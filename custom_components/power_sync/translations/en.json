@@ -600,12 +600,14 @@
           "sigenergy_username": "Email address",
           "sigenergy_password": "Password",
           "sigenergy_device_id": "Device ID (optional)",
+          "sigenergy_cloud_region": "Cloud region",
           "sigenergy_pass_enc": "Pre-encoded password (advanced)"
         },
         "data_description": {
           "sigenergy_username": "Your Sigenergy Cloud account email address.",
           "sigenergy_password": "Plain-text password (recommended). Encoded automatically.",
-          "sigenergy_device_id": "13-digit device ID. Only needed if authentication fails without it. Find it in browser dev tools > Network tab > 'token' request > userDeviceId.",
+          "sigenergy_device_id": "Optional 13-digit userDeviceId. Leave blank for modern accounts, including EU accounts that only show user_id, stationId, or stationCode.",
+          "sigenergy_cloud_region": "Select the Sigen Cloud data centre for your account. Europe uses the EU endpoint.",
           "sigenergy_pass_enc": "Pre-encoded password from the Sigenergy API. Leave blank unless you know what this is."
         },
         "submit": "Connect"
@@ -1072,6 +1074,7 @@
           "sigenergy_password": "Password",
           "sigenergy_pass_enc": "Pre-encoded password (advanced)",
           "sigenergy_device_id": "Device ID (optional)",
+          "sigenergy_cloud_region": "Cloud region",
           "sigenergy_station_id": "Station ID"
         },
         "data_description": {
@@ -1083,7 +1086,8 @@
           "sigenergy_username": "Your Sigenergy Cloud account email address.",
           "sigenergy_password": "Plain-text password (recommended). Encoded automatically.",
           "sigenergy_pass_enc": "Pre-encoded password from the Sigenergy API. Leave blank unless you know what this is.",
-          "sigenergy_device_id": "13-digit device ID. Only needed if authentication fails without it. Find it in browser dev tools > Network tab > 'token' request > userDeviceId.",
+          "sigenergy_device_id": "Optional 13-digit userDeviceId. Leave blank for modern accounts, including EU accounts that only show user_id, stationId, or stationCode.",
+          "sigenergy_cloud_region": "Select the Sigen Cloud data centre for your account. Europe uses the EU endpoint.",
           "sigenergy_station_id": "To find your Station ID, ask SigenAI 'Tell me my StationID' in the Sigenergy app."
         },
         "submit": "Save"
@@ -1297,6 +1301,7 @@
           "sigenergy_password": "Password",
           "sigenergy_pass_enc": "Pre-encoded password (advanced)",
           "sigenergy_device_id": "Device ID (optional)",
+          "sigenergy_cloud_region": "Cloud region",
           "sigenergy_station_id": "Station ID"
         },
         "data_description": {
@@ -1308,7 +1313,8 @@
           "sigenergy_username": "Your Sigenergy Cloud account email address.",
           "sigenergy_password": "Plain-text password (recommended). Encoded automatically.",
           "sigenergy_pass_enc": "Pre-encoded password from the Sigenergy API. Leave blank unless you know what this is.",
-          "sigenergy_device_id": "13-digit device ID. Only needed if authentication fails without it. Find it in browser dev tools > Network tab > 'token' request > userDeviceId.",
+          "sigenergy_device_id": "Optional 13-digit userDeviceId. Leave blank for modern accounts, including EU accounts that only show user_id, stationId, or stationCode.",
+          "sigenergy_cloud_region": "Select the Sigen Cloud data centre for your account. Europe uses the EU endpoint.",
           "sigenergy_station_id": "To find your Station ID, ask SigenAI 'Tell me my StationID' in the Sigenergy app."
         },
         "submit": "Save"

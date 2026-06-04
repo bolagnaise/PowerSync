@@ -609,6 +609,44 @@ def test_below_optimizer_reserve_blocks_lp_battery_export(
     assert all(action.action != "export" for action in result.schedule.actions)
 
 
+def test_below_optimizer_reserve_allows_later_export_after_recovery(
+    battery_optimizer_module,
+):
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("Reserve recovery export gating is enforced by the LP optimizer")
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.15,
+        hardware_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=2,
+    )
+    n = 24
+    export_slots = [False] * 12 + [True] * 12
+
+    result = optimizer.optimize(
+        import_prices=[0.05] * 12 + [0.30] * 12,
+        export_prices=[0.0] * 12 + [0.50] * 12,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.0] * n,
+        current_soc=0.04,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=export_slots,
+        block_battery_charge=export_slots,
+        allow_grid_charge=True,
+    )
+
+    early_actions = result.schedule.actions[:12]
+    later_actions = result.schedule.actions[12:]
+    assert any(action.action == "charge" for action in early_actions)
+    assert any(action.action == "export" for action in later_actions)
+    assert max(result.grid_export_w[12:]) > 1000
+    assert min(action.soc for action in later_actions) >= 0.15
+
+
 def test_below_optimizer_reserve_blocks_greedy_battery_export(
     battery_optimizer_module,
     monkeypatch,

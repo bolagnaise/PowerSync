@@ -345,6 +345,7 @@ from .const import (
     CONF_SIGENERGY_USERNAME,
     CONF_SIGENERGY_PASS_ENC,
     CONF_SIGENERGY_DEVICE_ID,
+    CONF_SIGENERGY_CLOUD_REGION,
     CONF_SIGENERGY_MODBUS_HOST,
     CONF_SIGENERGY_MODBUS_PORT,
     CONF_SIGENERGY_MODBUS_SLAVE_ID,
@@ -352,6 +353,7 @@ from .const import (
     CONF_SIGENERGY_ACCESS_TOKEN,
     CONF_SIGENERGY_REFRESH_TOKEN,
     CONF_SIGENERGY_TOKEN_EXPIRES_AT,
+    DEFAULT_SIGENERGY_CLOUD_REGION,
     # AlphaESS battery system configuration
     CONF_ALPHAESS_MODBUS_HOST,
     CONF_ALPHAESS_MODBUS_PORT,
@@ -18436,6 +18438,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             username = entry.data.get(CONF_SIGENERGY_USERNAME)
             pass_enc = entry.data.get(CONF_SIGENERGY_PASS_ENC)
             device_id = entry.data.get(CONF_SIGENERGY_DEVICE_ID)
+            cloud_region = entry.data.get(
+                CONF_SIGENERGY_CLOUD_REGION,
+                DEFAULT_SIGENERGY_CLOUD_REGION,
+            )
 
             if not all([station_id, username, pass_enc]):
                 _LOGGER.error("Missing Sigenergy Cloud credentials for tariff sync")
@@ -18662,6 +18668,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 username=username,
                 pass_enc=pass_enc,
                 device_id=device_id,
+                cloud_region=cloud_region,
                 access_token=stored_access_token,
                 refresh_token=stored_refresh_token,
                 token_expires_at=token_expires_at,
@@ -25284,7 +25291,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # AEMO VPP is spike detection on top of the user's normal tariff, so it
             # must restore the saved tariff instead of calling sync_tou_schedule
             # (which intentionally skips aemo_vpp).
-            dynamic_providers = ("amber", "flow_power")
+            dynamic_providers = ("amber", "flow_power", "octopus")
             if electricity_provider in dynamic_providers:
                 # Dynamic pricing users - trigger a fresh sync to get current prices
                 # (sync handler already loops over all site_ids)

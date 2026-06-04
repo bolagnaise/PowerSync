@@ -16,7 +16,9 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 
 from .const import (
+    DEFAULT_SIGENERGY_CLOUD_REGION,
     SIGENERGY_API_BASE_URL,
+    SIGENERGY_API_BASE_URLS,
     SIGENERGY_AUTH_ENDPOINT,
     SIGENERGY_SAVE_PRICE_ENDPOINT,
     SIGENERGY_STATIONS_ENDPOINT,
@@ -63,6 +65,7 @@ class SigenergyAPIClient:
         username: Optional[str] = None,
         pass_enc: Optional[str] = None,
         device_id: Optional[str] = None,
+        cloud_region: Optional[str] = None,
         access_token: Optional[str] = None,
         refresh_token: Optional[str] = None,
         token_expires_at: Optional[datetime] = None,
@@ -75,6 +78,7 @@ class SigenergyAPIClient:
             username: Sigenergy account email
             pass_enc: Encrypted password (from browser dev tools)
             device_id: Optional device identifier (13 digits, no longer required by Sigenergy)
+            cloud_region: Sigenergy regional data centre code (aus, eu, us, apac, cn)
             access_token: OAuth access token (if already authenticated)
             refresh_token: OAuth refresh token (for token refresh)
             token_expires_at: Token expiration datetime (if known)
@@ -84,12 +88,31 @@ class SigenergyAPIClient:
         self.username = username
         self.pass_enc = pass_enc
         self.device_id = device_id  # Optional — Sigenergy may no longer require it
+        self.cloud_region = self._normalize_cloud_region(cloud_region)
+        self.api_base_url = SIGENERGY_API_BASE_URLS.get(
+            self.cloud_region,
+            SIGENERGY_API_BASE_URL,
+        )
         self.access_token = access_token
         self.refresh_token = refresh_token
         self.token_expires_at = token_expires_at
         self._session = session
         self._own_session = False
         self._on_token_refresh = on_token_refresh
+
+    @staticmethod
+    def _normalize_cloud_region(cloud_region: Optional[str]) -> str:
+        """Return a supported Sigenergy cloud region, defaulting to AUS."""
+        region = str(cloud_region or DEFAULT_SIGENERGY_CLOUD_REGION).strip().lower()
+        return (
+            region
+            if region in SIGENERGY_API_BASE_URLS
+            else DEFAULT_SIGENERGY_CLOUD_REGION
+        )
+
+    def _url(self, endpoint: str) -> str:
+        """Build a Sigenergy API URL for the configured regional data centre."""
+        return f"{self.api_base_url}{endpoint}"
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create an aiohttp session."""
@@ -113,7 +136,7 @@ class SigenergyAPIClient:
         if not self.username or not self.pass_enc:
             return {"error": "Username and encrypted password are required"}
 
-        url = f"{SIGENERGY_API_BASE_URL}{SIGENERGY_AUTH_ENDPOINT}"
+        url = self._url(SIGENERGY_AUTH_ENDPOINT)
 
         headers = {
             "Authorization": SIGENERGY_BASIC_AUTH,
@@ -132,7 +155,11 @@ class SigenergyAPIClient:
 
         try:
             session = await self._get_session()
-            _LOGGER.info(f"Authenticating with Sigenergy for user: {self.username}")
+            _LOGGER.info(
+                "Authenticating with Sigenergy for user %s via %s cloud",
+                self.username,
+                self.cloud_region,
+            )
 
             async with session.post(url, headers=headers, data=data, timeout=30) as response:
                 if response.status != 200:
@@ -188,7 +215,7 @@ class SigenergyAPIClient:
         if not self.refresh_token:
             return {"error": "No refresh token available"}
 
-        url = f"{SIGENERGY_API_BASE_URL}{SIGENERGY_AUTH_ENDPOINT}"
+        url = self._url(SIGENERGY_AUTH_ENDPOINT)
 
         headers = {
             "Authorization": SIGENERGY_BASIC_AUTH,
@@ -282,7 +309,7 @@ class SigenergyAPIClient:
         if not await self._ensure_token():
             return {"error": "Not authenticated"}
 
-        url = f"{SIGENERGY_API_BASE_URL}{SIGENERGY_STATIONS_ENDPOINT}"
+        url = self._url(SIGENERGY_STATIONS_ENDPOINT)
 
         headers = {
             "Authorization": f"Bearer {self.access_token}",
@@ -333,7 +360,7 @@ class SigenergyAPIClient:
         if not await self._ensure_token():
             return {"error": "Not authenticated"}
 
-        url = f"{SIGENERGY_API_BASE_URL}{SIGENERGY_SAVE_PRICE_ENDPOINT}"
+        url = self._url(SIGENERGY_SAVE_PRICE_ENDPOINT)
 
         headers = {
             "Authorization": f"Bearer {self.access_token}",

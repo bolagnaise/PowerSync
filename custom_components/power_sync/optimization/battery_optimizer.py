@@ -915,7 +915,23 @@ class BatteryOptimizer:
             # optimiser reserve. Real import/export prices can still justify
             # charging, but ordinary self-use should be allowed to continue.
             self.terminal_weight = 0.0
-            allow_battery_export = [False] * n
+            export_floor = max(
+                self.backup_reserve,
+                self._configured_export_reserve_floor(),
+            )
+            allow_battery_export = self._export_allowed_after_reserve_recovery(
+                allow_battery_export,
+                block_battery_charge or [False] * n,
+                import_prices,
+                export_prices,
+                solar,
+                load,
+                soc_0,
+                export_floor,
+                allow_grid_charge,
+                acquisition_cost_kwh,
+                export_bonus_prices or [0.0] * n,
+            )
 
         try:
             return self._solve_lp_inner(
@@ -932,6 +948,51 @@ class BatteryOptimizer:
             if _soc_below_reserve:
                 self.terminal_weight = _saved_terminal_weight
                 self._below_reserve_recovery_target = None
+
+    def _export_allowed_after_reserve_recovery(
+        self,
+        allow_battery_export: list[bool],
+        block_battery_charge: list[bool],
+        import_prices: list[float],
+        export_prices: list[float],
+        solar: list[float],
+        load: list[float],
+        soc_0: float,
+        export_floor: float,
+        allow_grid_charge: bool,
+        acquisition_cost_kwh: float,
+        export_bonus_prices: list[float],
+    ) -> list[bool]:
+        """Allow export slots only after charge headroom can recover SOC."""
+        if soc_0 >= export_floor:
+            return allow_battery_export
+
+        reachable_soc = max(0.0, min(1.0, soc_0))
+        recovered: list[bool] = []
+        for idx, allowed in enumerate(allow_battery_export):
+            recovered.append(bool(allowed) and reachable_soc >= export_floor - 1e-6)
+            if idx >= len(solar) or idx >= len(load):
+                continue
+            blocked = idx < len(block_battery_charge) and block_battery_charge[idx]
+            if not blocked and idx < len(import_prices) and idx < len(export_prices):
+                blocked = bool(allowed) and self._is_export_profitable(
+                    export_prices[idx]
+                    + (export_bonus_prices[idx] if idx < len(export_bonus_prices) else 0.0),
+                    import_prices[idx],
+                    acquisition_cost_kwh,
+                    acquisition_cost_kwh,
+                )
+            if blocked:
+                continue
+            charge_kw = self._charge_limit_kw(load[idx], solar[idx], allow_grid_charge)
+            if charge_kw <= 0:
+                continue
+            reachable_soc = min(
+                1.0,
+                reachable_soc
+                + charge_kw * self.efficiency * self.dt_hours / self.capacity_kwh,
+            )
+        return recovered
 
     def _solve_lp_inner(
         self,

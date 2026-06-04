@@ -299,6 +299,38 @@ def test_sigenergy_tariff_sync_does_not_require_optional_device_id():
     assert credentials_guard in helper_source
     assert "if not all([station_id, username, pass_enc, device_id]):" not in helper_source
     assert "device_id=device_id" in helper_source
+    assert "cloud_region=cloud_region" in helper_source
+
+
+def test_sigenergy_cloud_region_is_collected_and_persisted():
+    config_flow_source = (COMPONENT_ROOT / "config_flow.py").read_text()
+
+    credentials_source = config_flow_source[
+        config_flow_source.index("async def async_step_sigenergy_credentials"):
+        config_flow_source.index("async def async_step_sigenergy_station")
+    ]
+    connection_source = config_flow_source[
+        config_flow_source.index("async def async_step_sigenergy_connection"):
+        config_flow_source.index("async def async_step_sungrow_connection")
+    ]
+    init_source = config_flow_source[
+        config_flow_source.index("async def async_step_init_sigenergy"):
+        config_flow_source.index("async def async_step_init_sungrow")
+    ]
+
+    assert "CONF_SIGENERGY_CLOUD_REGION" in credentials_source
+    assert "CONF_SIGENERGY_CLOUD_REGION: cloud_region" in credentials_source
+    assert "CONF_SIGENERGY_CLOUD_REGION" in connection_source
+    assert (
+        "new_data[CONF_SIGENERGY_CLOUD_REGION] = sigen_cloud_region"
+        in connection_source
+    )
+    assert "new_data.pop(CONF_SIGENERGY_ACCESS_TOKEN, None)" in connection_source
+    assert "CONF_SIGENERGY_CLOUD_REGION" in init_source
+    assert (
+        "new_data[CONF_SIGENERGY_CLOUD_REGION] = sigen_cloud_region"
+        in init_source
+    )
 
 
 def test_sigenergy_tariff_sync_caches_numeric_id_without_overwriting_configured_id():
@@ -361,12 +393,57 @@ class _FakeTariffSession:
     def __init__(self, responses: list[_FakeTariffResponse]):
         self.responses = responses
         self.post_calls = 0
+        self.post_args = []
         self.post_kwargs = []
 
     def post(self, *args, **kwargs):
         self.post_calls += 1
+        self.post_args.append(args)
         self.post_kwargs.append(kwargs)
         return self.responses.pop(0)
+
+
+def test_sigenergy_client_uses_region_specific_base_url(sigenergy_api_module):
+    client = sigenergy_api_module.SigenergyAPIClient(cloud_region="eu")
+
+    assert client.cloud_region == "eu"
+    assert client.api_base_url == "https://api-eu.sigencloud.com"
+    assert (
+        client._url(sigenergy_api_module.SIGENERGY_AUTH_ENDPOINT)
+        == "https://api-eu.sigencloud.com/auth/oauth/token"
+    )
+
+
+def test_sigenergy_client_defaults_unknown_region_to_aus(sigenergy_api_module):
+    client = sigenergy_api_module.SigenergyAPIClient(cloud_region="mars")
+
+    assert client.cloud_region == "aus"
+    assert client.api_base_url == "https://api-aus.sigencloud.com"
+
+
+def test_sigenergy_set_tariff_uses_configured_region_endpoint(
+    sigenergy_api_module,
+):
+    session = _FakeTariffSession([_FakeTariffResponse(200, payload={"code": 0})])
+    client = sigenergy_api_module.SigenergyAPIClient(
+        cloud_region="eu",
+        access_token="token",
+        token_expires_at=datetime.utcnow() + timedelta(hours=1),
+        session=session,
+    )
+
+    result = asyncio.run(
+        client.set_tariff_rate(
+            station_id="123",
+            buy_prices=[{"timeRange": "00:00-00:30", "price": 1.0}],
+            sell_prices=[{"timeRange": "00:00-00:30", "price": 0.0}],
+        )
+    )
+
+    assert result == {"success": True, "message": "Tariff updated"}
+    assert session.post_args[0][0] == (
+        "https://api-eu.sigencloud.com/device/stationelecsetprice/save"
+    )
 
 
 def test_sigenergy_set_tariff_retries_429_with_retry_after(

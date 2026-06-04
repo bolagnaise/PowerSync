@@ -6,6 +6,18 @@ PowerSync supports Sigenergy systems through two separate paths:
 - **Modbus TCP / Remote EMS** reads live power data and lets PowerSync control charge, discharge, reserve, and curtailment.
 - **Sigenergy EVAC / EVDC charger support** can be configured separately for EV charging, using the charger type, host, port, and slave ID exposed through PowerSync's EV charging settings.
 
+## Sigenergy Cloud region
+
+Select the Sigen Cloud region that matches your mySigen account when configuring Cloud credentials:
+
+- Australia / New Zealand: `api-aus.sigencloud.com`
+- Europe: `api-eu.sigencloud.com`
+- United States: `api-us.sigencloud.com`
+- Asia-Pacific: `api-apac.sigencloud.com`
+- China: `api-cn.sigencloud.com`
+
+Leave **Device ID** blank unless your account exposes a 13-digit `userDeviceId`. EU accounts commonly expose `user_id`, `stationId`, and `stationCode` instead; those are not Device ID values. Use `stationId` only in the Station ID step when the station list is unavailable.
+
 ## Smart Optimization requirements
 
 When **Smart Optimization** is enabled, PowerSync's LP optimizer must own battery dispatch. Configure the Sigenergy system so native tariff optimisation does not compete with PowerSync:

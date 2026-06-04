@@ -357,6 +357,16 @@ def test_restore_normal_suppresses_tesla_force_toggle_during_dynamic_sync():
     assert "Skipping force mode toggle" in sync_source
 
 
+def test_restore_normal_treats_octopus_as_dynamic_sync_provider():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    restore = _find_function(tree, "handle_restore_normal")
+    restore_source = ast.get_source_segment(source, restore)
+
+    assert restore_source is not None
+    assert 'dynamic_providers = ("amber", "flow_power", "octopus")' in restore_source
+
+
 def test_tesla_tou_upload_waits_for_site_info_readback():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
@@ -431,7 +441,7 @@ def test_aemo_vpp_restore_uses_saved_tariff_not_dynamic_sync():
             for target in node.targets
         )
     ]
-    assert dynamic_assignments == ['dynamic_providers = ("amber", "flow_power")']
+    assert dynamic_assignments == ['dynamic_providers = ("amber", "flow_power", "octopus")']
     assert 'if electricity_provider in ("globird", "aemo_vpp"):' in function_source
 
 

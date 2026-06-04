@@ -171,12 +171,15 @@ from .const import (
     CONF_SIGENERGY_PASSWORD,
     CONF_SIGENERGY_PASS_ENC,
     CONF_SIGENERGY_DEVICE_ID,
+    CONF_SIGENERGY_CLOUD_REGION,
     CONF_SIGENERGY_STATION_ID,
     CONF_SIGENERGY_TARIFF_STATION_ID,
     CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID,
     CONF_SIGENERGY_ACCESS_TOKEN,
     CONF_SIGENERGY_REFRESH_TOKEN,
     CONF_SIGENERGY_TOKEN_EXPIRES_AT,
+    DEFAULT_SIGENERGY_CLOUD_REGION,
+    SIGENERGY_CLOUD_REGIONS,
     # Sigenergy DC Curtailment via Modbus
     CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
     CONF_SIGENERGY_MODBUS_HOST,
@@ -1071,6 +1074,7 @@ async def validate_sigenergy_credentials(
     username: str,
     pass_enc: str,
     device_id: str,
+    cloud_region: str = DEFAULT_SIGENERGY_CLOUD_REGION,
 ) -> dict[str, Any]:
     """Validate Sigenergy credentials and get stations list."""
     from .sigenergy_api import SigenergyAPIClient
@@ -1081,6 +1085,7 @@ async def validate_sigenergy_credentials(
             username=username,
             pass_enc=pass_enc,
             device_id=device_id,
+            cloud_region=cloud_region,
             session=session,
         )
 
@@ -2798,6 +2803,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             plain_password = user_input.get(CONF_SIGENERGY_PASSWORD, "").strip()
             pass_enc = user_input.get(CONF_SIGENERGY_PASS_ENC, "").strip()
             device_id = user_input.get(CONF_SIGENERGY_DEVICE_ID, "").strip()
+            cloud_region = user_input.get(
+                CONF_SIGENERGY_CLOUD_REGION,
+                DEFAULT_SIGENERGY_CLOUD_REGION,
+            )
 
             # Determine which password to use
             # Priority: pass_enc (explicit override) > password (encode it)
@@ -2817,7 +2826,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 # Validate credentials
                 validation_result = await validate_sigenergy_credentials(
-                    self.hass, username, final_pass_enc, device_id
+                    self.hass, username, final_pass_enc, device_id, cloud_region
                 )
 
                 if validation_result["success"]:
@@ -2825,6 +2834,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_SIGENERGY_USERNAME: username,
                         CONF_SIGENERGY_PASS_ENC: final_pass_enc,  # Always store encoded
                         CONF_SIGENERGY_DEVICE_ID: device_id,
+                        CONF_SIGENERGY_CLOUD_REGION: cloud_region,
                         CONF_SIGENERGY_ACCESS_TOKEN: validation_result.get(
                             "access_token"
                         ),
@@ -2853,6 +2863,16 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(CONF_SIGENERGY_DEVICE_ID, default=""): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.TEXT)
                     ),
+                    vol.Required(
+                        CONF_SIGENERGY_CLOUD_REGION,
+                        default=DEFAULT_SIGENERGY_CLOUD_REGION,
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in SIGENERGY_CLOUD_REGIONS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Optional(CONF_SIGENERGY_PASS_ENC): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.PASSWORD)
                     ),
@@ -6003,6 +6023,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 sigen_password = user_input.get(CONF_SIGENERGY_PASSWORD, "").strip()
                 sigen_pass_enc = user_input.get(CONF_SIGENERGY_PASS_ENC, "").strip()
                 sigen_device_id = user_input.get(CONF_SIGENERGY_DEVICE_ID, "").strip()
+                sigen_cloud_region = user_input.get(
+                    CONF_SIGENERGY_CLOUD_REGION,
+                    DEFAULT_SIGENERGY_CLOUD_REGION,
+                )
                 sigen_station_id = user_input.get(CONF_SIGENERGY_STATION_ID, "").strip()
 
                 if sigen_pass_enc:
@@ -6018,6 +6042,15 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     new_data[CONF_SIGENERGY_PASS_ENC] = final_pass_enc
                 if sigen_device_id:
                     new_data[CONF_SIGENERGY_DEVICE_ID] = sigen_device_id
+                previous_cloud_region = new_data.get(
+                    CONF_SIGENERGY_CLOUD_REGION,
+                    DEFAULT_SIGENERGY_CLOUD_REGION,
+                )
+                new_data[CONF_SIGENERGY_CLOUD_REGION] = sigen_cloud_region
+                if previous_cloud_region != sigen_cloud_region:
+                    new_data.pop(CONF_SIGENERGY_ACCESS_TOKEN, None)
+                    new_data.pop(CONF_SIGENERGY_REFRESH_TOKEN, None)
+                    new_data.pop(CONF_SIGENERGY_TOKEN_EXPIRES_AT, None)
                 if sigen_station_id:
                     previous_station_id = new_data.get(CONF_SIGENERGY_STATION_ID)
                     new_data[CONF_SIGENERGY_STATION_ID] = sigen_station_id
@@ -6048,6 +6081,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         current_sigen_username = self.config_entry.data.get(CONF_SIGENERGY_USERNAME, "")
         current_sigen_device_id = self.config_entry.data.get(
             CONF_SIGENERGY_DEVICE_ID, ""
+        )
+        current_sigen_cloud_region = self.config_entry.data.get(
+            CONF_SIGENERGY_CLOUD_REGION, DEFAULT_SIGENERGY_CLOUD_REGION
         )
         current_sigen_station_id = self.config_entry.data.get(
             CONF_SIGENERGY_STATION_ID, ""
@@ -6102,6 +6138,16 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         default=current_sigen_device_id,
                         description={"suggested_value": current_sigen_device_id},
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Required(
+                        CONF_SIGENERGY_CLOUD_REGION,
+                        default=current_sigen_cloud_region,
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in SIGENERGY_CLOUD_REGIONS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Optional(
                         CONF_SIGENERGY_STATION_ID,
                         default=current_sigen_station_id,
@@ -7996,6 +8042,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 sigen_password = user_input.get(CONF_SIGENERGY_PASSWORD, "").strip()
                 sigen_pass_enc = user_input.get(CONF_SIGENERGY_PASS_ENC, "").strip()
                 sigen_device_id = user_input.get(CONF_SIGENERGY_DEVICE_ID, "").strip()
+                sigen_cloud_region = user_input.get(
+                    CONF_SIGENERGY_CLOUD_REGION,
+                    DEFAULT_SIGENERGY_CLOUD_REGION,
+                )
                 sigen_station_id = user_input.get(CONF_SIGENERGY_STATION_ID, "").strip()
 
                 # Determine final pass_enc: explicit pass_enc > encoded password
@@ -8012,6 +8062,15 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     new_data[CONF_SIGENERGY_PASS_ENC] = final_pass_enc
                 if sigen_device_id:
                     new_data[CONF_SIGENERGY_DEVICE_ID] = sigen_device_id
+                previous_cloud_region = new_data.get(
+                    CONF_SIGENERGY_CLOUD_REGION,
+                    DEFAULT_SIGENERGY_CLOUD_REGION,
+                )
+                new_data[CONF_SIGENERGY_CLOUD_REGION] = sigen_cloud_region
+                if previous_cloud_region != sigen_cloud_region:
+                    new_data.pop(CONF_SIGENERGY_ACCESS_TOKEN, None)
+                    new_data.pop(CONF_SIGENERGY_REFRESH_TOKEN, None)
+                    new_data.pop(CONF_SIGENERGY_TOKEN_EXPIRES_AT, None)
                 if sigen_station_id:
                     previous_station_id = new_data.get(CONF_SIGENERGY_STATION_ID)
                     new_data[CONF_SIGENERGY_STATION_ID] = sigen_station_id
@@ -8055,6 +8114,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         current_sigen_username = self.config_entry.data.get(CONF_SIGENERGY_USERNAME, "")
         current_sigen_device_id = self.config_entry.data.get(
             CONF_SIGENERGY_DEVICE_ID, ""
+        )
+        current_sigen_cloud_region = self.config_entry.data.get(
+            CONF_SIGENERGY_CLOUD_REGION, DEFAULT_SIGENERGY_CLOUD_REGION
         )
         current_sigen_station_id = self.config_entry.data.get(
             CONF_SIGENERGY_STATION_ID, ""
@@ -8121,6 +8183,16 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         default=current_sigen_device_id,
                         description={"suggested_value": current_sigen_device_id},
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Required(
+                        CONF_SIGENERGY_CLOUD_REGION,
+                        default=current_sigen_cloud_region,
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in SIGENERGY_CLOUD_REGIONS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Optional(
                         CONF_SIGENERGY_STATION_ID,
                         default=current_sigen_station_id,

@@ -395,6 +395,7 @@ CONF_SIGENERGY_USERNAME = "sigenergy_username"
 CONF_SIGENERGY_PASSWORD = "sigenergy_password"  # Plain password (will be encoded)
 CONF_SIGENERGY_PASS_ENC = "sigenergy_pass_enc"  # Encoded password (backwards compat)
 CONF_SIGENERGY_DEVICE_ID = "sigenergy_device_id"
+CONF_SIGENERGY_CLOUD_REGION = "sigenergy_cloud_region"
 CONF_SIGENERGY_STATION_ID = "sigenergy_station_id"
 CONF_SIGENERGY_TARIFF_STATION_ID = "sigenergy_tariff_station_id"
 CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID = "sigenergy_tariff_station_source_id"
@@ -403,7 +404,22 @@ CONF_SIGENERGY_REFRESH_TOKEN = "sigenergy_refresh_token"
 CONF_SIGENERGY_TOKEN_EXPIRES_AT = "sigenergy_token_expires_at"
 
 # Sigenergy API
-SIGENERGY_API_BASE_URL = "https://api-aus.sigencloud.com"
+DEFAULT_SIGENERGY_CLOUD_REGION = "aus"
+SIGENERGY_CLOUD_REGIONS = {
+    "aus": "Australia / New Zealand",
+    "eu": "Europe",
+    "us": "United States",
+    "apac": "Asia-Pacific",
+    "cn": "China",
+}
+SIGENERGY_API_BASE_URLS = {
+    "aus": "https://api-aus.sigencloud.com",
+    "eu": "https://api-eu.sigencloud.com",
+    "us": "https://api-us.sigencloud.com",
+    "apac": "https://api-apac.sigencloud.com",
+    "cn": "https://api-cn.sigencloud.com",
+}
+SIGENERGY_API_BASE_URL = SIGENERGY_API_BASE_URLS[DEFAULT_SIGENERGY_CLOUD_REGION]
 SIGENERGY_AUTH_ENDPOINT = "/auth/oauth/token"
 SIGENERGY_SAVE_PRICE_ENDPOINT = "/device/stationelecsetprice/save"
 SIGENERGY_STATIONS_ENDPOINT = "/device/station/list"
