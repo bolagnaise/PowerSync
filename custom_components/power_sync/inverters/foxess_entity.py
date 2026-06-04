@@ -8,15 +8,37 @@ single Modbus session.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 _LOGGER = logging.getLogger(__name__)
 
 
 _UNAVAILABLE = {"", "unknown", "unavailable", "none", "None"}
+_FOXESS_REMOTE_CONTROL_DISABLE = 0
+_FOXESS_REMOTE_CONTROL_ENABLE = 1
+_FOXESS_REMOTE_CONTROL_GRID = 0x0009
+_FOXESS_REMOTE_ENABLE_REGISTER = 46001
+_FOXESS_REMOTE_TIMEOUT_REGISTER = 46002
+_FOXESS_REMOTE_ACTIVE_POWER_REGISTER = 46003
+_FOXESS_REMOTE_WORK_MODE_REGISTER = 49203
+_FOXESS_REMOTE_CONTROL_TIMEOUT_SECONDS = 600
+_FOXESS_WORK_MODE_SELF_USE = 1
+_FOXESS_WORK_MODE_FEED_IN_FIRST = 2
+_FOXESS_WORK_MODE_BACK_UP = 3
+_FOXESS_MODBUS_DOMAIN = "foxess_modbus"
+_FOXESS_REMOTE_CONTROL_MODEL_HINTS = {
+    "1KOMMA5",
+    "ENPAL_IX",
+    "H3_PRO",
+    "H3_SMART",
+    "ONE_KOMMA_FIVE",
+    "SK_HWR_SMART",
+}
 
 _READ_ENTITIES: dict[str, tuple[str, ...]] = {
     "battery_level": ("battery_soc", "battery_soc_1"),
@@ -88,6 +110,8 @@ class FoxESSEntityController:
         self._foxess_entry_id = (foxess_entry_id or "").strip()
         self._prefix = entity_prefix.strip()
         self._entity_map: dict[str, str] = {}
+        self._remote_control_settle_seconds = 1.0
+        self._remote_control_active = False
         # Rate-limit the "curtailment unavailable" diagnostic to once per
         # discovery so a missing/disabled export-limit entity does not spam
         # the log every curtailment cycle.
@@ -179,20 +203,59 @@ class FoxESSEntityController:
     async def force_charge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
         """Force charge by setting Nathan's remote-control power and work mode."""
         self._ensure_entity_map()
-        if power_w > 0:
-            await self._set_number("force_charge_power", power_w / 1000.0)
-        return await self._select_work_mode("Force Charge")
+        try:
+            if power_w > 0:
+                await self._set_number("force_charge_power", power_w / 1000.0)
+            if await self._select_work_mode("Force Charge"):
+                return True
+        except Exception:
+            _LOGGER.warning(
+                "FoxESS entity bridge: Force Charge entity path failed; "
+                "trying foxess_modbus remote-control registers",
+                exc_info=True,
+            )
+        return await self._force_via_foxess_modbus_remote_control(
+            "charge",
+            duration_minutes,
+            power_w,
+        )
 
     async def force_discharge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
         """Force discharge by setting Nathan's remote-control power and work mode."""
         self._ensure_entity_map()
-        if power_w > 0:
-            await self._set_number("force_discharge_power", power_w / 1000.0)
-        return await self._select_work_mode("Force Discharge")
+        try:
+            if power_w > 0:
+                await self._set_number("force_discharge_power", power_w / 1000.0)
+            if await self._select_work_mode("Force Discharge"):
+                return True
+        except Exception:
+            _LOGGER.warning(
+                "FoxESS entity bridge: Force Discharge entity path failed; "
+                "trying foxess_modbus remote-control registers",
+                exc_info=True,
+            )
+        return await self._force_via_foxess_modbus_remote_control(
+            "discharge",
+            duration_minutes,
+            power_w,
+        )
 
     async def restore_normal(self) -> bool:
         """Restore normal self-use operation."""
-        return await self._select_work_mode("Self Use")
+        if self._remote_control_active and await self._restore_foxess_modbus_remote_control(
+            _FOXESS_WORK_MODE_SELF_USE
+        ):
+            return True
+        try:
+            if await self._select_work_mode("Self Use"):
+                return True
+        except Exception:
+            _LOGGER.warning(
+                "FoxESS entity bridge: Self Use entity path failed; "
+                "trying foxess_modbus remote-control registers",
+                exc_info=True,
+            )
+        return await self._restore_foxess_modbus_remote_control(_FOXESS_WORK_MODE_SELF_USE)
 
     async def set_backup_reserve(self, percent: int) -> bool:
         """Set minimum reserve SOC."""
@@ -245,6 +308,8 @@ class FoxESSEntityController:
         """Apply an export limit when the upstream entity exposes it."""
         self._ensure_entity_map()
         if not self._entity_exists("export_power_limit"):
+            if await self._curtail_via_foxess_modbus_remote_control(home_load_w):
+                return True
             if not self._export_limit_warned:
                 self._export_limit_warned = True
                 _LOGGER.warning(
@@ -259,6 +324,8 @@ class FoxESSEntityController:
         """Remove export limit when the upstream entity exposes it."""
         self._ensure_entity_map()
         if not self._entity_exists("export_power_limit"):
+            if await self._restore_foxess_modbus_remote_control():
+                return True
             _LOGGER.debug(
                 "FoxESS entity bridge: export_power_limit entity not found; "
                 "nothing to restore"
@@ -266,6 +333,383 @@ class FoxESSEntityController:
             return False
         await self._set_number("export_power_limit", 99999)
         return True
+
+    async def _force_via_foxess_modbus_remote_control(
+        self,
+        mode: str,
+        duration_minutes: int,
+        power_w: float,
+    ) -> bool:
+        inverter = self._foxess_modbus_service_target()
+        if (
+            not inverter
+            or not self._foxess_modbus_write_service_available()
+            or not self._foxess_modbus_remote_control_supported()
+        ):
+            return False
+
+        is_charge = mode == "charge"
+        target_power_w = self._force_power_w(
+            power_w,
+            "max_charge_current" if is_charge else "max_discharge_current",
+        )
+        active_power_w = -target_power_w if is_charge else target_power_w
+        fallback_work_mode = (
+            _FOXESS_WORK_MODE_BACK_UP if is_charge else _FOXESS_WORK_MODE_FEED_IN_FIRST
+        )
+        timeout_seconds = max(
+            _FOXESS_REMOTE_CONTROL_TIMEOUT_SECONDS,
+            int(max(1, duration_minutes) * 60),
+        )
+
+        try:
+            await self._call_foxess_modbus_write_registers(
+                inverter,
+                _FOXESS_REMOTE_WORK_MODE_REGISTER,
+                [fallback_work_mode],
+            )
+            await self._call_foxess_modbus_write_registers(
+                inverter,
+                _FOXESS_REMOTE_TIMEOUT_REGISTER,
+                [timeout_seconds],
+            )
+            await self._call_foxess_modbus_write_registers(
+                inverter,
+                _FOXESS_REMOTE_ENABLE_REGISTER,
+                [_FOXESS_REMOTE_CONTROL_ENABLE],
+            )
+            if self._remote_control_settle_seconds > 0:
+                await asyncio.sleep(self._remote_control_settle_seconds)
+            await self._call_foxess_modbus_write_registers(
+                inverter,
+                _FOXESS_REMOTE_ACTIVE_POWER_REGISTER,
+                self._int32_register_values(active_power_w),
+            )
+        except Exception:
+            _LOGGER.exception(
+                "FoxESS entity bridge: foxess_modbus remote-control %s failed",
+                mode,
+            )
+            return False
+
+        _LOGGER.info(
+            "FoxESS entity bridge: force %s via foxess_modbus remote control "
+            "(target=%s, power=%dW, timeout=%ss)",
+            mode,
+            inverter,
+            target_power_w,
+            timeout_seconds,
+        )
+        self._remote_control_active = True
+        return True
+
+    async def _curtail_via_foxess_modbus_remote_control(
+        self,
+        home_load_w: int | None,
+    ) -> bool:
+        """Fallback for H3 Smart/Pro where foxess_modbus has no export-limit entity.
+
+        nathanmarlor/foxess_modbus exposes H3 Smart/Pro remote-control support
+        through registers 46001, 46002, and 46003/46004. Use its service API so
+        PowerSync does not open a competing Modbus connection.
+        """
+        inverter = self._foxess_modbus_service_target()
+        if (
+            not inverter
+            or not self._foxess_modbus_write_service_available()
+            or not self._foxess_modbus_remote_control_supported()
+        ):
+            return False
+
+        power_w = max(0, int(home_load_w or 0))
+        try:
+            await self._call_foxess_modbus_write_registers(
+                inverter,
+                _FOXESS_REMOTE_ENABLE_REGISTER,
+                [_FOXESS_REMOTE_CONTROL_GRID],
+            )
+            await self._call_foxess_modbus_write_registers(
+                inverter,
+                _FOXESS_REMOTE_TIMEOUT_REGISTER,
+                [_FOXESS_REMOTE_CONTROL_TIMEOUT_SECONDS],
+            )
+            if self._remote_control_settle_seconds > 0:
+                await asyncio.sleep(self._remote_control_settle_seconds)
+            await self._call_foxess_modbus_write_registers(
+                inverter,
+                _FOXESS_REMOTE_ACTIVE_POWER_REGISTER,
+                self._int32_register_values(power_w),
+            )
+        except Exception:
+            _LOGGER.exception(
+                "FoxESS entity bridge: foxess_modbus remote-control curtailment failed"
+            )
+            return False
+
+        _LOGGER.info(
+            "FoxESS entity bridge: curtailment via foxess_modbus remote control "
+            "(target=%s, power=%dW)",
+            inverter,
+            power_w,
+        )
+        self._remote_control_active = True
+        return True
+
+    async def _restore_foxess_modbus_remote_control(self, work_mode: int | None = None) -> bool:
+        inverter = self._foxess_modbus_service_target()
+        if (
+            not inverter
+            or not self._foxess_modbus_write_service_available()
+            or not self._foxess_modbus_remote_control_supported()
+        ):
+            return False
+        try:
+            await self._call_foxess_modbus_write_registers(
+                inverter,
+                _FOXESS_REMOTE_ENABLE_REGISTER,
+                [_FOXESS_REMOTE_CONTROL_DISABLE],
+            )
+            if work_mode is not None:
+                await self._call_foxess_modbus_write_registers(
+                    inverter,
+                    _FOXESS_REMOTE_WORK_MODE_REGISTER,
+                    [work_mode],
+                )
+        except Exception:
+            _LOGGER.exception(
+                "FoxESS entity bridge: foxess_modbus remote-control restore failed"
+            )
+            return False
+
+        _LOGGER.info(
+            "FoxESS entity bridge: restored foxess_modbus remote control "
+            "(target=%s)",
+            inverter,
+        )
+        self._remote_control_active = False
+        return True
+
+    def _foxess_modbus_write_service_available(self) -> bool:
+        has_service = getattr(self.hass.services, "has_service", None)
+        if has_service is None:
+            return True
+        return bool(has_service(_FOXESS_MODBUS_DOMAIN, "write_registers"))
+
+    def _force_power_w(self, requested_power_w: float, current_limit_key: str) -> int:
+        if requested_power_w > 0:
+            return max(0, int(requested_power_w))
+
+        current_limit_a = self._read_float(current_limit_key)
+        if current_limit_a is not None and current_limit_a > 0:
+            return self._current_to_power_w(current_limit_a)
+        return 5000
+
+    async def _call_foxess_modbus_write_registers(
+        self,
+        inverter: str,
+        start_address: int,
+        values: list[int],
+    ) -> None:
+        await self.hass.services.async_call(
+            _FOXESS_MODBUS_DOMAIN,
+            "write_registers",
+            {
+                "inverter": inverter,
+                "start_address": start_address,
+                "values": ",".join(str(int(value)) for value in values),
+            },
+            blocking=True,
+        )
+
+    def _foxess_modbus_service_target(self) -> str | None:
+        """Return a foxess_modbus service target: device id first, friendly name second."""
+        if self._foxess_entry_id:
+            try:
+                registry = er.async_get(self.hass)
+                entries = er.async_entries_for_config_entry(
+                    registry, self._foxess_entry_id
+                )
+                for entry in entries:
+                    device_id = getattr(entry, "device_id", None)
+                    if device_id:
+                        return str(device_id)
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+            friendly_name = self._foxess_modbus_config_friendly_name()
+            if friendly_name:
+                return friendly_name
+
+            config_entries = getattr(self.hass, "config_entries", None)
+            get_entry = getattr(config_entries, "async_get_entry", None)
+            if get_entry is not None:
+                try:
+                    entry = get_entry(self._foxess_entry_id)
+                    title = (getattr(entry, "title", "") or "").strip()
+                    if title:
+                        return title
+                except Exception:  # pragma: no cover - defensive
+                    pass
+
+        return self._prefix or None
+
+    def _foxess_modbus_remote_control_supported(self) -> bool:
+        """Return true only for upstream profiles with the 46001 remote API."""
+        return any(
+            self._model_hint_supports_remote_control(model_hint)
+            for model_hint in self._foxess_modbus_model_hints()
+        )
+
+    def _foxess_modbus_model_hints(self) -> list[str]:
+        hints: list[str] = []
+        hints.extend(self._foxess_modbus_device_model_hints())
+        config_entry = self._foxess_modbus_config_entry()
+        if config_entry is not None:
+            for value in (
+                getattr(config_entry, "data", {}) or {},
+                getattr(config_entry, "options", {}) or {},
+            ):
+                hints.extend(self._string_values(value))
+        return hints
+
+    def _foxess_modbus_device_model_hints(self) -> list[str]:
+        if not self._foxess_entry_id:
+            return []
+
+        try:
+            registry = er.async_get(self.hass)
+            entries = er.async_entries_for_config_entry(registry, self._foxess_entry_id)
+            device_ids = {
+                str(device_id)
+                for entry in entries
+                if (device_id := getattr(entry, "device_id", None))
+            }
+        except Exception:  # pragma: no cover - defensive
+            return []
+
+        if not device_ids:
+            return []
+
+        hints: list[str] = []
+        registries = []
+        try:
+            registries.append(dr.async_get(self.hass))
+        except Exception:  # pragma: no cover - defensive
+            pass
+        local_registry = getattr(self.hass, "device_registry", None)
+        if local_registry is not None and local_registry not in registries:
+            registries.append(local_registry)
+
+        for device_registry in registries:
+            devices = getattr(device_registry, "devices", {}) or {}
+            for device_id in device_ids:
+                device = devices.get(device_id) if hasattr(devices, "get") else None
+                if device is None:
+                    continue
+
+                model = getattr(device, "model", None)
+                if model:
+                    hints.append(str(model))
+
+                for identifier in getattr(device, "identifiers", ()) or ():
+                    parts = tuple(identifier)
+                    if len(parts) >= 2 and parts[0] == _FOXESS_MODBUS_DOMAIN:
+                        hints.append(str(parts[1]))
+
+        return hints
+
+    def _foxess_modbus_config_entry(self) -> Any | None:
+        if not self._foxess_entry_id:
+            return None
+        config_entries = getattr(self.hass, "config_entries", None)
+        get_entry = getattr(config_entries, "async_get_entry", None)
+        if get_entry is None:
+            return None
+        try:
+            return get_entry(self._foxess_entry_id)
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+    def _foxess_modbus_config_friendly_name(self) -> str | None:
+        config_entry = self._foxess_modbus_config_entry()
+        if config_entry is None:
+            return None
+
+        for value in (
+            getattr(config_entry, "data", {}) or {},
+            getattr(config_entry, "options", {}) or {},
+        ):
+            for friendly_name in self._values_for_key(value, "friendly_name"):
+                friendly_name = str(friendly_name).strip()
+                if friendly_name:
+                    return friendly_name
+        return None
+
+    @staticmethod
+    def _model_hint_supports_remote_control(model_hint: str) -> bool:
+        normalized = (
+            str(model_hint)
+            .upper()
+            .replace("-", "_")
+            .replace(" ", "_")
+            .replace(".", "_")
+        )
+        normalized = "_".join(part for part in normalized.split("_") if part)
+        compact = normalized.replace("_", "")
+        if (
+            normalized in _FOXESS_REMOTE_CONTROL_MODEL_HINTS
+            or any(
+                normalized.startswith(f"{supported}_")
+                or normalized.endswith(f"_{supported}")
+                or f"_{supported}_" in f"_{normalized}_"
+                for supported in _FOXESS_REMOTE_CONTROL_MODEL_HINTS
+            )
+        ):
+            return True
+        return (
+            compact.startswith("H3PRO")
+            or (compact.startswith("H3") and compact.endswith("SMART"))
+            or (compact.startswith("SKHWR") and compact.endswith("SMART"))
+        )
+
+    @classmethod
+    def _string_values(cls, value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, dict):
+            values: list[str] = []
+            for item in value.values():
+                values.extend(cls._string_values(item))
+            return values
+        if isinstance(value, (list, tuple, set)):
+            values = []
+            for item in value:
+                values.extend(cls._string_values(item))
+            return values
+        return []
+
+    @classmethod
+    def _values_for_key(cls, value: Any, key: str) -> list[Any]:
+        if isinstance(value, dict):
+            values: list[Any] = []
+            for item_key, item_value in value.items():
+                if item_key == key:
+                    values.append(item_value)
+                values.extend(cls._values_for_key(item_value, key))
+            return values
+        if isinstance(value, (list, tuple, set)):
+            values = []
+            for item in value:
+                values.extend(cls._values_for_key(item, key))
+            return values
+        return []
+
+    @staticmethod
+    def _int32_register_values(value: int) -> list[int]:
+        value = int(value)
+        if value < 0:
+            value += 0x100000000
+        return [(value >> 16) & 0xFFFF, value & 0xFFFF]
 
     def _diagnose_missing_export_limit(self) -> str:
         """Explain why the export power limit entity is unusable.
@@ -599,6 +1043,20 @@ class FoxESSEntityController:
             entity_id = self._entity_map.get("work_mode")
         if not entity_id or self.hass.states.get(entity_id) is None:
             _LOGGER.error("FoxESS entity bridge: work_mode entity not found")
+            return False
+        state = self.hass.states.get(entity_id)
+        options = (getattr(state, "attributes", {}) or {}).get("options")
+        if (
+            options is not None
+            and isinstance(options, (list, tuple, set))
+            and option not in options
+        ):
+            _LOGGER.warning(
+                "FoxESS entity bridge: %s does not expose option %s; available=%s",
+                entity_id,
+                option,
+                ", ".join(str(item) for item in options),
+            )
             return False
         await self.hass.services.async_call(
             "select",

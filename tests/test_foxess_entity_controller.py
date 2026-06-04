@@ -18,18 +18,24 @@ COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
 def _install_stubs() -> None:
     ha_root = types.ModuleType("homeassistant")
     ha_helpers = types.ModuleType("homeassistant.helpers")
+    ha_device_registry = types.ModuleType("homeassistant.helpers.device_registry")
     ha_entity_registry = types.ModuleType("homeassistant.helpers.entity_registry")
 
+    ha_device_registry.async_get = lambda hass: getattr(
+        hass, "device_registry", SimpleNamespace(devices={})
+    )
     ha_entity_registry.async_get = lambda hass: hass.entity_registry
     ha_entity_registry.async_entries_for_config_entry = (
         lambda registry, entry_id: registry.entries_for(entry_id)
     )
 
+    ha_helpers.device_registry = ha_device_registry
     ha_helpers.entity_registry = ha_entity_registry
     ha_root.helpers = ha_helpers
 
     sys.modules["homeassistant"] = ha_root
     sys.modules["homeassistant.helpers"] = ha_helpers
+    sys.modules["homeassistant.helpers.device_registry"] = ha_device_registry
     sys.modules["homeassistant.helpers.entity_registry"] = ha_entity_registry
 
     power_sync = types.ModuleType("power_sync")
@@ -39,6 +45,7 @@ def _install_stubs() -> None:
     inverters = types.ModuleType("power_sync.inverters")
     inverters.__path__ = [str(COMPONENT_ROOT / "inverters")]
     sys.modules["power_sync.inverters"] = inverters
+    sys.modules.pop("power_sync.inverters.foxess_entity", None)
 
 
 _install_stubs()
@@ -77,8 +84,15 @@ class _FakeStates:
 
 
 class _FakeServices:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        available_services: set[tuple[str, str]] | None = None,
+    ) -> None:
         self.calls: list[tuple[str, str, dict]] = []
+        self._available_services = available_services or set()
+
+    def has_service(self, domain: str, service: str) -> bool:
+        return (domain, service) in self._available_services
 
     async def async_call(
         self,
@@ -91,25 +105,51 @@ class _FakeServices:
 
 
 class _FakeRegistry:
-    def __init__(self, entries: dict[str, list[str]] | None = None) -> None:
+    def __init__(self, entries: dict[str, list[str | SimpleNamespace]] | None = None) -> None:
         self._entries = entries or {}
 
     def entries_for(self, entry_id: str):
-        return [
-            SimpleNamespace(entity_id=entity_id)
-            for entity_id in self._entries.get(entry_id, [])
-        ]
+        entries = []
+        for entry in self._entries.get(entry_id, []):
+            if isinstance(entry, str):
+                entries.append(SimpleNamespace(entity_id=entry))
+            else:
+                entries.append(entry)
+        return entries
+
+
+class _FakeConfigEntries:
+    def __init__(
+        self,
+        titles: dict[str, str] | None = None,
+        data: dict[str, dict] | None = None,
+    ) -> None:
+        self._titles = titles or {}
+        self._data = data or {}
+
+    def async_get_entry(self, entry_id: str):
+        title = self._titles.get(entry_id)
+        data = self._data.get(entry_id)
+        if title is None and data is None:
+            return None
+        return SimpleNamespace(title=title or "", data=data or {}, options={})
 
 
 class _FakeHass:
     def __init__(
         self,
         states: list[_FakeState],
-        registry_entries: dict[str, list[str]] | None = None,
+        registry_entries: dict[str, list[str | SimpleNamespace]] | None = None,
+        service_names: set[tuple[str, str]] | None = None,
+        config_entry_titles: dict[str, str] | None = None,
+        config_entry_data: dict[str, dict] | None = None,
+        devices: dict[str, SimpleNamespace] | None = None,
     ) -> None:
         self.states = _FakeStates(states)
-        self.services = _FakeServices()
+        self.services = _FakeServices(service_names)
         self.entity_registry = _FakeRegistry(registry_entries)
+        self.config_entries = _FakeConfigEntries(config_entry_titles, config_entry_data)
+        self.device_registry = SimpleNamespace(devices=devices or {})
 
 
 def _kw() -> dict[str, str]:
@@ -166,6 +206,13 @@ def _base_states(prefix: str = "foxess") -> list[_FakeState]:
         _FakeState(f"number.{prefix}_max_discharge_current", "25"),
         _FakeState(f"number.{prefix}_export_power_limit", "99999"),
     ]
+
+
+def _h3_smart_device() -> SimpleNamespace:
+    return SimpleNamespace(
+        identifiers={("foxess_modbus", "H3_SMART", "AUX", "Kitchen FoxESS")},
+        model="H3_SMART - AUX",
+    )
 
 
 def _without_suffix(states: list[_FakeState], suffixes: tuple[str, ...]) -> list[_FakeState]:
@@ -472,10 +519,224 @@ def test_force_charge_rediscovers_entities_after_foxess_modbus_renames_controls(
     ]
 
 
+def test_force_charge_uses_foxess_modbus_remote_control_when_select_option_is_missing():
+    states = _base_states()
+    for state in states:
+        if state.entity_id == "select.foxess_work_mode":
+            state.attributes = {
+                "options": ["Self Use", "Feed-in First", "Back-up"],
+            }
+    registry_ids = [
+        SimpleNamespace(entity_id=state.entity_id, device_id="fox-device")
+        for state in states
+    ]
+    hass = _FakeHass(
+        states,
+        registry_entries={"fox-entry": registry_ids},
+        service_names={("foxess_modbus", "write_registers")},
+        devices={"fox-device": _h3_smart_device()},
+    )
+    controller = FoxESSEntityController(hass, foxess_entry_id="fox-entry")
+    controller._remote_control_settle_seconds = 0
+
+    assert asyncio.run(controller.connect())
+    assert asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
+
+    assert hass.services.calls == [
+        (
+            "number",
+            "set_value",
+            {"entity_id": "number.foxess_force_charge_power", "value": 4.2},
+        ),
+        (
+            "foxess_modbus",
+            "write_registers",
+            {"inverter": "fox-device", "start_address": 49203, "values": "3"},
+        ),
+        (
+            "foxess_modbus",
+            "write_registers",
+            {"inverter": "fox-device", "start_address": 46002, "values": "1800"},
+        ),
+        (
+            "foxess_modbus",
+            "write_registers",
+            {"inverter": "fox-device", "start_address": 46001, "values": "1"},
+        ),
+        (
+            "foxess_modbus",
+            "write_registers",
+            {"inverter": "fox-device", "start_address": 46003, "values": "65535,61336"},
+        ),
+    ]
+
+    hass.services.calls.clear()
+    assert asyncio.run(controller.restore_normal())
+    assert hass.services.calls == [
+        (
+            "foxess_modbus",
+            "write_registers",
+            {"inverter": "fox-device", "start_address": 46001, "values": "0"},
+        ),
+        (
+            "foxess_modbus",
+            "write_registers",
+            {"inverter": "fox-device", "start_address": 49203, "values": "1"},
+        ),
+    ]
+
+
+def test_force_discharge_uses_foxess_modbus_remote_control_when_select_option_is_missing():
+    states = _base_states()
+    for state in states:
+        if state.entity_id == "select.foxess_work_mode":
+            state.attributes = {
+                "options": ["Self Use", "Feed-in First", "Back-up"],
+            }
+    registry_ids = [
+        SimpleNamespace(entity_id=state.entity_id, device_id="fox-device")
+        for state in states
+    ]
+    hass = _FakeHass(
+        states,
+        registry_entries={"fox-entry": registry_ids},
+        service_names={("foxess_modbus", "write_registers")},
+        devices={"fox-device": _h3_smart_device()},
+    )
+    controller = FoxESSEntityController(hass, foxess_entry_id="fox-entry")
+    controller._remote_control_settle_seconds = 0
+
+    assert asyncio.run(controller.connect())
+    assert asyncio.run(controller.force_discharge(duration_minutes=15, power_w=4200))
+
+    assert hass.services.calls == [
+        (
+            "number",
+            "set_value",
+            {"entity_id": "number.foxess_force_discharge_power", "value": 4.2},
+        ),
+        (
+            "foxess_modbus",
+            "write_registers",
+            {"inverter": "fox-device", "start_address": 49203, "values": "2"},
+        ),
+        (
+            "foxess_modbus",
+            "write_registers",
+            {"inverter": "fox-device", "start_address": 46002, "values": "900"},
+        ),
+        (
+            "foxess_modbus",
+            "write_registers",
+            {"inverter": "fox-device", "start_address": 46001, "values": "1"},
+        ),
+        (
+            "foxess_modbus",
+            "write_registers",
+            {"inverter": "fox-device", "start_address": 46003, "values": "0,4200"},
+        ),
+    ]
+
+
 def test_curtailment_returns_false_when_export_limit_is_missing():
     states = _without_suffix(_base_states(), ("_export_power_limit",))
     hass = _FakeHass(states)
     controller = FoxESSEntityController(hass, entity_prefix="foxess")
+
+    assert asyncio.run(controller.connect())
+    assert not asyncio.run(controller.curtail(1500))
+    assert hass.services.calls == []
+
+
+def test_curtailment_uses_foxess_modbus_remote_control_when_export_limit_is_missing():
+    states = _without_suffix(_base_states(), ("_export_power_limit",))
+    registry_ids = [
+        SimpleNamespace(entity_id=state.entity_id, device_id="fox-device")
+        for state in states
+    ]
+    hass = _FakeHass(
+        states,
+        registry_entries={"fox-entry": registry_ids},
+        service_names={("foxess_modbus", "write_registers")},
+        devices={"fox-device": _h3_smart_device()},
+    )
+    controller = FoxESSEntityController(hass, foxess_entry_id="fox-entry")
+    controller._remote_control_settle_seconds = 0
+
+    assert asyncio.run(controller.connect())
+    assert asyncio.run(controller.curtail(1500))
+
+    assert hass.services.calls == [
+        (
+            "foxess_modbus",
+            "write_registers",
+            {"inverter": "fox-device", "start_address": 46001, "values": "9"},
+        ),
+        (
+            "foxess_modbus",
+            "write_registers",
+            {"inverter": "fox-device", "start_address": 46002, "values": "600"},
+        ),
+        (
+            "foxess_modbus",
+            "write_registers",
+            {"inverter": "fox-device", "start_address": 46003, "values": "0,1500"},
+        ),
+    ]
+
+
+def test_restore_disables_foxess_modbus_remote_control_when_export_limit_is_missing():
+    states = _without_suffix(_base_states(), ("_export_power_limit",))
+    registry_ids = [SimpleNamespace(entity_id=state.entity_id) for state in states]
+    hass = _FakeHass(
+        states,
+        registry_entries={"fox-entry": registry_ids},
+        service_names={("foxess_modbus", "write_registers")},
+        config_entry_titles={"fox-entry": "Kitchen FoxESS"},
+        config_entry_data={
+            "fox-entry": {
+                "inverters": [
+                    {
+                        "friendly_name": "Kitchen FoxESS",
+                        "inverter_model": "H3_SMART",
+                    }
+                ]
+            }
+        },
+    )
+    controller = FoxESSEntityController(hass, foxess_entry_id="fox-entry")
+
+    assert asyncio.run(controller.connect())
+    assert asyncio.run(controller.restore())
+
+    assert hass.services.calls == [
+        (
+            "foxess_modbus",
+            "write_registers",
+            {"inverter": "Kitchen FoxESS", "start_address": 46001, "values": "0"},
+        ),
+    ]
+
+
+def test_h3_smart_remote_registers_are_not_used_for_other_models():
+    states = _without_suffix(_base_states(), ("_export_power_limit",))
+    registry_ids = [
+        SimpleNamespace(entity_id=state.entity_id, device_id="fox-device")
+        for state in states
+    ]
+    hass = _FakeHass(
+        states,
+        registry_entries={"fox-entry": registry_ids},
+        service_names={("foxess_modbus", "write_registers")},
+        devices={
+            "fox-device": SimpleNamespace(
+                identifiers={("foxess_modbus", "H3", "AUX", "Kitchen FoxESS")},
+                model="H3 - AUX",
+            )
+        },
+    )
+    controller = FoxESSEntityController(hass, foxess_entry_id="fox-entry")
+    controller._remote_control_settle_seconds = 0
 
     assert asyncio.run(controller.connect())
     assert not asyncio.run(controller.curtail(1500))
