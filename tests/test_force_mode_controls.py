@@ -1047,7 +1047,9 @@ def test_goodwe_entity_mode_prefers_solar_first_charge_and_export_discharge_mode
     assert '"auto",' in restore_source
     assert "reset_power_limit=True" in restore_source
     assert "restore_operation_mode=True" in restore_source
-    assert '"value": 0' in ems_source
+    assert "restore_limit" in ems_source
+    assert "GOODWE_EMS_MAX_W" in ems_source
+    assert '"value": restore_limit' in ems_source
     assert "select.{p}_inverter_operation_mode" in ems_restore_source
     assert "general_mode" in ems_restore_source
     assert '"options"' in attempts_source

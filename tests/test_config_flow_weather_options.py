@@ -269,6 +269,8 @@ def test_neovolt_surplus_balancer_help_explains_disabled_single_entry_status():
 
 def test_weather_entity_selector_is_conditional_and_has_blank_state():
     method = _options_flow_method("_add_weather_entity_selector")
+    source = CONFIG_FLOW_PATH.read_text()
+    method_source = ast.get_source_segment(source, method)
 
     assert any(
         isinstance(node, ast.Call)
@@ -277,6 +279,9 @@ def test_weather_entity_selector_is_conditional_and_has_blank_state():
         for node in ast.walk(method)
     )
     assert any(_calls_vol_optional_without_default(node) for node in ast.walk(method))
+    assert method_source is not None
+    assert "suggested_value" in method_source
+    assert "default=current_weather_entity" not in method_source
 
 
 def test_weather_options_sanitizes_weather_entity_before_storing():
@@ -1227,6 +1232,10 @@ def test_disabling_curtailment_restores_owned_inverter_limits():
 
     assert "_last_sigenergy_curtailment_reapply" in helper_source
     assert "_last_goodwe_curtailment_reapply" in helper_source
+    assert "restore_when_state_lost: bool = False" in helper_source
+    assert "not was_curtailed and not restore_when_state_lost" in helper_source
+    assert '"GoodWe",' in helper_source
+    assert "restore_when_state_lost=True" in helper_source
     assert "_last_foxess_curtailment_reapply" in helper_source
     assert "sungrow_coord.set_export_limit(None)" in helper_source
     assert 'entry_data["sungrow_power_limit_w"] = None' in helper_source

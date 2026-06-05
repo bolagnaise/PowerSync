@@ -5627,17 +5627,27 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
                 )
                 power_limit_log = capped_w
             elif reset_power_limit:
+                state = self.hass.states.get(power_entity)
+                raw_max = state.attributes.get("max") if state else None
+                try:
+                    restore_limit = int(float(raw_max))
+                except (TypeError, ValueError):
+                    restore_limit = int(
+                        (self.data or {}).get("rated_power_w") or GOODWE_EMS_MAX_W
+                    )
+                restore_limit = max(1, min(restore_limit, GOODWE_EMS_MAX_W))
                 try:
                     await self.hass.services.async_call(
                         "number", "set_value",
-                        {"entity_id": power_entity, "value": 0},
+                        {"entity_id": power_entity, "value": restore_limit},
                         blocking=True,
                     )
-                    power_limit_log = 0
+                    power_limit_log = restore_limit
                 except Exception as reset_exc:
                     _LOGGER.warning(
-                        "GoodWe EMS control could not reset %s power limit to 0W: %s",
+                        "GoodWe EMS control could not reset %s power limit to %dW: %s",
                         power_entity,
+                        restore_limit,
                         reset_exc,
                     )
 

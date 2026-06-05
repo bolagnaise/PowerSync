@@ -5386,8 +5386,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             coord_key: str,
             state_key: str,
             *extra_state_keys: str,
+            restore_when_state_lost: bool = False,
         ) -> None:
-            if entry_data.get(state_key) != "curtailed":
+            was_curtailed = entry_data.get(state_key) == "curtailed"
+            if not was_curtailed and not restore_when_state_lost:
                 return
 
             coord = entry_data.get(coord_key)
@@ -5409,10 +5411,17 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 entry_data[state_key] = "normal"
                 for key in extra_state_keys:
                     entry_data.pop(key, None)
-                _LOGGER.info(
-                    "Solar curtailment disabled - restored %s export limit",
-                    label,
-                )
+                if was_curtailed:
+                    _LOGGER.info(
+                        "Solar curtailment disabled - restored %s export limit",
+                        label,
+                    )
+                else:
+                    _LOGGER.info(
+                        "Solar curtailment disabled - restored %s export limit "
+                        "(curtailment state was not marked active)",
+                        label,
+                    )
             else:
                 _LOGGER.error("%s curtailment restore returned false", label)
 
@@ -5432,6 +5441,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             "goodwe_coordinator",
             "goodwe_curtailment_state",
             "_last_goodwe_curtailment_reapply",
+            restore_when_state_lost=True,
         )
 
         if entry_data.get("foxess_curtailment_state") == "curtailed":
@@ -5703,10 +5713,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         if not current_weather_entity and not self._has_weather_entities():
             return
 
-        selector_key = (
-            vol.Optional(CONF_WEATHER_ENTITY, default=current_weather_entity)
-            if current_weather_entity
-            else vol.Optional(CONF_WEATHER_ENTITY)
+        selector_key = vol.Optional(
+            CONF_WEATHER_ENTITY,
+            description=(
+                {"suggested_value": current_weather_entity}
+                if current_weather_entity
+                else None
+            ),
         )
         schema_dict[selector_key] = EntitySelector(
             EntitySelectorConfig(domain="weather")
