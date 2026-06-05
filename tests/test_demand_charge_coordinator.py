@@ -6,7 +6,7 @@ import asyncio
 import importlib
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,7 +48,13 @@ def _install_coordinator_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
 
     class Store:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            self._data = None
+
+        async def async_load(self):
+            return self._data
+
+        def async_delay_save(self, data_func, delay):
+            self._data = data_func()
 
     ha_core.HomeAssistant = object
     ha_exceptions.ConfigEntryAuthFailed = ConfigEntryAuthFailed
@@ -131,3 +137,74 @@ def test_peak_demand_tracks_only_billable_demand_window_samples(
     assert data["grid_import_power_kw"] == 10.99
     assert data["peak_demand_kw"] == 4.2
     assert data["estimated_cost"] == pytest.approx(37.8)
+
+
+def test_peak_demand_uses_rolling_average_not_instantaneous(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Peak demand should reflect the rolling average, not a single spike."""
+    coordinator_module = _coordinator_module(monkeypatch)
+    energy = SimpleNamespace(data={"grid_power": 0.0})
+    demand = coordinator_module.DemandChargeCoordinator(
+        hass=SimpleNamespace(),
+        energy_coordinator=energy,
+        enabled=True,
+        rate=7.0,
+        start_time="16:00",
+        end_time="21:00",
+        days="All Days",
+        billing_day=1,
+        averaging_minutes=5,
+    )
+
+    # Feed 5 samples at 1-min intervals during demand window
+    # 4 low + 1 spike: average should be (1+1+1+1+8)/5 = 2.4, not 8
+    base_time = datetime(2026, 6, 1, 17, 0, tzinfo=timezone.utc)
+    samples = [1.0, 1.0, 1.0, 1.0, 8.0]
+    for i, power in enumerate(samples):
+        _Clock.current = base_time + timedelta(minutes=i)
+        energy.data = {"grid_power": power}
+        data = asyncio.run(demand._async_update_data())
+
+    # Peak should be the rolling average (~2.4), NOT the spike (8.0)
+    assert data["peak_demand_kw"] == pytest.approx(2.4)
+    assert data["rolling_avg_kw"] == pytest.approx(2.4)
+    assert data["estimated_cost"] == pytest.approx(2.4 * 7.0)
+
+
+def test_rolling_window_prunes_old_samples(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Samples older than averaging_minutes should be pruned."""
+    coordinator_module = _coordinator_module(monkeypatch)
+    energy = SimpleNamespace(data={"grid_power": 0.0})
+    demand = coordinator_module.DemandChargeCoordinator(
+        hass=SimpleNamespace(),
+        energy_coordinator=energy,
+        enabled=True,
+        rate=7.0,
+        start_time="16:00",
+        end_time="21:00",
+        days="All Days",
+        billing_day=1,
+        averaging_minutes=3,
+    )
+
+    base_time = datetime(2026, 6, 1, 17, 0, tzinfo=timezone.utc)
+
+    # Sample at t=0: 6 kW
+    _Clock.current = base_time
+    energy.data = {"grid_power": 6.0}
+    asyncio.run(demand._async_update_data())
+
+    # Samples at t=4,5 (past the 3-min window, so t=0 sample should be pruned)
+    _Clock.current = base_time + timedelta(minutes=4)
+    energy.data = {"grid_power": 2.0}
+    asyncio.run(demand._async_update_data())
+
+    _Clock.current = base_time + timedelta(minutes=5)
+    energy.data = {"grid_power": 2.0}
+    data = asyncio.run(demand._async_update_data())
+
+    # Only the 2.0 samples should remain (6.0 is older than 3 mins)
+    assert data["rolling_avg_kw"] == pytest.approx(2.0)
