@@ -429,6 +429,7 @@ class FoxESSController(InverterController):
         self._baudrate = int(baudrate)
         self._original_work_mode: Optional[int] = None
         self._original_min_soc: Optional[int] = None
+        self._last_valid_load_power_kw: Optional[float] = None
 
         # Model detection
         if model_family:
@@ -780,6 +781,7 @@ class FoxESSController(InverterController):
             attrs["ct2_power_kw"] = ct2_power_kw
 
             # Load/home power
+            load_power_is_calculated = False
             if reg.load_power:
                 lp_raw = await self._read_data_register(reg.load_power, 1)
                 load_power_kw = lp_raw[0] / bp_gain if lp_raw else None
@@ -787,10 +789,23 @@ class FoxESSController(InverterController):
                 # H3-Pro/H3-Smart: no load register, calculate from energy balance
                 # Sign convention: battery positive=discharge, grid positive=import
                 # Load = PV_DC + CT2_AC + battery_discharge + grid_import
+                load_power_is_calculated = True
                 if grid_power_kw is not None and battery_power_kw is not None:
                     load_power_kw = total_pv_kw + ct2_power_kw + grid_power_kw + battery_power_kw
                 else:
                     load_power_kw = None
+            if load_power_is_calculated and load_power_kw is not None:
+                if load_power_kw > 0:
+                    self._last_valid_load_power_kw = load_power_kw
+                elif self._last_valid_load_power_kw is not None:
+                    _LOGGER.debug(
+                        "FoxESS calculated load %.3f kW invalid; keeping previous %.3f kW",
+                        load_power_kw,
+                        self._last_valid_load_power_kw,
+                    )
+                    load_power_kw = self._last_valid_load_power_kw
+                else:
+                    load_power_kw = 0.0
             attrs["load_power_kw"] = load_power_kw
 
             # Work mode (holding register)

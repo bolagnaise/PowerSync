@@ -336,6 +336,14 @@ def test_local_powerwall_home_load_never_goes_negative_after_ev_subtraction():
     assert entity.native_value == 0.0
 
 
+def test_home_load_sensor_never_publishes_negative_history_value():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "home_load")
+
+    assert desc.value_fn({"load_power": -19.519}) == 0.0
+    assert desc.value_fn({"load_power": 1.234}) == 1.234
+
+
 def test_neovolt_surplus_balancer_sensor_exposes_status_and_attributes():
     sensor = _sensor_module()
     desc = next(d for d in sensor.NEOVOLT_SENSORS if d.key == "neovolt_surplus_balancer")

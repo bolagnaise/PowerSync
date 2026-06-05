@@ -302,6 +302,19 @@ def _sungrow_ac_inverter_power_kw(entry: ConfigEntry, hass: HomeAssistant) -> fl
         return 0.0
 
 
+def _home_load_power_kw(data: Any) -> float | None:
+    """Return Home Load in kW, clamped to its physical lower bound."""
+    if not data:
+        return None
+    value = data.get("load_power")
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 # Large rolling prediction arrays exposed as sensor attributes (≈48h @ 5min /
 # price-period series). They exceed Home Assistant's 16 KB per-state recorder
 # attribute cap and are regenerated each cycle (not history), so the recorder
@@ -579,7 +592,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
-        value_fn=lambda data: data.get("load_power") if data else None,
+        value_fn=_home_load_power_kw,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_BATTERY_LEVEL,

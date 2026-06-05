@@ -729,8 +729,20 @@ class PowerSyncChart extends HTMLElement {
         ? cached
         : this._statePoint(stateObj, now);
       const data = this._projectHistoryToNow(rawData, stateObj, now, start, end);
-      return { name: s.name, color: s.color, fill: !!s.fill, strokeWidth: s.strokeWidth, data: data.filter(([t]) => t >= start && t <= end) };
+      const filtered = this._filterSeriesData(data, s);
+      return { name: s.name, color: s.color, fill: !!s.fill, strokeWidth: s.strokeWidth, data: filtered.filter(([t]) => t >= start && t <= end) };
     });
+  }
+
+  _filterSeriesData(data, seriesConfig) {
+    const minValue = Number(seriesConfig?.minValue);
+    const maxValue = Number(seriesConfig?.maxValue);
+    const hasMin = Number.isFinite(minValue);
+    const hasMax = Number.isFinite(maxValue);
+    if (!hasMin && !hasMax) return data;
+    return (Array.isArray(data) ? data : []).filter(([, value]) => (
+      (!hasMin || value >= minValue) && (!hasMax || value <= maxValue)
+    ));
   }
 
   _projectHistoryToNow(data, stateObj, now, start, end) {
@@ -5562,7 +5574,7 @@ function _combinedEnergyChart(e, hasHome) {
     { entity: e('battery_power'), name: 'Battery', color: '#2196F3' },
   ];
   if (hasHome) {
-    series.push({ entity: e('home_load'), name: 'Home', color: '#9C27B0' });
+    series.push({ entity: e('home_load'), name: 'Home', color: '#9C27B0', minValue: 0 });
   }
   return {
     type: 'custom:power-sync-chart',

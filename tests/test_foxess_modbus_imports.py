@@ -215,3 +215,74 @@ def test_h3_smart_direct_modbus_reads_pv3_power(tmp_path: Path):
     finally:
         sys.path[:] = original_path
         _restore_modules(snapshot)
+
+
+def test_h3_smart_direct_modbus_keeps_last_valid_calculated_load(tmp_path: Path):
+    snapshot = _snapshot_modules()
+    original_path = list(sys.path)
+    try:
+        _clear_test_modules()
+        _write_fake_pymodbus(tmp_path)
+        sys.path.insert(0, str(tmp_path))
+        _install_power_sync_package()
+        module = importlib.import_module("power_sync.inverters.foxess")
+        controller = module.FoxESSController(
+            host="192.0.2.1",
+            model_family="H3-Smart",
+        )
+
+        def signed32_words(value: int) -> list[int]:
+            value &= 0xFFFFFFFF
+            return [(value >> 16) & 0xFFFF, value & 0xFFFF]
+
+        readings = [
+            {
+                "battery_power_w": -2000,
+                "grid_power_w": 1000,
+                "pv_power_w": 6000,
+            },
+            {
+                "battery_power_w": -20000,
+                "grid_power_w": -1000,
+                "pv_power_w": 6000,
+            },
+        ]
+        poll_index = 0
+
+        async def fake_read_holding(address: int, count: int = 1):
+            current = readings[poll_index]
+            holding_registers = {
+                37612: [60],
+                39237: signed32_words(current["battery_power_w"]),
+                39279: signed32_words(current["pv_power_w"]),
+                39281: [0, 0],
+                39283: [0, 0],
+                # H3-Smart raw grid sign is inverted: positive raw means export.
+                38814: signed32_words(-current["grid_power_w"] * 10),
+                38914: [0, 0],
+                49203: [1],
+                46611: [10],
+                46607: [250],
+                46608: [250],
+                39227: [5000],
+                37611: [240],
+                37624: [100],
+                39053: [0, 15000],
+                37635: [1000],
+                39625: [0, 0],
+            }
+            return holding_registers.get(address, [0] * count)
+
+        controller._read_holding_registers = fake_read_holding
+
+        first = asyncio.run(controller.get_status())
+        poll_index = 1
+        second = asyncio.run(controller.get_status())
+
+        assert first.status == module.InverterStatus.ONLINE
+        assert first.attributes["load_power_kw"] == 5.0
+        assert second.status == module.InverterStatus.ONLINE
+        assert second.attributes["load_power_kw"] == 5.0
+    finally:
+        sys.path[:] = original_path
+        _restore_modules(snapshot)
