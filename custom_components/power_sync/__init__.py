@@ -226,6 +226,7 @@ from .const import (
     CONF_DEMAND_CHARGE_DAYS,
     CONF_DEMAND_CHARGE_BILLING_DAY,
     CONF_DEMAND_CHARGE_APPLY_TO,
+    CONF_DEMAND_CHARGE_AVERAGING_MINUTES,
     CONF_DEMAND_ARTIFICIAL_PRICE,
     CONF_DEMAND_ALLOW_GRID_CHARGING,
     CONF_DAILY_SUPPLY_CHARGE,
@@ -17739,6 +17740,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_MONTHLY_SUPPLY_CHARGE,
             entry.data.get(CONF_MONTHLY_SUPPLY_CHARGE, 0.0)
         )
+        demand_charge_averaging_minutes = entry.options.get(
+            CONF_DEMAND_CHARGE_AVERAGING_MINUTES,
+            entry.data.get(CONF_DEMAND_CHARGE_AVERAGING_MINUTES, 30)
+        )
 
         demand_charge_coordinator = DemandChargeCoordinator(
             hass,
@@ -17751,6 +17756,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             billing_day=demand_charge_billing_day,
             daily_supply_charge=daily_supply_charge,
             monthly_supply_charge=monthly_supply_charge,
+            averaging_minutes=demand_charge_averaging_minutes,
         )
         await demand_charge_coordinator.async_config_entry_first_refresh()
         _LOGGER.info("Demand charge coordinator initialized")
