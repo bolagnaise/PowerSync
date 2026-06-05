@@ -3161,12 +3161,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
         for index, action in enumerate(actions):
-            if getattr(action, "action", None) != "idle":
+            action_name = getattr(action, "action", None)
+            action_charge_w = float(getattr(action, "battery_charge_w", 0.0) or 0.0)
+            action_discharge_w = float(
+                getattr(action, "battery_discharge_w", 0.0) or 0.0
+            )
+            should_simulate_self_use = (
+                action_name in SELF_USE_ACTIONS
+                and action_charge_w <= 0
+                and action_discharge_w <= 0
+            )
+            if action_name != "idle" and not should_simulate_self_use:
                 new_actions.append(action)
                 soc_cursor = _advance_soc(
                     soc_cursor,
-                    float(getattr(action, "battery_charge_w", 0.0) or 0.0),
-                    float(getattr(action, "battery_discharge_w", 0.0) or 0.0),
+                    action_charge_w,
+                    action_discharge_w,
                 )
                 continue
             changed = True

@@ -2573,6 +2573,66 @@ def test_flow_power_no_idle_schedule_simulates_home_load(opt_module):
     assert converted.actions[1].soc < converted.actions[0].soc
 
 
+def test_flow_power_no_idle_schedule_fills_zero_self_consumption_after_export(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power")
+    coordinator._config.disable_idle_enabled = True
+    coordinator._config.battery_capacity_wh = 10000
+    coordinator._config.max_discharge_w = 5000
+    coordinator._config.backup_reserve = 0.30
+    coordinator._startup_backup_reserve = 5
+
+    start = datetime(2026, 5, 3, 18, 45, tzinfo=timezone.utc)
+    schedule = opt_module.OptimizationSchedule(
+        actions=[
+            opt_module.ScheduleAction(
+                timestamp=start,
+                action="export",
+                power_w=5000,
+                soc=0.30,
+                battery_charge_w=0,
+                battery_discharge_w=5000,
+            ),
+            opt_module.ScheduleAction(
+                timestamp=start + timedelta(minutes=5),
+                action="self_consumption",
+                power_w=0,
+                soc=0.05,
+                battery_charge_w=0,
+                battery_discharge_w=0,
+            ),
+            opt_module.ScheduleAction(
+                timestamp=start + timedelta(minutes=10),
+                action="self_consumption",
+                power_w=0,
+                soc=0.05,
+                battery_charge_w=0,
+                battery_discharge_w=0,
+            ),
+        ],
+        predicted_cost=1.23,
+        predicted_savings=0.45,
+        last_updated=start,
+    )
+
+    converted = coordinator._disable_idle_schedule(
+        schedule,
+        solar_forecast=[0.0, 0.0, 0.0],
+        load_forecast=[0.0, 2.0, 2.0],
+        initial_soc=0.30,
+    )
+
+    assert [action.action for action in converted.actions] == [
+        "export",
+        "self_consumption",
+        "self_consumption",
+    ]
+    assert converted.actions[1].battery_discharge_w == 2000.0
+    assert converted.actions[2].battery_discharge_w == 2000.0
+    assert converted.actions[1].soc > 0.05
+    assert converted.actions[2].soc > 0.05
+    assert converted.actions[2].soc < converted.actions[1].soc
+
+
 def test_flow_power_no_idle_schedule_uses_hardware_floor_for_home_load(opt_module):
     coordinator = _coordinator(opt_module, "flow_power")
     coordinator._config.disable_idle_enabled = True
