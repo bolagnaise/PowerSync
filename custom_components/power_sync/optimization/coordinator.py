@@ -4773,6 +4773,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     > floor + 0.0001
                 ]
                 if not spread_positions:
+                    fallback_soc = _action_soc(start - 1)
+                    if fallback_soc is None:
+                        fallback_soc = floor
                     for pos in range(start, end):
                         original = actions[pos]
                         if getattr(original, "action", None) in ("export", "discharge"):
@@ -4780,7 +4783,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 timestamp=original.timestamp,
                                 action="self_consumption",
                                 power_w=0.0,
-                                soc=original.soc,
+                                soc=(
+                                    round(fallback_soc, 4)
+                                    if fallback_soc is not None
+                                    else original.soc
+                                ),
                                 battery_charge_w=0.0,
                                 battery_discharge_w=0.0,
                             )
@@ -4827,7 +4834,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         timestamp=original.timestamp,
                         action="self_consumption",
                         power_w=0.0,
-                        soc=original.soc,
+                        soc=(
+                            round(soc_cursor, 4)
+                            if soc_cursor is not None
+                            else original.soc
+                        ),
                         battery_charge_w=0.0,
                         battery_discharge_w=0.0,
                     )
@@ -4840,7 +4851,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         timestamp=original.timestamp,
                         action="self_consumption",
                         power_w=0.0,
-                        soc=original.soc,
+                        soc=(
+                            round(soc_cursor, 4)
+                            if soc_cursor is not None
+                            else original.soc
+                        ),
                         battery_charge_w=0.0,
                         battery_discharge_w=0.0,
                     )
@@ -7699,6 +7714,73 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         total_baseline = self._actual_baseline_today + baseline_remaining
         return round(total_baseline - total_cost, 2)
 
+    def _display_grid_arrays_from_schedule(
+        self,
+        api_response: dict[str, list[Any]],
+        raw_grid_import_w: list[float] | None,
+        raw_grid_export_w: list[float] | None,
+    ) -> tuple[list[float], list[float]]:
+        """Build display grid arrays from the post-processed schedule."""
+        timestamps = api_response.get("timestamps", [])
+        n = len(timestamps)
+        charge_w = api_response.get("charge_w", [])
+        consume_w = api_response.get("battery_consume_w", [])
+        export_w = api_response.get("battery_export_w", [])
+        display_import: list[float] = []
+        display_export: list[float] = []
+
+        for idx in range(n):
+            raw_import = (
+                float(raw_grid_import_w[idx])
+                if raw_grid_import_w is not None and idx < len(raw_grid_import_w)
+                else 0.0
+            )
+            raw_export = (
+                float(raw_grid_export_w[idx])
+                if raw_grid_export_w is not None and idx < len(raw_grid_export_w)
+                else 0.0
+            )
+            battery_charge = (
+                float(charge_w[idx]) if idx < len(charge_w) and charge_w[idx] else 0.0
+            )
+            battery_consume = (
+                float(consume_w[idx]) if idx < len(consume_w) and consume_w[idx] else 0.0
+            )
+            battery_export = (
+                float(export_w[idx]) if idx < len(export_w) and export_w[idx] else 0.0
+            )
+
+            if (
+                idx < len(getattr(self, "_last_solar_forecast", []) or [])
+                and idx < len(getattr(self, "_last_load_forecast", []) or [])
+            ):
+                solar_w = max(
+                    0.0,
+                    float(self._last_solar_forecast[idx] or 0.0) * 1000.0,
+                )
+                load_w = max(
+                    0.0,
+                    float(self._last_load_forecast[idx] or 0.0) * 1000.0,
+                )
+                display_export.append(
+                    round(
+                        max(0.0, solar_w + battery_export - load_w - battery_charge),
+                        1,
+                    )
+                )
+                display_import.append(
+                    round(max(0.0, load_w + battery_charge - solar_w - battery_consume), 1)
+                )
+                continue
+
+            if battery_export <= 0:
+                display_export.append(0.0)
+            else:
+                display_export.append(round(max(0.0, raw_export), 1))
+            display_import.append(round(max(0.0, raw_import), 1))
+
+        return display_import, display_export
+
     def set_cost_function(self, cost_function: str | CostFunction) -> None:
         """Set the optimization cost function."""
         if isinstance(cost_function, str):
@@ -8038,8 +8120,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             api_response = self._current_schedule.to_api_response()
             # Add grid import/export from LP result
             if self._last_optimizer_result:
-                api_response["grid_import_w"] = self._last_optimizer_result.grid_import_w
-                api_response["grid_export_w"] = self._last_optimizer_result.grid_export_w
+                grid_import_w, grid_export_w = self._display_grid_arrays_from_schedule(
+                    api_response,
+                    self._last_optimizer_result.grid_import_w,
+                    self._last_optimizer_result.grid_export_w,
+                )
+                api_response["grid_import_w"] = grid_import_w
+                api_response["grid_export_w"] = grid_export_w
             # Add price arrays for pricing overlay (use actual tariff rates, not LP-adjusted)
             n_sched = len(api_response["timestamps"])
             display_import = self._last_display_import_prices or self._last_import_prices

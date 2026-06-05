@@ -2983,6 +2983,66 @@ def test_spread_export_schedule_defaults_to_configured_reserve_floor(opt_module)
     )
 
 
+def test_spread_export_schedule_carries_reserve_soc_after_capped_export(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power", profit_max=True)
+    coordinator.battery_system = "goodwe"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.backup_reserve = 0.30
+    coordinator._config.battery_capacity_wh = 10000
+    coordinator._config.max_discharge_w = 6000
+    coordinator._optimizer = SimpleNamespace(efficiency=1.0)
+    start = datetime(2026, 5, 3, 17, 30, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="export",
+            power_w=6000,
+            soc=[0.40, 0.35, 0.30, 0.25, 0.20, 0.05][idx],
+            battery_discharge_w=6000,
+        )
+        for idx in range(6)
+    ]
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread = coordinator._spread_export_schedule(schedule, [True] * 6)
+
+    assert [action.action for action in spread.actions] == [
+        "export",
+        "export",
+        "self_consumption",
+        "self_consumption",
+        "self_consumption",
+        "self_consumption",
+    ]
+    assert min(action.soc for action in spread.actions) >= 0.30 - 1e-6
+    assert [action.soc for action in spread.actions[2:]] == [0.30] * 4
+
+
+def test_schedule_display_grid_export_uses_post_processed_battery_export(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power", profit_max=True)
+    coordinator._last_solar_forecast = [0.0, 0.0, 1.5]
+    coordinator._last_load_forecast = [0.0, 0.0, 0.5]
+    api_response = {
+        "timestamps": ["a", "b", "c"],
+        "charge_w": [0.0, 0.0, 0.0],
+        "battery_consume_w": [0.0, 0.0, 0.0],
+        "battery_export_w": [23000.0, 0.0, 0.0],
+    }
+
+    _grid_import, grid_export = coordinator._display_grid_arrays_from_schedule(
+        api_response,
+        raw_grid_import_w=[0.0, 0.0, 0.0],
+        raw_grid_export_w=[23000.0, 23000.0, 13075.0],
+    )
+
+    assert grid_export == [23000.0, 0.0, 1000.0]
+
+
 def test_spread_export_schedule_uses_export_power_for_target_batteries(opt_module):
     coordinator = _coordinator(opt_module, "octopus")
     coordinator.battery_system = "goodwe"
