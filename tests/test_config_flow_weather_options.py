@@ -320,6 +320,30 @@ def test_ev_charging_save_preserves_fallback_generic_soc_sensor():
     assert "final_data[CONF_GENERIC_CHARGER_SOC_ENTITY_2]" in method_source
 
 
+def test_ev_charging_save_allows_clearing_generic_charger_entities():
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("_save_ev_options")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    for key in (
+        "CONF_GENERIC_CHARGER_SWITCH_ENTITY",
+        "CONF_GENERIC_CHARGER_AMPS_ENTITY",
+        "CONF_GENERIC_CHARGER_STATUS_ENTITY",
+        "CONF_GENERIC_CHARGER_SOC_ENTITY",
+        "CONF_GENERIC_CHARGER_SOC_ENTITY_2",
+    ):
+        assert f"final_data[{key}] = ev_input.get(" in method_source
+    for stale_guard in (
+        "if generic_switch:",
+        "if generic_amps:",
+        "if generic_status:",
+        "if generic_soc:",
+        "if generic_soc_2:",
+    ):
+        assert stale_guard not in method_source
+
+
 def test_ev_charging_fallback_generic_soc_sensor_is_translated():
     for path in (STRINGS_PATH, TRANSLATIONS_PATH):
         data = json.loads(path.read_text())

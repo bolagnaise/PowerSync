@@ -516,6 +516,21 @@ def test_tesla_force_modes_always_reissue_autonomous_mode():
     assert force_charge_source.count('json={"default_real_mode": "autonomous"}') >= 1
 
 
+def test_set_operation_mode_verifies_readback_and_raises_for_automation_retries():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_set_operation_mode")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert "transport.read_config(din)" in function_source
+    assert "default_real_mode" in function_source
+    assert "_confirm_mode" in function_source
+    assert "_bounce_to_autonomous" in function_source
+    assert "Tesla accepted the mode change but readback did not verify" in function_source
+    assert "raise HomeAssistantError" in function_source
+
+
 def test_neovolt_energy_coordinator_passes_force_discharge_restore_mode_flag():
     source = COORDINATOR_PATH.read_text()
     tree = ast.parse(source)

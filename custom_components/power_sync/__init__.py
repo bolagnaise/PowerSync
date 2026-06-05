@@ -160,7 +160,7 @@ from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 import homeassistant.helpers.config_validation as cv
 from homeassistant.const import Platform, CONF_ACCESS_TOKEN, CONF_TOKEN
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -26630,7 +26630,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not din:
                 return False
             # default_real_mode lives at the top level of config.json, not under site_info.
-            return await transport.write_config(din, {"default_real_mode": mode})
+            if not await transport.write_config(din, {"default_real_mode": mode}):
+                return False
+            for attempt in range(1, 4):
+                if attempt > 1:
+                    await asyncio.sleep(2)
+                config = await transport.read_config(din)
+                observed_mode = config.get("default_real_mode") if isinstance(config, dict) else None
+                if observed_mode == mode:
+                    _LOGGER.info(
+                        "Confirmed local Tesla operation mode %s for DIN %s (attempt %d/3)",
+                        mode,
+                        din,
+                        attempt,
+                    )
+                    return True
+                _LOGGER.warning(
+                    "Local Tesla operation mode readback for DIN %s is %s, expected %s (attempt %d/3)",
+                    din,
+                    observed_mode,
+                    mode,
+                    attempt,
+                )
+            return False
 
         async def _cloud() -> bool:
             site_configs = _get_tesla_site_configs(hass, entry)
@@ -26640,46 +26662,197 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             any_ok = False
             session = async_get_clientsession(hass)
+
+            async def _post_mode(
+                api_base: str,
+                site_id: str,
+                headers: dict[str, str],
+                requested_mode: str,
+            ) -> tuple[bool, int | None, str]:
+                try:
+                    async with session.post(
+                        f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                        headers=headers,
+                        json={"default_real_mode": requested_mode},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        text = await response.text()
+                        return response.status == 200, response.status, text
+                except asyncio.TimeoutError:
+                    return False, None, "timeout"
+
+            async def _read_mode(
+                api_base: str,
+                site_id: str,
+                headers: dict[str, str],
+            ) -> str | None:
+                try:
+                    async with session.get(
+                        f"{api_base}/api/1/energy_sites/{site_id}/site_info",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status != 200:
+                            text = await response.text()
+                            _LOGGER.warning(
+                                "Tesla operation mode readback failed for site %s: %s - %s",
+                                site_id,
+                                response.status,
+                                text[:200],
+                            )
+                            return None
+                        data = await response.json()
+                        return data.get("response", {}).get("default_real_mode")
+                except Exception as err:
+                    _LOGGER.warning(
+                        "Tesla operation mode readback error for site %s: %s",
+                        site_id,
+                        err,
+                    )
+                    return None
+
+            async def _confirm_mode(
+                api_base: str,
+                site_id: str,
+                headers: dict[str, str],
+                expected_mode: str,
+                *,
+                attempts: int = 4,
+                delay_seconds: float = 2.0,
+            ) -> bool:
+                for attempt in range(1, attempts + 1):
+                    if attempt > 1:
+                        await asyncio.sleep(delay_seconds)
+                    observed_mode = await _read_mode(api_base, site_id, headers)
+                    if observed_mode == expected_mode:
+                        _LOGGER.info(
+                            "Confirmed Tesla operation mode %s for site %s (attempt %d/%d)",
+                            expected_mode,
+                            site_id,
+                            attempt,
+                            attempts,
+                        )
+                        return True
+                    _LOGGER.warning(
+                        "Tesla operation mode readback for site %s is %s, expected %s (attempt %d/%d)",
+                        site_id,
+                        observed_mode,
+                        expected_mode,
+                        attempt,
+                        attempts,
+                    )
+                return False
+
+            async def _bounce_to_autonomous(
+                api_base: str,
+                site_id: str,
+                headers: dict[str, str],
+            ) -> bool:
+                ok, status, text = await _post_mode(
+                    api_base,
+                    site_id,
+                    headers,
+                    "self_consumption",
+                )
+                if not ok:
+                    _LOGGER.warning(
+                        "Tesla autonomous recovery bounce could not set self_consumption for site %s: %s - %s",
+                        site_id,
+                        status,
+                        text[:200],
+                    )
+                await asyncio.sleep(5)
+                ok, status, text = await _post_mode(
+                    api_base,
+                    site_id,
+                    headers,
+                    "autonomous",
+                )
+                if not ok:
+                    _LOGGER.warning(
+                        "Tesla autonomous recovery bounce could not set autonomous for site %s: %s - %s",
+                        site_id,
+                        status,
+                        text[:200],
+                    )
+                    return False
+                return await _confirm_mode(api_base, site_id, headers, "autonomous")
+
             for site_id, current_token, provider in site_configs:
                 headers = {
                     "Authorization": f"Bearer {current_token}",
                     "Content-Type": "application/json",
                 }
-                api_base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
+                api_base = get_tesla_api_base_url(
+                    provider,
+                    entry.data.get(CONF_FLEET_API_BASE_URL),
+                )
 
                 # Retry up to 3 times for operation mode
                 for attempt in range(1, 4):
-                    try:
-                        async with session.post(
-                            f"{api_base}/api/1/energy_sites/{site_id}/operation",
-                            headers=headers,
-                            json={"default_real_mode": mode},
-                            timeout=aiohttp.ClientTimeout(total=30),
-                        ) as response:
-                            if response.status == 200:
-                                _LOGGER.info("Operation mode set to %s for site %s", mode, site_id)
+                    ok, status, text = await _post_mode(api_base, site_id, headers, mode)
+                    if ok:
+                        _LOGGER.info("Operation mode set to %s for site %s", mode, site_id)
+                        if await _confirm_mode(api_base, site_id, headers, mode):
+                            any_ok = True
+                            break
+                        if mode == "autonomous":
+                            _LOGGER.warning(
+                                "Tesla site %s did not stay in autonomous after direct write; trying mode bounce",
+                                site_id,
+                            )
+                            if await _bounce_to_autonomous(api_base, site_id, headers):
                                 any_ok = True
                                 break
-                            elif response.status in (429, 500, 502, 503, 504):
-                                _LOGGER.warning(
-                                    "Tesla operation mode attempt %d/3 failed for site %s: %s",
-                                    attempt, site_id, response.status,
-                                )
-                                if attempt < 3:
-                                    await asyncio.sleep(2 ** attempt)
-                                else:
-                                    text = await response.text()
-                                    _LOGGER.error("Failed to set operation mode for site %s after 3 attempts: %s - %s", site_id, response.status, text[:200])
-                                    hass.async_create_task(_notify_api_error(hass, "Mode Change Failed", f"Could not change Tesla operation mode after 3 attempts — API {response.status}"))
-                            else:
-                                text = await response.text()
-                                _LOGGER.error("Failed to set operation mode for site %s: %s - %s", site_id, response.status, text[:200])
-                                hass.async_create_task(_notify_api_error(hass, "Mode Change Failed", "Could not change Tesla operation mode — API error"))
-                                break
-                    except asyncio.TimeoutError:
-                        _LOGGER.warning("Tesla operation mode attempt %d/3 timed out for site %s", attempt, site_id)
+                        _LOGGER.error(
+                            "Failed to verify operation mode %s for site %s after Tesla accepted the write",
+                            mode,
+                            site_id,
+                        )
+                        hass.async_create_task(
+                            _notify_api_error(
+                                hass,
+                                "Mode Change Failed",
+                                "Tesla accepted the mode change but readback did not verify",
+                            )
+                        )
+                        break
+                    if status in (429, 500, 502, 503, 504):
+                        _LOGGER.warning(
+                            "Tesla operation mode attempt %d/3 failed for site %s: %s",
+                            attempt, site_id, status or text,
+                        )
                         if attempt < 3:
                             await asyncio.sleep(2 ** attempt)
+                        else:
+                            _LOGGER.error(
+                                "Failed to set operation mode for site %s after 3 attempts: %s - %s",
+                                site_id,
+                                status,
+                                text[:200],
+                            )
+                            hass.async_create_task(
+                                _notify_api_error(
+                                    hass,
+                                    "Mode Change Failed",
+                                    f"Could not change Tesla operation mode after 3 attempts - API {status}",
+                                )
+                            )
+                    else:
+                        _LOGGER.error(
+                            "Failed to set operation mode for site %s: %s - %s",
+                            site_id,
+                            status,
+                            text[:200],
+                        )
+                        hass.async_create_task(
+                            _notify_api_error(
+                                hass,
+                                "Mode Change Failed",
+                                "Could not change Tesla operation mode - API error",
+                            )
+                        )
+                        break
             return any_ok
 
         try:
@@ -26690,15 +26863,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 label="set_operation_mode",
             )
             if success:
-                _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
+                _tesla_coord_for_cache = (
+                    hass.data.get(DOMAIN, {})
+                    .get(entry.entry_id, {})
+                    .get("tesla_coordinator")
+                )
                 if _tesla_coord_for_cache is not None:
                     _tesla_coord_for_cache.invalidate_site_info_cache()
                 if mode == "self_consumption":
                     if entry.entry_id in hass.data[DOMAIN]:
                         hass.data[DOMAIN][entry.entry_id].pop("last_force_toggle_time", None)
                         _LOGGER.debug("Cleared last_force_toggle_time (user set self_consumption)")
+            else:
+                raise HomeAssistantError(f"Could not verify Tesla operation mode changed to {mode}")
         except Exception as e:
             _LOGGER.error(f"Error setting operation mode: {e}", exc_info=True)
+            raise
 
     async def handle_set_grid_export(call: ServiceCall) -> None:
         """Set the grid export rule."""

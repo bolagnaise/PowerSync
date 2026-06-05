@@ -9904,21 +9904,21 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         final_data[CONF_GENERIC_CHARGER_ENABLED] = ev_input.get(
             CONF_GENERIC_CHARGER_ENABLED, False
         )
-        generic_switch = ev_input.get(CONF_GENERIC_CHARGER_SWITCH_ENTITY, "")
-        if generic_switch:
-            final_data[CONF_GENERIC_CHARGER_SWITCH_ENTITY] = generic_switch
-        generic_amps = ev_input.get(CONF_GENERIC_CHARGER_AMPS_ENTITY, "")
-        if generic_amps:
-            final_data[CONF_GENERIC_CHARGER_AMPS_ENTITY] = generic_amps
-        generic_status = ev_input.get(CONF_GENERIC_CHARGER_STATUS_ENTITY, "")
-        if generic_status:
-            final_data[CONF_GENERIC_CHARGER_STATUS_ENTITY] = generic_status
-        generic_soc = ev_input.get(CONF_GENERIC_CHARGER_SOC_ENTITY, "")
-        if generic_soc:
-            final_data[CONF_GENERIC_CHARGER_SOC_ENTITY] = generic_soc
-        generic_soc_2 = ev_input.get(CONF_GENERIC_CHARGER_SOC_ENTITY_2, "")
-        if generic_soc_2:
-            final_data[CONF_GENERIC_CHARGER_SOC_ENTITY_2] = generic_soc_2
+        final_data[CONF_GENERIC_CHARGER_SWITCH_ENTITY] = ev_input.get(
+            CONF_GENERIC_CHARGER_SWITCH_ENTITY, ""
+        ).strip()
+        final_data[CONF_GENERIC_CHARGER_AMPS_ENTITY] = ev_input.get(
+            CONF_GENERIC_CHARGER_AMPS_ENTITY, ""
+        ).strip()
+        final_data[CONF_GENERIC_CHARGER_STATUS_ENTITY] = ev_input.get(
+            CONF_GENERIC_CHARGER_STATUS_ENTITY, ""
+        ).strip()
+        final_data[CONF_GENERIC_CHARGER_SOC_ENTITY] = ev_input.get(
+            CONF_GENERIC_CHARGER_SOC_ENTITY, ""
+        ).strip()
+        final_data[CONF_GENERIC_CHARGER_SOC_ENTITY_2] = ev_input.get(
+            CONF_GENERIC_CHARGER_SOC_ENTITY_2, ""
+        ).strip()
 
         # Add Sigenergy EV charger settings
         final_data[CONF_SIGENERGY_CHARGER_ENABLED] = ev_input.get(
