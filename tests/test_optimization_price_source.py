@@ -558,6 +558,55 @@ def test_epex_export_price_sensor_price_values_override_and_pad(opt_module):
     assert coordinator._last_display_export_prices == export_prices
 
 
+def test_epex_export_price_sensor_timestamped_price_values_align_to_slots(opt_module):
+    coordinator = _coordinator_with_epex_provider(
+        opt_module,
+        [
+            _State(
+                "sensor.actual_export_price",
+                "0",
+                unit="ct/kWh",
+                attributes={
+                    "price_values": {
+                        "2026-05-03T10:00:00+02:00": 1.0,
+                        "2026-05-03T11:00:00+02:00": 2.0,
+                        "2026-05-03T12:00:00+02:00": 3.0,
+                    }
+                },
+            )
+        ],
+    )
+
+    _import_prices, export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert export_prices[:6] == pytest.approx([0.01] * 6)
+    assert export_prices[6:] == pytest.approx([0.02] * 6)
+    assert coordinator._last_display_export_prices == pytest.approx(export_prices)
+
+
+def test_epex_export_price_sensor_uses_direct_timestamp_attributes(opt_module):
+    coordinator = _coordinator_with_epex_provider(
+        opt_module,
+        [
+            _State(
+                "sensor.actual_export_price",
+                "0",
+                unit="ct/kWh",
+                attributes={
+                    "2026-05-03T08:00:00+00:00": 1.0,
+                    "2026-05-03T09:00:00+00:00": 2.0,
+                    "2026-05-03T10:00:00+00:00": 3.0,
+                },
+            )
+        ],
+    )
+
+    _import_prices, export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert export_prices[:6] == pytest.approx([0.01] * 6)
+    assert export_prices[6:] == pytest.approx([0.02] * 6)
+
+
 def test_epex_export_price_sensor_supports_major_unit(opt_module):
     coordinator = _coordinator_with_epex_provider(
         opt_module,

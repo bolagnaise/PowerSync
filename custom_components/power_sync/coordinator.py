@@ -4041,6 +4041,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._total_import_baseline: float | None = None
         self._total_export_baseline: float | None = None
         self._baseline_date: str | None = None  # ISO date string
+        self._pre_control_discharge_limit_kw: float | None = None
 
         super().__init__(
             hass,
@@ -4312,6 +4313,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         async with self._modbus_lock, self._controller:
             target_power_w = power_w if power_w > 0 else 5000
             if power_w > 0:
+                await self._capture_discharge_limit_for_restore()
                 await self._controller.set_discharge_rate_limit(power_w / 1000)
             return await self._controller.force_discharge(power_w=target_power_w)
 
@@ -4322,7 +4324,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             True if successful
         """
         async with self._modbus_lock, self._controller:
-            return await self._controller.restore_normal()
+            normal_ok = await self._controller.restore_normal()
+            limit_ok = await self._restore_captured_discharge_limit()
+            return bool(normal_ok and limit_ok)
 
     async def set_max_soc(self, percent: int) -> bool:
         """Set maximum battery SOC percentage.
@@ -4356,12 +4360,49 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
     async def set_no_discharge_mode(self) -> bool:
         """Block Sungrow battery discharge while still allowing battery charge."""
         async with self._modbus_lock, self._controller:
+            await self._capture_discharge_limit_for_restore()
             return await self._controller.set_discharge_rate_limit(0)
 
     async def restore_no_discharge_mode(self) -> bool:
         """Restore Sungrow from scheduled EV no-discharge preserve mode."""
         async with self._modbus_lock, self._controller:
-            return await self._controller.restore_normal()
+            normal_ok = await self._controller.restore_normal()
+            limit_ok = await self._restore_captured_discharge_limit()
+            return bool(normal_ok and limit_ok)
+
+    async def _capture_discharge_limit_for_restore(self) -> None:
+        """Save the current Sungrow discharge limit before a temporary cap."""
+        if getattr(self, "_pre_control_discharge_limit_kw", None) is not None:
+            return
+
+        current_limit_kw = None
+        coord_data = getattr(self, "data", None) or {}
+        try:
+            current_limit_kw = coord_data.get("battery_max_discharge_power")
+            discharge_limit_w = coord_data.get("battery_max_discharge_power_w")
+            if current_limit_kw is None and discharge_limit_w:
+                current_limit_kw = float(discharge_limit_w) / 1000.0
+            if current_limit_kw is None:
+                live_data = await self._controller.get_battery_data()
+                current_limit_kw = live_data.get("discharge_rate_limit_kw")
+            if current_limit_kw is not None and float(current_limit_kw) > 0:
+                self._pre_control_discharge_limit_kw = float(current_limit_kw)
+        except Exception as err:
+            _LOGGER.debug(
+                "Could not capture Sungrow discharge limit before temporary cap: %s",
+                err,
+            )
+
+    async def _restore_captured_discharge_limit(self) -> bool:
+        """Restore a Sungrow discharge limit saved before temporary control."""
+        restore_limit_kw = getattr(self, "_pre_control_discharge_limit_kw", None)
+        if restore_limit_kw is None or restore_limit_kw <= 0:
+            return True
+
+        limit_ok = await self._controller.set_discharge_rate_limit(restore_limit_kw)
+        if limit_ok:
+            self._pre_control_discharge_limit_kw = None
+        return bool(limit_ok)
 
     async def restore_work_mode_from_idle(self) -> bool:
         """Restore self-consumption mode after IDLE."""

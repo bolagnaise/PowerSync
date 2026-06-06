@@ -19,7 +19,7 @@ def _function_source(name: str) -> str:
     for node in module.body:
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_setup_entry":
             for child in node.body:
-                if isinstance(child, ast.AsyncFunctionDef) and child.name == name:
+                if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef)) and child.name == name:
                     segment = ast.get_source_segment(source, child)
                     assert segment is not None
                     return segment
@@ -161,6 +161,38 @@ def test_goodwe_curtailment_periodically_reapplies_export_limit():
     assert 'current_state != "curtailed" or _needs_reapply' in handler
     assert 'entry_data["_last_goodwe_curtailment_reapply"] = _now' in handler
     assert 'entry_data.pop("_last_goodwe_curtailment_reapply", None)' in handler
+
+
+def test_goodwe_curtailment_releases_limit_before_force_discharge():
+    handler = _function_source("handle_force_discharge")
+
+    assert handler.count("await _restore_goodwe_curtailment_for_export(") >= 2
+    release_index = handler.index(
+        'await _restore_goodwe_curtailment_for_export(\n                    entry_data,\n                    "optimizer force discharge",'
+    )
+    optimizer_force_index = handler.index(
+        "await goodwe_coord.force_discharge(duration, power_w=power_w)"
+    )
+    manual_release_index = handler.index(
+        'await _restore_goodwe_curtailment_for_export(\n                    entry_data,\n                    "force discharge",'
+    )
+    manual_force_index = handler.index(
+        "discharge_result = await goodwe_coord.force_discharge(duration, power_w=power_w)"
+    )
+
+    assert release_index < optimizer_force_index
+    assert manual_release_index < manual_force_index
+
+
+def test_goodwe_curtailment_does_not_reapply_during_force_export():
+    handler = _function_source("handle_goodwe_curtailment")
+    helper = _function_source("_goodwe_force_export_active")
+
+    assert "get_active_force_state" in helper
+    assert 'active_force.get("type") == "discharge"' in helper
+    assert "if _goodwe_force_export_active(entry_data):" in handler
+    assert '"active force discharge"' in handler
+    assert "GoodWe curtailment skipped while force discharge/export is active" in handler
 
 
 def test_periodic_solar_curtailment_routes_to_sungrow_before_tesla_path():

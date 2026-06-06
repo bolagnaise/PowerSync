@@ -20537,6 +20537,68 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error("SolarEdge curtailment error: %s", e, exc_info=True)
 
+    def _goodwe_force_export_active(entry_data: dict) -> bool:
+        """Return true while user or optimizer force-discharge owns GoodWe export."""
+        if force_discharge_state.get("active"):
+            return True
+
+        opt_coord = entry_data.get("optimization_coordinator")
+        active_getter = getattr(opt_coord, "get_active_force_state", None)
+        if not callable(active_getter):
+            return False
+
+        try:
+            active_force = active_getter() or {}
+        except Exception as err:
+            _LOGGER.debug("GoodWe curtailment: active force check failed: %s", err)
+            return False
+
+        return (
+            bool(active_force.get("active"))
+            and active_force.get("type") == "discharge"
+        )
+
+    async def _restore_goodwe_curtailment_for_export(
+        entry_data: dict,
+        reason: str,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """Release GoodWe zero-export curtailment before an export command."""
+        gw_coord = entry_data.get("goodwe_coordinator")
+        if not gw_coord or not hasattr(gw_coord, "_controller") or not gw_coord._controller:
+            return True
+
+        controller = gw_coord._controller
+        current_state = entry_data.get("goodwe_curtailment_state", "normal")
+        has_saved_limit = bool(
+            getattr(controller, "_grid_export_state_saved", False)
+            or getattr(controller, "_saved_grid_export_enabled", None) is not None
+            or getattr(controller, "_saved_grid_export_limit", None) is not None
+        )
+        if not force and current_state == "normal" and not has_saved_limit:
+            return True
+
+        try:
+            _LOGGER.info(
+                "GoodWe curtailment RELEASED before %s: restoring export limit",
+                reason,
+            )
+            success = await controller.restore()
+            if success:
+                entry_data["goodwe_curtailment_state"] = "normal"
+                entry_data.pop("_last_goodwe_curtailment_reapply", None)
+                return True
+            _LOGGER.error("GoodWe curtailment release before %s failed", reason)
+        except Exception as err:
+            _LOGGER.error(
+                "GoodWe curtailment release before %s failed: %s",
+                reason,
+                err,
+                exc_info=True,
+            )
+        return False
+
     async def handle_goodwe_curtailment(feedin_price=None, import_price=None) -> None:
         """Handle GoodWe DC curtailment via export limit register.
 
@@ -20578,6 +20640,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         try:
             if export_earnings < 1:
+                if _goodwe_force_export_active(entry_data):
+                    if current_state != "normal":
+                        await _restore_goodwe_curtailment_for_export(
+                            entry_data,
+                            "active force discharge",
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "GoodWe curtailment skipped while force discharge/export is active"
+                        )
+                    return
+
                 import time as _time_mod
                 _goodwe_reapply_interval = 900
                 _last_reapply = entry_data.get("_last_goodwe_curtailment_reapply", 0)
@@ -22185,6 +22259,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             goodwe_coord = entry_data.get("goodwe_coordinator")
             if goodwe_coord:
+                await _restore_goodwe_curtailment_for_export(
+                    entry_data,
+                    "optimizer force discharge",
+                    force=True,
+                )
                 await goodwe_coord.force_discharge(duration, power_w=power_w)
                 _LOGGER.debug(f"GoodWe force discharge hardware extended ({duration}min)")
                 return
@@ -22416,6 +22495,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 power_w = command_power_w
+                await _restore_goodwe_curtailment_for_export(
+                    entry_data,
+                    "force discharge",
+                    force=True,
+                )
                 discharge_result = await goodwe_coord.force_discharge(duration, power_w=power_w)
 
                 if discharge_result:

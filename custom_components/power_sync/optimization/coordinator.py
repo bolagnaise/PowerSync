@@ -6478,6 +6478,88 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return unit
         return "ct/kWh"
 
+    @staticmethod
+    def _parse_price_timestamp(value: Any) -> datetime | None:
+        """Parse an ISO timestamp key from a price sensor attribute."""
+        if not isinstance(value, str):
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+
+    def _timestamped_price_values_to_slots(
+        self,
+        raw_values: dict[Any, Any],
+        unit: str | None,
+        n_steps: int,
+    ) -> list[float]:
+        """Convert timestamp-keyed sensor values into optimizer price slots."""
+        interval = max(1, self._config.interval_minutes)
+        now = dt_util.now()
+        current_window = now.replace(
+            minute=(now.minute // interval) * interval,
+            second=0,
+            microsecond=0,
+        )
+        entries: list[tuple[datetime, float]] = []
+        for key, raw_price in raw_values.items():
+            start_dt = self._parse_price_timestamp(key)
+            if start_dt is None:
+                continue
+            price = self._epex_export_sensor_value_to_major(raw_price, unit)
+            if price is None:
+                continue
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=current_window.tzinfo)
+            if current_window.tzinfo is not None:
+                start_dt = start_dt.astimezone(current_window.tzinfo)
+            entries.append((start_dt, price))
+
+        if not entries:
+            return []
+
+        entries.sort(key=lambda item: item[0])
+        slots: list[float | None] = [None] * n_steps
+        last_delta = timedelta(minutes=interval)
+        for idx, (start_dt, price) in enumerate(entries):
+            next_start = entries[idx + 1][0] if idx + 1 < len(entries) else None
+            if next_start is not None:
+                delta = next_start - start_dt
+                if delta.total_seconds() > 0:
+                    last_delta = delta
+                end_dt = next_start
+            else:
+                end_dt = start_dt + last_delta
+
+            slot_bounds = self._entry_slot_bounds(
+                {
+                    "valid_from": start_dt.isoformat(),
+                    "valid_to": end_dt.isoformat(),
+                },
+                current_window,
+                interval,
+                n_steps,
+            )
+            if slot_bounds is None:
+                continue
+            start_idx, end_idx = slot_bounds
+            for pos in range(start_idx, end_idx):
+                slots[pos] = price
+
+        return self._fill_price_gaps(slots)
+
+    def _timestamp_attribute_price_values(
+        self,
+        attrs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return direct timestamp attributes from HA price sensors."""
+        return {
+            key: value
+            for key, value in attrs.items()
+            if self._parse_price_timestamp(key) is not None
+        }
+
     def _read_epex_export_price_entity(
         self,
         n_steps: int,
@@ -6525,9 +6607,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 for value in raw_values
             ]
             display_prices = self._fill_price_gaps(values)
+        elif isinstance(raw_values, dict) and raw_values:
+            display_prices = self._timestamped_price_values_to_slots(
+                raw_values,
+                unit,
+                n_steps,
+            )
         else:
-            value = self._epex_export_sensor_value_to_major(state_value, unit)
-            display_prices = [value] if value is not None else []
+            timestamp_values = self._timestamp_attribute_price_values(attrs)
+            if timestamp_values:
+                display_prices = self._timestamped_price_values_to_slots(
+                    timestamp_values,
+                    unit,
+                    n_steps,
+                )
+            else:
+                value = self._epex_export_sensor_value_to_major(state_value, unit)
+                display_prices = [value] if value is not None else []
 
         if not display_prices:
             _LOGGER.warning(
