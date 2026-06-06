@@ -141,7 +141,9 @@ def test_auto_apply_reserve_setting_is_exposed_through_api_and_coordinator():
     assert 'CONF_OPTIMIZATION_MANUAL_RESERVE' in init_source
     assert '"auto_apply_reserve_enabled": self.auto_apply_reserve_enabled' in coordinator_source
     assert '"manual_backup_reserve": self.manual_backup_reserve' in coordinator_source
-    assert "async def set_auto_apply_reserve_enabled(self, enabled: bool) -> None:" in coordinator_source
+    assert "async def set_auto_apply_reserve_enabled(" in coordinator_source
+    assert "rerun: bool = True" in coordinator_source
+    assert "self._schedule_settings_reoptimization()" in coordinator_source
     assert "def _apply_auto_reserve_recommendation(" in coordinator_source
 
 

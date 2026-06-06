@@ -378,6 +378,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._polling_task: asyncio.Task | None = None
         self._initial_opt_task: asyncio.Task | None = None
         self._deferred_restore_task: asyncio.Task | None = None
+        self._settings_reoptimize_task: asyncio.Task | None = None
+        self._settings_reoptimize_requested = False
 
     def _monitoring_mode_active(self) -> bool:
         """Return True when monitoring mode should block hardware writes."""
@@ -847,14 +849,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         return True
 
-    async def set_auto_apply_reserve_enabled(self, enabled: bool) -> None:
+    async def set_auto_apply_reserve_enabled(
+        self,
+        enabled: bool,
+        *,
+        rerun: bool = True,
+    ) -> bool:
         """Enable or disable forecast-driven optimizer reserve tracking."""
         enabled = bool(enabled)
         was_enabled = bool(getattr(self, "_auto_apply_reserve_enabled", False))
         current_manual = getattr(self, "_manual_backup_reserve", None)
+        changed = enabled != was_enabled
         if enabled:
             if not was_enabled or current_manual is None:
                 current_manual = self._config.backup_reserve
+                changed = True
             self._manual_backup_reserve = current_manual
             self._auto_apply_reserve_enabled = True
             self._config.auto_apply_reserve_enabled = True
@@ -868,10 +877,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if restore_reserve is None:
                 restore_reserve = self._config.backup_reserve
                 self._manual_backup_reserve = restore_reserve
+                changed = True
             self._auto_apply_reserve_enabled = False
             self._config.auto_apply_reserve_enabled = False
-            if restore_reserve is not None:
+            if restore_reserve is not None and (
+                changed
+                or not math.isclose(
+                    self._config.backup_reserve,
+                    restore_reserve,
+                    abs_tol=0.0001,
+                )
+            ):
                 self.update_config(backup_reserve=restore_reserve)
+                changed = True
             self._config.manual_backup_reserve = restore_reserve
             self._persist_optimizer_reserve_settings(
                 auto_apply=False,
@@ -889,8 +907,33 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else ""
             ),
         )
-        if getattr(self, "_enabled", False):
+        if rerun and changed and getattr(self, "_enabled", False):
             await self._run_optimization()
+        return changed
+
+    async def _run_settings_reoptimization(self) -> None:
+        """Run settings-triggered optimizer refreshes after the API response."""
+        try:
+            while self._settings_reoptimize_requested and getattr(
+                self, "_enabled", False
+            ):
+                self._settings_reoptimize_requested = False
+                await self._run_optimization()
+        finally:
+            self._settings_reoptimize_task = None
+
+    def _schedule_settings_reoptimization(self) -> None:
+        """Coalesce settings-triggered optimizer refreshes into one background task."""
+        if not getattr(self, "_enabled", False):
+            return
+        self._settings_reoptimize_requested = True
+        settings_task = getattr(self, "_settings_reoptimize_task", None)
+        if settings_task and not settings_task.done():
+            return
+        self._settings_reoptimize_task = self.hass.async_create_background_task(
+            self._run_settings_reoptimization(),
+            "powersync_settings_reoptimize",
+        )
 
     def _dispatch_auto_apply_reserve_state(self) -> None:
         """Notify HA switches after config-flow/API/mobile changes."""
@@ -2462,6 +2505,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._deferred_restore_task and not self._deferred_restore_task.done():
             self._deferred_restore_task.cancel()
             self._deferred_restore_task = None
+        if self._settings_reoptimize_task and not self._settings_reoptimize_task.done():
+            self._settings_reoptimize_task.cancel()
+            self._settings_reoptimize_task = None
 
         if self._price_listener_unsub:
             self._price_listener_unsub()
@@ -8313,12 +8359,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.hass.config_entries.async_update_entry(self._entry, options=new_options)
 
         if "auto_apply_reserve_enabled" in settings:
-            await self.set_auto_apply_reserve_enabled(
-                bool(settings["auto_apply_reserve_enabled"])
+            changed = await self.set_auto_apply_reserve_enabled(
+                bool(settings["auto_apply_reserve_enabled"]),
+                rerun=False,
             )
             response["changes"].append(
                 f"auto_apply_reserve_enabled: {settings['auto_apply_reserve_enabled']}"
             )
+            if changed:
+                rerun_after_settings = True
 
         if "manual_backup_reserve" in settings:
             manual_reserve = self._reserve_ratio(settings["manual_backup_reserve"])
@@ -8564,7 +8613,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 response["changes"].append(f"ev_integration: {ev_enabled}")
 
         if rerun_after_settings and getattr(self, "_enabled", False):
-            await self._run_optimization()
+            self._schedule_settings_reoptimization()
 
         return response
 

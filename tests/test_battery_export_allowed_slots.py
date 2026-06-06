@@ -979,8 +979,11 @@ def _prepare_enabled_settings_coordinator(coordinator):
     coordinator.entry_id = "entry-1"
     coordinator._enabled = True
     coordinator._load_estimator = None
+    coordinator._settings_reoptimize_task = None
+    coordinator._settings_reoptimize_requested = False
     updates = []
     run_calls = []
+    background_tasks = []
 
     class _ConfigEntries:
         def async_update_entry(self, entry, **kwargs):
@@ -993,17 +996,51 @@ def _prepare_enabled_settings_coordinator(coordinator):
     async def _run_optimization():
         run_calls.append(True)
 
+    def async_create_background_task(coro, name):
+        background_tasks.append(name)
+        coro.close()
+        return SimpleNamespace(done=lambda: True, cancel=lambda: None)
+
     coordinator.hass = SimpleNamespace(
         data={"power_sync": {"entry-1": {}}},
         config_entries=_ConfigEntries(),
+        async_create_background_task=async_create_background_task,
     )
     coordinator._run_optimization = _run_optimization
-    return updates, run_calls
+    return updates, run_calls, background_tasks
 
 
-def test_profit_max_setting_change_forces_immediate_reoptimization(opt_module):
+def test_auto_apply_reserve_setting_schedules_background_reoptimization(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "amber",
+        optimization_backup_reserve=0.60,
+        optimization_manual_reserve=0.30,
+        optimization_auto_apply_reserve=True,
+    )
+    coordinator._auto_apply_reserve_enabled = True
+    coordinator._manual_backup_reserve = 0.30
+    coordinator._config.backup_reserve = 0.60
+    updates, run_calls, background_tasks = _prepare_enabled_settings_coordinator(
+        coordinator
+    )
+
+    result = asyncio.run(
+        coordinator.set_settings({"auto_apply_reserve_enabled": False})
+    )
+
+    assert result["success"] is True
+    assert result["changes"] == ["auto_apply_reserve_enabled: False"]
+    assert coordinator.auto_apply_reserve_enabled is False
+    assert coordinator._config.backup_reserve == 0.30
+    assert updates[-1]["options"]["optimization_auto_apply_reserve"] is False
+    assert run_calls == []
+    assert background_tasks == ["powersync_settings_reoptimize"]
+
+
+def test_profit_max_setting_change_schedules_background_reoptimization(opt_module):
     coordinator = _coordinator(opt_module, "flow_power", profit_max=False)
-    updates, run_calls = _prepare_enabled_settings_coordinator(coordinator)
+    updates, run_calls, background_tasks = _prepare_enabled_settings_coordinator(coordinator)
 
     result = asyncio.run(coordinator.set_settings({"profit_max_enabled": True}))
 
@@ -1011,7 +1048,8 @@ def test_profit_max_setting_change_forces_immediate_reoptimization(opt_module):
     assert result["changes"] == ["profit_max_enabled: True"]
     assert coordinator._config.profit_max_enabled is True
     assert updates[-1]["options"]["profit_max_enabled"] is True
-    assert len(run_calls) == 1
+    assert run_calls == []
+    assert background_tasks == ["powersync_settings_reoptimize"]
 
 
 @pytest.mark.parametrize(
@@ -1022,29 +1060,32 @@ def test_profit_max_setting_change_forces_immediate_reoptimization(opt_module):
         ({"disable_idle_enabled": True}, "disable_idle_enabled: True"),
     ],
 )
-def test_optimizer_mode_setting_change_forces_immediate_reoptimization(
+def test_optimizer_mode_setting_change_schedules_background_reoptimization(
     opt_module,
     settings,
     expected_change,
 ):
     coordinator = _coordinator(opt_module, "flow_power")
-    updates, run_calls = _prepare_enabled_settings_coordinator(coordinator)
+    updates, run_calls, background_tasks = _prepare_enabled_settings_coordinator(
+        coordinator
+    )
 
     result = asyncio.run(coordinator.set_settings(settings))
 
     assert result["success"] is True
     assert expected_change in result["changes"]
     assert updates
-    assert len(run_calls) == 1
+    assert run_calls == []
+    assert background_tasks == ["powersync_settings_reoptimize"]
     if "profit_max_target_time" in settings:
         assert coordinator._config.profit_max_target_time == settings["profit_max_target_time"]
     if "profit_max_target_soc" in settings:
         assert coordinator._config.profit_max_target_soc == 0.8
 
 
-def test_optimizer_config_setting_change_forces_immediate_reoptimization(opt_module):
+def test_optimizer_config_setting_change_schedules_background_reoptimization(opt_module):
     coordinator = _coordinator(opt_module, "flow_power")
-    updates, run_calls = _prepare_enabled_settings_coordinator(coordinator)
+    updates, run_calls, background_tasks = _prepare_enabled_settings_coordinator(coordinator)
 
     result = asyncio.run(coordinator.set_settings({"allow_grid_charge": False}))
 
@@ -1052,7 +1093,8 @@ def test_optimizer_config_setting_change_forces_immediate_reoptimization(opt_mod
     assert "config: ['allow_grid_charge']" in result["changes"]
     assert coordinator._config.allow_grid_charge is False
     assert updates[-1]["options"]["allow_grid_charge"] is False
-    assert len(run_calls) == 1
+    assert run_calls == []
+    assert background_tasks == ["powersync_settings_reoptimize"]
 
 
 @pytest.mark.parametrize(
@@ -1062,7 +1104,7 @@ def test_optimizer_config_setting_change_forces_immediate_reoptimization(opt_mod
         ({"profit_max_target_soc": 80}, "profit_max_target_soc: 80%"),
     ],
 )
-def test_profit_max_target_setting_change_forces_immediate_reoptimization(
+def test_profit_max_target_setting_change_schedules_background_reoptimization(
     opt_module,
     settings,
     expected_change,
@@ -1074,14 +1116,15 @@ def test_profit_max_target_setting_change_forces_immediate_reoptimization(
         profit_max_target_time="17:15",
         profit_max_target_soc=1.0,
     )
-    updates, run_calls = _prepare_enabled_settings_coordinator(coordinator)
+    updates, run_calls, background_tasks = _prepare_enabled_settings_coordinator(coordinator)
 
     result = asyncio.run(coordinator.set_settings(settings))
 
     assert result["success"] is True
     assert expected_change in result["changes"]
     assert updates
-    assert len(run_calls) == 1
+    assert run_calls == []
+    assert background_tasks == ["powersync_settings_reoptimize"]
 
 
 def test_startup_uses_fixed_optimization_interval_not_persisted_value():
