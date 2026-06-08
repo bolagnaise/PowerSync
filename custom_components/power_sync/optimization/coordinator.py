@@ -527,6 +527,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         soc_pct = int(soc * 100)
         configured_idle_floor = int(self._config.backup_reserve * 100)
 
+        if self.battery_system == "goodwe" and not preserve_charge:
+            if hasattr(battery, "set_self_consumption_mode"):
+                await battery.set_self_consumption_mode()
+            elif hasattr(battery, "restore_normal"):
+                await battery.restore_normal()
+            _LOGGER.info(
+                "Optimizer: IDLE — GoodWe self-consumption without DOD hold "
+                "(current_soc=%d%%, optimizer_floor=%d%%)",
+                soc_pct,
+                configured_idle_floor,
+            )
+            self._idle_hold_reserve = None
+            return True
+
         if self._pre_idle_backup_reserve is None:
             if self._startup_backup_reserve is not None:
                 self._pre_idle_backup_reserve = self._startup_backup_reserve

@@ -2092,6 +2092,27 @@ def test_idle_at_reserve_floor_is_not_overridden_to_self_consumption(opt_module)
     assert coordinator._last_executed_action == "idle"
 
 
+def test_goodwe_idle_does_not_write_dod_reserve_hold(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "goodwe"
+    coordinator._config.backup_reserve = 0.20
+    coordinator._startup_backup_reserve = 5
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+
+    assert battery.self_consumption_calls == 1
+    assert battery.restore_normal_calls == 0
+    assert battery.backup_reserve_calls == []
+    assert coordinator._pre_idle_backup_reserve is None
+    assert coordinator._idle_hold_reserve is None
+    assert coordinator._last_executed_action == "idle"
+
+
 def test_tesla_idle_holds_current_soc_when_below_optimizer_floor(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.32)
