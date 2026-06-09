@@ -142,6 +142,7 @@ CONF_GENERIC_CHARGER_ENABLED = "generic_charger_enabled"
 CONF_GENERIC_CHARGER_SWITCH_ENTITY = "generic_charger_switch_entity"
 CONF_GENERIC_CHARGER_AMPS_ENTITY = "generic_charger_amps_entity"
 CONF_GENERIC_CHARGER_STATUS_ENTITY = "generic_charger_status_entity"
+CONF_GENERIC_CHARGER_POWER_ENTITY = "generic_charger_power_entity"
 CONF_GENERIC_CHARGER_SOC_ENTITY = "generic_charger_soc_entity"
 CONF_GENERIC_CHARGER_SOC_ENTITY_2 = "generic_charger_soc_entity_2"
 
@@ -183,6 +184,7 @@ BATTERY_SYSTEM_SAJ_H2 = "saj_h2"
 BATTERY_SYSTEM_FRONIUS_RESERVA = "fronius_reserva"
 BATTERY_SYSTEM_NEOVOLT = "neovolt"
 BATTERY_SYSTEM_SOLAREDGE = "solaredge"
+BATTERY_SYSTEM_ANKER_SOLIX = "anker_solix"
 BATTERY_SYSTEM_CUSTOM = "custom"
 
 BATTERY_SYSTEMS = {
@@ -198,6 +200,7 @@ BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius GEN24 storage (BYD/Reserva) — via Fronius Modbus integration",
     BATTERY_SYSTEM_NEOVOLT: "Neovolt/Bytewatt — via Neovolt Modbus integration",
     BATTERY_SYSTEM_SOLAREDGE: "SolarEdge Home Battery / inverter curtailment — HA entity bridge + Modbus TCP",
+    BATTERY_SYSTEM_ANKER_SOLIX: "Anker Solix — X1 Modbus or Anker Solix HA integration",
     BATTERY_SYSTEM_CUSTOM: "Custom / external controller — planner only via Home Assistant entities",
 }
 
@@ -535,6 +538,32 @@ NEOVOLT_SURPLUS_BALANCER_MODES = (
 )
 DEFAULT_NEOVOLT_SURPLUS_BALANCER_MODE = NEOVOLT_SURPLUS_BALANCER_AUTO
 DEFAULT_NEOVOLT_SOC_BALANCE_TOLERANCE = 5.0
+
+# Anker Solix battery system configuration.
+CONF_ANKER_SOLIX_CONNECTION_TYPE = "anker_solix_connection_type"
+CONF_ANKER_SOLIX_MODBUS_HOST = "anker_solix_modbus_host"
+CONF_ANKER_SOLIX_MODBUS_PORT = "anker_solix_modbus_port"
+CONF_ANKER_SOLIX_MODBUS_SLAVE_ID = "anker_solix_modbus_slave_id"
+CONF_ANKER_SOLIX_CONFIG_ENTRY_ID = "anker_solix_config_entry_id"
+CONF_ANKER_SOLIX_ENTITY_PREFIX = "anker_solix_entity_prefix"
+CONF_ANKER_SOLIX_BATTERY_CAPACITY_KWH = "anker_solix_battery_capacity_kwh"
+CONF_ANKER_SOLIX_MAX_CHARGE_KW = "anker_solix_max_charge_kw"
+CONF_ANKER_SOLIX_MAX_DISCHARGE_KW = "anker_solix_max_discharge_kw"
+
+ANKER_SOLIX_CONNECTION_MODBUS = "modbus"
+ANKER_SOLIX_CONNECTION_OFFICIAL_HA = "official_ha"
+ANKER_SOLIX_CONNECTION_CLOUD_HA = "cloud_ha"
+ANKER_SOLIX_CONNECTION_TYPES = {
+    ANKER_SOLIX_CONNECTION_MODBUS: "Direct X1 Modbus TCP",
+    ANKER_SOLIX_CONNECTION_OFFICIAL_HA: "Official Anker Solix HA integration",
+    ANKER_SOLIX_CONNECTION_CLOUD_HA: "Unofficial Anker Solix cloud HA integration",
+}
+
+DEFAULT_ANKER_SOLIX_MODBUS_PORT = 502
+DEFAULT_ANKER_SOLIX_MODBUS_SLAVE_ID = 1
+DEFAULT_ANKER_SOLIX_BATTERY_CAPACITY_KWH = 10.0
+DEFAULT_ANKER_SOLIX_MAX_CHARGE_KW = 5.0
+DEFAULT_ANKER_SOLIX_MAX_DISCHARGE_KW = 5.0
 
 # SolarEdge Home battery dispatch via HA storage-control entities, plus
 # SolarEdge inverter curtailment via Modbus TCP/entity fallback.
@@ -1282,7 +1311,26 @@ SERVICE_CURTAIL_INVERTER = "curtail_inverter"
 SERVICE_RESTORE_INVERTER = "restore_inverter"
 
 # Manual discharge/charge duration options (minutes)
-DISCHARGE_DURATIONS = [5, 10, 15, 30, 45, 60, 75, 90, 105, 120, 150, 180, 210, 240]
+DISCHARGE_DURATIONS = [
+    5,
+    10,
+    15,
+    30,
+    45,
+    60,
+    75,
+    90,
+    105,
+    120,
+    135,
+    150,
+    165,
+    180,
+    195,
+    210,
+    225,
+    240,
+]
 DEFAULT_DISCHARGE_DURATION = 30
 
 # Duration dropdown entity option keys (stored in ConfigEntry.options)
@@ -1760,6 +1808,7 @@ OPTIMIZATION_PROVIDER_NATIVE_NAMES = {
     BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius GEN24 storage",
     BATTERY_SYSTEM_NEOVOLT: "Neovolt",
     BATTERY_SYSTEM_SOLAREDGE: "SolarEdge",
+    BATTERY_SYSTEM_ANKER_SOLIX: "Anker Solix",
     BATTERY_SYSTEM_CUSTOM: "Custom / external controller",
 }
 
@@ -1806,6 +1855,7 @@ TARGET_EXPORT_POWER_BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_SAJ_H2,
     BATTERY_SYSTEM_FRONIUS_RESERVA,
     BATTERY_SYSTEM_NEOVOLT,
+    BATTERY_SYSTEM_ANKER_SOLIX,
 }
 
 TARGET_CHARGE_POWER_BATTERY_SYSTEMS = {
@@ -1817,6 +1867,7 @@ TARGET_CHARGE_POWER_BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_SOLAX,
     BATTERY_SYSTEM_FRONIUS_RESERVA,
     BATTERY_SYSTEM_NEOVOLT,
+    BATTERY_SYSTEM_ANKER_SOLIX,
 }
 
 # Optimization cost function (only cost minimization — self-consumption is the battery's native mode)
@@ -1843,6 +1894,7 @@ BATTERY_CAPACITY_DEFAULTS = {
     BATTERY_SYSTEM_FRONIUS_RESERVA: 9600,  # Fronius GEN24 storage varies by module count
     BATTERY_SYSTEM_NEOVOLT: 20100,    # Bytewatt pack is commonly 20.1 kWh
     BATTERY_SYSTEM_SOLAREDGE: 10000,  # SolarEdge Home Battery varies by stack
+    BATTERY_SYSTEM_ANKER_SOLIX: 10000, # Anker Solix X1/Solarbank varies by stack
     BATTERY_SYSTEM_CUSTOM: 10000,     # User-provided external system
 }
 
@@ -1860,6 +1912,7 @@ BATTERY_POWER_DEFAULTS = {
     BATTERY_SYSTEM_FRONIUS_RESERVA: 5000,  # Reserva/GEN24 common operating target
     BATTERY_SYSTEM_NEOVOLT: 5000,      # Configurable in the upstream Neovolt integration
     BATTERY_SYSTEM_SOLAREDGE: 5000,    # Active-power curtailment only in v1
+    BATTERY_SYSTEM_ANKER_SOLIX: 5000,  # X1/Solarbank stack varies by installation
     BATTERY_SYSTEM_CUSTOM: 5000,       # User-provided external system
 }
 

@@ -638,6 +638,33 @@
         },
         "submit": "Connect"
       },
+      "anker_solix": {
+        "title": "Anker Solix connection",
+        "description": "Choose direct X1 Modbus, Anker's official local HA integration, or the unofficial cloud HA bridge. Direct Modbus and the official local bridge are preferred for dispatch control.",
+        "data": {
+          "anker_solix_connection_type": "Connection type",
+          "anker_solix_modbus_host": "X1 IP address",
+          "anker_solix_modbus_port": "Modbus TCP port",
+          "anker_solix_modbus_slave_id": "Slave ID",
+          "anker_solix_config_entry_id": "Anker integration",
+          "anker_solix_entity_prefix": "Entity prefix override",
+          "anker_solix_battery_capacity_kwh": "Battery capacity",
+          "anker_solix_max_charge_kw": "Maximum charge power",
+          "anker_solix_max_discharge_kw": "Maximum discharge power"
+        },
+        "data_description": {
+          "anker_solix_connection_type": "Direct X1 Modbus uses local TCP port 502. Official HA bridges through anker_solix_official. Cloud HA bridges through the unofficial anker_solix integration and may be telemetry-only.",
+          "anker_solix_modbus_host": "Local IP address of the Anker SOLIX X1 system. Third-party control and Modbus TCP must be enabled in Anker settings.",
+          "anker_solix_modbus_port": "Default: 502.",
+          "anker_solix_modbus_slave_id": "Default: 1.",
+          "anker_solix_config_entry_id": "Optional. Select the Anker HA integration entry PowerSync should read from when more than one is configured.",
+          "anker_solix_entity_prefix": "Optional. Used when Anker entities have a shared prefix and PowerSync needs help matching the right device.",
+          "anker_solix_battery_capacity_kwh": "Usable battery capacity in kWh. Used by the LP optimizer when the Anker path does not expose rated energy.",
+          "anker_solix_max_charge_kw": "Maximum charge power in kW. Used by dispatch commands and the LP optimizer.",
+          "anker_solix_max_discharge_kw": "Maximum discharge/export power in kW. Used by dispatch commands and the LP optimizer."
+        },
+        "submit": "Connect"
+      },
       "sigenergy_credentials": {
         "title": "Sigenergy Cloud login",
         "description": "Enter your Sigenergy Cloud API credentials to connect your system.",
@@ -1016,6 +1043,9 @@
       "neovolt_missing_entities": "Could not find the required Neovolt entities in the selected Neovolt integration entry. Make sure the integration is installed, the system is online, and its entities have been created in Home Assistant.",
       "neovolt_connect_failed": "Failed to validate Neovolt entities. Check the selected integration entry and try again.",
       "neovolt_capacity_invalid": "Enter positive battery capacities in kWh, separated by commas.",
+      "anker_solix_host_required": "Enter the local IP address of the Anker SOLIX X1 system.",
+      "anker_solix_ha_not_installed": "The selected Anker HA integration is not installed or has no configured entries. Install and configure it before selecting this connection type.",
+      "anker_solix_connect_failed": "Could not validate the Anker Solix connection. For direct Modbus, check IP, port 502, slave ID, and third-party control. For HA bridge mode, check that the Anker integration exposes SOC and solar power entities.",
       "solaredge_host_required": "Enter the SolarEdge inverter IP address, or enter an HA entity prefix for entity fallback.",
       "solaredge_connect_failed": "Could not connect to SolarEdge via Modbus or find a matching SolarEdge active power limit entity. Check Modbus TCP, power-control settings, firmware/grid profile support, and the entity prefix.",
       "solaredge_rated_power_required": "Enter the SolarEdge inverter rated AC power in watts."
@@ -1894,6 +1924,7 @@
           "generic_charger_switch_entity": "Charger switch entity",
           "generic_charger_amps_entity": "Charger amps entity",
           "generic_charger_status_entity": "Connector status sensor",
+          "generic_charger_power_entity": "EV charging power sensor",
           "generic_charger_soc_entity": "EV battery SoC sensor",
           "generic_charger_soc_entity_2": "Fallback EV battery SoC sensor",
           "sigenergy_charger_enabled": "Enable Sigenergy EV charger",
@@ -1917,6 +1948,7 @@
           "generic_charger_switch_entity": "Entity ID of the switch that starts/stops charging (e.g. switch.evnex_charge_now). Required.",
           "generic_charger_amps_entity": "Entity ID for charge current control in amps. Leave blank if not supported.",
           "generic_charger_status_entity": "Entity ID reporting connector status. Recognised: charging, preparing, suspended_evse, suspended_ev, finishing. Leave blank to skip.",
+          "generic_charger_power_entity": "Entity ID reporting measured EV charging power in W or kW. Used for dashboard power and charging-state detection; leave blank if unavailable.",
           "generic_charger_soc_entity": "Entity ID reporting EV battery SoC as a percentage. Used for target SoC charging. Leave blank if unavailable.",
           "generic_charger_soc_entity_2": "Optional second EV battery SoC sensor. Used only when the primary SoC sensor is unavailable or invalid.",
           "sigenergy_charger_enabled": "Use Sigenergy Modbus for EVAC/EVDC charger status and start/stop control.",
@@ -1971,6 +2003,7 @@
           "generic_charger_switch_entity": "Charger switch entity",
           "generic_charger_amps_entity": "Charger amps entity",
           "generic_charger_status_entity": "Connector status sensor",
+          "generic_charger_power_entity": "EV charging power sensor",
           "generic_charger_soc_entity": "EV battery SoC sensor",
           "generic_charger_soc_entity_2": "Fallback EV battery SoC sensor",
           "sigenergy_charger_enabled": "Enable Sigenergy EV charger",
@@ -1994,6 +2027,7 @@
           "generic_charger_switch_entity": "Entity ID of the switch that starts/stops charging. Required.",
           "generic_charger_amps_entity": "Entity ID for charge current control in amps. Leave blank if not supported.",
           "generic_charger_status_entity": "Entity ID reporting connector status. Leave blank to skip plug detection.",
+          "generic_charger_power_entity": "Entity ID reporting measured EV charging power in W or kW. Used for dashboard power and charging-state detection; leave blank if unavailable.",
           "generic_charger_soc_entity": "Entity ID reporting EV battery SoC as a percentage. Leave blank if unavailable.",
           "generic_charger_soc_entity_2": "Optional second EV battery SoC sensor. Used only when the primary SoC sensor is unavailable or invalid.",
           "sigenergy_charger_enabled": "Use Sigenergy Modbus for EVAC/EVDC charger status and start/stop control.",

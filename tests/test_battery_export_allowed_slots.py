@@ -161,7 +161,7 @@ def _install_power_sync_stubs() -> None:
     const_module.DEFAULT_EXPORT_BOOST_START = "17:00"
     const_module.DEFAULT_EXPORT_BOOST_END = "21:00"
     const_module.DEFAULT_EXPORT_BOOST_THRESHOLD = 0.0
-    const_module.DISCHARGE_DURATIONS = [5, 10, 15, 30, 45, 60, 75, 90, 105, 120, 150, 180, 210, 240]
+    const_module.DISCHARGE_DURATIONS = [5, 10, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180, 195, 210, 225, 240]
     const_module.TARGET_EXPORT_POWER_BATTERY_SYSTEMS = {
         "goodwe", "sigenergy", "sungrow", "foxess",
         "alphaess", "solax", "saj_h2", "fronius_reserva", "neovolt",

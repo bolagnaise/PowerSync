@@ -5830,6 +5830,7 @@ def _with_configured_charger_entities(
     if charger_type == "generic":
         from ..const import (
             CONF_GENERIC_CHARGER_AMPS_ENTITY,
+            CONF_GENERIC_CHARGER_POWER_ENTITY,
             CONF_GENERIC_CHARGER_STATUS_ENTITY,
             CONF_GENERIC_CHARGER_SWITCH_ENTITY,
         )
@@ -5844,6 +5845,10 @@ def _with_configured_charger_entities(
         )
         params["charger_status_entity"] = params.get("charger_status_entity") or opts.get(
             CONF_GENERIC_CHARGER_STATUS_ENTITY,
+            "",
+        )
+        params["charger_power_entity"] = params.get("charger_power_entity") or opts.get(
+            CONF_GENERIC_CHARGER_POWER_ENTITY,
             "",
         )
     elif charger_type == "ocpp":
@@ -6767,6 +6772,26 @@ class PriceLevelChargingExecutor:
             reason: Reason for starting charging
             vehicle_vin: Optional VIN for specific vehicle. If None, uses default.
         """
+        from .ev_ownership import manual_stop_hold_reason
+
+        hold_reason = manual_stop_hold_reason(
+            self.hass,
+            self.config_entry,
+            vehicle_vin,
+        )
+        if hold_reason:
+            state = self._get_or_create_vehicle_state(vehicle_vin or "_default")
+            state.is_charging = False
+            state.last_decision = "waiting"
+            state.last_decision_reason = hold_reason
+            await self.apply_preserve_home_battery(False, hold_reason)
+            _LOGGER.info(
+                "Price-level charging: start suppressed for %s - %s",
+                vehicle_vin or "_default",
+                hold_reason,
+            )
+            return False
+
         success = await _start_coordinated_charging(
             self.hass,
             self._domain,

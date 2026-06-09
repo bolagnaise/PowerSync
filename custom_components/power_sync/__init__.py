@@ -412,7 +412,25 @@ from .const import (
     DEFAULT_NEOVOLT_SURPLUS_BALANCER_MODE,
     DEFAULT_NEOVOLT_SOC_BALANCE_TOLERANCE,
     BATTERY_SYSTEM_SOLAREDGE,
+    BATTERY_SYSTEM_ANKER_SOLIX,
     BATTERY_SYSTEM_CUSTOM,
+    CONF_ANKER_SOLIX_CONNECTION_TYPE,
+    CONF_ANKER_SOLIX_MODBUS_HOST,
+    CONF_ANKER_SOLIX_MODBUS_PORT,
+    CONF_ANKER_SOLIX_MODBUS_SLAVE_ID,
+    CONF_ANKER_SOLIX_CONFIG_ENTRY_ID,
+    CONF_ANKER_SOLIX_ENTITY_PREFIX,
+    CONF_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+    CONF_ANKER_SOLIX_MAX_CHARGE_KW,
+    CONF_ANKER_SOLIX_MAX_DISCHARGE_KW,
+    ANKER_SOLIX_CONNECTION_MODBUS,
+    ANKER_SOLIX_CONNECTION_OFFICIAL_HA,
+    ANKER_SOLIX_CONNECTION_CLOUD_HA,
+    DEFAULT_ANKER_SOLIX_MODBUS_PORT,
+    DEFAULT_ANKER_SOLIX_MODBUS_SLAVE_ID,
+    DEFAULT_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+    DEFAULT_ANKER_SOLIX_MAX_CHARGE_KW,
+    DEFAULT_ANKER_SOLIX_MAX_DISCHARGE_KW,
     CONF_CUSTOM_BATTERY_LEVEL_ENTITY,
     CONF_CUSTOM_BATTERY_POWER_ENTITY,
     CONF_CUSTOM_GRID_POWER_ENTITY,
@@ -592,6 +610,7 @@ from .coordinator import (
     SajH2EnergyCoordinator,
     FroniusReservaEnergyCoordinator,
     NeovoltEnergyCoordinator,
+    AnkerSolixEnergyCoordinator,
     DemandChargeCoordinator,
     AEMOSensorCoordinator,
     OctopusPriceCoordinator,
@@ -5125,6 +5144,7 @@ class BatteryHealthView(HomeAssistantView):
             "fronius_reserva_coordinator": "fronius_reserva",
             "neovolt_coordinator": "neovolt",
             "solaredge_coordinator": "solaredge",
+            "anker_solix_coordinator": "anker_solix",
         }
 
         for coord_key, brand in brand_map.items():
@@ -5174,6 +5194,13 @@ class BatteryHealthView(HomeAssistantView):
                 if (v := d.get("battery_level")) is not None: bms["soc_percent"] = round(float(v), 1)
                 if (v := d.get("battery_max_charge_power_w")) is not None: bms["max_charge_power_w"] = int(v)
                 if (v := d.get("battery_max_discharge_power_w")) is not None: bms["max_discharge_power_w"] = int(v)
+
+            elif brand == "anker_solix":
+                if (v := d.get("battery_capacity_kwh")) is not None: bms["rated_capacity_kwh"] = round(float(v), 2)
+                if (v := d.get("battery_level")) is not None: bms["soc_percent"] = round(float(v), 1)
+                if (v := d.get("battery_max_charge_power_w")) is not None: bms["max_charge_power_w"] = int(v)
+                if (v := d.get("battery_max_discharge_power_w")) is not None: bms["max_discharge_power_w"] = int(v)
+                if (v := d.get("control_path")) is not None: bms["control_path"] = str(v)
 
             elif brand == "fronius_reserva":
                 if (v := d.get("battery_temperature")) is not None: bms["temperature_c"] = round(float(v), 1)
@@ -8209,6 +8236,36 @@ class ProviderConfigView(HomeAssistantView):
                 "battery_system": battery_system,
                 "config": config,
             }
+
+            if battery_system == BATTERY_SYSTEM_ANKER_SOLIX:
+                entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                anker_coord = entry_data.get("anker_solix_coordinator")
+                anker_data = getattr(anker_coord, "data", None) or {}
+                connection_type = entry.options.get(
+                    CONF_ANKER_SOLIX_CONNECTION_TYPE,
+                    entry.data.get(CONF_ANKER_SOLIX_CONNECTION_TYPE, ANKER_SOLIX_CONNECTION_MODBUS),
+                )
+                dispatch_supported = bool(anker_data.get("dispatch_supported", False))
+                limitations: list[str] = []
+                if connection_type == ANKER_SOLIX_CONNECTION_CLOUD_HA:
+                    limitations.append(
+                        "Unofficial Anker cloud bridge: data can be stale and write controls may require the owner account."
+                    )
+                if not dispatch_supported:
+                    limitations.append("Monitoring-only: required Anker write entities are unavailable.")
+                if connection_type == ANKER_SOLIX_CONNECTION_MODBUS:
+                    limitations.append("X1 direct Modbus does not support parallel systems in the current Anker register map.")
+
+                result["battery_config"] = {
+                    "connection_type": connection_type,
+                    "control_path": anker_data.get("control_path", connection_type),
+                    "dispatch_supported": dispatch_supported,
+                    "supports_force_charge": dispatch_supported,
+                    "supports_force_discharge": dispatch_supported,
+                    "supports_restore_normal": dispatch_supported,
+                    "supports_backup_reserve": False,
+                    "limitations": limitations,
+                }
 
             _LOGGER.info(f"✅ Provider config response: provider={electricity_provider}")
             return web.json_response(result)
@@ -11620,6 +11677,7 @@ class EVVehicleCommandView(HomeAssistantView):
             from .const import (
                 CONF_GENERIC_CHARGER_AMPS_ENTITY,
                 CONF_GENERIC_CHARGER_ENABLED,
+                CONF_GENERIC_CHARGER_POWER_ENTITY,
                 CONF_GENERIC_CHARGER_STATUS_ENTITY,
                 CONF_GENERIC_CHARGER_SWITCH_ENTITY,
             )
@@ -11632,6 +11690,7 @@ class EVVehicleCommandView(HomeAssistantView):
                         "charger_switch_entity": opts.get(CONF_GENERIC_CHARGER_SWITCH_ENTITY, ""),
                         "charger_amps_entity": opts.get(CONF_GENERIC_CHARGER_AMPS_ENTITY, ""),
                         "charger_status_entity": opts.get(CONF_GENERIC_CHARGER_STATUS_ENTITY, ""),
+                        "charger_power_entity": opts.get(CONF_GENERIC_CHARGER_POWER_ENTITY, ""),
                     }
 
         if vehicle_vin in (None, "sigenergy_charger"):
@@ -13446,6 +13505,7 @@ class ChargingBoostView(HomeAssistantView):
             if boost_vehicle_id == "generic_ev":
                 from .const import (
                     CONF_GENERIC_CHARGER_AMPS_ENTITY,
+                    CONF_GENERIC_CHARGER_POWER_ENTITY,
                     CONF_GENERIC_CHARGER_STATUS_ENTITY,
                     CONF_GENERIC_CHARGER_SWITCH_ENTITY,
                 )
@@ -13458,6 +13518,7 @@ class ChargingBoostView(HomeAssistantView):
                     "charger_switch_entity": opts.get(CONF_GENERIC_CHARGER_SWITCH_ENTITY, ""),
                     "charger_amps_entity": opts.get(CONF_GENERIC_CHARGER_AMPS_ENTITY, ""),
                     "charger_status_entity": opts.get(CONF_GENERIC_CHARGER_STATUS_ENTITY, ""),
+                    "charger_power_entity": opts.get(CONF_GENERIC_CHARGER_POWER_ENTITY, ""),
                 })
             elif (
                 boost_vehicle_id == "zaptec_standalone"
@@ -14611,6 +14672,7 @@ class EVLoadpointStatusView(HomeAssistantView):
             from .const import (
                 CONF_GENERIC_CHARGER_AMPS_ENTITY,
                 CONF_GENERIC_CHARGER_ENABLED,
+                CONF_GENERIC_CHARGER_POWER_ENTITY,
                 CONF_GENERIC_CHARGER_STATUS_ENTITY,
                 CONF_GENERIC_CHARGER_SWITCH_ENTITY,
             )
@@ -14673,10 +14735,12 @@ class EVLoadpointStatusView(HomeAssistantView):
                 switch_entity = opts.get(CONF_GENERIC_CHARGER_SWITCH_ENTITY)
                 amps_entity = opts.get(CONF_GENERIC_CHARGER_AMPS_ENTITY)
                 status_entity = opts.get(CONF_GENERIC_CHARGER_STATUS_ENTITY)
+                power_entity = opts.get(CONF_GENERIC_CHARGER_POWER_ENTITY)
 
                 switch_state = self._hass.states.get(switch_entity) if switch_entity else None
                 amps_state = self._hass.states.get(amps_entity) if amps_entity else None
                 status_state = self._hass.states.get(status_entity) if status_entity else None
+                power_state = self._hass.states.get(power_entity) if power_entity else None
                 resolved_soc = resolve_generic_charger_soc(self._hass, opts)
 
                 vehicle_name = "EV"
@@ -14694,6 +14758,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                         switch_state=switch_state.state if switch_state else None,
                         amps_value=amps_state.state if amps_state else None,
                         status_state=status_state.state if status_state else None,
+                        power_value=_kw_from_power_state(power_state) if power_state else None,
                         soc_value=resolved_soc,
                     )
                 )
@@ -16402,6 +16467,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         or entry.data.get(CONF_SOLAREDGE_HOST)
         or entry.data.get(CONF_SOLAREDGE_ENTITY_PREFIX)
     )
+    is_anker_solix = entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_ANKER_SOLIX
     is_custom_battery = entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_CUSTOM
     tesla_coordinator = None
     sigenergy_coordinator = None
@@ -16415,6 +16481,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     fronius_reserva_coordinator = None
     neovolt_coordinator = None
     solaredge_coordinator = None
+    anker_solix_coordinator = None
     token_getter = None  # Will be set for Tesla users
 
     if is_sigenergy:
@@ -16818,6 +16885,83 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entity_prefix=solaredge_entity_prefix or "solaredge",
             entry_id=entry.entry_id,
         )
+    elif is_anker_solix:
+        anker_connection_type = entry.options.get(
+            CONF_ANKER_SOLIX_CONNECTION_TYPE,
+            entry.data.get(CONF_ANKER_SOLIX_CONNECTION_TYPE, ANKER_SOLIX_CONNECTION_MODBUS),
+        )
+        _LOGGER.info("Running in Anker Solix mode (%s)", anker_connection_type)
+
+        if anker_connection_type == ANKER_SOLIX_CONNECTION_OFFICIAL_HA:
+            anker_domain = "anker_solix_official"
+        elif anker_connection_type == ANKER_SOLIX_CONNECTION_CLOUD_HA:
+            anker_domain = "anker_solix"
+        else:
+            anker_domain = None
+
+        anker_solix_coordinator = AnkerSolixEnergyCoordinator(
+            hass,
+            entry_id=entry.entry_id,
+            connection_type=anker_connection_type,
+            host=entry.options.get(
+                CONF_ANKER_SOLIX_MODBUS_HOST,
+                entry.data.get(CONF_ANKER_SOLIX_MODBUS_HOST),
+            ),
+            port=int(
+                entry.options.get(
+                    CONF_ANKER_SOLIX_MODBUS_PORT,
+                    entry.data.get(
+                        CONF_ANKER_SOLIX_MODBUS_PORT,
+                        DEFAULT_ANKER_SOLIX_MODBUS_PORT,
+                    ),
+                )
+            ),
+            slave_id=int(
+                entry.options.get(
+                    CONF_ANKER_SOLIX_MODBUS_SLAVE_ID,
+                    entry.data.get(
+                        CONF_ANKER_SOLIX_MODBUS_SLAVE_ID,
+                        DEFAULT_ANKER_SOLIX_MODBUS_SLAVE_ID,
+                    ),
+                )
+            ),
+            integration_domain=anker_domain,
+            anker_entry_id=entry.options.get(
+                CONF_ANKER_SOLIX_CONFIG_ENTRY_ID,
+                entry.data.get(CONF_ANKER_SOLIX_CONFIG_ENTRY_ID),
+            ),
+            entity_prefix=entry.options.get(
+                CONF_ANKER_SOLIX_ENTITY_PREFIX,
+                entry.data.get(CONF_ANKER_SOLIX_ENTITY_PREFIX, ""),
+            ),
+            battery_capacity_kwh=float(
+                entry.options.get(
+                    CONF_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+                    entry.data.get(
+                        CONF_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+                        DEFAULT_ANKER_SOLIX_BATTERY_CAPACITY_KWH,
+                    ),
+                )
+            ),
+            max_charge_kw=float(
+                entry.options.get(
+                    CONF_ANKER_SOLIX_MAX_CHARGE_KW,
+                    entry.data.get(
+                        CONF_ANKER_SOLIX_MAX_CHARGE_KW,
+                        DEFAULT_ANKER_SOLIX_MAX_CHARGE_KW,
+                    ),
+                )
+            ),
+            max_discharge_kw=float(
+                entry.options.get(
+                    CONF_ANKER_SOLIX_MAX_DISCHARGE_KW,
+                    entry.data.get(
+                        CONF_ANKER_SOLIX_MAX_DISCHARGE_KW,
+                        DEFAULT_ANKER_SOLIX_MAX_DISCHARGE_KW,
+                    ),
+                )
+            ),
+        )
     elif is_custom_battery:
         _LOGGER.info(
             "Running in custom external-controller mode - using selected Home Assistant entities for planner telemetry"
@@ -16963,6 +17107,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             else:
                 _LOGGER.warning("SolarEdge energy coordinator failed to initialize: %s", e)
                 solaredge_coordinator = None
+    if anker_solix_coordinator:
+        try:
+            await anker_solix_coordinator.async_config_entry_first_refresh()
+            _LOGGER.info("Anker Solix coordinator initialized successfully")
+        except Exception as e:
+            _LOGGER.warning("Anker Solix coordinator failed to initialize: %s", e)
+            anker_solix_coordinator = None
 
     # Initialize demand charge coordinator if enabled (any battery system with grid power data)
     demand_charge_coordinator = None
@@ -16975,7 +17126,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         or sigenergy_coordinator or sungrow_coordinator or alphaess_coordinator
         or esy_sunhome_coordinator or solax_coordinator or saj_h2_coordinator
         or fronius_reserva_coordinator or neovolt_coordinator
-        or solaredge_coordinator
+        or solaredge_coordinator or anker_solix_coordinator
     )
     if demand_charge_enabled and energy_coord_for_demand:
         demand_charge_rate = entry.options.get(
@@ -17035,7 +17186,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     # Tesla AEMO Spike Manager (tariff-based) — only for Tesla
-    if aemo_spike_enabled and has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess and not is_goodwe and not is_alphaess and not is_esy_sunhome and not is_solax and not is_saj_h2 and not is_fronius_reserva and not is_neovolt and not is_solaredge:
+    if aemo_spike_enabled and has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess and not is_goodwe and not is_alphaess and not is_esy_sunhome and not is_solax and not is_saj_h2 and not is_fronius_reserva and not is_neovolt and not is_solaredge and not is_anker_solix:
         aemo_region = entry.options.get(
             CONF_AEMO_REGION,
             entry.data.get(CONF_AEMO_REGION)
@@ -17184,7 +17335,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Create session managers for non-LP battery control
         if saving_session_coordinator:
             # Tesla TOU mode manager
-            if has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess and not is_goodwe and not is_fronius_reserva and not is_solaredge:
+            if has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess and not is_goodwe and not is_fronius_reserva and not is_solaredge and not is_anker_solix:
                 saving_session_tariff_manager = SavingSessionTariffManager(
                     hass=hass,
                     entry=entry,
@@ -17198,7 +17349,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info("Saving Session Tariff Manager initialized for Tesla")
 
             # Non-Tesla generic manager
-            elif is_sigenergy or is_sungrow or is_foxess or is_goodwe or is_esy_sunhome or is_solax or is_saj_h2 or is_fronius_reserva or is_neovolt or is_solaredge:
+            elif is_sigenergy or is_sungrow or is_foxess or is_goodwe or is_esy_sunhome or is_solax or is_saj_h2 or is_fronius_reserva or is_neovolt or is_solaredge or is_anker_solix:
                 battery_type = (
                     "sigenergy" if is_sigenergy else
                     "sungrow" if is_sungrow else
@@ -17209,6 +17360,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "fronius_reserva" if is_fronius_reserva else
                     "neovolt" if is_neovolt else
                     "solaredge" if is_solaredge else
+                    "anker_solix" if is_anker_solix else
                     "foxess"
                 )
                 generic_saving_session_manager = GenericSavingSessionManager(
@@ -17657,6 +17809,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "fronius_reserva_coordinator": fronius_reserva_coordinator,  # For Fronius GEN24 storage (bridges via fronius_modbus)
         "neovolt_coordinator": neovolt_coordinator,  # For Neovolt / Bytewatt (bridges via Neovolt integration)
         "solaredge_coordinator": solaredge_coordinator,  # For SolarEdge Home battery telemetry
+        "anker_solix_coordinator": anker_solix_coordinator,  # For Anker Solix X1/HA bridge telemetry and control
         "demand_charge_coordinator": demand_charge_coordinator,
         "aemo_spike_manager": aemo_spike_manager,
         "generic_aemo_spike_manager": generic_aemo_spike_manager,  # For non-Tesla AEMO spike detection
@@ -17700,6 +17853,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_fronius_reserva": is_fronius_reserva,  # Track if Fronius GEN24 storage battery system
         "is_neovolt": is_neovolt,  # Track if Neovolt battery system
         "is_solaredge": is_solaredge,  # Track if SolarEdge battery/curtailment system
+        "is_anker_solix": is_anker_solix,  # Track if Anker Solix battery system
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
         "sigenergy_curtailment_state": "normal",  # Track Sigenergy DC curtailment state
         "alphaess_curtailment_state": "normal",  # Track AlphaESS DC curtailment state
@@ -22499,6 +22653,181 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # NOTE: restore_force_mode_from_persistence is scheduled AFTER handle_restore_normal
     # is defined (see below), because it needs handle_restore_normal in its closure.
 
+    async def _tesla_force_read_operation_mode(
+        session,
+        api_base: str,
+        site_id: str,
+        headers: dict[str, str],
+    ) -> str | None:
+        try:
+            async with session.get(
+                f"{api_base}/api/1/energy_sites/{site_id}/site_info",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    _LOGGER.warning(
+                        "Tesla force-mode operation readback failed for site %s: %s - %s",
+                        site_id,
+                        response.status,
+                        text[:200],
+                    )
+                    return None
+                data = await response.json()
+                return data.get("response", {}).get("default_real_mode")
+        except Exception as err:
+            _LOGGER.warning(
+                "Tesla force-mode operation readback error for site %s: %s",
+                site_id,
+                err,
+            )
+            return None
+
+    async def _tesla_force_confirm_operation_mode(
+        session,
+        api_base: str,
+        site_id: str,
+        headers: dict[str, str],
+        expected_mode: str,
+        *,
+        attempts: int = 4,
+        delay_seconds: float = 2.0,
+    ) -> bool:
+        for attempt in range(1, attempts + 1):
+            if attempt > 1:
+                await asyncio.sleep(delay_seconds)
+            observed_mode = await _tesla_force_read_operation_mode(
+                session,
+                api_base,
+                site_id,
+                headers,
+            )
+            if observed_mode == expected_mode:
+                _LOGGER.info(
+                    "Confirmed Tesla force-mode operation %s for site %s (attempt %d/%d)",
+                    expected_mode,
+                    site_id,
+                    attempt,
+                    attempts,
+                )
+                return True
+            _LOGGER.warning(
+                "Tesla force-mode operation readback for site %s is %s, expected %s (attempt %d/%d)",
+                site_id,
+                observed_mode,
+                expected_mode,
+                attempt,
+                attempts,
+            )
+        return False
+
+    async def _tesla_force_set_operation_mode(
+        session,
+        api_base: str,
+        site_id: str,
+        headers: dict[str, str],
+        mode: str,
+        *,
+        reason: str,
+        max_attempts: int = 3,
+    ) -> bool:
+        retry_after_delay: float | None = None
+        last_status: int | None = None
+        last_text = ""
+
+        for attempt in range(1, max_attempts + 1):
+            if attempt > 1:
+                wait_time = retry_after_delay or (2 ** (attempt - 1))
+                retry_after_delay = None
+                await asyncio.sleep(wait_time)
+
+            try:
+                async with session.post(
+                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                    headers=headers,
+                    json={"default_real_mode": mode},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    last_status = response.status
+                    last_text = await response.text()
+                    if response.status == 200:
+                        _LOGGER.info(
+                            "Tesla %s set operation mode to %s for site %s",
+                            reason,
+                            mode,
+                            site_id,
+                        )
+                        if await _tesla_force_confirm_operation_mode(
+                            session,
+                            api_base,
+                            site_id,
+                            headers,
+                            mode,
+                        ):
+                            return True
+                        _LOGGER.warning(
+                            "Tesla %s operation mode %s was accepted but readback did not verify for site %s",
+                            reason,
+                            mode,
+                            site_id,
+                        )
+                        continue
+
+                    if response.status in (429, 500, 502, 503, 504):
+                        retry_after_delay = _parse_retry_after(response)
+                        _LOGGER.warning(
+                            "Tesla %s operation mode attempt %d/%d failed for site %s: %s - %s",
+                            reason,
+                            attempt,
+                            max_attempts,
+                            site_id,
+                            response.status,
+                            last_text[:200],
+                        )
+                        continue
+
+                    _LOGGER.warning(
+                        "Tesla %s operation mode failed for site %s: %s - %s",
+                        reason,
+                        site_id,
+                        response.status,
+                        last_text[:200],
+                    )
+                    return False
+            except asyncio.TimeoutError:
+                last_status = None
+                last_text = "timeout"
+                _LOGGER.warning(
+                    "Tesla %s operation mode attempt %d/%d timed out for site %s",
+                    reason,
+                    attempt,
+                    max_attempts,
+                    site_id,
+                )
+            except aiohttp.ClientError as err:
+                last_status = None
+                last_text = str(err)
+                _LOGGER.warning(
+                    "Tesla %s operation mode attempt %d/%d network error for site %s: %s",
+                    reason,
+                    attempt,
+                    max_attempts,
+                    site_id,
+                    err,
+                )
+
+        _LOGGER.error(
+            "Tesla %s operation mode %s failed for site %s after %d attempts: %s - %s",
+            reason,
+            mode,
+            site_id,
+            max_attempts,
+            last_status,
+            last_text[:200],
+        )
+        return False
+
     async def handle_force_discharge(call: ServiceCall) -> None:
         """Force discharge mode - switches to autonomous with high export tariff."""
 
@@ -22668,6 +22997,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if solaredge_coord:
                 await solaredge_coord.force_discharge(duration, power_w=power_w)
                 _LOGGER.debug(f"SolarEdge force discharge hardware refreshed ({duration}min, {power_w}W)")
+                return
+            anker_coord = entry_data.get("anker_solix_coordinator")
+            if anker_coord:
+                await anker_coord.force_discharge(duration, power_w=power_w)
+                _LOGGER.debug(f"Anker Solix force discharge hardware refreshed ({duration}min, {power_w}W)")
                 return
             _LOGGER.debug(
                 "_extend_hardware: no direct coordinator found for source=%s, falling through to full handler",
@@ -23338,6 +23672,69 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "SolarEdge entity write error"))
                 return
 
+        is_anker_solix_local = entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_ANKER_SOLIX
+        if is_anker_solix_local:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                anker_coord = entry_data.get("anker_solix_coordinator")
+                if not anker_coord:
+                    force_discharge_state["active"] = False
+                    _LOGGER.error("Force discharge: Anker Solix coordinator not available")
+                    hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Anker Solix control is unavailable"))
+                    return
+
+                if force_charge_state["active"]:
+                    _LOGGER.info("Canceling active charge mode to enable Anker Solix discharge mode")
+                    if force_charge_state.get("cancel_expiry_timer"):
+                        force_charge_state["cancel_expiry_timer"]()
+                        force_charge_state["cancel_expiry_timer"] = None
+                    force_charge_state["active"] = False
+                    force_charge_state["expires_at"] = None
+
+                power_w = command_power_w
+                discharge_result = await anker_coord.force_discharge(duration, power_w=power_w)
+
+                if discharge_result:
+                    force_discharge_state["active"] = True
+                    force_discharge_state["source"] = source
+                    force_discharge_state["duration"] = duration
+                    force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info("Anker Solix FORCE DISCHARGE ACTIVE for %d minutes (power_w=%s)", duration, power_w)
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                        "active": True,
+                        "expires_at": force_discharge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_discharge_anker_solix(_now):
+                        if _command_generation[0] != _restore_gen:
+                            _LOGGER.debug("Anker Solix force discharge timer superseded — skipping restore")
+                            return
+                        if force_discharge_state["active"]:
+                            _LOGGER.info("Anker Solix force discharge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_discharge_anker_solix,
+                        force_discharge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    force_discharge_state["active"] = False
+                    _LOGGER.error("Anker Solix force discharge failed")
+                    hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Anker Solix control path is telemetry-only or rejected the command"))
+                return
+            except Exception as e:
+                force_discharge_state["active"] = False
+                _LOGGER.error(f"Error in Anker Solix force discharge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Anker Solix control error"))
+                return
+
         try:
             # Get Tesla gateway config
             site_configs = _get_tesla_site_configs(hass, entry)
@@ -23526,6 +23923,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_discharge_state["saved_export_rule"] = primary_state.get("saved_export_rule")
 
             # Step 3: Switch to autonomous mode on all gateways
+            mode_success = True
             for site_id, current_token, provider in site_configs:
                 headers = {
                     "Authorization": f"Bearer {current_token}",
@@ -23533,23 +23931,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 }
                 api_base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
 
-                _LOGGER.info("Switching to autonomous mode for site %s...", site_id)
-                async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
-                    headers=headers,
-                    json={"default_real_mode": "autonomous"},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        _LOGGER.info("Switched to autonomous mode for site %s", site_id)
-                    else:
-                        text = await response.text()
-                        _LOGGER.warning(
-                            "Could not switch operation mode for site %s: %s - %s",
-                            site_id,
-                            response.status,
-                            text[:200],
-                        )
+                mode_ok = await _tesla_force_set_operation_mode(
+                    session,
+                    api_base,
+                    site_id,
+                    headers,
+                    "autonomous",
+                    reason="force discharge",
+                )
+                if not mode_ok:
+                    mode_success = False
+                    break
+
+            if not mode_success:
+                _LOGGER.error(
+                    "Force discharge autonomous mode did not verify after retries; "
+                    "continuing to tariff upload so restore cleanup remains armed"
+                )
+                hass.async_create_task(
+                    _notify_api_error(
+                        hass,
+                        "Force Discharge Warning",
+                        "Could not verify Tesla Time-Based Control after retries",
+                    )
+                )
 
             # Step 4: Create and upload discharge tariff to all gateways
             discharge_tariff, actual_expiry = _create_discharge_tariff(tariff_duration)
@@ -23969,6 +24374,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if solaredge_coord:
                 await solaredge_coord.force_charge(duration, power_w=power_w)
                 _LOGGER.debug(f"SolarEdge force charge hardware refreshed ({duration}min, {power_w}W)")
+                return
+            anker_coord = entry_data.get("anker_solix_coordinator")
+            if anker_coord:
+                await anker_coord.force_charge(duration, power_w=power_w)
+                _LOGGER.debug(f"Anker Solix force charge hardware refreshed ({duration}min, {power_w}W)")
                 return
             # Fallback: no coordinator found, proceed with full handler
             _LOGGER.debug(
@@ -24779,6 +25189,69 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "SolarEdge entity write error"))
                 return
 
+        is_anker_solix_local = entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_ANKER_SOLIX
+        if is_anker_solix_local:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                anker_coord = entry_data.get("anker_solix_coordinator")
+                if not anker_coord:
+                    force_charge_state["active"] = False
+                    _LOGGER.error("Force charge: Anker Solix coordinator not available")
+                    hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Anker Solix control is unavailable"))
+                    return
+
+                if force_discharge_state["active"]:
+                    _LOGGER.info("Canceling active discharge mode to enable Anker Solix charge mode")
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+                        force_discharge_state["cancel_expiry_timer"] = None
+                    force_discharge_state["active"] = False
+                    force_discharge_state["expires_at"] = None
+
+                power_w = command_power_w
+                charge_result = await anker_coord.force_charge(duration, power_w=power_w)
+
+                if charge_result:
+                    force_charge_state["active"] = True
+                    force_charge_state["source"] = source
+                    force_charge_state["duration"] = duration
+                    force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info("Anker Solix FORCE CHARGE ACTIVE for %d minutes (power_w=%s)", duration, power_w)
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                        "active": True,
+                        "expires_at": force_charge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_charge_state.get("cancel_expiry_timer"):
+                        force_charge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_charge_anker_solix(_now):
+                        if _command_generation[0] != _restore_gen:
+                            _LOGGER.debug("Anker Solix force charge timer superseded — skipping restore")
+                            return
+                        if force_charge_state["active"]:
+                            _LOGGER.info("Anker Solix force charge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_charge_anker_solix,
+                        force_charge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    force_charge_state["active"] = False
+                    _LOGGER.error("Anker Solix force charge failed")
+                    hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Anker Solix control path is telemetry-only or rejected the command"))
+                return
+            except Exception as e:
+                force_charge_state["active"] = False
+                _LOGGER.error(f"Error in Anker Solix force charge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Anker Solix control error"))
+                return
+
         try:
             # Get Tesla gateway config
             site_configs = _get_tesla_site_configs(hass, entry)
@@ -24917,12 +25390,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_charge_state["saved_backup_reserve"] = primary_state.get("saved_backup_reserve")
 
             # Step 3: Switch to autonomous mode and set backup reserve on all gateways
+            mode_success = True
             for site_id, current_token, provider in site_configs:
                 headers = {
                     "Authorization": f"Bearer {current_token}",
                     "Content-Type": "application/json",
                 }
                 api_base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
+
+                mode_ok = await _tesla_force_set_operation_mode(
+                    session,
+                    api_base,
+                    site_id,
+                    headers,
+                    "autonomous",
+                    reason="force charge",
+                )
+                if not mode_ok:
+                    mode_success = False
+                    break
 
                 _LOGGER.info("Enabling grid charging for force charge on site %s...", site_id)
                 async with session.post(
@@ -24942,24 +25428,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             text[:200],
                         )
 
-                _LOGGER.info("Switching to autonomous mode for site %s...", site_id)
-                async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
-                    headers=headers,
-                    json={"default_real_mode": "autonomous"},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        _LOGGER.info("Switched to autonomous mode for site %s", site_id)
-                    else:
-                        text = await response.text()
-                        _LOGGER.warning(
-                            "Could not switch operation mode for site %s: %s - %s",
-                            site_id,
-                            response.status,
-                            text[:200],
-                        )
-
                 # Set backup reserve to 100% to force charging
                 _LOGGER.info("Setting backup reserve to 100%% for site %s...", site_id)
                 async with session.post(
@@ -24972,6 +25440,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.info("Set backup reserve to 100%% for site %s", site_id)
                     else:
                         _LOGGER.warning("Could not set backup reserve for site %s: %s", site_id, response.status)
+
+            if not mode_success:
+                force_charge_state["active"] = False
+                _LOGGER.error("Force charge failed before tariff upload: Tesla autonomous mode did not verify")
+                hass.async_create_task(
+                    _notify_api_error(
+                        hass,
+                        "Force Charge Failed",
+                        "Could not verify Tesla Time-Based Control after retries",
+                    )
+                )
+                return
 
             # Step 4: Create and upload charge tariff to all gateways
             charge_tariff, actual_expiry = _create_charge_tariff(duration)
@@ -25728,6 +26208,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error in SolarEdge restore normal: {e}", exc_info=True)
                 return
 
+        is_anker_solix_local = entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_ANKER_SOLIX
+        if is_anker_solix_local:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                anker_coord = entry_data.get("anker_solix_coordinator")
+                if anker_coord:
+                    await anker_coord.restore_normal()
+                else:
+                    _LOGGER.warning("Restore normal: Anker Solix coordinator not available")
+
+                force_charge_state["active"] = False
+                force_discharge_state["active"] = False
+                force_charge_state["expires_at"] = None
+                force_discharge_state["expires_at"] = None
+
+                _LOGGER.info("Anker Solix NORMAL OPERATION RESTORED")
+
+                if not suppress_notification:
+                    try:
+                        from .automations.actions import _send_expo_push
+                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                    except Exception as notify_err:
+                        _LOGGER.debug(f"Could not send success notification: {notify_err}")
+
+                async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+                async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+
+                await persist_force_mode_state()
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in Anker Solix restore normal: {e}", exc_info=True)
+                return
+
         # Check if this is a Sungrow system
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         if is_sungrow:
@@ -25959,30 +26476,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         restore_mode,
                     )
                     restore_mode = "self_consumption"
-                _LOGGER.info("Restoring operation mode to %s for site %s", restore_mode, site_id)
-                async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
-                    headers=headers,
-                    json={"default_real_mode": restore_mode},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        _LOGGER.info("Restored operation mode to %s for site %s", restore_mode, site_id)
-                        if restore_mode == "self_consumption":
-                            restore_entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
-                            restore_entry_data.pop("last_force_toggle_time", None)
-                            restore_entry_data.pop("retoggle_attempted", None)
-                    else:
-                        _LOGGER.warning("Could not restore operation mode for site %s: %s", site_id, response.status)
-                        try:
-                            from .automations.actions import _send_expo_push
-                            await _send_expo_push(
-                                hass,
-                                "Battery Alert",
-                                "Mode restore failed - check settings"
-                            )
-                        except Exception as notify_err:
-                            _LOGGER.debug(f"Could not send notification: {notify_err}")
+                mode_ok = await _tesla_force_set_operation_mode(
+                    session,
+                    api_base,
+                    site_id,
+                    headers,
+                    restore_mode,
+                    reason="restore normal",
+                )
+                if mode_ok:
+                    if restore_mode == "self_consumption":
+                        restore_entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+                        restore_entry_data.pop("last_force_toggle_time", None)
+                        restore_entry_data.pop("retoggle_attempted", None)
+                else:
+                    _LOGGER.warning("Could not restore operation mode for site %s after retries", site_id)
+                    try:
+                        from .automations.actions import _send_expo_push
+                        await _send_expo_push(
+                            hass,
+                            "Battery Alert",
+                            "Mode restore failed - check settings"
+                        )
+                    except Exception as notify_err:
+                        _LOGGER.debug(f"Could not send notification: {notify_err}")
 
                 # Restore backup reserve per site
                 saved_backup_reserve = (
@@ -26180,6 +26697,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Solar may still charge the battery."
             ),
         },
+        "anker_solix":  {
+            "supported": True,
+            "warning": (
+                "Anker Solix Hold SoC uses third-party control to request 0 W "
+                "dispatch where available. Cloud bridge support may be telemetry-only."
+            ),
+        },
     }
 
     async def handle_hold_battery_soc(call: ServiceCall) -> None:
@@ -26228,6 +26752,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ("fronius_reserva_coordinator", "fronius_reserva"),
             ("neovolt_coordinator", "neovolt"),
             ("solaredge_coordinator", "solaredge"),
+            ("anker_solix_coordinator", "anker_solix"),
         ):
             coord = entry_data.get(coord_key)
             if coord:
@@ -26600,6 +27125,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error setting SolarEdge self-consumption: {e}", exc_info=True)
                 return
 
+        # Check if this is an Anker Solix system
+        is_anker_solix_sc = entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_ANKER_SOLIX
+        if is_anker_solix_sc:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                anker_coord = entry_data.get("anker_solix_coordinator")
+                if not anker_coord:
+                    _LOGGER.error("Self-consumption: Anker Solix coordinator not available")
+                    return
+
+                success = await anker_coord.restore_normal()
+                if success:
+                    _LOGGER.info("Anker Solix self-consumption mode restored")
+                else:
+                    _LOGGER.error("Failed to set Anker Solix self-consumption mode")
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error setting Anker Solix self-consumption: {e}", exc_info=True)
+                return
+
         # Check if this is a Solax system
         is_solax_sc = bool(
             entry.data.get(CONF_SOLAX_CONFIG_ENTRY_ID)
@@ -26965,6 +27510,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             except Exception as e:
                 _LOGGER.error(f"Error setting Solax backup reserve: {e}", exc_info=True)
+        elif entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_ANKER_SOLIX:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                anker_coord = entry_data.get("anker_solix_coordinator")
+                if not anker_coord:
+                    _LOGGER.error("Anker Solix coordinator not available for set_backup_reserve")
+                    return
+
+                success = await anker_coord.set_backup_reserve(percent)
+                if success:
+                    _LOGGER.info(f"Anker Solix backup reserve set to {percent}%")
+                else:
+                    _LOGGER.warning(
+                        "Anker Solix backup reserve is unavailable for this control path"
+                    )
+
+            except Exception as e:
+                _LOGGER.error(f"Error setting Anker Solix backup reserve: {e}", exc_info=True)
         else:
             # Tesla Powerwall — local V1R first when paired, cloud Fleet API as fallback.
             try:
@@ -29812,7 +30375,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     for _key in ("foxess_coordinator", "goodwe_coordinator",
                                  "alphaess_coordinator", "solax_coordinator",
                                  "saj_h2_coordinator", "fronius_reserva_coordinator",
-                                 "neovolt_coordinator", "solaredge_coordinator"):
+                                 "neovolt_coordinator", "solaredge_coordinator",
+                                 "anker_solix_coordinator"):
                         _c = entry_data.get(_key)
                         if _c and _c.data:
                             _kw_coord = _c
@@ -29971,6 +30535,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 from .const import (
                                     CONF_GENERIC_CHARGER_AMPS_ENTITY,
                                     CONF_GENERIC_CHARGER_ENABLED,
+                                    CONF_GENERIC_CHARGER_POWER_ENTITY,
                                     CONF_GENERIC_CHARGER_STATUS_ENTITY,
                                     CONF_GENERIC_CHARGER_SWITCH_ENTITY,
                                 )
@@ -29983,6 +30548,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                         vc["charger_amps_entity"] = _opts.get(CONF_GENERIC_CHARGER_AMPS_ENTITY, "")
                                     if not vc.get("charger_status_entity"):
                                         vc["charger_status_entity"] = _opts.get(CONF_GENERIC_CHARGER_STATUS_ENTITY, "")
+                                    if not vc.get("charger_power_entity"):
+                                        vc["charger_power_entity"] = _opts.get(CONF_GENERIC_CHARGER_POWER_ENTITY, "")
                                 elif _opts.get("ocpp_enabled"):
                                     vc_charger_type = "ocpp"
                                 else:
@@ -30206,6 +30773,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             elif is_solaredge:
                 battery_system = "solaredge"
                 energy_coordinator = solaredge_coordinator
+            elif is_anker_solix:
+                battery_system = "anker_solix"
+                energy_coordinator = anker_solix_coordinator
             elif is_custom_battery:
                 battery_system = BATTERY_SYSTEM_CUSTOM
                 energy_coordinator = None
@@ -31522,7 +32092,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                       "foxess_coordinator", "goodwe_coordinator", "alphaess_coordinator",
                       "solax_coordinator", "saj_h2_coordinator",
                       "fronius_reserva_coordinator", "neovolt_coordinator",
-                      "solaredge_coordinator"):
+                      "solaredge_coordinator", "anker_solix_coordinator"):
         coord = entry_data.get(coord_key)
         if coord and hasattr(coord, "_energy_acc"):
             try:

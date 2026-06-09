@@ -3165,7 +3165,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             from ..const import DISCHARGE_DURATIONS
         except Exception:
-            DISCHARGE_DURATIONS = [5, 10, 15, 30, 45, 60, 75, 90, 105, 120, 150, 180, 210, 240]
+            DISCHARGE_DURATIONS = [5, 10, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180, 195, 210, 225, 240]
 
         supported = sorted(int(duration) for duration in DISCHARGE_DURATIONS)
         if allow_boundary_overrun:

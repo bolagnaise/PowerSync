@@ -62,6 +62,7 @@ FORCE_POWER_COORDINATOR_KEYS = (
     "saj_h2_coordinator",
     "fronius_reserva_coordinator",
     "neovolt_coordinator",
+    "anker_solix_coordinator",
 )
 
 

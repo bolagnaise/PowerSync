@@ -746,6 +746,26 @@ def test_generic_charger_observation_reports_commanded_without_power():
     assert loadpoints[0]["soc"] == 62
 
 
+def test_generic_charger_observation_uses_measured_power():
+    observation = build_generic_charger_observation(
+        vehicle_name="Generic EV",
+        switch_state="off",
+        amps_value="15",
+        status_state="disconnected",
+        power_value="3500",
+        soc_value="69",
+    )
+
+    loadpoints = build_loadpoint_status({}, [observation])
+
+    assert loadpoints[0]["connected"] is True
+    assert loadpoints[0]["actual_charging"] is True
+    assert loadpoints[0]["status"] == "charging"
+    assert loadpoints[0]["current_power_kw"] == 3.5
+    assert loadpoints[0]["blocking_reason"] is None
+    assert loadpoints[0]["soc"] == 69
+
+
 def test_generic_charger_loadpoint_uses_fallback_soc_value():
     hass = _Hass({
         "sensor.primary_soc": _State("unknown"),

@@ -1665,10 +1665,19 @@ async def _execute_single_action(
     elif action_type == "stop_ev_charging":
         success = await _action_stop_ev_charging(hass, config_entry, params)
         if success and not params.get("skip_ownership"):
+            from .ev_ownership import record_manual_stop_hold
+
+            loadpoint_id = _ev_action_loadpoint_id(params)
             await clear_tracked_ev_charging_session(
                 hass,
                 config_entry,
-                _ev_action_loadpoint_id(params),
+                loadpoint_id,
+                reason=params.get("reason", "Manual automation stop"),
+            )
+            record_manual_stop_hold(
+                hass,
+                config_entry,
+                loadpoint_id,
                 reason=params.get("reason", "Manual automation stop"),
             )
         return success

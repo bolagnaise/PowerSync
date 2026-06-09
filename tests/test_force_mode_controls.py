@@ -535,15 +535,23 @@ def test_tesla_force_modes_always_reissue_autonomous_mode():
     tree = ast.parse(source)
     force_discharge = _find_function(tree, "handle_force_discharge")
     force_charge = _find_function(tree, "handle_force_charge")
+    force_set_mode = _find_function(tree, "_tesla_force_set_operation_mode")
     force_discharge_source = ast.get_source_segment(source, force_discharge)
     force_charge_source = ast.get_source_segment(source, force_charge)
+    force_set_mode_source = ast.get_source_segment(source, force_set_mode)
 
     assert force_discharge_source is not None
     assert force_charge_source is not None
+    assert force_set_mode_source is not None
     assert 'if saved_mode != "autonomous":' not in force_discharge_source
     assert 'if saved_mode != "autonomous":' not in force_charge_source
-    assert force_discharge_source.count('json={"default_real_mode": "autonomous"}') >= 1
-    assert force_charge_source.count('json={"default_real_mode": "autonomous"}') >= 1
+    assert "_tesla_force_set_operation_mode(" in force_discharge_source
+    assert "_tesla_force_set_operation_mode(" in force_charge_source
+    assert '"autonomous"' in force_discharge_source
+    assert '"autonomous"' in force_charge_source
+    assert 'json={"default_real_mode": mode}' in force_set_mode_source
+    assert "_tesla_force_confirm_operation_mode(" in force_set_mode_source
+    assert "response.status in (429, 500, 502, 503, 504)" in force_set_mode_source
 
 
 def test_set_operation_mode_verifies_readback_and_raises_for_automation_retries():
@@ -817,6 +825,7 @@ def test_restore_normal_does_not_clear_newer_force_command():
     assert '_restore_superseded("initial mode handoff")' in function_source
     assert '_restore_superseded("tariff restore")' in function_source
     assert '_restore_superseded("mode/reserve restore")' in function_source
+    assert "_tesla_force_set_operation_mode(" in function_source
 
 
 def test_tesla_force_charge_enables_grid_charging_before_tariff_upload():

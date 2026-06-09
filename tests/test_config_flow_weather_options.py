@@ -350,6 +350,7 @@ def test_ev_charging_save_allows_clearing_generic_charger_entities():
         "CONF_GENERIC_CHARGER_SWITCH_ENTITY",
         "CONF_GENERIC_CHARGER_AMPS_ENTITY",
         "CONF_GENERIC_CHARGER_STATUS_ENTITY",
+        "CONF_GENERIC_CHARGER_POWER_ENTITY",
         "CONF_GENERIC_CHARGER_SOC_ENTITY",
         "CONF_GENERIC_CHARGER_SOC_ENTITY_2",
     ):
@@ -358,6 +359,7 @@ def test_ev_charging_save_allows_clearing_generic_charger_entities():
         "if generic_switch:",
         "if generic_amps:",
         "if generic_status:",
+        "if generic_power:",
         "if generic_soc:",
         "if generic_soc_2:",
     ):
@@ -377,6 +379,13 @@ def test_ev_charging_fallback_generic_soc_sensor_is_translated():
                 step["data"]["generic_charger_soc_entity_2"]
                 == "Fallback EV battery SoC sensor"
             )
+            assert (
+                step["data"]["generic_charger_power_entity"]
+                == "EV charging power sensor"
+            )
+            assert "measured EV charging power" in step["data_description"][
+                "generic_charger_power_entity"
+            ]
             assert "primary SoC sensor" in step["data_description"][
                 "generic_charger_soc_entity_2"
             ]

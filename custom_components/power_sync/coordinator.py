@@ -6808,6 +6808,137 @@ class NeovoltEnergyCoordinator(DataUpdateCoordinator):
         await self._controller.disconnect()
 
 
+class AnkerSolixEnergyCoordinator(DataUpdateCoordinator):
+    """Coordinator for Anker Solix direct Modbus or HA entity bridge."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        *,
+        entry_id: str = "",
+        connection_type: str = "modbus",
+        host: str | None = None,
+        port: int = 502,
+        slave_id: int = 1,
+        integration_domain: str = "anker_solix_official",
+        anker_entry_id: str | None = None,
+        entity_prefix: str | None = None,
+        battery_capacity_kwh: float | None = None,
+        max_charge_kw: float = 5.0,
+        max_discharge_kw: float = 5.0,
+    ) -> None:
+        from .const import ANKER_SOLIX_CONNECTION_MODBUS
+        from .inverters.anker_solix import (
+            AnkerSolixEntityController,
+            AnkerSolixX1ModbusController,
+        )
+
+        self._entry_id = entry_id
+        self.connection_type = connection_type
+        if connection_type == ANKER_SOLIX_CONNECTION_MODBUS:
+            self._controller = AnkerSolixX1ModbusController(
+                host=host or "",
+                port=port,
+                slave_id=slave_id,
+                battery_capacity_kwh=battery_capacity_kwh,
+                max_charge_kw=max_charge_kw,
+                max_discharge_kw=max_discharge_kw,
+            )
+        else:
+            self._controller = AnkerSolixEntityController(
+                hass,
+                integration_domain=integration_domain,
+                config_entry_id=anker_entry_id,
+                entity_prefix=entity_prefix,
+                battery_capacity_kwh=battery_capacity_kwh,
+                max_charge_kw=max_charge_kw,
+                max_discharge_kw=max_discharge_kw,
+            )
+        self._energy_acc = EnergyAccumulator(hass, "anker_solix")
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_anker_solix_energy",
+            update_interval=timedelta(seconds=30),
+        )
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Return Anker Solix data from direct Modbus or HA entity states."""
+        if not self._energy_acc._last_update:
+            await self._energy_acc.async_restore()
+
+        try:
+            status = await self._controller.get_status() if asyncio.iscoroutinefunction(self._controller.get_status) else self._controller.get_status()
+        except Exception as exc:
+            if self.data:
+                _LOGGER.warning("Anker Solix read failed, returning stale data: %s", exc)
+                return self.data
+            raise UpdateFailed(f"Anker Solix read failed: {exc}") from exc
+
+        solar_kw = status.get("solar_power", 0.0) or 0.0
+        grid_kw = status.get("grid_power", 0.0) or 0.0
+        battery_kw = status.get("battery_power", 0.0) or 0.0
+        load_kw = status.get("load_power", 0.0) or 0.0
+        soc = status.get("battery_level", 0.0) or 0.0
+
+        buy, sell = _get_current_prices(self.hass, self._entry_id)
+        self._energy_acc.update(max(0.0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+
+        return {
+            "solar_power": solar_kw,
+            "grid_power": grid_kw,
+            "battery_power": battery_kw,
+            "load_power": load_kw,
+            "battery_level": soc,
+            "battery_capacity_kwh": status.get("battery_capacity_kwh"),
+            "battery_max_charge_power_w": status.get("battery_max_charge_power_w"),
+            "battery_max_discharge_power_w": status.get("battery_max_discharge_power_w"),
+            "battery_status": status.get("battery_status"),
+            "operating_mode": status.get("operating_mode") or status.get("mode"),
+            "control_path": status.get("control_path"),
+            "dispatch_supported": status.get("dispatch_supported", True),
+            "energy_summary": self._energy_acc.as_dict(),
+        }
+
+    async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
+        return await self._controller.force_charge(duration_minutes, power_w)
+
+    async def force_discharge(self, duration_minutes: int, power_w: int) -> bool:
+        return await self._controller.force_discharge(duration_minutes, power_w)
+
+    async def restore_normal(self) -> bool:
+        return await self._controller.restore_normal()
+
+    async def set_self_consumption_mode(self) -> bool:
+        if hasattr(self._controller, "set_self_consumption_mode"):
+            return await self._controller.set_self_consumption_mode()
+        return await self.restore_normal()
+
+    async def set_backup_mode(self) -> bool:
+        if hasattr(self._controller, "set_backup_mode"):
+            return await self._controller.set_backup_mode()
+        return False
+
+    async def restore_work_mode_from_idle(self) -> bool:
+        if hasattr(self._controller, "restore_work_mode_from_idle"):
+            return await self._controller.restore_work_mode_from_idle()
+        return await self.restore_normal()
+
+    async def set_backup_reserve(self, percent: int) -> bool:
+        if hasattr(self._controller, "set_backup_reserve"):
+            return await self._controller.set_backup_reserve(percent)
+        return False
+
+    async def get_backup_reserve(self) -> int | None:
+        if hasattr(self._controller, "get_backup_reserve"):
+            return await self._controller.get_backup_reserve()
+        return None
+
+    async def async_shutdown(self) -> None:
+        await self._controller.disconnect()
+
+
 class ESYSunhomeEnergyCoordinator(DataUpdateCoordinator):
     """Bridge coordinator for ESY Sunhome via the upstream esy_sunhome integration.
 

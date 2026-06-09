@@ -1,6 +1,7 @@
 """Flow Power KWatch public API client."""
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta
 from math import isfinite
@@ -66,7 +67,7 @@ class FlowPowerAPIClient:
             if resp.status >= 400:
                 raise FlowPowerAPIError(f"api_status_{resp.status}")
             try:
-                return await resp.json(content_type=None)
+                payload = await resp.json(content_type=None)
             except Exception as err:
                 _LOGGER.debug(
                     "Flow Power API %s returned non-JSON response: %s",
@@ -74,6 +75,24 @@ class FlowPowerAPIClient:
                     text[:200],
                 )
                 raise FlowPowerAPIError("invalid_json") from err
+            return self._decode_nested_json(payload, endpoint)
+
+    @staticmethod
+    def _decode_nested_json(payload: Any, endpoint: str) -> Any:
+        """Decode KWatch responses that wrap JSON inside a JSON string."""
+        decoded = payload
+        for _ in range(3):
+            if not isinstance(decoded, str):
+                return decoded
+            text = decoded.strip()
+            if not text:
+                return decoded
+            try:
+                decoded = json.loads(text)
+            except json.JSONDecodeError:
+                return decoded
+            _LOGGER.debug("Flow Power API %s returned nested JSON string", endpoint)
+        return decoded
 
     @staticmethod
     def _records(payload: Any, *keys: str) -> list[dict[str, Any]]:

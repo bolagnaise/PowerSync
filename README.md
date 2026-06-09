@@ -14,7 +14,7 @@
 
 </div>
 
-> **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, AlphaESS, ESY Sunhome, Solax, SAJ, Neovolt, Bytewatt, Amber Electric, Localvolts, Flow Power, GloBird, Octopus Energy, EPEX/ENTSO-E, or AEMO. Use at your own risk.
+> **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, AlphaESS, ESY Sunhome, Solax, SAJ, Fronius, SolarEdge, Neovolt, Bytewatt, Anker, Amber Electric, Localvolts, Flow Power, GloBird, Octopus Energy, EPEX/ENTSO-E, or AEMO. Use at your own risk.
 
 > [!WARNING]
 > **The built-in optimizer is actively under development.** You should expect occasional bugs and schedules that don't behave as expected — particularly on unusual tariffs, battery configurations, or edge cases. If you see something odd, please report it on [Discord](https://discord.gg/eaWDWxEWE3) with your tariff details and the action plan it generated.
@@ -39,6 +39,7 @@
 | **Fronius GEN24 storage** (BYD Battery-Box / Reserva) | Via [Fronius Modbus](https://github.com/callifo/fronius_modbus) companion integration (HACS) | LP optimizer, force charge/discharge, hold SOC, restore normal, backup reserve |
 | **Neovolt / Bytewatt** | Via [Neovolt Modbus](https://github.com/pvandenh/NeovoltBattery_ModbusPlugin) companion integration (HACS) | LP optimizer, force charge/discharge, backup reserve |
 | **SolarEdge Home Battery** | Via SolarEdge HA storage-control entities, plus Modbus TCP/entity fallback for inverter curtailment | Force charge/discharge, restore normal, backup reserve, Hold SOC, Smart Optimization dispatch, mobile controls, telemetry, live flow, usage stats, and active-power curtailment when the writable SolarEdge storage entities are exposed |
+| **Anker Solix** | Direct local X1 Modbus TCP, official local Anker HA integration, or unofficial Anker cloud HA bridge | Telemetry, live flow, Smart Optimization, force charge/discharge and restore when direct Modbus or writable official HA controls are available. Unofficial cloud bridge can be monitoring-only |
 | **Custom / external controller** | Existing Home Assistant entities for battery SOC, battery power, grid power, solar power, and home load | Planner-only Smart Optimization in monitoring mode. PowerSync exposes optimizer decisions and telemetry; your existing controller or automations keep ownership of hardware dispatch |
 
 ### AC-Coupled Inverter Curtailment
@@ -113,7 +114,7 @@ Or manually:
 
 | Feature | Description | Wiki |
 |---------|-------------|------|
-| **Battery System Setup** | Tesla, FoxESS, Sigenergy, GoodWe, Sungrow, AlphaESS, ESY Sunhome, Solax Hybrid, SAJ H2/HS2, Fronius GEN24 storage, and custom/external controller setup guides | [Setup Guide](https://github.com/bolagnaise/PowerSync/wiki/Battery-System-Setup) |
+| **Battery System Setup** | Tesla, FoxESS, Sigenergy, GoodWe, Sungrow, AlphaESS, ESY Sunhome, Solax Hybrid, SAJ H2/HS2, Fronius GEN24 storage, SolarEdge, Anker Solix, and custom/external controller setup guides | [Setup Guide](https://github.com/bolagnaise/PowerSync/wiki/Battery-System-Setup) |
 | **Smart Optimization** | Built-in LP optimizer calculates optimal charge/discharge schedule using prices, solar, and load. It can optionally auto-apply the forecast-recommended software reserve floor while keeping the hardware backup reserve user controlled. **Solar forecasting via Solcast or Open-Meteo Solar Forecast must be configured for accurate scheduling.** | [Details](https://github.com/bolagnaise/PowerSync/wiki/Smart-Optimization) |
 | **EV Smart Charging** | Coordinate EV charging with battery optimization — Solar, Cheapest, Deadline modes | [Details](https://github.com/bolagnaise/PowerSync/wiki/EV-Smart-Charging) |
 | **Advanced Features** | AEMO spike detection, solar curtailment, spike protection, export boost, **off-grid control** | [Details](https://github.com/bolagnaise/PowerSync/wiki/Advanced-Features) |

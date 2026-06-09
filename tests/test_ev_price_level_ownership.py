@@ -1866,6 +1866,35 @@ def test_price_level_zaptec_start_is_blocked_by_manual_owner(fake_actions):
     assert "manual already owns" in last_command["reason"]
 
 
+def test_price_level_start_respects_manual_stop_hold(fake_actions):
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    hass = _FakeHass()
+    entry = _FakeConfigEntry()
+    ev_ownership.record_manual_stop_hold(
+        hass,
+        entry,
+        "generic_ev",
+        reason="Manual stop from mobile",
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    result = asyncio.run(
+        executor._start_charging(
+            "price_level_opportunity",
+            "cheap price",
+            vehicle_vin="generic_ev",
+        )
+    )
+
+    assert result is False
+    fake_actions._action_start_ev_charging_dynamic.assert_not_awaited()
+    state = executor._get_or_create_vehicle_state("generic_ev")
+    assert state.last_decision == "waiting"
+    assert "Manual stop hold active" in state.last_decision_reason
+
+
 def test_price_level_disabled_does_not_stop_unowned_charging(monkeypatch, fake_actions):
     fake_actions._dynamic_ev_state = {}
 

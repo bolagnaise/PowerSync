@@ -765,22 +765,26 @@ def build_generic_charger_observation(
     switch_state: Any = None,
     amps_value: Any = None,
     status_state: Any = None,
+    power_value: Any = None,
     soc_value: Any = None,
 ) -> dict[str, Any]:
     """Build an observed loadpoint record for a generic HA charger."""
     normalized_status = _normal_key(status_state)
     switch_on = str(switch_state).lower() in ("on", "true", "1", "charging")
     current_amps = _int_value(amps_value, 0)
+    power_kw = _float_value(power_value, 0.0)
+    if power_kw > 100:
+        power_kw /= 1000
 
     status_says_connected = normalized_status in GENERIC_CONNECTED_STATES
     status_says_charging = normalized_status in GENERIC_CHARGING_STATES
 
-    is_connected = switch_on or status_says_connected
-    is_charging = status_says_charging
+    is_connected = switch_on or status_says_connected or power_kw > ACTIVE_POWER_THRESHOLD_KW
+    is_charging = status_says_charging or power_kw > ACTIVE_POWER_THRESHOLD_KW
     blocking_reason = None
     if normalized_status in {"paused", "suspendedevse", "suspendedev", "finishing", "faulted"}:
         blocking_reason = str(status_state)
-    elif current_amps > 0 and not is_charging:
+    elif current_amps > 0 and power_kw <= ACTIVE_POWER_THRESHOLD_KW and not status_says_charging:
         blocking_reason = f"Commanded {current_amps}A but no measured charge power"
 
     return {
@@ -790,7 +794,7 @@ def build_generic_charger_observation(
         "charger_type": "generic",
         "current_amps": current_amps,
         "target_amps": current_amps,
-        "ev_power_kw": 0.0,
+        "ev_power_kw": power_kw,
         "ev_soc": _optional_int(soc_value),
         "is_connected": is_connected,
         "is_charging": is_charging,

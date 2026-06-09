@@ -150,6 +150,37 @@ def test_flow_power_api_client_posts_key_and_normalizes_sites_summary_and_prices
     assert all(call[2]["x-api-key"] == "secret-key" for call in session.calls)
 
 
+def test_flow_power_api_client_decodes_nested_json_string_payloads():
+    api = _flow_power_api_module()
+    session = _FakeSession(
+        {
+            "GetResidentialSites": json.dumps(
+                {"sites": [{"nmi": "4407000000", "networkTariff": "BLNREX2"}]}
+            ),
+            "dispatch5mins": json.dumps(
+                {"data": [{"timestamp": "2026-06-08T10:00:00+10:00", "price": 123.4}]}
+            ),
+            "predispatch30mins": json.dumps(
+                {"result": [{"periodDateTime": "2026/06/08 10:30:00", "RRP": 98.0}]}
+            ),
+        }
+    )
+    client = api.FlowPowerAPIClient("secret-key", session)
+
+    async def run():
+        sites = await client.get_residential_sites()
+        dispatch = await client.dispatch5mins("nsw")
+        forecast = await client.predispatch30mins("nsw")
+        return sites, dispatch, forecast
+
+    sites, dispatch, forecast = asyncio.run(run())
+
+    assert sites[0]["nmi"] == "4407000000"
+    assert sites[0]["networkTariff"] == "BLNREX2"
+    assert dispatch[0]["perKwh"] == 12.34
+    assert forecast[0]["perKwh"] == 9.8
+
+
 def test_flow_power_price_endpoints_can_work_when_site_lookup_fails():
     api = _flow_power_api_module()
     session = _FakeSession(

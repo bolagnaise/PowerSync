@@ -1481,6 +1481,7 @@ async def async_setup_entry(
     fronius_reserva_coordinator = domain_data.get("fronius_reserva_coordinator")
     neovolt_coordinator = domain_data.get("neovolt_coordinator")
     solaredge_coordinator = domain_data.get("solaredge_coordinator")
+    anker_solix_coordinator = domain_data.get("anker_solix_coordinator")
     demand_charge_coordinator: DemandChargeCoordinator | None = domain_data.get("demand_charge_coordinator")
     aemo_spike_manager = domain_data.get("aemo_spike_manager")
     is_sigenergy = domain_data.get("is_sigenergy", False)
@@ -1494,6 +1495,7 @@ async def async_setup_entry(
     is_fronius_reserva = domain_data.get("is_fronius_reserva", False)
     is_neovolt = domain_data.get("is_neovolt", False)
     is_solaredge = domain_data.get("is_solaredge", False)
+    is_anker_solix = domain_data.get("is_anker_solix", False)
 
     entities: list[SensorEntity] = []
 
@@ -1589,6 +1591,8 @@ async def async_setup_entry(
         energy_coordinator = neovolt_coordinator
     elif is_solaredge:
         energy_coordinator = solaredge_coordinator
+    elif is_anker_solix:
+        energy_coordinator = anker_solix_coordinator
     else:
         energy_coordinator = tesla_coordinator
     if energy_coordinator:
@@ -2016,6 +2020,8 @@ async def async_setup_entry(
         battery_system = "fronius_reserva"
     elif is_neovolt:
         battery_system = "neovolt"
+    elif is_anker_solix:
+        battery_system = "anker_solix"
     entities.append(BatteryHealthSensor(
         entry=entry,
         coordinator=energy_coordinator,
