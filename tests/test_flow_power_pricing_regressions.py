@@ -181,6 +181,56 @@ def test_flow_power_api_client_decodes_nested_json_string_payloads():
     assert forecast[0]["perKwh"] == 9.8
 
 
+def test_flow_power_api_client_normalizes_kwatch_key_value_price_records():
+    api = _flow_power_api_module()
+    session = _FakeSession(
+        {
+            "dispatch5mins": [
+                {"Key": "2026-06-08T10:05:00+10:00", "Value": 145.6},
+                {"Key": "2026-06-08T10:00:00+10:00", "Value": 123.4},
+            ],
+            "predispatch5mins": [
+                {"key": "2026-06-08T10:10:00+10:00", "value": 156.7},
+            ],
+        }
+    )
+    client = api.FlowPowerAPIClient("secret-key", session)
+
+    async def run():
+        dispatch = await client.dispatch5mins("nsw", period=60)
+        forecast = await client.predispatch5mins("nsw", period=60)
+        return dispatch, forecast
+
+    dispatch, forecast = asyncio.run(run())
+
+    assert [entry["nemTime"] for entry in dispatch] == [
+        "2026-06-08T10:00:00+10:00",
+        "2026-06-08T10:05:00+10:00",
+    ]
+    assert [round(entry["perKwh"], 2) for entry in dispatch] == [12.34, 14.56]
+    assert forecast[0]["nemTime"] == "2026-06-08T10:10:00+10:00"
+    assert round(forecast[0]["perKwh"], 2) == 15.67
+
+
+def test_flow_power_api_client_reports_allowlist_403_separately():
+    api = _flow_power_api_module()
+    session = _FakeSession(
+        {
+            "dispatch5mins": ("Host not allowlisted for this API key", 403),
+        }
+    )
+    client = api.FlowPowerAPIClient("secret-key", session)
+
+    async def run():
+        try:
+            await client.dispatch5mins("nsw")
+        except api.FlowPowerAPIError as err:
+            return str(err)
+        return None
+
+    assert asyncio.run(run()) == "host_not_allowlisted"
+
+
 def test_flow_power_price_endpoints_can_work_when_site_lookup_fails():
     api = _flow_power_api_module()
     session = _FakeSession(
