@@ -62,7 +62,12 @@ class FlowPowerAPIClient:
             request_kwargs["json"] = payload
         async with session.post(url, **request_kwargs) as resp:
             text = await resp.text()
-            if resp.status == 401 or resp.status == 403:
+            if resp.status == 401:
+                raise FlowPowerAPIError("invalid_api_key")
+            if resp.status == 403:
+                body = text.strip()
+                if "allowlist" in body.lower():
+                    raise FlowPowerAPIError("host_not_allowlisted")
                 raise FlowPowerAPIError("invalid_api_key")
             if resp.status >= 400:
                 raise FlowPowerAPIError(f"api_status_{resp.status}")
@@ -243,13 +248,13 @@ class FlowPowerAPIClient:
         for record in records:
             price_mwh = self._first_number(
                 record,
+                "Value",            # KWatch {Key, Value} shape
+                "value",
                 "price",
                 "Price",
                 "rrp",
                 "RRP",
                 "Rrp",
-                "value",
-                "Value",
                 "dispatchPrice",
                 "DispatchPrice",
             )
@@ -258,6 +263,8 @@ class FlowPowerAPIClient:
             period_time = self._parse_time(
                 self._first_text(
                     record,
+                    "Key",              # KWatch {Key, Value} shape
+                    "key",
                     "time",
                     "Time",
                     "timestamp",
