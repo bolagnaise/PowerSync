@@ -926,7 +926,9 @@ async def validate_flow_power_api_key(
 
     api_region = FLOW_POWER_KWATCH_REGIONS.get(region, str(region).lower())
     try:
-        dispatch = await client.dispatch5mins(api_region, period=1)
+        # period=60 minutes for dispatch (1 min returns null/empty from the API)
+        # period=1 day for predispatch30mins
+        dispatch = await client.dispatch5mins(api_region, period=60)
         forecast = await client.predispatch30mins(api_region, period=1)
     except FlowPowerAPIError as err:
         if str(err) == "invalid_api_key":
