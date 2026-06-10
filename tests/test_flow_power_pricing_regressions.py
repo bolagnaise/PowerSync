@@ -231,6 +231,76 @@ def test_flow_power_api_client_reports_allowlist_403_separately():
     assert asyncio.run(run()) == "host_not_allowlisted"
 
 
+def test_flow_power_api_client_covers_documented_kwatch_endpoints():
+    api = _flow_power_api_module()
+    session = _FakeSession(
+        {
+            "GetResidentialSite": {"nmi": "4407000000", "networkTariff": "BLNREX2"},
+            "dispatch30mins": [
+                {"Key": "2026-06-08T10:00:00+10:00", "Value": 120.0},
+            ],
+            "dispatch30minsDateRange": [
+                {"Key": "2026-06-08T10:30:00+10:00", "Value": 130.0},
+            ],
+            "PreDispatchDemand30mins": [
+                {"Key": "2026-06-08T11:00:00+10:00", "Value": 8100.0},
+            ],
+            "DispatchDemand30mins": [
+                {"Key": "2026-06-08T11:30:00+10:00", "Value": 8200.0},
+            ],
+            "QuarterCeilingPrice": [
+                {"Key": "2026-06-08T12:00:00+10:00", "Value": 14500.0},
+            ],
+        }
+    )
+    client = api.FlowPowerAPIClient("secret-key", session)
+    start = datetime(2026, 6, 8, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 6, 9, 0, 0, tzinfo=timezone.utc)
+
+    async def run():
+        site = await client.get_residential_site("4407000000")
+        dispatch = await client.dispatch30mins("nsw", period=7)
+        ranged = await client.dispatch30mins_date_range("nsw", start, end)
+        pre_demand = await client.predispatch_demand30mins("nsw", period=2)
+        demand = await client.dispatch_demand30mins("nsw", period=30)
+        quarter = await client.quarter_ceiling_price("nsw", 2, start, end)
+        return site, dispatch, ranged, pre_demand, demand, quarter
+
+    site, dispatch, ranged, pre_demand, demand, quarter = asyncio.run(run())
+
+    assert site == {"nmi": "4407000000", "networkTariff": "BLNREX2"}
+    assert dispatch[0]["perKwh"] == 12.0
+    assert ranged[0]["perKwh"] == 13.0
+    assert pre_demand[0]["value"] == 8100.0
+    assert pre_demand[0]["unit"] == "MW"
+    assert demand[0]["value"] == 8200.0
+    assert demand[0]["unit"] == "MW"
+    assert quarter[0]["perKwh"] == 1450.0
+    assert [(call[0], call[1]) for call in session.calls] == [
+        ("GetResidentialSite", {"nmi": "4407000000"}),
+        ("dispatch30mins", {"regName": "nsw", "period": 7}),
+        (
+            "dispatch30minsDateRange",
+            {
+                "regName": "nsw",
+                "startDate": "2026-06-08T00:00:00+00:00",
+                "endDate": "2026-06-09T00:00:00+00:00",
+            },
+        ),
+        ("PreDispatchDemand30mins", {"regName": "nsw", "period": 2}),
+        ("DispatchDemand30mins", {"regName": "nsw", "period": 30}),
+        (
+            "QuarterCeilingPrice",
+            {
+                "regName": "nsw",
+                "quarter": 2,
+                "startDate": "2026-06-08T00:00:00+00:00",
+                "endDate": "2026-06-09T00:00:00+00:00",
+            },
+        ),
+    ]
+
+
 def test_flow_power_price_endpoints_can_work_when_site_lookup_fails():
     api = _flow_power_api_module()
     session = _FakeSession(
