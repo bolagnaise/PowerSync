@@ -10,5 +10,5 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://discord.gg/eaWDWxEWE3",
   "requirements": ["aiohttp>=3.9.0", "aemo-to-tariff>=0.7.15", "cryptography>=42.0.0", "goodwe>=0.4.9", "protobuf>=4.25.0", "highspy>=1.7.0"],
-  "version": "2.12.617"
+  "version": "2.12.618"
 }
