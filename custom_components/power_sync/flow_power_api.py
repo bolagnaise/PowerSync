@@ -62,7 +62,12 @@ class FlowPowerAPIClient:
             request_kwargs["json"] = payload
         async with session.post(url, **request_kwargs) as resp:
             text = await resp.text()
-            if resp.status == 401 or resp.status == 403:
+            if resp.status == 401:
+                raise FlowPowerAPIError("invalid_api_key")
+            if resp.status == 403:
+                body = text.strip()
+                if "allowlist" in body.lower():
+                    raise FlowPowerAPIError("host_not_allowlisted")
                 raise FlowPowerAPIError("invalid_api_key")
             if resp.status >= 400:
                 raise FlowPowerAPIError(f"api_status_{resp.status}")
@@ -160,6 +165,13 @@ class FlowPowerAPIClient:
                 continue
         return None
 
+    @staticmethod
+    def _api_datetime(value: datetime | str) -> str:
+        """Format a datetime value for KWatch DateTime payload fields."""
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return str(value)
+
     async def get_residential_sites(self) -> list[dict[str, Any]]:
         """Return residential sites available to the API key."""
         payload = await self._post("GetResidentialSites")
@@ -194,7 +206,7 @@ class FlowPowerAPIClient:
         return normalize_site_summary(records[0])
 
     async def dispatch5mins(self, reg_name: str, period: float = 60) -> list[dict[str, Any]]:
-        """Return 5-minute dispatch prices in $/MWh."""
+        """Return 5-minute dispatch prices for a minutes-based period."""
         payload = await self._post(
             "dispatch5mins",
             {"regName": reg_name, "period": period},
@@ -206,7 +218,7 @@ class FlowPowerAPIClient:
         reg_name: str,
         period: float = 60,
     ) -> list[dict[str, Any]]:
-        """Return 5-minute predispatch prices in $/MWh."""
+        """Return 5-minute predispatch prices for a minutes-based period."""
         payload = await self._post(
             "predispatch5mins",
             {"regName": reg_name, "period": period},
@@ -218,10 +230,82 @@ class FlowPowerAPIClient:
         reg_name: str,
         period: float = 2,
     ) -> list[dict[str, Any]]:
-        """Return 30-minute predispatch prices in $/MWh."""
+        """Return 30-minute predispatch prices for a days-based period."""
         payload = await self._post(
             "predispatch30mins",
             {"regName": reg_name, "period": period},
+        )
+        return self._normalize_price_records(payload, duration=30)
+
+    async def dispatch30mins(
+        self,
+        reg_name: str,
+        period: float,
+    ) -> list[dict[str, Any]]:
+        """Return 30-minute dispatch prices for a days-based lookback period."""
+        payload = await self._post(
+            "dispatch30mins",
+            {"regName": reg_name, "period": period},
+        )
+        return self._normalize_price_records(payload, duration=30)
+
+    async def dispatch30mins_date_range(
+        self,
+        reg_name: str,
+        start_date: datetime | str,
+        end_date: datetime | str,
+    ) -> list[dict[str, Any]]:
+        """Return 30-minute dispatch prices for a date range."""
+        payload = await self._post(
+            "dispatch30minsDateRange",
+            {
+                "regName": reg_name,
+                "startDate": self._api_datetime(start_date),
+                "endDate": self._api_datetime(end_date),
+            },
+        )
+        return self._normalize_price_records(payload, duration=30)
+
+    async def predispatch_demand30mins(
+        self,
+        reg_name: str,
+        period: float = 2,
+    ) -> list[dict[str, Any]]:
+        """Return 30-minute predispatch demand for a days-based period."""
+        payload = await self._post(
+            "PreDispatchDemand30mins",
+            {"regName": reg_name, "period": period},
+        )
+        return self._normalize_quantity_records(payload, duration=30, unit="MW")
+
+    async def dispatch_demand30mins(
+        self,
+        reg_name: str,
+        period: float,
+    ) -> list[dict[str, Any]]:
+        """Return 30-minute dispatch demand for a days-based lookback period."""
+        payload = await self._post(
+            "DispatchDemand30mins",
+            {"regName": reg_name, "period": period},
+        )
+        return self._normalize_quantity_records(payload, duration=30, unit="MW")
+
+    async def quarter_ceiling_price(
+        self,
+        reg_name: str,
+        quarter: int,
+        start_date: datetime | str,
+        end_date: datetime | str,
+    ) -> list[dict[str, Any]]:
+        """Return quarter ceiling prices for the supplied quarter and date range."""
+        payload = await self._post(
+            "QuarterCeilingPrice",
+            {
+                "regName": reg_name,
+                "quarter": quarter,
+                "startDate": self._api_datetime(start_date),
+                "endDate": self._api_datetime(end_date),
+            },
         )
         return self._normalize_price_records(payload, duration=30)
 
@@ -243,13 +327,13 @@ class FlowPowerAPIClient:
         for record in records:
             price_mwh = self._first_number(
                 record,
+                "Value",            # KWatch {Key, Value} shape
+                "value",
                 "price",
                 "Price",
                 "rrp",
                 "RRP",
                 "Rrp",
-                "value",
-                "Value",
                 "dispatchPrice",
                 "DispatchPrice",
             )
@@ -258,6 +342,8 @@ class FlowPowerAPIClient:
             period_time = self._parse_time(
                 self._first_text(
                     record,
+                    "Key",              # KWatch {Key, Value} shape
+                    "key",
                     "time",
                     "Time",
                     "timestamp",
@@ -284,6 +370,75 @@ class FlowPowerAPIClient:
         if not normalized:
             _LOGGER.debug(
                 "Flow Power API returned no parseable price records from shape %s",
+                type(payload).__name__,
+            )
+            return []
+
+        normalized.sort(key=lambda item: item["nemTime"])
+        return normalized
+
+    def _normalize_quantity_records(
+        self,
+        payload: Any,
+        *,
+        duration: int,
+        unit: str,
+    ) -> list[dict[str, Any]]:
+        records = self._records(
+            payload,
+            "demand",
+            "demands",
+            "values",
+            "priceData",
+            "PriceData",
+        )
+        normalized: list[dict[str, Any]] = []
+        for record in records:
+            value = self._first_number(
+                record,
+                "Value",
+                "value",
+                "demand",
+                "Demand",
+                "demandMw",
+                "DemandMw",
+                "mw",
+                "MW",
+            )
+            if value is None:
+                continue
+            period_time = self._parse_time(
+                self._first_text(
+                    record,
+                    "Key",
+                    "key",
+                    "time",
+                    "Time",
+                    "timestamp",
+                    "Timestamp",
+                    "settlementDate",
+                    "SettlementDate",
+                    "dateTime",
+                    "DateTime",
+                    "periodDateTime",
+                    "PeriodDateTime",
+                )
+            )
+            if period_time is None:
+                period_time = dt_util.utcnow()
+            normalized.append(
+                {
+                    "nemTime": period_time.isoformat(),
+                    "value": value,
+                    "unit": unit,
+                    "duration": duration,
+                    "raw": record,
+                }
+            )
+
+        if not normalized:
+            _LOGGER.debug(
+                "Flow Power API returned no parseable quantity records from shape %s",
                 type(payload).__name__,
             )
             return []

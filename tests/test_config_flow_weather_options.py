@@ -604,7 +604,7 @@ def test_flow_power_api_key_setup_validates_and_routes_sites():
     assert setup_source is not None
     assert site_source is not None
     assert "FLOW_POWER_KWATCH_REGIONS" in validate_source
-    assert "client.dispatch5mins(api_region, period=1)" in validate_source
+    assert "client.dispatch5mins(api_region, period=60)" in validate_source
     assert "client.predispatch30mins(api_region, period=1)" in validate_source
     assert '"site_lookup_error": site_lookup_error or "no_sites"' in validate_source
     assert "CONF_FLOWPOWER_API_KEY" in setup_source
