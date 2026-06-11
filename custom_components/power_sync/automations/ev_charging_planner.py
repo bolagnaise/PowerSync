@@ -5253,10 +5253,9 @@ class AutoScheduleExecutor:
         """Get backup reserve from Tesla Powerwall via Fleet API."""
         try:
             from ..const import (
+                CONF_FLEET_API_BASE_URL,
                 CONF_TESLA_ENERGY_SITE_ID,
-                TESLA_PROVIDER_TESLEMETRY,
-                TESLEMETRY_API_BASE_URL,
-                FLEET_API_BASE_URL,
+                get_tesla_api_base_url,
             )
             from .. import get_tesla_api_token
 
@@ -5274,7 +5273,9 @@ class AutoScheduleExecutor:
                 "Authorization": f"Bearer {current_token}",
                 "Content-Type": "application/json",
             }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            api_base = get_tesla_api_base_url(
+                provider, self.config_entry.data.get(CONF_FLEET_API_BASE_URL)
+            )
 
             async with session.get(
                 f"{api_base}/api/1/energy_sites/{site_id}/site_info",
@@ -5329,10 +5330,9 @@ class AutoScheduleExecutor:
         """Set backup reserve on Tesla Powerwall via Fleet API."""
         try:
             from ..const import (
+                CONF_FLEET_API_BASE_URL,
                 CONF_TESLA_ENERGY_SITE_ID,
-                TESLA_PROVIDER_TESLEMETRY,
-                TESLEMETRY_API_BASE_URL,
-                FLEET_API_BASE_URL,
+                get_tesla_api_base_url,
             )
             from .. import get_tesla_api_token
 
@@ -5350,7 +5350,9 @@ class AutoScheduleExecutor:
                 "Authorization": f"Bearer {current_token}",
                 "Content-Type": "application/json",
             }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            api_base = get_tesla_api_base_url(
+                provider, self.config_entry.data.get(CONF_FLEET_API_BASE_URL)
+            )
 
             async with session.post(
                 f"{api_base}/api/1/energy_sites/{site_id}/backup",
@@ -5382,10 +5384,9 @@ class AutoScheduleExecutor:
 
         try:
             from ..const import (
+                CONF_FLEET_API_BASE_URL,
                 CONF_TESLA_ENERGY_SITE_ID,
-                TESLA_PROVIDER_TESLEMETRY,
-                TESLEMETRY_API_BASE_URL,
-                FLEET_API_BASE_URL,
+                get_tesla_api_base_url,
             )
             from .. import get_tesla_api_token
 
@@ -5402,7 +5403,9 @@ class AutoScheduleExecutor:
                 "Authorization": f"Bearer {current_token}",
                 "Content-Type": "application/json",
             }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            api_base = get_tesla_api_base_url(
+                provider, self.config_entry.data.get(CONF_FLEET_API_BASE_URL)
+            )
 
             async with session.get(
                 f"{api_base}/api/1/energy_sites/{site_id}/site_info",
@@ -5445,10 +5448,9 @@ class AutoScheduleExecutor:
 
         try:
             from ..const import (
+                CONF_FLEET_API_BASE_URL,
                 CONF_TESLA_ENERGY_SITE_ID,
-                TESLA_PROVIDER_TESLEMETRY,
-                TESLEMETRY_API_BASE_URL,
-                FLEET_API_BASE_URL,
+                get_tesla_api_base_url,
             )
             from .. import get_tesla_api_token
 
@@ -5466,7 +5468,9 @@ class AutoScheduleExecutor:
                 "Authorization": f"Bearer {current_token}",
                 "Content-Type": "application/json",
             }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            api_base = get_tesla_api_base_url(
+                provider, self.config_entry.data.get(CONF_FLEET_API_BASE_URL)
+            )
 
             # Map our rule names to Tesla API
             disallow_export = rule == "never"

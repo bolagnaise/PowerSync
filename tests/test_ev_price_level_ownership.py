@@ -45,6 +45,10 @@ _ha_dr = sys.modules.setdefault(
 _ha_event = sys.modules.setdefault(
     "homeassistant.helpers.event", types.ModuleType("homeassistant.helpers.event")
 )
+_ha_aiohttp_client = sys.modules.setdefault(
+    "homeassistant.helpers.aiohttp_client",
+    types.ModuleType("homeassistant.helpers.aiohttp_client"),
+)
 _ha_util = sys.modules.setdefault("homeassistant.util", types.ModuleType("homeassistant.util"))
 _ha_dt = sys.modules.setdefault("homeassistant.util.dt", types.ModuleType("homeassistant.util.dt"))
 _ha_core.HomeAssistant = type("HomeAssistant", (), {})
@@ -71,6 +75,7 @@ _ha_helpers.device_registry = _ha_dr
 _ha_helpers.storage = _ha_storage
 _ha_helpers.update_coordinator = _ha_update
 _ha_helpers.event = _ha_event
+_ha_helpers.aiohttp_client = _ha_aiohttp_client
 _ha_root.helpers = _ha_helpers
 _ha_util.dt = _ha_dt
 _ha_root.util = _ha_util
@@ -146,6 +151,45 @@ class _FakeStates:
         return [entity_id for entity_id in self._states if entity_id.startswith(prefix)]
 
 
+class _FakeTeslaResponse:
+    def __init__(self, status: int = 200, payload: dict | None = None, text: str = "") -> None:
+        self.status = status
+        self._payload = payload or {}
+        self._text = text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def json(self):
+        return self._payload
+
+    async def text(self):
+        return self._text
+
+
+class _FakeTeslaSession:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def get(self, url: str, **kwargs):
+        self.calls.append(("GET", url, kwargs))
+        return _FakeTeslaResponse(
+            payload={
+                "response": {
+                    "backup_reserve_percent": 42,
+                    "components": {"customer_preferred_export_rule": "pv_only"},
+                }
+            }
+        )
+
+    def post(self, url: str, **kwargs):
+        self.calls.append(("POST", url, kwargs))
+        return _FakeTeslaResponse()
+
+
 @pytest.fixture
 def fake_actions(monkeypatch):
     actions = types.ModuleType("power_sync.automations.actions")
@@ -182,6 +226,62 @@ async def _one_vehicle(*args, **kwargs):
 
 async def _no_vehicles(*args, **kwargs):
     return []
+
+
+def test_auto_schedule_tesla_helpers_use_powersync_proxy_base(monkeypatch):
+    const = importlib.import_module("power_sync.const")
+    fake_session = _FakeTeslaSession()
+    hass = _FakeHass()
+    hass.session = fake_session
+
+    class PowerSyncEntry(_FakeConfigEntry):
+        data = {
+            const.CONF_TESLA_ENERGY_SITE_ID: "site-1",
+            const.CONF_FLEET_API_BASE_URL: "https://fleet.example.test",
+        }
+
+    monkeypatch.setattr(
+        sys.modules["power_sync"],
+        "get_tesla_api_token",
+        lambda hass, entry: ("psync_test", const.TESLA_PROVIDER_POWERSYNC),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        _ha_aiohttp_client,
+        "async_get_clientsession",
+        lambda hass: hass.session,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ev_planner.aiohttp,
+        "ClientTimeout",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+        raising=False,
+    )
+
+    async def run_helpers():
+        executor = ev_planner.AutoScheduleExecutor(
+            hass,
+            PowerSyncEntry(),
+            planner=SimpleNamespace(),
+        )
+        reserve = await executor._get_tesla_backup_reserve()
+        reserve_set = await executor._set_tesla_backup_reserve(35)
+        export_rule = await executor._get_current_export_rule()
+        export_set = await executor._set_export_rule("battery_ok")
+        return reserve, reserve_set, export_rule, export_set
+
+    assert asyncio.run(run_helpers()) == (42, True, "pv_only", True)
+    assert [call[0] for call in fake_session.calls] == ["GET", "POST", "GET", "POST"]
+    assert all(
+        url.startswith(f"{const.POWERSYNC_API_BASE_URL}/api/1/energy_sites/site-1/")
+        for _method, url, _kwargs in fake_session.calls
+    )
+    assert not any("fleet.example.test" in url for _method, url, _kwargs in fake_session.calls)
+    assert all(
+        kwargs["headers"]["Authorization"] == "Bearer psync_test"
+        for _method, _url, kwargs in fake_session.calls
+    )
 
 
 def test_price_level_leaves_solar_surplus_owned_session_alone(monkeypatch, fake_actions):

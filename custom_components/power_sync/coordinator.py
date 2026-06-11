@@ -4432,15 +4432,24 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             return await self._controller.set_backup_reserve(percent)
 
     async def set_backup_mode(self) -> bool:
-        """Set Sungrow to Forced+Stop for IDLE (prevents self-consumption discharge)."""
+        """Block Sungrow discharge for IDLE while still allowing battery charge."""
         async with self._modbus_lock, self._controller:
-            return await self._controller.set_idle_mode()
+            await self._capture_discharge_limit_for_restore()
+            limit_ok = await self._controller.set_discharge_rate_limit(0)
+            if not limit_ok:
+                # Some Sungrow firmware exposes 10 W as the minimum writable
+                # discharge cap. Use that as a near-zero fallback.
+                limit_ok = await self._controller.set_discharge_rate_limit(0.01)
+            return bool(limit_ok)
 
     async def set_no_discharge_mode(self) -> bool:
         """Block Sungrow battery discharge while still allowing battery charge."""
         async with self._modbus_lock, self._controller:
             await self._capture_discharge_limit_for_restore()
-            return await self._controller.set_discharge_rate_limit(0)
+            limit_ok = await self._controller.set_discharge_rate_limit(0)
+            if not limit_ok:
+                limit_ok = await self._controller.set_discharge_rate_limit(0.01)
+            return bool(limit_ok)
 
     async def restore_no_discharge_mode(self) -> bool:
         """Restore Sungrow from scheduled EV no-discharge preserve mode."""
@@ -4484,9 +4493,11 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         return bool(limit_ok)
 
     async def restore_work_mode_from_idle(self) -> bool:
-        """Restore self-consumption mode after IDLE."""
+        """Restore self-consumption mode and discharge limit after IDLE."""
         async with self._modbus_lock, self._controller:
-            return await self._controller.restore_from_idle()
+            normal_ok = await self._controller.restore_normal()
+            limit_ok = await self._restore_captured_discharge_limit()
+            return bool(normal_ok and limit_ok)
 
     async def set_charge_rate_limit(self, kw: float) -> bool:
         """Set maximum charge rate in kW.

@@ -6353,7 +6353,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             if provider == "flow_power":
                 return await self.async_step_flow_power_options()
             if provider in CUSTOM_TOU_PROVIDER_OPTIONS:
-                return await self.async_step_globird_options()
+                return await self._async_route_custom_tou_options(provider)
             if provider == "localvolts":
                 return await self.async_step_localvolts_options()
             if provider == "octopus":
@@ -8427,7 +8427,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 elif self._provider == "flow_power":
                     return await self.async_step_flow_power_options()
                 elif self._provider in CUSTOM_TOU_PROVIDER_OPTIONS:
-                    return await self.async_step_globird_options()
+                    return await self._async_route_custom_tou_options(self._provider)
                 elif self._provider == "localvolts":
                     return await self.async_step_localvolts_options()
                 elif self._provider == "octopus":
@@ -8626,7 +8626,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 elif self._provider == "flow_power":
                     return await self.async_step_flow_power_options()
                 elif self._provider in CUSTOM_TOU_PROVIDER_OPTIONS:
-                    return await self.async_step_globird_options()
+                    return await self._async_route_custom_tou_options(self._provider)
                 elif self._provider == "octopus":
                     return await self.async_step_octopus_options()
                 elif self._provider == "epex":
@@ -8784,7 +8784,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     elif self._provider == "flow_power":
                         return await self.async_step_flow_power_options()
                     elif self._provider in CUSTOM_TOU_PROVIDER_OPTIONS:
-                        return await self.async_step_globird_options()
+                        return await self._async_route_custom_tou_options(self._provider)
                     elif self._provider == "octopus":
                         return await self.async_step_octopus_options()
                     elif self._provider == "epex":
@@ -8911,7 +8911,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 elif self._provider == "flow_power":
                     return await self.async_step_flow_power_options()
                 elif self._provider in CUSTOM_TOU_PROVIDER_OPTIONS:
-                    return await self.async_step_globird_options()
+                    return await self._async_route_custom_tou_options(self._provider)
                 elif self._provider == "octopus":
                     return await self.async_step_octopus_options()
                 elif self._provider == "epex":
@@ -9080,7 +9080,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     elif self._provider == "flow_power":
                         return await self.async_step_flow_power_options()
                     elif self._provider in CUSTOM_TOU_PROVIDER_OPTIONS:
-                        return await self.async_step_globird_options()
+                        return await self._async_route_custom_tou_options(self._provider)
                     elif self._provider == "octopus":
                         return await self.async_step_octopus_options()
                     elif self._provider == "epex":
@@ -9158,6 +9158,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             errors=errors,
         )
 
+    async def _async_route_custom_tou_options(self, provider: str) -> FlowResult:
+        """Route custom/static TOU providers to their relevant options step."""
+        if provider in ("other", "tou_only"):
+            return await self.async_step_custom_tariff_options()
+        return await self.async_step_globird_options()
+
     async def _async_route_to_provider_options(self) -> FlowResult:
         """Continue the options flow into the electricity-provider-specific step.
 
@@ -9178,7 +9184,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         if provider == "flow_power":
             return await self.async_step_flow_power_options()
         if provider in CUSTOM_TOU_PROVIDER_OPTIONS:
-            return await self.async_step_globird_options()
+            return await self._async_route_custom_tou_options(provider)
         if provider == "localvolts":
             return await self.async_step_localvolts_options()
         if provider == "octopus":

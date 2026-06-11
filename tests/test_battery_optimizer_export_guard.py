@@ -1502,6 +1502,27 @@ def test_disallow_grid_charge_blocks_forced_grid_charging(
     assert max(result.grid_import_w) <= 500.1
 
 
+def test_disallow_grid_charge_blocks_negative_import_force_charge(
+    battery_optimizer_module,
+):
+    optimizer = _optimizer(battery_optimizer_module)
+
+    result = optimizer.optimize(
+        import_prices=[-0.05] * 12,
+        export_prices=[0.0] * 12,
+        solar_forecast=[0.0] * 12,
+        load_forecast=[0.5] * 12,
+        current_soc=0.05,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=False,
+        allow_grid_charge=False,
+    )
+
+    assert max(action.battery_charge_w for action in result.schedule.actions) <= 1e-6
+    assert all(action.action != "charge" for action in result.schedule.actions)
+    assert max(result.grid_import_w) <= 500.1
+
+
 def test_disallow_grid_charge_ignores_pre_export_fill_target(
     battery_optimizer_module,
 ):

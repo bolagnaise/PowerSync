@@ -1702,6 +1702,7 @@ class BatteryOptimizer:
             solar, load, soc_0, import_prices, effective_export_prices,
             block_battery_charge,
             schedule_timestamps,
+            allow_grid_charge,
         )
 
         # Calculate costs for first 24 hours only (display as daily cost)
@@ -2032,6 +2033,7 @@ class BatteryOptimizer:
             [export_prices[t] + export_bonus_prices[t] for t in range(n)],
             block_battery_charge,
             schedule_timestamps,
+            allow_grid_charge,
         )
 
         n_24h = min(n, int(24 * 60 / self.interval_minutes))
@@ -2273,6 +2275,7 @@ class BatteryOptimizer:
             solar, load, soc_0, import_prices, effective_export_prices,
             block_battery_charge,
             schedule_timestamps,
+            allow_grid_charge,
         )
 
         # Calculate costs for first 24 hours only (display as daily cost)
@@ -2335,6 +2338,7 @@ class BatteryOptimizer:
         export_prices: list[float] | None = None,
         block_battery_charge: list[bool] | None = None,
         schedule_timestamps: list[datetime] | None = None,
+        allow_grid_charge: bool = True,
     ) -> OptimizationSchedule:
         """
         Map LP solution to battery actions.
@@ -2392,6 +2396,7 @@ class BatteryOptimizer:
                 import_prices is not None
                 and import_prices[t] <= 0.001
                 and not charge_blocked
+                and allow_grid_charge
             )
 
             # Determine action

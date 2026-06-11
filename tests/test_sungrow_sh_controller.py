@@ -45,6 +45,7 @@ def _install_const_stub() -> None:
     const.DEFAULT_TWAP_WINDOW_DAYS = 7
     const.MIN_TWAP_SAMPLES = 1
     const.FLOW_POWER_MARKET_AVG = "market_avg"
+    const.FLOW_POWER_KWATCH_REGIONS = {}
     const.CONF_FLEET_API_BASE_URL = "fleet_api_base_url"
     const.TESLA_SITE_INFO_CACHE_TTL_SECONDS = 3600
     const.CONF_SIGENERGY_CHARGER_ENABLED = "sigenergy_charger_enabled"
@@ -417,7 +418,9 @@ class _FakeSungrowController:
         self.force_charge_power_w: list[float] = []
         self.force_discharge_power_w: list[float] = []
         self.restore_normal_calls = 0
+        self.idle_mode_calls = 0
         self.battery_data = {"discharge_rate_limit_kw": 15.0}
+        self.fail_zero_discharge_limit = False
 
     async def __aenter__(self):
         return self
@@ -431,6 +434,8 @@ class _FakeSungrowController:
 
     async def set_discharge_rate_limit(self, kw: float) -> bool:
         self.discharge_rate_limits.append(kw)
+        if kw == 0 and self.fail_zero_discharge_limit:
+            return False
         return True
 
     async def force_charge(self, power_w: float = 5000) -> bool:
@@ -442,6 +447,14 @@ class _FakeSungrowController:
         return True
 
     async def restore_normal(self) -> bool:
+        self.restore_normal_calls += 1
+        return True
+
+    async def set_idle_mode(self) -> bool:
+        self.idle_mode_calls += 1
+        return True
+
+    async def restore_from_idle(self) -> bool:
         self.restore_normal_calls += 1
         return True
 
@@ -594,6 +607,54 @@ def test_sungrow_no_discharge_restore_reinstates_previous_discharge_limit():
     assert restore_result
     assert fake_controller.restore_normal_calls == 1
     assert fake_controller.discharge_rate_limits == [0, 15.0]
+
+
+def test_sungrow_idle_hold_uses_discharge_cap_and_allows_charge():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_idle_cycle():
+        fake_controller = _FakeSungrowController()
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {"battery_max_discharge_power": 15.0}
+
+        idle_result = await coordinator.set_backup_mode()
+        restore_result = await coordinator.restore_work_mode_from_idle()
+        return idle_result, restore_result, fake_controller
+
+    try:
+        idle_result, restore_result, fake_controller = asyncio.run(run_idle_cycle())
+    finally:
+        restore()
+
+    assert idle_result
+    assert restore_result
+    assert fake_controller.idle_mode_calls == 0
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == [0, 15.0]
+
+
+def test_sungrow_no_discharge_falls_back_to_ten_watts_when_zero_rejected():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_no_discharge_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.fail_zero_discharge_limit = True
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {"battery_max_discharge_power": 15.0}
+
+        block_result = await coordinator.set_no_discharge_mode()
+        restore_result = await coordinator.restore_no_discharge_mode()
+        return block_result, restore_result, fake_controller
+
+    try:
+        block_result, restore_result, fake_controller = asyncio.run(run_no_discharge_cycle())
+    finally:
+        restore()
+
+    assert block_result
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == [0, 0.01, 15.0]
 
 
 def test_sungrow_force_discharge_restore_reinstates_previous_discharge_limit():

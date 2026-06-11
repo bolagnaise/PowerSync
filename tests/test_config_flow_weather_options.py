@@ -483,6 +483,33 @@ def test_globird_options_flow_has_plan_schema_helper():
     assert "self._globird_plan_schema(current_globird_settings).schema" in method_source
 
 
+def test_other_custom_tou_options_route_directly_to_custom_tariff():
+    source = CONFIG_FLOW_PATH.read_text()
+    route_helper = ast.get_source_segment(
+        source,
+        _options_flow_method("_async_route_custom_tou_options"),
+    )
+    pricing_step = ast.get_source_segment(
+        source,
+        _options_flow_method("async_step_pricing"),
+    )
+    provider_router = ast.get_source_segment(
+        source,
+        _options_flow_method("_async_route_to_provider_options"),
+    )
+
+    assert route_helper is not None
+    assert 'provider in ("other", "tou_only")' in route_helper
+    assert "return await self.async_step_custom_tariff_options()" in route_helper
+    assert "return await self.async_step_globird_options()" in route_helper
+
+    assert pricing_step is not None
+    assert "return await self._async_route_custom_tou_options(provider)" in pricing_step
+
+    assert provider_router is not None
+    assert "return await self._async_route_custom_tou_options(provider)" in provider_router
+
+
 def test_globird_plan_strings_are_available_in_setup_and_options():
     for path in (STRINGS_PATH, TRANSLATIONS_PATH):
         data = json.loads(path.read_text())
