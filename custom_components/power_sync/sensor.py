@@ -143,6 +143,11 @@ from .const import (
     BATTERY_MODE_STATE_FORCE_DISCHARGE,
     BATTERY_MODE_STATE_HOLD_SOC,
     BATTERY_MODE_STATE_SELF_CONSUMPTION,
+    INVERTER_CONTROL_MODE_NORMAL,
+    INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
+    INVERTER_CONTROL_MODE_SHUTDOWN,
+    INVERTER_CONTROL_MODE_CURTAILED,
+    INVERTER_CONTROL_MODES,
     CONF_AC_INVERTER_CURTAILMENT_ENABLED,
     CONF_INVERTER_BRAND,
     CONF_INVERTER_MODEL,
@@ -4181,10 +4186,23 @@ class InverterStatusSensor(SensorEntity):
             self._cached_attrs["brand"] = inverter_brand
             self._cached_attrs["last_poll"] = dt_util.now().isoformat()
 
-            # Also update hass.data for consistency with curtailment logic
+            # Also update hass.data for consistency with curtailment logic.
+            # Keep explicit manual/automatic control modes more specific than
+            # the inverter's generic curtailed/running status.
             entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
             if entry_data:
-                entry_data["inverter_last_state"] = self._cached_state
+                control_mode = entry_data.get("inverter_control_mode")
+                if control_mode in (
+                    INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
+                    INVERTER_CONTROL_MODE_SHUTDOWN,
+                ):
+                    entry_data["inverter_last_state"] = "curtailed"
+                else:
+                    entry_data["inverter_last_state"] = self._cached_state
+                    if self._cached_state == "running":
+                        entry_data["inverter_control_mode"] = INVERTER_CONTROL_MODE_NORMAL
+                    elif self._cached_state == "curtailed" and control_mode not in INVERTER_CONTROL_MODES:
+                        entry_data["inverter_control_mode"] = INVERTER_CONTROL_MODE_CURTAILED
                 entry_data["inverter_attributes"] = self._cached_attrs
 
             _LOGGER.info(f"Inverter poll: state={self._cached_state}, power={state.power_limit_percent}%")
@@ -4201,14 +4219,31 @@ class InverterStatusSensor(SensorEntity):
         """Get config value from options first, then data."""
         return self._entry.options.get(key, self._entry.data.get(key, default))
 
+    def _entry_data(self) -> dict[str, Any]:
+        """Return runtime data for this config entry."""
+        return self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+
+    def _control_mode(self) -> str:
+        """Return the current runtime AC inverter control mode."""
+        mode = self._entry_data().get("inverter_control_mode")
+        if mode in INVERTER_CONTROL_MODES:
+            return mode
+        if self._cached_state == "curtailed":
+            return INVERTER_CONTROL_MODE_CURTAILED
+        return INVERTER_CONTROL_MODE_NORMAL
+
+    def _target_power_w(self) -> int | None:
+        """Return the runtime inverter target limit when one is known."""
+        value = self._entry_data().get("inverter_power_limit_w")
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
     @property
     def native_value(self) -> str:
         """Return the inverter status."""
-        if self._cached_state == "curtailed":
-            return "Curtailed"
-        elif self._cached_state == "running":
-            return "Normal"
-        elif self._cached_state == "offline":
+        if self._cached_state == "offline":
             return "Offline"
         elif self._cached_state == "disabled":
             return "Disabled"
@@ -4216,6 +4251,16 @@ class InverterStatusSensor(SensorEntity):
             return "Not Configured"
         elif self._cached_state == "error":
             return "Error"
+
+        control_mode = self._control_mode()
+        if control_mode == INVERTER_CONTROL_MODE_LOAD_FOLLOWING:
+            return "Load Following"
+        elif control_mode == INVERTER_CONTROL_MODE_SHUTDOWN:
+            return "Shutdown"
+        elif control_mode == INVERTER_CONTROL_MODE_CURTAILED or self._cached_state == "curtailed":
+            return "Curtailed"
+        elif self._cached_state == "running":
+            return "Normal"
         else:
             return "Unknown"
 
@@ -4238,6 +4283,9 @@ class InverterStatusSensor(SensorEntity):
         inverter_host = self._get_config_value(CONF_INVERTER_HOST, "")
         inverter_model = self._get_config_value(CONF_INVERTER_MODEL, "")
 
+        control_mode = self._control_mode()
+        target_power_w = self._target_power_w()
+
         # Base attributes
         attrs = {
             "enabled": inverter_enabled,
@@ -4245,11 +4293,26 @@ class InverterStatusSensor(SensorEntity):
             "host": inverter_host,
             "model": inverter_model,
             "state": self._cached_state,
+            "control_mode": control_mode,
+            "target_power_w": target_power_w,
         }
 
-        # Add description based on state
-        if self._cached_state == "curtailed":
-            attrs["description"] = "Inverter power limited to prevent negative export"
+        # Add cached attributes from inverter polling
+        attrs.update(self._cached_attrs)
+        attrs["control_mode"] = control_mode
+        attrs["target_power_w"] = target_power_w
+
+        # Add description based on state after cached attrs so the public
+        # dashboard text remains specific to PowerSync's active control mode.
+        if control_mode == INVERTER_CONTROL_MODE_LOAD_FOLLOWING:
+            if target_power_w is not None and target_power_w > 0:
+                attrs["description"] = f"Inverter curtailed - load following at {target_power_w}W"
+            else:
+                attrs["description"] = "Inverter curtailed - load following"
+        elif control_mode == INVERTER_CONTROL_MODE_SHUTDOWN:
+            attrs["description"] = "Inverter curtailed - shutdown mode"
+        elif self._cached_state == "curtailed":
+            attrs["description"] = "Inverter curtailed"
         elif self._cached_state == "running":
             attrs["description"] = "Inverter operating normally"
         elif self._cached_state == "offline":
@@ -4267,9 +4330,6 @@ class InverterStatusSensor(SensorEntity):
             attrs["description"] = "Inverter host not configured"
         else:
             attrs["description"] = "Status unknown"
-
-        # Add cached attributes from inverter polling
-        attrs.update(self._cached_attrs)
 
         return attrs
 

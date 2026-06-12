@@ -5947,6 +5947,8 @@ async def _dynamic_ev_update(
     phases = params.get("phases", 1)
     fixed_charge_amps = _coerce_positive_int(params.get("fixed_charge_amps"))
     current_amps = state.get("current_amps", max_amps)
+    owner_mode = str(params.get("owner_mode") or "").lower()
+    scheduled_floor_active = owner_mode == "scheduled" and not no_grid_import
 
     if (
         params.get("charger_type") == "sigenergy"
@@ -6084,6 +6086,9 @@ async def _dynamic_ev_update(
     elif battery_full:
         # Battery is full — taper is natural, not a deficit. Use grid headroom directly.
         available_power_kw = grid_headroom_kw
+        if scheduled_floor_active and current_amps > 0:
+            min_power_delta_kw = ((min_amps - current_amps) * voltage * phases) / 1000
+            available_power_kw = max(available_power_kw, min_power_delta_kw)
     elif battery_deficit_kw > 0.1:
         # Battery has surplus beyond target — available for EV
         available_power_kw = battery_deficit_kw

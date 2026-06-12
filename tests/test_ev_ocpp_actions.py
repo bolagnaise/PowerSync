@@ -729,6 +729,108 @@ def test_dynamic_battery_target_uses_grid_headroom_when_powerwall_tapers(monkeyp
     assert actions._dynamic_ev_state["entry-1"]["VIN123"]["current_amps"] == 22
 
 
+def test_dynamic_scheduled_full_battery_grid_cap_holds_min_amps(monkeypatch):
+    set_amps_calls: list[int] = []
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_power": -15000,
+            "grid_power": 18400,
+            "solar_power": 4000,
+            "load_power": 500,
+            "ev_power": 2400,
+            "battery_soc": 95.1,
+        }
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        "VIN123": {
+            "active": True,
+            "current_amps": 10,
+            "target_amps": 10,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "scheduled",
+                "charger_type": "tesla",
+                "target_battery_charge_kw": 0,
+                "max_grid_import_kw": 12.5,
+                "no_grid_import": False,
+                "min_charge_amps": 6,
+                "max_charge_amps": 32,
+                "voltage": 240,
+                "phases": 1,
+            },
+        }
+    }
+
+    asyncio.run(actions._dynamic_ev_update(_Hass([]), _Entry(), "entry-1", "VIN123"))
+
+    assert set_amps_calls == [6]
+    assert actions._dynamic_ev_state["entry-1"]["VIN123"]["current_amps"] == 6
+
+
+def test_dynamic_full_battery_grid_cap_can_stop_non_scheduled_session(monkeypatch):
+    set_amps_calls: list[int] = []
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_power": -15000,
+            "grid_power": 18400,
+            "solar_power": 4000,
+            "load_power": 500,
+            "ev_power": 2400,
+            "battery_soc": 95.1,
+        }
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        "VIN123": {
+            "active": True,
+            "current_amps": 10,
+            "target_amps": 10,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "target_battery_charge_kw": 0,
+                "max_grid_import_kw": 12.5,
+                "no_grid_import": False,
+                "min_charge_amps": 6,
+                "max_charge_amps": 32,
+                "voltage": 240,
+                "phases": 1,
+            },
+        }
+    }
+
+    asyncio.run(actions._dynamic_ev_update(_Hass([]), _Entry(), "entry-1", "VIN123"))
+
+    assert set_amps_calls == [0]
+    assert actions._dynamic_ev_state["entry-1"]["VIN123"]["current_amps"] == 0
+
+
 def test_dynamic_battery_target_uses_solar_and_home_load_to_preserve_grid_charge(monkeypatch):
     set_amps_calls: list[int] = []
 

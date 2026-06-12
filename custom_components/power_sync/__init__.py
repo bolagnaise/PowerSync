@@ -212,6 +212,11 @@ from .const import (
     SERVICE_SET_GRID_CHARGING,
     SERVICE_CURTAIL_INVERTER,
     SERVICE_RESTORE_INVERTER,
+    INVERTER_CONTROL_MODE_NORMAL,
+    INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
+    INVERTER_CONTROL_MODE_SHUTDOWN,
+    INVERTER_CONTROL_MODE_CURTAILED,
+    INVERTER_CONTROL_MODES,
     DISCHARGE_DURATIONS,
     DEFAULT_DISCHARGE_DURATION,
     TESLEMETRY_API_BASE_URL,
@@ -18263,6 +18268,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.warning("Charge kick (%s) failed: %s", reason, e)
 
+    def _set_inverter_control_state(
+        control_mode: str,
+        target_power_w: int | None = None,
+        *,
+        update_dpel_time: bool = False,
+    ) -> None:
+        """Record the current AC inverter control mode for services and sensors."""
+        entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+        mode = control_mode if control_mode in INVERTER_CONTROL_MODES else INVERTER_CONTROL_MODE_CURTAILED
+        entry_data["inverter_control_mode"] = mode
+        entry_data["inverter_last_state"] = (
+            "normal" if mode == INVERTER_CONTROL_MODE_NORMAL else "curtailed"
+        )
+        entry_data["inverter_power_limit_w"] = (
+            None if mode == INVERTER_CONTROL_MODE_NORMAL else target_power_w
+        )
+        if update_dpel_time:
+            entry_data["last_dpel_update_time"] = datetime.now()
+        elif mode == INVERTER_CONTROL_MODE_NORMAL:
+            entry_data["last_dpel_update_time"] = None
+
     # Smart AC-coupled curtailment check
     async def should_curtail_ac_coupled(import_price: float | None, export_earnings: float | None) -> bool:
         """Smart curtailment logic for AC-coupled solar systems.
@@ -18649,8 +18675,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         success = await controller.restore()
                         if success:
                             _LOGGER.info(f"✅ Inverter restored (battery can absorb solar)")
-                            hass.data[DOMAIN][entry.entry_id]["inverter_last_state"] = "running"
-                            hass.data[DOMAIN][entry.entry_id]["inverter_power_limit_w"] = None
+                            _set_inverter_control_state(INVERTER_CONTROL_MODE_NORMAL)
                         else:
                             _LOGGER.error(f"❌ Failed to restore inverter")
                         return success
@@ -18698,11 +18723,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     else:
                         _LOGGER.info(f"✅ Inverter curtailed successfully")
                     # Store last state
-                    hass.data[DOMAIN][entry.entry_id]["inverter_last_state"] = "curtailed"
-                    hass.data[DOMAIN][entry.entry_id]["inverter_power_limit_w"] = home_load_w
-                    # Track DPEL update time for Enphase refresh logic
-                    from datetime import datetime
-                    hass.data[DOMAIN][entry.entry_id]["last_dpel_update_time"] = datetime.now()
+                    _set_inverter_control_state(
+                        INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
+                        home_load_w,
+                        update_dpel_time=inverter_brand == "enphase",
+                    )
                     # Inverter handled curtailment cleanly — make sure any
                     # prior off-grid fallback session is released now that
                     # the AC path is working again.
@@ -18731,8 +18756,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if success:
                     _LOGGER.info(f"✅ Inverter restored successfully")
                     # Store last state
-                    hass.data[DOMAIN][entry.entry_id]["inverter_last_state"] = "running"
-                    hass.data[DOMAIN][entry.entry_id]["inverter_power_limit_w"] = None  # Clear power limit
+                    _set_inverter_control_state(INVERTER_CONTROL_MODE_NORMAL)
                 else:
                     _LOGGER.error(f"❌ Failed to restore inverter")
                 # Always release any off-grid curtailment session when
@@ -28597,7 +28621,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                       or zero-export mode (other brands)
         - 'shutdown': Full shutdown/0% output (for inverters that support it)
         """
-        mode = call.data.get("mode", "load_following")
+        requested_mode = call.data.get("mode", INVERTER_CONTROL_MODE_LOAD_FOLLOWING)
+        mode = (
+            INVERTER_CONTROL_MODE_SHUTDOWN
+            if requested_mode == INVERTER_CONTROL_MODE_SHUTDOWN
+            else INVERTER_CONTROL_MODE_LOAD_FOLLOWING
+        )
         _LOGGER.info(f"🔴 Manual inverter curtailment requested (mode: {mode})")
 
         inverter_enabled = entry.options.get(
@@ -28728,12 +28757,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.info(f"✅ Inverter curtailed (load-following to {home_load_w}W)")
                 else:
                     _LOGGER.info(f"✅ Inverter curtailed successfully")
-                hass.data[DOMAIN][entry.entry_id]["inverter_last_state"] = "curtailed"
-                hass.data[DOMAIN][entry.entry_id]["inverter_power_limit_w"] = home_load_w
+                hass.data[DOMAIN][entry.entry_id]["inverter_controller"] = controller
+                _set_inverter_control_state(
+                    mode,
+                    home_load_w,
+                    update_dpel_time=inverter_brand == "enphase",
+                )
             else:
                 _LOGGER.error("❌ Failed to curtail inverter")
-
-            await controller.disconnect()
+                await controller.disconnect()
 
         except Exception as e:
             _LOGGER.error(f"Error curtailing inverter: {e}")
@@ -28839,12 +28871,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             if success:
                 _LOGGER.info(f"✅ Inverter restored to normal operation")
-                hass.data[DOMAIN][entry.entry_id]["inverter_last_state"] = "normal"
-                hass.data[DOMAIN][entry.entry_id]["inverter_power_limit_w"] = None
+                _set_inverter_control_state(INVERTER_CONTROL_MODE_NORMAL)
             else:
                 _LOGGER.error("❌ Failed to restore inverter")
 
             await controller.disconnect()
+            if success:
+                hass.data[DOMAIN][entry.entry_id].pop("inverter_controller", None)
 
         except Exception as e:
             _LOGGER.error(f"Error restoring inverter: {e}")
@@ -30113,10 +30146,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.data[DOMAIN][entry.entry_id]["fp_portal_cancel"] = fp_portal_cancel
             _LOGGER.info("Flow Power account data refresh scheduled (every 30min)")
 
-    # Set up fast load-following update (every 30 seconds) for responsive power limiting
-    # This only updates the power limit when already in load-following mode, doesn't change curtail/restore decisions
+    # Set up fast load-following update for responsive power limiting.
+    # Enphase DPEL can time out quickly, so it is checked every 15 seconds;
+    # other brands keep the existing effective 30-second cadence.
     async def fast_load_following_update(now):
-        """Update inverter power limit based on current home load (runs every 30s when in load-following mode)."""
+        """Update inverter power limit based on current home load when load-following is active."""
         try:
             entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
 
@@ -30128,20 +30162,63 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not inverter_curtailment_enabled:
                 return
 
-            # Check if currently in load-following mode (curtailed state)
-            inverter_last_state = entry_data.get("inverter_last_state")
-            if inverter_last_state != "curtailed":
-                return  # Only update when already in load-following mode
-
             # Get inverter config
             inverter_brand = entry.options.get(CONF_INVERTER_BRAND, entry.data.get(CONF_INVERTER_BRAND))
             inverter_host = entry.options.get(CONF_INVERTER_HOST, entry.data.get(CONF_INVERTER_HOST))
+
+            if inverter_brand != "enphase" and getattr(now, "second", None) not in (0, 30):
+                return
+
+            control_mode = entry_data.get("inverter_control_mode")
+            inverter_last_state = entry_data.get("inverter_last_state")
+            if control_mode not in INVERTER_CONTROL_MODES:
+                control_mode = (
+                    INVERTER_CONTROL_MODE_LOAD_FOLLOWING
+                    if inverter_last_state == "curtailed"
+                    else INVERTER_CONTROL_MODE_NORMAL
+                )
+
+            if control_mode == INVERTER_CONTROL_MODE_NORMAL:
+                return
+            if control_mode not in (
+                INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
+                INVERTER_CONTROL_MODE_SHUTDOWN,
+                INVERTER_CONTROL_MODE_CURTAILED,
+            ):
+                return
 
             # Only brands with load-following curtail() support
             if inverter_brand not in ("zeversolar", "sigenergy", "sungrow", "enphase", "foxess", "huawei", "goodwe", "solax", "alphaess", "solaredge"):
                 return
 
             if not inverter_host:
+                return
+
+            # Get inverter controller
+            controller = entry_data.get("inverter_controller")
+            if not controller:
+                return
+
+            last_dpel_time = entry_data.get("last_dpel_update_time")
+            now_time = datetime.now()
+            force_reapply = False
+            if inverter_brand == "enphase":
+                if last_dpel_time is None or (now_time - last_dpel_time) > timedelta(seconds=15):
+                    force_reapply = True
+                    _LOGGER.debug(f"Enphase DPEL refresh needed (last update: {last_dpel_time})")
+
+            if control_mode == INVERTER_CONTROL_MODE_SHUTDOWN:
+                if inverter_brand != "enphase" or not force_reapply:
+                    return
+                if hasattr(controller, 'curtail'):
+                    success = await controller.curtail()
+                    if success:
+                        _LOGGER.debug("⚡ Enphase DPEL shutdown re-apply")
+                        _set_inverter_control_state(
+                            INVERTER_CONTROL_MODE_SHUTDOWN,
+                            entry_data.get("inverter_power_limit_w"),
+                            update_dpel_time=True,
+                        )
                 return
 
             # Get current home load from Tesla API
@@ -30159,23 +30236,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             # Get current power limit to avoid unnecessary updates
             current_limit = entry_data.get("inverter_power_limit_w")
-            last_dpel_time = entry_data.get("last_dpel_update_time")
 
-            # For Enphase, always re-apply DPEL at least every 45 seconds since it may timeout
+            # For Enphase, always re-apply DPEL at least every 15 seconds since it may timeout
             # For other brands, only update if changed by more than 50W
-            now_time = datetime.now()
-            force_reapply = False
-            if inverter_brand == "enphase":
-                if last_dpel_time is None or (now_time - last_dpel_time) > timedelta(seconds=45):
-                    force_reapply = True
-                    _LOGGER.debug(f"Enphase DPEL refresh needed (last update: {last_dpel_time})")
-
             if not force_reapply and current_limit is not None and abs(home_load_w - current_limit) < 50:
-                return
-
-            # Get inverter controller
-            controller = entry_data.get("inverter_controller")
-            if not controller:
                 return
 
             # Update power limit
@@ -30186,19 +30250,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     success = await controller.curtail(home_load_w=home_load_w)
                     if success:
                         _LOGGER.debug(f"⚡ Fast load-following update: {home_load_w}W")
-                        hass.data[DOMAIN][entry.entry_id]["inverter_power_limit_w"] = home_load_w
-                        hass.data[DOMAIN][entry.entry_id]["last_dpel_update_time"] = datetime.now()
+                        _set_inverter_control_state(
+                            INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
+                            home_load_w,
+                            update_dpel_time=inverter_brand == "enphase",
+                        )
         except Exception as err:
             _LOGGER.debug(f"Fast load-following update error (non-critical): {err}")
 
-    # Run every 30 seconds at :00 and :30
+    # Run every 15 seconds; non-Enphase brands return early on :15/:45.
     load_following_cancel_timer = async_track_utc_time_change(
         hass,
         fast_load_following_update,
-        second=[0, 30],
+        second=[0, 15, 30, 45],
     )
     hass.data[DOMAIN][entry.entry_id]["load_following_cancel"] = load_following_cancel_timer
-    _LOGGER.info("Fast load-following update scheduled every 30 seconds")
+    _LOGGER.info("Fast load-following update scheduled every 15 seconds for Enphase, 30 seconds for other brands")
 
     # Set up automatic AEMO spike check every minute if enabled
     if aemo_spike_manager:
