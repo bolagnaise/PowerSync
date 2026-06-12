@@ -564,6 +564,7 @@ from .const import (
     CONF_OPTIMIZATION_PROVIDER,
     CONF_OPTIMIZATION_ENABLED,
     CONF_OPTIMIZATION_EV_INTEGRATION,
+    CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
     OPT_PROVIDER_NATIVE,
     OPT_PROVIDER_POWERSYNC,
     CONF_OPTIMIZATION_COST_FUNCTION,
@@ -31615,6 +31616,14 @@ class OptimizationSettingsView(HomeAssistantView):
                         config_entry.data.get(CONF_OPTIMIZATION_EV_INTEGRATION, False),
                     )
                 ),
+                "planned_ev_load_entity": (
+                    config_entry.options.get(
+                        CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
+                        config_entry.data.get(CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY),
+                    )
+                    if config_entry
+                    else None
+                ),
                 "profit_max_enabled": bool(
                     config_entry
                     and config_entry.options.get(
@@ -31667,6 +31676,14 @@ class OptimizationSettingsView(HomeAssistantView):
                         )
                         if config_entry
                         else True
+                    ),
+                    "planned_ev_load_entity": (
+                        config_entry.options.get(
+                            CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
+                            config_entry.data.get(CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY),
+                        )
+                        if config_entry
+                        else None
                     ),
                     "spread_export_enabled": bool(
                         config_entry.options.get(
@@ -31728,6 +31745,7 @@ class OptimizationSettingsView(HomeAssistantView):
             "optimiser_available": opt_coordinator.optimiser_available,
             "cost_function": opt_coordinator._cost_function.value,
             "ev_integration": opt_coordinator._ev_integration_enabled,
+            "planned_ev_load_entity": opt_coordinator._planned_ev_load_entity_id,
             "profit_max_enabled": opt_coordinator.profit_max_mode,
             "spread_export_enabled": opt_coordinator._config.spread_export_enabled,
             "spread_import_enabled": opt_coordinator._config.spread_import_enabled,
@@ -31744,6 +31762,7 @@ class OptimizationSettingsView(HomeAssistantView):
                 "max_discharge_w": opt_coordinator._config.max_discharge_w,
                 "max_grid_import_w": opt_coordinator._config.max_grid_import_w,
                 "allow_grid_charge": opt_coordinator._config.allow_grid_charge,
+                "planned_ev_load_entity": opt_coordinator._planned_ev_load_entity_id,
                 "spread_export_enabled": opt_coordinator._config.spread_export_enabled,
                 "spread_import_enabled": opt_coordinator._config.spread_import_enabled,
                 "disable_idle_enabled": opt_coordinator.disable_idle_enabled,
@@ -31835,6 +31854,14 @@ class OptimizationSettingsView(HomeAssistantView):
                 from .const import CONF_OPTIMIZATION_EV_INTEGRATION
                 new_options[CONF_OPTIMIZATION_EV_INTEGRATION] = settings["ev_integration"]
                 changes.append(f"Set EV integration to {settings['ev_integration']}")
+
+            if "planned_ev_load_entity" in settings:
+                raw_entity = settings.get("planned_ev_load_entity")
+                entity_id = raw_entity.strip() if isinstance(raw_entity, str) else None
+                entity_id = entity_id or None
+                new_data[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = entity_id
+                new_options[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = entity_id
+                changes.append(f"Set planned EV load entity to {entity_id or 'cleared'}")
 
             if "profit_max_enabled" in settings:
                 from .const import CONF_PROFIT_MAX_ENABLED

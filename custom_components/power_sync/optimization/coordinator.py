@@ -274,12 +274,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # EV integration persisted flag (loaded from config entry)
         self._ev_integration_enabled = False
+        self._planned_ev_load_entity_id: str | None = None
         if self._entry:
-            from ..const import CONF_OPTIMIZATION_EV_INTEGRATION
+            from ..const import (
+                CONF_OPTIMIZATION_EV_INTEGRATION,
+                CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
+            )
             self._ev_integration_enabled = self._entry.options.get(
                 CONF_OPTIMIZATION_EV_INTEGRATION,
                 self._entry.data.get(CONF_OPTIMIZATION_EV_INTEGRATION, False),
             )
+            self._planned_ev_load_entity_id = self._entry.options.get(
+                CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
+                self._entry.data.get(CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY),
+            ) or None
 
         # Cached schedule from optimizer
         self._current_schedule: OptimizationSchedule | None = None
@@ -296,6 +304,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_display_export_prices: list[float] | None = None  # $/kWh actual tariff
         self._last_export_boost_allowed_slots: list[bool] = []
         self._last_price_timestamps: list[datetime] | None = None
+        self._last_planned_ev_load_forecast_w: list[float] | None = None
         self._last_zerohero_bonus_prices: list[float] | None = None
         self._last_zerohero_bonus_cap_kwh: float | None = None
         self._solar_nowcast_derate: float = 1.0
@@ -2647,11 +2656,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Overlay EV charging plan onto load forecast
             ev_peak_kw = 0.0
+            self._last_planned_ev_load_forecast_w = None
+            if load:
+                planned_ev_load_w = self._get_planned_ev_load_forecast(len(load))
+                if planned_ev_load_w:
+                    load = [l + ev for l, ev in zip(load, planned_ev_load_w)]
+                    self._last_planned_ev_load_forecast_w = planned_ev_load_w
+                    ev_peak_kw = max(ev_peak_kw, max(planned_ev_load_w) / 1000)
+
             if load and self._ev_integration_enabled:
                 ev_load_w = self._get_ev_planned_load(len(load))
                 if ev_load_w:
                     load = [l + ev for l, ev in zip(load, ev_load_w)]
-                    ev_peak_kw = max(ev_load_w) / 1000
+                    ev_peak_kw = max(ev_peak_kw, max(ev_load_w) / 1000)
 
             import_prices = prices[0] if prices else []
             export_prices = prices[1] if prices else []
@@ -7353,6 +7370,190 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:
             _LOGGER.debug("Optimizer: EV forecast refresh skipped: %s", err)
 
+    def _get_planned_ev_load_forecast(self, n_intervals: int) -> list[float] | None:
+        """Read an optional forecast-only EV load overlay from a HA sensor."""
+        entity_id = (self._planned_ev_load_entity_id or "").strip()
+        if not entity_id or n_intervals <= 0:
+            return None
+
+        state_getter = getattr(
+            getattr(self.hass, "states", None),
+            "get",
+            lambda _eid: None,
+        )
+        state = state_getter(entity_id)
+        if state is None:
+            _LOGGER.warning(
+                "Planned EV load forecast sensor %s not found; skipping overlay",
+                entity_id,
+            )
+            return None
+
+        state_value = getattr(state, "state", None)
+        if str(state_value).lower() in ("unknown", "unavailable", "none", ""):
+            _LOGGER.debug(
+                "Planned EV load forecast sensor %s is %s; skipping overlay",
+                entity_id,
+                state_value,
+            )
+            return None
+
+        attrs = getattr(state, "attributes", {}) or {}
+        planned_load = attrs.get("planned_load")
+        if not planned_load:
+            return None
+
+        interval = max(1, self._config.interval_minutes)
+        now = dt_util.now()
+        current_window = now.replace(
+            minute=(now.minute // interval) * interval,
+            second=0,
+            microsecond=0,
+        )
+        ev_load = [0.0] * n_intervals
+
+        if isinstance(planned_load, list):
+            self._apply_planned_ev_load_windows(
+                ev_load,
+                planned_load,
+                current_window,
+                interval,
+            )
+        elif isinstance(planned_load, dict):
+            self._apply_timestamped_planned_ev_load(
+                ev_load,
+                planned_load,
+                attrs,
+                current_window,
+                interval,
+            )
+
+        if not any(value > 0 for value in ev_load):
+            return None
+
+        peak_kw = max(ev_load) / 1000.0
+        total_kwh = sum(ev_load) / 1000.0 * (interval / 60)
+        _LOGGER.debug(
+            "Planned EV load overlay: peak %.1fkW, total %.1fkWh from %s",
+            peak_kw,
+            total_kwh,
+            entity_id,
+        )
+        return ev_load
+
+    def _apply_planned_ev_load_windows(
+        self,
+        ev_load: list[float],
+        windows: list[Any],
+        current_window: datetime,
+        interval: int,
+    ) -> None:
+        """Apply explicit planned EV load windows into a watts slot array."""
+        for window in windows:
+            if not isinstance(window, dict):
+                continue
+            start = window.get("start") or window.get("valid_from")
+            end = window.get("end") or window.get("valid_to")
+            if not start or not end:
+                continue
+            power_w = self._planned_ev_window_power_to_w(window)
+            if power_w <= 0:
+                continue
+            bounds = self._entry_slot_bounds(
+                {
+                    "valid_from": str(start),
+                    "valid_to": str(end),
+                },
+                current_window,
+                interval,
+                len(ev_load),
+            )
+            if bounds is None:
+                continue
+            start_idx, end_idx = bounds
+            for idx in range(start_idx, end_idx):
+                ev_load[idx] += power_w
+
+    def _apply_timestamped_planned_ev_load(
+        self,
+        ev_load: list[float],
+        raw_values: dict[Any, Any],
+        attrs: dict[str, Any],
+        current_window: datetime,
+        interval: int,
+    ) -> None:
+        """Apply timestamp-keyed planned EV load values into a watts slot array."""
+        entries: list[tuple[datetime, float]] = []
+        unit = self._planned_ev_load_unit(attrs)
+        for key, raw_power in raw_values.items():
+            start_dt = self._parse_price_timestamp(key)
+            if start_dt is None:
+                continue
+            power_w = self._planned_ev_scalar_to_w(raw_power, unit)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=current_window.tzinfo)
+            if current_window.tzinfo is not None:
+                start_dt = start_dt.astimezone(current_window.tzinfo)
+            entries.append((start_dt, power_w))
+
+        if not entries:
+            return
+
+        entries.sort(key=lambda item: item[0])
+        last_delta = timedelta(minutes=interval)
+        for idx, (start_dt, power_w) in enumerate(entries):
+            next_start = entries[idx + 1][0] if idx + 1 < len(entries) else None
+            if next_start is not None:
+                delta = next_start - start_dt
+                if delta.total_seconds() > 0:
+                    last_delta = delta
+                end_dt = next_start
+            else:
+                end_dt = start_dt + last_delta
+            if power_w <= 0:
+                continue
+            bounds = self._entry_slot_bounds(
+                {
+                    "valid_from": start_dt.isoformat(),
+                    "valid_to": end_dt.isoformat(),
+                },
+                current_window,
+                interval,
+                len(ev_load),
+            )
+            if bounds is None:
+                continue
+            start_idx, end_idx = bounds
+            for pos in range(start_idx, end_idx):
+                ev_load[pos] += power_w
+
+    @staticmethod
+    def _planned_ev_load_unit(attrs: dict[str, Any]) -> str:
+        unit = attrs.get("unit_of_measurement")
+        return str(unit).strip() if unit else "kW"
+
+    def _planned_ev_window_power_to_w(self, window: dict[str, Any]) -> float:
+        if "power_w" in window:
+            return self._planned_ev_scalar_to_w(window.get("power_w"), "W")
+        if "power_kw" in window:
+            return self._planned_ev_scalar_to_w(window.get("power_kw"), "kW")
+        if "power" in window:
+            return self._planned_ev_scalar_to_w(window.get("power"), "kW")
+        return 0.0
+
+    @staticmethod
+    def _planned_ev_scalar_to_w(value: Any, unit: str | None) -> float:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(numeric) or numeric <= 0:
+            return 0.0
+        label = (unit or "kW").strip().lower()
+        if label in ("w", "watt", "watts") or label.endswith(" w"):
+            return numeric
+        return numeric * 1000.0
+
     def _get_ev_planned_load(self, n_intervals: int) -> list[float] | None:
         """Get EV planned charging load from AutoScheduleExecutor.
 
@@ -8390,6 +8591,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 data["load_away_recovery_remaining_hours"] = load_summary.get("away_recovery_remaining_hours")
                 data["profit_max_mode"] = load_summary.get("profit_max_mode", False)
 
+        if self._last_planned_ev_load_forecast_w:
+            planned_kw = [
+                round(value / 1000.0, 3)
+                for value in self._last_planned_ev_load_forecast_w
+            ]
+            data["planned_ev_load_forecast_w"] = self._last_planned_ev_load_forecast_w
+            data["planned_ev_load_peak_kw"] = max(planned_kw) if planned_kw else 0.0
+            data["planned_ev_load_kwh"] = sum(planned_kw) * dt_h
+
         # Use actual tariff prices for display (not LP-adjusted values)
         disp_import = self._last_display_import_prices or self._last_import_prices
         disp_export = self._last_display_export_prices or self._last_export_prices
@@ -8587,9 +8797,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ),
                 "interval_minutes": self._config.interval_minutes,
                 "horizon_hours": self._config.horizon_hours,
+                "planned_ev_load_entity": self._planned_ev_load_entity_id,
             },
             "features": {
                 "ev_integration": self._ev_integration_enabled or len(self._ev_configs) > 0,
+                "planned_ev_load": bool(self._planned_ev_load_entity_id),
                 "spread_export": self._should_spread_export_schedule(),
                 "spread_import": self._should_spread_import_schedule(),
                 "vpp_enabled": False,
@@ -8609,6 +8821,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "away_mode": load_summary["away_mode"],
                 "profit_max_mode": load_summary.get("profit_max_mode", False),
             }
+
+        if self._last_planned_ev_load_forecast_w:
+            dt_h = self._config.interval_minutes / 60
+            data["planned_ev_load_forecast_w"] = self._last_planned_ev_load_forecast_w
+            data["planned_ev_load_peak_kw"] = round(
+                max(self._last_planned_ev_load_forecast_w) / 1000.0,
+                3,
+            )
+            data["planned_ev_load_kwh"] = round(
+                sum(self._last_planned_ev_load_forecast_w) / 1000.0 * dt_h,
+                3,
+            )
 
         # Add daily cost breakdown (actual + predicted remaining)
         pred_remaining, baseline_remaining = self._get_predicted_cost_to_midnight()
@@ -8653,6 +8877,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 api_response["import_price"] = display_import[:n_sched]
             if display_export:
                 api_response["export_price"] = display_export[:n_sched]
+            if self._last_planned_ev_load_forecast_w:
+                api_response["planned_ev_load_w"] = (
+                    self._last_planned_ev_load_forecast_w[:n_sched]
+                )
             # Debug: log SOC range for API response
             soc_vals = api_response.get("soc", [])
             if soc_vals:
@@ -8994,6 +9222,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 response["changes"].append(
                     f"disable_idle_enabled: {self.disable_idle_enabled}"
                 )
+                rerun_after_settings = True
+
+        if "planned_ev_load_entity" in settings:
+            raw_entity = settings.get("planned_ev_load_entity")
+            entity_id = raw_entity.strip() if isinstance(raw_entity, str) else None
+            entity_id = entity_id or None
+            changed = entity_id != self._planned_ev_load_entity_id
+            self._planned_ev_load_entity_id = entity_id
+            if self._entry:
+                from ..const import CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY
+                new_data = dict(self._entry.data)
+                new_options = dict(self._entry.options)
+                new_data[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = entity_id
+                new_options[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = entity_id
+                from ..const import DOMAIN as _SKIP_DOM
+                self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
+                self.hass.config_entries.async_update_entry(
+                    self._entry,
+                    data=new_data,
+                    options=new_options,
+                )
+            response["changes"].append(
+                f"planned_ev_load_entity: {entity_id or 'cleared'}"
+            )
+            if changed:
                 rerun_after_settings = True
 
         if "profit_max_target_time" in settings and self._entry:

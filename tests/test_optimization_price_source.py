@@ -126,6 +126,7 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_OPTIMIZATION_AUTO_APPLY_RESERVE = "optimization_auto_apply_reserve"
     const_module.CONF_OPTIMIZATION_BACKUP_RESERVE = "optimization_backup_reserve"
     const_module.CONF_OPTIMIZATION_EV_INTEGRATION = "optimization_ev_integration"
+    const_module.CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY = "optimization_planned_ev_load_entity"
     const_module.CONF_OPTIMIZATION_MANUAL_RESERVE = "optimization_manual_reserve"
     const_module.DEFAULT_SOLAR_FORECAST_PROVIDER = "solcast"
     const_module.DEFAULT_SOLCAST_ESTIMATE_TYPE = "estimate"
@@ -235,6 +236,208 @@ class _States:
             return list(self._states)
         prefix = f"{domain}."
         return [state for state in self._states if state.entity_id.startswith(prefix)]
+
+
+class _ConfigEntries:
+    def __init__(self) -> None:
+        self.updates: list[dict] = []
+
+    def async_update_entry(self, entry, **kwargs) -> None:
+        if "data" in kwargs:
+            entry.data = kwargs["data"]
+        if "options" in kwargs:
+            entry.options = kwargs["options"]
+        self.updates.append(kwargs)
+
+
+class _Entry:
+    entry_id = "entry-1"
+
+    def __init__(self, data: dict | None = None, options: dict | None = None) -> None:
+        self.data = data or {}
+        self.options = options or {}
+
+
+def _planned_ev_load_coordinator(opt_module, states: list[_State]):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator.hass = SimpleNamespace(states=_States(states))
+    coordinator.entry_id = "entry-1"
+    coordinator._entry = None
+    coordinator._config = opt_module.OptimizationConfig(horizon_hours=1)
+    coordinator._enabled = False
+    coordinator._planned_ev_load_entity_id = "sensor.planned_ev_load"
+    coordinator._last_solar_forecast = None
+    coordinator._last_solar_nowcast_ratio = None
+    coordinator._last_load_forecast = None
+    coordinator._last_import_prices = None
+    coordinator._last_export_prices = None
+    coordinator._last_display_import_prices = None
+    coordinator._last_display_export_prices = None
+    coordinator._current_schedule = None
+    return coordinator
+
+
+def test_planned_ev_load_window_sensor_maps_to_forecast_slots(opt_module):
+    coordinator = _planned_ev_load_coordinator(
+        opt_module,
+        [
+            _State(
+                "sensor.planned_ev_load",
+                "1",
+                attributes={
+                    "planned_load": [
+                        {
+                            "start": "2026-05-03T08:35:00+00:00",
+                            "end": "2026-05-03T08:50:00+00:00",
+                            "power_kw": 5.75,
+                        }
+                    ]
+                },
+            )
+        ],
+    )
+
+    forecast = coordinator._get_planned_ev_load_forecast(6)
+
+    assert forecast == [0.0, 5750.0, 5750.0, 5750.0, 0.0, 0.0]
+
+
+def test_planned_ev_load_timestamped_watts_aligns_to_slots(opt_module):
+    coordinator = _planned_ev_load_coordinator(
+        opt_module,
+        [
+            _State(
+                "sensor.planned_ev_load",
+                "1",
+                unit="W",
+                attributes={
+                    "planned_load": {
+                        "2026-05-03T08:35:00+00:00": 2000,
+                        "2026-05-03T08:45:00+00:00": 0,
+                    }
+                },
+            )
+        ],
+    )
+
+    forecast = coordinator._get_planned_ev_load_forecast(6)
+
+    assert forecast == [0.0, 2000.0, 2000.0, 0.0, 0.0, 0.0]
+
+
+def test_planned_ev_load_timestamped_values_align_timezone_offsets(opt_module):
+    coordinator = _planned_ev_load_coordinator(
+        opt_module,
+        [
+            _State(
+                "sensor.planned_ev_load",
+                "1",
+                attributes={
+                    "planned_load": {
+                        "2026-05-03T18:35:00+10:00": 3.5,
+                        "2026-05-03T18:45:00+10:00": 0,
+                    }
+                },
+            )
+        ],
+    )
+
+    forecast = coordinator._get_planned_ev_load_forecast(6)
+
+    assert forecast == [0.0, 3500.0, 3500.0, 0.0, 0.0, 0.0]
+
+
+def test_planned_ev_load_ignores_invalid_and_past_windows(opt_module):
+    coordinator = _planned_ev_load_coordinator(
+        opt_module,
+        [
+            _State(
+                "sensor.planned_ev_load",
+                "1",
+                attributes={
+                    "planned_load": [
+                        {
+                            "start": "2026-05-03T07:00:00+00:00",
+                            "end": "2026-05-03T07:30:00+00:00",
+                            "power_kw": 7,
+                        },
+                        {
+                            "start": "not-a-time",
+                            "end": "2026-05-03T09:00:00+00:00",
+                            "power_kw": 7,
+                        },
+                        {
+                            "start": "2026-05-03T08:40:00+00:00",
+                            "end": "2026-05-03T08:45:00+00:00",
+                            "power_kw": -2,
+                        },
+                    ]
+                },
+            )
+        ],
+    )
+
+    assert coordinator._get_planned_ev_load_forecast(6) is None
+
+
+def test_planned_ev_load_forecast_data_exposes_debug_fields(opt_module):
+    coordinator = _planned_ev_load_coordinator(opt_module, [])
+    coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
+    coordinator._last_planned_ev_load_forecast_w = [0.0, 3000.0, 3000.0]
+    coordinator._last_solar_nowcast_ratio = None
+    coordinator._solar_nowcast_derate = 1.0
+    coordinator._last_solar_forecast = []
+    coordinator._last_load_forecast = None
+    coordinator._last_import_prices = None
+    coordinator._last_export_prices = None
+    coordinator._last_display_import_prices = None
+    coordinator._last_display_export_prices = None
+    coordinator._current_schedule = None
+
+    data = coordinator.get_forecast_data()
+
+    assert data["planned_ev_load_forecast_w"] == [0.0, 3000.0, 3000.0]
+    assert data["planned_ev_load_peak_kw"] == 3.0
+    assert data["planned_ev_load_kwh"] == pytest.approx(0.5)
+
+
+def test_planned_ev_load_settings_write_and_clear_without_ev_integration(opt_module):
+    entry = _Entry(
+        data={"optimization_ev_integration": False},
+        options={"optimization_ev_integration": False},
+    )
+    config_entries = _ConfigEntries()
+    coordinator = _planned_ev_load_coordinator(opt_module, [])
+    coordinator.hass = SimpleNamespace(
+        states=_States([]),
+        data={"power_sync": {"entry-1": {}}},
+        config_entries=config_entries,
+    )
+    coordinator._entry = entry
+    coordinator._planned_ev_load_entity_id = None
+
+    result = asyncio.run(
+        coordinator.set_settings(
+            {"planned_ev_load_entity": " sensor.node_red_ev_forecast "}
+        )
+    )
+
+    assert result["success"] is True
+    assert coordinator._planned_ev_load_entity_id == "sensor.node_red_ev_forecast"
+    assert entry.data["optimization_planned_ev_load_entity"] == "sensor.node_red_ev_forecast"
+    assert entry.options["optimization_planned_ev_load_entity"] == "sensor.node_red_ev_forecast"
+    assert entry.options["optimization_ev_integration"] is False
+    assert coordinator.hass.data["power_sync"]["entry-1"]["_skip_reload"] is True
+    assert "planned_ev_load_entity: sensor.node_red_ev_forecast" in result["changes"]
+
+    result = asyncio.run(coordinator.set_settings({"planned_ev_load_entity": ""}))
+
+    assert result["success"] is True
+    assert coordinator._planned_ev_load_entity_id is None
+    assert entry.data["optimization_planned_ev_load_entity"] is None
+    assert entry.options["optimization_planned_ev_load_entity"] is None
+    assert "planned_ev_load_entity: cleared" in result["changes"]
+    assert len(config_entries.updates) == 2
 
 
 def _tariff_schedule() -> dict:

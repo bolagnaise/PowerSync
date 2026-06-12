@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_FLOW_PATH = ROOT / "custom_components" / "power_sync" / "config_flow.py"
+INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
 STRINGS_PATH = ROOT / "custom_components" / "power_sync" / "strings.json"
 TRANSLATIONS_PATH = ROOT / "custom_components" / "power_sync" / "translations" / "en.json"
 
@@ -110,6 +111,21 @@ def _options_flow_method(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
                 ):
                     return item
     raise AssertionError(f"PowerSyncOptionsFlow.{name} not found")
+
+
+def _init_class_method(
+    class_name: str, method_name: str
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    tree = ast.parse(INIT_PATH.read_text())
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                if (
+                    isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and item.name == method_name
+                ):
+                    return item
+    raise AssertionError(f"{class_name}.{method_name} not found")
 
 
 def _calls_vol_optional_without_default(node: ast.AST) -> bool:
@@ -754,6 +770,13 @@ def test_optimization_options_exposes_enabled_toggle():
     assert "CONF_OPTIMIZATION_MANUAL_RESERVE" in method_source
     assert "CONF_OPTIMIZATION_EV_INTEGRATION" in method_source
     assert "new_options[CONF_OPTIMIZATION_EV_INTEGRATION] = ev_integration_enabled" in method_source
+    assert "CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY" in method_source
+    assert "planned_ev_load_entity = _normalize_optional_entity(" in method_source
+    assert (
+        "new_options[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = planned_ev_load_entity"
+        in method_source
+    )
+    assert "planned_ev_load_entity" in method_source
     assert "CONF_MONITORING_MODE" in method_source
     assert "new_options[CONF_MONITORING_MODE] = monitoring_mode" in method_source
     assert "battery_system == BATTERY_SYSTEM_SIGENERGY and monitoring_mode" in method_source
@@ -762,10 +785,13 @@ def test_optimization_options_exposes_enabled_toggle():
     assert "CONF_HARDWARE_BACKUP_RESERVE" in method_source
     assert "new_options[CONF_HARDWARE_BACKUP_RESERVE] = hardware_backup_reserve" in method_source
     assert 'new_options.pop("_user_backup_reserve", None)' in method_source
+    schema_source = method_source[method_source.index("schema_fields") :]
     assert (
-        method_source.index("CONF_OPTIMIZATION_ENABLED")
-        < method_source.index("CONF_OPTIMIZATION_AUTO_APPLY_RESERVE")
-        < method_source.index("CONF_OPTIMIZATION_EV_INTEGRATION")
+        schema_source.index("CONF_OPTIMIZATION_ENABLED")
+        < schema_source.index("CONF_OPTIMIZATION_AUTO_APPLY_RESERVE")
+        < schema_source.index("CONF_OPTIMIZATION_EV_INTEGRATION")
+        < schema_source.index("CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY")
+        < schema_source.index("CONF_MONITORING_MODE")
     )
     assert (
         method_source.index("CONF_OPTIMIZATION_BACKUP_RESERVE")
@@ -892,6 +918,25 @@ def test_optimization_options_apply_tunables_in_place_without_reload():
     assert "await coordinator._run_optimization()" not in method_source
 
 
+def test_optimization_settings_api_exposes_planned_ev_load_entity():
+    source = INIT_PATH.read_text()
+    get_method = _init_class_method("OptimizationSettingsView", "get")
+    post_method = _init_class_method("OptimizationSettingsView", "post")
+    get_source = ast.get_source_segment(source, get_method)
+    post_source = ast.get_source_segment(source, post_method)
+
+    assert get_source is not None
+    assert post_source is not None
+    assert '"planned_ev_load_entity"' in get_source
+    assert "CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY" in get_source
+    assert "opt_coordinator._planned_ev_load_entity_id" in get_source
+    assert '"planned_ev_load_entity"' in post_source
+    assert "raw_entity.strip() if isinstance(raw_entity, str) else None" in post_source
+    assert "new_data[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = entity_id" in post_source
+    assert "new_options[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = entity_id" in post_source
+    assert "entity_id or 'cleared'" in post_source
+
+
 def test_neovolt_surplus_balancer_selector_is_in_optimization_options():
     source = CONFIG_FLOW_PATH.read_text()
     method = _options_flow_method("async_step_optimization")
@@ -922,6 +967,9 @@ def test_initial_smart_optimization_configuration_exposes_enabled_toggle():
     assert "CONF_OPTIMIZATION_MANUAL_RESERVE" in method_source
     assert "CONF_OPTIMIZATION_EV_INTEGRATION" in method_source
     assert "user_input.get(CONF_OPTIMIZATION_EV_INTEGRATION, False)" in method_source
+    assert "CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY" in method_source
+    assert "_normalize_optional_entity(" in method_source
+    assert "user_input.get(CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY)" in method_source
     assert "CONF_MONITORING_MODE" in method_source
     assert "user_input.get(CONF_MONITORING_MODE, False)" in method_source
     assert "CONF_HARDWARE_BACKUP_RESERVE" in method_source
@@ -930,6 +978,8 @@ def test_initial_smart_optimization_configuration_exposes_enabled_toggle():
         schema_source.index("CONF_OPTIMIZATION_ENABLED")
         < schema_source.index("CONF_OPTIMIZATION_AUTO_APPLY_RESERVE")
         < schema_source.index("CONF_OPTIMIZATION_EV_INTEGRATION")
+        < schema_source.index("CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY")
+        < schema_source.index("CONF_MONITORING_MODE")
     )
     assert (
         method_source.index("CONF_OPTIMIZATION_BACKUP_RESERVE")
@@ -1539,6 +1589,13 @@ def test_optimization_enabled_toggle_is_translated_in_config_and_options():
             assert "LP optimizer" in step["data_description"]["optimization_enabled"]
             assert step["data"]["optimization_ev_integration"] == "EV Charging Integration"
             assert "EV charging demand" in step["data_description"]["optimization_ev_integration"]
+            assert (
+                step["data"]["optimization_planned_ev_load_entity"]
+                == "Planned EV load forecast sensor"
+            )
+            assert "forecast-only EV demand" in step["data_description"][
+                "optimization_planned_ev_load_entity"
+            ]
             assert step["data"]["monitoring_mode"] == "Monitoring mode"
             assert "Block battery and inverter control commands" in step["data_description"]["monitoring_mode"]
             assert step["data"]["hardware_backup_reserve"] == "Hardware backup reserve"
@@ -1555,7 +1612,8 @@ def test_optimization_enabled_toggle_is_translated_in_config_and_options():
             assert step["data"]["profit_max_enabled"] == "Enable Profit Max"
             assert "profitable export opportunities" in step["data_description"]["profit_max_enabled"]
             assert keys.index("optimization_enabled") < keys.index("optimization_ev_integration")
-            assert keys.index("optimization_ev_integration") < keys.index("monitoring_mode")
+            assert keys.index("optimization_ev_integration") < keys.index("optimization_planned_ev_load_entity")
+            assert keys.index("optimization_planned_ev_load_entity") < keys.index("monitoring_mode")
             assert keys.index("profit_max_enabled") < keys.index("profit_max_target_time")
 
 
