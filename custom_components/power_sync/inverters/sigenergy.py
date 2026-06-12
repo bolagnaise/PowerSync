@@ -366,6 +366,10 @@ class SigenergyController(InverterController):
         low = value & 0xFFFF
         return [high, low]
 
+    def _from_signed32(self, value: int) -> list[int]:
+        """Convert signed 32-bit to two 16-bit registers [high, low]."""
+        return self._from_unsigned32(value & 0xFFFFFFFF)
+
     def _to_unsigned64(self, regs: list[int]) -> int:
         """Convert four unsigned 16-bit registers to unsigned 64-bit.
 
@@ -1256,13 +1260,30 @@ class SigenergyController(InverterController):
                 return False
             _LOGGER.info("Remote EMS control mode set to %s", mode_name)
 
-            # 3. Set grid export limit. The dynamic safety cap is bypassed because
+            # 3. Set active power target. The export limit below is only a
+            # ceiling; this signed target is what tells Sigenergy to actually
+            # push power out instead of just covering local load.
+            scaled_value = int(effective_kw * self.GAIN_POWER)
+            target_values = self._from_signed32(-scaled_value)
+            target_result = await self._write_holding_registers(
+                self.REG_ACTIVE_POWER_FIXED_TARGET,
+                target_values,
+            )
+            if not target_result:
+                _LOGGER.warning(
+                    "Failed to set Sigenergy active power target to %.2f kW export; "
+                    "falling back to export limit only",
+                    effective_kw,
+                )
+            else:
+                _LOGGER.info("Sigenergy active power target set to %.2f kW export", effective_kw)
+
+            # 4. Set grid export limit. The dynamic safety cap is bypassed because
             # path 5 of _get_effective_export_safety_cap_kw reads back
             # REG_GRID_EXPORT_LIMIT itself — a curtailment-set low value would
             # then clamp force_discharge to that low value. The user-configured
             # DNSP limit is still honored (it's path 1 of the cap chain and not
             # circular).
-            scaled_value = int(effective_kw * self.GAIN_POWER)
             values = self._from_unsigned32(scaled_value)
             rate_result = await self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, values)
             if not rate_result:

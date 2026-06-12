@@ -152,6 +152,10 @@ def test_force_discharge_uses_pv_first_mode_when_solar_can_cover_target(sigenerg
             [controller.REMOTE_EMS_MODE_DISCHARGE_PV],
         ),
         (
+            controller.REG_ACTIVE_POWER_FIXED_TARGET,
+            controller._from_signed32(-5000),
+        ),
+        (
             controller.REG_GRID_EXPORT_LIMIT,
             controller._from_unsigned32(5000),
         ),
@@ -190,6 +194,10 @@ def test_force_discharge_uses_ess_first_mode_when_target_needs_battery(sigenergy
             [controller.REMOTE_EMS_MODE_DISCHARGE_ESS],
         ),
         (
+            controller.REG_ACTIVE_POWER_FIXED_TARGET,
+            controller._from_signed32(-5000),
+        ),
+        (
             controller.REG_GRID_EXPORT_LIMIT,
             controller._from_unsigned32(5000),
         ),
@@ -224,6 +232,47 @@ def test_force_discharge_mode_selection_uses_configured_export_cap(sigenergy_mod
         (
             controller.REG_REMOTE_EMS_CONTROL_MODE,
             [controller.REMOTE_EMS_MODE_DISCHARGE_PV],
+        ),
+        (
+            controller.REG_ACTIVE_POWER_FIXED_TARGET,
+            controller._from_signed32(-5000),
+        ),
+        (
+            controller.REG_GRID_EXPORT_LIMIT,
+            controller._from_unsigned32(5000),
+        ),
+    ]
+
+
+def test_force_discharge_continues_when_active_power_target_write_fails(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    writes: list[tuple[int, list[int]]] = []
+
+    async def connect():
+        return True
+
+    async def get_status():
+        return types.SimpleNamespace(attributes={"pv_power_kw": 0.0})
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, list(values)))
+        return address != controller.REG_ACTIVE_POWER_FIXED_TARGET
+
+    controller.connect = connect
+    controller.get_status = get_status
+    controller._write_holding_registers = write
+
+    assert asyncio.run(controller.force_discharge(power_kw=5.0))
+
+    assert writes == [
+        (controller.REG_REMOTE_EMS_ENABLE, [1]),
+        (
+            controller.REG_REMOTE_EMS_CONTROL_MODE,
+            [controller.REMOTE_EMS_MODE_DISCHARGE_ESS],
+        ),
+        (
+            controller.REG_ACTIVE_POWER_FIXED_TARGET,
+            controller._from_signed32(-5000),
         ),
         (
             controller.REG_GRID_EXPORT_LIMIT,
