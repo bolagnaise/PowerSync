@@ -448,6 +448,35 @@ def test_solar_forecast_preferred_provider_falls_back_when_unavailable(monkeypat
     assert forecaster.last_forecast_source == "solcast"
 
 
+def test_solcast_external_async_forecast_list_is_awaited(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 5, 9, 10, 0, tzinfo=timezone.utc)
+
+    class AsyncSolcastApi:
+        async def get_forecast_list(self):
+            return [
+                {
+                    "period_start": start.isoformat(),
+                    "pv_estimate": 2.5,
+                },
+            ]
+
+    hass = SimpleNamespace(
+        data={
+            "solcast_solar": {
+                "entry-1": SimpleNamespace(solcast=AsyncSolcastApi()),
+            },
+        },
+        states=_FakeStates(),
+    )
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+
+    forecast = _run(forecaster.get_forecast(horizon_hours=1, start_time=start))
+
+    assert forecast == [2500.0, 0.0]
+    assert forecaster.last_forecast_source == "solcast"
+
+
 def test_solar_forecast_invalid_provider_normalizes_to_solcast(monkeypatch):
     module = _load_estimator_module(monkeypatch)
     forecaster = module.SolcastForecaster(

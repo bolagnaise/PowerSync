@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import bisect
 import functools
+import inspect
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -1379,7 +1380,7 @@ class SolcastForecaster:
             # Fallback: try the Solcast Solar integration hass.data
             solcast_solar_data = self.hass.data.get("solcast_solar")
             if solcast_solar_data:
-                forecast = self._extract_from_solcast_solar_integration(
+                forecast = await self._extract_from_solcast_solar_integration(
                     solcast_solar_data, start_time, n_intervals
                 )
                 if forecast:
@@ -1563,7 +1564,7 @@ class SolcastForecaster:
 
         return result
 
-    def _extract_from_solcast_solar_integration(
+    async def _extract_from_solcast_solar_integration(
         self,
         solcast_data: Any,
         start_time: datetime,
@@ -1606,6 +1607,8 @@ class SolcastForecaster:
                         if hasattr(solcast_api, 'get_forecast_list'):
                             try:
                                 forecast_list = solcast_api.get_forecast_list()
+                                if inspect.isawaitable(forecast_list):
+                                    forecast_list = await forecast_list
                                 if forecast_list:
                                     parsed = self._parse_detailed_forecast(
                                         forecast_list, start_time, n_intervals
