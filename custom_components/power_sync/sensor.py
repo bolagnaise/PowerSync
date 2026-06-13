@@ -5356,7 +5356,10 @@ class EVStatusSensor(SensorEntity):
                     self._ev_data["ev_power_kw"] = ev_power
 
             if not sigenergy_context_applied:
-                sigenergy_state = await _read_sigenergy_charger_state_for_entry(self._entry)
+                sigenergy_state = await _read_sigenergy_charger_state_for_entry(
+                    self._entry,
+                    self.hass,
+                )
             else:
                 sigenergy_state = None
             if sigenergy_state is not None:

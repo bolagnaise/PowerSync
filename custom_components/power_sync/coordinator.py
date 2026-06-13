@@ -48,13 +48,7 @@ from .const import (
     CONF_FLEET_API_BASE_URL,
     TESLA_SITE_INFO_CACHE_TTL_SECONDS,
     CONF_SIGENERGY_CHARGER_ENABLED,
-    CONF_SIGENERGY_CHARGER_HOST,
-    CONF_SIGENERGY_CHARGER_PORT,
-    CONF_SIGENERGY_CHARGER_SLAVE_ID,
     CONF_SIGENERGY_CHARGER_TYPE,
-    CONF_SIGENERGY_MODBUS_HOST,
-    DEFAULT_SIGENERGY_CHARGER_PORT,
-    DEFAULT_SIGENERGY_CHARGER_SLAVE_ID,
     SIGENERGY_CHARGER_EVAC,
     SIGENERGY_CHARGER_EVDC,
 )
@@ -3585,12 +3579,14 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
         if charger_type != SIGENERGY_CHARGER_EVDC:
             return None
 
-        host = str(
-            opts.get(CONF_SIGENERGY_CHARGER_HOST)
-            or opts.get(CONF_SIGENERGY_MODBUS_HOST)
-            or self.host
-            or ""
-        ).strip()
+        from .sigenergy_charger_config import resolve_sigenergy_charger_connection
+
+        config = resolve_sigenergy_charger_connection(
+            entry,
+            hass=self.hass,
+            fallback_host=self.host,
+        )
+        host = str(config["host"]).strip()
         if not host:
             return None
 
@@ -3598,11 +3594,8 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
 
         controller = SigenergyEVChargerController(
             host=host,
-            port=opts.get(CONF_SIGENERGY_CHARGER_PORT, DEFAULT_SIGENERGY_CHARGER_PORT),
-            slave_id=opts.get(
-                CONF_SIGENERGY_CHARGER_SLAVE_ID,
-                DEFAULT_SIGENERGY_CHARGER_SLAVE_ID,
-            ),
+            port=config["port"],
+            slave_id=config["slave_id"],
             charger_type=SIGENERGY_CHARGER_EVDC,
         )
         try:

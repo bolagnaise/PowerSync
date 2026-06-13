@@ -10672,7 +10672,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     DEFAULT_SIGENERGY_CHARGER_SLAVE_ID,
                 ),
             ): NumberSelector(NumberSelectorConfig(
-                min=1, max=246, step=1, mode=NumberSelectorMode.BOX,
+                min=1, max=247, step=1, mode=NumberSelectorMode.BOX,
             )),
             vol.Optional(
                 CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY,

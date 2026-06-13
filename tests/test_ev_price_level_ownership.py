@@ -2255,7 +2255,7 @@ def test_sigenergy_plug_detection_wins_before_ocpp_false(monkeypatch):
         },
     )
 
-    async def sigenergy_plugged(config_entry):
+    async def sigenergy_plugged(config_entry, hass=None):
         assert config_entry is entry
         return True
 
@@ -2279,7 +2279,7 @@ def test_sigenergy_plug_detection_can_report_unplugged(monkeypatch):
         options={"sigenergy_charger_enabled": True},
     )
 
-    async def sigenergy_unplugged(config_entry):
+    async def sigenergy_unplugged(config_entry, hass=None):
         return False
 
     monkeypatch.setattr(
@@ -2309,7 +2309,7 @@ def test_disconnected_sigenergy_does_not_block_any_vehicle_fallback(monkeypatch)
         },
     )
 
-    async def sigenergy_unplugged(config_entry):
+    async def sigenergy_unplugged(config_entry, hass=None):
         return False
 
     monkeypatch.setattr(

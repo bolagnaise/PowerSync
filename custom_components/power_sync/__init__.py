@@ -1258,42 +1258,29 @@ def _get_ev_vehicles_status(hass, entry) -> list:
     return list(coalesce_vehicle_observations(vehicles))
 
 
-async def _read_sigenergy_charger_state_for_entry(entry):
+async def _read_sigenergy_charger_state_for_entry(entry, hass=None):
     """Read configured Sigenergy EVAC/EVDC charger state, if enabled."""
     from .const import (
         CONF_SIGENERGY_CHARGER_ENABLED,
-        CONF_SIGENERGY_CHARGER_HOST,
-        CONF_SIGENERGY_CHARGER_PORT,
-        CONF_SIGENERGY_CHARGER_SLAVE_ID,
-        CONF_SIGENERGY_CHARGER_TYPE,
-        CONF_SIGENERGY_MODBUS_HOST,
-        DEFAULT_SIGENERGY_CHARGER_PORT,
-        DEFAULT_SIGENERGY_CHARGER_SLAVE_ID,
         SIGENERGY_CHARGER_EVAC,
     )
+    from .sigenergy_charger_config import resolve_sigenergy_charger_connection
     from .sigenergy_charger import SigenergyEVChargerController
 
     opts = {**entry.data, **entry.options}
     if not opts.get(CONF_SIGENERGY_CHARGER_ENABLED):
         return None
 
-    host = (
-        opts.get(CONF_SIGENERGY_CHARGER_HOST)
-        or opts.get(CONF_SIGENERGY_MODBUS_HOST)
-        or ""
-    )
-    host = str(host).strip()
+    config = resolve_sigenergy_charger_connection(entry, hass=hass)
+    host = str(config["host"]).strip()
     if not host:
         return None
 
     controller = SigenergyEVChargerController(
         host=host,
-        port=opts.get(CONF_SIGENERGY_CHARGER_PORT, DEFAULT_SIGENERGY_CHARGER_PORT),
-        slave_id=opts.get(
-            CONF_SIGENERGY_CHARGER_SLAVE_ID,
-            DEFAULT_SIGENERGY_CHARGER_SLAVE_ID,
-        ),
-        charger_type=opts.get(CONF_SIGENERGY_CHARGER_TYPE, SIGENERGY_CHARGER_EVAC),
+        port=config["port"],
+        slave_id=config["slave_id"],
+        charger_type=config["charger_type"] or SIGENERGY_CHARGER_EVAC,
     )
     try:
         return await controller.read_state()
@@ -11148,7 +11135,7 @@ class EVVehiclesView(HomeAssistantView):
 
                 from .sigenergy_charger import sigenergy_charger_state_to_vehicle
 
-                state = await _read_sigenergy_charger_state_for_entry(entry)
+                state = await _read_sigenergy_charger_state_for_entry(entry, hass)
                 vehicles.append(
                     sigenergy_charger_state_to_vehicle(
                         state or configured_state,
@@ -12648,6 +12635,16 @@ class VehicleChargingConfigView(HomeAssistantView):
                     "charger_status_entity": data.get("charger_status_entity"),
                     "charger_power_entity": data.get("charger_power_entity"),
                     "ocpp_charger_id": data.get("ocpp_charger_id"),
+                    "sigenergy_charger_host": data.get("sigenergy_charger_host"),
+                    "sigenergy_charger_port": data.get("sigenergy_charger_port"),
+                    "sigenergy_charger_slave_id": data.get("sigenergy_charger_slave_id"),
+                    "sigenergy_charger_type": data.get("sigenergy_charger_type"),
+                    "sigenergy_charger_charge_power_limit_entity": data.get(
+                        "sigenergy_charger_charge_power_limit_entity"
+                    ),
+                    "sigenergy_charger_discharge_power_limit_entity": data.get(
+                        "sigenergy_charger_discharge_power_limit_entity"
+                    ),
                     "pre_charge_wake_entity": data.get("pre_charge_wake_entity"),
                     "pre_charge_wake_duration_seconds": data.get("pre_charge_wake_duration_seconds", 5),
                     "min_amps": data.get("min_amps", data.get("min_charge_amps", 5)),
@@ -14263,7 +14260,10 @@ class EVWidgetDataView(HomeAssistantView):
             if configured_sigenergy_state:
                 from .sigenergy_charger import sigenergy_charger_state_to_widget
 
-                sigenergy_state = await _read_sigenergy_charger_state_for_entry(self._config_entry)
+                sigenergy_state = await _read_sigenergy_charger_state_for_entry(
+                    self._config_entry,
+                    self._hass,
+                )
                 widget_data.append(
                     sigenergy_charger_state_to_widget(
                         sigenergy_state or configured_sigenergy_state,
@@ -14789,7 +14789,10 @@ class EVLoadpointStatusView(HomeAssistantView):
             if configured_sigenergy_state:
                 from .sigenergy_charger import sigenergy_charger_state_to_loadpoint_observation
 
-                sigenergy_state = await _read_sigenergy_charger_state_for_entry(self._config_entry)
+                sigenergy_state = await _read_sigenergy_charger_state_for_entry(
+                    self._config_entry,
+                    self._hass,
+                )
                 observed_vehicles.append(
                     sigenergy_charger_state_to_loadpoint_observation(
                         sigenergy_state or configured_sigenergy_state,

@@ -118,43 +118,33 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
-async def _read_sigenergy_charger_plugged_state(config_entry: "ConfigEntry") -> bool | None:
+async def _read_sigenergy_charger_plugged_state(
+    config_entry: "ConfigEntry",
+    hass: Optional["HomeAssistant"] = None,
+) -> bool | None:
     """Read the configured Sigenergy EV charger connection state."""
     from ..const import (
         CONF_SIGENERGY_CHARGER_ENABLED,
-        CONF_SIGENERGY_CHARGER_HOST,
-        CONF_SIGENERGY_CHARGER_PORT,
-        CONF_SIGENERGY_CHARGER_SLAVE_ID,
-        CONF_SIGENERGY_CHARGER_TYPE,
-        CONF_SIGENERGY_MODBUS_HOST,
-        DEFAULT_SIGENERGY_CHARGER_PORT,
-        DEFAULT_SIGENERGY_CHARGER_SLAVE_ID,
         SIGENERGY_CHARGER_EVAC,
     )
+    from ..sigenergy_charger_config import resolve_sigenergy_charger_connection
     from ..sigenergy_charger import SigenergyEVChargerController
 
     opts = {**config_entry.data, **config_entry.options} if config_entry else {}
     if not opts.get(CONF_SIGENERGY_CHARGER_ENABLED):
         return None
 
-    host = (
-        opts.get(CONF_SIGENERGY_CHARGER_HOST)
-        or opts.get(CONF_SIGENERGY_MODBUS_HOST)
-        or ""
-    )
-    host = str(host).strip()
+    config = resolve_sigenergy_charger_connection(config_entry, hass=hass)
+    host = str(config["host"]).strip()
     if not host:
         _LOGGER.debug("Sigenergy charger plug check skipped: no Modbus host configured")
         return None
 
     controller = SigenergyEVChargerController(
         host=host,
-        port=opts.get(CONF_SIGENERGY_CHARGER_PORT, DEFAULT_SIGENERGY_CHARGER_PORT),
-        slave_id=opts.get(
-            CONF_SIGENERGY_CHARGER_SLAVE_ID,
-            DEFAULT_SIGENERGY_CHARGER_SLAVE_ID,
-        ),
-        charger_type=opts.get(CONF_SIGENERGY_CHARGER_TYPE, SIGENERGY_CHARGER_EVAC),
+        port=config["port"],
+        slave_id=config["slave_id"],
+        charger_type=config["charger_type"] or SIGENERGY_CHARGER_EVAC,
     )
     try:
         state = await controller.read_state()
@@ -661,7 +651,7 @@ async def is_ev_plugged_in(
     if config_entry and vehicle_vin in (None, "sigenergy_charger"):
         opts = {**config_entry.data, **config_entry.options}
         if opts.get(CONF_SIGENERGY_CHARGER_ENABLED):
-            plugged = await _read_sigenergy_charger_plugged_state(config_entry)
+            plugged = await _read_sigenergy_charger_plugged_state(config_entry, hass)
             if plugged is True or (vehicle_vin == "sigenergy_charger" and plugged is not None):
                 return plugged
 

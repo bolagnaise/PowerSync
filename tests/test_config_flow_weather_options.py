@@ -428,13 +428,39 @@ def test_ev_charging_sigenergy_charger_fields_are_translated():
                 assert key in step["data_description"], (
                     f"{path.name}: {step_name}.data_description.{key}"
                 )
-
             assert step["data"]["sigenergy_charger_enabled"] == (
                 "Enable Sigenergy EV charger"
             )
             assert "EVAC/EVDC" in step["data_description"][
                 "sigenergy_charger_enabled"
             ]
+
+
+def test_ev_charging_sigenergy_charger_slave_id_allows_247():
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_ev_charging")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    assert "CONF_SIGENERGY_CHARGER_SLAVE_ID" in method_source
+    assert "min=1, max=247, step=1" in method_source
+
+
+def test_vehicle_config_creation_preserves_sigenergy_fields():
+    source = INIT_PATH.read_text()
+    method = _init_class_method("VehicleChargingConfigView", "post")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    for key in (
+        "sigenergy_charger_host",
+        "sigenergy_charger_port",
+        "sigenergy_charger_slave_id",
+        "sigenergy_charger_type",
+        "sigenergy_charger_charge_power_limit_entity",
+        "sigenergy_charger_discharge_power_limit_entity",
+    ):
+        assert key in method_source
 
 
 def test_globird_initial_flow_warns_tesla_users_about_tariff_baseline():
