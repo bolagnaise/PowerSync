@@ -6107,7 +6107,9 @@ async def _dynamic_ev_update(
 
     # Calculate new target amps
     raw_new_amps = current_amps + available_amps
-    if raw_new_amps < min_amps:
+    if scheduled_floor_active and current_amps > 0 and raw_new_amps < min_amps:
+        new_amps = min_amps
+    elif raw_new_amps < min_amps:
         new_amps = 0
     else:
         new_amps = int(round(max(min_amps, min(max_amps, raw_new_amps))))
