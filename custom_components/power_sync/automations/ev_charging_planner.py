@@ -86,6 +86,7 @@ _LOGGER.addFilter(SensitiveDataFilter())
 # via charger settings if your charger has a different minimum.
 MIN_CHARGING_POWER_KW = 1.4
 FULL_EV_SOC = 100
+EXTERNAL_SCHEDULED_STOP_SUPPRESS_SECONDS = 15 * 60
 
 
 def _configured_ble_prefixes(
@@ -8023,6 +8024,7 @@ class EVChargingModeCoordinator:
         self._is_charging = False
         self._active_modes: List[str] = []
         self._last_reason = ""
+        self._last_external_scheduled_stop: Optional[Tuple[Optional[str], str, float]] = None
 
     async def _start_charging(self, modes: List[str], reason: str) -> bool:
         """Start EV charging."""
@@ -8043,6 +8045,7 @@ class EVChargingModeCoordinator:
         self._is_charging = True
         self._active_modes = modes
         self._last_reason = reason
+        self._last_external_scheduled_stop = None
         _LOGGER.info(f"EV Coordinator: Started charging - modes: {modes}, reason: {reason}")
         return True
 
@@ -8090,6 +8093,26 @@ class EVChargingModeCoordinator:
         self._last_reason = reason
         _LOGGER.info("EV Coordinator: Stopped external scheduled charging - %s", reason)
         return True
+
+    def _external_scheduled_stop_recent(
+        self,
+        vehicle_vin: Optional[str],
+        reason: str,
+    ) -> bool:
+        """Return true when the same external scheduled stop was just sent."""
+        if not self._last_external_scheduled_stop:
+            return False
+        last_vin, last_reason, last_time = self._last_external_scheduled_stop
+        if last_vin != vehicle_vin or last_reason != reason:
+            return False
+        return (time.monotonic() - last_time) < EXTERNAL_SCHEDULED_STOP_SUPPRESS_SECONDS
+
+    def _record_external_scheduled_stop(
+        self,
+        vehicle_vin: Optional[str],
+        reason: str,
+    ) -> None:
+        self._last_external_scheduled_stop = (vehicle_vin, reason, time.monotonic())
 
     async def evaluate(
         self,
@@ -8228,18 +8251,35 @@ class EVChargingModeCoordinator:
                     )
                 if external_charge:
                     scheduled_reason = decisions[0].reason or "Scheduled charging inactive"
-                    _LOGGER.info(
-                        "Scheduled charging stopping external session: %s",
+                    if self._external_scheduled_stop_recent(
+                        external_vehicle_vin,
                         scheduled_reason,
-                    )
-                    if await self._stop_external_scheduled_charging(
-                        scheduled_reason,
-                        vehicle_vin=external_vehicle_vin,
                     ):
-                        scheduled_exec.update_charging_state(False, scheduled_reason)
-                        scheduled_exec._state.last_decision = "stopped"
-                        scheduled_exec._state.last_decision_reason = scheduled_reason
+                        _LOGGER.info(
+                            "Scheduled charging suppressing repeat external stop for %s: %s",
+                            external_vehicle_vin or "configured charger",
+                            scheduled_reason,
+                        )
                         stopped_external_scheduled = True
+                    else:
+                        _LOGGER.info(
+                            "Scheduled charging stopping external session: %s",
+                            scheduled_reason,
+                        )
+                        if await self._stop_external_scheduled_charging(
+                            scheduled_reason,
+                            vehicle_vin=external_vehicle_vin,
+                        ):
+                            self._record_external_scheduled_stop(
+                                external_vehicle_vin,
+                                scheduled_reason,
+                            )
+                            scheduled_exec.update_charging_state(False, scheduled_reason)
+                            scheduled_exec._state.last_decision = "stopped"
+                            scheduled_exec._state.last_decision_reason = scheduled_reason
+                            stopped_external_scheduled = True
+                else:
+                    self._last_external_scheduled_stop = None
 
             # Update executor states
             if scheduled_exec and not stopped_external_scheduled:
