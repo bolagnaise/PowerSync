@@ -1078,6 +1078,29 @@ class SolcastForecaster:
                 return state
         return None
 
+    def _iter_solcast_detailed_states(self) -> list[Any]:
+        """Return Solcast sensor states that expose detailed forecast periods."""
+        async_all = getattr(self.hass.states, "async_all", None)
+        if not callable(async_all):
+            return []
+
+        try:
+            states = async_all("sensor")
+        except TypeError:
+            states = async_all()
+
+        detailed_states: list[Any] = []
+        for state in states or []:
+            entity_id = getattr(state, "entity_id", "")
+            if "solcast" not in entity_id:
+                continue
+            attributes = getattr(state, "attributes", {}) or {}
+            detailed = attributes.get("detailedForecast")
+            if isinstance(detailed, list) and detailed:
+                detailed_states.append(state)
+
+        return detailed_states
+
     async def get_forecast(
         self,
         horizon_hours: int = 48,
@@ -1457,12 +1480,19 @@ class SolcastForecaster:
             "sensor.solcast_forecast_today",
             "sensor.solcast_pv_forecast_today",
         ])
-        if not today_state:
+        fallback_states = self._iter_solcast_detailed_states()
+        if not today_state and not fallback_states:
             return None
 
-        today_detailed = today_state.attributes.get("detailedForecast")
+        today_detailed = (
+            today_state.attributes.get("detailedForecast") if today_state else None
+        )
         if not today_detailed or not isinstance(today_detailed, list):
-            return None
+            if fallback_states:
+                today_state = fallback_states[0]
+                today_detailed = today_state.attributes["detailedForecast"]
+            else:
+                return None
 
         # Combine today + tomorrow for 48h coverage
         combined_forecast = list(today_detailed)
@@ -1481,6 +1511,18 @@ class SolcastForecaster:
             )
             if tomorrow_detailed and isinstance(tomorrow_detailed, list):
                 combined_forecast.extend(tomorrow_detailed)
+
+        seen_entity_ids = {
+            getattr(state, "entity_id", None)
+            for state in (today_state, tomorrow_state)
+            if state is not None
+        }
+        for state in fallback_states:
+            entity_id = getattr(state, "entity_id", None)
+            if entity_id in seen_entity_ids:
+                continue
+            combined_forecast.extend(state.attributes["detailedForecast"])
+            seen_entity_ids.add(entity_id)
 
         if not combined_forecast:
             return None

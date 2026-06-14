@@ -448,6 +448,30 @@ def test_solar_forecast_preferred_provider_falls_back_when_unavailable(monkeypat
     assert forecaster.last_forecast_source == "solcast"
 
 
+def test_solcast_sensor_scan_uses_renamed_detailed_forecast_entities(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 5, 9, 10, 0, tzinfo=timezone.utc)
+    solcast_state = SimpleNamespace(
+        entity_id="sensor.solcast_home_forecast_today",
+        state="18.8",
+        attributes={
+            "detailedForecast": [
+                {"period_start": start.isoformat(), "pv_estimate": 1.5},
+            ],
+        },
+    )
+    hass = SimpleNamespace(
+        data={},
+        states=_FakeStates([solcast_state]),
+    )
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+
+    forecast = _run(forecaster.get_forecast(horizon_hours=1, start_time=start))
+
+    assert forecast == [1500.0, 0.0]
+    assert forecaster.last_forecast_source == "solcast"
+
+
 def test_solcast_external_async_forecast_list_is_awaited(monkeypatch):
     module = _load_estimator_module(monkeypatch)
     start = datetime(2026, 5, 9, 10, 0, tzinfo=timezone.utc)
