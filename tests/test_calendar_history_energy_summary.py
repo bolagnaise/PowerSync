@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +31,8 @@ def _calendar_namespace() -> dict[str, Any]:
         "_calendar_entry_from_energy_sensor_states",
         "_merge_calendar_energy_entries",
         "_calendar_current_entry",
+        "_calendar_statistic_suffixes",
+        "_find_calendar_statistic_entity_ids",
         "_calendar_residual_entry",
         "_calendar_range_includes_today",
         "_calendar_statistics_end_dt",
@@ -44,6 +48,15 @@ def _calendar_namespace() -> dict[str, Any]:
             )
         ):
             body.append(node)
+        elif (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "_CALENDAR_STATISTIC_FIELD_ALIASES"
+                for target in node.targets
+            )
+        ):
+            body.append(node)
         elif isinstance(node, ast.FunctionDef) and node.name in wanted_functions:
             body.append(node)
 
@@ -53,6 +66,7 @@ def _calendar_namespace() -> dict[str, Any]:
     namespace: dict[str, Any] = {
         "Any": Any,
         "datetime": datetime,
+        "DOMAIN": "power_sync",
         "HomeAssistant": object,
         "dt_util": SimpleNamespace(
             now=lambda: datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc)
@@ -69,9 +83,39 @@ class _States:
     def get(self, entity_id: str) -> Any:
         return self._states.get(entity_id)
 
+    def async_all(self, domain: str) -> list[Any]:
+        return []
+
 
 def _state(value: str, unit: str = "kWh") -> SimpleNamespace:
     return SimpleNamespace(state=value, attributes={"unit_of_measurement": unit})
+
+
+@contextmanager
+def _fake_entity_registry(entities: dict[str, Any]):
+    helpers = SimpleNamespace()
+    entity_registry = SimpleNamespace(
+        async_get=lambda hass: SimpleNamespace(entities=entities)
+    )
+    helpers.entity_registry = entity_registry
+    previous_homeassistant = sys.modules.get("homeassistant")
+    previous_helpers = sys.modules.get("homeassistant.helpers")
+    previous_registry = sys.modules.get("homeassistant.helpers.entity_registry")
+    sys.modules["homeassistant"] = SimpleNamespace(helpers=helpers)
+    sys.modules["homeassistant.helpers"] = helpers
+    sys.modules["homeassistant.helpers.entity_registry"] = entity_registry
+    try:
+        yield
+    finally:
+        for module_name, previous in (
+            ("homeassistant", previous_homeassistant),
+            ("homeassistant.helpers", previous_helpers),
+            ("homeassistant.helpers.entity_registry", previous_registry),
+        ):
+            if previous is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous
 
 
 def test_calendar_range_includes_today_when_end_is_now_snapshot():
@@ -161,6 +205,43 @@ def test_calendar_residual_entry_subtracts_existing_hourly_rows():
     assert residual["home_consumption"] == 7000
     assert residual["solar_energy_exported"] == 4000
     assert residual["consumer_energy_imported"] == 7000
+
+
+def test_calendar_statistic_finder_accepts_foxess_daily_battery_aliases():
+    namespace = _calendar_namespace()
+    entities = {
+        "sensor.power_sync_daily_battery_charge_foxess": SimpleNamespace(
+            domain="sensor",
+            platform="power_sync",
+            unique_id="entry-1_daily_battery_charge_foxess",
+            entity_id="sensor.power_sync_daily_battery_charge_foxess",
+        ),
+        "sensor.power_sync_daily_battery_discharge_foxess": SimpleNamespace(
+            domain="sensor",
+            platform="power_sync",
+            unique_id="entry-1_daily_battery_discharge_foxess",
+            entity_id="sensor.power_sync_daily_battery_discharge_foxess",
+        ),
+    }
+    hass = SimpleNamespace(
+        states=_States(
+            {
+                "sensor.power_sync_daily_battery_charge_foxess": _state("47.5"),
+                "sensor.power_sync_daily_battery_discharge_foxess": _state("42.7"),
+            }
+        )
+    )
+
+    with _fake_entity_registry(entities):
+        entity_ids = namespace["_find_calendar_statistic_entity_ids"](
+            hass, "entry-1"
+        )
+
+    assert entity_ids["battery_charge"] == "sensor.power_sync_daily_battery_charge_foxess"
+    assert (
+        entity_ids["battery_discharge"]
+        == "sensor.power_sync_daily_battery_discharge_foxess"
+    )
 
 
 def test_current_calendar_entry_uses_live_daily_sensor_states_when_accumulator_is_zero():

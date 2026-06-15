@@ -3871,6 +3871,17 @@ _CALENDAR_STATISTIC_FIELDS = {
     "home_consumption": "daily_load",
 }
 
+_CALENDAR_STATISTIC_FIELD_ALIASES = {
+    "battery_discharge": ("daily_battery_discharge_foxess",),
+    "battery_charge": ("daily_battery_charge_foxess",),
+}
+
+
+def _calendar_statistic_suffixes(field: str) -> tuple[str, ...]:
+    """Return entity suffixes that can provide one calendar-history field."""
+    primary = _CALENDAR_STATISTIC_FIELDS[field]
+    return (primary, *_CALENDAR_STATISTIC_FIELD_ALIASES.get(field, ()))
+
 
 def _calendar_entry_has_energy(entry: dict[str, Any] | None) -> bool:
     """Return True when a calendar entry contains at least one energy value."""
@@ -4092,9 +4103,11 @@ def _find_calendar_statistic_entity_ids(
         if preferred_entry_id and not unique_id.startswith(f"{preferred_entry_id}_"):
             continue
 
-        for field, suffix in _CALENDAR_STATISTIC_FIELDS.items():
-            if unique_id.endswith(f"_{suffix}") and hass.states.get(entity.entity_id):
-                entity_ids.setdefault(field, entity.entity_id)
+        for field in _CALENDAR_STATISTIC_FIELDS:
+            for suffix in _calendar_statistic_suffixes(field):
+                if unique_id.endswith(f"_{suffix}") and hass.states.get(entity.entity_id):
+                    entity_ids.setdefault(field, entity.entity_id)
+                    break
 
     if len(entity_ids) == len(_CALENDAR_STATISTIC_FIELDS):
         return entity_ids
@@ -4103,9 +4116,11 @@ def _find_calendar_statistic_entity_ids(
         object_id = state.entity_id.split(".", 1)[-1]
         if "power_sync" not in object_id:
             continue
-        for field, suffix in _CALENDAR_STATISTIC_FIELDS.items():
-            if object_id.endswith(suffix):
-                entity_ids.setdefault(field, state.entity_id)
+        for field in _CALENDAR_STATISTIC_FIELDS:
+            for suffix in _calendar_statistic_suffixes(field):
+                if object_id.endswith(suffix):
+                    entity_ids.setdefault(field, state.entity_id)
+                    break
 
     return entity_ids
 
