@@ -5945,7 +5945,7 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
         if self._ems_prefix:
             if power_w <= 0:
                 power_w = (self.data or {}).get("rated_power_w", 5000)
-            return await self._ems_set_mode("charge_battery", power_w, fallback_option="buy_power")
+            return await self._ems_set_mode("charge_pv", power_w, fallback_option="charge_battery")
         if not self._connected:
             await self._controller.connect()
             self._connected = True

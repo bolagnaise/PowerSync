@@ -1175,7 +1175,7 @@ def test_goodwe_entity_mode_prefers_solar_first_charge_and_export_discharge_mode
     assert ems_restore_source is not None
     assert attempts_source is not None
 
-    assert '"charge_battery", power_w, fallback_option="buy_power"' in charge_source
+    assert '"charge_pv", power_w, fallback_option="charge_battery"' in charge_source
     assert '"sell_power", power_w, fallback_option="discharge_battery"' in discharge_source
     assert '"auto",' in restore_source
     assert "reset_power_limit=True" in restore_source
