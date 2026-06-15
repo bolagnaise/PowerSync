@@ -6661,7 +6661,14 @@ class FroniusReservaEnergyCoordinator(DataUpdateCoordinator):
         grid_kw = status.get("grid_power", 0.0) or 0.0
         battery_kw = status.get("battery_power", 0.0) or 0.0
         load_kw = status.get("load_power", 0.0) or 0.0
-        soc = status.get("battery_level", 0.0) or 0.0
+        soc = status.get("battery_level")
+        if soc is None and self.data:
+            soc = self.data.get("battery_level")
+            if soc is not None:
+                _LOGGER.warning(
+                    "Fronius GEN24 storage SOC unavailable; using previous %.1f%% reading",
+                    soc,
+                )
 
         buy, sell = _get_current_prices(self.hass, self._entry_id)
         self._energy_acc.update(max(0.0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
