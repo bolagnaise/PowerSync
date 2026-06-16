@@ -36,6 +36,8 @@ def _calendar_namespace() -> dict[str, Any]:
         "_calendar_residual_entry",
         "_calendar_range_includes_today",
         "_calendar_statistics_end_dt",
+        "_calendar_history_bucket_timestamp",
+        "_calendar_time_series_from_state_history_rows",
     }
     body: list[ast.stmt] = []
     for node in tree.body:
@@ -69,7 +71,8 @@ def _calendar_namespace() -> dict[str, Any]:
         "DOMAIN": "power_sync",
         "HomeAssistant": object,
         "dt_util": SimpleNamespace(
-            now=lambda: datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc)
+            now=lambda: datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc),
+            as_local=lambda value: value,
         ),
     }
     exec(compile(module, str(INIT_PATH), "exec"), namespace)
@@ -89,6 +92,19 @@ class _States:
 
 def _state(value: str, unit: str = "kWh") -> SimpleNamespace:
     return SimpleNamespace(state=value, attributes={"unit_of_measurement": unit})
+
+
+def _history_state(
+    value: str,
+    timestamp: datetime,
+    unit: str = "kWh",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        state=value,
+        attributes={"unit_of_measurement": unit},
+        last_changed=timestamp,
+        last_updated=timestamp,
+    )
 
 
 @contextmanager
@@ -205,6 +221,82 @@ def test_calendar_residual_entry_subtracts_existing_hourly_rows():
     assert residual["home_consumption"] == 7000
     assert residual["solar_energy_exported"] == 4000
     assert residual["consumer_energy_imported"] == 7000
+
+
+def test_calendar_state_history_rows_convert_daily_totals_to_hourly_deltas():
+    namespace = _calendar_namespace()
+    start = datetime(2026, 5, 16, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc)
+    history = {
+        "sensor.power_sync_daily_solar_energy": [
+            _history_state("2.0", datetime(2026, 5, 16, 9, 15, tzinfo=timezone.utc)),
+            _history_state("4.5", datetime(2026, 5, 16, 10, 45, tzinfo=timezone.utc)),
+        ],
+        "sensor.power_sync_daily_grid_import": [
+            _history_state("1.2", datetime(2026, 5, 16, 10, 10, tzinfo=timezone.utc)),
+            _history_state("1.7", datetime(2026, 5, 16, 11, 5, tzinfo=timezone.utc)),
+        ],
+    }
+    entity_to_field = {
+        "sensor.power_sync_daily_solar_energy": "solar_generation",
+        "sensor.power_sync_daily_grid_import": "grid_import",
+    }
+
+    rows = namespace["_calendar_time_series_from_state_history_rows"](
+        history,
+        entity_to_field,
+        "day",
+        start,
+        end,
+    )
+
+    assert rows == [
+        {
+            "timestamp": "2026-05-16T09:00:00+00:00",
+            "solar_generation": 2000,
+            "battery_discharge": 0,
+            "battery_charge": 0,
+            "grid_import": 0,
+            "grid_export": 0,
+            "home_consumption": 0,
+            "solar_energy_exported": 2000,
+            "battery_energy_exported": 0,
+            "battery_energy_imported": 0,
+            "consumer_energy_imported": 0,
+            "grid_energy_imported": 0,
+            "grid_energy_exported": 0,
+        },
+        {
+            "timestamp": "2026-05-16T10:00:00+00:00",
+            "solar_generation": 2500,
+            "battery_discharge": 0,
+            "battery_charge": 0,
+            "grid_import": 1200,
+            "grid_export": 0,
+            "home_consumption": 0,
+            "solar_energy_exported": 2500,
+            "battery_energy_exported": 0,
+            "battery_energy_imported": 0,
+            "consumer_energy_imported": 0,
+            "grid_energy_imported": 1200,
+            "grid_energy_exported": 0,
+        },
+        {
+            "timestamp": "2026-05-16T11:00:00+00:00",
+            "solar_generation": 0,
+            "battery_discharge": 0,
+            "battery_charge": 0,
+            "grid_import": 500,
+            "grid_export": 0,
+            "home_consumption": 0,
+            "solar_energy_exported": 0,
+            "battery_energy_exported": 0,
+            "battery_energy_imported": 0,
+            "consumer_energy_imported": 0,
+            "grid_energy_imported": 500,
+            "grid_energy_exported": 0,
+        },
+    ]
 
 
 def test_calendar_statistic_finder_accepts_foxess_daily_battery_aliases():

@@ -4086,6 +4086,135 @@ def _calendar_statistics_end_dt(
     return min(end_dt, today_start)
 
 
+def _calendar_history_bucket_timestamp(
+    timestamp: datetime,
+    period: str,
+) -> str:
+    """Return the calendar-history bucket timestamp for a raw recorder state."""
+    local_timestamp = dt_util.as_local(timestamp)
+    if period == "day":
+        bucket = local_timestamp.replace(minute=0, second=0, microsecond=0)
+    else:
+        bucket = local_timestamp.replace(hour=0, minute=0, second=0, microsecond=0)
+    return bucket.isoformat()
+
+
+def _calendar_time_series_from_state_history_rows(
+    history: dict[str, list[Any]],
+    entity_to_field: dict[str, str],
+    period: str,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> list[dict[str, Any]]:
+    """Build calendar-history deltas from raw daily sensor state history."""
+    time_series: dict[str, dict[str, Any]] = {}
+
+    for entity_id, field in entity_to_field.items():
+        states = sorted(
+            (history or {}).get(entity_id, []) or [],
+            key=lambda state: (
+                getattr(state, "last_changed", None)
+                or getattr(state, "last_updated", None)
+                or start_dt
+            ),
+        )
+        previous_wh = 0.0
+        for state in states:
+            state_time = getattr(state, "last_changed", None) or getattr(
+                state, "last_updated", None
+            )
+            if state_time is None:
+                continue
+
+            local_time = dt_util.as_local(state_time)
+            if local_time < start_dt or local_time >= end_dt:
+                continue
+
+            current_wh = _calendar_energy_state_wh(state)
+            if current_wh <= 0:
+                previous_wh = current_wh
+                continue
+
+            # Daily sensors reset to zero around midnight. Treat a lower value
+            # than the previous state as a new-day delta instead of dropping it.
+            delta_wh = (
+                current_wh
+                if current_wh < previous_wh
+                else current_wh - previous_wh
+            )
+            previous_wh = current_wh
+            if delta_wh <= 0:
+                continue
+
+            timestamp = _calendar_history_bucket_timestamp(local_time, period)
+            row = time_series.setdefault(
+                timestamp,
+                {
+                    "timestamp": timestamp,
+                    "solar_generation": 0,
+                    "battery_discharge": 0,
+                    "battery_charge": 0,
+                    "grid_import": 0,
+                    "grid_export": 0,
+                    "home_consumption": 0,
+                },
+            )
+            row[field] += delta_wh
+
+    return [
+        _calendar_entry_with_detail_aliases(time_series[key])
+        for key in sorted(time_series)
+    ]
+
+
+async def _calendar_time_series_from_state_history(
+    hass: HomeAssistant,
+    period: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    entity_ids: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Build calendar history from raw recorder states when statistics are empty."""
+    if not entity_ids or end_dt <= start_dt:
+        return []
+
+    try:
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.history import get_significant_states
+
+        recorder = get_instance(hass)
+        if recorder is None:
+            return []
+
+        entity_to_field = {
+            entity_id: field for field, entity_id in entity_ids.items()
+        }
+        history = await recorder.async_add_executor_job(
+            get_significant_states,
+            hass,
+            start_dt,
+            end_dt,
+            list(entity_to_field),
+        )
+        rows = await hass.async_add_executor_job(
+            _calendar_time_series_from_state_history_rows,
+            history or {},
+            entity_to_field,
+            period,
+            start_dt,
+            end_dt,
+        )
+        if rows:
+            _LOGGER.info(
+                "Calendar history using recorder state fallback: rows=%d",
+                len(rows),
+            )
+        return rows
+    except Exception as exc:
+        _LOGGER.debug("Failed to build calendar history from state history: %s", exc)
+        return []
+
+
 def _find_calendar_statistic_entity_ids(
     hass: HomeAssistant,
     preferred_entry_id: str | None,
@@ -4209,6 +4338,14 @@ async def _calendar_time_series_from_statistics(
         _calendar_entry_with_detail_aliases(time_series[key])
         for key in sorted(time_series)
     ]
+    if not rows and statistic_end_dt > start_dt:
+        rows = await _calendar_time_series_from_state_history(
+            hass,
+            period,
+            start_dt,
+            statistic_end_dt,
+            entity_ids,
+        )
     if includes_today:
         current_entry = _calendar_current_entry(
             hass, coordinator, preferred_entry_id
