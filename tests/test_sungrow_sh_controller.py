@@ -585,7 +585,7 @@ def test_sungrow_coordinator_passes_requested_charge_power_to_controller():
         restore()
 
     assert result
-    assert fake_controller.charge_rate_limits == [12]
+    assert fake_controller.charge_rate_limits == []
     assert fake_controller.force_charge_power_w == [12000]
 
 
@@ -684,7 +684,7 @@ def test_sungrow_force_discharge_restore_reinstates_previous_discharge_limit():
     assert fake_controller.discharge_rate_limits == [5.0, 15.0]
 
 
-def test_sungrow_force_charge_restore_reinstates_previous_charge_limit():
+def test_sungrow_force_charge_leaves_existing_charge_limit_unchanged():
     SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
 
     async def run_force_charge_cycle():
@@ -705,7 +705,7 @@ def test_sungrow_force_charge_restore_reinstates_previous_charge_limit():
     assert restore_result
     assert fake_controller.force_charge_power_w == [5300]
     assert fake_controller.restore_normal_calls == 1
-    assert fake_controller.charge_rate_limits == [5.3, 15.0]
+    assert fake_controller.charge_rate_limits == []
 
 
 def test_sungrow_coordinator_serializes_force_charge_with_modbus_lock():
@@ -731,5 +731,5 @@ def test_sungrow_coordinator_serializes_force_charge_with_modbus_lock():
         restore()
 
     assert result
-    assert fake_controller.charge_rate_limits == [12]
+    assert fake_controller.charge_rate_limits == []
     assert fake_controller.force_charge_power_w == [12000]

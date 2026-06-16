@@ -4362,16 +4362,13 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
         Args:
             duration_minutes: Duration in minutes (not used by Sungrow - charge until manually stopped)
-            power_w: Target charge power in watts. If >0, sets charge rate limit first.
+            power_w: Target forced charge power in watts.
 
         Returns:
             True if successful
         """
         async with self._modbus_lock, self._controller:
             target_power_w = power_w if power_w > 0 else 5000
-            if power_w > 0:
-                await self._capture_charge_limit_for_restore()
-                await self._controller.set_charge_rate_limit(power_w / 1000)
             return await self._controller.force_charge(power_w=target_power_w)
 
     async def force_discharge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
