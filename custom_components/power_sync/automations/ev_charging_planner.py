@@ -842,10 +842,14 @@ async def is_ev_plugged_in(
                                 f"Charge cable {entity_id} is {state.state} and car at {location}, "
                                 f"treating as unplugged"
                             )
-                            return False
+                            if vehicle_vin is not None:
+                                return False
+                            continue
                     is_plugged = state.state == "on"
                     _LOGGER.debug(f"Found plugged in state from {entity_id} (VIN: {device_vin}): {is_plugged}")
-                    return is_plugged
+                    if is_plugged or vehicle_vin is not None:
+                        return is_plugged
+                    continue
 
             elif entity_id.startswith("sensor.") and "_charging" in entity_id_lower and "charging_" not in entity_id_lower:
                 state = hass.states.get(entity_id)
@@ -7958,6 +7962,7 @@ async def _find_external_scheduled_charging_vehicle(
         return None, False, "no active external scheduled session"
 
     blocked_reason = ""
+    saw_home_vehicle = False
     vehicles = await discover_all_tesla_vehicles(hass, config_entry)
     for vehicle in vehicles:
         vehicle_vin = vehicle.get("vin")
@@ -7987,10 +7992,13 @@ async def _find_external_scheduled_charging_vehicle(
             blocked_reason = f"vehicle location is {location or 'unknown'}"
             continue
 
+        saw_home_vehicle = True
         if await is_ev_actively_charging(hass, config_entry, vehicle_vin):
             return vehicle_vin, True, "vehicle is at home"
 
     if vehicles:
+        if saw_home_vehicle:
+            return None, False, "no active external scheduled session"
         return None, False, blocked_reason or "no active external scheduled session"
 
     can_stop, reason = await _can_stop_external_scheduled_session(hass, config_entry)
