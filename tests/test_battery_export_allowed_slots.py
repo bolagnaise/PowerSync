@@ -2775,6 +2775,57 @@ def test_single_slot_export_gap_is_not_bridged_below_reserve(opt_module):
     assert actions[1].soc == 0.32
 
 
+def test_single_slot_export_gap_respects_transient_export_floor(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.88)
+    coordinator._config.backup_reserve = 0.06
+    coordinator._config.battery_capacity_wh = 32000
+    coordinator._optimizer = SimpleNamespace(efficiency=0.92)
+    start = datetime(2026, 5, 3, 17, 30, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(
+            action="export",
+            power_w=15000,
+            battery_charge_w=0,
+            battery_discharge_w=15000,
+            soc=0.91,
+            timestamp=start,
+        ),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=900,
+            battery_charge_w=0,
+            battery_discharge_w=900,
+            soc=0.90,
+            timestamp=start + timedelta(minutes=5),
+        ),
+        SimpleNamespace(
+            action="export",
+            power_w=15000,
+            battery_charge_w=0,
+            battery_discharge_w=15000,
+            soc=0.88,
+            timestamp=start + timedelta(minutes=10),
+        ),
+    ]
+    schedule = SimpleNamespace(actions=actions)
+
+    coordinator._bridge_short_export_gaps(
+        schedule,
+        [0.45, 0.45, 0.45],
+        export_reserve_floor=0.90,
+    )
+
+    assert [action.action for action in actions] == [
+        "export",
+        "self_consumption",
+        "export",
+    ]
+    assert actions[1].power_w == 900
+    assert actions[1].battery_discharge_w == 900
+    assert actions[1].soc == 0.90
+
+
 def test_multi_slot_self_consumption_gap_between_exports_is_not_bridged(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)

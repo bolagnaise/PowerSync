@@ -2941,6 +2941,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._current_schedule = self._bridge_short_export_gaps(
                     self._current_schedule,
                     export_prices,
+                    export_reserve_floor=export_reserve_floor,
                 )
                 result.schedule = self._current_schedule
                 if self._should_disable_idle_schedule():
@@ -3429,6 +3430,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self,
         schedule: OptimizationSchedule,
         export_prices: list[float] | None = None,
+        export_reserve_floor: float | list[float] | None = None,
     ) -> OptimizationSchedule:
         """Keep export mode through one-slot self-use islands between exports."""
         actions = getattr(schedule, "actions", None) or []
@@ -3479,10 +3481,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 previous_action,
                 next_action,
             )
+            reserve_floor = self._bridge_export_reserve_floor(
+                export_reserve_floor,
+                gap_start,
+                gap_end,
+            )
             if not self._can_bridge_export_gap_above_reserve(
                 previous_action,
                 actions[gap_start:gap_end],
                 bridge_power_w,
+                reserve_floor,
             ):
                 continue
 
@@ -3511,9 +3519,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         previous_action: Any,
         gap_actions: list[Any],
         bridge_power_w: float,
+        reserve_floor: float | None = None,
     ) -> bool:
         """Return False when bridging would export below the configured floor."""
-        reserve_floor = self._force_discharge_reserve_floor()
+        reserve_floor = (
+            self._force_discharge_reserve_floor()
+            if reserve_floor is None
+            else max(0.0, min(1.0, reserve_floor))
+        )
         previous_soc = self._reserve_ratio(getattr(previous_action, "soc", None), None)
         gap_socs = [
             soc
@@ -3533,6 +3546,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if bridged_soc is None:
             return True
         return bridged_soc >= reserve_floor - 1e-6
+
+    def _bridge_export_reserve_floor(
+        self,
+        export_reserve_floor: float | list[float] | None,
+        gap_start: int,
+        gap_end: int,
+    ) -> float:
+        """Return the reserve floor that applies while filling an export gap."""
+        floor = self._force_discharge_reserve_floor()
+        if isinstance(export_reserve_floor, list):
+            scoped_floors = [
+                self._reserve_ratio(value, None)
+                for value in export_reserve_floor[gap_start:gap_end]
+            ]
+            scoped_floors = [value for value in scoped_floors if value is not None]
+            if scoped_floors:
+                floor = max(floor, max(scoped_floors))
+        else:
+            explicit_floor = self._reserve_ratio(export_reserve_floor, None)
+            if explicit_floor is not None:
+                floor = max(floor, explicit_floor)
+        return max(0.0, min(1.0, floor))
 
     def _bridged_gap_soc(
         self,
