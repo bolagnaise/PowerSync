@@ -183,6 +183,8 @@ def test_generic_dashboard_chart_tooltips_render_above_svg_lines():
     assert ".tooltip" in chart_source
     assert "z-index: 2;" in chart_source
     assert "z-index: 4;" in chart_source
+    assert "background: color-mix(in srgb, var(--ha-card-background, var(--card-background-color, white)) 48%, transparent);" in chart_source
+    assert "backdrop-filter: blur(10px) saturate(1.15);" in chart_source
 
 
 def test_optimizer_plan_shows_calculated_auto_reserve():
@@ -358,8 +360,8 @@ def test_optimizer_plan_charts_have_tooltips():
     assert "_priceTooltipConfig(model, compact, priceMeta)" in chart_source
     assert ".chart-tooltip-line" in chart_source
     assert ".chart-tooltip-time" in chart_source
-    assert "background: color-mix(in srgb, var(--ha-card-background, var(--card-background-color, white)) 78%, transparent);" in chart_source
-    assert "backdrop-filter: blur(8px);" in chart_source
+    assert "background: color-mix(in srgb, var(--ha-card-background, var(--card-background-color, white)) 48%, transparent);" in chart_source
+    assert "backdrop-filter: blur(10px) saturate(1.15);" in chart_source
 
 
 def test_optimizer_plan_chart_tooltips_stay_inside_android_webview():

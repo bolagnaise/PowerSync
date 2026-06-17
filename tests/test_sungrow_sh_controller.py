@@ -257,6 +257,38 @@ def test_force_charge_writes_requested_power_to_forced_power_register():
     ]
 
 
+def test_force_charge_clamps_below_practical_minimum():
+    async def run_force_charge():
+        controller, writes = _controller_with_recorded_writes()
+        result = await controller.force_charge(power_w=89)
+        return result, controller, writes
+
+    result, controller, writes = asyncio.run(run_force_charge())
+
+    assert result
+    assert writes == [
+        (controller.REG_CHARGE_DISCHARGE_POWER, controller.MIN_FORCED_POWER_W),
+        (controller.REG_EMS_MODE, controller.EMS_FORCED),
+        (controller.REG_CHARGE_CMD, controller.CMD_CHARGE),
+    ]
+
+
+def test_force_discharge_clamps_below_practical_minimum():
+    async def run_force_discharge():
+        controller, writes = _controller_with_recorded_writes()
+        result = await controller.force_discharge(power_w=150)
+        return result, controller, writes
+
+    result, controller, writes = asyncio.run(run_force_discharge())
+
+    assert result
+    assert writes == [
+        (controller.REG_CHARGE_DISCHARGE_POWER, controller.MIN_FORCED_POWER_W),
+        (controller.REG_EMS_MODE, controller.EMS_FORCED),
+        (controller.REG_CHARGE_CMD, controller.CMD_DISCHARGE),
+    ]
+
+
 def test_setup_battery_data_reads_only_core_battery_block():
     async def run_read():
         controller = SungrowSHController("192.0.2.10")
