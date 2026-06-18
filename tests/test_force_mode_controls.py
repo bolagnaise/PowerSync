@@ -124,6 +124,22 @@ def test_sungrow_force_discharge_timer_preserves_optimizer_export_window():
     assert '"source": "force_timer"' in function_source
 
 
+def test_sungrow_force_discharge_failure_clears_visible_switch_state():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_force_discharge")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    sungrow_section = function_source.split("is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))", 1)[1]
+    sungrow_section = sungrow_section.split("# Check if this is a GoodWe system", 1)[0]
+    failure_section = sungrow_section.split('else:\n                    force_discharge_state["active"] = False', 1)[1]
+    assert 'force_discharge_state["expires_at"] = None' in failure_section
+    assert 'force_discharge_state["hardware_expires_at"] = None' in failure_section
+    assert 'async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state"' in failure_section
+    assert "await persist_force_mode_state()" in failure_section
+
+
 def test_optimizer_force_action_matcher_distinguishes_charge_and_export():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
@@ -361,6 +377,19 @@ def test_force_handlers_use_optimizer_power_when_force_power_is_unset():
     assert 'power_w = command_power_w' in charge_source
     assert 'power_w = call.data.get("power_w", 0)' not in discharge_source
     assert 'power_w = call.data.get("power_w", 0)' not in charge_source
+
+
+def test_force_handlers_clamp_explicit_power_to_optimizer_max():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    resolve = _find_function(tree, "_resolve_force_command_power_w")
+    resolve_source = ast.get_source_segment(source, resolve)
+
+    assert resolve_source is not None
+    assert "explicit_power_w > configured_power_w" in resolve_source
+    assert "clamping explicit power" in resolve_source
+    assert "return configured_power_w" in resolve_source
+    assert "return explicit_power_w" in resolve_source
 
 
 def test_force_tariff_filter_matches_names_and_codes():

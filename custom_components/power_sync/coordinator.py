@@ -4384,10 +4384,20 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         """
         async with self._modbus_lock, self._controller:
             target_power_w = power_w if power_w > 0 else 5000
+            limit_changed = False
             if power_w > 0:
                 await self._capture_discharge_limit_for_restore()
                 await self._controller.set_discharge_rate_limit(power_w / 1000)
-            return await self._controller.force_discharge(power_w=target_power_w)
+                limit_changed = True
+            try:
+                result = await self._controller.force_discharge(power_w=target_power_w)
+            except Exception:
+                if limit_changed:
+                    await self._restore_captured_discharge_limit()
+                raise
+            if not result and limit_changed:
+                await self._restore_captured_discharge_limit()
+            return result
 
     async def restore_normal(self) -> bool:
         """Restore Sungrow to self-consumption mode.

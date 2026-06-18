@@ -458,6 +458,7 @@ class _FakeSungrowController:
             "discharge_rate_limit_kw": 15.0,
         }
         self.fail_zero_discharge_limit = False
+        self.force_discharge_result = True
 
     async def __aenter__(self):
         return self
@@ -481,7 +482,7 @@ class _FakeSungrowController:
 
     async def force_discharge(self, power_w: float = 5000) -> bool:
         self.force_discharge_power_w.append(power_w)
-        return True
+        return self.force_discharge_result
 
     async def restore_normal(self) -> bool:
         self.restore_normal_calls += 1
@@ -720,6 +721,28 @@ def test_sungrow_force_discharge_restore_reinstates_previous_discharge_limit():
     assert fake_controller.force_discharge_power_w == [5000]
     assert fake_controller.restore_normal_calls == 1
     assert fake_controller.discharge_rate_limits == [5.0, 15.0]
+
+
+def test_sungrow_force_discharge_failure_restores_previous_discharge_limit():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_force_discharge_failure():
+        fake_controller = _FakeSungrowController()
+        fake_controller.force_discharge_result = False
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {"battery_max_discharge_power": 15.0}
+
+        force_result = await coordinator.force_discharge(duration_minutes=30, power_w=500)
+        return force_result, fake_controller
+
+    try:
+        force_result, fake_controller = asyncio.run(run_force_discharge_failure())
+    finally:
+        restore()
+
+    assert not force_result
+    assert fake_controller.force_discharge_power_w == [500]
+    assert fake_controller.discharge_rate_limits == [0.5, 15.0]
 
 
 def test_sungrow_force_charge_leaves_existing_charge_limit_unchanged():

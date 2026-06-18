@@ -22797,11 +22797,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return int(round(parsed))
 
     def _resolve_force_command_power_w(direction: str, requested: Any) -> int:
-        """Use explicit force power first, then optimizer max power settings."""
+        """Resolve force power while respecting optimizer max power settings."""
         explicit_power_w = _coerce_force_power_w(requested)
-        if explicit_power_w > 0:
-            return explicit_power_w
         configured_power_w = _configured_force_power_w(direction)
+        if explicit_power_w > 0:
+            if configured_power_w > 0 and explicit_power_w > configured_power_w:
+                _LOGGER.info(
+                    "Force %s: clamping explicit power %dW to optimizer max %dW",
+                    direction,
+                    explicit_power_w,
+                    configured_power_w,
+                )
+                return configured_power_w
+            return explicit_power_w
         if configured_power_w > 0:
             _LOGGER.info(
                 "Force %s: no explicit power_w supplied; using optimizer max %dW",
@@ -24117,10 +24125,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await persist_force_mode_state()
                 else:
                     force_discharge_state["active"] = False
+                    force_discharge_state["expires_at"] = None
+                    force_discharge_state["hardware_expires_at"] = None
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                        "active": False,
+                        "expires_at": None,
+                        "duration": 0,
+                    })
+                    await persist_force_mode_state()
                     _LOGGER.error("Sungrow force discharge failed")
                 return
             except Exception as e:
                 force_discharge_state["active"] = False
+                force_discharge_state["expires_at"] = None
+                force_discharge_state["hardware_expires_at"] = None
+                async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                    "active": False,
+                    "expires_at": None,
+                    "duration": 0,
+                })
+                await persist_force_mode_state()
                 _LOGGER.error(f"Error in Sungrow force discharge: {e}", exc_info=True)
                 hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Sungrow Modbus communication error"))
                 return
