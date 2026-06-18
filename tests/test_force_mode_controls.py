@@ -100,6 +100,46 @@ def test_force_mode_persistence_uses_setup_store_reference():
     assert "await store.async_load()" in function_source
 
 
+def test_sungrow_force_charge_timer_preserves_optimizer_charge_window():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "auto_restore_charge_sungrow")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert '_optimizer_current_force_action_matches("charge")' in function_source
+    assert '_clear_force_timer_state_without_restore(' in function_source
+    assert '"source": "force_timer"' in function_source
+
+
+def test_sungrow_force_discharge_timer_preserves_optimizer_export_window():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "auto_restore_discharge_sungrow")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert '_optimizer_current_force_action_matches("discharge")' in function_source
+    assert 'still wants discharge/export' in function_source
+    assert '"source": "force_timer"' in function_source
+
+
+def test_optimizer_force_action_matcher_distinguishes_charge_and_export():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "_optimizer_current_force_action_matches")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert '"effective_current_action"' in function_source
+    assert '"planned_current_action"' in function_source
+    assert 'getattr(opt_coordinator, "_get_current_action", None)' in function_source
+    assert 'if force_type == "charge":' in function_source
+    assert 'return "charge" in current_actions' in function_source
+    assert 'if force_type == "discharge":' in function_source
+    assert '("discharge", "export")' in function_source
+
+
 def test_preserve_charge_backup_reserve_write_does_not_replace_user_reserve():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

@@ -16611,6 +16611,71 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         source = _control_call_source(call)
         return _is_monitoring_mode() and source not in ("user", "manual")
 
+    def _optimizer_current_force_action_matches(force_type: str) -> bool:
+        """Return True when the optimizer is actively asking for a force mode."""
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        opt_coordinator = entry_data.get("optimization_coordinator")
+        if not opt_coordinator or not getattr(opt_coordinator, "_enabled", False):
+            return False
+
+        current_actions: set[str] = set()
+        opt_data = getattr(opt_coordinator, "data", None)
+        if isinstance(opt_data, dict):
+            for key in (
+                "effective_current_action",
+                "current_action",
+                "planned_current_action",
+            ):
+                value = opt_data.get(key)
+                if value:
+                    current_actions.add(str(value).strip().lower())
+
+        get_current_action = getattr(opt_coordinator, "_get_current_action", None)
+        if callable(get_current_action):
+            try:
+                action = get_current_action()
+            except Exception as err:
+                _LOGGER.debug("Could not inspect optimizer current action: %s", err)
+            else:
+                action_name = getattr(action, "action", None)
+                if action_name:
+                    current_actions.add(str(action_name).strip().lower())
+
+        if force_type == "charge":
+            return "charge" in current_actions
+        if force_type == "discharge":
+            return bool(current_actions.intersection(("discharge", "export")))
+        return False
+
+    async def _clear_force_timer_state_without_restore(force_type: str, reason: str) -> None:
+        """Clear an expired manual force timer without changing hardware state."""
+        if force_type == "charge":
+            state = force_charge_state
+            signal = f"{DOMAIN}_force_charge_state"
+        else:
+            state = force_discharge_state
+            signal = f"{DOMAIN}_force_discharge_state"
+
+        _LOGGER.info("%s; clearing manual timer state without restore_normal", reason)
+        state["active"] = False
+        state["expires_at"] = None
+        state["hardware_expires_at"] = None
+        state["cancel_expiry_timer"] = None
+        state["duration"] = 0
+        state["saved_tariff"] = None
+        state["saved_operation_mode"] = None
+        state["saved_backup_reserve"] = None
+        state["saved_grid_charging_enabled"] = None
+        if force_type == "discharge":
+            state["saved_export_rule"] = None
+
+        async_dispatcher_send(hass, signal, {
+            "active": False,
+            "expires_at": None,
+            "duration": 0,
+        })
+        await persist_force_mode_state()
+
     if has_amber:
         _LOGGER.info("Running in Amber TOU Sync mode (provider: %s)", electricity_provider)
     elif has_localvolts:
@@ -24030,8 +24095,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             _LOGGER.debug("Sungrow force discharge timer superseded — skipping restore")
                             return
                         if force_discharge_state["active"]:
+                            if _optimizer_current_force_action_matches("discharge"):
+                                await _clear_force_timer_state_without_restore(
+                                    "discharge",
+                                    "Sungrow force discharge timer expired while optimizer still wants discharge/export",
+                                )
+                                return
                             _LOGGER.info("Sungrow force discharge expired, auto-restoring")
-                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+                            await hass.services.async_call(
+                                DOMAIN,
+                                SERVICE_RESTORE_NORMAL,
+                                {"source": "force_timer"},
+                                blocking=True,
+                            )
 
                     force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
                         hass,
@@ -25550,8 +25626,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             _LOGGER.debug("Sungrow force charge timer superseded — skipping restore")
                             return
                         if force_charge_state["active"]:
+                            if _optimizer_current_force_action_matches("charge"):
+                                await _clear_force_timer_state_without_restore(
+                                    "charge",
+                                    "Sungrow force charge timer expired while optimizer still wants charge",
+                                )
+                                return
                             _LOGGER.info("Sungrow force charge expired, auto-restoring")
-                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+                            await hass.services.async_call(
+                                DOMAIN,
+                                SERVICE_RESTORE_NORMAL,
+                                {"source": "force_timer"},
+                                blocking=True,
+                            )
 
                     force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
                         hass,
