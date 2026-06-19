@@ -2903,7 +2903,7 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         self.start_time = start_time
         self.end_time = end_time
         self.days = days
-        self.billing_day = billing_day
+        self.billing_day = int(billing_day)
         self.daily_supply_charge = daily_supply_charge
         self.monthly_supply_charge = monthly_supply_charge
         self.averaging_minutes = max(1, averaging_minutes)
