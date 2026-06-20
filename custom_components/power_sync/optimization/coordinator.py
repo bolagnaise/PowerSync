@@ -1337,14 +1337,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._entry:
             from ..const import (
                 CONF_ALPHAESS_EXPORT_LIMIT_KW,
+                CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
                 CONF_SIGENERGY_EXPORT_LIMIT_KW,
             )
+
+            if (
+                CONF_OPTIMIZATION_MAX_GRID_EXPORT_W in self._entry.options
+                or CONF_OPTIMIZATION_MAX_GRID_EXPORT_W in self._entry.data
+            ):
+                value = self._entry.options.get(
+                    CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+                    self._entry.data.get(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W),
+                )
+                return self._normalize_optional_export_power_w(value)
 
             for key in (CONF_SIGENERGY_EXPORT_LIMIT_KW, CONF_ALPHAESS_EXPORT_LIMIT_KW):
                 value = self._entry.options.get(key, self._entry.data.get(key))
                 watts = self._kw_to_w(value)
                 if watts is not None:
-                    return watts
+                    return int(round(watts))
 
         data = self._get_energy_data()
         if isinstance(data, dict):
@@ -1352,7 +1363,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if data.get("is_curtailed") and self._kw_to_w(export_limit) == 0:
                 return None
             if export_limit != "unlimited":
-                return self._kw_to_w(export_limit)
+                watts = self._kw_to_w(export_limit)
+                return int(round(watts)) if watts is not None else None
 
         return None
 
@@ -1403,7 +1415,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         export_command_cap_w: int | None = None
 
         if self._supports_target_export_power():
-            export_command_cap_w = self._config.max_discharge_w
+            export_command_cap_w = (
+                self._config.max_grid_export_w
+                if self._config.max_grid_export_w is not None
+                else self._config.max_discharge_w
+            )
             detected_physical_w = self._resolve_physical_max_discharge_w()
             if detected_physical_w and detected_physical_w > physical_discharge_w:
                 physical_discharge_w = detected_physical_w
@@ -3771,8 +3787,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 requested_w = 0.0
             if requested_w > 0:
                 command_w = min(command_w, requested_w)
-        if self._config.max_grid_export_w is not None:
-            command_w = min(command_w, float(self._config.max_grid_export_w))
+            if self._config.max_grid_export_w is not None:
+                command_w = min(command_w, float(self._config.max_grid_export_w))
         return command_w
 
     @staticmethod
@@ -5144,12 +5160,35 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             )
                     continue
 
+            export_cap_w = (
+                self._config.max_grid_export_w
+                if self._config.max_grid_export_w is not None
+                else self._config.max_discharge_w
+            )
             target_w = min(
-                float(self._config.max_discharge_w),
+                float(max(0, export_cap_w)),
                 export_wh / (len(spread_positions) * interval_hours),
             )
             target_w = round(max(0.0, target_w), 1)
             if target_w <= 0:
+                fallback_soc = _action_soc(start - 1)
+                if fallback_soc is None:
+                    fallback_soc = _action_soc(start)
+                for pos in spread_positions:
+                    original = actions[pos]
+                    if getattr(original, "action", None) in ("export", "discharge"):
+                        new_actions[pos] = ScheduleAction(
+                            timestamp=original.timestamp,
+                            action="self_consumption",
+                            power_w=0.0,
+                            soc=(
+                                round(fallback_soc, 4)
+                                if fallback_soc is not None
+                                else original.soc
+                            ),
+                            battery_charge_w=0.0,
+                            battery_discharge_w=0.0,
+                        )
                 continue
 
             soc_cursor = _action_soc(start - 1)
@@ -8605,6 +8644,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 value = FIXED_OPTIMIZATION_INTERVAL_MINUTES
             if key == "max_grid_import_w":
                 value = self._normalize_optional_power_w(value)
+            if key == "max_grid_export_w":
+                value = self._normalize_optional_export_power_w(value)
             if hasattr(self._config, key):
                 setattr(self._config, key, value)
         self._config.interval_minutes = FIXED_OPTIMIZATION_INTERVAL_MINUTES
@@ -8616,10 +8657,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 max_charge_w=self._config.max_charge_w,
                 max_discharge_w=self._config.max_discharge_w,
                 max_grid_import_w=self._config.max_grid_import_w,
+                max_grid_export_w=self._config.max_grid_export_w,
                 backup_reserve=self._config.backup_reserve,
                 horizon_hours=self._config.horizon_hours,
             )
-            self._optimizer.max_grid_export_w = self._config.max_grid_export_w
             self._optimizer.terminal_weight = self._profit_max_terminal_weight()
         if (
             "backup_reserve" in kwargs
@@ -8637,6 +8678,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except (TypeError, ValueError):
             return None
         return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _normalize_optional_export_power_w(value: Any) -> int | None:
+        if value in (None, "", []):
+            return None
+        try:
+            parsed = int(float(value))
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= 0 else None
 
     async def force_reoptimize(self) -> Any:
         """Force immediate re-optimization."""
@@ -9188,7 +9239,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Handle config updates
         config_keys = [
             "battery_capacity_wh", "max_charge_w", "max_discharge_w",
-            "max_grid_import_w",
+            "max_grid_import_w", "max_grid_export_w",
             "allow_grid_charge", "backup_reserve", "horizon_hours",
         ]
         config_updates = {k: v for k, v in settings.items() if k in config_keys}
@@ -9226,6 +9277,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     CONF_OPTIMIZATION_MAX_CHARGE_W,
                     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
                     CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
+                    CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
                 )
                 new_data = dict(self._entry.data)
                 new_options = dict(self._entry.options)
@@ -9263,6 +9315,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         new_data.pop(CONF_OPTIMIZATION_MAX_GRID_IMPORT_W, None)
                     else:
                         new_options[CONF_OPTIMIZATION_MAX_GRID_IMPORT_W] = grid_import_w
+                if "max_grid_export_w" in settings:
+                    grid_export_w = self._normalize_optional_export_power_w(
+                        settings["max_grid_export_w"]
+                    )
+                    if grid_export_w is None:
+                        new_options.pop(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W, None)
+                        new_data.pop(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W, None)
+                    else:
+                        new_options[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = grid_export_w
                 if "allow_grid_charge" in settings:
                     new_options[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = bool(settings["allow_grid_charge"])
                 # Prevent reload from API-driven options update

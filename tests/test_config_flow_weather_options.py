@@ -872,6 +872,7 @@ def test_battery_init_options_do_not_mix_optimization_settings():
         assert "CONF_OPTIMIZATION_PROVIDER" not in method_source
         assert "CONF_OPTIMIZATION_BACKUP_RESERVE" not in method_source
         assert "CONF_OPTIMIZATION_MAX_GRID_IMPORT_W" not in method_source
+        assert "CONF_OPTIMIZATION_MAX_GRID_EXPORT_W" not in method_source
 
     for path in (STRINGS_PATH, TRANSLATIONS_PATH):
         options_steps = json.loads(path.read_text())["options"]["step"]
@@ -887,9 +888,11 @@ def test_battery_init_options_do_not_mix_optimization_settings():
             assert "optimization_provider" not in step.get("data", {})
             assert "optimization_backup_reserve" not in step.get("data", {})
             assert "optimization_max_grid_import_w" not in step.get("data", {})
+            assert "optimization_max_grid_export_w" not in step.get("data", {})
             assert "optimization_provider" not in step.get("data_description", {})
             assert "optimization_backup_reserve" not in step.get("data_description", {})
             assert "optimization_max_grid_import_w" not in step.get("data_description", {})
+            assert "optimization_max_grid_export_w" not in step.get("data_description", {})
             assert "optimization" not in step["description"].lower()
 
 
@@ -961,6 +964,10 @@ def test_optimization_settings_api_exposes_planned_ev_load_entity():
     assert "new_data[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = entity_id" in post_source
     assert "new_options[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = entity_id" in post_source
     assert "entity_id or 'cleared'" in post_source
+    assert '"max_grid_export_w"' in get_source
+    assert "CONF_OPTIMIZATION_MAX_GRID_EXPORT_W" in get_source
+    assert '"max_grid_export_w"' in post_source
+    assert "Cleared max_grid_export_w" in post_source
 
 
 def test_neovolt_surplus_balancer_selector_is_in_optimization_options():
@@ -1613,13 +1620,21 @@ def test_optimization_enabled_toggle_is_translated_in_config_and_options():
 
             assert step["data"]["optimization_enabled"] == "Enable Smart Optimization"
             assert "LP optimizer" in step["data_description"]["optimization_enabled"]
-            assert step["data"]["optimization_ev_integration"] == "EV Charging Integration"
-            assert "EV charging demand" in step["data_description"]["optimization_ev_integration"]
+            assert step["data"]["optimization_ev_integration"] == "PowerSync EV charger plans"
+            assert "PowerSync-managed charger schedules" in step["data_description"][
+                "optimization_ev_integration"
+            ]
+            assert "same charging demand" in step["data_description"][
+                "optimization_ev_integration"
+            ]
             assert (
                 step["data"]["optimization_planned_ev_load_entity"]
                 == "Planned EV load forecast sensor"
             )
             assert "forecast-only EV demand" in step["data_description"][
+                "optimization_planned_ev_load_entity"
+            ]
+            assert "always adds this sensor" in step["data_description"][
                 "optimization_planned_ev_load_entity"
             ]
             assert step["data"]["monitoring_mode"] == "Monitoring mode"
@@ -1628,9 +1643,12 @@ def test_optimization_enabled_toggle_is_translated_in_config_and_options():
             assert "temporary hold or force-control modes" in step["data_description"]["hardware_backup_reserve"]
             assert step["data"]["optimization_max_grid_import_w"] == "Maximum grid import"
             assert "no site import cap" in step["data_description"]["optimization_max_grid_import_w"]
+            assert step["data"]["optimization_max_grid_export_w"] == "Maximum grid export"
+            assert "DNSP export cap" in step["data_description"]["optimization_max_grid_export_w"]
             keys = list(step["data"])
             assert keys.index("optimization_backup_reserve") < keys.index("hardware_backup_reserve")
-            assert keys.index("optimization_max_discharge_w") < keys.index("optimization_max_grid_import_w")
+            assert keys.index("optimization_max_discharge_w") < keys.index("optimization_max_grid_export_w")
+            assert keys.index("optimization_max_grid_export_w") < keys.index("optimization_max_grid_import_w")
             assert step["data"]["optimization_spread_export_enabled"] == "Spread export across window"
             assert "spreads planned battery export" in step["data_description"]["optimization_spread_export_enabled"]
             assert step["data"]["optimization_spread_import_enabled"] == "Spread import across window"

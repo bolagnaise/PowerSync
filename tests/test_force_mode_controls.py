@@ -792,16 +792,25 @@ def test_dual_sungrow_discharge_max_uses_each_inverter_limit():
     tree = ast.parse(source)
     update_method = _find_class_method(tree, "DualSungrowCoordinator", "_async_update_data")
     discharge_method = _find_class_method(tree, "DualSungrowCoordinator", "force_discharge")
+    grid_export_method = _find_class_method(tree, "DualSungrowCoordinator", "force_grid_export")
     update_source = ast.get_source_segment(source, update_method)
     discharge_source = ast.get_source_segment(source, discharge_method)
+    grid_export_source = ast.get_source_segment(source, grid_export_method)
 
     assert update_source is not None
     assert discharge_source is not None
+    assert grid_export_source is not None
     assert 'discharge_limit_w = self._combined_power_limit_w("discharge")' in update_source
     assert '"battery_max_discharge_power_w": discharge_limit_w' in update_source
     assert 'max_split = self._max_split_kw("discharge")' in discharge_source
     assert "power_w / 1000.0) >= sum(max_split)" in discharge_source
     assert "p1, p2 = max_split" in discharge_source
+    assert 'max_split = self._max_split_kw("discharge")' in grid_export_source
+    assert "self._coord1.force_grid_export" in grid_export_source
+    assert "export_limit_w=export_limit_w" in grid_export_source
+    assert "self._coord2.force_discharge" in grid_export_source
+    assert "power_w=p2 * 1000" in grid_export_source
+    assert "await self.restore_normal()" in grid_export_source
 
 
 def test_tesla_tariff_fetch_rejects_force_tariffs():

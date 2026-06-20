@@ -178,8 +178,13 @@ def test_max_grid_import_setting_is_exposed_through_api_and_coordinator():
     coordinator_source = COORDINATOR_PATH.read_text()
 
     assert 'CONF_OPTIMIZATION_MAX_GRID_IMPORT_W = "optimization_max_grid_import_w"' in const_source
+    assert 'CONF_OPTIMIZATION_MAX_GRID_EXPORT_W = "optimization_max_grid_export_w"' in const_source
     assert '"max_grid_import_w": opt_coordinator._config.max_grid_import_w' in init_source
+    assert '"max_grid_export_w": opt_coordinator._config.max_grid_export_w' in init_source
     assert '"max_grid_import_w": self._config.max_grid_import_w' in coordinator_source
-    assert '"max_grid_import_w",' in coordinator_source
+    assert '"max_grid_export_w": self._config.max_grid_export_w' in coordinator_source
+    assert '"max_grid_import_w", "max_grid_export_w",' in coordinator_source
     assert "CONF_OPTIMIZATION_MAX_GRID_IMPORT_W" in init_source
+    assert "CONF_OPTIMIZATION_MAX_GRID_EXPORT_W" in init_source
     assert "CONF_OPTIMIZATION_MAX_GRID_IMPORT_W" in coordinator_source
+    assert "CONF_OPTIMIZATION_MAX_GRID_EXPORT_W" in coordinator_source

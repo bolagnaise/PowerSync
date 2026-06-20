@@ -373,6 +373,66 @@ def test_grid_export_cap_limits_lp_export_plan_and_api_series(
     assert max(result.schedule.to_api_response()["battery_export_w"]) <= 5000.1
 
 
+def test_grid_export_cap_allows_extra_discharge_for_home_load(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=50000,
+        max_charge_w=10600,
+        max_discharge_w=10600,
+        max_grid_export_w=5500,
+        max_battery_export_w=5500,
+        backup_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.05] * 12,
+        export_prices=[1.00] * 12,
+        solar_forecast=[0.0] * 12,
+        load_forecast=[2.0] * 12,
+        current_soc=0.80,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=[True] * 12,
+        block_battery_charge=[True] * 12,
+    )
+
+    assert any(action.action == "export" for action in result.schedule.actions)
+    assert max(result.grid_export_w) <= 5500.1
+    assert max(action.power_w for action in result.schedule.actions) <= 5500.1
+    assert max(action.battery_discharge_w for action in result.schedule.actions) > 7000
+
+
+def test_zero_grid_export_cap_blocks_battery_export_plan(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=50000,
+        max_charge_w=10000,
+        max_discharge_w=10000,
+        max_grid_export_w=0,
+        max_battery_export_w=0,
+        backup_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.05] * 12,
+        export_prices=[1.00] * 12,
+        solar_forecast=[0.0] * 12,
+        load_forecast=[0.0] * 12,
+        current_soc=0.80,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=[True] * 12,
+        block_battery_charge=[True] * 12,
+    )
+
+    assert max(result.grid_export_w) <= 1e-6
+    assert all(action.action != "export" for action in result.schedule.actions)
+
+
 def test_target_export_cap_is_separate_from_total_discharge(battery_optimizer_module):
     optimizer = battery_optimizer_module.BatteryOptimizer(
         capacity_wh=50000,

@@ -30,6 +30,11 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
+from .history_migration import (
+    apply_history_relink,
+    format_history_relink_summary,
+    preview_history_relink,
+)
 from .const import (
     DOMAIN,
     CONF_AMBER_API_TOKEN,
@@ -438,6 +443,7 @@ from .const import (
     CONF_OPTIMIZATION_MAX_CHARGE_W,
     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
     CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
+    CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
     CONF_PROFIT_MAX_ENABLED,
     CONF_PROFIT_MAX_TARGET_TIME,
     CONF_PROFIT_MAX_TARGET_SOC,
@@ -752,6 +758,19 @@ def _stored_w_to_kw(value: Any, default_w: int) -> float:
     return amount / 1000.0 if amount > 100 else amount
 
 
+def _stored_optional_w_to_kw(value: Any) -> float | None:
+    """Convert an optional stored W/kW value to kW for config flow display."""
+    if value in (None, "", []):
+        return None
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return None
+    if amount < 0:
+        return None
+    return amount / 1000.0 if amount > 100 else amount
+
+
 def _stored_ratio_to_percent(value: Any, default_ratio: float) -> int:
     """Convert a stored 0-1 ratio or 0-100 percent to a clamped whole percent."""
     try:
@@ -823,6 +842,19 @@ def _form_kw_to_w(value: Any, default_kw: float) -> int:
         amount = float(value)
     except (TypeError, ValueError):
         amount = default_kw
+    return int(round(amount * 1000))
+
+
+def _form_optional_kw_to_w(value: Any) -> int | None:
+    """Convert an optional config flow kW field to W, preserving explicit zero."""
+    if value in (None, "", []):
+        return None
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return None
+    if amount < 0:
+        return None
     return int(round(amount * 1000))
 
 
@@ -2616,6 +2648,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 user_input.get(CONF_OPTIMIZATION_MAX_DISCHARGE_W),
                 default_discharge_kw,
             )
+            max_grid_export_w = _form_optional_kw_to_w(
+                user_input.get(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W)
+            )
             max_grid_import_w = _form_kw_to_w(
                 user_input.get(CONF_OPTIMIZATION_MAX_GRID_IMPORT_W),
                 0,
@@ -2640,6 +2675,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED: False,
                 }
             )
+            if max_grid_export_w is not None:
+                self._ml_options[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = (
+                    max_grid_export_w
+                )
             return self._create_final_entry()
 
         return self.async_show_form(
@@ -2704,6 +2743,17 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         NumberSelectorConfig(
                             min=0.1,
                             max=50,
+                            step=0.1,
+                            unit_of_measurement="kW",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=100,
                             step=0.1,
                             unit_of_measurement="kW",
                             mode=NumberSelectorMode.BOX,
@@ -2890,6 +2940,13 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         DEFAULT_PROFIT_MAX_TARGET_SOC,
                     ),
                 })
+                max_grid_export_w = _form_optional_kw_to_w(
+                    user_input.get(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W)
+                )
+                if max_grid_export_w is not None:
+                    self._ml_options[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = (
+                        max_grid_export_w
+                    )
             # Proceed to battery connection setup
             return await self._route_to_battery_setup()
 
@@ -2981,6 +3038,17 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 NumberSelectorConfig(
                     min=0.1,
                     max=50,
+                    step=0.1,
+                    unit_of_measurement="kW",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=100,
                     step=0.1,
                     unit_of_measurement="kW",
                     mode=NumberSelectorMode.BOX,
@@ -6504,6 +6572,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             menu_options.append("sigenergy_connection")
         elif battery_system == BATTERY_SYSTEM_SUNGROW:
             menu_options.append("sungrow_connection")
+            menu_options.append("history_relink")
         elif battery_system == BATTERY_SYSTEM_FOXESS:
             menu_options.append("foxess_connection_options")
         elif battery_system == BATTERY_SYSTEM_GOODWE:
@@ -6990,6 +7059,38 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 }
             ),
             errors=errors,
+        )
+
+    async def async_step_history_relink(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: relink mkaiser Sungrow history to PowerSync entities."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            if user_input.get("confirm") is not True:
+                errors["base"] = "confirm_required"
+            else:
+                result = apply_history_relink(self.hass, self.config_entry)
+                if result.get("applied_count", 0) > 0:
+                    return self.async_create_entry(
+                        title="",
+                        data=dict(self.config_entry.options),
+                    )
+                errors["base"] = "no_ready_history_relinks"
+
+        preview = preview_history_relink(self.hass, self.config_entry)
+        return self.async_show_form(
+            step_id="history_relink",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("confirm", default=False): BooleanSelector(),
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "summary": format_history_relink_summary(preview),
+            },
         )
 
     async def async_step_foxess_connection_options(
@@ -8129,6 +8230,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     user_input.get(CONF_OPTIMIZATION_MAX_DISCHARGE_W),
                     default_discharge_kw,
                 )
+                max_grid_export_w = _form_optional_kw_to_w(
+                    user_input.get(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W)
+                )
                 max_grid_import_w = _form_kw_to_w(
                     user_input.get(CONF_OPTIMIZATION_MAX_GRID_IMPORT_W),
                     0,
@@ -8168,6 +8272,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_options[CONF_OPTIMIZATION_MAX_CHARGE_W] = charge_w
                 new_data[CONF_OPTIMIZATION_MAX_DISCHARGE_W] = discharge_w
                 new_options[CONF_OPTIMIZATION_MAX_DISCHARGE_W] = discharge_w
+                if max_grid_export_w is None:
+                    new_data.pop(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W, None)
+                    new_options.pop(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W, None)
+                else:
+                    new_data[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = max_grid_export_w
+                    new_options[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = max_grid_export_w
                 new_data[CONF_OPTIMIZATION_MAX_GRID_IMPORT_W] = max_grid_import_w
                 new_options[CONF_OPTIMIZATION_MAX_GRID_IMPORT_W] = max_grid_import_w
                 new_data[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = allow_grid_charge
@@ -8278,6 +8388,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     "battery_capacity_wh": capacity_wh,
                     "max_charge_w": charge_w,
                     "max_discharge_w": discharge_w,
+                    "max_grid_export_w": max_grid_export_w,
                     "max_grid_import_w": max_grid_import_w,
                     "allow_grid_charge": allow_grid_charge,
                     "cost_function": COST_FUNCTION_COST,
@@ -8382,6 +8493,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 ),
             ),
             default_discharge_w,
+        )
+        current_max_grid_export_kw = _stored_optional_w_to_kw(
+            self._get_option(
+                CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+                self.config_entry.data.get(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W),
+            )
         )
         current_max_grid_import_kw = _stored_w_to_kw(
             self._get_option(
@@ -8532,6 +8649,17 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     default=current_discharge_kw,
                 ): NumberSelector(NumberSelectorConfig(
                     min=0.1, max=50, step=0.1, unit_of_measurement="kW",
+                    mode=NumberSelectorMode.BOX,
+                )),
+                vol.Optional(
+                    CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+                    description=(
+                        {"suggested_value": current_max_grid_export_kw}
+                        if current_max_grid_export_kw is not None
+                        else None
+                    ),
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0, max=100, step=0.1, unit_of_measurement="kW",
                     mode=NumberSelectorMode.BOX,
                 )),
                 vol.Required(

@@ -4966,6 +4966,46 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
             r2 = await self._coord2.force_discharge(duration_minutes)
         return r1 and r2
 
+    async def force_grid_export(
+        self,
+        duration_minutes: int = 30,
+        export_limit_w: float = 0,
+    ) -> bool:
+        """Force discharge both inverters while limiting site export on primary."""
+        max_split = self._max_split_kw("discharge")
+        if max_split:
+            _p1, p2 = max_split
+            r1 = await self._coord1.force_grid_export(
+                duration_minutes,
+                export_limit_w=export_limit_w,
+            )
+            if not r1:
+                return False
+            try:
+                r2 = await self._coord2.force_discharge(
+                    duration_minutes,
+                    power_w=p2 * 1000,
+                )
+            except Exception:
+                await self.restore_normal()
+                raise
+        else:
+            r1 = await self._coord1.force_grid_export(
+                duration_minutes,
+                export_limit_w=export_limit_w,
+            )
+            if not r1:
+                return False
+            try:
+                r2 = await self._coord2.force_discharge(duration_minutes)
+            except Exception:
+                await self.restore_normal()
+                raise
+
+        if not r2:
+            await self.restore_normal()
+        return r1 and r2
+
     async def restore_normal(self) -> bool:
         """Restore self-consumption on both inverters."""
         r1 = await self._coord1.restore_normal()

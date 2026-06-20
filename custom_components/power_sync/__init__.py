@@ -206,6 +206,8 @@ from .const import (
     SERVICE_RESTORE_NORMAL,
     SERVICE_GET_CALENDAR_HISTORY,
     SERVICE_SYNC_BATTERY_HEALTH,
+    SERVICE_PREVIEW_HISTORY_RELINK,
+    SERVICE_APPLY_HISTORY_RELINK,
     SERVICE_SET_BACKUP_RESERVE,
     SERVICE_SET_OPERATION_MODE,
     SERVICE_SET_GRID_EXPORT,
@@ -578,6 +580,7 @@ from .const import (
     CONF_OPTIMIZATION_MAX_CHARGE_W,
     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
     CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
+    CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
     CONF_OPTIMIZATION_DISABLE_IDLE,
@@ -590,6 +593,11 @@ from .const import (
     DEFAULT_PROFIT_MAX_TARGET_SOC,
     BATTERY_CAPACITY_DEFAULTS,
     BATTERY_POWER_DEFAULTS,
+)
+from .history_migration import (
+    apply_history_relink,
+    history_relink_applied_for_key,
+    preview_history_relink,
 )
 from .currency import (
     DEFAULT_CURRENCY,
@@ -4723,6 +4731,101 @@ class CalendarHistoryView(HomeAssistantView):
             self._inflight.pop(cache_key, None)
         self._store_calendar_result(cache_key, result, status)
         return web.json_response(result, status=status)
+
+
+def _is_history_relink_entry(entry: ConfigEntry) -> bool:
+    """Return True when an entry can use Sungrow history relinking."""
+    return (
+        entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_SUNGROW
+        or bool(entry.data.get(CONF_SUNGROW_HOST))
+        or bool(entry.options.get(CONF_SUNGROW_HOST))
+    )
+
+
+def _resolve_history_relink_entry(
+    hass: HomeAssistant,
+    entry_id: str | None = None,
+    default_entry: ConfigEntry | None = None,
+) -> ConfigEntry | None:
+    """Resolve the entry used by history relink preview/apply calls."""
+    if entry_id:
+        for candidate in hass.config_entries.async_entries(DOMAIN):
+            if candidate.entry_id == entry_id:
+                return candidate
+        return None
+
+    if default_entry is not None and _is_history_relink_entry(default_entry):
+        return default_entry
+
+    for candidate in hass.config_entries.async_entries(DOMAIN):
+        if _is_history_relink_entry(candidate):
+            return candidate
+    return default_entry
+
+
+class HistoryRelinkView(HomeAssistantView):
+    """HTTP view to preview/apply Sungrow history relinks."""
+
+    url = "/api/power_sync/history_relink"
+    name = "api:power_sync:history_relink"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle history relink preview requests."""
+        entry = _resolve_history_relink_entry(
+            self._hass,
+            request.query.get("entry_id"),
+        )
+        if entry is None:
+            return web.json_response(
+                {"success": False, "error": "PowerSync entry not found"},
+                status=404,
+            )
+        if not _is_history_relink_entry(entry):
+            return web.json_response(
+                {
+                    "success": False,
+                    "error": "History relink is only available for Sungrow entries",
+                },
+                status=400,
+            )
+        return web.json_response(preview_history_relink(self._hass, entry))
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle history relink apply requests."""
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+
+        entry = _resolve_history_relink_entry(
+            self._hass,
+            data.get("entry_id"),
+        )
+        if entry is None:
+            return web.json_response(
+                {"success": False, "error": "PowerSync entry not found"},
+                status=404,
+            )
+        if not _is_history_relink_entry(entry):
+            return web.json_response(
+                {
+                    "success": False,
+                    "error": "History relink is only available for Sungrow entries",
+                },
+                status=400,
+            )
+        if data.get("confirm") is not True:
+            return web.json_response(
+                {"success": False, "error": "confirm must be true"},
+                status=400,
+            )
+
+        return web.json_response(apply_history_relink(self._hass, entry))
 
 
 class PowerwallSettingsView(HomeAssistantView):
@@ -16136,6 +16239,12 @@ def _migrate_entity_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
         # Extract the sensor key from unique_id: "{entry_id}_{key}" → "key"
         key = uid[len(entry_prefix):]
         if not key:
+            continue
+        if history_relink_applied_for_key(entry.options, key):
+            _LOGGER.debug(
+                "Skipping canonical entity ID migration for history-relinked sensor %s",
+                entity_entry.entity_id,
+            )
             continue
 
         domain = entity_entry.entity_id.partition(".")[0]
@@ -29544,6 +29653,68 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(CalendarHistoryView(hass))
     _LOGGER.info("📊 Calendar history HTTP endpoint registered at /api/power_sync/calendar_history")
 
+    async def handle_preview_history_relink(call: ServiceCall) -> dict:
+        """Preview Sungrow history relinks without changing entities."""
+        target_entry = _resolve_history_relink_entry(
+            hass,
+            call.data.get("entry_id"),
+            entry,
+        )
+        if target_entry is None:
+            return {"success": False, "error": "PowerSync entry not found"}
+        if not _is_history_relink_entry(target_entry):
+            return {
+                "success": False,
+                "error": "History relink is only available for Sungrow entries",
+            }
+        result = preview_history_relink(hass, target_entry)
+        _LOGGER.info(
+            "Sungrow history relink preview: ready=%d statuses=%s",
+            result.get("ready_count", 0),
+            result.get("status_counts", {}),
+        )
+        return result
+
+    async def handle_apply_history_relink(call: ServiceCall) -> dict:
+        """Apply ready Sungrow history relinks."""
+        if call.data.get("confirm") is not True:
+            return {"success": False, "error": "confirm must be true"}
+
+        target_entry = _resolve_history_relink_entry(
+            hass,
+            call.data.get("entry_id"),
+            entry,
+        )
+        if target_entry is None:
+            return {"success": False, "error": "PowerSync entry not found"}
+        if not _is_history_relink_entry(target_entry):
+            return {
+                "success": False,
+                "error": "History relink is only available for Sungrow entries",
+            }
+        result = apply_history_relink(hass, target_entry)
+        _LOGGER.info(
+            "Sungrow history relink apply: applied=%d statuses=%s",
+            result.get("applied_count", 0),
+            result.get("status_counts", {}),
+        )
+        return result
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PREVIEW_HISTORY_RELINK,
+        handle_preview_history_relink,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_APPLY_HISTORY_RELINK,
+        handle_apply_history_relink,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.http.register_view(HistoryRelinkView(hass))
+    _LOGGER.info("Sungrow history relink endpoints registered")
+
     # Register HTTP endpoint for Powerwall settings (for mobile app Controls)
     hass.http.register_view(PowerwallSettingsView(hass))
     _LOGGER.info("⚙️ Powerwall settings HTTP endpoint registered at /api/power_sync/powerwall_settings")
@@ -31573,6 +31744,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return None
                 return parsed if parsed > 0 else None
 
+            def _nonnegative_optional_int_setting(key: str) -> int | None:
+                if key in entry.options:
+                    value = entry.options.get(key)
+                elif key in entry.data:
+                    value = entry.data.get(key)
+                else:
+                    return None
+                try:
+                    parsed = int(float(value))
+                except (TypeError, ValueError):
+                    return None
+                return parsed if parsed >= 0 else None
+
             saved_capacity_wh = _positive_int_setting(
                 CONF_OPTIMIZATION_BATTERY_CAPACITY_WH
             )
@@ -31584,6 +31768,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             saved_max_grid_import_w = _positive_int_setting(
                 CONF_OPTIMIZATION_MAX_GRID_IMPORT_W
+            )
+            saved_max_grid_export_w = _nonnegative_optional_int_setting(
+                CONF_OPTIMIZATION_MAX_GRID_EXPORT_W
             )
             saved_horizon_hours = _positive_int_setting(CONF_OPTIMIZATION_HORIZON)
             saved_auto_apply_reserve = bool(
@@ -31640,6 +31827,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if saved_max_discharge_w is not None:
                 optimizer_config_updates["max_discharge_w"] = saved_max_discharge_w
             optimizer_config_updates["max_grid_import_w"] = saved_max_grid_import_w
+            optimizer_config_updates["max_grid_export_w"] = saved_max_grid_export_w
             if saved_horizon_hours is not None:
                 optimizer_config_updates["horizon_hours"] = saved_horizon_hours
             optimization_coordinator.update_config(**optimizer_config_updates)
@@ -32070,6 +32258,21 @@ class OptimizationSettingsView(HomeAssistantView):
                     return default
                 return parsed if parsed > 0 else default
 
+            def _entry_optional_nonnegative_int_setting(key: str) -> int | None:
+                if not config_entry:
+                    return None
+                if key in config_entry.options:
+                    value = config_entry.options.get(key)
+                elif key in config_entry.data:
+                    value = config_entry.data.get(key)
+                else:
+                    return None
+                try:
+                    parsed = int(float(value))
+                except (TypeError, ValueError):
+                    return None
+                return parsed if parsed >= 0 else None
+
             def _entry_percent_setting(key: str, default_ratio: float) -> int:
                 if not config_entry:
                     return int(round(default_ratio * 100))
@@ -32209,6 +32412,9 @@ class OptimizationSettingsView(HomeAssistantView):
                         CONF_OPTIMIZATION_MAX_DISCHARGE_W,
                         default_power_w,
                     ),
+                    "max_grid_export_w": _entry_optional_nonnegative_int_setting(
+                        CONF_OPTIMIZATION_MAX_GRID_EXPORT_W
+                    ),
                     "max_grid_import_w": (
                         _entry_int_setting(CONF_OPTIMIZATION_MAX_GRID_IMPORT_W, 0)
                         if config_entry
@@ -32310,6 +32516,7 @@ class OptimizationSettingsView(HomeAssistantView):
                 "battery_capacity_wh": opt_coordinator._config.battery_capacity_wh,
                 "max_charge_w": opt_coordinator._config.max_charge_w,
                 "max_discharge_w": opt_coordinator._config.max_discharge_w,
+                "max_grid_export_w": opt_coordinator._config.max_grid_export_w,
                 "max_grid_import_w": opt_coordinator._config.max_grid_import_w,
                 "allow_grid_charge": opt_coordinator._config.allow_grid_charge,
                 "planned_ev_load_entity": opt_coordinator._planned_ev_load_entity_id,
@@ -32558,6 +32765,21 @@ class OptimizationSettingsView(HomeAssistantView):
                 if opt_coord:
                     opt_coord._startup_backup_reserve = int(hw_reserve * 100)
                     _LOGGER.info("Updated startup backup reserve to %d%%", int(hw_reserve * 100))
+
+            if "max_grid_export_w" in settings:
+                raw_export_cap = settings.get("max_grid_export_w")
+                if raw_export_cap in (None, "", []):
+                    new_data.pop(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W, None)
+                    new_options.pop(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W, None)
+                    changes.append("Cleared max_grid_export_w")
+                else:
+                    try:
+                        export_cap_w = int(float(raw_export_cap))
+                    except (TypeError, ValueError):
+                        export_cap_w = None
+                    if export_cap_w is not None and export_cap_w >= 0:
+                        new_options[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = export_cap_w
+                        changes.append(f"Set max_grid_export_w to {export_cap_w}")
 
             spec_key_map = {
                 "battery_capacity_wh": CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,

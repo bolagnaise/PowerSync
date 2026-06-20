@@ -140,6 +140,7 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_OPTIMIZATION_MAX_CHARGE_W = "max_charge_w"
     const_module.CONF_OPTIMIZATION_MAX_DISCHARGE_W = "max_discharge_w"
     const_module.CONF_OPTIMIZATION_MAX_GRID_IMPORT_W = "max_grid_import_w"
+    const_module.CONF_OPTIMIZATION_MAX_GRID_EXPORT_W = "optimization_max_grid_export_w"
     const_module.CONF_SIGENERGY_EXPORT_LIMIT_KW = "sigenergy_export_limit_kw"
     const_module.CONF_ALPHAESS_EXPORT_LIMIT_KW = "alphaess_export_limit_kw"
     const_module.CONF_PROFIT_MAX_TARGET_TIME = "profit_max_target_time"
@@ -544,6 +545,40 @@ def test_set_settings_persists_optimizer_reserve_to_data_and_options(opt_module)
     assert coordinator._entry.options["optimization_backup_reserve"] == 0.2
     assert updates[-1]["data"]["optimization_backup_reserve"] == 0.2
     assert updates[-1]["options"]["optimization_backup_reserve"] == 0.2
+
+
+def test_set_settings_persists_grid_export_cap_zero_and_clear(opt_module):
+    coordinator = _coordinator(opt_module, "amber")
+    coordinator.entry_id = "entry-1"
+
+    updates = []
+
+    class _ConfigEntries:
+        def async_update_entry(self, entry, **kwargs):
+            updates.append(kwargs)
+            if "data" in kwargs:
+                entry.data = kwargs["data"]
+            if "options" in kwargs:
+                entry.options = kwargs["options"]
+
+    coordinator.hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": {}}},
+        config_entries=_ConfigEntries(),
+    )
+
+    result = asyncio.run(coordinator.set_settings({"max_grid_export_w": 0}))
+
+    assert result["success"] is True
+    assert coordinator._config.max_grid_export_w == 0
+    assert coordinator._entry.options["optimization_max_grid_export_w"] == 0
+    assert updates[-1]["options"]["optimization_max_grid_export_w"] == 0
+
+    result = asyncio.run(coordinator.set_settings({"max_grid_export_w": None}))
+
+    assert result["success"] is True
+    assert coordinator._config.max_grid_export_w is None
+    assert "optimization_max_grid_export_w" not in coordinator._entry.options
+    assert "optimization_max_grid_export_w" not in coordinator._entry.data
 
 
 def test_auto_apply_reserve_enable_snapshots_current_optimizer_reserve(opt_module):
@@ -3389,6 +3424,7 @@ def test_non_target_export_battery_keeps_max_discharge_command(opt_module, batte
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
     coordinator.battery_system = battery_system
     coordinator._config.max_discharge_w = 5000
+    coordinator._config.max_grid_export_w = 1000
     start = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
     actions = [
         SimpleNamespace(
@@ -3413,6 +3449,17 @@ def test_grid_export_cap_resolves_from_sigenergy_config(opt_module):
     )
 
     assert coordinator._resolve_max_grid_export_w() == 5000
+
+
+def test_grid_export_cap_prefers_explicit_optimizer_config(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "amber",
+        optimization_max_grid_export_w=0,
+        sigenergy_export_limit_kw=5,
+    )
+
+    assert coordinator._resolve_max_grid_export_w() == 0
 
 
 def test_grid_export_cap_resolves_from_energy_data(opt_module):
@@ -3450,6 +3497,26 @@ def test_target_export_sync_uses_physical_discharge_and_user_export_cap(opt_modu
     assert updates["max_battery_export_w"] == 1000
 
 
+def test_target_export_sync_uses_grid_export_cap_as_command_cap(opt_module):
+    coordinator = _coordinator(opt_module, "globird")
+    coordinator.battery_system = "goodwe"
+    coordinator._config.max_discharge_w = 10600
+    coordinator._config.max_grid_export_w = 5500
+    coordinator.energy_coordinator = SimpleNamespace(data={"rated_power_w": 16384})
+    updates = {}
+
+    class _Optimizer:
+        def update_config(self, **kwargs):
+            updates.update(kwargs)
+
+    coordinator._optimizer = _Optimizer()
+
+    coordinator._sync_optimizer_discharge_limits()
+
+    assert updates["max_discharge_w"] == 16384
+    assert updates["max_battery_export_w"] == 5500
+
+
 def test_spread_export_schedule_flattens_planned_energy_across_allowed_window(opt_module):
     coordinator = _coordinator(opt_module, "octopus")
     coordinator.battery_system = "goodwe"
@@ -3479,6 +3546,35 @@ def test_spread_export_schedule_flattens_planned_energy_across_allowed_window(op
     original_wh = sum(action.battery_discharge_w for action in actions) * (5 / 60)
     spread_wh = sum(action.battery_discharge_w for action in spread.actions) * (5 / 60)
     assert spread_wh == pytest.approx(original_wh, abs=0.1)
+
+
+def test_spread_export_schedule_caps_target_at_grid_export_limit(opt_module):
+    coordinator = _coordinator(opt_module, "octopus")
+    coordinator.battery_system = "goodwe"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.max_discharge_w = 10000
+    coordinator._config.max_grid_export_w = 1000
+    start = datetime(2026, 5, 3, 9, 0, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="export" if idx < 2 else "self_consumption",
+            power_w=5000 if idx < 2 else 0,
+            battery_discharge_w=5000 if idx < 2 else 0,
+        )
+        for idx in range(6)
+    ]
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread = coordinator._spread_export_schedule(schedule, [True] * 6)
+
+    assert {action.action for action in spread.actions} == {"export"}
+    assert [action.power_w for action in spread.actions] == [1000.0] * 6
 
 
 def test_spread_export_schedule_respects_auto_reserve_export_floor(opt_module):

@@ -239,7 +239,7 @@ class BatteryOptimizer:
         self.max_charge_w = max_charge_w
         self.max_discharge_w = max_discharge_w
         self.max_grid_import_w = self._normalize_optional_power_w(max_grid_import_w)
-        self.max_grid_export_w = max_grid_export_w
+        self.max_grid_export_w = self._normalize_optional_export_power_w(max_grid_export_w)
         self.max_battery_export_w = max_battery_export_w
         self.efficiency = efficiency
         self.backup_reserve = backup_reserve
@@ -303,7 +303,7 @@ class BatteryOptimizer:
         max_charge_w: float | None = None,
         max_discharge_w: float | None = None,
         max_grid_import_w: float | None | object = _UNSET,
-        max_grid_export_w: float | None = None,
+        max_grid_export_w: float | None | object = _UNSET,
         max_battery_export_w: float | None | object = _UNSET,
         efficiency: float | None = None,
         backup_reserve: float | None = None,
@@ -326,8 +326,8 @@ class BatteryOptimizer:
                 if self.max_grid_import_w is not None
                 else None
             )
-        if max_grid_export_w is not None:
-            self.max_grid_export_w = max_grid_export_w
+        if max_grid_export_w is not _UNSET:
+            self.max_grid_export_w = self._normalize_optional_export_power_w(max_grid_export_w)
         if max_battery_export_w is not _UNSET:
             self.max_battery_export_w = max_battery_export_w
             self.max_battery_export_kw = (
@@ -354,6 +354,14 @@ class BatteryOptimizer:
         except (TypeError, ValueError):
             return None
         return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _normalize_optional_export_power_w(value: float | None | object) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= 0 else None
 
     def _charge_limit_kw(
         self,
