@@ -23473,8 +23473,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         await controller.disconnect()
             sungrow_coord = entry_data.get("sungrow_coordinator")
             if sungrow_coord:
-                await sungrow_coord.force_discharge(duration, power_w=power_w)
-                _LOGGER.debug(f"Sungrow force discharge hardware extended ({duration}min)")
+                opt_coord = entry_data.get("optimization_coordinator")
+                spread_export_active = bool(
+                    source == "optimizer"
+                    and getattr(opt_coord, "spread_export_enabled", False)
+                    and hasattr(sungrow_coord, "force_grid_export")
+                )
+                if spread_export_active:
+                    await sungrow_coord.force_grid_export(
+                        duration,
+                        export_limit_w=power_w,
+                    )
+                    _LOGGER.debug(
+                        "Sungrow spread export hardware refreshed (%dmin, export_limit=%.0fW)",
+                        duration,
+                        power_w,
+                    )
+                else:
+                    await sungrow_coord.force_discharge(duration, power_w=power_w)
+                    _LOGGER.debug(f"Sungrow force discharge hardware extended ({duration}min)")
                 return
             goodwe_coord = entry_data.get("goodwe_coordinator")
             if goodwe_coord:

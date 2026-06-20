@@ -4399,6 +4399,63 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 await self._restore_captured_discharge_limit()
             return result
 
+    async def force_grid_export(
+        self,
+        duration_minutes: int = 30,
+        export_limit_w: float = 0,
+    ) -> bool:
+        """Force battery discharge while limiting grid export separately.
+
+        Spread-export wants a target grid export rate, not a lower inverter
+        discharge ceiling. Keep the battery discharge cap at the normal inverter
+        limit so home load spikes can still be served by the battery, and use
+        Sungrow's export-limit register to constrain export to grid.
+        """
+        async with self._modbus_lock, self._controller:
+            target_export_w = max(0, int(round(export_limit_w or 0)))
+
+            await self._capture_export_limit_for_restore()
+            await self._capture_discharge_limit_for_restore()
+
+            normal_limit_kw = await self._resolve_normal_discharge_limit_kw()
+            if normal_limit_kw is None or normal_limit_kw <= 0:
+                normal_limit_kw = max(target_export_w / 1000.0, 5.0)
+
+            forced_power_w = int(round(normal_limit_kw * 1000))
+            limit_changed = False
+            export_limit_changed = False
+            try:
+                limit_changed = await self._controller.set_discharge_rate_limit(normal_limit_kw)
+                if not limit_changed:
+                    _LOGGER.warning(
+                        "Sungrow spread export: failed to set discharge limit to %.2fkW",
+                        normal_limit_kw,
+                    )
+                    return False
+
+                export_limit_changed = await self._controller.set_export_limit(target_export_w)
+                if not export_limit_changed:
+                    _LOGGER.warning(
+                        "Sungrow spread export: failed to set grid export limit to %dW",
+                        target_export_w,
+                    )
+                    await self._restore_captured_discharge_limit()
+                    return False
+
+                result = await self._controller.force_discharge(power_w=forced_power_w)
+            except Exception:
+                if export_limit_changed:
+                    await self._restore_captured_export_limit()
+                if limit_changed:
+                    await self._restore_captured_discharge_limit()
+                raise
+
+            if not result:
+                await self._restore_captured_export_limit()
+                await self._restore_captured_discharge_limit()
+
+            return result
+
     async def restore_normal(self) -> bool:
         """Restore Sungrow to self-consumption mode.
 
@@ -4407,9 +4464,10 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         """
         async with self._modbus_lock, self._controller:
             normal_ok = await self._controller.restore_normal()
+            export_limit_ok = await self._restore_captured_export_limit()
             charge_limit_ok = await self._restore_captured_charge_limit()
             limit_ok = await self._restore_captured_discharge_limit()
-            return bool(normal_ok and charge_limit_ok and limit_ok)
+            return bool(normal_ok and export_limit_ok and charge_limit_ok and limit_ok)
 
     async def set_max_soc(self, percent: int) -> bool:
         """Set maximum battery SOC percentage.
@@ -4476,6 +4534,45 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 "Could not capture Sungrow discharge limit before temporary cap: %s",
                 err,
             )
+
+    async def _capture_export_limit_for_restore(self) -> None:
+        """Save the current Sungrow export limit before a temporary target."""
+        if getattr(self, "_pre_control_export_limit_captured", False):
+            return
+
+        export_limit_w: int | None = None
+        export_limit_enabled: bool | None = None
+
+        coord_data = getattr(self, "data", None) or {}
+        if "export_limit_enabled" in coord_data:
+            export_limit_enabled = bool(coord_data.get("export_limit_enabled"))
+        if coord_data.get("export_limit_w") is not None:
+            try:
+                export_limit_w = int(float(coord_data.get("export_limit_w")))
+            except (TypeError, ValueError):
+                export_limit_w = None
+
+        if export_limit_enabled is None or (export_limit_enabled and export_limit_w is None):
+            try:
+                live_data = await self._controller.get_battery_data()
+            except Exception as err:
+                _LOGGER.debug(
+                    "Could not read live Sungrow export limit for restore target: %s",
+                    err,
+                )
+            else:
+                if "export_limit_enabled" in live_data:
+                    export_limit_enabled = bool(live_data.get("export_limit_enabled"))
+                if live_data.get("export_limit_w") is not None:
+                    try:
+                        export_limit_w = int(float(live_data.get("export_limit_w")))
+                    except (TypeError, ValueError):
+                        export_limit_w = None
+
+        self._pre_control_export_limit_w = (
+            export_limit_w if export_limit_enabled and export_limit_w is not None else None
+        )
+        self._pre_control_export_limit_captured = True
 
     async def _resolve_normal_discharge_limit_kw(self) -> float | None:
         """Resolve the Sungrow discharge cap to restore for self-consumption.
@@ -4570,6 +4667,22 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         limit_ok = await self._controller.set_discharge_rate_limit(restore_limit_kw)
         if limit_ok:
             self._pre_control_discharge_limit_kw = None
+        return bool(limit_ok)
+
+    async def _restore_captured_export_limit(self) -> bool:
+        """Restore a Sungrow export limit saved before temporary control."""
+        if not getattr(self, "_pre_control_export_limit_captured", False):
+            return True
+
+        restore_limit_w = getattr(self, "_pre_control_export_limit_w", None)
+        if restore_limit_w is None:
+            limit_ok = await self._controller.set_export_limit(None)
+        else:
+            limit_ok = await self._controller.set_export_limit(int(restore_limit_w))
+
+        if limit_ok:
+            self._pre_control_export_limit_w = None
+            self._pre_control_export_limit_captured = False
         return bool(limit_ok)
 
     async def restore_work_mode_from_idle(self) -> bool:
