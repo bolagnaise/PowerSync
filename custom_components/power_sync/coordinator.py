@@ -4377,27 +4377,14 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
         Args:
             duration_minutes: Duration in minutes (not used by Sungrow - discharge until manually stopped)
-            power_w: Target discharge power in watts. If >0, sets discharge rate limit first.
+            power_w: Target forced discharge power in watts.
 
         Returns:
             True if successful
         """
         async with self._modbus_lock, self._controller:
             target_power_w = power_w if power_w > 0 else 5000
-            limit_changed = False
-            if power_w > 0:
-                await self._capture_discharge_limit_for_restore()
-                await self._controller.set_discharge_rate_limit(power_w / 1000)
-                limit_changed = True
-            try:
-                result = await self._controller.force_discharge(power_w=target_power_w)
-            except Exception:
-                if limit_changed:
-                    await self._restore_captured_discharge_limit()
-                raise
-            if not result and limit_changed:
-                await self._restore_captured_discharge_limit()
-            return result
+            return await self._controller.force_discharge(power_w=target_power_w)
 
     async def force_grid_export(
         self,
@@ -4654,13 +4641,15 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
     async def _restore_captured_discharge_limit(self) -> bool:
         """Restore a Sungrow discharge limit saved before temporary control."""
-        restore_limit_kw = await self._resolve_normal_discharge_limit_kw()
         captured_limit_kw = getattr(self, "_pre_control_discharge_limit_kw", None)
-        if captured_limit_kw is not None:
-            if restore_limit_kw is None:
-                restore_limit_kw = captured_limit_kw
-            else:
-                restore_limit_kw = max(restore_limit_kw, captured_limit_kw)
+        if captured_limit_kw is None:
+            return True
+
+        restore_limit_kw = await self._resolve_normal_discharge_limit_kw()
+        if restore_limit_kw is None:
+            restore_limit_kw = captured_limit_kw
+        else:
+            restore_limit_kw = max(restore_limit_kw, captured_limit_kw)
         if restore_limit_kw is None or restore_limit_kw <= 0:
             return True
 

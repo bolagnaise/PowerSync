@@ -611,7 +611,7 @@ def test_sungrow_coordinator_passes_requested_discharge_power_to_controller():
         restore()
 
     assert result
-    assert fake_controller.discharge_rate_limits == [20]
+    assert fake_controller.discharge_rate_limits == []
     assert fake_controller.force_discharge_power_w == [20000]
 
 
@@ -727,7 +727,7 @@ def test_sungrow_force_discharge_restore_reinstates_previous_discharge_limit():
     assert restore_result
     assert fake_controller.force_discharge_power_w == [5000]
     assert fake_controller.restore_normal_calls == 1
-    assert fake_controller.discharge_rate_limits == [5.0, 15.0]
+    assert fake_controller.discharge_rate_limits == []
 
 
 def test_sungrow_force_discharge_restore_uses_normal_inverter_limit():
@@ -762,7 +762,7 @@ def test_sungrow_force_discharge_restore_uses_normal_inverter_limit():
     assert restore_result
     assert fake_controller.force_discharge_power_w == [500]
     assert fake_controller.restore_normal_calls == 1
-    assert fake_controller.discharge_rate_limits == [0.5, 7.9]
+    assert fake_controller.discharge_rate_limits == []
 
 
 def test_sungrow_spread_export_uses_export_limit_not_discharge_cap():
@@ -864,7 +864,7 @@ def test_sungrow_force_discharge_failure_restores_previous_discharge_limit():
 
     assert not force_result
     assert fake_controller.force_discharge_power_w == [500]
-    assert fake_controller.discharge_rate_limits == [0.5, 15.0]
+    assert fake_controller.discharge_rate_limits == []
 
 
 def test_sungrow_force_charge_leaves_existing_charge_limit_unchanged():
