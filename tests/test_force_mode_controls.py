@@ -693,6 +693,7 @@ def test_tesla_force_modes_always_reissue_autonomous_mode():
     assert '"autonomous"' in force_discharge_source
     assert '"autonomous"' in force_charge_source
     assert 'json={"default_real_mode": mode}' in force_set_mode_source
+    assert "from .coordinator import _parse_retry_after" in force_set_mode_source
     assert "_tesla_force_confirm_operation_mode(" in force_set_mode_source
     assert "response.status in (429, 500, 502, 503, 504)" in force_set_mode_source
 

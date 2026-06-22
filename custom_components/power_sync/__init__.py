@@ -23364,6 +23364,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         reason: str,
         max_attempts: int = 3,
     ) -> bool:
+        from .coordinator import _parse_retry_after
+
         retry_after_delay: float | None = None
         last_status: int | None = None
         last_text = ""
