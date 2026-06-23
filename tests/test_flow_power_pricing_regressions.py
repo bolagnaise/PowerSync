@@ -626,6 +626,26 @@ def test_flow_power_startup_populates_tariff_schedule_after_ha_started():
     assert "EVENT_HOMEASSISTANT_STARTED" in source
 
 
+def test_force_session_refreshes_display_tariff_before_upload_skip():
+    source = (COMPONENT_ROOT / "__init__.py").read_text()
+    sync_start = source.index("async def _handle_sync_tou_internal")
+    sync_source = source[
+        sync_start:
+        source.index("hass.services.async_register(DOMAIN, SERVICE_SYNC_TOU", sync_start)
+    ]
+
+    assert "skip_battery_tariff_sync = False" in sync_source
+    assert "refreshing display tariff schedule only" in sync_source
+
+    force_guard_pos = sync_source.index("if force_discharge_state.get(\"active\"):")
+    start_sync_pos = sync_source.index("_LOGGER.info(\"=== Starting TOU sync ===\")")
+    display_store_pos = sync_source.index("[\"tariff_schedule\"] = {")
+    upload_skip_pos = sync_source.index("if skip_battery_tariff_sync:")
+    token_pos = sync_source.index("current_token, current_provider = token_getter()")
+
+    assert force_guard_pos < start_sync_pos < display_store_pos < upload_skip_pos < token_pos
+
+
 def test_sigenergy_flow_power_sync_stores_canonical_tariff_schedule():
     source = (COMPONENT_ROOT / "__init__.py").read_text()
     sync_source = source[
@@ -638,6 +658,30 @@ def test_sigenergy_flow_power_sync_stores_canonical_tariff_schedule():
     assert '"sell_prices": canonical_sell_rates' in sync_source
     assert 'f"power_sync_tariff_updated_{entry.entry_id}"' in sync_source
     assert "Tariff schedule stored for sigenergy dashboard" in sync_source
+
+
+def test_sigenergy_force_session_can_refresh_display_schedule_without_cloud_upload():
+    source = (COMPONENT_ROOT / "__init__.py").read_text()
+    sigenergy_source = source[
+        source.index("async def _sync_tariff_to_sigenergy"):
+        source.index("async def _sync_tariff_to_foxess")
+    ]
+    sync_start = source.index("async def _handle_sync_tou_internal")
+    sync_source = source[
+        sync_start:
+        source.index("hass.services.async_register(DOMAIN, SERVICE_SYNC_TOU", sync_start)
+    ]
+
+    assert "upload_to_cloud: bool = True" in sigenergy_source
+    assert "if not upload_to_cloud:" in sigenergy_source
+    assert "display tariff schedule refreshed" in sigenergy_source
+    assert "upload_to_cloud=not skip_battery_tariff_sync" in sync_source
+
+    no_upload_pos = sigenergy_source.index("if not upload_to_cloud:")
+    credential_guard_pos = sigenergy_source.index("if not all([station_id, username, pass_enc]):")
+    cloud_upload_pos = sigenergy_source.index("client.set_tariff_rate")
+
+    assert no_upload_pos < credential_guard_pos < cloud_upload_pos
 
 
 def test_flow_power_tariff_dependent_sensors_listen_for_tariff_updates():

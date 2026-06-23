@@ -19512,7 +19512,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         return tariff
 
-    async def _sync_tariff_to_sigenergy(forecast_data: list, sync_mode: str, current_actual_interval: dict = None) -> None:
+    async def _sync_tariff_to_sigenergy(
+        forecast_data: list,
+        sync_mode: str,
+        current_actual_interval: dict = None,
+        upload_to_cloud: bool = True,
+    ) -> None:
         """Sync Amber prices to Sigenergy Cloud API.
 
         Converts Amber forecast data to Sigenergy's expected format and uploads
@@ -19561,10 +19566,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 CONF_SIGENERGY_CLOUD_REGION,
                 DEFAULT_SIGENERGY_CLOUD_REGION,
             )
-
-            if not all([station_id, username, pass_enc]):
-                _LOGGER.error("Missing Sigenergy Cloud credentials for tariff sync")
-                return
 
             if not forecast_data:
                 _LOGGER.warning("No forecast data available for Sigenergy tariff sync")
@@ -19719,6 +19720,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     len(sell_prices),
                     canonical_timezone or "auto",
                 )
+
+            if not upload_to_cloud:
+                if buy_prices:
+                    _LOGGER.info(
+                        "Sigenergy tariff upload skipped during active force session; "
+                        "display tariff schedule refreshed"
+                    )
+                else:
+                    _LOGGER.warning(
+                        "Sigenergy tariff upload skipped during active force session, "
+                        "but no canonical display tariff schedule was generated"
+                    )
+                return
+
+            if not all([station_id, username, pass_enc]):
+                _LOGGER.error("Missing Sigenergy Cloud credentials for tariff sync")
+                return
 
             if not buy_prices:
                 payload_source = "raw_sigenergy_converter_fallback"
@@ -20022,25 +20040,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("⏭️  TOU sync skipped - %s uses AEMO spike detection only", electricity_provider_check)
             return
 
-        # Skip TOU sync if force discharge is active - don't overwrite the discharge tariff
+        skip_battery_tariff_sync = False
+
+        # Defer external tariff writes while a force session is active, but still
+        # refresh the stored display schedule used by current-price sensors.
         if force_discharge_state.get("active"):
+            skip_battery_tariff_sync = True
             expires_at = force_discharge_state.get("expires_at")
             if expires_at:
                 remaining = (expires_at - dt_util.utcnow()).total_seconds() / 60
-                _LOGGER.info(f"⏭️  TOU sync skipped - Force discharge active ({remaining:.1f} min remaining)")
+                _LOGGER.info(
+                    "⏭️  Battery/cloud tariff sync deferred - Force discharge "
+                    "active (%.1f min remaining); refreshing display tariff schedule only",
+                    remaining,
+                )
             else:
-                _LOGGER.info("⏭️  TOU sync skipped - Force discharge active")
-            return
+                _LOGGER.info(
+                    "⏭️  Battery/cloud tariff sync deferred - Force discharge "
+                    "active; refreshing display tariff schedule only"
+                )
 
-        # Skip TOU sync if force charge is active - don't overwrite the charge tariff
+        # Defer external tariff writes while a force charge is active for the
+        # same reason: the battery/cloud tariff may currently be an override.
         if force_charge_state.get("active"):
+            skip_battery_tariff_sync = True
             expires_at = force_charge_state.get("expires_at")
             if expires_at:
                 remaining = (expires_at - dt_util.utcnow()).total_seconds() / 60
-                _LOGGER.info(f"⏭️  TOU sync skipped - Force charge active ({remaining:.1f} min remaining)")
+                _LOGGER.info(
+                    "⏭️  Battery/cloud tariff sync deferred - Force charge "
+                    "active (%.1f min remaining); refreshing display tariff schedule only",
+                    remaining,
+                )
             else:
-                _LOGGER.info("⏭️  TOU sync skipped - Force charge active")
-            return
+                _LOGGER.info(
+                    "⏭️  Battery/cloud tariff sync deferred - Force charge "
+                    "active; refreshing display tariff schedule only"
+                )
 
         _LOGGER.info("=== Starting TOU sync ===")
 
@@ -20494,15 +20530,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info("[MONITORING] Would sync Sigenergy tariff — blocked by monitoring mode")
                 return
             _LOGGER.info("🔀 Using Sigenergy Cloud API for tariff sync")
-            await _sync_tariff_to_sigenergy(forecast_data, sync_mode, current_actual_interval)
+            await _sync_tariff_to_sigenergy(
+                forecast_data,
+                sync_mode,
+                current_actual_interval,
+                upload_to_cloud=not skip_battery_tariff_sync,
+            )
             return
 
         # FoxESS: sync to Cloud API if configured, otherwise store for sensors only
         if battery_system == "foxess":
             foxess_api_key = entry.data.get(CONF_FOXESS_CLOUD_API_KEY)
-            if foxess_api_key and not _is_monitoring_mode():
+            if (
+                foxess_api_key
+                and not _is_monitoring_mode()
+                and not skip_battery_tariff_sync
+            ):
                 _LOGGER.info("🔀 Using FoxESS Cloud API for schedule sync")
                 await _sync_tariff_to_foxess(forecast_data, sync_mode, current_actual_interval)
+            elif foxess_api_key and skip_battery_tariff_sync:
+                _LOGGER.info(
+                    "FoxESS Cloud schedule sync deferred during active force "
+                    "session; storing prices for sensors only"
+                )
             elif foxess_api_key and _is_monitoring_mode():
                 _LOGGER.info("[MONITORING] Would sync FoxESS Cloud schedule — blocked by monitoring mode; storing prices for sensors only")
             else:
@@ -20812,6 +20862,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Send tariff to Tesla via Teslemetry or Fleet API (non-Tesla systems exit here)
         if token_getter is None:
+            return
+
+        if skip_battery_tariff_sync:
+            _LOGGER.info(
+                "Battery tariff upload skipped during active force session; "
+                "display tariff schedule refreshed"
+            )
             return
 
         # Blocked in monitoring mode — tariff_schedule already stored above for display.
