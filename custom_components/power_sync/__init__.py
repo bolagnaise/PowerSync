@@ -18513,14 +18513,60 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Signal sensor to update
         async_dispatcher_send(hass, f"power_sync_curtailment_updated_{entry.entry_id}")
 
-    # Helper function to get live status from Tesla API
+    def _get_cached_live_status() -> dict | None:
+        """Get live status from the active site coordinator when available."""
+        try:
+            from .automations.live_status import coordinator_data_to_ev_live_status
+
+            entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            for coord_key in (
+                "tesla_coordinator",
+                "sigenergy_coordinator",
+                "sungrow_coordinator",
+                "foxess_coordinator",
+                "goodwe_coordinator",
+                "alphaess_coordinator",
+                "solax_coordinator",
+                "saj_h2_coordinator",
+                "fronius_reserva_coordinator",
+                "neovolt_coordinator",
+                "solaredge_coordinator",
+                "anker_solix_coordinator",
+            ):
+                coordinator = entry_data.get(coord_key)
+                data = getattr(coordinator, "data", None)
+                if not data:
+                    continue
+
+                live_status = coordinator_data_to_ev_live_status(data)
+                inverter_last_state = entry_data.get("inverter_last_state")
+                if inverter_last_state == "curtailed":
+                    live_status["is_curtailed"] = True
+                elif inverter_last_state in ("normal", "running"):
+                    live_status["is_curtailed"] = False
+                _LOGGER.debug("Live status from %s", coord_key)
+                return live_status
+        except Exception as e:
+            _LOGGER.debug("Error getting cached coordinator live status: %s", e)
+
+        return None
+
+    # Helper function to get live status from the active coordinator or Tesla API
     async def get_live_status() -> dict | None:
-        """Get current live status from Tesla API.
+        """Get current live status from coordinator data or Tesla API.
 
         Returns:
             Dict with battery_soc, grid_power, solar_power, etc. or None if unavailable
             grid_power: Negative = exporting to grid, Positive = importing from grid
         """
+        cached_status = _get_cached_live_status()
+        if cached_status:
+            return cached_status
+
+        if not callable(token_getter):
+            _LOGGER.debug("No Tesla API token getter available for live status check")
+            return None
+
         try:
             current_token, current_provider = token_getter()
             if not current_token:

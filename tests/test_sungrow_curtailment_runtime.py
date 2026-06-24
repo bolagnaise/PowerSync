@@ -234,6 +234,22 @@ def test_periodic_solar_curtailment_routes_ac_inverter_without_tesla_token():
     )
 
 
+def test_ac_curtailment_live_status_uses_non_tesla_coordinator_before_api():
+    helper = _function_source("_get_cached_live_status")
+    live_status = _function_source("get_live_status")
+
+    assert "coordinator_data_to_ev_live_status" in helper
+    assert '"fronius_reserva_coordinator"' in helper
+    assert '"goodwe_coordinator"' in helper
+    assert '"solaredge_coordinator"' in helper
+    assert 'live_status["is_curtailed"] = True' in helper
+    assert "cached_status = _get_cached_live_status()" in live_status
+    assert "if not callable(token_getter):" in live_status
+    assert live_status.index("cached_status = _get_cached_live_status()") < live_status.index(
+        "if not callable(token_getter):"
+    )
+
+
 def test_solar_curtailment_is_not_blocked_by_monitoring_mode():
     periodic_handler = _function_source("handle_solar_curtailment_check")
     websocket_handler = _function_source("handle_solar_curtailment_with_websocket_data")
