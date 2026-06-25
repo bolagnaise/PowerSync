@@ -426,6 +426,7 @@ def test_dashboard_adds_provider_pricing_cards_as_hideable_sections():
 
     assert "findProviderSensor = (provider, suffixOrSuffixes)" in source
     assert "hasProviderSensor('globird', ['latest_data_status', 'latest_day_cost', 'balance'])" in source
+    assert "'power_sync_service_'" in source
     assert "const globirdCard = _globirdProvider(findProviderSensor);" in source
     assert "const flowPowerCard = _flowPower(e, hasE);" in source
     assert "left.push(flowPowerCard)" in source

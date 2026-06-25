@@ -5082,10 +5082,14 @@ class PowerSyncStrategy {
 
       const directMatches = [];
       for (const suffix of suffixes) {
-        for (const id of [
+        const ids = [
           `sensor.power_sync_${providerKey}_${suffix}`,
           `sensor.powersync_${providerKey}_${suffix}`,
-        ]) {
+        ];
+        if (providerKey === 'globird') {
+          ids.push(`sensor.power_sync_${suffix}`, `sensor.powersync_${suffix}`);
+        }
+        for (const id of ids) {
           if (hass.states[id]) directMatches.push(id);
         }
       }
@@ -5093,7 +5097,14 @@ class PowerSyncStrategy {
       const suffixMatches = Object.keys(hass.states || {}).filter((id) => {
         if (!id.startsWith('sensor.')) return false;
         const objectId = id.slice('sensor.'.length);
-        if (!objectId.startsWith(`power_sync_${providerKey}_`) && !objectId.startsWith(`powersync_${providerKey}_`)) {
+        const providerPrefixes = [
+          `power_sync_${providerKey}_`,
+          `powersync_${providerKey}_`,
+        ];
+        if (providerKey === 'globird') {
+          providerPrefixes.push('power_sync_service_', 'powersync_service_');
+        }
+        if (!providerPrefixes.some((prefix) => objectId.startsWith(prefix))) {
           return false;
         }
         return suffixes.some((suffix) => objectId.endsWith(`_${suffix}`));
