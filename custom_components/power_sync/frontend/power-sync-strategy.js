@@ -1460,8 +1460,8 @@ class PowerSyncBatteryHealth extends HTMLElement {
   }
 
   _fallbackPackLabel(index, role, isFollower, isExpansion) {
-    if (role === 'leader') return 'Leader PW3';
-    if (role === 'follower' || isFollower) return 'Follower PW3';
+    if (role === 'leader') return 'Leader Powerwall';
+    if (role === 'follower' || isFollower) return 'Follower Powerwall';
     if (role === 'expansion' || isExpansion) return `Expansion Pack ${index}`;
     return `Powerwall ${index}`;
   }

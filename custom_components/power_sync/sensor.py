@@ -2102,20 +2102,24 @@ def _pack_label(packs: list[dict[str, Any]], index: int) -> str:
         powerwall_number = sum(1 for prior in packs[: index + 1] if prior.get("role") == "powerwall")
         return f"Powerwall {powerwall_number}"
     if role == "leader":
-        return "Leader PW3"
+        return "Leader Powerwall"
     if role == "follower" or pack.get("isFollower"):
         follower_number = sum(
             1
             for prior in packs[: index + 1]
             if prior.get("role") == "follower" or prior.get("isFollower")
         )
-        return "Follower PW3" if follower_number == 1 else f"Follower PW3 {follower_number}"
+        return (
+            "Follower Powerwall"
+            if follower_number == 1
+            else f"Follower Powerwall {follower_number}"
+        )
     if pack.get("isExpansion"):
         expansion_number = sum(1 for prior in packs[: index + 1] if prior.get("isExpansion"))
         return f"Expansion Pack {expansion_number}"
 
     base_number = sum(1 for prior in packs[: index + 1] if not prior.get("isExpansion"))
-    return "Leader PW3" if base_number == 1 else f"Follower PW3 {base_number - 1}"
+    return "Leader Powerwall" if base_number == 1 else f"Follower Powerwall {base_number - 1}"
 
 
 def _pack_metric_available(packs: list[dict[str, Any]], metric: str) -> bool:

@@ -752,8 +752,8 @@ def test_powerwall_pack_labels_leader_follower_and_expansions():
     ]
 
     assert [sensor._pack_label(packs, index) for index in range(len(packs))] == [
-        "Leader PW3",
-        "Follower PW3",
+        "Leader Powerwall",
+        "Follower Powerwall",
         "Expansion Pack 1",
         "Expansion Pack 2",
     ]
