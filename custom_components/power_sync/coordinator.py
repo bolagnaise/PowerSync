@@ -3345,7 +3345,8 @@ class FlowPowerKWatchPriceCoordinator(DataUpdateCoordinator):
 
         try:
             dispatch = await self._client.dispatch5mins(self.api_region, period=60)
-            forecast_30 = await self._client.predispatch30mins(self.api_region, period=2)
+            # Keep the first upcoming half-hour slot; period=2 skips it.
+            forecast_30 = await self._client.predispatch30mins(self.api_region, period=1)
             forecast_5 = await self._client.predispatch5mins(self.api_region, period=60)
 
             if not dispatch:

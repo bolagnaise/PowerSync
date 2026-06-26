@@ -349,6 +349,7 @@ def test_flow_power_kwatch_coordinator_publishes_amber_compatible_data():
 
     assert "dispatch5mins" in source
     assert "predispatch30mins" in source
+    assert "predispatch30mins(self.api_region, period=1)" in source
     assert "predispatch5mins" in source
     assert "'current': current_prices" in source
     assert "'forecast': forecast" in source
