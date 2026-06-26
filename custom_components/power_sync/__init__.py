@@ -25005,11 +25005,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         sell_rate_discharge = 99.00  # $99/kWh - huge incentive to discharge
         sell_rate_normal = 0.08      # 8c/kWh normal feed-in
 
-        # Buy rates: LOW during discharge so Tesla Time-Based Control sees a
-        # clear export incentive. Grid charging is disabled before this tariff
-        # is uploaded, so the low import price cannot be used for grid charging.
+        # Buy rates: HIGH during discharge so Tesla Time-Based Control does not
+        # treat the force window as cheap grid import arbitrage.
         # Normal outside discharge window.
-        buy_rate_discharge = 0.00    # $0/kWh - maximize sell/buy spread
+        buy_rate_discharge = 99.00   # $99/kWh - no incentive to import from grid
         buy_rate_normal = 0.30       # 30c/kWh
 
         _LOGGER.info(f"Creating discharge tariff: sell=${sell_rate_discharge}/kWh, buy=${buy_rate_discharge}/kWh for {duration_minutes} min")
