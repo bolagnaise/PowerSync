@@ -4323,7 +4323,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return live_limit_w
 
     def _tesla_force_charge_should_yield_to_live_solar(self) -> bool:
-        """Return True when Tesla force charge should avoid curtailing live solar."""
+        """Return True when Tesla force charge should avoid curtailing solar surplus."""
         if self.battery_system != "tesla":
             return False
         if self._supports_target_charge_power():
@@ -4344,9 +4344,40 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if battery_level >= 98.0:
             return False
 
+        load_w = self._kw_to_w(data.get("load_power"))
+        battery_w = self._kw_to_w(data.get("battery_power"))
+        grid_w = self._kw_to_w(data.get("grid_power"))
+
+        if battery_w is not None and battery_w > 250.0:
+            _LOGGER.debug(
+                "Optimizer: Allowing Tesla force charge with %.0fW live solar "
+                "because the battery is discharging %.0fW into site load",
+                solar_w,
+                battery_w,
+            )
+            return False
+
+        if load_w is not None and solar_w - load_w < 500.0:
+            _LOGGER.debug(
+                "Optimizer: Allowing Tesla force charge with %.0fW live solar "
+                "because site load %.0fW leaves no meaningful solar surplus",
+                solar_w,
+                load_w,
+            )
+            return False
+
+        if grid_w is not None and grid_w > 250.0:
+            _LOGGER.debug(
+                "Optimizer: Allowing Tesla force charge with %.0fW live solar "
+                "because the site is importing %.0fW",
+                solar_w,
+                grid_w,
+            )
+            return False
+
         _LOGGER.info(
-            "Optimizer: Blocking Tesla force charge while %.0fW live solar is "
-            "available; Tesla TOU force charge cannot target partial charge "
+            "Optimizer: Blocking Tesla force charge while %.0fW live solar "
+            "surplus is available; Tesla TOU force charge cannot target partial charge "
             "power and may curtail AC-coupled solar",
             solar_w,
         )

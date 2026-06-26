@@ -322,6 +322,9 @@ def test_tesla_force_charge_yields_to_live_solar(opt_module):
     coordinator.energy_coordinator = SimpleNamespace(
         data={
             "solar_power": 3.8,
+            "load_power": 0.7,
+            "battery_power": 0.0,
+            "grid_power": 0.0,
             "battery_level": 46.0,
         }
     )
@@ -336,6 +339,22 @@ def test_tesla_force_charge_allowed_without_live_solar(opt_module):
         data={
             "solar_power": 0.0,
             "battery_level": 46.0,
+        }
+    )
+
+    assert coordinator._tesla_force_charge_should_yield_to_live_solar() is False
+
+
+def test_tesla_force_charge_allowed_when_site_load_absorbs_live_solar(opt_module):
+    coordinator = _coordinator(opt_module, "globird")
+    coordinator.battery_system = "tesla"
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "solar_power": 3.1,
+            "load_power": 11.8,
+            "battery_power": 8.7,
+            "grid_power": 0.0,
+            "battery_level": 24.0,
         }
     )
 
