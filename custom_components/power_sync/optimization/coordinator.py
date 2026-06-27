@@ -136,6 +136,8 @@ class OptimizationConfig:
     max_grid_import_w: int | None = None
     max_grid_export_w: int | None = None
     allow_grid_charge: bool = True
+    max_grid_charge_price: float | None = None
+    grid_charge_soc_cap: float = 1.0
     backup_reserve: float = 0.2
     interval_minutes: int = FIXED_OPTIMIZATION_INTERVAL_MINUTES
     horizon_hours: int = 48
@@ -3084,6 +3086,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             battery_charge_blocked = self._battery_charge_blocked_slots(
                 len(import_prices),
             )
+            grid_charge_allowed = self._grid_charge_allowed_slots(
+                import_prices,
+                solar_forecast,
+                load_forecast,
+                soc,
+            )
             self._sync_grid_export_cap_to_optimizer()
             self._sync_optimizer_discharge_limits()
             schedule_timestamps = self._price_timestamps(len(import_prices))
@@ -3124,6 +3132,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         battery_export_allowed,
                         battery_charge_blocked,
                         self._config.allow_grid_charge,
+                        grid_charge_allowed,
                         self._last_zerohero_bonus_prices,
                         self._last_zerohero_bonus_cap_kwh,
                         export_reserve_floor,
@@ -9205,6 +9214,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 value = self._normalize_optional_power_w(value)
             if key == "max_grid_export_w":
                 value = self._normalize_optional_export_power_w(value)
+            if key == "max_grid_charge_price":
+                value = self._normalize_optional_price(value)
+            if key == "grid_charge_soc_cap":
+                value = self._soc_ratio(value, 1.0)
             if hasattr(self._config, key):
                 setattr(self._config, key, value)
         self._config.interval_minutes = FIXED_OPTIMIZATION_INTERVAL_MINUTES
@@ -9248,10 +9261,111 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
         return parsed if parsed >= 0 else None
 
+    @staticmethod
+    def _normalize_optional_price(value: Any) -> float | None:
+        if value in (None, "", []):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if parsed <= 0:
+            return None
+        # Mobile/config flows expose cents/kWh. Internal prices are dollars/kWh.
+        if parsed > 1:
+            parsed = parsed / 100.0
+        return parsed
+
+    def _grid_charge_allowed_slots(
+        self,
+        import_prices: list[float],
+        solar_forecast: list[float],
+        load_forecast: list[float],
+        current_soc: float,
+    ) -> list[bool]:
+        """Return per-slot permission for forced grid battery charging."""
+        allowed = [True] * len(import_prices)
+        price_cap = self._normalize_optional_price(
+            getattr(self._config, "max_grid_charge_price", None)
+        )
+        if price_cap is not None:
+            for idx, price in enumerate(import_prices):
+                try:
+                    if float(price) > price_cap + 1e-9:
+                        allowed[idx] = False
+                except (TypeError, ValueError):
+                    continue
+
+        soc_cap = self._soc_ratio(
+            getattr(self._config, "grid_charge_soc_cap", 1.0),
+            1.0,
+        )
+        if soc_cap < 0.999:
+            capacity_kwh = max(0.0, float(self._config.battery_capacity_wh or 0) / 1000.0)
+            max_charge_kw = max(0.0, float(self._config.max_charge_w or 0) / 1000.0)
+            dt_hours = self._config.interval_minutes / 60.0
+            projected_soc = max(0.0, min(1.0, float(current_soc or 0.0)))
+            for idx in range(len(import_prices)):
+                if projected_soc >= soc_cap - 1e-6:
+                    allowed[idx] = False
+                if capacity_kwh <= 0 or idx >= len(solar_forecast) or idx >= len(load_forecast):
+                    continue
+                surplus_kw = max(
+                    0.0,
+                    float(solar_forecast[idx] or 0.0) - float(load_forecast[idx] or 0.0),
+                )
+                if surplus_kw > 0:
+                    projected_soc = min(
+                        1.0,
+                        projected_soc
+                        + min(surplus_kw, max_charge_kw) * dt_hours / capacity_kwh,
+                    )
+
+        return allowed
+
     async def force_reoptimize(self) -> Any:
         """Force immediate re-optimization."""
         await self._run_optimization()
         return self._current_schedule
+
+    @staticmethod
+    def _settings_groups() -> dict[str, Any]:
+        """Return non-breaking mobile metadata for grouped optimizer settings."""
+        return {
+            "optimizer": {
+                "title": "Smart Optimization",
+                "collapsed": False,
+                "fields": [
+                    "enabled",
+                    "backup_reserve",
+                    "hardware_backup_reserve",
+                    "profit_max_enabled",
+                    "charge_by_time_enabled",
+                    "charge_by_time_target_time",
+                    "charge_by_time_target_soc",
+                    "load_entity",
+                    "planned_ev_load_entity",
+                    "battery_capacity_wh",
+                    "max_charge_w",
+                    "max_discharge_w",
+                ],
+            },
+            "advanced_optimizer": {
+                "title": "Advanced optimizer controls",
+                "collapsed": True,
+                "fields": [
+                    "allow_grid_charge",
+                    "max_grid_charge_price",
+                    "grid_charge_soc_cap",
+                    "max_grid_import_w",
+                    "max_grid_export_w",
+                    "spread_import_enabled",
+                    "spread_export_enabled",
+                    "disable_idle_enabled",
+                    "auto_apply_reserve_enabled",
+                ],
+            },
+        }
 
     def get_forecast_data(self) -> dict[str, Any]:
         """Get forecast data for LP forecast sensors.
@@ -9460,6 +9574,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "auto_apply_reserve_enabled": self.auto_apply_reserve_enabled,
             "manual_backup_reserve": self.manual_backup_reserve,
             "backup_reserve": self._config.backup_reserve,
+            "settings_groups": self._settings_groups(),
             "idle_hold_active": (
                 self._last_executed_action == "idle"
                 and self._idle_hold_reserve is not None
@@ -9497,6 +9612,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "max_discharge_w": self._config.max_discharge_w,
                 "max_grid_import_w": self._config.max_grid_import_w,
                 "max_grid_export_w": self._config.max_grid_export_w,
+                "max_grid_charge_price": (
+                    round(self._config.max_grid_charge_price * 100, 3)
+                    if self._config.max_grid_charge_price is not None
+                    else 0
+                ),
+                "grid_charge_soc_cap": int(
+                    round(self._soc_ratio(self._config.grid_charge_soc_cap, 1.0) * 100)
+                ),
                 "allow_grid_charge": self._config.allow_grid_charge,
                 "spread_export_enabled": self._config.spread_export_enabled,
                 "spread_import_enabled": self._config.spread_import_enabled,
@@ -9813,6 +9936,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         config_keys = [
             "battery_capacity_wh", "max_charge_w", "max_discharge_w",
             "max_grid_import_w", "max_grid_export_w",
+            "max_grid_charge_price", "grid_charge_soc_cap",
             "allow_grid_charge", "backup_reserve", "horizon_hours",
         ]
         config_updates = {k: v for k, v in settings.items() if k in config_keys}
@@ -9824,6 +9948,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 reserve = config_updates["backup_reserve"]
                 if reserve > 1:
                     config_updates["backup_reserve"] = reserve / 100
+            if "max_grid_charge_price" in config_updates:
+                config_updates["max_grid_charge_price"] = (
+                    self._normalize_optional_price(
+                        config_updates["max_grid_charge_price"]
+                    )
+                )
+            if "grid_charge_soc_cap" in config_updates:
+                config_updates["grid_charge_soc_cap"] = self._soc_ratio(
+                    config_updates["grid_charge_soc_cap"],
+                    1.0,
+                )
             if "horizon_hours" in config_updates:
                 try:
                     horizon_hours = int(float(config_updates["horizon_hours"]))
@@ -9851,6 +9986,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
                     CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
                     CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+                    CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
+                    CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
                 )
                 new_data = dict(self._entry.data)
                 new_options = dict(self._entry.options)
@@ -9897,6 +10034,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         new_data.pop(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W, None)
                     else:
                         new_options[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = grid_export_w
+                if "max_grid_charge_price" in settings:
+                    price_cap = self._normalize_optional_price(
+                        settings["max_grid_charge_price"]
+                    )
+                    if price_cap is None:
+                        new_options.pop(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE, None)
+                        new_data.pop(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE, None)
+                    else:
+                        new_options[CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE] = price_cap
+                        new_data[CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE] = price_cap
+                if "grid_charge_soc_cap" in settings:
+                    soc_cap = self._soc_ratio(settings["grid_charge_soc_cap"], 1.0)
+                    new_options[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = soc_cap
+                    new_data[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = soc_cap
                 if "allow_grid_charge" in settings:
                     new_options[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = bool(settings["allow_grid_charge"])
                 # Prevent reload from API-driven options update

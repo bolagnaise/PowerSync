@@ -445,6 +445,8 @@ from .const import (
     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
     CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
     CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+    CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
+    CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
     CONF_PROFIT_MAX_ENABLED,
     CONF_CHARGE_BY_TIME_ENABLED,
     CONF_CHARGE_BY_TIME_TARGET_TIME,
@@ -786,6 +788,19 @@ def _stored_ratio_to_percent(value: Any, default_ratio: float) -> int:
     return max(0, min(100, int(round(amount))))
 
 
+def _stored_optional_price_to_cents(value: Any) -> float:
+    """Convert optional stored $/kWh or c/kWh to c/kWh for form display."""
+    if value in (None, "", []):
+        return 0.0
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if amount <= 0:
+        return 0.0
+    return amount * 100.0 if amount <= 1 else amount
+
+
 def _normalize_optional_entity(value: Any) -> str | None:
     """Return a usable entity id, or None for unset optional entity fields."""
     if not isinstance(value, str):
@@ -860,6 +875,19 @@ def _form_optional_kw_to_w(value: Any) -> int | None:
     if amount < 0:
         return None
     return int(round(amount * 1000))
+
+
+def _form_optional_cents_to_price(value: Any) -> float | None:
+    """Convert optional c/kWh form input to stored $/kWh."""
+    if value in (None, "", []):
+        return None
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return None
+    if amount <= 0:
+        return None
+    return amount / 100.0 if amount > 1 else amount
 
 
 def _form_percent_to_ratio(value: Any, default_ratio: float) -> float:
@@ -2930,6 +2958,15 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         user_input.get(CONF_OPTIMIZATION_MAX_GRID_IMPORT_W),
                         0,
                     ),
+                    CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE: (
+                        _form_optional_cents_to_price(
+                            user_input.get(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE)
+                        )
+                    ),
+                    CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP: _form_percent_to_ratio(
+                        user_input.get(CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP),
+                        1.0,
+                    ),
                     CONF_OPTIMIZATION_ALLOW_GRID_CHARGE: user_input.get(
                         CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                         True,
@@ -3091,6 +3128,30 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                 default=True,
             ): BooleanSelector(),
+            vol.Required(
+                CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
+                default=0,
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=200,
+                    step=0.1,
+                    unit_of_measurement="c/kWh",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(
+                CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
+                default=100,
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=100,
+                    step=1,
+                    unit_of_measurement="%",
+                    mode=NumberSelectorMode.SLIDER,
+                )
+            ),
         }
         if not is_tesla:
             schema_fields.update({
@@ -9045,6 +9106,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     user_input.get(CONF_OPTIMIZATION_MAX_GRID_IMPORT_W),
                     0,
                 )
+                max_grid_charge_price = _form_optional_cents_to_price(
+                    user_input.get(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE)
+                )
+                grid_charge_soc_cap = _form_percent_to_ratio(
+                    user_input.get(CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP),
+                    1.0,
+                )
                 allow_grid_charge = user_input.get(
                     CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                     True,
@@ -9091,6 +9159,18 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     new_options[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = max_grid_export_w
                 new_data[CONF_OPTIMIZATION_MAX_GRID_IMPORT_W] = max_grid_import_w
                 new_options[CONF_OPTIMIZATION_MAX_GRID_IMPORT_W] = max_grid_import_w
+                if max_grid_charge_price is None:
+                    new_data.pop(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE, None)
+                    new_options.pop(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE, None)
+                else:
+                    new_data[CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE] = (
+                        max_grid_charge_price
+                    )
+                    new_options[CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE] = (
+                        max_grid_charge_price
+                    )
+                new_data[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = grid_charge_soc_cap
+                new_options[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = grid_charge_soc_cap
                 new_data[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = allow_grid_charge
                 new_options[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = allow_grid_charge
                 spread_export_enabled = (
@@ -9212,6 +9292,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     "max_discharge_w": discharge_w,
                     "max_grid_export_w": max_grid_export_w,
                     "max_grid_import_w": max_grid_import_w,
+                    "max_grid_charge_price": max_grid_charge_price,
+                    "grid_charge_soc_cap": grid_charge_soc_cap,
                     "allow_grid_charge": allow_grid_charge,
                     "cost_function": COST_FUNCTION_COST,
                     "profit_max_enabled": profit_max_enabled,
@@ -9337,6 +9419,19 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         current_allow_grid_charge = self._get_option(
             CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
             self.config_entry.data.get(CONF_OPTIMIZATION_ALLOW_GRID_CHARGE, True),
+        )
+        current_max_grid_charge_price = _stored_optional_price_to_cents(
+            self._get_option(
+                CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
+                self.config_entry.data.get(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE),
+            )
+        )
+        current_grid_charge_soc_cap = _stored_ratio_to_percent(
+            self._get_option(
+                CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
+                self.config_entry.data.get(CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP, 1.0),
+            ),
+            1.0,
         )
         current_spread_export_enabled = self._get_option(
             CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
@@ -9524,6 +9619,20 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                     default=bool(current_allow_grid_charge),
                 ): BooleanSelector(),
+                vol.Required(
+                    CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
+                    default=current_max_grid_charge_price,
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                    mode=NumberSelectorMode.BOX,
+                )),
+                vol.Required(
+                    CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
+                    default=current_grid_charge_soc_cap,
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0, max=100, step=1, unit_of_measurement="%",
+                    mode=NumberSelectorMode.SLIDER,
+                )),
             }
         )
         if not is_tesla:

@@ -1033,6 +1033,28 @@ def test_restore_normal_does_not_clear_newer_force_command():
     assert "_tesla_force_set_operation_mode(" in function_source
 
 
+def test_tesla_restore_failure_keeps_force_state_for_retry():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_restore_normal")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    retry_helper_index = function_source.index("def _schedule_tesla_restore_retry")
+    failure_guard_index = function_source.index("if tesla_restore_failed:")
+    clear_index = function_source.index(
+        '# Clear discharge state',
+        failure_guard_index,
+    )
+
+    assert retry_helper_index < failure_guard_index < clear_index
+    assert '_mark_tesla_restore_failed(f"operation mode restore failed for site {site_id}")' in function_source
+    assert "backup reserve restore failed for site" in function_source
+    assert "grid charging restore failed for site" in function_source
+    assert '"_restore_retry": next_retry' in function_source
+    assert "await persist_force_mode_state()" in function_source[failure_guard_index:clear_index]
+
+
 def test_tesla_force_charge_enables_grid_charging_before_tariff_upload():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

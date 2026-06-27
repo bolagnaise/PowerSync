@@ -31,6 +31,39 @@ When enabled, Smart Optimization may plan forced battery charging from grid
 import when prices make it worthwhile. When disabled, Charge By Time cannot force
 grid charging, but solar surplus can still charge the battery naturally.
 
+## Advanced optimizer controls
+
+Advanced controls change the LP solver's decision boundaries. Leave them at their
+defaults unless you want a hard rule that overrides the optimiser's whole-plan
+economics.
+
+### Maximum grid charge price
+
+Sets a hard import-price ceiling for forced grid battery charging. For example,
+`30c/kWh` means Smart Optimization will not plan forced grid charging in slots
+above `30c/kWh`, even if Profit Max or a later high-price period would otherwise
+make that charge look worthwhile.
+
+Set this to `0` to disable the price ceiling. The limit only applies to forced
+grid charging; solar surplus can still charge the battery.
+
+### Grid charge SOC cap
+
+Limits forced grid charging once the forecast battery SOC reaches the configured
+cap. For example, `80%` lets the optimiser top up from grid when needed but stops
+grid top-up above `80%`.
+
+This is not the same as the Charge By Time target SOC or the hardware backup
+reserve. The cap limits grid top-up; it does not stop solar from filling the
+battery above the cap, and it does not change the battery's outage reserve.
+
+### Import/export and spread controls
+
+The maximum grid import/export, spread import/export, No Idle, and auto-applied
+reserve controls are also advanced settings because they change solver limits or
+post-processing behavior. They are grouped with the grid-charge price and SOC cap
+in the mobile app.
+
 ## Profit Max
 
 Profit Max makes the optimizer more willing to export stored energy for profit

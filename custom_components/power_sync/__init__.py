@@ -22,6 +22,45 @@ DISCREPANCY_ALERT_DAILY_MAX = 4
 AEMO_SETTLED_SYNC_DELAY_SECONDS = 5.0
 
 
+def _optimizer_settings_groups() -> dict[str, Any]:
+    """Return mobile metadata for grouped optimizer settings."""
+    return {
+        "optimizer": {
+            "title": "Smart Optimization",
+            "collapsed": False,
+            "fields": [
+                "enabled",
+                "backup_reserve",
+                "hardware_backup_reserve",
+                "profit_max_enabled",
+                "charge_by_time_enabled",
+                "charge_by_time_target_time",
+                "charge_by_time_target_soc",
+                "load_entity",
+                "planned_ev_load_entity",
+                "battery_capacity_wh",
+                "max_charge_w",
+                "max_discharge_w",
+            ],
+        },
+        "advanced_optimizer": {
+            "title": "Advanced optimizer controls",
+            "collapsed": True,
+            "fields": [
+                "allow_grid_charge",
+                "max_grid_charge_price",
+                "grid_charge_soc_cap",
+                "max_grid_import_w",
+                "max_grid_export_w",
+                "spread_import_enabled",
+                "spread_export_enabled",
+                "disable_idle_enabled",
+                "auto_apply_reserve_enabled",
+            ],
+        },
+    }
+
+
 def _parse_battery_health_timestamp(value: Any) -> datetime | None:
     """Parse a battery-health scan timestamp into a comparable datetime."""
     if not value:
@@ -582,6 +621,8 @@ from .const import (
     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
     CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
     CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+    CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
+    CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
     CONF_OPTIMIZATION_DISABLE_IDLE,
@@ -26820,6 +26861,73 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return True
 
+        try:
+            restore_retry_count = int(call.data.get("_restore_retry", 0) or 0)
+        except (TypeError, ValueError):
+            restore_retry_count = 0
+        tesla_restore_failed = False
+
+        def _mark_tesla_restore_failed(reason: str) -> None:
+            nonlocal tesla_restore_failed
+            tesla_restore_failed = True
+            _LOGGER.warning("Tesla restore_normal did not fully complete: %s", reason)
+
+        def _schedule_tesla_restore_retry(reason: str) -> bool:
+            if restore_retry_count >= 3:
+                _LOGGER.error(
+                    "Tesla restore_normal still failing after %d retries; "
+                    "leaving force state active for manual restore (%s)",
+                    restore_retry_count,
+                    reason,
+                )
+                return False
+
+            retry_state = (
+                force_charge_state
+                if restore_was_force_charging or force_charge_state.get("active")
+                else force_discharge_state
+            )
+            retry_at = dt_util.utcnow() + timedelta(seconds=60)
+            next_retry = restore_retry_count + 1
+
+            async def _retry_tesla_restore(_now):
+                if not (
+                    force_charge_state.get("active")
+                    or force_discharge_state.get("active")
+                ):
+                    _LOGGER.debug(
+                        "Tesla restore retry skipped; force state is no longer active"
+                    )
+                    return
+                _LOGGER.warning(
+                    "Retrying Tesla restore_normal after incomplete restore (%s, attempt %d)",
+                    reason,
+                    next_retry,
+                )
+                await hass.services.async_call(
+                    DOMAIN,
+                    SERVICE_RESTORE_NORMAL,
+                    {
+                        "_restore_retry": next_retry,
+                        "_allow_monitoring_restore": True,
+                    },
+                    blocking=True,
+                )
+
+            if retry_state.get("cancel_expiry_timer"):
+                retry_state["cancel_expiry_timer"]()
+            retry_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                hass,
+                _retry_tesla_restore,
+                retry_at,
+            )
+            _LOGGER.warning(
+                "Tesla restore_normal incomplete; retry %d scheduled in 60 seconds (%s)",
+                next_retry,
+                reason,
+            )
+            return True
+
         # Check if this is a Sigenergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
         if is_sigenergy:
@@ -27462,6 +27570,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             _LOGGER.info("Restored saved tariff for site %s", site_id)
                         else:
                             _LOGGER.error("Failed to restore saved tariff for site %s", site_id)
+                            _mark_tesla_restore_failed(f"tariff restore failed for site {site_id}")
                     else:
                         _LOGGER.warning(
                             "No restorable saved tariff for site %s; refusing to restore a PowerSync force tariff",
@@ -27534,6 +27643,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         restore_entry_data.pop("retoggle_attempted", None)
                 else:
                     _LOGGER.warning("Could not restore operation mode for site %s after retries", site_id)
+                    _mark_tesla_restore_failed(f"operation mode restore failed for site {site_id}")
                     try:
                         from .automations.actions import _send_expo_push
                         await _send_expo_push(
@@ -27599,6 +27709,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             else:
                                 text = await response.text()
                                 _LOGGER.error("Failed to restore backup reserve for site %s: %s - %s", site_id, response.status, text)
+                                _mark_tesla_restore_failed(
+                                    f"backup reserve restore failed for site {site_id}"
+                                )
                                 try:
                                     from .automations.actions import _send_expo_push
                                     await _send_expo_push(
@@ -27625,6 +27738,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             _LOGGER.info("Restored export rule to %s for site %s", saved_export_rule, site_id)
                         else:
                             _LOGGER.warning("Could not restore export rule for site %s: %s", site_id, response.status)
+                            _mark_tesla_restore_failed(f"export rule restore failed for site {site_id}")
                 if _restore_superseded("mode/reserve restore"):
                     return
 
@@ -27703,8 +27817,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 response.status,
                                 text[:200],
                             )
+                            _mark_tesla_restore_failed(
+                                f"grid charging restore failed for site {site_id}"
+                            )
                     if _restore_superseded("grid charging restore"):
                         return
+
+            if tesla_restore_failed:
+                if _schedule_tesla_restore_retry("one or more Tesla restore writes failed"):
+                    await persist_force_mode_state()
+                return
 
             # Clear discharge state
             force_discharge_state["active"] = False
@@ -32095,6 +32217,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return None
                 return parsed if parsed >= 0 else None
 
+            def _optional_positive_price_setting(key: str) -> float | None:
+                if key in entry.options:
+                    value = entry.options.get(key)
+                elif key in entry.data:
+                    value = entry.data.get(key)
+                else:
+                    return None
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError):
+                    return None
+                if parsed <= 0:
+                    return None
+                return parsed / 100.0 if parsed > 1 else parsed
+
+            def _ratio_setting(key: str, default: float) -> float:
+                value = entry.options.get(key, entry.data.get(key, default))
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError):
+                    parsed = default
+                if parsed > 1:
+                    parsed = parsed / 100.0
+                return max(0.0, min(1.0, parsed))
+
             saved_capacity_wh = _positive_int_setting(
                 CONF_OPTIMIZATION_BATTERY_CAPACITY_WH
             )
@@ -32109,6 +32256,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             saved_max_grid_export_w = _nonnegative_optional_int_setting(
                 CONF_OPTIMIZATION_MAX_GRID_EXPORT_W
+            )
+            saved_max_grid_charge_price = _optional_positive_price_setting(
+                CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE
+            )
+            saved_grid_charge_soc_cap = _ratio_setting(
+                CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
+                1.0,
             )
             saved_horizon_hours = _positive_int_setting(CONF_OPTIMIZATION_HORIZON)
             saved_auto_apply_reserve = bool(
@@ -32166,6 +32320,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 optimizer_config_updates["max_discharge_w"] = saved_max_discharge_w
             optimizer_config_updates["max_grid_import_w"] = saved_max_grid_import_w
             optimizer_config_updates["max_grid_export_w"] = saved_max_grid_export_w
+            optimizer_config_updates["max_grid_charge_price"] = (
+                saved_max_grid_charge_price
+            )
+            optimizer_config_updates["grid_charge_soc_cap"] = saved_grid_charge_soc_cap
             if saved_horizon_hours is not None:
                 optimizer_config_updates["horizon_hours"] = saved_horizon_hours
             optimization_coordinator.update_config(**optimizer_config_updates)
@@ -32644,6 +32802,18 @@ class OptimizationSettingsView(HomeAssistantView):
                     parsed *= 100
                 return max(0, min(100, int(round(parsed))))
 
+            def _entry_price_cents_setting(key: str) -> float:
+                if not config_entry:
+                    return 0.0
+                value = config_entry.options.get(key, config_entry.data.get(key))
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError):
+                    return 0.0
+                if parsed <= 0:
+                    return 0.0
+                return round(parsed * 100.0, 3) if parsed <= 1 else round(parsed, 3)
+
             charge_by_time_enabled = bool(
                 config_entry
                 and config_entry.options.get(
@@ -32821,6 +32991,13 @@ class OptimizationSettingsView(HomeAssistantView):
                         if config_entry
                         else 0
                     ),
+                    "max_grid_charge_price": _entry_price_cents_setting(
+                        CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE
+                    ),
+                    "grid_charge_soc_cap": _entry_percent_setting(
+                        CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
+                        1.0,
+                    ),
                     "horizon_hours": (
                         _entry_int_setting(CONF_OPTIMIZATION_HORIZON, 48)
                         if config_entry
@@ -32884,6 +33061,7 @@ class OptimizationSettingsView(HomeAssistantView):
                     )
                     else "default",
                 },
+                "settings_groups": _optimizer_settings_groups(),
             })
 
         return web.json_response({
@@ -32899,6 +33077,7 @@ class OptimizationSettingsView(HomeAssistantView):
             "spread_import_enabled": opt_coordinator._config.spread_import_enabled,
             "disable_idle_enabled": opt_coordinator.disable_idle_enabled,
             "auto_apply_reserve_enabled": opt_coordinator.auto_apply_reserve_enabled,
+            "settings_groups": _optimizer_settings_groups(),
             "manual_backup_reserve": (
                 round(opt_coordinator.manual_backup_reserve * 100)
                 if opt_coordinator.manual_backup_reserve is not None
@@ -32910,6 +33089,18 @@ class OptimizationSettingsView(HomeAssistantView):
                 "max_discharge_w": opt_coordinator._config.max_discharge_w,
                 "max_grid_export_w": opt_coordinator._config.max_grid_export_w,
                 "max_grid_import_w": opt_coordinator._config.max_grid_import_w,
+                "max_grid_charge_price": (
+                    round(opt_coordinator._config.max_grid_charge_price * 100, 3)
+                    if opt_coordinator._config.max_grid_charge_price is not None
+                    else 0
+                ),
+                "grid_charge_soc_cap": max(
+                    0,
+                    min(
+                        100,
+                        int(round(opt_coordinator._config.grid_charge_soc_cap * 100)),
+                    ),
+                ),
                 "allow_grid_charge": opt_coordinator._config.allow_grid_charge,
                 "planned_ev_load_entity": opt_coordinator._planned_ev_load_entity_id,
                 "spread_export_enabled": opt_coordinator._config.spread_export_enabled,
@@ -33058,6 +33249,38 @@ class OptimizationSettingsView(HomeAssistantView):
             if "allow_grid_charge" in settings:
                 new_options[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = bool(settings["allow_grid_charge"])
                 changes.append(f"Set grid charging to {settings['allow_grid_charge']}")
+
+            if "max_grid_charge_price" in settings:
+                raw_price_cap = settings.get("max_grid_charge_price")
+                try:
+                    price_cap = float(raw_price_cap)
+                except (TypeError, ValueError):
+                    price_cap = 0.0
+                if price_cap <= 0:
+                    new_data.pop(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE, None)
+                    new_options.pop(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE, None)
+                    changes.append("Cleared max_grid_charge_price")
+                else:
+                    price_cap = price_cap / 100.0 if price_cap > 1 else price_cap
+                    new_data[CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE] = price_cap
+                    new_options[CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE] = price_cap
+                    changes.append(
+                        f"Set max_grid_charge_price to {round(price_cap * 100, 3)}c/kWh"
+                    )
+
+            if "grid_charge_soc_cap" in settings:
+                try:
+                    soc_cap = float(settings["grid_charge_soc_cap"])
+                except (TypeError, ValueError):
+                    soc_cap = 100.0
+                if soc_cap > 1:
+                    soc_cap = soc_cap / 100.0
+                soc_cap = max(0.0, min(1.0, soc_cap))
+                new_data[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = soc_cap
+                new_options[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = soc_cap
+                changes.append(
+                    f"Set grid_charge_soc_cap to {int(round(soc_cap * 100))}%"
+                )
 
             if "spread_export_enabled" in settings:
                 new_options[CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED] = bool(settings["spread_export_enabled"])

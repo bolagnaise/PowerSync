@@ -141,6 +141,8 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_OPTIMIZATION_MAX_DISCHARGE_W = "max_discharge_w"
     const_module.CONF_OPTIMIZATION_MAX_GRID_IMPORT_W = "max_grid_import_w"
     const_module.CONF_OPTIMIZATION_MAX_GRID_EXPORT_W = "optimization_max_grid_export_w"
+    const_module.CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE = "optimization_max_grid_charge_price"
+    const_module.CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP = "optimization_grid_charge_soc_cap"
     const_module.CONF_SIGENERGY_EXPORT_LIMIT_KW = "sigenergy_export_limit_kw"
     const_module.CONF_ALPHAESS_EXPORT_LIMIT_KW = "alphaess_export_limit_kw"
     const_module.CONF_CHARGE_BY_TIME_ENABLED = "charge_by_time_enabled"
@@ -1406,6 +1408,44 @@ def test_optimizer_config_setting_change_schedules_background_reoptimization(opt
     assert updates[-1]["options"]["allow_grid_charge"] is False
     assert run_calls == []
     assert background_tasks == ["powersync_settings_reoptimize"]
+
+
+def test_grid_charge_advanced_settings_persist_and_reoptimize(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power")
+    updates, run_calls, background_tasks = _prepare_enabled_settings_coordinator(coordinator)
+
+    result = asyncio.run(
+        coordinator.set_settings({
+            "max_grid_charge_price": 30,
+            "grid_charge_soc_cap": 80,
+        })
+    )
+
+    assert result["success"] is True
+    assert "config: ['max_grid_charge_price', 'grid_charge_soc_cap']" in result["changes"]
+    assert coordinator._config.max_grid_charge_price == pytest.approx(0.30)
+    assert coordinator._config.grid_charge_soc_cap == pytest.approx(0.80)
+    assert updates[-1]["options"]["optimization_max_grid_charge_price"] == pytest.approx(0.30)
+    assert updates[-1]["options"]["optimization_grid_charge_soc_cap"] == pytest.approx(0.80)
+    assert run_calls == []
+    assert background_tasks == ["powersync_settings_reoptimize"]
+
+
+def test_grid_charge_allowed_slots_apply_price_and_soc_caps(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power")
+    coordinator._config.battery_capacity_wh = 10000
+    coordinator._config.max_charge_w = 5000
+    coordinator._config.max_grid_charge_price = 0.30
+    coordinator._config.grid_charge_soc_cap = 0.80
+
+    allowed = coordinator._grid_charge_allowed_slots(
+        import_prices=[0.20, 0.20, 0.40, 0.20],
+        solar_forecast=[5.0, 5.0, 0.0, 0.0],
+        load_forecast=[0.0, 0.0, 0.0, 0.0],
+        current_soc=0.79,
+    )
+
+    assert allowed == [True, False, False, False]
 
 
 @pytest.mark.parametrize(

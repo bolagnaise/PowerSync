@@ -421,7 +421,7 @@
       },
       "ml_options": {
         "title": "Smart Optimization settings",
-        "description": "Configure PowerSync's Smart Optimization limits. The minimum discharge level is the optimizer's floor, not your battery's hardware backup reserve for grid outages.",
+        "description": "Configure PowerSync's Smart Optimization limits. Advanced optimizer controls change how the solver evaluates grid charging, import/export limits, spreading, idle handling, and forecast reserve.",
         "data": {
           "optimization_provider": "Optimization mode",
           "optimization_enabled": "Enable Smart Optimization",
@@ -437,6 +437,8 @@
           "optimization_max_discharge_w": "Maximum discharge power",
           "optimization_max_grid_export_w": "Maximum grid export",
           "optimization_max_grid_import_w": "Maximum grid import",
+          "optimization_max_grid_charge_price": "Maximum grid charge price",
+          "optimization_grid_charge_soc_cap": "Grid charge SOC cap",
           "optimization_allow_grid_charge": "Allow grid charging",
           "optimization_spread_export_enabled": "Spread export across window",
           "optimization_spread_import_enabled": "Spread import across window",
@@ -461,6 +463,8 @@
           "optimization_max_discharge_w": "Maximum battery/inverter discharge power in kW that the LP optimizer may request for loads and export.",
           "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Leave blank to auto-detect where available; set 0 for zero-export sites. This does not limit battery power used by house loads.",
           "optimization_max_grid_import_w": "Maximum total site grid import in kW. Set 0 for no site import cap; solar can still add charging power above this limit.",
+          "optimization_max_grid_charge_price": "Advanced: never plan forced battery charging from grid import above this import price. Set 0 to disable the price cap.",
+          "optimization_grid_charge_soc_cap": "Advanced: stop forced grid charging once forecast battery SOC reaches this cap. Solar surplus can still charge above the cap.",
           "optimization_allow_grid_charge": "When disabled, Smart Optimization can still charge from solar surplus but will not plan forced battery charging from grid import.",
           "optimization_spread_export_enabled": "When enabled on supported batteries, Smart Optimization spreads planned battery export across the full eligible export window instead of using maximum discharge power.",
           "optimization_spread_import_enabled": "When enabled on supported batteries, Smart Optimization spreads planned grid charging across each same-price import window instead of using maximum charge power.",
@@ -1393,7 +1397,7 @@
       },
       "optimization": {
         "title": "Smart Optimization settings",
-        "description": "Configure PowerSync's Smart Optimization limits. The minimum discharge level is the optimizer's floor, not your battery's hardware backup reserve for grid outages.",
+        "description": "Configure PowerSync's Smart Optimization limits. Advanced optimizer controls change how the solver evaluates grid charging, import/export limits, spreading, idle handling, and forecast reserve.",
         "data": {
           "optimization_provider": "Optimization mode",
           "optimization_enabled": "Enable Smart Optimization",
@@ -1409,6 +1413,8 @@
           "optimization_max_discharge_w": "Maximum discharge power",
           "optimization_max_grid_export_w": "Maximum grid export",
           "optimization_max_grid_import_w": "Maximum grid import",
+          "optimization_max_grid_charge_price": "Maximum grid charge price",
+          "optimization_grid_charge_soc_cap": "Grid charge SOC cap",
           "optimization_allow_grid_charge": "Allow grid charging",
           "optimization_spread_export_enabled": "Spread export across window",
           "optimization_spread_import_enabled": "Spread import across window",
@@ -1433,6 +1439,8 @@
           "optimization_max_discharge_w": "Maximum battery/inverter discharge power in kW that the LP optimizer may request for loads and export.",
           "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Leave blank to auto-detect where available; set 0 for zero-export sites. This does not limit battery power used by house loads.",
           "optimization_max_grid_import_w": "Maximum total site grid import in kW. Set 0 for no site import cap; solar can still add charging power above this limit.",
+          "optimization_max_grid_charge_price": "Advanced: never plan forced battery charging from grid import above this import price. Set 0 to disable the price cap.",
+          "optimization_grid_charge_soc_cap": "Advanced: stop forced grid charging once forecast battery SOC reaches this cap. Solar surplus can still charge above the cap.",
           "optimization_allow_grid_charge": "When disabled, Smart Optimization can still charge from solar surplus but will not plan forced battery charging from grid import.",
           "optimization_spread_export_enabled": "When enabled on supported batteries, Smart Optimization spreads planned battery export across the full eligible export window instead of using maximum discharge power.",
           "optimization_spread_import_enabled": "When enabled on supported batteries, Smart Optimization spreads planned grid charging across each same-price import window instead of using maximum charge power.",
