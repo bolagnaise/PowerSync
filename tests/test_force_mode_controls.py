@@ -1308,6 +1308,27 @@ def test_foxess_dc_curtailment_reapplies_when_live_export_continues():
     assert ") or _live_export_reapply" in handler_source
 
 
+def test_foxess_curtailment_restore_defers_during_force_remote_control():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    handler = _find_function(tree, "handle_foxess_curtailment")
+    handler_source = ast.get_source_segment(source, handler)
+    force_discharge = _find_function(tree, "handle_force_discharge")
+    force_discharge_source = ast.get_source_segment(source, force_discharge)
+    force_charge = _find_function(tree, "handle_force_charge")
+    force_charge_source = ast.get_source_segment(source, force_charge)
+
+    assert handler_source is not None
+    assert force_discharge_source is not None
+    assert force_charge_source is not None
+    assert 'force_charge_state.get("active") or force_discharge_state.get("active")' in handler_source
+    assert "remote-control override remains owned by force mode" in handler_source
+    assert 'entry_data["foxess_curtailment_state"] = "normal"' in force_discharge_source
+    assert 'entry_data.pop("_last_foxess_curtailment_reapply", None)' in force_discharge_source
+    assert 'entry_data["foxess_curtailment_state"] = "normal"' in force_charge_source
+    assert 'entry_data.pop("_last_foxess_curtailment_reapply", None)' in force_charge_source
+
+
 def test_sigenergy_curtailment_reapplies_when_live_export_continues():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

@@ -21532,6 +21532,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             else:
                 # Positive export earnings → restore
                 if current_state != "normal":
+                    if force_charge_state.get("active") or force_discharge_state.get("active"):
+                        active_mode = "charge" if force_charge_state.get("active") else "discharge"
+                        _LOGGER.info(
+                            "FoxESS curtailment restore deferred: force %s is active; "
+                            "remote-control override remains owned by force mode",
+                            active_mode,
+                        )
+                        return
                     _LOGGER.info("FoxESS curtailment RESTORED: export_earnings=%.2fc (>=1c) → normal export", export_earnings)
                     if hasattr(fc, "restore_curtailment"):
                         success = await fc.restore_curtailment()
@@ -24151,6 +24159,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state["source"] = source
                     force_discharge_state["duration"] = duration
                     force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    entry_data["foxess_curtailment_state"] = "normal"
+                    entry_data.pop("_last_foxess_curtailment_reapply", None)
                     _LOGGER.info(f"FoxESS FORCE DISCHARGE ACTIVE for {duration} minutes (power_w={power_w})")
 
                     async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
@@ -25668,6 +25678,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_charge_state["source"] = source
                     force_charge_state["duration"] = duration
                     force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    entry_data["foxess_curtailment_state"] = "normal"
+                    entry_data.pop("_last_foxess_curtailment_reapply", None)
                     _LOGGER.info(f"FoxESS FORCE CHARGE ACTIVE for {duration} minutes (power_w={power_w})")
 
                     async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
