@@ -1173,12 +1173,27 @@ def _future_optimizer_action_windows(
         if end and end <= now:
             continue
 
+        planned_power_w = item.get("power_w")
+        display_power_w = planned_power_w
+        if start and end and start <= now < end:
+            effective_action = (
+                data.get("effective_current_action") or data.get("current_action")
+            )
+            if item_action == effective_action:
+                try:
+                    current_power_w = float(data.get("current_power_w") or 0)
+                except (TypeError, ValueError):
+                    current_power_w = 0
+                if current_power_w > 0:
+                    display_power_w = current_power_w
+
         window: dict[str, Any] = {
             "action": item_action,
             "start_time": item.get("timestamp"),
             "end_time": item.get("end_time"),
             "label": _format_optimizer_window(start, end),
-            "power_w": item.get("power_w"),
+            "power_w": display_power_w,
+            "planned_power_w": planned_power_w,
             "soc": item.get("soc"),
         }
 

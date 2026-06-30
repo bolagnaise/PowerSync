@@ -9624,6 +9624,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ):
                     effective_current_action = last_executed_action
                     current_action = effective_current_action
+                    if current_action in ("charge", "discharge", "export"):
+                        force_type = (
+                            "charge"
+                            if current_action == "charge"
+                            else "discharge"
+                        )
+                        force_state = self._optimizer_force_state or {}
+                        if (
+                            force_state.get("active")
+                            and force_state.get("type") == force_type
+                        ):
+                            try:
+                                force_power_w = float(force_state.get("power_w") or 0)
+                            except (TypeError, ValueError):
+                                force_power_w = 0
+                            if force_power_w > 0:
+                                current_power_w = force_power_w
                     if current_action in ("idle", "no_discharge", "self_consumption"):
                         current_power_w = actual_battery_power_w
                 else:

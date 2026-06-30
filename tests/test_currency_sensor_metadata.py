@@ -531,6 +531,44 @@ def test_optimizer_force_discharge_windows_include_discharge_and_export():
     assert attrs["next_power_w"] == 4200
 
 
+def test_optimizer_force_charge_window_uses_active_command_power():
+    sensor = _sensor_module()
+    desc = next(
+        d
+        for d in sensor.OPTIMIZER_ACTION_SENSORS
+        if d.key == "optimization_force_charge_windows"
+    )
+    payload = {
+        "current_action": "charge",
+        "effective_current_action": "charge",
+        "current_power_w": 1019,
+        "next_actions": [
+            {
+                "action": "charge",
+                "timestamp": "2026-05-03T11:30:00+00:00",
+                "end_time": "2026-05-03T13:00:00+00:00",
+                "power_w": 10000,
+                "soc": 0.52,
+            },
+            {
+                "action": "charge",
+                "timestamp": "2026-05-03T14:00:00+00:00",
+                "end_time": "2026-05-03T14:30:00+00:00",
+                "power_w": 5000,
+                "soc": 0.64,
+            },
+        ],
+    }
+    entity = sensor.OptimizerActionSensor(SimpleNamespace(data=payload), desc, _entry("amber"))
+
+    attrs = entity.extra_state_attributes
+    assert attrs["next_power_w"] == 1019
+    assert attrs["windows"][0]["power_w"] == 1019
+    assert attrs["windows"][0]["planned_power_w"] == 10000
+    assert attrs["windows"][1]["power_w"] == 5000
+    assert attrs["windows"][1]["planned_power_w"] == 5000
+
+
 def test_optimizer_current_action_exposes_reserve_recommendation():
     sensor = _sensor_module()
     desc = next(
