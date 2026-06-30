@@ -19,6 +19,8 @@ _LOGGER = logging.getLogger(__name__)
 _READ_ENTITIES: dict[str, tuple[str, ...]] = {
     "battery_level": (
         "state_of_charge",
+        "state_of_charge_2",
+        "state_of_charge_3",
         "soc",
         "battery_storage_soc",
         "reserva_state_of_charge_2",
@@ -269,7 +271,7 @@ class FroniusReservaBatteryController:
         mode = self._read_state("storage_control_mode") or self._read_state("storage_control_mode_sensor")
 
         return {
-            "battery_level": self._read_float("battery_level") or 0.0,
+            "battery_level": self._read_float("battery_level"),
             "battery_power": battery_kw,
             "grid_power": grid_kw,
             "solar_power": solar_kw,

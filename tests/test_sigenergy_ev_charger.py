@@ -281,6 +281,47 @@ def test_sigenergy_charger_offline_placeholder_still_has_visible_status(charger_
     assert loadpoint["control_strategy"] == "one_shot"
 
 
+def test_sigenergy_charger_shapes_accept_configured_evdc_rate_capabilities(charger_module):
+    state = charger_module.SigenergyChargerState(
+        charger_type="evdc",
+        status="occupied",
+        is_connected=True,
+        power_kw=0.0,
+    )
+    capabilities = {
+        "charger_type": "evdc",
+        "supports_start_stop": True,
+        "supports_rate_control": True,
+        "supports_restart_while_plugged": False,
+        "control_strategy": "one_shot",
+        "solar_control_strategy": "dynamic_rate",
+        "sigenergy_charger_charge_power_limit_entity": "number.evdc_charge_limit",
+    }
+
+    vehicle = charger_module.sigenergy_charger_state_to_vehicle(
+        state,
+        updated_at="2026-06-08T10:00:00+10:00",
+        capabilities=capabilities,
+    )
+    loadpoint = charger_module.sigenergy_charger_state_to_loadpoint_observation(
+        state,
+        capabilities=capabilities,
+    )
+    widget = charger_module.sigenergy_charger_state_to_widget(
+        state,
+        capabilities=capabilities,
+    )
+
+    assert vehicle["supports_rate_control"] is True
+    assert vehicle["supports_restart_while_plugged"] is False
+    assert vehicle["solar_control_strategy"] == "dynamic_rate"
+    assert vehicle["charger_capabilities"]["sigenergy_charger_charge_power_limit_entity"] == (
+        "number.evdc_charge_limit"
+    )
+    assert loadpoint["supports_rate_control"] is True
+    assert widget["supports_rate_control"] is True
+
+
 def test_sigenergy_home_load_excludes_signed_evdc_branch(charger_module):
     model = importlib.import_module("power_sync.sigenergy_model")
 

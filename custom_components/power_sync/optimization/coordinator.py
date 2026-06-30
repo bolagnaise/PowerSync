@@ -7,6 +7,7 @@ to produce a schedule, which the execution layer then applies.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import math
 from dataclasses import dataclass
@@ -24,7 +25,7 @@ from .schedule_reader import OptimizationSchedule, ScheduleAction
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
 from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode
-from ..const import DEFAULT_OPTIMIZATION_INTERVAL
+from ..const import DEFAULT_OPTIMIZATION_INTERVAL, supports_no_idle_mode_provider
 from ..flow_power_pricing import (
     FlowPowerPricingContext,
     calculate_flow_power_pea,
@@ -73,6 +74,8 @@ FIXED_OPTIMIZATION_INTERVAL_MINUTES = DEFAULT_OPTIMIZATION_INTERVAL
 FLOW_POWER_NEM_TZ = timezone(timedelta(hours=10))
 EXPORT_ACTIONS = {"discharge", "export"}
 SELF_USE_ACTIONS = {"consume", "self_consumption"}
+OPTIMIZER_FORCE_CHARGE_MIN_COMMITMENT = timedelta(minutes=20)
+OPTIMIZER_FORCE_DISCHARGE_MIN_COMMITMENT = timedelta(minutes=20)
 
 
 def _flow_power_network_tariff_rate(
@@ -135,13 +138,16 @@ class OptimizationConfig:
     max_grid_import_w: int | None = None
     max_grid_export_w: int | None = None
     allow_grid_charge: bool = True
+    max_grid_charge_price: float | None = None
+    grid_charge_soc_cap: float = 1.0
     backup_reserve: float = 0.2
     interval_minutes: int = FIXED_OPTIMIZATION_INTERVAL_MINUTES
     horizon_hours: int = 48
     cost_function: str = "cost"
     profit_max_enabled: bool = False
-    profit_max_target_time: str = "17:15"
-    profit_max_target_soc: float = 1.0
+    charge_by_time_enabled: bool = False
+    charge_by_time_target_time: str = "17:15"
+    charge_by_time_target_soc: float = 1.0
     spread_export_enabled: bool = False
     spread_import_enabled: bool = False
     disable_idle_enabled: bool = False
@@ -214,6 +220,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_custom_energy_warning: str | None = None
         self._auto_apply_reserve_enabled = False
         self._manual_backup_reserve: float | None = None
+        self._active_export_reserve_floor_slots: list[float] | None = None
+        self._active_export_reserve_floor_timestamps: list[datetime] | None = None
         if self._entry:
             from ..const import (
                 CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
@@ -274,12 +282,26 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # EV integration persisted flag (loaded from config entry)
         self._ev_integration_enabled = False
+        self._configured_load_entity_id: str | None = None
+        self._planned_ev_load_entity_id: str | None = None
         if self._entry:
-            from ..const import CONF_OPTIMIZATION_EV_INTEGRATION
+            from ..const import (
+                CONF_OPTIMIZATION_EV_INTEGRATION,
+                CONF_OPTIMIZATION_LOAD_ENTITY,
+                CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
+            )
+            self._configured_load_entity_id = self._entry.options.get(
+                CONF_OPTIMIZATION_LOAD_ENTITY,
+                self._entry.data.get(CONF_OPTIMIZATION_LOAD_ENTITY),
+            ) or None
             self._ev_integration_enabled = self._entry.options.get(
                 CONF_OPTIMIZATION_EV_INTEGRATION,
                 self._entry.data.get(CONF_OPTIMIZATION_EV_INTEGRATION, False),
             )
+            self._planned_ev_load_entity_id = self._entry.options.get(
+                CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
+                self._entry.data.get(CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY),
+            ) or None
 
         # Cached schedule from optimizer
         self._current_schedule: OptimizationSchedule | None = None
@@ -288,7 +310,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Cached forecast data (populated each optimization run)
         self._last_solar_forecast: list[float] | None = None    # kW values
-        self._has_solar_forecast: bool = False  # True if real Solcast data, False if zeros
+        self._has_solar_forecast: bool | None = None  # None until the first forecast attempt
         self._last_load_forecast: list[float] | None = None     # kW values
         self._last_import_prices: list[float] | None = None     # $/kWh values (LP-adjusted)
         self._last_export_prices: list[float] | None = None     # $/kWh values (LP-adjusted)
@@ -296,6 +318,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_display_export_prices: list[float] | None = None  # $/kWh actual tariff
         self._last_export_boost_allowed_slots: list[bool] = []
         self._last_price_timestamps: list[datetime] | None = None
+        self._last_planned_ev_load_forecast_w: list[float] | None = None
         self._last_zerohero_bonus_prices: list[float] | None = None
         self._last_zerohero_bonus_cap_kwh: float | None = None
         self._solar_nowcast_derate: float = 1.0
@@ -348,8 +371,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # the LP twice in quick succession can churn force mode commands.
         self._last_price_triggered_optimization: datetime | None = None
 
-        # Track last executed action for mode transitions.
+        # Track last executed action for mode transitions and status reporting.
         self._last_executed_action: str | None = None
+        self._last_executed_planned_action: str | None = None
         # Optimizer-issued force commands use a hardware-only service path for
         # non-Tesla systems so automated actions do not appear as manual force
         # countdowns in the UI. Track that private state here so a later LP
@@ -360,6 +384,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "expires_at": None,
             "hardware_expires_at": None,
             "power_w": 0,
+            "started_at": None,
             "source": "optimizer",
             "scope": "optimizer",
         }
@@ -378,6 +403,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._polling_task: asyncio.Task | None = None
         self._initial_opt_task: asyncio.Task | None = None
         self._deferred_restore_task: asyncio.Task | None = None
+        self._settings_reoptimize_task: asyncio.Task | None = None
+        self._settings_reoptimize_requested = False
 
     def _monitoring_mode_active(self) -> bool:
         """Return True when monitoring mode should block hardware writes."""
@@ -426,6 +453,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._pre_idle_backup_reserve, e,
             )
             return False
+
+    def _should_restore_pre_idle_backup_reserve_from_polling(self) -> bool:
+        """Return True when the polling loop should retry a pending reserve restore."""
+        return (
+            self._pre_idle_backup_reserve is not None
+            and self._last_executed_action != "idle"
+            and not self._scheduled_ev_no_discharge_active
+        )
 
     def _scheduled_ev_preserve_active(self) -> bool:
         """Return True when scheduled EV charging requested no-discharge mode."""
@@ -524,6 +559,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         soc, _ = await self._get_battery_state()
         soc_pct = int(soc * 100)
         configured_idle_floor = int(self._config.backup_reserve * 100)
+
+        if self.battery_system == "goodwe" and not preserve_charge:
+            if hasattr(battery, "set_self_consumption_mode"):
+                await battery.set_self_consumption_mode()
+            elif hasattr(battery, "restore_normal"):
+                await battery.restore_normal()
+            _LOGGER.info(
+                "Optimizer: IDLE — GoodWe self-consumption without DOD hold "
+                "(current_soc=%d%%, optimizer_floor=%d%%)",
+                soc_pct,
+                configured_idle_floor,
+            )
+            self._idle_hold_reserve = None
+            return True
 
         if self._pre_idle_backup_reserve is None:
             if self._startup_backup_reserve is not None:
@@ -678,6 +727,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self._config.profit_max_enabled
 
     @property
+    def charge_by_time_enabled(self) -> bool:
+        """Return whether charge-by-time prefill is active."""
+        return self._config.charge_by_time_enabled
+
+    @property
     def spread_export_enabled(self) -> bool:
         """Return whether export spreading is active."""
         return self._config.spread_export_enabled
@@ -689,7 +743,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @property
     def disable_idle_enabled(self) -> bool:
-        """Return whether Flow Power optimizer IDLE actions are disabled."""
+        """Return whether optimizer IDLE actions are disabled."""
         return self._should_disable_idle_schedule()
 
     @property
@@ -727,8 +781,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._config.spread_export_enabled == bool(enabled):
             return False
         self._config.spread_export_enabled = bool(enabled)
-        if self._load_estimator:
-            self._load_estimator.invalidate_cache()
+        load_estimator = getattr(self, "_load_estimator", None)
+        if load_estimator:
+            load_estimator.invalidate_cache()
         _LOGGER.info(
             "Spread Export Across Window %s",
             "ENABLED" if enabled else "DISABLED",
@@ -811,15 +866,44 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.hass.config_entries.async_update_entry(self._entry, options=new_options)
         return True
 
-    def set_disable_idle_enabled(self, enabled: bool) -> bool:
-        """Enable or disable Flow Power no-idle mode."""
-        if self._config.disable_idle_enabled == bool(enabled):
+    def set_charge_by_time_enabled(self, enabled: bool) -> bool:
+        """Enable or disable charge-by-time prefill mode."""
+        enabled = bool(enabled)
+        if self._config.charge_by_time_enabled == enabled:
             return False
-        self._config.disable_idle_enabled = bool(enabled)
+        self._config.charge_by_time_enabled = enabled
+        load_estimator = getattr(self, "_load_estimator", None)
+        if load_estimator:
+            load_estimator.invalidate_cache()
+        _LOGGER.info("Charge By Time %s", "ENABLED" if enabled else "DISABLED")
+        if self.hass and self.entry_id:
+            from homeassistant.helpers.dispatcher import async_dispatcher_send
+
+            from ..const import DOMAIN
+
+            async_dispatcher_send(
+                self.hass,
+                f"{DOMAIN}_{self.entry_id}_charge_by_time",
+                enabled,
+            )
+        if self._entry:
+            from ..const import CONF_CHARGE_BY_TIME_ENABLED, DOMAIN
+            new_options = dict(self._entry.options)
+            new_options[CONF_CHARGE_BY_TIME_ENABLED] = enabled
+            self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry_id, {})["_skip_reload"] = True
+            self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+        return True
+
+    def set_disable_idle_enabled(self, enabled: bool) -> bool:
+        """Enable or disable no-idle mode."""
+        enabled = bool(enabled) and self._supports_disable_idle_mode()
+        if self._config.disable_idle_enabled == enabled:
+            return False
+        self._config.disable_idle_enabled = enabled
         if self._load_estimator:
             self._load_estimator.invalidate_cache()
         _LOGGER.info(
-            "Flow Power No Idle mode %s",
+            "No Idle mode %s",
             "ENABLED" if enabled else "DISABLED",
         )
         if self.hass and self.entry_id:
@@ -830,15 +914,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             async_dispatcher_send(
                 self.hass,
                 f"{DOMAIN}_{self.entry_id}_disable_idle",
-                bool(enabled),
+                enabled,
             )
         if self._entry:
             from ..const import CONF_OPTIMIZATION_DISABLE_IDLE, DOMAIN
 
             new_data = dict(self._entry.data)
             new_options = dict(self._entry.options)
-            new_data[CONF_OPTIMIZATION_DISABLE_IDLE] = bool(enabled)
-            new_options[CONF_OPTIMIZATION_DISABLE_IDLE] = bool(enabled)
+            new_data[CONF_OPTIMIZATION_DISABLE_IDLE] = enabled
+            new_options[CONF_OPTIMIZATION_DISABLE_IDLE] = enabled
             self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry_id, {})["_skip_reload"] = True
             self.hass.config_entries.async_update_entry(
                 self._entry,
@@ -847,13 +931,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         return True
 
-    async def set_auto_apply_reserve_enabled(self, enabled: bool) -> None:
+    async def set_auto_apply_reserve_enabled(
+        self,
+        enabled: bool,
+        *,
+        rerun: bool = True,
+    ) -> bool:
         """Enable or disable forecast-driven optimizer reserve tracking."""
         enabled = bool(enabled)
+        was_enabled = bool(getattr(self, "_auto_apply_reserve_enabled", False))
         current_manual = getattr(self, "_manual_backup_reserve", None)
+        changed = enabled != was_enabled
         if enabled:
-            if current_manual is None:
+            if not was_enabled or current_manual is None:
                 current_manual = self._config.backup_reserve
+                changed = True
             self._manual_backup_reserve = current_manual
             self._auto_apply_reserve_enabled = True
             self._config.auto_apply_reserve_enabled = True
@@ -867,10 +959,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if restore_reserve is None:
                 restore_reserve = self._config.backup_reserve
                 self._manual_backup_reserve = restore_reserve
+                changed = True
             self._auto_apply_reserve_enabled = False
             self._config.auto_apply_reserve_enabled = False
-            if restore_reserve is not None:
+            if restore_reserve is not None and (
+                changed
+                or not math.isclose(
+                    self._config.backup_reserve,
+                    restore_reserve,
+                    abs_tol=0.0001,
+                )
+            ):
                 self.update_config(backup_reserve=restore_reserve)
+                changed = True
             self._config.manual_backup_reserve = restore_reserve
             self._persist_optimizer_reserve_settings(
                 auto_apply=False,
@@ -888,8 +989,33 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else ""
             ),
         )
-        if getattr(self, "_enabled", False):
+        if rerun and changed and getattr(self, "_enabled", False):
             await self._run_optimization()
+        return changed
+
+    async def _run_settings_reoptimization(self) -> None:
+        """Run settings-triggered optimizer refreshes after the API response."""
+        try:
+            while self._settings_reoptimize_requested and getattr(
+                self, "_enabled", False
+            ):
+                self._settings_reoptimize_requested = False
+                await self._run_optimization()
+        finally:
+            self._settings_reoptimize_task = None
+
+    def _schedule_settings_reoptimization(self) -> None:
+        """Coalesce settings-triggered optimizer refreshes into one background task."""
+        if not getattr(self, "_enabled", False):
+            return
+        self._settings_reoptimize_requested = True
+        settings_task = getattr(self, "_settings_reoptimize_task", None)
+        if settings_task and not settings_task.done():
+            return
+        self._settings_reoptimize_task = self.hass.async_create_background_task(
+            self._run_settings_reoptimization(),
+            "powersync_settings_reoptimize",
+        )
 
     def _dispatch_auto_apply_reserve_state(self) -> None:
         """Notify HA switches after config-flow/API/mobile changes."""
@@ -978,9 +1104,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         target_percent = max(float(hardware_percent), min(100.0, suggested_percent))
         return max(0.0, min(1.0, target_percent / 100.0))
 
-    def _force_discharge_reserve_floor(self) -> float:
+    def _force_discharge_reserve_floor(self, action: Any | None = None) -> float:
         """Return the software floor used before force discharge/export commands."""
         floor = self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
+        action_timestamp = getattr(action, "timestamp", None)
+        if action_timestamp is not None:
+            timestamps = getattr(self, "_active_export_reserve_floor_timestamps", None) or []
+            floors = getattr(self, "_active_export_reserve_floor_slots", None) or []
+            for idx, timestamp in enumerate(timestamps):
+                if timestamp == action_timestamp and idx < len(floors):
+                    floor = max(floor, floors[idx])
+                    break
         if self.auto_apply_reserve_enabled:
             recommendation = (
                 getattr(getattr(self, "_last_optimizer_result", None), "reserve_recommendation", {})
@@ -990,6 +1124,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 recommendation.get("home_load_export_floor_percent"),
                 None,
             )
+            if export_floor is not None:
+                bridge_export_start = recommendation.get(
+                    "home_load_bridge_after_export_start"
+                )
+                if bridge_export_start:
+                    try:
+                        bridge_start = datetime.fromisoformat(
+                            str(bridge_export_start)
+                        )
+                        now = dt_util.now()
+                        if bridge_start.tzinfo is not None:
+                            now = now.astimezone(bridge_start.tzinfo)
+                        if bridge_start.date() != now.date():
+                            export_floor = None
+                    except (TypeError, ValueError):
+                        pass
             if export_floor is not None:
                 floor = max(floor, export_floor)
         return max(0.0, min(1.0, floor))
@@ -1024,6 +1174,208 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except (TypeError, ValueError):
                 pass
         return export_floor
+
+    def _auto_export_reserve_floor_slots(
+        self,
+        reserve_recommendation: dict[str, Any],
+        slot_count: int,
+    ) -> list[float] | None:
+        """Return future-scoped export reserve floors for the optimizer horizon."""
+        if not self.auto_apply_reserve_enabled or slot_count <= 0:
+            return None
+        export_floor = self._reserve_ratio(
+            reserve_recommendation.get("home_load_export_floor_percent"),
+            None,
+        )
+        if export_floor is None:
+            return None
+        optimizer_floor = self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
+        if export_floor <= optimizer_floor + 0.0001:
+            return None
+        bridge_export_start = reserve_recommendation.get(
+            "home_load_bridge_after_export_start"
+        )
+        if not bridge_export_start:
+            return None
+        try:
+            bridge_start = datetime.fromisoformat(str(bridge_export_start))
+            now = dt_util.now()
+            if bridge_start.tzinfo is not None:
+                now = now.astimezone(bridge_start.tzinfo)
+            if bridge_start.date() == now.date():
+                return None
+            seconds_until_start = (bridge_start - now).total_seconds()
+        except (TypeError, ValueError):
+            return None
+        if seconds_until_start <= 0:
+            return None
+        interval_seconds = max(1, int(self._config.interval_minutes or 5)) * 60
+        start_slot = max(0, math.floor(seconds_until_start / interval_seconds))
+        if start_slot >= slot_count:
+            return None
+        floors = [0.0] * slot_count
+        for idx in range(start_slot, slot_count):
+            floors[idx] = export_floor
+        return floors
+
+    def _hardware_reserve_ratio(self) -> float:
+        """Return the configured hardware backup reserve as a ratio."""
+        startup_reserve = getattr(self, "_startup_backup_reserve", None)
+        if startup_reserve is not None:
+            try:
+                return max(0.0, min(1.0, float(startup_reserve) / 100.0))
+            except (TypeError, ValueError):
+                pass
+        optimizer = getattr(self, "_optimizer", None)
+        if getattr(optimizer, "hardware_reserve_known", False):
+            try:
+                return max(
+                    0.0,
+                    min(
+                        1.0,
+                        float(getattr(optimizer, "hardware_reserve", 0.0) or 0.0),
+                    ),
+                )
+            except (TypeError, ValueError):
+                pass
+        return 0.0
+
+    def _post_processed_export_reserve_floor_slots(
+        self,
+        schedule: OptimizationSchedule | None,
+        solar_forecast: list[float] | None,
+        load_forecast: list[float] | None,
+    ) -> tuple[list[float] | None, dict[str, Any]]:
+        """Build export-only reserve floors from the final candidate schedule."""
+        if not self.auto_apply_reserve_enabled:
+            return None, {}
+        actions = list(getattr(schedule, "actions", None) or [])
+        if not actions:
+            return None, {}
+
+        capacity_kwh = max(
+            0.0,
+            float(getattr(self._config, "battery_capacity_wh", 0) or 0) / 1000.0,
+        )
+        if capacity_kwh <= 0:
+            return None, {}
+
+        interval_hours = max(
+            1,
+            int(getattr(self._config, "interval_minutes", 5) or 5),
+        ) / 60.0
+        efficiency = max(
+            0.001,
+            float(getattr(getattr(self, "_optimizer", None), "efficiency", 0.95) or 0.95),
+        )
+        hardware_reserve = self._hardware_reserve_ratio()
+        active_floor = self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
+        threshold_kw = 0.1
+        floors = [0.0] * len(actions)
+        best_floor = 0.0
+        best_meta: dict[str, Any] = {}
+
+        def _forecast_kw(values: list[float] | None, index: int) -> float:
+            if not values or index >= len(values):
+                return 0.0
+            try:
+                return max(0.0, float(values[index]))
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _charge_opportunity(index: int) -> tuple[bool, str | None]:
+            action = actions[index]
+            if float(getattr(action, "battery_charge_w", 0.0) or 0.0) > 100.0:
+                return (
+                    True,
+                    "scheduled_grid_charge"
+                    if getattr(action, "action", None) == "charge"
+                    else "forecast_solar_surplus",
+                )
+            if _forecast_kw(solar_forecast, index) - _forecast_kw(load_forecast, index) > threshold_kw:
+                return True, "forecast_solar_surplus"
+            return False, None
+
+        for idx, action in enumerate(actions):
+            if getattr(action, "action", None) not in EXPORT_ACTIONS:
+                continue
+            discharge_w = float(
+                getattr(action, "battery_discharge_w", None)
+                or getattr(action, "power_w", 0.0)
+                or 0.0
+            )
+            if discharge_w <= 100.0:
+                continue
+
+            bridge_kwh = 0.0
+            next_charge_idx: int | None = None
+            next_charge_reason: str | None = None
+            for scan_idx in range(idx + 1, len(actions)):
+                is_charge, reason = _charge_opportunity(scan_idx)
+                if is_charge:
+                    next_charge_idx = scan_idx
+                    next_charge_reason = reason
+                    break
+                bridge_kwh += max(
+                    0.0,
+                    _forecast_kw(load_forecast, scan_idx)
+                    - _forecast_kw(solar_forecast, scan_idx),
+                ) * interval_hours
+
+            bridge_soc = bridge_kwh / max(capacity_kwh * efficiency, 0.001)
+            floor = max(hardware_reserve, min(1.0, hardware_reserve + bridge_soc))
+            if floor <= active_floor + 0.0001:
+                continue
+
+            floors[idx] = floor
+            if floor > best_floor:
+                best_floor = floor
+                protects_until_idx = (
+                    next_charge_idx if next_charge_idx is not None else len(actions) - 1
+                )
+                bridge_start_idx = min(idx + 1, len(actions) - 1)
+                best_meta = {
+                    "home_load_export_floor_percent": max(
+                        0,
+                        min(100, int(round(floor * 100))),
+                    ),
+                    "home_load_bridge_kwh": round(bridge_kwh, 3),
+                    "home_load_bridge_start": actions[
+                        bridge_start_idx
+                    ].timestamp.isoformat(),
+                    "home_load_bridge_until": actions[
+                        protects_until_idx
+                    ].timestamp.isoformat(),
+                    "home_load_bridge_next_charge_reason": (
+                        next_charge_reason or "no_charge_in_horizon"
+                    ),
+                    "home_load_bridge_after_export_start": action.timestamp.isoformat(),
+                }
+
+        if best_floor <= 0.0:
+            return None, {}
+        return floors, best_meta
+
+    def _set_active_export_reserve_floor_slots(
+        self,
+        floors: list[float] | None,
+        schedule: OptimizationSchedule | None,
+    ) -> None:
+        """Store transient export floors for runtime export guards."""
+        if not floors:
+            self._active_export_reserve_floor_slots = None
+            self._active_export_reserve_floor_timestamps = None
+            return
+        actions = list(getattr(schedule, "actions", None) or [])
+        normalized = [
+            max(0.0, min(1.0, float(value or 0.0)))
+            for value in floors[: len(actions)]
+        ]
+        self._active_export_reserve_floor_slots = normalized
+        self._active_export_reserve_floor_timestamps = [
+            getattr(action, "timestamp", None)
+            for action in actions[: len(normalized)]
+        ]
 
     def _force_discharge_reaches_reserve(
         self,
@@ -1225,14 +1577,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._entry:
             from ..const import (
                 CONF_ALPHAESS_EXPORT_LIMIT_KW,
+                CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
                 CONF_SIGENERGY_EXPORT_LIMIT_KW,
             )
+
+            if (
+                CONF_OPTIMIZATION_MAX_GRID_EXPORT_W in self._entry.options
+                or CONF_OPTIMIZATION_MAX_GRID_EXPORT_W in self._entry.data
+            ):
+                value = self._entry.options.get(
+                    CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+                    self._entry.data.get(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W),
+                )
+                return self._normalize_optional_export_power_w(value)
 
             for key in (CONF_SIGENERGY_EXPORT_LIMIT_KW, CONF_ALPHAESS_EXPORT_LIMIT_KW):
                 value = self._entry.options.get(key, self._entry.data.get(key))
                 watts = self._kw_to_w(value)
                 if watts is not None:
-                    return watts
+                    return int(round(watts))
 
         data = self._get_energy_data()
         if isinstance(data, dict):
@@ -1240,7 +1603,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if data.get("is_curtailed") and self._kw_to_w(export_limit) == 0:
                 return None
             if export_limit != "unlimited":
-                return self._kw_to_w(export_limit)
+                watts = self._kw_to_w(export_limit)
+                return int(round(watts)) if watts is not None else None
 
         return None
 
@@ -1291,7 +1655,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         export_command_cap_w: int | None = None
 
         if self._supports_target_export_power():
-            export_command_cap_w = self._config.max_discharge_w
+            export_command_cap_w = (
+                self._config.max_grid_export_w
+                if self._config.max_grid_export_w is not None
+                else self._config.max_discharge_w
+            )
             detected_physical_w = self._resolve_physical_max_discharge_w()
             if detected_physical_w and detected_physical_w > physical_discharge_w:
                 physical_discharge_w = detected_physical_w
@@ -1643,6 +2011,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if self._load_estimator and self._load_estimator._in_recovery else None
             ),
             "profit_max_mode": self.profit_max_mode,
+            "charge_by_time_enabled": self.charge_by_time_enabled,
         }
 
     async def async_setup(self) -> bool:
@@ -1717,10 +2086,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
                 CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
                 CONF_PROFIT_MAX_ENABLED,
+                CONF_CHARGE_BY_TIME_ENABLED,
+                CONF_CHARGE_BY_TIME_TARGET_TIME,
+                CONF_CHARGE_BY_TIME_TARGET_SOC,
                 CONF_PROFIT_MAX_TARGET_TIME,
                 CONF_PROFIT_MAX_TARGET_SOC,
-                DEFAULT_PROFIT_MAX_TARGET_TIME,
-                DEFAULT_PROFIT_MAX_TARGET_SOC,
+                DEFAULT_CHARGE_BY_TIME_TARGET_TIME,
+                DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
             )
             allow_grid_charge = self._entry.options.get(
                 CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
@@ -1745,48 +2117,88 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             if self._config.spread_import_enabled:
                 _LOGGER.info("Spread Import Across Window: ENABLED")
-            self._config.disable_idle_enabled = bool(
+            raw_disable_idle = bool(
                 self._entry.options.get(
                     CONF_OPTIMIZATION_DISABLE_IDLE,
                     self._entry.data.get(CONF_OPTIMIZATION_DISABLE_IDLE, False),
                 )
             )
+            self._config.disable_idle_enabled = (
+                raw_disable_idle and self._supports_disable_idle_mode()
+            )
             if self._should_disable_idle_schedule():
-                _LOGGER.info("Flow Power No Idle: ENABLED")
+                _LOGGER.info("No Idle mode: ENABLED")
 
             profit_max = self._entry.options.get(
                 CONF_PROFIT_MAX_ENABLED,
                 self._entry.data.get(CONF_PROFIT_MAX_ENABLED, False),
             )
             self._config.profit_max_enabled = bool(profit_max)
-            self._config.profit_max_target_time = str(
+            charge_by_time = self._entry.options.get(
+                CONF_CHARGE_BY_TIME_ENABLED,
+                self._entry.data.get(
+                    CONF_CHARGE_BY_TIME_ENABLED,
+                    bool(profit_max),
+                ),
+            )
+            self._config.charge_by_time_enabled = bool(charge_by_time)
+            self._config.charge_by_time_target_time = str(
                 self._entry.options.get(
-                    CONF_PROFIT_MAX_TARGET_TIME,
+                    CONF_CHARGE_BY_TIME_TARGET_TIME,
                     self._entry.data.get(
-                        CONF_PROFIT_MAX_TARGET_TIME,
-                        DEFAULT_PROFIT_MAX_TARGET_TIME,
+                        CONF_CHARGE_BY_TIME_TARGET_TIME,
+                        self._entry.options.get(
+                            CONF_PROFIT_MAX_TARGET_TIME,
+                            self._entry.data.get(
+                                CONF_PROFIT_MAX_TARGET_TIME,
+                                DEFAULT_CHARGE_BY_TIME_TARGET_TIME,
+                            ),
+                        ),
                     ),
                 )
             )
-            self._config.profit_max_target_soc = self._soc_ratio(
+            self._config.charge_by_time_target_soc = self._soc_ratio(
                 self._entry.options.get(
-                    CONF_PROFIT_MAX_TARGET_SOC,
+                    CONF_CHARGE_BY_TIME_TARGET_SOC,
                     self._entry.data.get(
-                        CONF_PROFIT_MAX_TARGET_SOC,
-                        DEFAULT_PROFIT_MAX_TARGET_SOC,
+                        CONF_CHARGE_BY_TIME_TARGET_SOC,
+                        self._entry.options.get(
+                            CONF_PROFIT_MAX_TARGET_SOC,
+                            self._entry.data.get(
+                                CONF_PROFIT_MAX_TARGET_SOC,
+                                DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
+                            ),
+                        ),
                     ),
                 ),
-                DEFAULT_PROFIT_MAX_TARGET_SOC,
+                DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
             )
             if self._optimizer:
                 self._optimizer.terminal_weight = self._profit_max_terminal_weight()
             if profit_max:
                 _LOGGER.info("Restored profit maximisation mode: ENABLED")
+            if charge_by_time:
+                _LOGGER.info("Restored Charge By Time: ENABLED")
 
         # Initialize solar forecaster
-        from ..const import CONF_SOLCAST_ESTIMATE_TYPE, DEFAULT_SOLCAST_ESTIMATE_TYPE
+        from ..const import (
+            CONF_SOLAR_FORECAST_PROVIDER,
+            CONF_SOLCAST_ESTIMATE_TYPE,
+            DEFAULT_SOLAR_FORECAST_PROVIDER,
+            DEFAULT_SOLCAST_ESTIMATE_TYPE,
+            SOLAR_FORECAST_PROVIDERS,
+        )
+        solar_forecast_provider = DEFAULT_SOLAR_FORECAST_PROVIDER
         solcast_estimate_type = DEFAULT_SOLCAST_ESTIMATE_TYPE
         if self._entry:
+            solar_forecast_provider = self._entry.options.get(
+                CONF_SOLAR_FORECAST_PROVIDER,
+                self._entry.data.get(
+                    CONF_SOLAR_FORECAST_PROVIDER, DEFAULT_SOLAR_FORECAST_PROVIDER
+                ),
+            )
+            if solar_forecast_provider not in SOLAR_FORECAST_PROVIDERS:
+                solar_forecast_provider = DEFAULT_SOLAR_FORECAST_PROVIDER
             solcast_estimate_type = self._entry.options.get(
                 CONF_SOLCAST_ESTIMATE_TYPE,
                 self._entry.data.get(
@@ -1797,6 +2209,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.hass,
             interval_minutes=self._config.interval_minutes,
             estimate_type=solcast_estimate_type,
+            provider_preference=solar_forecast_provider,
         )
 
         # Initialize executor (for battery control)
@@ -1870,6 +2283,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _get_load_entity_id(self) -> str | None:
         """Get the load entity ID based on battery system."""
+        if self._configured_load_entity_id:
+            configured_state = self.hass.states.get(self._configured_load_entity_id)
+            if self._is_usable_load_sensor_state(
+                configured_state
+            ) and not self._is_generated_load_forecast_sensor(configured_state):
+                _LOGGER.info(
+                    "Using configured load sensor: %s",
+                    self._configured_load_entity_id,
+                )
+                return self._configured_load_entity_id
+            _LOGGER.warning(
+                "Configured load sensor %s is unavailable or not a live load sensor; "
+                "falling back to auto-discovery",
+                self._configured_load_entity_id,
+            )
+
         # Try known sensor names first (most specific → least specific)
         fallbacks = [
             "sensor.power_sync_home_load",
@@ -1964,7 +2393,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         coordinator_name = type(self.price_coordinator).__name__
-        dynamic_providers = ["AmberPriceCoordinator", "AEMOPriceCoordinator"]
+        dynamic_providers = [
+            "AmberPriceCoordinator",
+            "AEMOPriceCoordinator",
+            "FlowPowerKWatchPriceCoordinator",
+        ]
 
         if coordinator_name == "OctopusPriceCoordinator" and self._is_octopus_dynamic_tariff():
             dynamic_providers.append("OctopusPriceCoordinator")
@@ -2218,36 +2651,40 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         now, so a long hold is no longer needed to keep the event loop
         responsive during startup.
         """
-        if not self.hass.is_running:
-            from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+        try:
+            if not self.hass.is_running:
+                from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 
-            _LOGGER.info("Deferring initial optimization until HA finishes starting")
-            started = asyncio.Event()
-            unsub = self.hass.bus.async_listen_once(
-                EVENT_HOMEASSISTANT_STARTED, lambda _event: started.set()
-            )
-            # Bounded by the legacy startup window so a missed start event can
-            # never hold the first solve forever.
-            cap = max(0.0, float(INITIAL_OPTIMIZATION_DELAY_SECONDS))
-            try:
-                await asyncio.wait_for(started.wait(), timeout=cap or None)
-            except asyncio.TimeoutError:
-                pass
-            finally:
-                # async_listen_once removes its own listener once it fires;
-                # calling unsub() again raises "unknown job listener". Only
-                # remove it on the timeout path where it never fired, and guard
-                # the boundary race where it fires just as we time out.
-                if not started.is_set():
-                    try:
-                        unsub()
-                    except ValueError:
-                        pass
+                _LOGGER.info("Deferring initial optimization until HA finishes starting")
+                started = asyncio.Event()
+                unsub = self.hass.bus.async_listen_once(
+                    EVENT_HOMEASSISTANT_STARTED, lambda _event: started.set()
+                )
+                # Bounded by the legacy startup window so a missed start event can
+                # never hold the first solve forever.
+                cap = max(0.0, float(INITIAL_OPTIMIZATION_DELAY_SECONDS))
+                try:
+                    await asyncio.wait_for(started.wait(), timeout=cap or None)
+                except asyncio.TimeoutError:
+                    pass
+                finally:
+                    # async_listen_once removes its own listener once it fires;
+                    # calling unsub() again raises "unknown job listener". Only
+                    # remove it on the timeout path where it never fired, and guard
+                    # the boundary race where it fires just as we time out.
+                    if not started.is_set():
+                        try:
+                            unsub()
+                        except ValueError:
+                            pass
 
-        if not self._enabled:
-            return
+            if not self._enabled:
+                return
 
-        await self._run_optimization()
+            await self._run_optimization()
+        finally:
+            if self._initial_opt_task is asyncio.current_task():
+                self._initial_opt_task = None
 
     def _seconds_until_initial_optimization_allowed(self) -> float:
         """Return remaining startup hold before the first LP solve may run.
@@ -2445,6 +2882,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._deferred_restore_task and not self._deferred_restore_task.done():
             self._deferred_restore_task.cancel()
             self._deferred_restore_task = None
+        if self._settings_reoptimize_task and not self._settings_reoptimize_task.done():
+            self._settings_reoptimize_task.cancel()
+            self._settings_reoptimize_task = None
 
         if self._price_listener_unsub:
             self._price_listener_unsub()
@@ -2519,11 +2959,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Overlay EV charging plan onto load forecast
             ev_peak_kw = 0.0
+            self._last_planned_ev_load_forecast_w = None
+            if load:
+                planned_ev_load_w = self._get_planned_ev_load_forecast(len(load))
+                if planned_ev_load_w:
+                    load = [l + ev for l, ev in zip(load, planned_ev_load_w)]
+                    self._last_planned_ev_load_forecast_w = planned_ev_load_w
+                    ev_peak_kw = max(ev_peak_kw, max(planned_ev_load_w) / 1000)
+
             if load and self._ev_integration_enabled:
                 ev_load_w = self._get_ev_planned_load(len(load))
                 if ev_load_w:
                     load = [l + ev for l, ev in zip(load, ev_load_w)]
-                    ev_peak_kw = max(ev_load_w) / 1000
+                    ev_peak_kw = max(ev_peak_kw, max(ev_load_w) / 1000)
 
             import_prices = prices[0] if prices else []
             export_prices = prices[1] if prices else []
@@ -2623,21 +3071,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 self._optimizer.suppress_reserve_warning = False
 
-            # Pre-window SOC floor: in profit_max mode, force the battery to
-            # be filled by the configured target time before the next
-            # high-value export window (today's Flow Power Happy Hour).
-            # Without this, the LP's 48 h horizon places
-            # the planned grid-charge slots at the globally cheapest PEA
-            # periods, which often misses today's HH and leaves the user
-            # at ~80% SOC at 17:30.
+            # Pre-window SOC floor: in Charge By Time mode, force the battery
+            # to reach the configured SOC by the configured target time.
             _target_slot = (
-                self._next_profit_max_target_slot()
+                self._next_charge_by_time_target_slot()
                 if self._config.allow_grid_charge
                 else None
             )
             self._optimizer.pre_window_slot = _target_slot
             self._optimizer.pre_window_soc_target = (
-                self._profit_max_target_soc()
+                self._charge_by_time_target_soc()
                 if self._optimizer.pre_window_slot is not None
                 else 0.0
             )
@@ -2649,8 +3092,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             battery_charge_blocked = self._battery_charge_blocked_slots(
                 len(import_prices),
             )
+            grid_charge_allowed = self._grid_charge_allowed_slots(
+                import_prices,
+                solar_forecast,
+                load_forecast,
+                soc,
+            )
             self._sync_grid_export_cap_to_optimizer()
             self._sync_optimizer_discharge_limits()
+            schedule_timestamps = self._price_timestamps(len(import_prices))
 
             def _auto_reserve_baseline_floor() -> float | None:
                 if not self.auto_apply_reserve_enabled:
@@ -2671,7 +3121,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             async def _run_optimizer_once(
                 reserve_floor: float | None = None,
-                export_reserve_floor: float | None = None,
+                export_reserve_floor: float | list[float] | None = None,
             ) -> OptimizerResult:
                 if reserve_floor is not None:
                     self._optimizer.update_config(backup_reserve=reserve_floor)
@@ -2688,9 +3138,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         battery_export_allowed,
                         battery_charge_blocked,
                         self._config.allow_grid_charge,
+                        grid_charge_allowed,
                         self._last_zerohero_bonus_prices,
                         self._last_zerohero_bonus_cap_kwh,
                         export_reserve_floor,
+                        schedule_timestamps,
                     )
                 finally:
                     if reserve_floor is not None:
@@ -2755,9 +3207,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 reserve_recommendation = dict(
                     getattr(result, "reserve_recommendation", {}) or {}
                 )
-            export_reserve_floor = self._auto_export_reserve_floor(
-                reserve_recommendation
+            export_reserve_floor, export_reserve_metadata = (
+                self._post_processed_export_reserve_floor_slots(
+                    self._current_schedule,
+                    solar_forecast,
+                    load_forecast,
+                )
             )
+            if export_reserve_metadata:
+                reserve_recommendation.update(export_reserve_metadata)
+            if export_reserve_floor is None:
+                export_reserve_floor = self._auto_export_reserve_floor(
+                    reserve_recommendation
+                )
+                if export_reserve_floor is None:
+                    export_reserve_floor = self._auto_export_reserve_floor_slots(
+                        reserve_recommendation,
+                        len(import_prices),
+                    )
             if (
                 reserve_changed
                 or used_recommendation_floor
@@ -2788,6 +3255,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._current_schedule = self._bridge_short_export_gaps(
                     self._current_schedule,
                     export_prices,
+                    export_reserve_floor=export_reserve_floor,
                 )
                 result.schedule = self._current_schedule
                 if self._should_disable_idle_schedule():
@@ -2817,9 +3285,46 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if export_reserve_floor is not None:
                         result.reserve_recommendation.setdefault(
                             "applied_export_reserve_floor_percent",
-                            int(round(export_reserve_floor * 100)),
+                            int(
+                                round(
+                                    (
+                                        max(export_reserve_floor)
+                                        if isinstance(export_reserve_floor, list)
+                                        else export_reserve_floor
+                                    )
+                                    * 100
+                                )
+                            ),
                         )
                 self._last_update_time = dt_util.now()
+
+            final_export_reserve_floor, final_export_reserve_metadata = (
+                self._post_processed_export_reserve_floor_slots(
+                    self._current_schedule,
+                    solar_forecast,
+                    load_forecast,
+                )
+            )
+            if final_export_reserve_floor is not None:
+                self._set_active_export_reserve_floor_slots(
+                    final_export_reserve_floor,
+                    self._current_schedule,
+                )
+                result.reserve_recommendation = dict(
+                    getattr(result, "reserve_recommendation", {}) or {}
+                )
+                result.reserve_recommendation.update(final_export_reserve_metadata)
+                result.reserve_recommendation.setdefault(
+                    "applied_export_reserve_floor_percent",
+                    int(round(max(final_export_reserve_floor) * 100)),
+                )
+            elif export_reserve_floor is not None:
+                self._set_active_export_reserve_floor_slots(
+                    export_reserve_floor if isinstance(export_reserve_floor, list) else None,
+                    self._current_schedule,
+                )
+            else:
+                self._set_active_export_reserve_floor_slots(None, None)
 
             # Store forecast data for LP forecast sensors
             self._has_solar_forecast = solar_forecast is not None and any(v > 0 for v in (solar_forecast or []))
@@ -2908,7 +3413,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Safety: if a pre-IDLE backup reserve restore is pending,
                 # keep trying until it succeeds. This catches API failures
                 # during previous restore attempts.
-                if self._pre_idle_backup_reserve is not None and self._last_executed_action != "idle":
+                if self._should_restore_pre_idle_backup_reserve_from_polling():
                     battery = self._executor.battery_controller if self._executor else None
                     if battery:
                         await self._restore_pre_idle_backup_reserve(battery, "polling safety check")
@@ -2933,8 +3438,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         break
                     # The dedicated initial optimization task owns the first
                     # post-startup solve. Resume polling at the next boundary.
-                    if self._initial_opt_task is not None:
+                    initial_task = self._initial_opt_task
+                    if initial_task is not None and not initial_task.done():
                         continue
+                    self._initial_opt_task = None
+
+                # Apply the already-computed slot at the wall-clock boundary
+                # before any forecast/API work in the next LP solve can delay
+                # hardware control.
+                await self._execute_cached_current_action_if_changed()
 
                 # Re-optimize on each interval (executes the resulting action internally)
                 await self._run_optimization()
@@ -2944,6 +3456,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as e:
                 _LOGGER.error("Error in schedule polling: %s", e)
                 await asyncio.sleep(60)
+
+    async def _execute_cached_current_action_if_changed(self) -> None:
+        """Apply the cached schedule action when coordinator refresh crosses a boundary."""
+        if not getattr(self, "_enabled", False):
+            return
+        if not getattr(self, "_executor", None):
+            return
+
+        optimization_lock = getattr(self, "_optimization_lock", None)
+        if optimization_lock is not None and optimization_lock.locked():
+            return
+
+        current_action = self._get_current_action()
+        action_name = getattr(current_action, "action", None)
+        if not current_action or not action_name:
+            return
+        if action_name == getattr(self, "_last_executed_action", None):
+            return
+
+        _LOGGER.info(
+            "Optimizer: applying cached schedule action %s on coordinator refresh",
+            action_name,
+        )
+        await self._execute_optimizer_action(current_action)
 
     def _seconds_until_next_interval(self) -> float:
         """Return seconds until the next optimizer interval boundary."""
@@ -3027,7 +3563,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             from ..const import DISCHARGE_DURATIONS
         except Exception:
-            DISCHARGE_DURATIONS = [5, 10, 15, 30, 45, 60, 75, 90, 105, 120, 150, 180, 210, 240]
+            DISCHARGE_DURATIONS = [5, 10, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180, 195, 210, 225, 240]
 
         supported = sorted(int(duration) for duration in DISCHARGE_DURATIONS)
         if allow_boundary_overrun:
@@ -3038,11 +3574,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return int(max(1, requested))
 
+    def _supports_disable_idle_mode(self) -> bool:
+        """Return True when this provider can disable optimizer IDLE."""
+        return supports_no_idle_mode_provider(self._provider_key())
+
     def _should_disable_idle_schedule(self) -> bool:
-        """Return True when Flow Power users have disabled optimizer IDLE."""
-        return self._provider_key() == "flow_power" and bool(
+        """Return True when no-idle mode should replace optimizer IDLE."""
+        return self._supports_disable_idle_mode() and bool(
             self._config.disable_idle_enabled
         )
+
+    def _effective_runtime_action(
+        self,
+        action_name: str | None,
+        timestamp: datetime | None = None,
+    ) -> str | None:
+        """Return the action that runtime execution will apply."""
+        if action_name != "idle":
+            return action_name
+        if self._should_disable_idle_schedule():
+            return "self_consumption"
+        if timestamp is not None and self._is_in_demand_window_at(timestamp):
+            return "self_consumption"
+        return action_name
 
     def _disable_idle_schedule(
         self,
@@ -3052,7 +3606,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         load_forecast: list[float] | None = None,
         initial_soc: float | None = None,
     ) -> OptimizationSchedule:
-        """Replace optimizer IDLE slots with self-consumption for Flow Power."""
+        """Replace optimizer IDLE slots with self-consumption."""
         actions = getattr(schedule, "actions", None) or []
         if not actions:
             return schedule
@@ -3107,6 +3661,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         if soc_cursor is not None:
             self_consumption_floor = min(soc_cursor, self_consumption_floor)
+        charge_by_time_target_slot = self._next_charge_by_time_target_slot()
+        charge_by_time_target_soc = (
+            self._charge_by_time_target_soc()
+            if charge_by_time_target_slot is not None
+            else 0.0
+        )
 
         def _forecast_w(values: list[float] | None, index: int) -> float:
             if not values or index >= len(values):
@@ -3144,13 +3704,59 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
         for index, action in enumerate(actions):
-            if getattr(action, "action", None) != "idle":
-                new_actions.append(action)
-                soc_cursor = _advance_soc(
-                    soc_cursor,
-                    float(getattr(action, "battery_charge_w", 0.0) or 0.0),
-                    float(getattr(action, "battery_discharge_w", 0.0) or 0.0),
+            action_name = getattr(action, "action", None)
+            action_charge_w = float(getattr(action, "battery_charge_w", 0.0) or 0.0)
+            action_discharge_w = float(
+                getattr(action, "battery_discharge_w", 0.0) or 0.0
+            )
+            should_simulate_self_use = (
+                action_name in SELF_USE_ACTIONS
+                and action_charge_w <= 0
+                and action_discharge_w <= 0
+            )
+            should_preserve_charge_by_time_hold = (
+                charge_by_time_target_slot is not None
+                and index < charge_by_time_target_slot
+                and soc_cursor is not None
+                and soc_cursor < charge_by_time_target_soc - 0.0001
+                and (action_name == "idle" or should_simulate_self_use)
+            )
+            if should_preserve_charge_by_time_hold:
+                new_actions.append(
+                    ScheduleAction(
+                        timestamp=action.timestamp,
+                        action=action.action,
+                        power_w=0.0,
+                        soc=round(soc_cursor, 4),
+                        battery_charge_w=0.0,
+                        battery_discharge_w=0.0,
+                    )
                 )
+                continue
+            if action_name != "idle" and not should_simulate_self_use:
+                next_soc = _advance_soc(
+                    soc_cursor,
+                    action_charge_w,
+                    action_discharge_w,
+                )
+                if soc_cursor is None:
+                    new_actions.append(action)
+                else:
+                    new_actions.append(
+                        ScheduleAction(
+                            timestamp=action.timestamp,
+                            action=action.action,
+                            power_w=action.power_w,
+                            soc=(
+                                round(next_soc, 4)
+                                if next_soc is not None
+                                else getattr(action, "soc", None)
+                            ),
+                            battery_charge_w=action.battery_charge_w,
+                            battery_discharge_w=action.battery_discharge_w,
+                        )
+                    )
+                soc_cursor = next_soc
                 continue
             changed = True
             discharge_w = round(_natural_discharge_w(index, soc_cursor), 1)
@@ -3173,7 +3779,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not changed:
             return schedule
 
-        _LOGGER.info("Flow Power No Idle: converted optimizer IDLE slots to self-consumption")
+        _LOGGER.info("No Idle mode: converted optimizer IDLE slots to self-consumption")
         return OptimizationSchedule(
             actions=new_actions,
             predicted_cost=schedule.predicted_cost,
@@ -3185,6 +3791,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self,
         schedule: OptimizationSchedule,
         export_prices: list[float] | None = None,
+        export_reserve_floor: float | list[float] | None = None,
     ) -> OptimizationSchedule:
         """Keep export mode through one-slot self-use islands between exports."""
         actions = getattr(schedule, "actions", None) or []
@@ -3235,6 +3842,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 previous_action,
                 next_action,
             )
+            reserve_floor = self._bridge_export_reserve_floor(
+                export_reserve_floor,
+                gap_start,
+                gap_end,
+            )
+            if not self._can_bridge_export_gap_above_reserve(
+                previous_action,
+                actions[gap_start:gap_end],
+                bridge_power_w,
+                reserve_floor,
+            ):
+                continue
 
             for gap_action in actions[gap_start:gap_end]:
                 gap_action.action = export_action
@@ -3244,6 +3863,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     getattr(gap_action, "battery_discharge_w", 0.0) or 0.0,
                     bridge_power_w,
                 )
+                bridged_soc = self._bridged_gap_soc(previous_action, bridge_power_w)
+                if bridged_soc is not None:
+                    gap_action.soc = bridged_soc
                 bridged += 1
 
         if bridged:
@@ -3253,12 +3875,96 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         return schedule
 
+    def _can_bridge_export_gap_above_reserve(
+        self,
+        previous_action: Any,
+        gap_actions: list[Any],
+        bridge_power_w: float,
+        reserve_floor: float | None = None,
+    ) -> bool:
+        """Return False when bridging would export below the configured floor."""
+        reserve_floor = (
+            self._force_discharge_reserve_floor()
+            if reserve_floor is None
+            else max(0.0, min(1.0, reserve_floor))
+        )
+        previous_soc = self._reserve_ratio(getattr(previous_action, "soc", None), None)
+        gap_socs = [
+            soc
+            for soc in (
+                self._reserve_ratio(getattr(action, "soc", None), None)
+                for action in gap_actions
+            )
+            if soc is not None
+        ]
+        if previous_soc is None and not gap_socs:
+            return True
+        if previous_soc is not None and previous_soc <= reserve_floor + 1e-6:
+            return False
+        if any(soc <= reserve_floor + 1e-6 for soc in gap_socs):
+            return False
+        bridged_soc = self._bridged_gap_soc(previous_action, bridge_power_w)
+        if bridged_soc is None:
+            return True
+        return bridged_soc >= reserve_floor - 1e-6
+
+    def _bridge_export_reserve_floor(
+        self,
+        export_reserve_floor: float | list[float] | None,
+        gap_start: int,
+        gap_end: int,
+    ) -> float:
+        """Return the reserve floor that applies while filling an export gap."""
+        floor = self._force_discharge_reserve_floor()
+        if isinstance(export_reserve_floor, list):
+            scoped_floors = [
+                self._reserve_ratio(value, None)
+                for value in export_reserve_floor[gap_start:gap_end]
+            ]
+            scoped_floors = [value for value in scoped_floors if value is not None]
+            if scoped_floors:
+                floor = max(floor, max(scoped_floors))
+        else:
+            explicit_floor = self._reserve_ratio(export_reserve_floor, None)
+            if explicit_floor is not None:
+                floor = max(floor, explicit_floor)
+        return max(0.0, min(1.0, floor))
+
+    def _bridged_gap_soc(
+        self,
+        previous_action: Any,
+        bridge_power_w: float,
+    ) -> float | None:
+        """Estimate SOC after one bridged export slot."""
+        previous_soc = self._reserve_ratio(getattr(previous_action, "soc", None), None)
+        if previous_soc is None:
+            return None
+        capacity_wh = float(getattr(self._config, "battery_capacity_wh", 0.0) or 0.0)
+        if capacity_wh <= 0:
+            return previous_soc
+        interval_hours = max(
+            1,
+            int(getattr(self._config, "interval_minutes", 5) or 5),
+        ) / 60.0
+        efficiency = float(
+            getattr(getattr(self, "_optimizer", None), "efficiency", 0.92) or 0.92
+        )
+        removed_wh = max(0.0, float(bridge_power_w or 0.0)) * interval_hours / max(
+            efficiency,
+            0.001,
+        )
+        return max(0.0, min(1.0, round(previous_soc - removed_wh / capacity_wh, 4)))
+
     def _dynamic_export_prices_can_have_real_one_slot_gaps(self) -> bool:
         """Return True when a one-slot export gap may be a real price signal."""
         if getattr(self, "_is_dynamic_pricing", False):
             return True
         coordinator_name = type(getattr(self, "price_coordinator", None)).__name__
-        return coordinator_name in {"AmberPriceCoordinator", "AEMOPriceCoordinator"}
+        return coordinator_name in {
+            "AmberPriceCoordinator",
+            "AEMOPriceCoordinator",
+            "FlowPowerKWatchPriceCoordinator",
+        }
 
     @staticmethod
     def _short_export_gap_prices_match(
@@ -3367,6 +4073,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "expires_at": None,
                 "hardware_expires_at": None,
                 "power_w": 0,
+                "started_at": None,
                 "source": "optimizer",
                 "scope": "optimizer",
             }
@@ -3381,15 +4088,103 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Record an optimizer-owned hardware force command."""
         now = dt_util.utcnow()
         expires_at = now + timedelta(minutes=max(1, int(duration_minutes)))
+        existing_state = getattr(self, "_optimizer_force_state", None)
+        started_at = None
+        if (
+            isinstance(existing_state, dict)
+            and existing_state.get("active")
+            and existing_state.get("type") == force_type
+        ):
+            started_at = self._as_utc_datetime(existing_state.get("started_at"))
         self._optimizer_force_state = {
             "active": True,
             "type": force_type,
             "expires_at": expires_at,
             "hardware_expires_at": expires_at,
             "power_w": power_w,
+            "started_at": started_at or now,
             "source": "optimizer",
             "scope": "optimizer",
         }
+
+    def _optimizer_force_charge_commitment_remaining(
+        self,
+        force_state: dict[str, Any],
+    ) -> timedelta | None:
+        """Return remaining minimum hold time for optimizer-owned force charge."""
+        if (
+            force_state.get("scope") != "optimizer"
+            or force_state.get("type") != "charge"
+        ):
+            return None
+
+        started_at = self._as_utc_datetime(force_state.get("started_at"))
+        if started_at is None:
+            return None
+
+        remaining = (
+            OPTIMIZER_FORCE_CHARGE_MIN_COMMITMENT
+            - (dt_util.utcnow() - started_at)
+        )
+        if remaining <= timedelta(0):
+            return None
+        return remaining
+
+    def _optimizer_force_discharge_commitment_remaining(
+        self,
+        force_state: dict[str, Any],
+        action: Any,
+    ) -> timedelta | None:
+        """Return remaining hold time for optimizer-owned force discharge."""
+        if (
+            force_state.get("scope") != "optimizer"
+            or force_state.get("type") != "discharge"
+        ):
+            return None
+
+        started_at = self._as_utc_datetime(force_state.get("started_at"))
+        if started_at is None:
+            return None
+
+        remaining = (
+            OPTIMIZER_FORCE_DISCHARGE_MIN_COMMITMENT
+            - (dt_util.utcnow() - started_at)
+        )
+        if remaining <= timedelta(0):
+            return None
+
+        if not self._schedule_has_future_action(action, EXPORT_ACTIONS, remaining):
+            return None
+        return remaining
+
+    def _schedule_has_future_action(
+        self,
+        action: Any,
+        matching_actions: set[str],
+        horizon: timedelta,
+    ) -> bool:
+        """Return true when the active schedule still wants a matching future action."""
+        schedule = getattr(self, "_current_schedule", None)
+        actions = getattr(schedule, "actions", None)
+        if not actions:
+            return False
+
+        now = dt_util.utcnow()
+        action_ts = self._as_utc_datetime(getattr(action, "timestamp", None))
+        start_at = max(now, action_ts) if action_ts is not None else now
+        horizon_end = now + horizon
+
+        for scheduled_action in actions:
+            scheduled_ts = self._as_utc_datetime(
+                getattr(scheduled_action, "timestamp", None)
+            )
+            if scheduled_ts is None or scheduled_ts < start_at:
+                continue
+            if scheduled_ts > horizon_end:
+                continue
+            if getattr(scheduled_action, "action", None) in matching_actions:
+                return True
+        return False
 
     def _get_active_force_state(self) -> dict[str, Any]:
         """Return user-visible force state or private optimizer force state."""
@@ -3423,6 +4218,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _export_command_power_w(self, action: Any) -> float:
         """Return the hardware export command power for an optimizer action."""
         command_w = float(self._config.max_discharge_w)
+        if self.battery_system == "goodwe":
+            try:
+                discharge_w = float(getattr(action, "battery_discharge_w", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                discharge_w = 0.0
+            if discharge_w > 0:
+                return min(command_w, discharge_w)
         if self._supports_target_export_power():
             try:
                 requested_w = float(getattr(action, "power_w", 0.0) or 0.0)
@@ -3430,8 +4232,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 requested_w = 0.0
             if requested_w > 0:
                 command_w = min(command_w, requested_w)
-        if self._config.max_grid_export_w is not None:
-            command_w = min(command_w, float(self._config.max_grid_export_w))
+            if self._config.max_grid_export_w is not None:
+                command_w = min(command_w, float(self._config.max_grid_export_w))
         return command_w
 
     @staticmethod
@@ -3510,12 +4312,112 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         return True
 
-    def _current_import_price_is_free(self) -> bool:
+    def _force_discharge_hardware_needs_refresh(self, target_power_w: float) -> bool:
+        """Return True when telemetry shows a stale non-Tesla discharge command."""
+        if self.battery_system == "tesla":
+            return False
+
+        data = self._get_energy_data()
+        if not isinstance(data, dict):
+            return False
+
+        try:
+            target_w = float(target_power_w)
+        except (TypeError, ValueError):
+            return False
+        if target_w <= 0:
+            return False
+
+        mode_value = (
+            data.get("work_mode_name")
+            or data.get("mode")
+            or data.get("work_mode")
+            or data.get("ems_mode_name")
+        )
+        mode = str(mode_value or "").strip().lower()
+        if any(
+            token in mode
+            for token in (
+                "sell",
+                "discharge",
+                "export",
+                "eco_discharge",
+                "force_discharge",
+            )
+        ):
+            return False
+
+        try:
+            battery_power = float(data.get("battery_power", 0) or 0)
+        except (TypeError, ValueError):
+            battery_power = 0.0
+        battery_power_w = battery_power * 1000 if abs(battery_power) < 100 else battery_power
+        discharge_power_w = max(0.0, battery_power_w)
+
+        try:
+            grid_power = float(data.get("grid_power", 0) or 0)
+        except (TypeError, ValueError):
+            grid_power = 0.0
+        grid_power_w = grid_power * 1000 if abs(grid_power) < 100 else grid_power
+        export_power_w = max(0.0, -grid_power_w)
+
+        observed_power_w = max(discharge_power_w, export_power_w)
+        minimum_expected_w = max(500.0, target_w * 0.2)
+
+        if observed_power_w >= minimum_expected_w:
+            return False
+
+        _LOGGER.info(
+            "Optimizer: force discharge hardware appears inactive "
+            "(mode=%s, discharging %.0fW/exporting %.0fW below %.0fW target) — refreshing command",
+            mode_value,
+            discharge_power_w,
+            export_power_w,
+            target_w,
+        )
+        return True
+
+    def _current_import_price_for_action(
+        self,
+        prices: list[float],
+        action: Any | None,
+    ) -> float | None:
+        """Return the tariff price for an action's scheduled interval."""
+        if action is None:
+            return None
+        action_time = self._as_utc_datetime(getattr(action, "timestamp", None))
+        if action_time is None:
+            return None
+        timestamps = getattr(self, "_last_price_timestamps", None)
+        if not timestamps:
+            return None
+
+        interval_minutes = max(
+            1,
+            int(getattr(self._config, "interval_minutes", 5) or 5),
+        )
+        slot_limit = timedelta(minutes=interval_minutes)
+        n = min(len(prices), len(timestamps))
+        for idx in range(n):
+            slot_start = self._as_utc_datetime(timestamps[idx])
+            if slot_start is None:
+                continue
+            if slot_start <= action_time < slot_start + slot_limit:
+                try:
+                    return float(prices[idx])
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    def _current_import_price_is_free(self, action: Any | None = None) -> bool:
         prices = getattr(self, "_last_display_import_prices", None) or getattr(
             self, "_last_import_prices", None
         )
         if not prices:
             return False
+        action_price = self._current_import_price_for_action(prices, action)
+        if action_price is not None:
+            return action_price <= 0.001
         try:
             return float(prices[0]) <= 0.001
         except (TypeError, ValueError):
@@ -3584,10 +4486,88 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         return live_limit_w
 
+    def _tesla_force_charge_should_yield_to_live_solar(
+        self,
+        action: Any | None = None,
+    ) -> bool:
+        """Return True when Tesla force charge should avoid curtailing solar surplus."""
+        if self.battery_system != "tesla":
+            return False
+        if self._supports_target_charge_power():
+            return False
+
+        if self._current_import_price_is_free(action):
+            _LOGGER.debug(
+                "Optimizer: Allowing Tesla force charge with live solar during "
+                "free import"
+            )
+            return False
+
+        data = self._get_energy_data()
+        if not isinstance(data, dict):
+            return False
+
+        solar_w = self._kw_to_w(data.get("solar_power"))
+        if solar_w is None or solar_w < 500.0:
+            return False
+
+        try:
+            battery_level = float(data.get("battery_level", 0) or 0)
+        except (TypeError, ValueError):
+            battery_level = 0.0
+        if battery_level >= 98.0:
+            return False
+
+        load_w = self._kw_to_w(data.get("load_power"))
+        battery_w = self._kw_to_w(data.get("battery_power"))
+        grid_w = self._kw_to_w(data.get("grid_power"))
+
+        if battery_w is not None and battery_w > 250.0:
+            _LOGGER.debug(
+                "Optimizer: Allowing Tesla force charge with %.0fW live solar "
+                "because the battery is discharging %.0fW into site load",
+                solar_w,
+                battery_w,
+            )
+            return False
+
+        if load_w is not None and solar_w - load_w < 500.0:
+            _LOGGER.debug(
+                "Optimizer: Allowing Tesla force charge with %.0fW live solar "
+                "because site load %.0fW leaves no meaningful solar surplus",
+                solar_w,
+                load_w,
+            )
+            return False
+
+        if grid_w is not None and grid_w > 250.0:
+            _LOGGER.debug(
+                "Optimizer: Allowing Tesla force charge with %.0fW live solar "
+                "because the site is importing %.0fW",
+                solar_w,
+                grid_w,
+            )
+            return False
+
+        _LOGGER.info(
+            "Optimizer: Blocking Tesla force charge while %.0fW live solar "
+            "surplus is available; Tesla TOU force charge cannot target partial charge "
+            "power and may curtail AC-coupled solar",
+            solar_w,
+        )
+        return True
+
     async def _execute_optimizer_action(self, action: Any) -> None:
         """Execute an optimizer action on the battery."""
         if not self._executor or not self._executor.battery_controller:
             return
+
+        if (
+            getattr(action, "action", None) == "idle"
+            and self._should_disable_idle_schedule()
+        ):
+            action = copy.copy(action)
+            action.action = "self_consumption"
 
         # Monitoring mode — log what would happen but don't execute
         if self._monitoring_mode_active():
@@ -3637,7 +4617,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if force_type == "discharge":
                         try:
                             soc_now, _ = await self._get_battery_state()
-                            opt_reserve = self._force_discharge_reserve_floor()
+                            opt_reserve = self._force_discharge_reserve_floor(action)
                             reaches_reserve, projected_soc = (
                                 self._force_discharge_reaches_reserve(
                                     action,
@@ -3672,6 +4652,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     await battery.restore_normal()
                                 elif hasattr(battery, "set_self_consumption_mode"):
                                     await battery.set_self_consumption_mode()
+                                self._last_executed_planned_action = action.action
                                 self._last_executed_action = "self_consumption"
                                 return
                         except Exception as reserve_err:
@@ -3680,6 +4661,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 "discharge failed: %s",
                                 reserve_err,
                             )
+
+                    if (
+                        force_type == "charge"
+                        and self._tesla_force_charge_should_yield_to_live_solar(
+                            action
+                        )
+                    ):
+                        _LOGGER.info(
+                            "Optimizer: Canceling active Tesla force charge — "
+                            "live solar is available, restoring self_consumption"
+                        )
+                        if force_state.get("scope") == "optimizer":
+                            self._clear_optimizer_force_state()
+                        elif self._force_state_clearer:
+                            self._force_state_clearer()
+                        if hasattr(battery, "restore_normal"):
+                            await battery.restore_normal()
+                        elif hasattr(battery, "set_self_consumption_mode"):
+                            await battery.set_self_consumption_mode()
+                        self._last_executed_planned_action = action.action
+                        self._last_executed_action = "self_consumption"
+                        return
 
                     # Extend the expiry timer so the force mode doesn't expire
                     # between optimizer cycles (avoids restore→re-issue gap).
@@ -3770,6 +4773,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             should_refresh_hardware
                             or self._force_charge_hardware_needs_refresh(force_power_w)
                         )
+                    elif force_type == "discharge":
+                        should_refresh_hardware = (
+                            should_refresh_hardware
+                            or self._force_discharge_hardware_needs_refresh(force_power_w)
+                        )
 
                     # Re-issue hardware writes when the hardware-side window is
                     # shorter than the extended optimizer-owned force state, or
@@ -3836,6 +4844,34 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     return
 
                 # LP changed its mind — cancel the optimizer's force mode.
+                if action.action in SELF_USE_ACTIONS or action.action == "idle":
+                    if force_type == "charge":
+                        commitment_remaining = (
+                            self._optimizer_force_charge_commitment_remaining(
+                                force_state
+                            )
+                        )
+                    else:
+                        commitment_remaining = (
+                            self._optimizer_force_discharge_commitment_remaining(
+                                force_state,
+                                action,
+                            )
+                        )
+                    if commitment_remaining is not None:
+                        remaining_minutes = max(
+                            1,
+                            int((commitment_remaining.total_seconds() + 59) // 60),
+                        )
+                        _LOGGER.info(
+                            "Optimizer: Holding active force %s for %d more min "
+                            "despite LP now wanting %s",
+                            force_type,
+                            remaining_minutes,
+                            action.action,
+                        )
+                        return
+
                 # Clear force state BEFORE calling restore_normal so that
                 # TOU sync (triggered inside restore_normal) doesn't skip
                 # due to seeing force_charge_state["active"]=True.
@@ -3862,7 +4898,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # peak demand — the opposite of what demand charge avoidance wants.
             # Self-consumption lets the battery discharge to cover home load,
             # minimizing grid import during the demand window.
-            effective_action = action.action
+            planned_action = action.action
+            effective_action = planned_action
 
             # --- Off-grid transition handling ---
             # If we're currently off-grid and the new action needs the grid,
@@ -3908,7 +4945,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             if effective_action == "idle" and self._should_disable_idle_schedule():
                 _LOGGER.info(
-                    "Flow Power No Idle: overriding optimizer IDLE to self_consumption"
+                    "No Idle mode: overriding optimizer IDLE to self_consumption"
                 )
                 effective_action = "self_consumption"
 
@@ -4013,7 +5050,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if effective_action in ("discharge", "export"):
                 try:
                     soc_now, _ = await self._get_battery_state()
-                    opt_reserve = self._force_discharge_reserve_floor()
+                    opt_reserve = self._force_discharge_reserve_floor(action)
                     reaches_reserve, projected_soc = (
                         self._force_discharge_reaches_reserve(
                             action,
@@ -4046,6 +5083,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             if effective_action == "charge":
                 if hasattr(battery, "force_charge"):
+                    if self._tesla_force_charge_should_yield_to_live_solar(action):
+                        effective_action = "self_consumption"
+                        if hasattr(battery, "set_self_consumption_mode"):
+                            await battery.set_self_consumption_mode()
+                        elif hasattr(battery, "restore_normal"):
+                            await battery.restore_normal()
+                    if effective_action != "charge":
+                        self._last_executed_planned_action = action.action
+                        self._last_executed_action = effective_action
+                        return
+
                     charge_power_w = self._charge_command_power_w(action)
                     charge_duration = self._force_duration_for_action_window(
                         action,
@@ -4372,6 +5420,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             )
                     _LOGGER.debug("Optimizer: Self-consumption mode (action=%s)", effective_action)
 
+            self._last_executed_planned_action = planned_action
             self._last_executed_action = effective_action
 
         except Exception as e:
@@ -4613,7 +5662,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self,
         schedule: OptimizationSchedule,
         allowed_slots: bool | list[bool],
-        export_reserve_floor: float | None = None,
+        export_reserve_floor: float | list[float] | None = None,
     ) -> OptimizationSchedule:
         """Spread planned export energy across each contiguous allowed window."""
         actions = list(schedule.actions or [])
@@ -4629,8 +5678,38 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 allowed.extend([False] * (n - len(allowed)))
 
         interval_hours = max(1, int(self._config.interval_minutes or 5)) / 60.0
+        capacity_wh = max(0.0, float(self._config.battery_capacity_wh or 0))
+        efficiency = float(getattr(self._optimizer, "efficiency", 0.92) or 0.92)
+        scoped_export_floors = (
+            export_reserve_floor if isinstance(export_reserve_floor, list) else None
+        )
+        min_export_floor = (
+            None
+            if scoped_export_floors is not None
+            else self._reserve_ratio(export_reserve_floor, None)
+        )
+        if min_export_floor is None and scoped_export_floors is None:
+            min_export_floor = self._force_discharge_reserve_floor()
         new_actions: list[ScheduleAction] = list(actions)
         idx = 0
+
+        def _action_soc(pos: int) -> float | None:
+            if pos < 0 or pos >= len(new_actions):
+                return None
+            return self._reserve_ratio(getattr(new_actions[pos], "soc", None), None)
+
+        def _advance_export_soc(soc: float, export_w: float) -> float:
+            if capacity_wh <= 0:
+                return soc
+            removed_wh = max(0.0, export_w) * interval_hours / max(efficiency, 0.001)
+            return max(0.0, min(1.0, soc - removed_wh / capacity_wh))
+
+        def _available_export_w(soc: float, floor: float) -> float:
+            if capacity_wh <= 0:
+                return 0.0
+            available_wh = max(0.0, soc - floor) * capacity_wh
+            return available_wh * max(efficiency, 0.001) / interval_hours
+
         while idx < n:
             if not allowed[idx]:
                 idx += 1
@@ -4640,6 +5719,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             while idx < n and allowed[idx]:
                 idx += 1
             end = idx
+            window_floor = min_export_floor
+            if scoped_export_floors is not None:
+                scoped_window = scoped_export_floors[start:end]
+                scoped_floor = max(scoped_window) if scoped_window else 0.0
+                window_floor = (
+                    scoped_floor
+                    if scoped_floor > 0
+                    else self._force_discharge_reserve_floor()
+                )
             window_actions = actions[start:end]
             export_power_field = (
                 "power_w"
@@ -4656,8 +5744,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 continue
 
             spread_positions = list(range(start, end))
-            floor = self._reserve_ratio(export_reserve_floor, None)
-            if floor is not None:
+            floor = self._reserve_ratio(window_floor, None)
+            if floor is not None and any(_action_soc(pos) is not None for pos in spread_positions):
                 spread_positions = [
                     pos
                     for pos in spread_positions
@@ -4671,26 +5759,115 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     > floor + 0.0001
                 ]
                 if not spread_positions:
+                    fallback_soc = _action_soc(start - 1)
+                    if fallback_soc is None:
+                        fallback_soc = floor
+                    for pos in range(start, end):
+                        original = actions[pos]
+                        if getattr(original, "action", None) in ("export", "discharge"):
+                            new_actions[pos] = ScheduleAction(
+                                timestamp=original.timestamp,
+                                action="self_consumption",
+                                power_w=0.0,
+                                soc=(
+                                    round(fallback_soc, 4)
+                                    if fallback_soc is not None
+                                    else original.soc
+                                ),
+                                battery_charge_w=0.0,
+                                battery_discharge_w=0.0,
+                            )
                     continue
 
+            export_cap_w = (
+                self._config.max_grid_export_w
+                if self._config.max_grid_export_w is not None
+                else self._config.max_discharge_w
+            )
             target_w = min(
-                float(self._config.max_discharge_w),
+                float(max(0, export_cap_w)),
                 export_wh / (len(spread_positions) * interval_hours),
             )
             target_w = round(max(0.0, target_w), 1)
             if target_w <= 0:
+                fallback_soc = _action_soc(start - 1)
+                if fallback_soc is None:
+                    fallback_soc = _action_soc(start)
+                for pos in spread_positions:
+                    original = actions[pos]
+                    if getattr(original, "action", None) in ("export", "discharge"):
+                        new_actions[pos] = ScheduleAction(
+                            timestamp=original.timestamp,
+                            action="self_consumption",
+                            power_w=0.0,
+                            soc=(
+                                round(fallback_soc, 4)
+                                if fallback_soc is not None
+                                else original.soc
+                            ),
+                            battery_charge_w=0.0,
+                            battery_discharge_w=0.0,
+                        )
                 continue
 
+            soc_cursor = _action_soc(start - 1)
+            if soc_cursor is None:
+                soc_cursor = _action_soc(start)
             for pos in spread_positions:
                 original = actions[pos]
-                new_actions[pos] = ScheduleAction(
-                    timestamp=original.timestamp,
-                    action="export",
-                    power_w=target_w,
-                    soc=original.soc,
-                    battery_charge_w=0.0,
-                    battery_discharge_w=target_w,
-                )
+                slot_target_w = target_w
+                if floor is not None and soc_cursor is not None:
+                    slot_target_w = min(
+                        slot_target_w,
+                        _available_export_w(soc_cursor, floor),
+                    )
+                    slot_target_w = round(max(0.0, slot_target_w), 1)
+                if slot_target_w > 0:
+                    soc_after = (
+                        _advance_export_soc(soc_cursor, slot_target_w)
+                        if soc_cursor is not None
+                        else original.soc
+                    )
+                    new_actions[pos] = ScheduleAction(
+                        timestamp=original.timestamp,
+                        action="export",
+                        power_w=slot_target_w,
+                        soc=round(soc_after, 4) if soc_cursor is not None else original.soc,
+                        battery_charge_w=0.0,
+                        battery_discharge_w=slot_target_w,
+                    )
+                    if soc_cursor is not None:
+                        soc_cursor = soc_after
+                else:
+                    new_actions[pos] = ScheduleAction(
+                        timestamp=original.timestamp,
+                        action="self_consumption",
+                        power_w=0.0,
+                        soc=(
+                            round(soc_cursor, 4)
+                            if soc_cursor is not None
+                            else original.soc
+                        ),
+                        battery_charge_w=0.0,
+                        battery_discharge_w=0.0,
+                    )
+            for pos in range(start, end):
+                if pos in spread_positions:
+                    continue
+                original = actions[pos]
+                if getattr(original, "action", None) in ("export", "discharge"):
+                    new_actions[pos] = ScheduleAction(
+                        timestamp=original.timestamp,
+                        action="self_consumption",
+                        power_w=0.0,
+                        soc=(
+                            round(soc_cursor, 4)
+                            if soc_cursor is not None
+                            else original.soc
+                        ),
+                        battery_charge_w=0.0,
+                        battery_discharge_w=0.0,
+                    )
 
         return OptimizationSchedule(
             actions=new_actions,
@@ -5120,12 +6297,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _apply_chip_mode(
         self,
         export_prices: list[float],
+        reference_export_prices: list[float] | None = None,
     ) -> list[float]:
         """Apply chip mode to LP export prices — suppress exports unless price exceeds threshold.
 
         During the configured window, sets export prices to 0 so the LP won't plan
-        exports. Preserves original price for spikes above threshold. Mirrors the
-        Tesla tariff pipeline logic but operates on flat 5-min price arrays.
+        exports. Preserves price for spikes above threshold. If export prices have
+        already been adjusted by Export Boost, reference_export_prices keeps the
+        Chip threshold tied to the real export price.
         """
         if not self._entry:
             return export_prices
@@ -5164,6 +6343,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         allowed_spikes = 0
 
         result = list(export_prices)
+        threshold_prices = (
+            reference_export_prices
+            if reference_export_prices is not None
+            and len(reference_export_prices) == len(result)
+            else result
+        )
         for t in range(len(result)):
             ts = now + timedelta(minutes=t * interval)
             minutes_of_day = ts.hour * 60 + ts.minute
@@ -5175,7 +6360,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 in_window = start_min <= minutes_of_day < end_min
 
             if in_window:
-                if result[t] >= threshold:
+                if threshold_prices[t] >= threshold:
                     allowed_spikes += 1  # Keep original price for spike
                 else:
                     result[t] = 0.0  # Suppress export
@@ -5190,51 +6375,41 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return result
 
-    def _next_profit_max_target_slot(self) -> int | None:
-        """Slot index of the next Profit Max full-SOC target in the LP horizon.
-
-        Used to enforce a pre-window SOC floor when profit_max mode is on.
-        Returns None when the floor should not be applied (profit_max off,
-        unsupported provider, or no upcoming target in horizon).
-
-        Currently only Flow Power is supported. The default target is 17:15,
-        preserving the original 15-minute safety buffer before Happy Hour.
-        """
-        if not self._entry:
-            return None
-        if not self._config.profit_max_enabled:
+    def _next_charge_by_time_target_slot(self) -> int | None:
+        """Slot index of the next Charge By Time SOC target in the LP horizon."""
+        if not self._config.charge_by_time_enabled:
             return None
 
         from ..const import (
-            CONF_ELECTRICITY_PROVIDER,
-            CONF_FLOW_POWER_STATE,
-            DEFAULT_PROFIT_MAX_TARGET_TIME,
+            CONF_CHARGE_BY_TIME_TARGET_TIME,
+            CONF_PROFIT_MAX_TARGET_TIME,
+            DEFAULT_CHARGE_BY_TIME_TARGET_TIME,
         )
-        provider = self._entry.options.get(
-            CONF_ELECTRICITY_PROVIDER,
-            self._entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
+        target_time = getattr(
+            self._config,
+            "charge_by_time_target_time",
+            DEFAULT_CHARGE_BY_TIME_TARGET_TIME,
         )
-        if provider != "flow_power":
-            return None
-        state = self._entry.options.get(
-            CONF_FLOW_POWER_STATE,
-            self._entry.data.get(CONF_FLOW_POWER_STATE, ""),
-        )
-        if not state:
-            return None
-
-        happy_start_min = 17 * 60 + 30  # 17:30
+        if self._entry:
+            target_time = self._entry.options.get(
+                CONF_CHARGE_BY_TIME_TARGET_TIME,
+                self._entry.data.get(
+                    CONF_CHARGE_BY_TIME_TARGET_TIME,
+                    self._entry.options.get(
+                        CONF_PROFIT_MAX_TARGET_TIME,
+                        self._entry.data.get(
+                            CONF_PROFIT_MAX_TARGET_TIME,
+                            target_time,
+                        ),
+                    ),
+                ),
+            )
         target_min = _hhmm_to_minutes(
-            getattr(
-                self._config,
-                "profit_max_target_time",
-                DEFAULT_PROFIT_MAX_TARGET_TIME,
-            ),
-            DEFAULT_PROFIT_MAX_TARGET_TIME,
+            target_time,
+            DEFAULT_CHARGE_BY_TIME_TARGET_TIME,
         )
-        if target_min >= happy_start_min:
-            target_min = _hhmm_to_minutes(DEFAULT_PROFIT_MAX_TARGET_TIME)
         interval = self._config.interval_minutes
+        target_slot_min = (target_min // interval) * interval
         n_steps = int(self._config.horizon_hours * 60) // interval
         raw_now = dt_util.now()
         now = raw_now.replace(
@@ -5244,7 +6419,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for t in range(n_steps):
             slot = now + timedelta(minutes=t * interval)
             slot_min = slot.hour * 60 + slot.minute
-            if slot_min == target_min:
+            if slot_min == target_slot_min:
                 # Skip t=0: the target is now, so there are no pre-window slots
                 # to charge in. The next matching target will be tomorrow.
                 if t == 0:
@@ -5252,25 +6427,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return t
         return None
 
-    def _profit_max_target_soc(self) -> float:
-        """Return the configured Profit Max target SOC as a 0-1 ratio."""
+    def _charge_by_time_target_soc(self) -> float:
+        """Return the configured Charge By Time target SOC as a 0-1 ratio."""
         if not self._entry:
-            return self._soc_ratio(self._config.profit_max_target_soc, 1.0)
+            return self._soc_ratio(self._config.charge_by_time_target_soc, 1.0)
 
         from ..const import (
+            CONF_CHARGE_BY_TIME_TARGET_SOC,
             CONF_PROFIT_MAX_TARGET_SOC,
-            DEFAULT_PROFIT_MAX_TARGET_SOC,
+            DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
         )
 
         return self._soc_ratio(
             self._entry.options.get(
-                CONF_PROFIT_MAX_TARGET_SOC,
+                CONF_CHARGE_BY_TIME_TARGET_SOC,
                 self._entry.data.get(
-                    CONF_PROFIT_MAX_TARGET_SOC,
-                    DEFAULT_PROFIT_MAX_TARGET_SOC,
+                    CONF_CHARGE_BY_TIME_TARGET_SOC,
+                    self._entry.options.get(
+                        CONF_PROFIT_MAX_TARGET_SOC,
+                        self._entry.data.get(
+                            CONF_PROFIT_MAX_TARGET_SOC,
+                            DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
+                        ),
+                    ),
                 ),
             ),
-            DEFAULT_PROFIT_MAX_TARGET_SOC,
+            DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
         )
 
     def _apply_flow_power_export(
@@ -6018,6 +7200,267 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             filled.append(last)
         return filled
 
+    def _epex_price_entity_id(self, conf_key: str) -> str | None:
+        """Return a configured EPEX price valuation sensor, if any."""
+        if not self._entry:
+            return None
+
+        from ..const import CONF_ELECTRICITY_PROVIDER
+
+        provider = self._entry.options.get(
+            CONF_ELECTRICITY_PROVIDER,
+            self._entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
+        )
+        if provider != "epex":
+            return None
+
+        entity_id = self._entry.options.get(
+            conf_key,
+            self._entry.data.get(conf_key),
+        )
+        if isinstance(entity_id, str):
+            entity_id = entity_id.strip()
+        return entity_id or None
+
+    def _epex_import_price_entity_id(self) -> str | None:
+        """Return the configured EPEX import valuation sensor, if any."""
+        from ..const import CONF_EPEX_IMPORT_PRICE_ENTITY
+
+        return self._epex_price_entity_id(CONF_EPEX_IMPORT_PRICE_ENTITY)
+
+    def _epex_export_price_entity_id(self) -> str | None:
+        """Return the configured EPEX export valuation sensor, if any."""
+        from ..const import CONF_EPEX_EXPORT_PRICE_ENTITY
+
+        return self._epex_price_entity_id(CONF_EPEX_EXPORT_PRICE_ENTITY)
+
+    @staticmethod
+    def _epex_sensor_value_to_major(value: Any, unit: str | None) -> float | None:
+        """Convert an EPEX price sensor value to EUR/kWh."""
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(numeric):
+            return None
+
+        label = (unit or "").strip().lower()
+        if not label:
+            return numeric / 100.0
+        if "ct" in label or "cent" in label:
+            return numeric / 100.0
+        return numeric
+
+    def _epex_sensor_unit(self, attrs: dict[str, Any]) -> str | None:
+        """Pick the unit label for an EPEX price sensor."""
+        for key in ("unit_of_measurement", "price_unit", "minor_price_unit"):
+            unit = attrs.get(key)
+            if isinstance(unit, str) and unit.strip():
+                return unit
+        return "ct/kWh"
+
+    @staticmethod
+    def _parse_price_timestamp(value: Any) -> datetime | None:
+        """Parse an ISO timestamp key from a price sensor attribute."""
+        if not isinstance(value, str):
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+
+    def _timestamped_price_values_to_slots(
+        self,
+        raw_values: dict[Any, Any],
+        unit: str | None,
+        n_steps: int,
+    ) -> list[float]:
+        """Convert timestamp-keyed sensor values into optimizer price slots."""
+        interval = max(1, self._config.interval_minutes)
+        now = dt_util.now()
+        current_window = now.replace(
+            minute=(now.minute // interval) * interval,
+            second=0,
+            microsecond=0,
+        )
+        entries: list[tuple[datetime, float]] = []
+        for key, raw_price in raw_values.items():
+            start_dt = self._parse_price_timestamp(key)
+            if start_dt is None:
+                continue
+            price = self._epex_sensor_value_to_major(raw_price, unit)
+            if price is None:
+                continue
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=current_window.tzinfo)
+            if current_window.tzinfo is not None:
+                start_dt = start_dt.astimezone(current_window.tzinfo)
+            entries.append((start_dt, price))
+
+        if not entries:
+            return []
+
+        entries.sort(key=lambda item: item[0])
+        slots: list[float | None] = [None] * n_steps
+        last_delta = timedelta(minutes=interval)
+        for idx, (start_dt, price) in enumerate(entries):
+            next_start = entries[idx + 1][0] if idx + 1 < len(entries) else None
+            if next_start is not None:
+                delta = next_start - start_dt
+                if delta.total_seconds() > 0:
+                    last_delta = delta
+                end_dt = next_start
+            else:
+                end_dt = start_dt + last_delta
+
+            slot_bounds = self._entry_slot_bounds(
+                {
+                    "valid_from": start_dt.isoformat(),
+                    "valid_to": end_dt.isoformat(),
+                },
+                current_window,
+                interval,
+                n_steps,
+            )
+            if slot_bounds is None:
+                continue
+            start_idx, end_idx = slot_bounds
+            for pos in range(start_idx, end_idx):
+                slots[pos] = price
+
+        return self._fill_price_gaps(slots)
+
+    def _timestamp_attribute_price_values(
+        self,
+        attrs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return direct timestamp attributes from HA price sensors."""
+        return {
+            key: value
+            for key, value in attrs.items()
+            if self._parse_price_timestamp(key) is not None
+        }
+
+    def _read_epex_price_entity(
+        self,
+        n_steps: int,
+        entity_id: str | None,
+        price_kind: str,
+    ) -> list[float] | None:
+        """Read an optional EPEX price override sensor."""
+        if not entity_id:
+            return None
+
+        state_getter = getattr(
+            getattr(self.hass, "states", None),
+            "get",
+            lambda _eid: None,
+        )
+        state = state_getter(entity_id)
+        if state is None:
+            _LOGGER.warning(
+                "EPEX %s price override sensor %s not found; using EPEX %s prices",
+                price_kind,
+                entity_id,
+                price_kind,
+            )
+            return None
+
+        state_value = getattr(state, "state", None)
+        if str(state_value).lower() in ("unknown", "unavailable", "none", ""):
+            _LOGGER.debug(
+                "EPEX %s price override sensor %s is %s; using EPEX %s prices",
+                price_kind,
+                entity_id,
+                state_value,
+                price_kind,
+            )
+            return None
+
+        attrs = getattr(state, "attributes", {}) or {}
+        unit = self._epex_sensor_unit(attrs)
+        raw_values = attrs.get("price_values")
+
+        values: list[float | None] = []
+        if isinstance(raw_values, list) and raw_values:
+            values = [
+                self._epex_sensor_value_to_major(value, unit)
+                for value in raw_values
+            ]
+            display_prices = self._fill_price_gaps(values)
+        elif isinstance(raw_values, dict) and raw_values:
+            display_prices = self._timestamped_price_values_to_slots(
+                raw_values,
+                unit,
+                n_steps,
+            )
+        else:
+            timestamp_values = self._timestamp_attribute_price_values(attrs)
+            if timestamp_values:
+                display_prices = self._timestamped_price_values_to_slots(
+                    timestamp_values,
+                    unit,
+                    n_steps,
+                )
+            else:
+                value = self._epex_sensor_value_to_major(state_value, unit)
+                display_prices = [value] if value is not None else []
+
+        if not display_prices:
+            _LOGGER.warning(
+                "EPEX %s price override sensor %s has no numeric price values; "
+                "using EPEX %s prices",
+                price_kind,
+                entity_id,
+                price_kind,
+            )
+            return None
+
+        if len(display_prices) < n_steps:
+            display_prices.extend(
+                [display_prices[-1]] * (n_steps - len(display_prices))
+            )
+        display_prices = display_prices[:n_steps]
+
+        _LOGGER.info(
+            "EPEX %s price override: using %s (%d steps, %.2f-%.2f ct/kWh)",
+            price_kind,
+            entity_id,
+            len(display_prices),
+            min(display_prices) * 100,
+            max(display_prices) * 100,
+        )
+        return display_prices
+
+    def _read_epex_import_price_entity(self, n_steps: int) -> list[float] | None:
+        """Read the optional EPEX import price override sensor."""
+        return self._read_epex_price_entity(
+            n_steps,
+            self._epex_import_price_entity_id(),
+            "import",
+        )
+
+    def _read_epex_export_price_entity(
+        self,
+        n_steps: int,
+    ) -> tuple[list[float], list[float]] | None:
+        """Read the optional EPEX export price override sensor.
+
+        Returns display prices and LP prices in EUR/kWh. Display prices preserve
+        signed export earnings; LP prices are clamped so negative export value
+        cannot become profitable revenue.
+        """
+        display_prices = self._read_epex_price_entity(
+            n_steps,
+            self._epex_export_price_entity_id(),
+            "export",
+        )
+        if display_prices is None:
+            return None
+
+        lp_prices = [max(0.0, price) for price in display_prices]
+        return display_prices, lp_prices
+
     async def _get_price_forecast(self) -> tuple[list[float], list[float]] | None:
         """Get price forecasts for optimizer.
 
@@ -6059,6 +7502,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # Separate by channel type
                     general = [e for e in all_entries if e.get("channelType") == "general"]
                     feed_in = [e for e in all_entries if e.get("channelType") == "feedIn"]
+                    is_flow_power_provider = self._electricity_provider() == "flow_power"
 
                     # Sort by start time (works for Octopus, Amber, and AEMO)
                     for lst in (general, feed_in):
@@ -6076,6 +7520,52 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         minute=(now.minute // 5) * 5,
                         second=0, microsecond=0,
                     )
+                    fp_current_general = None
+                    fp_current_period_start = None
+                    fp_current_period_end = None
+                    if is_flow_power_provider:
+                        current_general = [
+                            e
+                            for e in data.get("current", []) or []
+                            if e.get("channelType") == "general"
+                        ]
+                        current_feedin = [
+                            e
+                            for e in data.get("current", []) or []
+                            if e.get("channelType") == "feedIn"
+                        ]
+                        current_general.sort(key=lambda e: self._get_entry_end_time(e))
+                        current_feedin.sort(key=lambda e: self._get_entry_end_time(e))
+                        if current_general:
+                            fp_current_general = current_general[-1]
+                            current_nem_start = self._get_entry_start_datetime(
+                                fp_current_general,
+                                current_window,
+                            ).astimezone(FLOW_POWER_NEM_TZ)
+                            fp_current_period_start = current_nem_start.replace(
+                                minute=0 if current_nem_start.minute < 30 else 30,
+                                second=0,
+                                microsecond=0,
+                            )
+                            fp_current_period_end = fp_current_period_start + timedelta(
+                                minutes=30
+                            )
+
+                            def _flow_power_current_period_entry(source: dict) -> dict:
+                                entry = dict(source)
+                                entry["nemTime"] = fp_current_period_end.isoformat()
+                                entry["duration"] = 30
+                                entry["type"] = "CurrentInterval"
+                                return entry
+
+                            general.append(
+                                _flow_power_current_period_entry(fp_current_general)
+                            )
+                            if current_feedin:
+                                feed_in.append(
+                                    _flow_power_current_period_entry(current_feedin[-1])
+                                )
+
                     for lst in (general, feed_in):
                         original_len = len(lst)
                         filtered = []
@@ -6137,16 +7627,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
                         is_flow_power = _provider == "flow_power"
                         if is_flow_power:
-                            fp_pea_enabled = self._entry.options.get(
+                            def _flow_power_option(key: str, default=None):
+                                return self._entry.options.get(
+                                    key,
+                                    self._entry.data.get(key, default),
+                                )
+
+                            fp_pea_enabled = _flow_power_option(
                                 CONF_PEA_ENABLED, True
                             )
-                            fp_base_rate = self._entry.options.get(
+                            fp_base_rate = _flow_power_option(
                                 CONF_FLOW_POWER_BASE_RATE,
                                 FLOW_POWER_DEFAULT_BASE_RATE,
                             )
-                            fp_custom_pea = self._entry.options.get(
-                                CONF_PEA_CUSTOM_VALUE
-                            )
+                            fp_custom_pea = _flow_power_option(CONF_PEA_CUSTOM_VALUE)
                             domain_data = self.hass.data.get(
                                 _DOMAIN, {}
                             ).get(self._entry.entry_id, {})
@@ -6258,6 +7752,33 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 wholesale_cents = e.get("wholesaleKWHPrice")
                                 if wholesale_cents is None:
                                     wholesale_cents = e.get("perKwh", 0)
+                                if (
+                                    fp_current_general
+                                    and fp_current_period_start is not None
+                                ):
+                                    entry_period_start = self._get_entry_start_datetime(
+                                        e,
+                                        current_window,
+                                    ).astimezone(FLOW_POWER_NEM_TZ)
+                                    entry_period_start = entry_period_start.replace(
+                                        minute=(
+                                            0
+                                            if entry_period_start.minute < 30
+                                            else 30
+                                        ),
+                                        second=0,
+                                        microsecond=0,
+                                    )
+                                    if entry_period_start == fp_current_period_start:
+                                        current_wholesale_cents = (
+                                            fp_current_general.get("wholesaleKWHPrice")
+                                        )
+                                        if current_wholesale_cents is None:
+                                            current_wholesale_cents = (
+                                                fp_current_general.get("perKwh")
+                                            )
+                                        if current_wholesale_cents is not None:
+                                            wholesale_cents = current_wholesale_cents
                                 tariff_rate = fp_tariff_rates.get(id(e))
                                 if (
                                     tariff_rate is not None
@@ -6393,6 +7914,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                         )
 
                     if import_prices:
+                        epex_import_override = self._read_epex_import_price_entity(
+                            n_steps
+                        )
+                        if epex_import_override is not None:
+                            import_prices = epex_import_override
+
+                        epex_override = self._read_epex_export_price_entity(n_steps)
+                        if epex_override is not None:
+                            display_export_raw, export_prices = epex_override
+
                         # Apply Flow Power export schedule before display storage.
                         # For Flow Power, the synthetic Happy Hour schedule IS the
                         # contractual truth, so it overrides the Amber-derived
@@ -6411,23 +7942,33 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         self._last_display_import_prices = list(import_prices[:actual_price_intervals])
                         self._last_display_export_prices = list(display_export_raw[:actual_price_intervals])
 
-                        # Apply export boost, saving session overlay, and chip mode to LP prices
+                        # Apply export boost, saving session overlay, and chip mode to LP prices.
+                        # Chip mode uses the real export price as its threshold reference so
+                        # Export Boost cannot make a below-threshold export slot look allowed.
+                        chip_reference_export_prices = list(export_prices)
                         export_prices, _ = self._apply_export_boost(export_prices, import_prices)
                         import_prices, export_prices = self._apply_saving_session_prices(import_prices, export_prices)
-                        export_prices = self._apply_chip_mode(export_prices)
+                        export_prices = self._apply_chip_mode(
+                            export_prices,
+                            chip_reference_export_prices,
+                        )
 
                         # Apply demand charge penalty to LP import prices
                         import_prices = self._apply_demand_charge_penalty(import_prices)
 
                         # Apply confidence decay for LP input.
-                        # Flow Power is skipped: Happy Hour export (45c) and the
-                        # base-rate import (34c) are contractual fixed rates, not
-                        # speculative spot prices. Decaying them toward the median
-                        # (0c export, ~26c import) makes overnight charging appear
-                        # unprofitable, causing the LP to undercharge the battery
-                        # before a Happy Hour window that is 18-24h away.
-                        if not is_flow_power:
-                            decay_horizon = 12.0 if self._config.profit_max_enabled else 6.0
+                        decay_horizon = 12.0 if self._config.profit_max_enabled else 6.0
+                        if is_flow_power:
+                            # Flow Power Happy Hour export is contractual, so keep
+                            # the export schedule fixed. Import PEA forecasts still
+                            # come from speculative wholesale forecasts and should
+                            # not let far-future spikes dominate the LP unchanged.
+                            import_prices, _ = self._apply_confidence_decay(
+                                import_prices,
+                                export_prices,
+                                confidence_horizon_hours=decay_horizon,
+                            )
+                        else:
                             import_prices, export_prices = self._apply_confidence_decay(
                                 import_prices, export_prices,
                                 confidence_horizon_hours=decay_horizon,
@@ -6441,7 +7982,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             len(import_prices),
                             min(self._last_display_import_prices) * 100,
                             max(self._last_display_import_prices) * 100,
-                            "(no decay)" if is_flow_power else "(decayed)",
+                            "(import-decayed)" if is_flow_power else "(decayed)",
                             min(import_prices) * 100,
                             max(import_prices) * 100,
                         )
@@ -6607,7 +8148,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _get_warnings(self) -> list[dict[str, str]]:
         """Get active warnings for the optimizer."""
         warnings = []
-        if not self._has_solar_forecast:
+        if getattr(self, "_has_solar_forecast", None) is False:
             warnings.append({
                 "type": "no_solar_forecast",
                 "title": "No Solar Forecast",
@@ -6666,6 +8207,190 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await refresh()
         except Exception as err:
             _LOGGER.debug("Optimizer: EV forecast refresh skipped: %s", err)
+
+    def _get_planned_ev_load_forecast(self, n_intervals: int) -> list[float] | None:
+        """Read an optional forecast-only EV load overlay from a HA sensor."""
+        entity_id = (self._planned_ev_load_entity_id or "").strip()
+        if not entity_id or n_intervals <= 0:
+            return None
+
+        state_getter = getattr(
+            getattr(self.hass, "states", None),
+            "get",
+            lambda _eid: None,
+        )
+        state = state_getter(entity_id)
+        if state is None:
+            _LOGGER.warning(
+                "Planned EV load forecast sensor %s not found; skipping overlay",
+                entity_id,
+            )
+            return None
+
+        state_value = getattr(state, "state", None)
+        if str(state_value).lower() in ("unknown", "unavailable", "none", ""):
+            _LOGGER.debug(
+                "Planned EV load forecast sensor %s is %s; skipping overlay",
+                entity_id,
+                state_value,
+            )
+            return None
+
+        attrs = getattr(state, "attributes", {}) or {}
+        planned_load = attrs.get("planned_load")
+        if not planned_load:
+            return None
+
+        interval = max(1, self._config.interval_minutes)
+        now = dt_util.now()
+        current_window = now.replace(
+            minute=(now.minute // interval) * interval,
+            second=0,
+            microsecond=0,
+        )
+        ev_load = [0.0] * n_intervals
+
+        if isinstance(planned_load, list):
+            self._apply_planned_ev_load_windows(
+                ev_load,
+                planned_load,
+                current_window,
+                interval,
+            )
+        elif isinstance(planned_load, dict):
+            self._apply_timestamped_planned_ev_load(
+                ev_load,
+                planned_load,
+                attrs,
+                current_window,
+                interval,
+            )
+
+        if not any(value > 0 for value in ev_load):
+            return None
+
+        peak_kw = max(ev_load) / 1000.0
+        total_kwh = sum(ev_load) / 1000.0 * (interval / 60)
+        _LOGGER.debug(
+            "Planned EV load overlay: peak %.1fkW, total %.1fkWh from %s",
+            peak_kw,
+            total_kwh,
+            entity_id,
+        )
+        return ev_load
+
+    def _apply_planned_ev_load_windows(
+        self,
+        ev_load: list[float],
+        windows: list[Any],
+        current_window: datetime,
+        interval: int,
+    ) -> None:
+        """Apply explicit planned EV load windows into a watts slot array."""
+        for window in windows:
+            if not isinstance(window, dict):
+                continue
+            start = window.get("start") or window.get("valid_from")
+            end = window.get("end") or window.get("valid_to")
+            if not start or not end:
+                continue
+            power_w = self._planned_ev_window_power_to_w(window)
+            if power_w <= 0:
+                continue
+            bounds = self._entry_slot_bounds(
+                {
+                    "valid_from": str(start),
+                    "valid_to": str(end),
+                },
+                current_window,
+                interval,
+                len(ev_load),
+            )
+            if bounds is None:
+                continue
+            start_idx, end_idx = bounds
+            for idx in range(start_idx, end_idx):
+                ev_load[idx] += power_w
+
+    def _apply_timestamped_planned_ev_load(
+        self,
+        ev_load: list[float],
+        raw_values: dict[Any, Any],
+        attrs: dict[str, Any],
+        current_window: datetime,
+        interval: int,
+    ) -> None:
+        """Apply timestamp-keyed planned EV load values into a watts slot array."""
+        entries: list[tuple[datetime, float]] = []
+        unit = self._planned_ev_load_unit(attrs)
+        for key, raw_power in raw_values.items():
+            start_dt = self._parse_price_timestamp(key)
+            if start_dt is None:
+                continue
+            power_w = self._planned_ev_scalar_to_w(raw_power, unit)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=current_window.tzinfo)
+            if current_window.tzinfo is not None:
+                start_dt = start_dt.astimezone(current_window.tzinfo)
+            entries.append((start_dt, power_w))
+
+        if not entries:
+            return
+
+        entries.sort(key=lambda item: item[0])
+        last_delta = timedelta(minutes=interval)
+        for idx, (start_dt, power_w) in enumerate(entries):
+            next_start = entries[idx + 1][0] if idx + 1 < len(entries) else None
+            if next_start is not None:
+                delta = next_start - start_dt
+                if delta.total_seconds() > 0:
+                    last_delta = delta
+                end_dt = next_start
+            else:
+                end_dt = start_dt + last_delta
+            if power_w <= 0:
+                continue
+            bounds = self._entry_slot_bounds(
+                {
+                    "valid_from": start_dt.isoformat(),
+                    "valid_to": end_dt.isoformat(),
+                },
+                current_window,
+                interval,
+                len(ev_load),
+            )
+            if bounds is None:
+                continue
+            start_idx, end_idx = bounds
+            for pos in range(start_idx, end_idx):
+                ev_load[pos] += power_w
+
+    @staticmethod
+    def _planned_ev_load_unit(attrs: dict[str, Any]) -> str:
+        unit = attrs.get("unit_of_measurement")
+        return str(unit).strip() if unit else "kW"
+
+    def _planned_ev_window_power_to_w(self, window: dict[str, Any]) -> float:
+        if "power_w" in window:
+            return self._planned_ev_scalar_to_w(window.get("power_w"), "W")
+        if "power_kw" in window:
+            return self._planned_ev_scalar_to_w(window.get("power_kw"), "kW")
+        if "power" in window:
+            return self._planned_ev_scalar_to_w(window.get("power"), "kW")
+        return 0.0
+
+    @staticmethod
+    def _planned_ev_scalar_to_w(value: Any, unit: str | None) -> float:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(numeric) or numeric <= 0:
+            return 0.0
+        label = (unit or "kW").strip().lower()
+        if label in ("w", "watt", "watts") or label.endswith(" w"):
+            return numeric
+        return numeric * 1000.0
 
     def _get_ev_planned_load(self, n_intervals: int) -> list[float] | None:
         """Get EV planned charging load from AutoScheduleExecutor.
@@ -7546,6 +9271,73 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         total_baseline = self._actual_baseline_today + baseline_remaining
         return round(total_baseline - total_cost, 2)
 
+    def _display_grid_arrays_from_schedule(
+        self,
+        api_response: dict[str, list[Any]],
+        raw_grid_import_w: list[float] | None,
+        raw_grid_export_w: list[float] | None,
+    ) -> tuple[list[float], list[float]]:
+        """Build display grid arrays from the post-processed schedule."""
+        timestamps = api_response.get("timestamps", [])
+        n = len(timestamps)
+        charge_w = api_response.get("charge_w", [])
+        consume_w = api_response.get("battery_consume_w", [])
+        export_w = api_response.get("battery_export_w", [])
+        display_import: list[float] = []
+        display_export: list[float] = []
+
+        for idx in range(n):
+            raw_import = (
+                float(raw_grid_import_w[idx])
+                if raw_grid_import_w is not None and idx < len(raw_grid_import_w)
+                else 0.0
+            )
+            raw_export = (
+                float(raw_grid_export_w[idx])
+                if raw_grid_export_w is not None and idx < len(raw_grid_export_w)
+                else 0.0
+            )
+            battery_charge = (
+                float(charge_w[idx]) if idx < len(charge_w) and charge_w[idx] else 0.0
+            )
+            battery_consume = (
+                float(consume_w[idx]) if idx < len(consume_w) and consume_w[idx] else 0.0
+            )
+            battery_export = (
+                float(export_w[idx]) if idx < len(export_w) and export_w[idx] else 0.0
+            )
+
+            if (
+                idx < len(getattr(self, "_last_solar_forecast", []) or [])
+                and idx < len(getattr(self, "_last_load_forecast", []) or [])
+            ):
+                solar_w = max(
+                    0.0,
+                    float(self._last_solar_forecast[idx] or 0.0) * 1000.0,
+                )
+                load_w = max(
+                    0.0,
+                    float(self._last_load_forecast[idx] or 0.0) * 1000.0,
+                )
+                display_export.append(
+                    round(
+                        max(0.0, solar_w + battery_export - load_w - battery_charge),
+                        1,
+                    )
+                )
+                display_import.append(
+                    round(max(0.0, load_w + battery_charge - solar_w - battery_consume), 1)
+                )
+                continue
+
+            if battery_export <= 0:
+                display_export.append(0.0)
+            else:
+                display_export.append(round(max(0.0, raw_export), 1))
+            display_import.append(round(max(0.0, raw_import), 1))
+
+        return display_import, display_export
+
     def set_cost_function(self, cost_function: str | CostFunction) -> None:
         """Set the optimization cost function."""
         if isinstance(cost_function, str):
@@ -7563,6 +9355,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 value = FIXED_OPTIMIZATION_INTERVAL_MINUTES
             if key == "max_grid_import_w":
                 value = self._normalize_optional_power_w(value)
+            if key == "max_grid_export_w":
+                value = self._normalize_optional_export_power_w(value)
+            if key == "max_grid_charge_price":
+                value = self._normalize_optional_price(value)
+            if key == "grid_charge_soc_cap":
+                value = self._soc_ratio(value, 1.0)
             if hasattr(self._config, key):
                 setattr(self._config, key, value)
         self._config.interval_minutes = FIXED_OPTIMIZATION_INTERVAL_MINUTES
@@ -7574,9 +9372,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 max_charge_w=self._config.max_charge_w,
                 max_discharge_w=self._config.max_discharge_w,
                 max_grid_import_w=self._config.max_grid_import_w,
+                max_grid_export_w=self._config.max_grid_export_w,
                 backup_reserve=self._config.backup_reserve,
+                horizon_hours=self._config.horizon_hours,
             )
-            self._optimizer.max_grid_export_w = self._config.max_grid_export_w
             self._optimizer.terminal_weight = self._profit_max_terminal_weight()
         if (
             "backup_reserve" in kwargs
@@ -7595,10 +9394,121 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
         return parsed if parsed > 0 else None
 
+    @staticmethod
+    def _normalize_optional_export_power_w(value: Any) -> int | None:
+        if value in (None, "", []):
+            return None
+        try:
+            parsed = int(float(value))
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= 0 else None
+
+    @staticmethod
+    def _normalize_optional_price(value: Any) -> float | None:
+        if value in (None, "", []):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if parsed <= 0:
+            return None
+        # Mobile/config flows expose cents/kWh. Internal prices are dollars/kWh.
+        if parsed > 1:
+            parsed = parsed / 100.0
+        return parsed
+
+    def _grid_charge_allowed_slots(
+        self,
+        import_prices: list[float],
+        solar_forecast: list[float],
+        load_forecast: list[float],
+        current_soc: float,
+    ) -> list[bool]:
+        """Return per-slot permission for forced grid battery charging."""
+        allowed = [True] * len(import_prices)
+        price_cap = self._normalize_optional_price(
+            getattr(self._config, "max_grid_charge_price", None)
+        )
+        if price_cap is not None:
+            for idx, price in enumerate(import_prices):
+                try:
+                    if float(price) > price_cap + 1e-9:
+                        allowed[idx] = False
+                except (TypeError, ValueError):
+                    continue
+
+        soc_cap = self._soc_ratio(
+            getattr(self._config, "grid_charge_soc_cap", 1.0),
+            1.0,
+        )
+        if soc_cap < 0.999:
+            capacity_kwh = max(0.0, float(self._config.battery_capacity_wh or 0) / 1000.0)
+            max_charge_kw = max(0.0, float(self._config.max_charge_w or 0) / 1000.0)
+            dt_hours = self._config.interval_minutes / 60.0
+            projected_soc = max(0.0, min(1.0, float(current_soc or 0.0)))
+            for idx in range(len(import_prices)):
+                if projected_soc >= soc_cap - 1e-6:
+                    allowed[idx] = False
+                if capacity_kwh <= 0 or idx >= len(solar_forecast) or idx >= len(load_forecast):
+                    continue
+                surplus_kw = max(
+                    0.0,
+                    float(solar_forecast[idx] or 0.0) - float(load_forecast[idx] or 0.0),
+                )
+                if surplus_kw > 0:
+                    projected_soc = min(
+                        1.0,
+                        projected_soc
+                        + min(surplus_kw, max_charge_kw) * dt_hours / capacity_kwh,
+                    )
+
+        return allowed
+
     async def force_reoptimize(self) -> Any:
         """Force immediate re-optimization."""
         await self._run_optimization()
         return self._current_schedule
+
+    @staticmethod
+    def _settings_groups() -> dict[str, Any]:
+        """Return non-breaking mobile metadata for grouped optimizer settings."""
+        return {
+            "optimizer": {
+                "title": "Smart Optimization",
+                "collapsed": False,
+                "fields": [
+                    "enabled",
+                    "backup_reserve",
+                    "hardware_backup_reserve",
+                    "profit_max_enabled",
+                    "charge_by_time_enabled",
+                    "charge_by_time_target_time",
+                    "charge_by_time_target_soc",
+                    "load_entity",
+                    "planned_ev_load_entity",
+                    "battery_capacity_wh",
+                    "max_charge_w",
+                    "max_discharge_w",
+                ],
+            },
+            "advanced_optimizer": {
+                "title": "Advanced optimizer controls",
+                "collapsed": True,
+                "fields": [
+                    "allow_grid_charge",
+                    "max_grid_charge_price",
+                    "grid_charge_soc_cap",
+                    "max_grid_import_w",
+                    "max_grid_export_w",
+                    "spread_import_enabled",
+                    "spread_export_enabled",
+                    "disable_idle_enabled",
+                    "auto_apply_reserve_enabled",
+                ],
+            },
+        }
 
     def get_forecast_data(self) -> dict[str, Any]:
         """Get forecast data for LP forecast sensors.
@@ -7635,6 +9545,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 data["load_away_disabled_at"] = load_summary.get("away_disabled_at")
                 data["load_away_recovery_remaining_hours"] = load_summary.get("away_recovery_remaining_hours")
                 data["profit_max_mode"] = load_summary.get("profit_max_mode", False)
+
+        if self._last_planned_ev_load_forecast_w:
+            planned_kw = [
+                round(value / 1000.0, 3)
+                for value in self._last_planned_ev_load_forecast_w
+            ]
+            data["planned_ev_load_forecast_w"] = self._last_planned_ev_load_forecast_w
+            data["planned_ev_load_peak_kw"] = max(planned_kw) if planned_kw else 0.0
+            data["planned_ev_load_kwh"] = sum(planned_kw) * dt_h
 
         # Use actual tariff prices for display (not LP-adjusted values)
         disp_import = self._last_display_import_prices or self._last_import_prices
@@ -7692,6 +9611,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         current_action = "idle"
         actual_battery_power_w = self._get_actual_battery_power_w()
         current_power_w = actual_battery_power_w
+        planned_current_action = current_action
+        planned_current_power_w = current_power_w
+        effective_current_action = current_action
         current_action_end_time = None  # When the current scheduled action segment ends
         next_action = "idle"
         next_action_time = None
@@ -7702,6 +9624,48 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if ca:
                 current_action = ca.action
                 current_power_w = ca.power_w
+                planned_current_action = current_action
+                planned_current_power_w = current_power_w
+                runtime_current_action = self._effective_runtime_action(
+                    planned_current_action,
+                    ca.timestamp,
+                )
+                last_executed_action = getattr(self, "_last_executed_action", None)
+                last_executed_planned_action = getattr(
+                    self,
+                    "_last_executed_planned_action",
+                    None,
+                )
+                if (
+                    last_executed_action
+                    and last_executed_planned_action == planned_current_action
+                ):
+                    effective_current_action = last_executed_action
+                    current_action = effective_current_action
+                    if current_action in ("charge", "discharge", "export"):
+                        force_type = (
+                            "charge"
+                            if current_action == "charge"
+                            else "discharge"
+                        )
+                        force_state = self._optimizer_force_state or {}
+                        if (
+                            force_state.get("active")
+                            and force_state.get("type") == force_type
+                        ):
+                            try:
+                                force_power_w = float(force_state.get("power_w") or 0)
+                            except (TypeError, ValueError):
+                                force_power_w = 0
+                            if force_power_w > 0:
+                                current_power_w = force_power_w
+                    if current_action in ("idle", "no_discharge", "self_consumption"):
+                        current_power_w = actual_battery_power_w
+                else:
+                    effective_current_action = runtime_current_action or current_action
+                    current_action = effective_current_action
+                    if current_action in ("idle", "no_discharge", "self_consumption"):
+                        current_power_w = actual_battery_power_w
 
             now = dt_util.now()
 
@@ -7716,10 +9680,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Find next different action (used by the Next Scheduled Change sensor)
             for a in self._current_schedule.actions:
-                if a.timestamp > now and a.action != current_action:
-                    next_action = a.action
+                runtime_next_action = self._effective_runtime_action(
+                    a.action,
+                    a.timestamp,
+                )
+                if a.timestamp > now and a.action != planned_current_action:
+                    next_action = runtime_next_action
                     next_action_time = a.timestamp.isoformat()
-                    next_action_power_w = a.power_w
+                    next_action_power_w = (
+                        actual_battery_power_w
+                        if runtime_next_action in (
+                            "idle",
+                            "no_discharge",
+                            "self_consumption",
+                        )
+                        else a.power_w
+                    )
                     break
 
         # LP-specific stats
@@ -7771,9 +9747,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "spread_export_enabled": self._config.spread_export_enabled,
             "spread_import_enabled": self._config.spread_import_enabled,
             "disable_idle_enabled": self.disable_idle_enabled,
+            "profit_max_enabled": self.profit_max_mode,
+            "profit_max_mode": self.profit_max_mode,
+            "charge_by_time_enabled": self.charge_by_time_enabled,
             "auto_apply_reserve_enabled": self.auto_apply_reserve_enabled,
             "manual_backup_reserve": self.manual_backup_reserve,
             "backup_reserve": self._config.backup_reserve,
+            "settings_groups": self._settings_groups(),
             "idle_hold_active": (
                 self._last_executed_action == "idle"
                 and self._idle_hold_reserve is not None
@@ -7792,6 +9772,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "optimization_status": "active" if optimizer_available else "not_available",
             "current_action": current_action,
             "current_power_w": current_power_w,
+            "planned_current_action": planned_current_action,
+            "planned_current_power_w": planned_current_power_w,
+            "effective_current_action": effective_current_action,
             "actual_battery_power_w": actual_battery_power_w,
             "current_action_end_time": current_action_end_time,
             "next_action": next_action,
@@ -7808,10 +9791,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "max_discharge_w": self._config.max_discharge_w,
                 "max_grid_import_w": self._config.max_grid_import_w,
                 "max_grid_export_w": self._config.max_grid_export_w,
+                "max_grid_charge_price": (
+                    round(self._config.max_grid_charge_price * 100, 3)
+                    if self._config.max_grid_charge_price is not None
+                    else 0
+                ),
+                "grid_charge_soc_cap": int(
+                    round(self._soc_ratio(self._config.grid_charge_soc_cap, 1.0) * 100)
+                ),
                 "allow_grid_charge": self._config.allow_grid_charge,
                 "spread_export_enabled": self._config.spread_export_enabled,
                 "spread_import_enabled": self._config.spread_import_enabled,
                 "disable_idle_enabled": self.disable_idle_enabled,
+                "profit_max_enabled": self.profit_max_mode,
+                "charge_by_time_enabled": self.charge_by_time_enabled,
+                "charge_by_time_target_time": self._config.charge_by_time_target_time,
+                "charge_by_time_target_soc": int(
+                    round(self._charge_by_time_target_soc() * 100)
+                ),
+                "profit_max_target_time": self._config.charge_by_time_target_time,
+                "profit_max_target_soc": int(
+                    round(self._charge_by_time_target_soc() * 100)
+                ),
                 "auto_apply_reserve_enabled": self.auto_apply_reserve_enabled,
                 "manual_backup_reserve": self.manual_backup_reserve,
                 "battery_specs_source": self._battery_specs_source,
@@ -7833,9 +9834,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ),
                 "interval_minutes": self._config.interval_minutes,
                 "horizon_hours": self._config.horizon_hours,
+                "planned_ev_load_entity": self._planned_ev_load_entity_id,
             },
             "features": {
                 "ev_integration": self._ev_integration_enabled or len(self._ev_configs) > 0,
+                "planned_ev_load": bool(self._planned_ev_load_entity_id),
                 "spread_export": self._should_spread_export_schedule(),
                 "spread_import": self._should_spread_import_schedule(),
                 "vpp_enabled": False,
@@ -7854,7 +9857,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "temperature_adjusted": load_summary["temperature_adjusted"],
                 "away_mode": load_summary["away_mode"],
                 "profit_max_mode": load_summary.get("profit_max_mode", False),
+                "charge_by_time_enabled": load_summary.get("charge_by_time_enabled", False),
             }
+
+        if self._last_planned_ev_load_forecast_w:
+            dt_h = self._config.interval_minutes / 60
+            data["planned_ev_load_forecast_w"] = self._last_planned_ev_load_forecast_w
+            data["planned_ev_load_peak_kw"] = round(
+                max(self._last_planned_ev_load_forecast_w) / 1000.0,
+                3,
+            )
+            data["planned_ev_load_kwh"] = round(
+                sum(self._last_planned_ev_load_forecast_w) / 1000.0 * dt_h,
+                3,
+            )
 
         # Add daily cost breakdown (actual + predicted remaining)
         pred_remaining, baseline_remaining = self._get_predicted_cost_to_midnight()
@@ -7884,8 +9900,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             api_response = self._current_schedule.to_api_response()
             # Add grid import/export from LP result
             if self._last_optimizer_result:
-                api_response["grid_import_w"] = self._last_optimizer_result.grid_import_w
-                api_response["grid_export_w"] = self._last_optimizer_result.grid_export_w
+                grid_import_w, grid_export_w = self._display_grid_arrays_from_schedule(
+                    api_response,
+                    self._last_optimizer_result.grid_import_w,
+                    self._last_optimizer_result.grid_export_w,
+                )
+                api_response["grid_import_w"] = grid_import_w
+                api_response["grid_export_w"] = grid_export_w
             # Add price arrays for pricing overlay (use actual tariff rates, not LP-adjusted)
             n_sched = len(api_response["timestamps"])
             display_import = self._last_display_import_prices or self._last_import_prices
@@ -7894,10 +9915,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 api_response["import_price"] = display_import[:n_sched]
             if display_export:
                 api_response["export_price"] = display_export[:n_sched]
+            if self._last_planned_ev_load_forecast_w:
+                api_response["planned_ev_load_w"] = (
+                    self._last_planned_ev_load_forecast_w[:n_sched]
+                )
             # Debug: log SOC range for API response
             soc_vals = api_response.get("soc", [])
             if soc_vals:
-                _DECISION_LOGGER.info(
+                _DECISION_LOGGER.debug(
                     "Schedule API: %d points, SOC range %.2f-%.2f (first=%.4f, last=%.4f)",
                     len(soc_vals), min(soc_vals), max(soc_vals),
                     soc_vals[0], soc_vals[-1],
@@ -7971,10 +9996,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             interval_delta = timedelta(minutes=self._config.interval_minutes)
             for a in self._current_schedule.actions[:intervals_24h]:
                 ad = a.to_dict()
-                # Match executor behavior: override idle → self_consumption
-                # during demand windows (executor does this at runtime)
-                if ad["action"] == "idle" and self._is_in_demand_window_at(a.timestamp):
-                    ad["action"] = "self_consumption"
+                runtime_action = self._effective_runtime_action(
+                    ad.get("action"),
+                    a.timestamp,
+                )
+                if runtime_action != ad.get("action"):
+                    ad["planned_action"] = ad.get("action")
+                    ad["action"] = runtime_action
                 # end_time = end of this interval (start + duration).
                 # Use the raw datetime (a.timestamp) since ad["timestamp"]
                 # is already an ISO string from to_dict().
@@ -7999,6 +10027,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         start_soc = action_ranges[-1]["soc"]
                     action_ranges.append({
                         "action": ad["action"],
+                        **(
+                            {"planned_action": ad["planned_action"]}
+                            if ad.get("planned_action")
+                            else {}
+                        ),
                         "timestamp": ad["timestamp"],
                         "end_time": interval_end,
                         "power_w": ad["power_w"],
@@ -8045,12 +10078,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.hass.config_entries.async_update_entry(self._entry, options=new_options)
 
         if "auto_apply_reserve_enabled" in settings:
-            await self.set_auto_apply_reserve_enabled(
-                bool(settings["auto_apply_reserve_enabled"])
+            changed = await self.set_auto_apply_reserve_enabled(
+                bool(settings["auto_apply_reserve_enabled"]),
+                rerun=False,
             )
             response["changes"].append(
                 f"auto_apply_reserve_enabled: {settings['auto_apply_reserve_enabled']}"
             )
+            if changed:
+                rerun_after_settings = True
 
         if "manual_backup_reserve" in settings:
             manual_reserve = self._reserve_ratio(settings["manual_backup_reserve"])
@@ -8086,7 +10122,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Handle config updates
         config_keys = [
             "battery_capacity_wh", "max_charge_w", "max_discharge_w",
-            "max_grid_import_w",
+            "max_grid_import_w", "max_grid_export_w",
+            "max_grid_charge_price", "grid_charge_soc_cap",
             "allow_grid_charge", "backup_reserve", "horizon_hours",
         ]
         config_updates = {k: v for k, v in settings.items() if k in config_keys}
@@ -8098,6 +10135,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 reserve = config_updates["backup_reserve"]
                 if reserve > 1:
                     config_updates["backup_reserve"] = reserve / 100
+            if "max_grid_charge_price" in config_updates:
+                config_updates["max_grid_charge_price"] = (
+                    self._normalize_optional_price(
+                        config_updates["max_grid_charge_price"]
+                    )
+                )
+            if "grid_charge_soc_cap" in config_updates:
+                config_updates["grid_charge_soc_cap"] = self._soc_ratio(
+                    config_updates["grid_charge_soc_cap"],
+                    1.0,
+                )
+            if "horizon_hours" in config_updates:
+                try:
+                    horizon_hours = int(float(config_updates["horizon_hours"]))
+                except (TypeError, ValueError):
+                    config_updates.pop("horizon_hours", None)
+                else:
+                    if horizon_hours > 0:
+                        config_updates["horizon_hours"] = horizon_hours
+                    else:
+                        config_updates.pop("horizon_hours", None)
 
             self.update_config(**config_updates)
             response["changes"].append(f"config: {list(config_updates.keys())}")
@@ -8108,11 +10166,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 from ..const import (
                     CONF_OPTIMIZATION_BACKUP_RESERVE,
                     CONF_OPTIMIZATION_MANUAL_RESERVE,
+                    CONF_OPTIMIZATION_HORIZON,
                     CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
                     CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                     CONF_OPTIMIZATION_MAX_CHARGE_W,
                     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
                     CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
+                    CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+                    CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
+                    CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
                 )
                 new_data = dict(self._entry.data)
                 new_options = dict(self._entry.options)
@@ -8122,12 +10184,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         reserve_value = reserve_value / 100
                     new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = reserve_value
                     new_options[CONF_OPTIMIZATION_BACKUP_RESERVE] = reserve_value
-                    if self.auto_apply_reserve_enabled:
-                        self._manual_backup_reserve = reserve_value
-                        self._config.manual_backup_reserve = reserve_value
-                        new_data[CONF_OPTIMIZATION_MANUAL_RESERVE] = reserve_value
-                        new_options[CONF_OPTIMIZATION_MANUAL_RESERVE] = reserve_value
-                        rerun_after_settings = True
+                    self._manual_backup_reserve = reserve_value
+                    self._config.manual_backup_reserve = reserve_value
+                    new_data[CONF_OPTIMIZATION_MANUAL_RESERVE] = reserve_value
+                    new_options[CONF_OPTIMIZATION_MANUAL_RESERVE] = reserve_value
+                    rerun_after_settings = True
+                if "horizon_hours" in settings:
+                    try:
+                        horizon_hours = int(float(settings["horizon_hours"]))
+                    except (TypeError, ValueError):
+                        horizon_hours = None
+                    if horizon_hours is not None and horizon_hours > 0:
+                        new_data[CONF_OPTIMIZATION_HORIZON] = horizon_hours
+                        new_options[CONF_OPTIMIZATION_HORIZON] = horizon_hours
                 if "battery_capacity_wh" in settings:
                     new_options[CONF_OPTIMIZATION_BATTERY_CAPACITY_WH] = int(settings["battery_capacity_wh"])
                 if "max_charge_w" in settings:
@@ -8143,6 +10212,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         new_data.pop(CONF_OPTIMIZATION_MAX_GRID_IMPORT_W, None)
                     else:
                         new_options[CONF_OPTIMIZATION_MAX_GRID_IMPORT_W] = grid_import_w
+                if "max_grid_export_w" in settings:
+                    grid_export_w = self._normalize_optional_export_power_w(
+                        settings["max_grid_export_w"]
+                    )
+                    if grid_export_w is None:
+                        new_options.pop(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W, None)
+                        new_data.pop(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W, None)
+                    else:
+                        new_options[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = grid_export_w
+                if "max_grid_charge_price" in settings:
+                    price_cap = self._normalize_optional_price(
+                        settings["max_grid_charge_price"]
+                    )
+                    if price_cap is None:
+                        new_options.pop(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE, None)
+                        new_data.pop(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE, None)
+                    else:
+                        new_options[CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE] = price_cap
+                        new_data[CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE] = price_cap
+                if "grid_charge_soc_cap" in settings:
+                    soc_cap = self._soc_ratio(settings["grid_charge_soc_cap"], 1.0)
+                    new_options[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = soc_cap
+                    new_data[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = soc_cap
                 if "allow_grid_charge" in settings:
                     new_options[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = bool(settings["allow_grid_charge"])
                 # Prevent reload from API-driven options update
@@ -8193,6 +10285,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 response["changes"].append(f"profit_max_enabled: {settings['profit_max_enabled']}")
                 rerun_after_settings = True
 
+        if "charge_by_time_enabled" in settings:
+            new_val = bool(settings["charge_by_time_enabled"])
+            changed = self.set_charge_by_time_enabled(new_val)
+            if changed:
+                response["changes"].append(
+                    f"charge_by_time_enabled: {settings['charge_by_time_enabled']}"
+                )
+                rerun_after_settings = True
+
         if "spread_export_enabled" in settings:
             new_val = bool(settings["spread_export_enabled"])
             changed = self.set_spread_export_enabled(new_val)
@@ -8211,20 +10312,87 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             new_val = bool(settings["disable_idle_enabled"])
             changed = self.set_disable_idle_enabled(new_val)
             if changed:
-                response["changes"].append(f"disable_idle_enabled: {settings['disable_idle_enabled']}")
+                response["changes"].append(
+                    f"disable_idle_enabled: {self.disable_idle_enabled}"
+                )
                 rerun_after_settings = True
 
-        if "profit_max_target_time" in settings and self._entry:
-            from ..const import CONF_PROFIT_MAX_TARGET_TIME
-            target_time = str(settings["profit_max_target_time"])
+        if "planned_ev_load_entity" in settings:
+            raw_entity = settings.get("planned_ev_load_entity")
+            entity_id = raw_entity.strip() if isinstance(raw_entity, str) else None
+            entity_id = entity_id or None
+            changed = entity_id != self._planned_ev_load_entity_id
+            self._planned_ev_load_entity_id = entity_id
+            if self._entry:
+                from ..const import CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY
+                new_data = dict(self._entry.data)
+                new_options = dict(self._entry.options)
+                new_data[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = entity_id
+                new_options[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = entity_id
+                from ..const import DOMAIN as _SKIP_DOM
+                self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
+                self.hass.config_entries.async_update_entry(
+                    self._entry,
+                    data=new_data,
+                    options=new_options,
+                )
+            response["changes"].append(
+                f"planned_ev_load_entity: {entity_id or 'cleared'}"
+            )
+            if changed:
+                rerun_after_settings = True
+
+        if "load_entity" in settings:
+            raw_entity = settings.get("load_entity")
+            entity_id = raw_entity.strip() if isinstance(raw_entity, str) else None
+            entity_id = entity_id or None
+            changed = entity_id != self._configured_load_entity_id
+            self._configured_load_entity_id = entity_id
+            if self._entry:
+                from ..const import CONF_OPTIMIZATION_LOAD_ENTITY
+                new_data = dict(self._entry.data)
+                new_options = dict(self._entry.options)
+                new_data[CONF_OPTIMIZATION_LOAD_ENTITY] = entity_id
+                new_options[CONF_OPTIMIZATION_LOAD_ENTITY] = entity_id
+                from ..const import DOMAIN as _SKIP_DOM
+                self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
+                self.hass.config_entries.async_update_entry(
+                    self._entry,
+                    data=new_data,
+                    options=new_options,
+                )
+            if changed and self._load_estimator:
+                self._load_estimator.load_entity_id = self._get_load_entity_id()
+                self._load_estimator._history_cache.clear()
+                self._load_estimator._cache_time = None
+                rerun_after_settings = True
+            response["changes"].append(
+                f"load_entity: {entity_id or 'auto-discovery'}"
+            )
+
+        target_time_key = (
+            "charge_by_time_target_time"
+            if "charge_by_time_target_time" in settings
+            else "profit_max_target_time"
+            if "profit_max_target_time" in settings
+            else None
+        )
+        if target_time_key and self._entry:
+            from ..const import (
+                CONF_CHARGE_BY_TIME_TARGET_TIME,
+                CONF_PROFIT_MAX_TARGET_TIME,
+            )
+            target_time = str(settings[target_time_key])
             changed = target_time != getattr(
                 self._config,
-                "profit_max_target_time",
+                "charge_by_time_target_time",
                 target_time,
             )
-            self._config.profit_max_target_time = target_time
+            self._config.charge_by_time_target_time = target_time
             new_data = dict(self._entry.data)
             new_options = dict(self._entry.options)
+            new_data[CONF_CHARGE_BY_TIME_TARGET_TIME] = target_time
+            new_options[CONF_CHARGE_BY_TIME_TARGET_TIME] = target_time
             new_data[CONF_PROFIT_MAX_TARGET_TIME] = target_time
             new_options[CONF_PROFIT_MAX_TARGET_TIME] = target_time
             from ..const import DOMAIN as _SKIP_DOM
@@ -8234,22 +10402,34 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 data=new_data,
                 options=new_options,
             )
-            response["changes"].append(f"profit_max_target_time: {target_time}")
+            response["changes"].append(f"{target_time_key}: {target_time}")
             if changed:
                 rerun_after_settings = True
 
-        if "profit_max_target_soc" in settings:
-            target_soc = self._soc_ratio(settings["profit_max_target_soc"], 1.0)
+        target_soc_key = (
+            "charge_by_time_target_soc"
+            if "charge_by_time_target_soc" in settings
+            else "profit_max_target_soc"
+            if "profit_max_target_soc" in settings
+            else None
+        )
+        if target_soc_key:
+            target_soc = self._soc_ratio(settings[target_soc_key], 1.0)
             changed = not math.isclose(
-                self._config.profit_max_target_soc,
+                self._config.charge_by_time_target_soc,
                 target_soc,
                 abs_tol=0.0001,
             )
-            self._config.profit_max_target_soc = target_soc
+            self._config.charge_by_time_target_soc = target_soc
             if self._entry:
-                from ..const import CONF_PROFIT_MAX_TARGET_SOC
+                from ..const import (
+                    CONF_CHARGE_BY_TIME_TARGET_SOC,
+                    CONF_PROFIT_MAX_TARGET_SOC,
+                )
                 new_data = dict(self._entry.data)
                 new_options = dict(self._entry.options)
+                new_data[CONF_CHARGE_BY_TIME_TARGET_SOC] = target_soc
+                new_options[CONF_CHARGE_BY_TIME_TARGET_SOC] = target_soc
                 new_data[CONF_PROFIT_MAX_TARGET_SOC] = target_soc
                 new_options[CONF_PROFIT_MAX_TARGET_SOC] = target_soc
                 from ..const import DOMAIN as _SKIP_DOM
@@ -8259,7 +10439,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     data=new_data,
                     options=new_options,
                 )
-            response["changes"].append(f"profit_max_target_soc: {int(round(target_soc * 100))}%")
+            response["changes"].append(
+                f"{target_soc_key}: {int(round(target_soc * 100))}%"
+            )
             if changed:
                 rerun_after_settings = True
 
@@ -8278,7 +10460,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 response["changes"].append(f"ev_integration: {ev_enabled}")
 
         if rerun_after_settings and getattr(self, "_enabled", False):
-            await self._run_optimization()
+            self._schedule_settings_reoptimization()
 
         return response
 
@@ -8289,6 +10471,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _initial_opt_task; running it here as well caused duplicate Modbus
         writes when both fired at the same 5-min boundary.
         """
+        await self._execute_cached_current_action_if_changed()
         return self.get_api_data()
 
     # ========================================

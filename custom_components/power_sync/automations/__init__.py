@@ -13,6 +13,14 @@ import json
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
+from ..const import (
+    CONF_SOLAR_FORECAST_PROVIDER,
+    CONF_SOLCAST_ESTIMATE_TYPE,
+    DEFAULT_SOLAR_FORECAST_PROVIDER,
+    DEFAULT_SOLCAST_ESTIMATE_TYPE,
+    SOLAR_FORECAST_PROVIDERS,
+)
+from ..optimization.load_estimator import SolcastForecaster
 from .triggers import evaluate_trigger, evaluate_conditions, TriggerResult
 from .actions import execute_actions
 
@@ -492,6 +500,8 @@ class AutomationEngine:
             "ev_state": {},
             "ocpp_state": {},
             "solcast_forecast": {},
+            "solar_forecast": {},
+            "solar_forecast_source": None,
             "battery_mode": "normal",  # normal, force_charge, force_discharge
             "spike_status": "none",    # none, potential, spike
         }
@@ -627,11 +637,15 @@ class AutomationEngine:
         except Exception as e:
             _LOGGER.warning(f"Failed to get OCPP state: {e}")
 
-        # Get Solcast forecast
+        # Get solar forecast. Keep solcast_forecast as a compatibility alias for
+        # existing automation triggers and conditions.
         try:
-            state["solcast_forecast"] = await self._async_get_solcast_forecast()
+            solar_forecast = await self._async_get_solar_forecast()
+            state["solar_forecast"] = solar_forecast
+            state["solcast_forecast"] = solar_forecast
+            state["solar_forecast_source"] = solar_forecast.get("source")
         except Exception as e:
-            _LOGGER.warning(f"Failed to get Solcast forecast: {e}")
+            _LOGGER.warning(f"Failed to get solar forecast: {e}")
 
         # Get weather
         try:
@@ -1078,40 +1092,34 @@ class AutomationEngine:
 
         return ocpp_state
 
-    async def _async_get_solcast_forecast(self) -> Dict[str, Any]:
-        """Get Solcast solar forecast data from Solcast integration entities."""
-        import re
+    async def _async_get_solar_forecast(self) -> Dict[str, Any]:
+        """Get solar forecast data using the configured provider preference."""
+        provider = self._config_entry.options.get(
+            CONF_SOLAR_FORECAST_PROVIDER,
+            self._config_entry.data.get(
+                CONF_SOLAR_FORECAST_PROVIDER, DEFAULT_SOLAR_FORECAST_PROVIDER
+            ),
+        )
+        if provider not in SOLAR_FORECAST_PROVIDERS:
+            provider = DEFAULT_SOLAR_FORECAST_PROVIDER
 
-        forecast = {
-            "today_kwh": None,
-            "tomorrow_kwh": None,
-            "today_forecast_kwh": None,  # Alias for compatibility
-        }
-
-        all_states = self._hass.states.async_all()
-
-        for state in all_states:
-            entity_id = state.entity_id
-            state_value = state.state
-
-            if state_value in ("unavailable", "unknown"):
-                continue
-
-            # Solcast forecast today (e.g., sensor.solcast_pv_forecast_forecast_today)
-            if re.match(r"sensor\.solcast.*forecast.*today", entity_id, re.IGNORECASE):
-                try:
-                    forecast["today_kwh"] = float(state_value)
-                    forecast["today_forecast_kwh"] = float(state_value)
-                    _LOGGER.debug(f"Solcast today forecast from {entity_id}: {state_value} kWh")
-                except (ValueError, TypeError):
-                    pass
-
-            # Solcast forecast tomorrow
-            elif re.match(r"sensor\.solcast.*forecast.*tomorrow", entity_id, re.IGNORECASE):
-                try:
-                    forecast["tomorrow_kwh"] = float(state_value)
-                    _LOGGER.debug(f"Solcast tomorrow forecast from {entity_id}: {state_value} kWh")
-                except (ValueError, TypeError):
-                    pass
-
+        estimate_type = self._config_entry.options.get(
+            CONF_SOLCAST_ESTIMATE_TYPE,
+            self._config_entry.data.get(
+                CONF_SOLCAST_ESTIMATE_TYPE, DEFAULT_SOLCAST_ESTIMATE_TYPE
+            ),
+        )
+        forecaster = SolcastForecaster(
+            self._hass,
+            interval_minutes=30,
+            estimate_type=estimate_type,
+            provider_preference=provider,
+        )
+        forecast = await forecaster.get_daily_summary()
+        if not forecast.get("source"):
+            return {}
         return forecast
+
+    async def _async_get_solcast_forecast(self) -> Dict[str, Any]:
+        """Compatibility wrapper for callers using the old Solcast method name."""
+        return await self._async_get_solar_forecast()

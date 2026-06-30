@@ -23,12 +23,25 @@
         "data": {
           "flow_power_state": "NEM region",
           "network_tariff_combined": "Network tariff",
-          "flow_power_base_rate": "Base rate"
+          "flow_power_base_rate": "Base rate",
+          "flowpower_api_key": "Flow Power API key"
         },
         "data_description": {
           "flow_power_state": "Your NEM region determines which wholesale price feed is used. Check your bill if unsure.",
           "network_tariff_combined": "Select the network tariff that matches your electricity bill.",
-          "flow_power_base_rate": "The base energy rate from your Flow Power contract, before wholesale adjustments."
+          "flow_power_base_rate": "The base energy rate from your Flow Power contract, before wholesale adjustments.",
+          "flowpower_api_key": "Optional. Get this from your Flow Power kWatch account page. When set, PowerSync can use the Flow Power API for prices and account metrics."
+        },
+        "submit": "Next"
+      },
+      "flow_power_site": {
+        "title": "Flow Power site",
+        "description": "Select the residential NMI PowerSync should use for Flow Power API account metrics.",
+        "data": {
+          "flowpower_nmi": "NMI"
+        },
+        "data_description": {
+          "flowpower_nmi": "PowerSync uses this site for Flow Power account metrics and tariff hints."
         },
         "submit": "Next"
       },
@@ -225,13 +238,17 @@
           "epex_region": "Bidding zone",
           "epex_surcharge": "Surcharge",
           "epex_tax_percent": "Tax",
-          "epex_export_rate": "Fixed export rate"
+          "epex_export_rate": "Fixed export rate",
+          "epex_import_price_entity": "Import price sensor",
+          "epex_export_price_entity": "Export price sensor"
         },
         "data_description": {
           "epex_region": "Your EPEX electricity market bidding zone. Most users need just their country code (DE, AT, BE, NL, FR, etc.).",
           "epex_surcharge": "Fixed network fees, levies, and other charges in ct/kWh. Added to the wholesale price before tax.",
           "epex_tax_percent": "VAT percentage applied on top of the total price. Example: 21 for Belgium, 19 for Germany.",
-          "epex_export_rate": "Fixed feed-in tariff in ct/kWh. Set to 0 to use the wholesale price for export valuation."
+          "epex_export_rate": "Fixed feed-in tariff in ct/kWh. Set to 0 to use the wholesale price for export valuation.",
+          "epex_import_price_entity": "Optional Home Assistant sensor for actual import costs. Use ct/kWh or EUR/kWh; a price_values attribute can provide a forecast.",
+          "epex_export_price_entity": "Optional Home Assistant sensor for actual export earnings. Use ct/kWh or EUR/kWh; a price_values attribute can provide a forecast."
         },
         "submit": "Connect"
       },
@@ -371,6 +388,7 @@
           "optimization_battery_capacity_wh": "Battery capacity",
           "optimization_max_charge_w": "Maximum charge power",
           "optimization_max_discharge_w": "Maximum discharge power",
+          "optimization_max_grid_export_w": "Maximum grid export",
           "optimization_max_grid_import_w": "Maximum grid import",
           "optimization_allow_grid_charge": "Allow grid charging"
         },
@@ -383,7 +401,8 @@
           "optimization_backup_reserve": "The optimizer will never plan discharge below this percentage.",
           "optimization_battery_capacity_wh": "Total usable battery capacity in kWh for the external battery system.",
           "optimization_max_charge_w": "Maximum charge power in kW that the planner may schedule.",
-          "optimization_max_discharge_w": "Maximum discharge/export power in kW that the planner may schedule.",
+          "optimization_max_discharge_w": "Maximum battery/inverter discharge power in kW that the planner may schedule for loads and export.",
+          "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Leave blank to auto-detect where available; set 0 for zero-export sites. This does not limit battery power used by house loads.",
           "optimization_max_grid_import_w": "Maximum site grid import in kW. Set 0 for no site import cap.",
           "optimization_allow_grid_charge": "When disabled, the planner will not schedule forced grid charging."
         },
@@ -402,46 +421,58 @@
       },
       "ml_options": {
         "title": "Smart Optimization settings",
-        "description": "Configure PowerSync's Smart Optimization limits. The minimum discharge level is the optimizer's floor, not your battery's hardware backup reserve for grid outages.",
+        "description": "Configure PowerSync's Smart Optimization limits. Advanced optimizer controls change how the solver evaluates grid charging, import/export limits, spreading, idle handling, and forecast reserve.",
         "data": {
           "optimization_provider": "Optimization mode",
           "optimization_enabled": "Enable Smart Optimization",
           "optimization_auto_apply_reserve": "Auto-apply optimizer reserve",
-          "optimization_ev_integration": "EV Charging Integration",
+          "optimization_ev_integration": "PowerSync EV charger plans",
+          "optimization_load_entity": "Historical load sensor",
+          "optimization_planned_ev_load_entity": "Planned EV load forecast sensor",
           "monitoring_mode": "Monitoring mode",
           "optimization_backup_reserve": "Minimum discharge level",
           "hardware_backup_reserve": "Hardware backup reserve",
           "optimization_battery_capacity_wh": "Battery capacity",
           "optimization_max_charge_w": "Maximum charge power",
           "optimization_max_discharge_w": "Maximum discharge power",
+          "optimization_max_grid_export_w": "Maximum grid export",
           "optimization_max_grid_import_w": "Maximum grid import",
+          "optimization_max_grid_charge_price": "Maximum grid charge price",
+          "optimization_grid_charge_soc_cap": "Grid charge SOC cap",
           "optimization_allow_grid_charge": "Allow grid charging",
           "optimization_spread_export_enabled": "Spread export across window",
           "optimization_spread_import_enabled": "Spread import across window",
           "optimization_disable_idle": "Disable idle mode",
           "profit_max_enabled": "Enable Profit Max",
-          "profit_max_target_time": "Profit Max target time",
-          "profit_max_target_soc": "Profit Max target SOC"
+          "charge_by_time_enabled": "Enable Charge By Time",
+          "charge_by_time_target_time": "Charge By Time target time",
+          "charge_by_time_target_soc": "Charge By Time target SOC"
         },
         "data_description": {
           "optimization_provider": "Smart Optimization uses an LP solver to minimise costs. Native mode uses your battery's built-in TOU scheduler.",
           "optimization_enabled": "Turn the LP optimizer on or off without changing the saved Smart Optimization settings.",
           "optimization_auto_apply_reserve": "Adjusts the software optimizer reserve floor from forecast recommendations. Your hardware backup reserve stays user controlled.",
-          "optimization_ev_integration": "Include EV charging demand in Smart Optimization decisions.",
+          "optimization_ev_integration": "Adds EV demand from PowerSync-managed charger schedules to Smart Optimization. Leave this off when the planned EV load forecast sensor already represents the same charging demand.",
+          "optimization_load_entity": "Optional recorder-backed live household load sensor for Smart Optimization history. Use a no-EV load sensor here if your home load history includes EV charging and you also add planned EV load separately.",
+          "optimization_planned_ev_load_entity": "Optional sensor with a planned_load attribute for forecast-only EV demand. PowerSync always adds this sensor to the load forecast when selected, but does not control the charger.",
           "monitoring_mode": "Block battery and inverter control commands while still updating prices, sensors, and plans for observation.",
           "optimization_backup_reserve": "The optimizer will never discharge below this percentage. Default 20% is a good starting point. Your battery's hardware backup reserve (set in the Tesla/Sigenergy app) is separate.",
           "hardware_backup_reserve": "The battery's own backup reserve for grid outages. PowerSync restores this level after temporary hold or force-control modes.",
           "optimization_battery_capacity_wh": "Total usable battery capacity in kWh. This should match the battery specs shown in the mobile app.",
           "optimization_max_charge_w": "Maximum grid charge power in kW that the LP optimizer may request.",
-          "optimization_max_discharge_w": "Maximum discharge/export power in kW that the LP optimizer may request.",
+          "optimization_max_discharge_w": "Maximum battery/inverter discharge power in kW that the LP optimizer may request for loads and export.",
+          "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Leave blank to auto-detect where available; set 0 for zero-export sites. This does not limit battery power used by house loads.",
           "optimization_max_grid_import_w": "Maximum total site grid import in kW. Set 0 for no site import cap; solar can still add charging power above this limit.",
+          "optimization_max_grid_charge_price": "Advanced: never plan forced battery charging from grid import above this import price. Set 0 to disable the price cap.",
+          "optimization_grid_charge_soc_cap": "Advanced: stop forced grid charging once forecast battery SOC reaches this cap. Solar surplus can still charge above the cap.",
           "optimization_allow_grid_charge": "When disabled, Smart Optimization can still charge from solar surplus but will not plan forced battery charging from grid import.",
           "optimization_spread_export_enabled": "When enabled on supported batteries, Smart Optimization spreads planned battery export across the full eligible export window instead of using maximum discharge power.",
           "optimization_spread_import_enabled": "When enabled on supported batteries, Smart Optimization spreads planned grid charging across each same-price import window instead of using maximum charge power.",
-          "optimization_disable_idle": "For Flow Power plans, replace Smart Optimization idle hold actions with self-consumption.",
+          "optimization_disable_idle": "For supported TOU plans, replace Smart Optimization idle hold actions with self-consumption.",
           "profit_max_enabled": "Let Smart Optimization prioritise profitable export opportunities instead of holding battery charge for later by default.",
-          "profit_max_target_time": "HH:MM time for Profit Max to reach the configured target SOC before the export window. Default 17:15.",
-          "profit_max_target_soc": "Battery SOC Profit Max should target before the export window. Default 100%."
+          "charge_by_time_enabled": "Force Smart Optimization to reach the configured target SOC by the configured time.",
+          "charge_by_time_target_time": "HH:MM time for Charge By Time to reach the configured target SOC. Default 17:15.",
+          "charge_by_time_target_soc": "Battery SOC Charge By Time should target by the configured time. Default 100%."
         },
         "submit": "Next"
       },
@@ -552,7 +583,7 @@
           "goodwe_host": "Local IP address of your GoodWe inverter.",
           "goodwe_protocol": "UDP uses direct GoodWe control on port 8899. TCP uses Modbus on port 502 for LAN/Kit-20 setups.",
           "goodwe_port": "Default: 8899 for UDP, 502 for TCP.",
-          "goodwe_ems_control_mode": "Choose how PowerSync sends GoodWe EMS commands. Direct IP requires UDP 8899 control. For TCP / LAN Kit-20 setups, PowerSync auto-uses detected GoodWe Experimental EMS entities because direct operation-mode writes do not reliably control the inverter. The IP address above is still used for telemetry.",
+          "goodwe_ems_control_mode": "Choose how PowerSync sends GoodWe EMS commands. Direct IP requires UDP 8899 control. For TCP / LAN Kit-20 setups, PowerSync auto-uses detected GoodWe Experimental EMS entities because direct operation-mode writes do not reliably control the inverter. TCP / LAN Kit-20 telemetry can also use detected GoodWe HA sensors to avoid a second direct TCP/502 polling client.",
           "goodwe_ems_entity_prefix": "Required only when EMS control method is Home Assistant entity control. PowerSync will auto-detect a matching EMS entity pair when possible. You can also enter only the prefix for the GoodWe Experimental EMS controls. Example: goodwe uses select.goodwe_ems_mode and number.goodwe_ems_power_limit."
         },
         "submit": "Connect"
@@ -620,6 +651,33 @@
           "neovolt_battery_capacities_kwh": "Optional comma-separated usable battery capacities in kWh. With multiple Neovolt integrations, values follow the selected integration order. With one integration, multiple values are summed. Example: 20.1, 30.2. Leave blank to use Neovolt's capacity sensors.",
           "neovolt_surplus_balancer_mode": "Controls independent NeoVolt stack balancing. Auto balances multiple selected Neovolt integrations whenever PowerSync is running; the Smart Optimization switch does not control it. Disable this if your batteries already have a parallel/BMS coordinator.",
           "neovolt_soc_balance_tolerance": "PowerSync will not force-charge a higher-SOC parked stack while another stack is behind by more than this percentage."
+        },
+        "submit": "Connect"
+      },
+      "anker_solix": {
+        "title": "Anker Solix connection",
+        "description": "Choose direct X1 Modbus, Anker's official local HA integration, or the unofficial cloud HA bridge. Direct Modbus and the official local bridge are preferred for dispatch control.",
+        "data": {
+          "anker_solix_connection_type": "Connection type",
+          "anker_solix_modbus_host": "X1 IP address",
+          "anker_solix_modbus_port": "Modbus TCP port",
+          "anker_solix_modbus_slave_id": "Slave ID",
+          "anker_solix_config_entry_id": "Anker integration",
+          "anker_solix_entity_prefix": "Entity prefix override",
+          "anker_solix_battery_capacity_kwh": "Battery capacity",
+          "anker_solix_max_charge_kw": "Maximum charge power",
+          "anker_solix_max_discharge_kw": "Maximum discharge power"
+        },
+        "data_description": {
+          "anker_solix_connection_type": "Direct X1 Modbus uses local TCP port 502. Official HA bridges through anker_solix_official. Cloud HA bridges through the unofficial anker_solix integration and may be telemetry-only.",
+          "anker_solix_modbus_host": "Local IP address of the Anker SOLIX X1 system. Third-party control and Modbus TCP must be enabled in Anker settings.",
+          "anker_solix_modbus_port": "Default: 502.",
+          "anker_solix_modbus_slave_id": "Default: 1.",
+          "anker_solix_config_entry_id": "Optional. Select the Anker HA integration entry PowerSync should read from when more than one is configured.",
+          "anker_solix_entity_prefix": "Optional. Used when Anker entities have a shared prefix and PowerSync needs help matching the right device.",
+          "anker_solix_battery_capacity_kwh": "Usable battery capacity in kWh. Used by the LP optimizer when the Anker path does not expose rated energy.",
+          "anker_solix_max_charge_kw": "Maximum charge power in kW. Used by dispatch commands and the LP optimizer.",
+          "anker_solix_max_discharge_kw": "Maximum discharge/export power in kW. Used by dispatch commands and the LP optimizer."
         },
         "submit": "Connect"
       },
@@ -771,6 +829,7 @@
           "weather_location": "Weather location",
           "openweathermap_api_key": "OpenWeatherMap API key",
           "weather_entity": "Home Assistant weather entity",
+          "solar_forecast_provider": "Solar forecast provider",
           "solcast_enabled": "Enable Solcast solar forecast",
           "solcast_api_key": "Solcast API key",
           "solcast_resource_id": "Solcast resource ID(s)",
@@ -780,6 +839,7 @@
           "weather_location": "Suburb, city, postcode, or lat,lon coordinates (e.g. 'Melbourne', '3000', '-37.81,144.96'). Leave blank to auto-detect from timezone.",
           "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny, cloudy, rain, snow, and storm triggers). Leave blank to disable.",
           "weather_entity": "Optional. Used for temperature-aware load forecasting if Home Assistant has a weather entity. Leave blank when using OpenWeatherMap.",
+          "solar_forecast_provider": "Choose which solar forecast provider PowerSync tries first. If the selected provider has no usable forecast, PowerSync falls back to the other supported provider.",
           "solcast_enabled": "Enable solar production forecasting. If the Solcast or Open-Meteo Solar Forecast HA integration is installed, PowerSync reads from its sensors automatically (no API calls needed).",
           "solcast_api_key": "Only needed if you do NOT have the Solcast HA integration. Get a free key from toolkit.solcast.com.au (10 calls/day on hobbyist tier).",
           "solcast_resource_id": "Only needed without the Solcast HA integration. For split arrays, enter comma-separated IDs (e.g. abc123,def456).",
@@ -980,6 +1040,8 @@
       "esy_sunhome_no_device": "No ESY Sunhome device found in the selected integration entry. Verify the ESY Sunhome integration is set up and has a paired device.",
       "invalid_credentials": "Email or password is incorrect. Check your Flow Power portal login credentials.",
       "invalid_mfa_code": "Verification code is incorrect or expired. Request a new SMS code and try again.",
+      "invalid_api_key": "Flow Power rejected that API key. Check the value from your kWatch account page and try again.",
+      "invalid_site": "Select a Flow Power site from the list.",
       "zaptec_auth_failed": "Zaptec Cloud login failed. Check that your email and password are correct.",
       "zaptec_missing_credentials": "Both email and password are required for Zaptec Cloud authentication.",
       "no_prices": "No prices found for this tariff and region combination. Verify your Octopus product and GSP region match your account.",
@@ -997,6 +1059,9 @@
       "neovolt_missing_entities": "Could not find the required Neovolt entities in the selected Neovolt integration entry. Make sure the integration is installed, the system is online, and its entities have been created in Home Assistant.",
       "neovolt_connect_failed": "Failed to validate Neovolt entities. Check the selected integration entry and try again.",
       "neovolt_capacity_invalid": "Enter positive battery capacities in kWh, separated by commas.",
+      "anker_solix_host_required": "Enter the local IP address of the Anker SOLIX X1 system.",
+      "anker_solix_ha_not_installed": "The selected Anker HA integration is not installed or has no configured entries. Install and configure it before selecting this connection type.",
+      "anker_solix_connect_failed": "Could not validate the Anker Solix connection. For direct Modbus, check IP, port 502, slave ID, and third-party control. For HA bridge mode, check that the Anker integration exposes SOC and solar power entities.",
       "solaredge_host_required": "Enter the SolarEdge inverter IP address, or enter an HA entity prefix for entity fallback.",
       "solaredge_connect_failed": "Could not connect to SolarEdge via Modbus or find a matching SolarEdge active power limit entity. Check Modbus TCP, power-control settings, firmware/grid profile support, and the entity prefix.",
       "solaredge_rated_power_required": "Enter the SolarEdge inverter rated AC power in watts."
@@ -1022,6 +1087,8 @@
       "captcha_required": "GloBird requested captcha verification. Sign in through the GloBird portal in a browser, then try again.",
       "invalid_credentials": "Email or password is incorrect. Check your Flow Power portal login credentials.",
       "invalid_mfa_code": "Verification code is incorrect or expired. Request a new SMS code and try again.",
+      "confirm_required": "Confirm the history relink before applying changes.",
+      "no_ready_history_relinks": "No ready history relinks were found. Check the preview summary.",
       "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again."
     },
     "step": {
@@ -1030,16 +1097,21 @@
         "description": "Choose a section to configure. Changes take effect immediately.",
         "menu_options": {
           "pricing": "Electricity pricing & provider",
+          "battery_system": "Battery / control method",
           "provider_portal": "Provider portal login",
           "tesla_connection": "Tesla API connection",
           "sigenergy_connection": "Sigenergy connection",
           "sungrow_connection": "Sungrow Modbus connection",
+          "history_relink": "Sungrow history relink",
           "foxess_connection_options": "FoxESS connection",
           "goodwe_connection_options": "GoodWe connection",
+          "alphaess_connection": "AlphaESS connection",
           "esy_sunhome_connection": "ESY Sunhome connection",
           "saj_h2_connection": "SAJ H2 connection",
           "fronius_reserva_connection": "Fronius GEN24 storage connection",
           "neovolt_connection": "Neovolt connection",
+          "anker_solix": "Anker Solix connection",
+          "custom_battery": "Custom external controller",
           "optimization": "Optimization mode",
           "inverter": "AC inverter curtailment",
           "curtailment": "Curtailment settings",
@@ -1049,6 +1121,78 @@
           "auto_update": "PowerSync auto-update",
           "solax_battery_options": "Solax connection"
         }
+      },
+      "battery_system": {
+        "title": "Battery / control method",
+        "description": "Change the battery or hybrid inverter that PowerSync controls. The selected method is saved before the connection page opens, and the integration reloads after the connection settings are saved.",
+        "data": {
+          "battery_system": "Battery / control method"
+        },
+        "data_description": {
+          "battery_system": "Choose the primary battery, inverter, or external controller PowerSync should use."
+        },
+        "submit": "Next"
+      },
+      "custom_battery": {
+        "title": "Custom external controller",
+        "description": "Select the Home Assistant entities PowerSync should use to model your battery system. PowerSync will generate optimizer plans in monitoring mode and will not send control commands.",
+        "data": {
+          "custom_battery_level_entity": "Battery level sensor",
+          "custom_battery_power_entity": "Battery power sensor",
+          "custom_grid_power_entity": "Grid power sensor",
+          "custom_solar_power_entity": "Solar power sensor",
+          "custom_load_power_entity": "Home load sensor",
+          "optimization_backup_reserve": "Minimum discharge level",
+          "optimization_battery_capacity_wh": "Battery capacity",
+          "optimization_max_charge_w": "Maximum charge power",
+          "optimization_max_discharge_w": "Maximum discharge power",
+          "optimization_max_grid_export_w": "Maximum grid export",
+          "optimization_max_grid_import_w": "Maximum grid import",
+          "optimization_allow_grid_charge": "Allow grid charging"
+        },
+        "submit": "Save"
+      },
+      "alphaess_connection": {
+        "title": "AlphaESS connection",
+        "description": "Update AlphaESS Modbus settings and optional AlphaESS Cloud fallback credentials.",
+        "data": {
+          "alphaess_modbus_host": "AlphaESS IP address",
+          "alphaess_modbus_port": "Modbus TCP port",
+          "alphaess_modbus_slave_id": "Slave ID",
+          "alphaess_export_limit_kw": "Export limit",
+          "alphaess_dc_curtailment_enabled": "Enable DC curtailment",
+          "alphaess_cloud_app_id": "Cloud App ID",
+          "alphaess_cloud_app_secret": "Cloud App Secret",
+          "alphaess_cloud_serial": "Cloud serial number"
+        },
+        "submit": "Save"
+      },
+      "anker_solix": {
+        "title": "Anker Solix connection",
+        "description": "Update Anker Solix direct Modbus or HA integration bridge settings.",
+        "data": {
+          "anker_solix_connection_type": "Connection type",
+          "anker_solix_modbus_host": "X1 IP address",
+          "anker_solix_modbus_port": "Modbus TCP port",
+          "anker_solix_modbus_slave_id": "Slave ID",
+          "anker_solix_config_entry_id": "Anker integration",
+          "anker_solix_entity_prefix": "Entity prefix override",
+          "anker_solix_battery_capacity_kwh": "Battery capacity",
+          "anker_solix_max_charge_kw": "Maximum charge power",
+          "anker_solix_max_discharge_kw": "Maximum discharge power"
+        },
+        "submit": "Save"
+      },
+      "history_relink": {
+        "title": "Sungrow history relink",
+        "description": "Relink PowerSync Sungrow energy entities to matching mkaiser Sungrow entity IDs so the Energy Dashboard can keep using existing long-term statistics. Create a Home Assistant backup before applying.\n\n{summary}",
+        "data": {
+          "confirm": "Apply ready relinks"
+        },
+        "data_description": {
+          "confirm": "Only mappings marked ready will be applied. Ambiguous, missing, and blocked mappings are skipped."
+        },
+        "submit": "Apply"
       },
       "auto_update": {
         "title": "PowerSync auto-update",
@@ -1180,7 +1324,7 @@
           "goodwe_host": "Local IP address of your GoodWe inverter.",
           "goodwe_protocol": "UDP uses direct GoodWe control on port 8899. TCP uses Modbus on port 502 for LAN/Kit-20 setups.",
           "goodwe_port": "Default: 8899 for UDP, 502 for TCP.",
-          "goodwe_ems_control_mode": "Choose how PowerSync sends GoodWe EMS commands. Direct IP requires UDP 8899 control. For TCP / LAN Kit-20 setups, PowerSync auto-uses detected GoodWe Experimental EMS entities because direct operation-mode writes do not reliably control the inverter. The IP address above is still used for telemetry.",
+          "goodwe_ems_control_mode": "Choose how PowerSync sends GoodWe EMS commands. Direct IP requires UDP 8899 control. For TCP / LAN Kit-20 setups, PowerSync auto-uses detected GoodWe Experimental EMS entities because direct operation-mode writes do not reliably control the inverter. TCP / LAN Kit-20 telemetry can also use detected GoodWe HA sensors to avoid a second direct TCP/502 polling client.",
           "goodwe_ems_entity_prefix": "Required only when EMS control method is Home Assistant entity control. PowerSync will auto-detect a matching EMS entity pair when possible. You can also enter only the prefix for the GoodWe Experimental EMS controls. Example: goodwe uses select.goodwe_ems_mode and number.goodwe_ems_power_limit."
         },
         "submit": "Save"
@@ -1253,46 +1397,58 @@
       },
       "optimization": {
         "title": "Smart Optimization settings",
-        "description": "Configure PowerSync's Smart Optimization limits. The minimum discharge level is the optimizer's floor, not your battery's hardware backup reserve for grid outages.",
+        "description": "Configure PowerSync's Smart Optimization limits. Advanced optimizer controls change how the solver evaluates grid charging, import/export limits, spreading, idle handling, and forecast reserve.",
         "data": {
           "optimization_provider": "Optimization mode",
           "optimization_enabled": "Enable Smart Optimization",
           "optimization_auto_apply_reserve": "Auto-apply optimizer reserve",
-          "optimization_ev_integration": "EV Charging Integration",
+          "optimization_ev_integration": "PowerSync EV charger plans",
+          "optimization_load_entity": "Historical load sensor",
+          "optimization_planned_ev_load_entity": "Planned EV load forecast sensor",
           "monitoring_mode": "Monitoring mode",
           "optimization_backup_reserve": "Minimum discharge level",
           "hardware_backup_reserve": "Hardware backup reserve",
           "optimization_battery_capacity_wh": "Battery capacity",
           "optimization_max_charge_w": "Maximum charge power",
           "optimization_max_discharge_w": "Maximum discharge power",
+          "optimization_max_grid_export_w": "Maximum grid export",
           "optimization_max_grid_import_w": "Maximum grid import",
+          "optimization_max_grid_charge_price": "Maximum grid charge price",
+          "optimization_grid_charge_soc_cap": "Grid charge SOC cap",
           "optimization_allow_grid_charge": "Allow grid charging",
           "optimization_spread_export_enabled": "Spread export across window",
           "optimization_spread_import_enabled": "Spread import across window",
           "optimization_disable_idle": "Disable idle mode",
           "profit_max_enabled": "Enable Profit Max",
-          "profit_max_target_time": "Profit Max target time",
-          "profit_max_target_soc": "Profit Max target SOC"
+          "charge_by_time_enabled": "Enable Charge By Time",
+          "charge_by_time_target_time": "Charge By Time target time",
+          "charge_by_time_target_soc": "Charge By Time target SOC"
         },
         "data_description": {
           "optimization_provider": "Smart Optimization uses an LP solver to minimise costs. Native mode uses your battery's built-in TOU scheduler.",
           "optimization_enabled": "Turn the LP optimizer on or off without changing the saved Smart Optimization settings.",
           "optimization_auto_apply_reserve": "Adjusts the software optimizer reserve floor from forecast recommendations. Your hardware backup reserve stays user controlled.",
-          "optimization_ev_integration": "Include EV charging demand in Smart Optimization decisions.",
+          "optimization_ev_integration": "Adds EV demand from PowerSync-managed charger schedules to Smart Optimization. Leave this off when the planned EV load forecast sensor already represents the same charging demand.",
+          "optimization_load_entity": "Optional recorder-backed live household load sensor for Smart Optimization history. Use a no-EV load sensor here if your home load history includes EV charging and you also add planned EV load separately.",
+          "optimization_planned_ev_load_entity": "Optional sensor with a planned_load attribute for forecast-only EV demand. PowerSync always adds this sensor to the load forecast when selected, but does not control the charger.",
           "monitoring_mode": "Block battery and inverter control commands while still updating prices, sensors, and plans for observation.",
           "optimization_backup_reserve": "The optimizer will never discharge below this percentage. Default 20% is a good starting point. Your battery's hardware backup reserve (set in the Tesla/Sigenergy app) is separate.",
           "hardware_backup_reserve": "The battery's own backup reserve for grid outages. PowerSync restores this level after temporary hold or force-control modes.",
           "optimization_battery_capacity_wh": "Total usable battery capacity in kWh. This should match the battery specs shown in the mobile app.",
           "optimization_max_charge_w": "Maximum grid charge power in kW that the LP optimizer may request.",
-          "optimization_max_discharge_w": "Maximum discharge/export power in kW that the LP optimizer may request.",
+          "optimization_max_discharge_w": "Maximum battery/inverter discharge power in kW that the LP optimizer may request for loads and export.",
+          "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Leave blank to auto-detect where available; set 0 for zero-export sites. This does not limit battery power used by house loads.",
           "optimization_max_grid_import_w": "Maximum total site grid import in kW. Set 0 for no site import cap; solar can still add charging power above this limit.",
+          "optimization_max_grid_charge_price": "Advanced: never plan forced battery charging from grid import above this import price. Set 0 to disable the price cap.",
+          "optimization_grid_charge_soc_cap": "Advanced: stop forced grid charging once forecast battery SOC reaches this cap. Solar surplus can still charge above the cap.",
           "optimization_allow_grid_charge": "When disabled, Smart Optimization can still charge from solar surplus but will not plan forced battery charging from grid import.",
           "optimization_spread_export_enabled": "When enabled on supported batteries, Smart Optimization spreads planned battery export across the full eligible export window instead of using maximum discharge power.",
           "optimization_spread_import_enabled": "When enabled on supported batteries, Smart Optimization spreads planned grid charging across each same-price import window instead of using maximum charge power.",
-          "optimization_disable_idle": "For Flow Power plans, replace Smart Optimization idle hold actions with self-consumption.",
+          "optimization_disable_idle": "For supported TOU plans, replace Smart Optimization idle hold actions with self-consumption.",
           "profit_max_enabled": "Let Smart Optimization prioritise profitable export opportunities instead of holding battery charge for later by default.",
-          "profit_max_target_time": "HH:MM time for Profit Max to reach the configured target SOC before the export window. Default 17:15.",
-          "profit_max_target_soc": "Battery SOC Profit Max should target before the export window. Default 100%."
+          "charge_by_time_enabled": "Force Smart Optimization to reach the configured target SOC by the configured time.",
+          "charge_by_time_target_time": "HH:MM time for Charge By Time to reach the configured target SOC. Default 17:15.",
+          "charge_by_time_target_soc": "Battery SOC Charge By Time should target by the configured time. Default 100%."
         },
         "submit": "Save"
       },
@@ -1410,7 +1566,7 @@
           "goodwe_host": "Local IP address of your GoodWe inverter.",
           "goodwe_protocol": "UDP uses direct GoodWe control on port 8899. TCP uses Modbus on port 502 for LAN/Kit-20 setups.",
           "goodwe_port": "Default: 8899 for UDP, 502 for TCP.",
-          "goodwe_ems_control_mode": "Choose how PowerSync sends GoodWe EMS commands. Direct IP requires UDP 8899 control. For TCP / LAN Kit-20 setups, PowerSync auto-uses detected GoodWe Experimental EMS entities because direct operation-mode writes do not reliably control the inverter. The IP address above is still used for telemetry.",
+          "goodwe_ems_control_mode": "Choose how PowerSync sends GoodWe EMS commands. Direct IP requires UDP 8899 control. For TCP / LAN Kit-20 setups, PowerSync auto-uses detected GoodWe Experimental EMS entities because direct operation-mode writes do not reliably control the inverter. TCP / LAN Kit-20 telemetry can also use detected GoodWe HA sensors to avoid a second direct TCP/502 polling client.",
           "goodwe_ems_entity_prefix": "Required only when EMS control method is Home Assistant entity control. PowerSync will auto-detect a matching EMS entity pair when possible. You can also enter only the prefix for the GoodWe Experimental EMS controls. Example: goodwe uses select.goodwe_ems_mode and number.goodwe_ems_power_limit."
         },
         "submit": "Save"
@@ -1503,7 +1659,7 @@
           "fp_amber_markup": "Amber comparison markup"
         },
         "data_description": {
-          "flow_power_price_source": "AEMO Direct fetches wholesale prices from NEMWeb (no API key). Amber API uses your Amber Electric account.",
+          "flow_power_price_source": "Flow Power API uses your KWatch API key. AEMO Direct fetches wholesale prices from NEMWeb without an API key. Amber API uses your Amber Electric account.",
           "flow_power_export_rate": "Fixed export credit paid during Flow Power Happy Hour. Set this if Flow Power has applied a promo or account-specific feed-in rate.",
           "pea_enabled": "PEA reflects how Flow Power actually bills you: final rate moves with wholesale prices. Disable for flat network tariff rates.",
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current prices.",
@@ -1559,6 +1715,28 @@
           "amber_api_token": "Found in the Amber app under Profile > Developer > API key. Or visit [{amber_url}]({amber_url})."
         },
         "submit": "Connect"
+      },
+      "flow_power_api_key_options": {
+        "title": "Flow Power API key",
+        "description": "Enter the API key from your Flow Power kWatch account page.",
+        "data": {
+          "flowpower_api_key": "API key"
+        },
+        "data_description": {
+          "flowpower_api_key": "Stored in Home Assistant and sent to Flow Power as the x-api-key header."
+        },
+        "submit": "Connect"
+      },
+      "flow_power_site_options": {
+        "title": "Flow Power site",
+        "description": "Select the residential NMI PowerSync should use for Flow Power API account metrics.",
+        "data": {
+          "flowpower_nmi": "NMI"
+        },
+        "data_description": {
+          "flowpower_nmi": "PowerSync uses this site for Flow Power account metrics and tariff hints."
+        },
+        "submit": "Next"
       },
       "flow_power_network_options": {
         "title": "Flow Power advanced options",
@@ -1668,6 +1846,8 @@
           "epex_surcharge": "Surcharge",
           "epex_tax_percent": "Tax",
           "epex_export_rate": "Fixed export rate",
+          "epex_import_price_entity": "Import price sensor",
+          "epex_export_price_entity": "Export price sensor",
           "auto_sync_enabled": "Enable automatic TOU sync",
           "battery_curtailment_enabled": "Stop export below 1c"
         },
@@ -1676,6 +1856,8 @@
           "epex_surcharge": "Fixed network fees, levies, and other charges in ct/kWh. Added to the wholesale price before tax.",
           "epex_tax_percent": "VAT percentage applied on top of the total price. Example: 21 for Belgium, 19 for Germany.",
           "epex_export_rate": "Fixed feed-in tariff in ct/kWh. Set to 0 to use the wholesale price for export valuation.",
+          "epex_import_price_entity": "Optional Home Assistant sensor for actual import costs. Use ct/kWh or EUR/kWh; a price_values attribute can provide a forecast.",
+          "epex_export_price_entity": "Optional Home Assistant sensor for actual export earnings. Use ct/kWh or EUR/kWh; a price_values attribute can provide a forecast.",
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery.",
           "battery_curtailment_enabled": "Stop battery from exporting when export earnings drop below 1c/kWh."
         },
@@ -1851,13 +2033,16 @@
           "generic_charger_switch_entity": "Charger switch entity",
           "generic_charger_amps_entity": "Charger amps entity",
           "generic_charger_status_entity": "Connector status sensor",
+          "generic_charger_power_entity": "EV charging power sensor",
           "generic_charger_soc_entity": "EV battery SoC sensor",
           "generic_charger_soc_entity_2": "Fallback EV battery SoC sensor",
           "sigenergy_charger_enabled": "Enable Sigenergy EV charger",
           "sigenergy_charger_type": "Sigenergy charger type",
           "sigenergy_charger_host": "Sigenergy charger Modbus host",
           "sigenergy_charger_port": "Sigenergy charger Modbus port",
-          "sigenergy_charger_slave_id": "Sigenergy charger slave ID"
+          "sigenergy_charger_slave_id": "Sigenergy charger slave ID",
+          "sigenergy_charger_charge_power_limit_entity": "EVDC charge power limit entity",
+          "sigenergy_charger_discharge_power_limit_entity": "EVDC discharge power limit entity"
         },
         "data_description": {
           "ev_charging_enabled": "Enable smart charging for Tesla vehicles. Not required for OCPP or Zaptec chargers.",
@@ -1872,13 +2057,16 @@
           "generic_charger_switch_entity": "Entity ID of the switch that starts/stops charging (e.g. switch.evnex_charge_now). Required.",
           "generic_charger_amps_entity": "Entity ID for charge current control in amps. Leave blank if not supported.",
           "generic_charger_status_entity": "Entity ID reporting connector status. Recognised: charging, preparing, suspended_evse, suspended_ev, finishing. Leave blank to skip.",
+          "generic_charger_power_entity": "Entity ID reporting measured EV charging power in W or kW. Used for dashboard power and charging-state detection; leave blank if unavailable.",
           "generic_charger_soc_entity": "Entity ID reporting EV battery SoC as a percentage. Used for target SoC charging. Leave blank if unavailable.",
           "generic_charger_soc_entity_2": "Optional second EV battery SoC sensor. Used only when the primary SoC sensor is unavailable or invalid.",
           "sigenergy_charger_enabled": "Use Sigenergy Modbus for EVAC/EVDC charger status and start/stop control.",
-          "sigenergy_charger_type": "EVAC supports rate control and repeated starts. EVDC uses conservative one-shot scheduling, no dynamic amps, and native mySigen PV-surplus behavior.",
+          "sigenergy_charger_type": "EVAC supports repeated starts. EVDC keeps conservative one-shot start protection; dynamic rate control is enabled when a charge power limit number entity is configured or detected.",
           "sigenergy_charger_host": "IP address of the Sigenergy Modbus endpoint. Defaults to the inverter Modbus host when blank.",
           "sigenergy_charger_port": "Modbus TCP port. Default: 502.",
-          "sigenergy_charger_slave_id": "Modbus slave ID for the charger or inverter exposing the EV charger registers."
+          "sigenergy_charger_slave_id": "Modbus slave ID for the charger or inverter exposing the EV charger registers.",
+          "sigenergy_charger_charge_power_limit_entity": "Optional HA number entity for EVDC max charging power in kW. Leave blank to auto-detect number.sigen_inverter_dc_charger_max_charging_power_limit.",
+          "sigenergy_charger_discharge_power_limit_entity": "Optional HA number entity for EVDC max discharging power in kW. Stored for V2X capability visibility; PowerSync does not schedule EVDC discharge."
         },
         "submit": "Save"
       },
@@ -1924,13 +2112,16 @@
           "generic_charger_switch_entity": "Charger switch entity",
           "generic_charger_amps_entity": "Charger amps entity",
           "generic_charger_status_entity": "Connector status sensor",
+          "generic_charger_power_entity": "EV charging power sensor",
           "generic_charger_soc_entity": "EV battery SoC sensor",
           "generic_charger_soc_entity_2": "Fallback EV battery SoC sensor",
           "sigenergy_charger_enabled": "Enable Sigenergy EV charger",
           "sigenergy_charger_type": "Sigenergy charger type",
           "sigenergy_charger_host": "Sigenergy charger Modbus host",
           "sigenergy_charger_port": "Sigenergy charger Modbus port",
-          "sigenergy_charger_slave_id": "Sigenergy charger slave ID"
+          "sigenergy_charger_slave_id": "Sigenergy charger slave ID",
+          "sigenergy_charger_charge_power_limit_entity": "EVDC charge power limit entity",
+          "sigenergy_charger_discharge_power_limit_entity": "EVDC discharge power limit entity"
         },
         "data_description": {
           "ev_charging_enabled": "Enable smart charging for Tesla vehicles. Not required for OCPP or Zaptec chargers.",
@@ -1945,13 +2136,16 @@
           "generic_charger_switch_entity": "Entity ID of the switch that starts/stops charging. Required.",
           "generic_charger_amps_entity": "Entity ID for charge current control in amps. Leave blank if not supported.",
           "generic_charger_status_entity": "Entity ID reporting connector status. Leave blank to skip plug detection.",
+          "generic_charger_power_entity": "Entity ID reporting measured EV charging power in W or kW. Used for dashboard power and charging-state detection; leave blank if unavailable.",
           "generic_charger_soc_entity": "Entity ID reporting EV battery SoC as a percentage. Leave blank if unavailable.",
           "generic_charger_soc_entity_2": "Optional second EV battery SoC sensor. Used only when the primary SoC sensor is unavailable or invalid.",
           "sigenergy_charger_enabled": "Use Sigenergy Modbus for EVAC/EVDC charger status and start/stop control.",
-          "sigenergy_charger_type": "EVAC supports rate control and repeated starts. EVDC uses conservative one-shot scheduling, no dynamic amps, and native mySigen PV-surplus behavior.",
+          "sigenergy_charger_type": "EVAC supports repeated starts. EVDC keeps conservative one-shot start protection; dynamic rate control is enabled when a charge power limit number entity is configured or detected.",
           "sigenergy_charger_host": "IP address of the Sigenergy Modbus endpoint. Defaults to the inverter Modbus host when blank.",
           "sigenergy_charger_port": "Modbus TCP port. Default: 502.",
-          "sigenergy_charger_slave_id": "Modbus slave ID for the charger or inverter exposing the EV charger registers."
+          "sigenergy_charger_slave_id": "Modbus slave ID for the charger or inverter exposing the EV charger registers.",
+          "sigenergy_charger_charge_power_limit_entity": "Optional HA number entity for EVDC max charging power in kW. Leave blank to auto-detect number.sigen_inverter_dc_charger_max_charging_power_limit.",
+          "sigenergy_charger_discharge_power_limit_entity": "Optional HA number entity for EVDC max discharging power in kW. Stored for V2X capability visibility; PowerSync does not schedule EVDC discharge."
         },
         "submit": "Save"
       },
@@ -2007,6 +2201,7 @@
           "weather_location": "Weather location",
           "openweathermap_api_key": "OpenWeatherMap API key",
           "weather_entity": "Home Assistant weather entity",
+          "solar_forecast_provider": "Solar forecast provider",
           "solcast_enabled": "Enable Solcast solar forecast",
           "solcast_api_key": "Solcast API key",
           "solcast_resource_id": "Solcast resource ID(s)",
@@ -2016,6 +2211,7 @@
           "weather_location": "Suburb, city, postcode, or lat,lon coordinates (e.g. 'Melbourne', '3000', '-37.81,144.96'). Leave blank to auto-detect from timezone.",
           "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny, cloudy, rain, snow, and storm triggers). Leave blank to disable.",
           "weather_entity": "Optional. Used for temperature-aware load forecasting if Home Assistant has a weather entity. Leave blank when using OpenWeatherMap.",
+          "solar_forecast_provider": "Choose which solar forecast provider PowerSync tries first. If the selected provider has no usable forecast, PowerSync falls back to the other supported provider.",
           "solcast_enabled": "Enable solar production forecasting. If the Solcast or Open-Meteo Solar Forecast HA integration is installed, PowerSync reads from its sensors automatically (no API calls needed).",
           "solcast_api_key": "Only needed if you do NOT have the Solcast HA integration. Get a free key from toolkit.solcast.com.au (10 calls/day on hobbyist tier).",
           "solcast_resource_id": "Only needed without the Solcast HA integration. For split arrays, enter comma-separated IDs (e.g. abc123,def456).",

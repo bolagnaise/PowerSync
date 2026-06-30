@@ -895,9 +895,20 @@ class SolarEdgeEnergyController:
             for entity_id in dict.fromkeys(matches)
             if self.hass.states.get(entity_id) is not None
         ]
+        if key.startswith("solar") or key.startswith("pv"):
+            valid_matches = [
+                entity_id
+                for entity_id in valid_matches
+                if not self._is_non_solar_power_entity(entity_id)
+            ]
         if not valid_matches:
             return None
         return sorted(valid_matches, key=lambda entity_id: self._match_score(entity_id, key))[0]
+
+    @staticmethod
+    def _is_non_solar_power_entity(entity_id: str) -> bool:
+        body = entity_id.split(".", 1)[-1].lower()
+        return any(token in body for token in ("_b", "battery", "_m", "meter", "grid"))
 
     def _match_score(self, entity_id: str, key: str) -> tuple[int, int, str]:
         body = entity_id.split(".", 1)[-1].lower()

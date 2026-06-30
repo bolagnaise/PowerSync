@@ -217,6 +217,131 @@ def test_h3_smart_direct_modbus_reads_pv3_power(tmp_path: Path):
         _restore_modules(snapshot)
 
 
+def test_h1_kh_h3_direct_modbus_uses_pv2_power_register(tmp_path: Path):
+    snapshot = _snapshot_modules()
+    original_path = list(sys.path)
+    try:
+        _clear_test_modules()
+        _write_fake_pymodbus(tmp_path)
+        sys.path.insert(0, str(tmp_path))
+        _install_power_sync_package()
+        module = importlib.import_module("power_sync.inverters.foxess")
+
+        for family in (
+            module.FoxESSModelFamily.H1,
+            module.FoxESSModelFamily.KH,
+            module.FoxESSModelFamily.H3,
+        ):
+            register_map = module.REGISTER_MAPS[family]
+
+            assert register_map.pv1_power == 31002
+            assert register_map.pv2_power == 31005
+    finally:
+        sys.path[:] = original_path
+        _restore_modules(snapshot)
+
+
+def test_kh_direct_modbus_normalizes_grid_import_sign(tmp_path: Path):
+    snapshot = _snapshot_modules()
+    original_path = list(sys.path)
+    try:
+        _clear_test_modules()
+        _write_fake_pymodbus(tmp_path)
+        sys.path.insert(0, str(tmp_path))
+        _install_power_sync_package()
+        module = importlib.import_module("power_sync.inverters.foxess")
+        controller = module.FoxESSController(
+            host="192.0.2.1",
+            model_family="KH",
+        )
+
+        def signed16_word(value: int) -> int:
+            return value & 0xFFFF
+
+        data_registers = {
+            31024: [34],
+            31022: [signed16_word(-5780)],
+            31002: [780],
+            31005: [0],
+            # KH reports forced grid charge/import as a negative raw grid value.
+            31008: [signed16_word(-5000)],
+            31016: [220],
+            31020: [512],
+            31021: [0],
+            31023: [250],
+        }
+        holding_registers = {
+            41000: [2],
+            41009: [10],
+            41007: [250],
+            41008: [250],
+        }
+
+        async def fake_read_data(address: int, count: int = 1):
+            return data_registers.get(address, [0] * count)
+
+        async def fake_read_holding(address: int, count: int = 1):
+            return holding_registers.get(address, [0] * count)
+
+        controller._read_data_register = fake_read_data
+        controller._read_holding_registers = fake_read_holding
+
+        status = asyncio.run(controller.get_status())
+
+        assert status.status == module.InverterStatus.ONLINE
+        assert status.attributes["model_family"] == "KH"
+        assert status.attributes["work_mode_name"] == "Backup"
+        assert status.attributes["battery_power_kw"] == -5.78
+        assert status.attributes["grid_power_kw"] == 5.0
+    finally:
+        sys.path[:] = original_path
+        _restore_modules(snapshot)
+
+
+def test_kh_daily_energy_retries_holding_registers_when_input_read_fails(tmp_path: Path):
+    snapshot = _snapshot_modules()
+    original_path = list(sys.path)
+    try:
+        _clear_test_modules()
+        _write_fake_pymodbus(tmp_path)
+        sys.path.insert(0, str(tmp_path))
+        _install_power_sync_package()
+        module = importlib.import_module("power_sync.inverters.foxess")
+        controller = module.FoxESSController(
+            host="192.0.2.1",
+            model_family="KH",
+        )
+
+        input_reads: list[tuple[int, int]] = []
+        holding_reads: list[tuple[int, int]] = []
+
+        async def fake_read_data(address: int, count: int = 1):
+            input_reads.append((address, count))
+            return None
+
+        async def fake_read_holding(address: int, count: int = 1):
+            holding_reads.append((address, count))
+            return {
+                31088: [164],
+                31089: [66],
+            }.get(address)
+
+        controller._read_data_register = fake_read_data
+        controller._read_holding_registers = fake_read_holding
+
+        summary = asyncio.run(controller.get_energy_summary())
+
+        assert summary == {
+            "charge_today_kwh": 16.4,
+            "discharge_today_kwh": 6.6,
+        }
+        assert input_reads == [(31088, 1), (31089, 1)]
+        assert holding_reads == [(31088, 1), (31089, 1)]
+    finally:
+        sys.path[:] = original_path
+        _restore_modules(snapshot)
+
+
 def test_h3_smart_direct_modbus_keeps_last_valid_calculated_load(tmp_path: Path):
     snapshot = _snapshot_modules()
     original_path = list(sys.path)

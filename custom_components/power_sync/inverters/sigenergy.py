@@ -182,7 +182,7 @@ class SigenergyController(InverterController):
                 yield
             finally:
                 self._modbus_transaction_depth = 0
-                self._modbus_transaction_owner = None
+            self._modbus_transaction_owner = None
 
     async def connect(self) -> bool:
         """Connect to the Sigenergy system via Modbus TCP."""
@@ -365,6 +365,10 @@ class SigenergyController(InverterController):
         high = (value >> 16) & 0xFFFF
         low = value & 0xFFFF
         return [high, low]
+
+    def _from_signed32(self, value: int) -> list[int]:
+        """Convert signed 32-bit to two 16-bit registers [high, low]."""
+        return self._from_unsigned32(value & 0xFFFFFFFF)
 
     def _to_unsigned64(self, regs: list[int]) -> int:
         """Convert four unsigned 16-bit registers to unsigned 64-bit.
@@ -1078,6 +1082,28 @@ class SigenergyController(InverterController):
         """Restore from STANDBY to self-consumption mode."""
         return await self.set_self_consumption_mode()
 
+    async def disable_remote_ems(self) -> bool:
+        """Disable Remote EMS so Sigenergy native/VPP control can resume."""
+        transaction = self._modbus_transaction()
+        await transaction.__aenter__()
+        try:
+            if not await self.connect():
+                return False
+
+            result = await self._write_holding_registers(self.REG_REMOTE_EMS_ENABLE, [0])
+            if not result:
+                _LOGGER.error("Failed to disable Sigenergy Remote EMS")
+                return False
+
+            _LOGGER.info("Sigenergy Remote EMS disabled; native/VPP control restored")
+            return True
+
+        except Exception as e:
+            _LOGGER.error(f"Error disabling Sigenergy Remote EMS: {e}")
+            return False
+        finally:
+            await transaction.__aexit__(None, None, None)
+
     async def force_charge(self, power_kw: float = 10.0) -> bool:
         """Force battery to charge from grid.
 
@@ -1151,9 +1177,9 @@ class SigenergyController(InverterController):
         """Force battery to discharge to grid/load.
 
         Enables Remote EMS mode, sets control mode to discharge, and sets
-        the grid export limit to the target power. The ESS max discharge
-        limit is left at rated capacity so the battery can always cover
-        home load — only the grid export is capped.
+        the active power target plus grid export limit to the requested export
+        power. ESS max discharge is left unchanged so home load does not
+        consume the grid-export allowance.
 
         Args:
             power_kw: Target grid export power in kW (default: 10.0)
@@ -1167,32 +1193,11 @@ class SigenergyController(InverterController):
             if not await self.connect():
                 return False
 
-            # 1. Enable Remote EMS
-            ems_result = await self._write_holding_registers(self.REG_REMOTE_EMS_ENABLE, [1])
-            if not ems_result:
-                _LOGGER.error("Failed to enable Remote EMS for force discharge")
-                return False
-            _LOGGER.info("Remote EMS enabled for force discharge")
-
-            # 2. Set control mode to discharge (PV first).
-            # DISCHARGE_ESS (mode 6) can suppress solar generation while the
-            # battery exports. DISCHARGE_PV (mode 5) preserves active PV and
-            # lets the battery contribute behind it.
-            mode_result = await self._write_holding_registers(
-                self.REG_REMOTE_EMS_CONTROL_MODE, [self.REMOTE_EMS_MODE_DISCHARGE_PV]
-            )
-            if not mode_result:
-                _LOGGER.error("Failed to set Remote EMS control mode to discharge")
-                return False
-            _LOGGER.info("Remote EMS control mode set to DISCHARGE_PV")
-
-            # 3. Set grid export limit. The dynamic safety cap is bypassed because
-            # path 5 of _get_effective_export_safety_cap_kw reads back
-            # REG_GRID_EXPORT_LIMIT itself — a curtailment-set low value would
-            # then clamp force_discharge to that low value. The user-configured
-            # DNSP limit is still honored (it's path 1 of the cap chain and not
-            # circular).
-            effective_kw = power_kw
+            try:
+                target_kw = max(0.0, float(power_kw))
+            except (TypeError, ValueError):
+                target_kw = 10.0
+            effective_kw = target_kw
             if self._configured_max_export_limit_kw is not None:
                 if effective_kw > self._configured_max_export_limit_kw:
                     _LOGGER.info(
@@ -1203,7 +1208,84 @@ class SigenergyController(InverterController):
                     )
                     effective_kw = self._configured_max_export_limit_kw
 
+            # The two Sigenergy discharge modes behave differently across sites:
+            # PV-first preserves solar but may not pull from the battery; ESS-first
+            # pulls from storage but can suppress PV. Pick the least invasive mode
+            # that can plausibly satisfy the requested export target.
+            mode = self.REMOTE_EMS_MODE_DISCHARGE_PV
+            mode_name = "DISCHARGE_PV"
+            attrs: dict = {}
+            try:
+                state = await self.get_status()
+                attrs = getattr(state, "attributes", {}) or {}
+                solar_known = (
+                    "pv_power_kw" in attrs
+                    or "third_party_pv_power_kw" in attrs
+                )
+                if solar_known:
+                    solar_kw = max(0.0, float(attrs.get("pv_power_kw", 0) or 0))
+                    solar_kw += max(
+                        0.0,
+                        float(attrs.get("third_party_pv_power_kw", 0) or 0),
+                    )
+                    if solar_kw < effective_kw * 0.8:
+                        mode = self.REMOTE_EMS_MODE_DISCHARGE_ESS
+                        mode_name = "DISCHARGE_ESS"
+                    _LOGGER.info(
+                        "Sigenergy force discharge mode selected: %s "
+                        "(solar %.2f kW, target %.2f kW)",
+                        mode_name,
+                        solar_kw,
+                        effective_kw,
+                    )
+            except Exception as e:
+                _LOGGER.debug(
+                    "Sigenergy force discharge mode selection using default "
+                    "PV-first mode: %s",
+                    e,
+                )
+
+            # 1. Enable Remote EMS
+            ems_result = await self._write_holding_registers(self.REG_REMOTE_EMS_ENABLE, [1])
+            if not ems_result:
+                _LOGGER.error("Failed to enable Remote EMS for force discharge")
+                return False
+            _LOGGER.info("Remote EMS enabled for force discharge")
+
+            # 2. Set control mode to discharge.
+            mode_result = await self._write_holding_registers(
+                self.REG_REMOTE_EMS_CONTROL_MODE, [mode]
+            )
+            if not mode_result:
+                _LOGGER.error("Failed to set Remote EMS control mode to discharge")
+                return False
+            _LOGGER.info("Remote EMS control mode set to %s", mode_name)
+
             scaled_value = int(effective_kw * self.GAIN_POWER)
+
+            # 3. Set active power target. The export limit below is only a
+            # ceiling; this signed target is what tells Sigenergy to actually
+            # push power out instead of just covering local load.
+            target_values = self._from_signed32(-scaled_value)
+            target_result = await self._write_holding_registers(
+                self.REG_ACTIVE_POWER_FIXED_TARGET,
+                target_values,
+            )
+            if not target_result:
+                _LOGGER.warning(
+                    "Failed to set Sigenergy active power target to %.2f kW export; "
+                    "falling back to export limit only",
+                    effective_kw,
+                )
+            else:
+                _LOGGER.info("Sigenergy active power target set to %.2f kW export", effective_kw)
+
+            # 4. Set grid export limit. The dynamic safety cap is bypassed because
+            # path 5 of _get_effective_export_safety_cap_kw reads back
+            # REG_GRID_EXPORT_LIMIT itself — a curtailment-set low value would
+            # then clamp force_discharge to that low value. The user-configured
+            # DNSP limit is still honored (it's path 1 of the cap chain and not
+            # circular).
             values = self._from_unsigned32(scaled_value)
             rate_result = await self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, values)
             if not rate_result:
@@ -1247,14 +1329,16 @@ class SigenergyController(InverterController):
         except Exception as e:
             _LOGGER.warning(f"Failed to restore ESS max limits to rated: {e}")
 
-    async def restore_normal(self) -> bool:
+    async def restore_normal(self, native_control: bool = False) -> bool:
         """Restore normal self-consumption operation.
 
-        Sets Remote EMS to maximum self-consumption mode (mode 2),
-        restores grid export limit to the safety cap, and restores ESS
-        max limits to rated values. Remote EMS stays enabled — mode 2
-        is equivalent to native self-consumption but allows instant
-        transitions to charge/discharge modes.
+        By default, sets Remote EMS to maximum self-consumption mode (mode 2),
+        restores grid export limit to the safety cap, and restores ESS max
+        limits to rated values. Remote EMS stays enabled so PowerSync can
+        transition to charge/discharge modes quickly.
+
+        When ``native_control`` is true, clears PowerSync limits and disables
+        Remote EMS so Sigenergy native/VPP control can resume.
 
         Returns:
             True if successful
@@ -1265,11 +1349,12 @@ class SigenergyController(InverterController):
             if not await self.connect():
                 return False
 
-            # 1. Set Remote EMS to self-consumption (leave enabled)
-            result = await self.set_self_consumption_mode()
-            if not result:
-                _LOGGER.error("Failed to set self-consumption mode during restore")
-                return False
+            if not native_control:
+                # 1. Set Remote EMS to self-consumption (leave enabled)
+                result = await self.set_self_consumption_mode()
+                if not result:
+                    _LOGGER.error("Failed to set self-consumption mode during restore")
+                    return False
 
             # 2. Restore grid export limit to safety cap
             # force_discharge sets this to a specific value — need to clear it
@@ -1280,6 +1365,11 @@ class SigenergyController(InverterController):
             # 3. Restore ESS max limits to rated values
             await self._restore_ess_max_limits_to_rated()
 
+            if native_control:
+                result = await self.disable_remote_ems()
+                if not result:
+                    return False
+
             # 4. Restore backup reserve if a target is set
             # Sigenergy firmware may reset backup SOC when Remote EMS mode
             # is toggled. Write it back to ensure the user's setting persists.
@@ -1289,6 +1379,10 @@ class SigenergyController(InverterController):
                     "Sigenergy backup reserve restored to %d%%",
                     self._restore_backup_reserve_pct,
                 )
+
+            if native_control:
+                _LOGGER.info("Sigenergy restored to native/VPP control")
+                return True
 
             _LOGGER.info("Sigenergy restored to self-consumption (Remote EMS mode 2, export limit restored)")
             return True

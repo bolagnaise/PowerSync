@@ -32,12 +32,14 @@ class PowerSyncChart extends HTMLElement {
     this._historyCache = new Map();
     this._historyRequestKey = null;
     this._hiddenSeries = new Set();
+    this._lastRenderSignature = '';
   }
 
   setConfig(config) {
     this._config = config;
     this._historyCache.clear();
     this._historyRequestKey = null;
+    this._lastRenderSignature = '';
     const validKeys = new Set((config.series || []).map((series, index) => this._seriesKey(series, index)));
     for (const key of Array.from(this._hiddenSeries)) {
       if (!validKeys.has(key)) this._hiddenSeries.delete(key);
@@ -47,7 +49,7 @@ class PowerSyncChart extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    this._scheduleRender();
+    this._scheduleRenderIfChanged();
   }
 
   getCardSize() {
@@ -56,7 +58,7 @@ class PowerSyncChart extends HTMLElement {
 
   connectedCallback() {
     if (!this._resizeObserver && 'ResizeObserver' in window) {
-      this._resizeObserver = new ResizeObserver(() => this._scheduleRender());
+      this._resizeObserver = new ResizeObserver(() => this._scheduleRenderIfChanged());
       this._resizeObserver.observe(this);
     }
     this._scheduleRender();
@@ -78,8 +80,101 @@ class PowerSyncChart extends HTMLElement {
     });
   }
 
+  _scheduleRenderIfChanged() {
+    const signature = this._renderSignature();
+    if (signature !== this._lastRenderSignature) {
+      this._scheduleRender();
+    }
+  }
+
+  _renderSignature() {
+    if (!this._config || !this._hass) return '';
+    const config = this._config;
+    const mode = config.mode || 'forecast';
+    const width = this.getBoundingClientRect().width || Number(config.width) || 0;
+    const compact = width < 520 ? 'compact' : 'wide';
+    const intervalMs = Math.max(60000, Number(config.intervalMinutes || 5) * 60000);
+    const clockBucket = mode === 'forecast'
+      ? Math.floor(Date.now() / intervalMs)
+      : Math.floor(Date.now() / 300000);
+    const series = (config.series || []).map((seriesConfig, index) => ({
+      key: this._seriesKey(seriesConfig, index),
+      entity: seriesConfig.entity,
+      attribute: seriesConfig.attribute,
+      dataKey: seriesConfig.key,
+      name: seriesConfig.name,
+      color: seriesConfig.color,
+      fill: !!seriesConfig.fill,
+      strokeWidth: seriesConfig.strokeWidth,
+      minValue: seriesConfig.minValue,
+      maxValue: seriesConfig.maxValue,
+      state: this._chartEntitySignature(mode, seriesConfig, config),
+      cache: mode === 'history' ? this._historyCacheSignature(seriesConfig.entity) : undefined,
+    }));
+
+    return JSON.stringify({
+      mode,
+      clockBucket,
+      compact,
+      title: config.title,
+      height: config.height,
+      width: config.width,
+      yUnit: config.yUnit,
+      yUnitCompact: config.yUnitCompact,
+      yMultiplier: config.yMultiplier,
+      yMin: config.yMin,
+      yMax: config.yMax,
+      zeroBaseline: config.zeroBaseline,
+      hideZeroTickLabel: config.hideZeroTickLabel,
+      stepLine: config.stepLine,
+      historyHours: config.historyHours,
+      historyRange: config.historyRange,
+      entity: mode === 'tou' ? this._touEntitySignature(config) : undefined,
+      hiddenSeries: Array.from(this._hiddenSeries).sort(),
+      series,
+    });
+  }
+
+  _chartEntitySignature(mode, seriesConfig, config) {
+    if (mode === 'forecast') {
+      return this._stateSignature(seriesConfig.entity, [seriesConfig.attribute || 'forecast_values_kw']);
+    }
+    if (mode === 'history') {
+      return this._stateSignature(seriesConfig.entity);
+    }
+    if (mode === 'tou') {
+      return this._touEntitySignature(config);
+    }
+    return '';
+  }
+
+  _touEntitySignature(config) {
+    const keys = (config.series || [])
+      .map(seriesConfig => seriesConfig.key)
+      .filter(Boolean)
+      .flatMap(key => [`${key}_price`]);
+    return this._stateSignature(config.entity, ['schedule', 'tou_schedule', ...keys]);
+  }
+
+  _stateSignature(entityId, attributeNames = []) {
+    if (!entityId) return '';
+    const state = this._hass?.states?.[entityId];
+    if (!state) return `${entityId}:missing`;
+    const attrs = attributeNames.map(name => state.attributes?.[name]);
+    return JSON.stringify([entityId, state.state, state.last_updated, state.last_changed, ...attrs]);
+  }
+
+  _historyCacheSignature(entityId) {
+    const points = this._historyCache.get(entityId) || [];
+    if (!points.length) return `${entityId || ''}:empty`;
+    const first = points[0];
+    const last = points[points.length - 1];
+    return JSON.stringify([entityId, points.length, first?.[0], first?.[1], last?.[0], last?.[1]]);
+  }
+
   _render() {
     if (!this._config || !this._hass) return;
+    this._lastRenderSignature = this._renderSignature();
 
     const config = this._config;
     const hass = this._hass;
@@ -185,7 +280,7 @@ class PowerSyncChart extends HTMLElement {
       const compactUnit = config.yUnitCompact || ['c', 'p', 'ct', 'c/kWh', 'p/kWh', 'ct/kWh'].includes(unit);
       const label = this._formatValue(tick, unit, compactUnit);
       if (!(config.hideZeroTickLabel && isZero)) {
-        svg += `<text x="${pad.left - 8}" y="${y + 4}" text-anchor="end" font-size="${compact ? 10 : 11}" fill="var(--secondary-text-color, #888)">${this._escSvg(label)}</text>`;
+        svg += `<text x="${pad.left - 6}" y="${y + 4}" text-anchor="end" font-size="${compact ? 10 : 11}" fill="var(--secondary-text-color, #888)">${this._escSvg(label)}</text>`;
       }
     }
 
@@ -359,6 +454,7 @@ class PowerSyncChart extends HTMLElement {
         .chart-wrap {
           position: relative;
           z-index: 1;
+          isolation: isolate;
           touch-action: none;
         }
         .tooltip-line {
@@ -370,6 +466,7 @@ class PowerSyncChart extends HTMLElement {
           opacity: 0;
           pointer-events: none;
           transform: translateX(-0.5px);
+          z-index: 2;
         }
         .tooltip {
           position: absolute;
@@ -377,7 +474,7 @@ class PowerSyncChart extends HTMLElement {
           max-width: min(240px, calc(100% - 16px));
           padding: 8px 10px;
           border-radius: 8px;
-          background: color-mix(in srgb, var(--ha-card-background, var(--card-background-color, white)) 88%, black);
+          background: rgba(var(--rgb-card-background-color, 255, 255, 255), 0.22);
           color: var(--primary-text-color, #333);
           box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
           border: 1px solid var(--divider-color, rgba(255,255,255,0.18));
@@ -386,6 +483,7 @@ class PowerSyncChart extends HTMLElement {
           opacity: 0;
           pointer-events: none;
           transform: translate(-50%, -100%);
+          z-index: 4;
         }
         .tooltip-time {
           font-weight: 700;
@@ -1362,8 +1460,8 @@ class PowerSyncBatteryHealth extends HTMLElement {
   }
 
   _fallbackPackLabel(index, role, isFollower, isExpansion) {
-    if (role === 'leader') return 'Leader PW3';
-    if (role === 'follower' || isFollower) return 'Follower PW3';
+    if (role === 'leader') return 'Leader Powerwall';
+    if (role === 'follower' || isFollower) return 'Follower Powerwall';
     if (role === 'expansion' || isExpansion) return `Expansion Pack ${index}`;
     return `Powerwall ${index}`;
   }
@@ -1451,6 +1549,11 @@ if (!customElements.get('power-sync-battery-health')) {
 // ─── PowerSyncOptimizationPlan Custom Element ───────────────────
 // API-backed Smart Optimization card that mirrors the mobile 24-hour view.
 
+const OPTIMIZATION_PLAN_FETCH_INTERVAL_MS = 45000;
+const OPTIMIZATION_PLAN_PENDING_RETRY_MS = 5000;
+const OPTIMIZATION_PLAN_CACHE = window.__powerSyncOptimizationPlanCache || new Map();
+window.__powerSyncOptimizationPlanCache = OPTIMIZATION_PLAN_CACHE;
+
 class PowerSyncOptimizationPlan extends HTMLElement {
   constructor() {
     super();
@@ -1463,13 +1566,20 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     this._lastFetch = 0;
     this._renderQueued = false;
     this._resizeObserver = null;
+    this._lastRenderSignature = '';
   }
 
   setConfig(config) {
+    const previousPath = this._optimizationPath();
     this._config = config || {};
-    this._data = null;
-    this._error = null;
-    this._lastFetch = 0;
+    const nextPath = this._optimizationPath();
+    if (previousPath !== nextPath) {
+      this._data = null;
+      this._error = null;
+      this._lastFetch = 0;
+    }
+    this._lastRenderSignature = '';
+    this._restoreCachedData(nextPath);
     this._scheduleRender();
     this._maybeLoadData(true);
   }
@@ -1477,12 +1587,12 @@ class PowerSyncOptimizationPlan extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     this._maybeLoadData(false);
-    this._scheduleRender();
+    this._scheduleRenderIfChanged();
   }
 
   connectedCallback() {
     if (!this._resizeObserver && 'ResizeObserver' in window) {
-      this._resizeObserver = new ResizeObserver(() => this._scheduleRender());
+      this._resizeObserver = new ResizeObserver(() => this._scheduleRenderIfChanged());
       this._resizeObserver.observe(this);
     }
     this._maybeLoadData(true);
@@ -1500,24 +1610,100 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     return 6;
   }
 
+  _optimizationPath() {
+    return this._config?.optimizationPath || 'power_sync/optimization';
+  }
+
+  _hasDetailedSchedule(data = this._data) {
+    const schedule = data?.schedule || {};
+    return Array.isArray(schedule.timestamps) && schedule.timestamps.length > 0;
+  }
+
+  _restoreCachedData(path = this._optimizationPath(), force = false) {
+    if (force) return false;
+    const cached = OPTIMIZATION_PLAN_CACHE.get(path);
+    if (!cached?.data) return false;
+    const fetchedAt = cached.fetchedAt || 0;
+    const maxAge = this._hasDetailedSchedule(cached.data)
+      ? OPTIMIZATION_PLAN_FETCH_INTERVAL_MS
+      : OPTIMIZATION_PLAN_PENDING_RETRY_MS;
+    if (Date.now() - fetchedAt >= maxAge) return false;
+    this._data = cached.data;
+    this._error = null;
+    this._lastFetch = fetchedAt;
+    return true;
+  }
+
   _maybeLoadData(force) {
     if (!this._config || !this._hass || typeof this._hass.callApi !== 'function') return;
     const now = Date.now();
     if (this._loading) return;
-    if (!force && this._data && now - this._lastFetch < 60000) return;
-    this._loadData();
+    if (this._data && !force) {
+      const maxAge = this._hasDetailedSchedule()
+        ? OPTIMIZATION_PLAN_FETCH_INTERVAL_MS
+        : OPTIMIZATION_PLAN_PENDING_RETRY_MS;
+      if (now - this._lastFetch < maxAge) return;
+    }
+
+    const path = this._optimizationPath();
+    if (this._restoreCachedData(path, force)) {
+      this._scheduleRender();
+      return;
+    }
+
+    const cached = OPTIMIZATION_PLAN_CACHE.get(path);
+    if (cached?.promise) {
+      this._adoptLoadPromise(path, cached.promise);
+      return;
+    }
+
+    this._loadData(path);
   }
 
-  async _loadData() {
+  _adoptLoadPromise(path, promise) {
     this._loading = true;
-    const path = this._config.optimizationPath || 'power_sync/optimization';
+    promise
+      .then((response) => {
+        if (path !== this._optimizationPath()) return;
+        const cached = OPTIMIZATION_PLAN_CACHE.get(path);
+        this._data = response || null;
+        this._error = null;
+        this._lastFetch = cached?.fetchedAt || Date.now();
+      })
+      .catch((err) => {
+        if (path !== this._optimizationPath()) return;
+        this._error = err?.message || 'Optimization API unavailable';
+      })
+      .finally(() => {
+        this._loading = false;
+        this._scheduleRender();
+      });
+  }
+
+  async _loadData(path = this._optimizationPath()) {
+    this._loading = true;
+    const request = this._hass.callApi('GET', path);
+    const previous = OPTIMIZATION_PLAN_CACHE.get(path);
+    OPTIMIZATION_PLAN_CACHE.set(path, { ...(previous || {}), promise: request });
     try {
-      const response = await this._hass.callApi('GET', path);
+      const response = await request;
       this._data = response || null;
       this._error = null;
       this._lastFetch = Date.now();
+      OPTIMIZATION_PLAN_CACHE.set(path, {
+        data: this._data,
+        fetchedAt: this._lastFetch,
+      });
     } catch (err) {
       this._error = err?.message || 'Optimization API unavailable';
+      const cached = OPTIMIZATION_PLAN_CACHE.get(path);
+      if (cached?.promise === request) {
+        if (previous?.data) {
+          OPTIMIZATION_PLAN_CACHE.set(path, previous);
+        } else {
+          OPTIMIZATION_PLAN_CACHE.delete(path);
+        }
+      }
     } finally {
       this._loading = false;
       this._scheduleRender();
@@ -1533,8 +1719,39 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     });
   }
 
+  _scheduleRenderIfChanged() {
+    const signature = this._renderSignature();
+    if (signature !== this._lastRenderSignature) {
+      this._scheduleRender();
+    }
+  }
+
+  _entityStateSignature(entityId, attributeNames = []) {
+    const state = this._hass?.states?.[entityId];
+    if (!state) return `${entityId || ''}:missing`;
+    const attrs = attributeNames.map(name => state.attributes?.[name]);
+    return JSON.stringify([entityId, state.state, ...attrs]);
+  }
+
+  _renderSignature() {
+    const width = this.getBoundingClientRect().width || 0;
+    const compact = width < 560 ? 'compact' : 'wide';
+    const priceMeta = _priceMeta(this._hass, this._config?.importPriceEntity);
+    return JSON.stringify({
+      path: this._optimizationPath(),
+      fetched: this._lastFetch,
+      loading: this._loading,
+      error: this._error,
+      compact,
+      priceMeta,
+      forceCharge: this._entityStateSignature(this._config?.forceChargeEntity, ['windows']),
+      forceDischarge: this._entityStateSignature(this._config?.forceDischargeEntity, ['windows']),
+    });
+  }
+
   _render() {
     if (!this._config) return;
+    this._lastRenderSignature = this._renderSignature();
 
     const model = this._buildModel();
     const hasSchedule = model.points.length > 0;
@@ -1649,12 +1866,15 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           border: 1px solid var(--divider-color);
           background: rgba(127, 127, 127, 0.045);
           overflow: hidden;
+          isolation: isolate;
           touch-action: none;
         }
         svg {
           display: block;
           width: 100%;
           height: auto;
+          position: relative;
+          z-index: 1;
         }
         .chart-tooltip-line {
           position: absolute;
@@ -1665,6 +1885,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           opacity: 0;
           pointer-events: none;
           transform: translateX(-0.5px);
+          z-index: 2;
         }
         .chart-tooltip {
           position: absolute;
@@ -1672,7 +1893,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           max-width: min(260px, calc(100% - 16px));
           padding: 8px 10px;
           border-radius: 8px;
-          background: color-mix(in srgb, var(--ha-card-background, var(--card-background-color, white)) 88%, black);
+          background: rgba(var(--rgb-card-background-color, 255, 255, 255), 0.22);
           color: var(--primary-text-color);
           box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
           border: 1px solid var(--divider-color);
@@ -1681,7 +1902,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           opacity: 0;
           pointer-events: none;
           transform: translate(-50%, -100%);
-          z-index: 2;
+          z-index: 4;
         }
         .chart-tooltip-time {
           font-weight: 800;
@@ -1804,6 +2025,11 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         .actions {
           display: grid;
           gap: 8px;
+          max-height: min(58vh, 620px);
+          overflow-y: auto;
+          overscroll-behavior: contain;
+          padding-right: 2px;
+          scrollbar-gutter: stable;
         }
         .action-row {
           display: grid;
@@ -2267,7 +2493,14 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       line.style.left = `${cssX}px`;
       line.style.opacity = '0.75';
       tooltip.style.left = `${Math.min(Math.max(cssX, 84), rect.width - 84)}px`;
-      tooltip.style.top = `${Math.max(34, rect.height - chart.pad.bottom - 8)}px`;
+      const tooltipBottom = Math.max(34, rect.height - chart.pad.bottom - 8);
+      if (tooltip.offsetHeight && tooltipBottom - tooltip.offsetHeight < 8) {
+        tooltip.style.transform = 'translate(-50%, 0)';
+        tooltip.style.top = '8px';
+      } else {
+        tooltip.style.transform = 'translate(-50%, -100%)';
+        tooltip.style.top = `${tooltipBottom}px`;
+      }
       tooltip.style.opacity = '1';
     };
 
@@ -2284,7 +2517,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       const y = pad.top + (chartH / 4) * i;
       svg += `<line x1="${pad.left}" y1="${y}" x2="${W - pad.right}" y2="${y}" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.4" stroke-dasharray="4,3" opacity="0.65"/>`;
     }
-    svg += `<text x="${pad.left - 8}" y="${pad.top + 4}" text-anchor="end" font-size="${compact ? 9 : 10}" fill="var(--secondary-text-color, #888)">${this._escSvg(maxLabel)}</text>`;
+    svg += `<text x="${pad.left - 4}" y="${pad.top + 4}" text-anchor="end" font-size="${compact ? 9 : 10}" fill="var(--secondary-text-color, #888)">${this._escSvg(maxLabel)}</text>`;
     const labelEvery = Math.max(1, Math.round((6 * 60) / this._intervalMinutes(points.map(p => p.timestamp))));
     for (let i = 0; i < points.length; i += labelEvery) {
       const x = pad.left + (i / Math.max(1, points.length - 1)) * chartW;
@@ -2329,7 +2562,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     if (!actions.length) {
       return '<div class="empty">No optimizer actions scheduled in the next 24 hours.</div>';
     }
-    return `<div class="actions">${actions.slice(0, 10).map(action => {
+    return `<div class="actions">${actions.map(action => {
       const info = this._actionInfo(action.action);
       const priceStats = this._priceStatsForAction(action, model);
       const power = Number(action.power_w || 0);
@@ -2350,7 +2583,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           <div class="soc">${this._escHtml(soc)}</div>
         </div>
       `;
-    }).join('')}${actions.length > 10 ? `<div class="empty">+${actions.length - 10} more actions</div>` : ''}</div>`;
+    }).join('')}</div>`;
   }
 
   _renderActionPriceStats(stats, action, priceMeta) {
@@ -2710,6 +2943,1101 @@ if (!customElements.get('power-sync-optimization-plan')) {
   customElements.define('power-sync-optimization-plan', PowerSyncOptimizationPlan);
 }
 
+const EV_PANEL_FETCH_INTERVAL_MS = 30000;
+const EV_PANEL_CACHE = window.__powerSyncEVPanelCache || new Map();
+window.__powerSyncEVPanelCache = EV_PANEL_CACHE;
+
+const EV_PANEL_PATHS = {
+  status: 'power_sync/ev/loadpoints/status',
+  solar: 'power_sync/ev/solar_surplus_config',
+  price: 'power_sync/ev/price_level_charging/settings',
+  scheduled: 'power_sync/ev/scheduled_charging/settings',
+  autoStatus: 'power_sync/ev/auto_schedule/status',
+  autoToggle: 'power_sync/ev/auto_schedule/toggle',
+  boost: 'power_sync/ev/boost',
+};
+
+class PowerSyncEVPanel extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._config = {};
+    this._hass = null;
+    this._data = null;
+    this._error = null;
+    this._notice = null;
+    this._loading = false;
+    this._savingKey = null;
+    this._lastFetch = 0;
+    this._renderQueued = false;
+    this._lastRenderSignature = '';
+    this._resizeObserver = null;
+    this._pollTimer = null;
+    this._selectedLoadpointId = null;
+    this._durationMinutes = 60;
+    this._policy = 'solar_only';
+  }
+
+  setConfig(config) {
+    this._config = config || {};
+    this._lastRenderSignature = '';
+    this._restoreCachedData();
+    this._scheduleRender();
+    this._maybeLoadData(true);
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._maybeLoadData(false);
+    this._scheduleRenderIfChanged();
+  }
+
+  connectedCallback() {
+    if (!this._resizeObserver && 'ResizeObserver' in window) {
+      this._resizeObserver = new ResizeObserver(() => this._scheduleRenderIfChanged());
+      this._resizeObserver.observe(this);
+    }
+    if (!this._pollTimer) {
+      this._pollTimer = window.setInterval(() => this._maybeLoadData(false), EV_PANEL_FETCH_INTERVAL_MS);
+    }
+    this._maybeLoadData(true);
+    this._scheduleRender();
+  }
+
+  disconnectedCallback() {
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+      this._resizeObserver = null;
+    }
+    if (this._pollTimer) {
+      window.clearInterval(this._pollTimer);
+      this._pollTimer = null;
+    }
+  }
+
+  getCardSize() {
+    return 8;
+  }
+
+  _cacheKey() {
+    return this._config?.cacheKey || 'power-sync-ev-panel';
+  }
+
+  _restoreCachedData() {
+    const cached = EV_PANEL_CACHE.get(this._cacheKey());
+    if (!cached?.data) return false;
+    const fetchedAt = cached.fetchedAt || 0;
+    if (Date.now() - fetchedAt >= EV_PANEL_FETCH_INTERVAL_MS) return false;
+    this._data = cached.data;
+    this._error = null;
+    this._lastFetch = fetchedAt;
+    this._syncSelectedLoadpoint();
+    return true;
+  }
+
+  _maybeLoadData(force) {
+    if (!this._hass || typeof this._hass.callApi !== 'function') return;
+    const now = Date.now();
+    if (this._loading) return;
+    if (!force && this._data && now - this._lastFetch < EV_PANEL_FETCH_INTERVAL_MS) return;
+    if (!force && this._restoreCachedData()) {
+      this._scheduleRender();
+      return;
+    }
+
+    const cacheKey = this._cacheKey();
+    const cached = EV_PANEL_CACHE.get(cacheKey);
+    if (!force && cached?.promise) {
+      this._adoptLoadPromise(cacheKey, cached.promise);
+      return;
+    }
+
+    this._loadData(cacheKey);
+  }
+
+  _adoptLoadPromise(cacheKey, promise) {
+    this._loading = true;
+    promise
+      .then((data) => {
+        if (cacheKey !== this._cacheKey()) return;
+        const cached = EV_PANEL_CACHE.get(cacheKey);
+        this._data = data;
+        this._error = null;
+        this._lastFetch = cached?.fetchedAt || Date.now();
+        this._syncSelectedLoadpoint();
+      })
+      .catch((err) => {
+        if (cacheKey !== this._cacheKey()) return;
+        this._error = err?.message || 'EV API unavailable';
+      })
+      .finally(() => {
+        this._loading = false;
+        this._scheduleRender();
+      });
+  }
+
+  async _loadData(cacheKey = this._cacheKey()) {
+    this._loading = true;
+    const request = this._fetchBundle();
+    const previous = EV_PANEL_CACHE.get(cacheKey);
+    EV_PANEL_CACHE.set(cacheKey, { ...(previous || {}), promise: request });
+    try {
+      const data = await request;
+      this._data = data;
+      this._error = null;
+      this._lastFetch = Date.now();
+      this._syncSelectedLoadpoint();
+      EV_PANEL_CACHE.set(cacheKey, {
+        data: this._data,
+        fetchedAt: this._lastFetch,
+      });
+    } catch (err) {
+      this._error = err?.message || 'EV API unavailable';
+      const cached = EV_PANEL_CACHE.get(cacheKey);
+      if (cached?.promise === request) {
+        if (previous?.data) {
+          EV_PANEL_CACHE.set(cacheKey, previous);
+        } else {
+          EV_PANEL_CACHE.delete(cacheKey);
+        }
+      }
+    } finally {
+      this._loading = false;
+      this._scheduleRender();
+    }
+  }
+
+  async _fetchBundle() {
+    const status = await this._hass.callApi('GET', 'power_sync/ev/loadpoints/status');
+    if (status?.success === false) {
+      throw new Error(status.error || 'EV status API unavailable');
+    }
+
+    const [solar, price, scheduled, autoStatus] = await Promise.allSettled([
+      this._hass.callApi('GET', EV_PANEL_PATHS.solar),
+      this._hass.callApi('GET', EV_PANEL_PATHS.price),
+      this._hass.callApi('GET', EV_PANEL_PATHS.scheduled),
+      this._hass.callApi('GET', EV_PANEL_PATHS.autoStatus),
+    ]);
+
+    const modeErrors = [];
+    const unwrap = (result, key, fallback) => {
+      if (result.status !== 'fulfilled') {
+        modeErrors.push(result.reason?.message || `${key} API unavailable`);
+        return fallback;
+      }
+      if (result.value?.success === false) {
+        modeErrors.push(result.value.error || `${key} API unavailable`);
+        return fallback;
+      }
+      return result.value?.[key] || fallback;
+    };
+
+    let autoScheduleStatus = null;
+    if (autoStatus.status === 'fulfilled' && autoStatus.value?.success !== false) {
+      autoScheduleStatus = autoStatus.value;
+    } else if (autoStatus.status === 'fulfilled') {
+      modeErrors.push(autoStatus.value?.error || 'auto schedule API unavailable');
+    } else {
+      modeErrors.push(autoStatus.reason?.message || 'auto schedule API unavailable');
+    }
+
+    return {
+      status,
+      solarConfig: unwrap(solar, 'config', {}),
+      priceSettings: unwrap(price, 'settings', {}),
+      scheduledSettings: unwrap(scheduled, 'settings', {}),
+      autoStatus: autoScheduleStatus,
+      modeErrors,
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  _scheduleRender() {
+    if (this._renderQueued) return;
+    this._renderQueued = true;
+    requestAnimationFrame(() => {
+      this._renderQueued = false;
+      this._render();
+    });
+  }
+
+  _scheduleRenderIfChanged() {
+    const signature = this._renderSignature();
+    if (signature !== this._lastRenderSignature) {
+      this._scheduleRender();
+    }
+  }
+
+  _renderSignature() {
+    const width = this.getBoundingClientRect().width || 0;
+    return JSON.stringify({
+      width: width < 560 ? 'compact' : 'wide',
+      data: this._data,
+      error: this._error,
+      notice: this._notice,
+      loading: this._loading,
+      savingKey: this._savingKey,
+      selected: this._selectedLoadpointId,
+      duration: this._durationMinutes,
+      policy: this._policy,
+      fetched: this._lastFetch,
+    });
+  }
+
+  _loadpoints() {
+    return Array.isArray(this._data?.status?.loadpoints) ? this._data.status.loadpoints : [];
+  }
+
+  _selectedLoadpoint() {
+    const loadpoints = this._loadpoints();
+    return loadpoints.find((lp) => lp.loadpoint_id === this._selectedLoadpointId) || loadpoints[0] || null;
+  }
+
+  _syncSelectedLoadpoint() {
+    const loadpoints = this._loadpoints();
+    if (loadpoints.length === 0) {
+      this._selectedLoadpointId = null;
+      return;
+    }
+    if (!this._selectedLoadpointId || !loadpoints.some((lp) => lp.loadpoint_id === this._selectedLoadpointId)) {
+      this._selectedLoadpointId = loadpoints[0].loadpoint_id;
+    }
+  }
+
+  _ownerConflict(loadpoint) {
+    if (!loadpoint || loadpoint.owner !== 'powersync') return false;
+    const ownerMode = String(loadpoint.owner_mode || '');
+    return !!ownerMode && !ownerMode.startsWith('manual');
+  }
+
+  _canStart(loadpoint) {
+    return !!loadpoint && loadpoint.connected && !this._ownerConflict(loadpoint) && !this._savingKey;
+  }
+
+  _canStop(loadpoint) {
+    return !!loadpoint && !this._savingKey && (loadpoint.owner === 'powersync' || loadpoint.actual_charging || loadpoint.quick_control);
+  }
+
+  _render() {
+    this._lastRenderSignature = this._renderSignature();
+    this._syncSelectedLoadpoint();
+    const hasApi = !!(this._hass && typeof this._hass.callApi === 'function');
+    const loadpoints = this._loadpoints();
+    const selected = this._selectedLoadpoint();
+    const conflict = this._ownerConflict(selected);
+    const canStart = this._canStart(selected);
+    const canStop = this._canStop(selected);
+
+    this.shadowRoot.innerHTML = `
+      <style>
+        ha-card {
+          padding: 16px;
+          overflow: hidden;
+        }
+        .header {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 12px;
+          margin-bottom: 12px;
+        }
+        .title {
+          margin: 0;
+          color: var(--primary-text-color);
+          font-size: 18px;
+          font-weight: 800;
+          line-height: 1.2;
+          letter-spacing: 0;
+        }
+        .subtitle {
+          margin-top: 4px;
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          line-height: 1.3;
+          font-weight: 600;
+        }
+        button {
+          font: inherit;
+          letter-spacing: 0;
+        }
+        .icon-button {
+          flex: 0 0 auto;
+          width: 34px;
+          height: 34px;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          background: var(--ha-card-background, var(--card-background-color, #fff));
+          color: var(--primary-text-color);
+          cursor: pointer;
+          display: grid;
+          place-items: center;
+        }
+        .icon-button[disabled],
+        .command[disabled],
+        .segment button[disabled] {
+          opacity: 0.48;
+          cursor: not-allowed;
+        }
+        .icon-button ha-icon {
+          width: 19px;
+          height: 19px;
+        }
+        .notice {
+          margin: 0 0 12px;
+          padding: 10px 12px;
+          border-radius: 8px;
+          color: var(--secondary-text-color);
+          background: rgba(127, 127, 127, 0.08);
+          border: 1px solid var(--divider-color);
+          font-size: 12px;
+          line-height: 1.35;
+        }
+        .notice.warn {
+          color: var(--warning-color, #ff9800);
+          background: rgba(255, 152, 0, 0.10);
+          border-color: rgba(255, 152, 0, 0.32);
+        }
+        .notice.error {
+          color: var(--error-color, #db4437);
+          background: rgba(219, 68, 55, 0.10);
+          border-color: rgba(219, 68, 55, 0.32);
+        }
+        .status {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 12px;
+          align-items: start;
+          padding: 12px;
+          border-radius: 8px;
+          border: 1px solid var(--divider-color);
+          background: rgba(127, 127, 127, 0.055);
+          margin-bottom: 12px;
+        }
+        .loadpoint-name {
+          margin: 0 0 5px;
+          color: var(--primary-text-color);
+          font-size: 16px;
+          font-weight: 800;
+          line-height: 1.2;
+          letter-spacing: 0;
+          overflow-wrap: anywhere;
+        }
+        .state-line {
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          line-height: 1.35;
+          font-weight: 600;
+        }
+        .pill {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 78px;
+          padding: 6px 8px;
+          border-radius: 999px;
+          color: var(--primary-text-color);
+          background: rgba(127, 127, 127, 0.10);
+          border: 1px solid var(--divider-color);
+          font-size: 11px;
+          font-weight: 800;
+          line-height: 1;
+          text-transform: uppercase;
+        }
+        .pill.on {
+          color: var(--success-color, #2e7d32);
+          background: rgba(76, 175, 80, 0.12);
+          border-color: rgba(76, 175, 80, 0.35);
+        }
+        .pill.warn {
+          color: var(--warning-color, #ff9800);
+          background: rgba(255, 152, 0, 0.12);
+          border-color: rgba(255, 152, 0, 0.35);
+        }
+        .metrics {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 8px;
+          margin: 10px 0 0;
+        }
+        .metric {
+          min-width: 0;
+          padding: 8px;
+          border-radius: 8px;
+          background: var(--ha-card-background, var(--card-background-color, #fff));
+          border: 1px solid var(--divider-color);
+        }
+        .metric-label {
+          color: var(--secondary-text-color);
+          font-size: 10px;
+          font-weight: 800;
+          line-height: 1.1;
+          text-transform: uppercase;
+        }
+        .metric-value {
+          margin-top: 4px;
+          color: var(--primary-text-color);
+          font-size: 14px;
+          font-weight: 800;
+          line-height: 1.15;
+          overflow-wrap: anywhere;
+        }
+        .controls {
+          display: grid;
+          gap: 10px;
+          margin-bottom: 14px;
+        }
+        .control-row {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+        }
+        .control-field {
+          min-width: 0;
+        }
+        label {
+          display: block;
+          margin: 0 0 4px;
+          color: var(--secondary-text-color);
+          font-size: 11px;
+          font-weight: 800;
+          line-height: 1.1;
+          text-transform: uppercase;
+        }
+        select,
+        input {
+          box-sizing: border-box;
+          width: 100%;
+          min-height: 36px;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          background: var(--ha-card-background, var(--card-background-color, #fff));
+          color: var(--primary-text-color);
+          padding: 7px 9px;
+          font: inherit;
+          font-size: 13px;
+          letter-spacing: 0;
+        }
+        input[type="checkbox"] {
+          width: 18px;
+          min-height: 18px;
+          height: 18px;
+          padding: 0;
+        }
+        .segment {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 6px;
+        }
+        .segment button {
+          min-height: 38px;
+          padding: 7px 8px;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          background: var(--ha-card-background, var(--card-background-color, #fff));
+          color: var(--primary-text-color);
+          cursor: pointer;
+          font-size: 12px;
+          font-weight: 800;
+          line-height: 1.15;
+          overflow-wrap: anywhere;
+        }
+        .segment button.active {
+          color: var(--text-primary-color, #fff);
+          background: var(--primary-color, #03a9f4);
+          border-color: var(--primary-color, #03a9f4);
+        }
+        .commands {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 8px;
+        }
+        .command {
+          min-height: 40px;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          background: var(--ha-card-background, var(--card-background-color, #fff));
+          color: var(--primary-text-color);
+          cursor: pointer;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 7px;
+          padding: 8px 10px;
+          font-size: 13px;
+          font-weight: 800;
+          line-height: 1.1;
+        }
+        .command ha-icon {
+          width: 18px;
+          height: 18px;
+        }
+        .command.primary {
+          color: var(--text-primary-color, #fff);
+          background: var(--primary-color, #03a9f4);
+          border-color: var(--primary-color, #03a9f4);
+        }
+        .command.danger {
+          color: var(--error-color, #db4437);
+          background: rgba(219, 68, 55, 0.08);
+          border-color: rgba(219, 68, 55, 0.32);
+        }
+        .section-title {
+          margin: 16px 0 8px;
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 800;
+          letter-spacing: 0;
+          text-transform: uppercase;
+        }
+        .mode-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+        }
+        .mode-card {
+          min-width: 0;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          padding: 10px;
+          background: rgba(127, 127, 127, 0.045);
+        }
+        .mode-head {
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 8px;
+          margin-bottom: 9px;
+        }
+        .mode-head ha-icon {
+          width: 19px;
+          height: 19px;
+          color: var(--primary-color, #03a9f4);
+        }
+        .mode-title {
+          color: var(--primary-text-color);
+          font-size: 13px;
+          font-weight: 800;
+          line-height: 1.15;
+          overflow-wrap: anywhere;
+        }
+        .mode-fields {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+        }
+        .field.check {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          min-height: 36px;
+        }
+        .field.check label {
+          margin: 0;
+          text-transform: none;
+          font-size: 12px;
+        }
+        .mode-actions {
+          display: flex;
+          justify-content: flex-end;
+          margin-top: 9px;
+        }
+        .mode-actions .command {
+          min-height: 34px;
+          font-size: 12px;
+          padding: 7px 9px;
+        }
+        .smart-list {
+          display: grid;
+          gap: 8px;
+        }
+        .smart-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
+          padding: 8px;
+          border-radius: 8px;
+          border: 1px solid var(--divider-color);
+          background: var(--ha-card-background, var(--card-background-color, #fff));
+        }
+        .smart-name {
+          color: var(--primary-text-color);
+          font-size: 13px;
+          font-weight: 800;
+          line-height: 1.2;
+          overflow-wrap: anywhere;
+        }
+        .smart-meta {
+          margin-top: 3px;
+          color: var(--secondary-text-color);
+          font-size: 11px;
+          font-weight: 600;
+          line-height: 1.25;
+        }
+        @media (max-width: 560px) {
+          .status,
+          .control-row,
+          .commands,
+          .mode-grid {
+            grid-template-columns: 1fr;
+          }
+          .metrics {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+          .segment {
+            grid-template-columns: 1fr;
+          }
+        }
+      </style>
+      <ha-card>
+        <div class="header">
+          <div>
+            <h2 class="title">EV Charging</h2>
+            <div class="subtitle">${this._subtitle()}</div>
+          </div>
+          <button class="icon-button" data-action="refresh" title="Refresh EV status" aria-label="Refresh EV status" ${this._loading ? 'disabled' : ''}>
+            <ha-icon icon="mdi:refresh"></ha-icon>
+          </button>
+        </div>
+        ${!hasApi ? this._noticeHtml('error', 'Home Assistant API access is unavailable for this dashboard card.') : ''}
+        ${this._error ? this._noticeHtml('error', this._error) : ''}
+        ${this._notice ? this._noticeHtml(this._notice.type, this._notice.message) : ''}
+        ${this._data?.modeErrors?.length ? this._noticeHtml('warn', this._data.modeErrors.join(' | ')) : ''}
+        ${this._loading && !this._data ? this._noticeHtml('', 'Loading EV status...') : ''}
+        ${loadpoints.length === 0 && this._data ? this._noticeHtml('warn', 'No EV loadpoints detected. Configure EV charging in PowerSync options or the mobile app.') : ''}
+        ${selected ? this._statusHtml(selected, conflict) : ''}
+        ${selected ? this._controlsHtml(loadpoints, selected, canStart, canStop) : ''}
+        ${selected && !selected.connected ? this._noticeHtml('warn', 'EV is disconnected. Start is disabled until the charger reports a connected vehicle.') : ''}
+        ${conflict ? this._noticeHtml('error', `${this._title(selected.owner_mode)} already owns this loadpoint.`) : ''}
+        ${this._modeSectionsHtml()}
+      </ha-card>
+    `;
+
+    this._attachEvents();
+  }
+
+  _subtitle() {
+    if (!this._data?.fetchedAt) return 'Status and runtime controls';
+    const date = new Date(this._data.fetchedAt);
+    if (Number.isNaN(date.getTime())) return 'Status and runtime controls';
+    return `Updated ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  }
+
+  _noticeHtml(type, message) {
+    const cls = type ? ` ${type}` : '';
+    return `<div class="notice${cls}">${this._escHtml(message)}</div>`;
+  }
+
+  _statusHtml(loadpoint, conflict) {
+    const stateClass = loadpoint.actual_charging ? 'on' : (conflict || loadpoint.blocking_reason ? 'warn' : '');
+    const stateText = loadpoint.actual_charging ? 'Charging' : (loadpoint.connected ? 'Connected' : 'Disconnected');
+    const countdown = this._countdown(loadpoint.expires_at);
+    const owner = this._title(loadpoint.owner_mode || loadpoint.owner || 'idle');
+    const source = this._sourceLabel(loadpoint);
+    return `
+      <div class="status">
+        <div>
+          <h3 class="loadpoint-name">${this._escHtml(this._loadpointLabel(loadpoint))}</h3>
+          <div class="state-line">${this._escHtml(owner)}${source ? ` | ${this._escHtml(source)}` : ''}${countdown ? ` | ${this._escHtml(countdown)}` : ''}</div>
+          ${loadpoint.blocking_reason ? `<div class="state-line">${this._escHtml(loadpoint.blocking_reason)}</div>` : ''}
+          <div class="metrics">
+            ${this._metric('Power', this._kw(loadpoint.current_power_kw))}
+            ${this._metric('Amps', this._amps(loadpoint.current_amps, loadpoint))}
+            ${this._metric('SoC', this._soc(loadpoint.soc))}
+            ${this._metric('Source', source || '--')}
+          </div>
+        </div>
+        <div class="pill ${stateClass}">${this._escHtml(stateText)}</div>
+      </div>
+    `;
+  }
+
+  _controlsHtml(loadpoints, selected, canStart, canStop) {
+    const options = loadpoints.map((lp, index) => `
+      <option value="${this._escAttr(lp.loadpoint_id)}" ${lp.loadpoint_id === selected.loadpoint_id ? 'selected' : ''}>
+        ${this._escHtml(this._loadpointLabel(lp, index))}
+      </option>
+    `).join('');
+    return `
+      <div class="controls">
+        <div class="control-row">
+          <div class="control-field">
+            <label for="ev-loadpoint">Loadpoint</label>
+            <select id="ev-loadpoint" data-control="loadpoint">${options}</select>
+          </div>
+          <div class="control-field">
+            <label for="ev-duration">Duration</label>
+            <select id="ev-duration" data-control="duration">
+              ${[30, 60, 120, 240, 360].map((minutes) => `<option value="${minutes}" ${minutes === this._durationMinutes ? 'selected' : ''}>${minutes < 60 ? `${minutes} min` : `${minutes / 60} hr`}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="segment" role="group" aria-label="EV charging source policy">
+          ${this._policyButton('solar_only', 'Solar Only')}
+          ${this._policyButton('limited_grid_solar', 'Limited Grid + Solar')}
+          ${this._policyButton('full_grid_solar', 'Full Grid + Solar')}
+        </div>
+        <div class="commands">
+          <button class="command primary" data-action="start" ${canStart ? '' : 'disabled'}>
+            <ha-icon icon="mdi:play"></ha-icon><span>Start</span>
+          </button>
+          <button class="command danger" data-action="stop" ${canStop ? '' : 'disabled'}>
+            <ha-icon icon="mdi:stop"></ha-icon><span>Stop</span>
+          </button>
+          <button class="command" data-action="boost" ${selected && selected.connected && !this._savingKey ? '' : 'disabled'}>
+            <ha-icon icon="mdi:flash"></ha-icon><span>Boost</span>
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  _policyButton(policy, label) {
+    const active = this._policy === policy ? 'active' : '';
+    return `<button class="${active}" data-policy="${policy}" ${this._savingKey ? 'disabled' : ''}>${this._escHtml(label)}</button>`;
+  }
+
+  _modeSectionsHtml() {
+    if (!this._data) return '';
+    return `
+      <div class="section-title">Modes</div>
+      <div class="mode-grid">
+        ${this._modeCard(
+          'solar',
+          'Solar Surplus',
+          'mdi:solar-power',
+          this._data.solarConfig,
+          [
+            { key: 'enabled', label: 'Enabled', type: 'checkbox' },
+            { key: 'household_buffer_kw', label: 'Buffer kW', type: 'number', step: '0.1' },
+            { key: 'home_battery_minimum', label: 'Home SOC %', type: 'number', step: '1' },
+            { key: 'sustained_surplus_minutes', label: 'Start Delay', type: 'number', step: '1' },
+            { key: 'stop_delay_minutes', label: 'Stop Delay', type: 'number', step: '1' },
+          ],
+        )}
+        ${this._modeCard(
+          'price',
+          'Price Level',
+          'mdi:cash-clock',
+          this._data.priceSettings,
+          [
+            { key: 'enabled', label: 'Enabled', type: 'checkbox' },
+            { key: 'recovery_soc', label: 'Recovery SOC %', type: 'number', step: '1' },
+            { key: 'recovery_price_cents', label: 'Recovery c/kWh', type: 'number', step: '0.1' },
+            { key: 'opportunity_price_cents', label: 'Opportunity c/kWh', type: 'number', step: '0.1' },
+          ],
+        )}
+        ${this._modeCard(
+          'scheduled',
+          'Scheduled Charging',
+          'mdi:calendar-clock',
+          this._data.scheduledSettings,
+          [
+            { key: 'enabled', label: 'Enabled', type: 'checkbox' },
+            { key: 'start_time', label: 'Start', type: 'time' },
+            { key: 'end_time', label: 'End', type: 'time' },
+            { key: 'max_price_cents', label: 'Max c/kWh', type: 'number', step: '0.1' },
+          ],
+        )}
+        ${this._smartScheduleCard()}
+      </div>
+    `;
+  }
+
+  _modeCard(kind, title, icon, settings, fields) {
+    const enabled = !!settings?.enabled;
+    const saving = this._savingKey === `mode:${kind}`;
+    return `
+      <div class="mode-card">
+        <div class="mode-head">
+          <ha-icon icon="${icon}"></ha-icon>
+          <div class="mode-title">${this._escHtml(title)}</div>
+          <div class="pill ${enabled ? 'on' : ''}">${enabled ? 'On' : 'Off'}</div>
+        </div>
+        <div class="mode-fields">
+          ${fields.map((field) => this._fieldHtml(kind, settings || {}, field)).join('')}
+        </div>
+        <div class="mode-actions">
+          <button class="command" data-save-mode="${kind}" ${saving || this._savingKey ? 'disabled' : ''}>
+            <ha-icon icon="mdi:content-save"></ha-icon><span>${saving ? 'Saving' : 'Save'}</span>
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  _fieldHtml(kind, settings, field) {
+    const value = settings[field.key];
+    const dataKey = `${kind}:${field.key}`;
+    if (field.type === 'checkbox') {
+      return `
+        <div class="field check">
+          <input id="${this._escAttr(dataKey)}" type="checkbox" data-setting="${this._escAttr(dataKey)}" ${value ? 'checked' : ''}>
+          <label for="${this._escAttr(dataKey)}">${this._escHtml(field.label)}</label>
+        </div>
+      `;
+    }
+    const inputType = field.type || 'text';
+    const step = field.step ? ` step="${this._escAttr(field.step)}"` : '';
+    return `
+      <div class="field">
+        <label for="${this._escAttr(dataKey)}">${this._escHtml(field.label)}</label>
+        <input id="${this._escAttr(dataKey)}" type="${inputType}" data-setting="${this._escAttr(dataKey)}" value="${this._escAttr(value ?? '')}"${step}>
+      </div>
+    `;
+  }
+
+  _smartScheduleCard() {
+    const settings = this._data?.autoStatus?.settings || {};
+    const entries = Object.entries(settings);
+    const rows = entries.length ? entries.map(([vehicleId, vehicle], index) => {
+      const enabled = !!vehicle.enabled;
+      const loadpoint = this._loadpoints().find((lp) => lp.loadpoint_id === vehicleId);
+      const name = loadpoint ? this._loadpointLabel(loadpoint) : `Vehicle ${index + 1}`;
+      const departure = vehicle.departure_time || Object.values(vehicle.departure_times || {})[0] || 'Not set';
+      return `
+        <div class="smart-row">
+          <div>
+            <div class="smart-name">${this._escHtml(name)}</div>
+            <div class="smart-meta">Target ${this._escHtml(vehicle.target_soc ?? '--')}% | Departure ${this._escHtml(departure)}</div>
+          </div>
+          <button class="command" data-smart-toggle="${this._escAttr(vehicleId)}" data-enabled="${enabled ? 'false' : 'true'}" ${this._savingKey ? 'disabled' : ''}>
+            <ha-icon icon="${enabled ? 'mdi:toggle-switch' : 'mdi:toggle-switch-off-outline'}"></ha-icon><span>${enabled ? 'On' : 'Off'}</span>
+          </button>
+        </div>
+      `;
+    }).join('') : '<div class="notice">No smart schedule vehicles configured.</div>';
+
+    const anyEnabled = entries.some(([, vehicle]) => !!vehicle.enabled);
+    return `
+      <div class="mode-card">
+        <div class="mode-head">
+          <ha-icon icon="mdi:calendar-star"></ha-icon>
+          <div class="mode-title">Smart Schedule</div>
+          <div class="pill ${anyEnabled ? 'on' : ''}">${anyEnabled ? 'On' : 'Off'}</div>
+        </div>
+        <div class="smart-list">${rows}</div>
+      </div>
+    `;
+  }
+
+  _attachEvents() {
+    this.shadowRoot.querySelector('[data-action="refresh"]')?.addEventListener('click', () => this._refresh());
+    this.shadowRoot.querySelector('[data-control="loadpoint"]')?.addEventListener('change', (event) => {
+      this._selectedLoadpointId = event.target.value;
+      this._scheduleRender();
+    });
+    this.shadowRoot.querySelector('[data-control="duration"]')?.addEventListener('change', (event) => {
+      this._durationMinutes = Number(event.target.value) || 60;
+      this._scheduleRender();
+    });
+    this.shadowRoot.querySelectorAll('[data-policy]').forEach((button) => {
+      button.addEventListener('click', () => {
+        this._policy = button.dataset.policy;
+        this._scheduleRender();
+      });
+    });
+    this.shadowRoot.querySelector('[data-action="start"]')?.addEventListener('click', () => this._startPolicy());
+    this.shadowRoot.querySelector('[data-action="stop"]')?.addEventListener('click', () => this._stopLoadpoint());
+    this.shadowRoot.querySelector('[data-action="boost"]')?.addEventListener('click', () => this._boostLoadpoint());
+    this.shadowRoot.querySelectorAll('[data-save-mode]').forEach((button) => {
+      button.addEventListener('click', () => this._saveMode(button.dataset.saveMode));
+    });
+    this.shadowRoot.querySelectorAll('[data-smart-toggle]').forEach((button) => {
+      button.addEventListener('click', () => this._toggleSmartSchedule(button.dataset.smartToggle, button.dataset.enabled === 'true'));
+    });
+  }
+
+  _refresh() {
+    this._notice = null;
+    this._lastFetch = 0;
+    this._maybeLoadData(true);
+  }
+
+  async _startPolicy() {
+    const loadpoint = this._selectedLoadpoint();
+    if (!loadpoint) return;
+    await this._runCommand(
+      'command:start',
+      this._commandPath(loadpoint.loadpoint_id),
+      {
+        command: 'start_policy_charging',
+        policy: this._policy,
+        duration_minutes: this._durationMinutes,
+      },
+      'Charging started',
+    );
+  }
+
+  async _stopLoadpoint() {
+    const loadpoint = this._selectedLoadpoint();
+    if (!loadpoint) return;
+    await this._runCommand(
+      'command:stop',
+      this._commandPath(loadpoint.loadpoint_id),
+      { command: 'stop_charging' },
+      'Charging stopped',
+    );
+  }
+
+  async _boostLoadpoint() {
+    const loadpoint = this._selectedLoadpoint();
+    if (!loadpoint) return;
+    await this._runCommand(
+      'command:boost',
+      EV_PANEL_PATHS.boost,
+      {
+        vehicle_id: loadpoint.loadpoint_id,
+        duration_minutes: this._durationMinutes,
+      },
+      'Boost started',
+    );
+  }
+
+  async _saveMode(kind) {
+    const paths = {
+      solar: EV_PANEL_PATHS.solar,
+      price: EV_PANEL_PATHS.price,
+      scheduled: EV_PANEL_PATHS.scheduled,
+    };
+    const path = paths[kind];
+    if (!path) return;
+    const payload = this._collectModePayload(kind);
+    await this._runCommand(`mode:${kind}`, path, payload, 'Settings saved');
+  }
+
+  async _toggleSmartSchedule(vehicleId, enabled) {
+    await this._runCommand(
+      `smart:${vehicleId}`,
+      EV_PANEL_PATHS.autoToggle,
+      { vehicle_id: vehicleId, enabled },
+      'Smart schedule updated',
+    );
+  }
+
+  _collectModePayload(kind) {
+    const payload = {};
+    this.shadowRoot.querySelectorAll(`[data-setting^="${kind}:"]`).forEach((input) => {
+      const key = input.dataset.setting.split(':')[1];
+      if (!key) return;
+      if (input.type === 'checkbox') {
+        payload[key] = input.checked;
+      } else if (input.type === 'number') {
+        const value = Number(input.value);
+        if (Number.isFinite(value)) payload[key] = value;
+      } else {
+        payload[key] = input.value;
+      }
+    });
+    return payload;
+  }
+
+  async _runCommand(savingKey, path, payload, successMessage) {
+    if (!this._hass || typeof this._hass.callApi !== 'function') return;
+    this._savingKey = savingKey;
+    this._notice = null;
+    this._error = null;
+    this._scheduleRender();
+    try {
+      const response = await this._hass.callApi('POST', path, payload);
+      if (response?.success === false) {
+        throw new Error(response.error || 'Command failed');
+      }
+      this._notice = { type: '', message: response?.data?.message || response?.message || successMessage };
+      this._lastFetch = 0;
+      EV_PANEL_CACHE.delete(this._cacheKey());
+      await this._loadData(this._cacheKey());
+    } catch (err) {
+      this._notice = { type: 'error', message: err?.message || 'Command failed' };
+    } finally {
+      this._savingKey = null;
+      this._scheduleRender();
+    }
+  }
+
+  _commandPath(loadpointId) {
+    return `power_sync/ev/vehicles/${encodeURIComponent(loadpointId)}/command`;
+  }
+
+  _metric(label, value) {
+    return `
+      <div class="metric">
+        <div class="metric-label">${this._escHtml(label)}</div>
+        <div class="metric-value">${this._escHtml(value)}</div>
+      </div>
+    `;
+  }
+
+  _loadpointLabel(loadpoint, index = null) {
+    const name = String(loadpoint?.vehicle_name || loadpoint?.name || '').trim();
+    if (name) return name;
+    const loadpoints = this._loadpoints();
+    const resolvedIndex = index ?? loadpoints.findIndex((candidate) => candidate === loadpoint);
+    if (resolvedIndex >= 0) return `Loadpoint ${resolvedIndex + 1}`;
+    return 'EV Loadpoint';
+  }
+
+  _sourceLabel(loadpoint) {
+    const mode = loadpoint?.source_mode;
+    if (mode === 'solar_only') return 'Solar only';
+    if (mode === 'limited_grid_solar') return 'Limited grid + solar';
+    if (mode === 'full_grid_solar' || mode === 'grid_allowed') return 'Full grid + solar';
+    if (loadpoint?.source === 'solar') return 'Solar';
+    if (loadpoint?.source === 'grid') return 'Grid';
+    return this._title(loadpoint?.source || mode || '');
+  }
+
+  _countdown(value) {
+    if (!value) return '';
+    const expires = new Date(value);
+    if (Number.isNaN(expires.getTime())) return '';
+    const remainingMs = expires.getTime() - Date.now();
+    if (remainingMs <= 0) return 'Ending now';
+    const totalMinutes = Math.ceil(remainingMs / 60000);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    if (hours > 0) return `${hours}h ${minutes}m remaining`;
+    return `${minutes}m remaining`;
+  }
+
+  _kw(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? `${number.toFixed(number >= 10 ? 1 : 2)} kW` : '--';
+  }
+
+  _amps(value, loadpoint = null) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return `${Math.round(number)} A`;
+    const power = Number(loadpoint?.current_power_kw);
+    if (Number.isFinite(power) && power > 0.05) return '--';
+    return Number.isFinite(number) ? '0 A' : '--';
+  }
+
+  _soc(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? `${Math.round(number)}%` : '--';
+  }
+
+  _title(value) {
+    const text = String(value || '').replace(/_/g, ' ').trim();
+    return text ? text.replace(/\b\w/g, c => c.toUpperCase()) : '';
+  }
+
+  _escHtml(value) {
+    return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  _escAttr(value) {
+    return this._escHtml(value).replace(/'/g, '&#39;');
+  }
+}
+
+if (!customElements.get('power-sync-ev-panel')) {
+  customElements.define('power-sync-ev-panel', PowerSyncEVPanel);
+}
+
 // ─── PowerSyncLayout Custom Element ─────────────────────────────
 // Viewport-fitting grid layout: 3 columns, fills available height.
 // Chart cards flex to fill remaining space; control cards stay natural size.
@@ -2733,6 +4061,8 @@ class PowerSyncLayout extends HTMLElement {
     this._storageKey = 'power-sync-dashboard-layout-v2';
     this._hiddenStorageKey = 'power-sync-dashboard-hidden-v1';
     this._appliedLayoutSignature = '';
+    this._lastLayoutWidth = 0;
+    this._lastLayoutColumnCount = 0;
   }
 
   setConfig(config) {
@@ -2743,7 +4073,6 @@ class PowerSyncLayout extends HTMLElement {
     this._hass = hass;
     if (!this._built) this._buildLayout();
     for (const c of this._cards) c.hass = hass;
-    this._scheduleLayout();
   }
 
   disconnectedCallback() {
@@ -2764,16 +4093,41 @@ class PowerSyncLayout extends HTMLElement {
 
   _columnCount() {
     const width = this.getBoundingClientRect().width || window.innerWidth || 0;
+    return this._columnCountForWidth(width);
+  }
+
+  _columnCountForWidth(width) {
     const portrait = window.matchMedia?.('(orientation: portrait)')?.matches;
     if (width < 760 || (portrait && width < 1040)) return 1;
     if (width < 1280) return 2;
     return 3;
   }
 
+  _scheduleLayoutForResize(entry) {
+    const box = Array.isArray(entry?.contentBoxSize)
+      ? entry.contentBoxSize[0]
+      : entry?.contentBoxSize;
+    const width = box?.inlineSize || entry?.contentRect?.width || this.getBoundingClientRect().width || window.innerWidth || 0;
+    const columnCount = this._columnCountForWidth(width);
+    const widthDelta = Math.abs(width - this._lastLayoutWidth);
+    if (
+      this._lastLayoutColumnCount &&
+      columnCount === this._lastLayoutColumnCount &&
+      widthDelta < 80
+    ) {
+      return;
+    }
+    this._scheduleLayout();
+  }
+
   _flattenCards() {
     const columns = this._config?.columns || [];
     const ordered = columns.length === 3 ? [columns[1], columns[0], columns[2]] : columns;
-    return ordered.flatMap(column => column || []);
+    const cards = ordered.flatMap(column => column || []);
+    if (!cards.some(card => card?.type === 'custom:power-sync-ev-panel')) {
+      cards.push(_evPanel());
+    }
+    return cards;
   }
 
   _cardKeyParts(cardConfig) {
@@ -3269,6 +4623,8 @@ class PowerSyncLayout extends HTMLElement {
     }
 
     const count = Math.min(this._columnCount(), visibleItems.length);
+    this._lastLayoutColumnCount = count;
+    this._lastLayoutWidth = this.getBoundingClientRect().width || window.innerWidth || 0;
     if (this._lanes.length !== count) {
       this._rebuildLanes(count);
     }
@@ -3483,7 +4839,7 @@ class PowerSyncLayout extends HTMLElement {
     root.appendChild(grid);
 
     if ('ResizeObserver' in window) {
-      this._resizeObserver = new ResizeObserver(() => this._scheduleLayout());
+      this._resizeObserver = new ResizeObserver((entries) => this._scheduleLayoutForResize(entries?.[0]));
       this._resizeObserver.observe(this);
     }
 
@@ -3726,10 +5082,14 @@ class PowerSyncStrategy {
 
       const directMatches = [];
       for (const suffix of suffixes) {
-        for (const id of [
+        const ids = [
           `sensor.power_sync_${providerKey}_${suffix}`,
           `sensor.powersync_${providerKey}_${suffix}`,
-        ]) {
+        ];
+        if (providerKey === 'globird') {
+          ids.push(`sensor.power_sync_${suffix}`, `sensor.powersync_${suffix}`);
+        }
+        for (const id of ids) {
           if (hass.states[id]) directMatches.push(id);
         }
       }
@@ -3737,7 +5097,14 @@ class PowerSyncStrategy {
       const suffixMatches = Object.keys(hass.states || {}).filter((id) => {
         if (!id.startsWith('sensor.')) return false;
         const objectId = id.slice('sensor.'.length);
-        if (!objectId.startsWith(`power_sync_${providerKey}_`) && !objectId.startsWith(`powersync_${providerKey}_`)) {
+        const providerPrefixes = [
+          `power_sync_${providerKey}_`,
+          `powersync_${providerKey}_`,
+        ];
+        if (providerKey === 'globird') {
+          providerPrefixes.push('power_sync_service_', 'powersync_service_');
+        }
+        if (!providerPrefixes.some((prefix) => objectId.startsWith(prefix))) {
           return false;
         }
         return suffixes.some((suffix) => objectId.endsWith(`_${suffix}`));
@@ -3860,6 +5227,9 @@ class PowerSyncStrategy {
     } else if (hasFlowCard && hasE('solar_power')) {
       center.push(_powerFlow(e));
     }
+
+    // --- Center Column: EV Dashboard Panel ---
+    center.push(_evPanel());
 
     // --- Right Column: Price Chart ---
     if (hasE('current_import_price')) {
@@ -4110,6 +5480,12 @@ function _optimizationPlan(e) {
     forceDischargeEntity: e('optimization_force_discharge_windows'),
     importPriceEntity: e('lp_import_price_forecast'),
     exportPriceEntity: e('lp_export_price_forecast'),
+  };
+}
+
+function _evPanel() {
+  return {
+    type: 'custom:power-sync-ev-panel',
   };
 }
 

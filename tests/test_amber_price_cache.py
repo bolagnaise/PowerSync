@@ -400,6 +400,64 @@ def test_tesla_lifetime_totals_coerces_persisted_values():
     assert totals == {"lifetime_grid_export_kwh": 604.96}
 
 
+def test_tesla_battery_level_preserves_last_valid_soc_when_live_status_omits_it():
+    tesla = coordinator.TeslaEnergyCoordinator(
+        _FakeHass(),
+        "site-1",
+        "token",
+        entry_id="entry-1",
+    )
+
+    assert tesla._resolve_battery_level_pct({"percentage_charged": 84.3}) == 84.3
+    assert tesla._resolve_battery_level_pct({"wall_connectors": []}) == 84.3
+
+
+def test_tesla_battery_level_missing_without_cache_returns_none():
+    tesla = coordinator.TeslaEnergyCoordinator(
+        _FakeHass(),
+        "site-1",
+        "token",
+        entry_id="entry-1",
+    )
+
+    assert tesla._resolve_battery_level_pct({"wall_connectors": []}) is None
+
+
+def test_tesla_outage_notification_waits_for_sustained_failure():
+    tesla = coordinator.TeslaEnergyCoordinator(
+        _FakeHass(),
+        "site-1",
+        "token",
+        entry_id="entry-1",
+    )
+
+    for now in (100.0, 115.0, 130.0, 145.0, 160.0):
+        should_notify, failure_duration = tesla._record_tesla_update_failure(now)
+
+    assert tesla._consecutive_failures == 5
+    assert tesla._failure_streak_start == 100.0
+    assert failure_duration == 60.0
+    assert should_notify is False
+    assert tesla._outage_notified is False
+
+
+def test_tesla_outage_notification_fires_after_sustained_failure():
+    tesla = coordinator.TeslaEnergyCoordinator(
+        _FakeHass(),
+        "site-1",
+        "token",
+        entry_id="entry-1",
+    )
+
+    for now in (100.0, 115.0, 130.0, 145.0, 401.0):
+        should_notify, failure_duration = tesla._record_tesla_update_failure(now)
+
+    assert tesla._consecutive_failures == 5
+    assert tesla._failure_streak_start == 100.0
+    assert failure_duration == 301.0
+    assert should_notify is True
+
+
 def test_stored_battery_health_capacity_uses_bms_current_capacity():
     hass = _FakeHass(
         data={

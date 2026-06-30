@@ -7,6 +7,8 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
+from .ev_ownership import is_solar_surplus_owner_mode
+
 
 ACTIVE_POWER_THRESHOLD_KW = 0.05
 DEFAULT_LOADPOINT_KEYS = {"default", "genericev", "ev"}
@@ -375,6 +377,20 @@ def _status_source(
     return "solar" if solar_kw >= power_kw * 0.8 else "grid"
 
 
+def _loadpoint_source(
+    power_kw: float,
+    surplus_kw: float,
+    owner_mode: Any = None,
+    allocated_surplus_kw: float | None = None,
+) -> str:
+    if (
+        power_kw > ACTIVE_POWER_THRESHOLD_KW
+        and is_solar_surplus_owner_mode(owner_mode)
+    ):
+        return "solar"
+    return _status_source(power_kw, surplus_kw, allocated_surplus_kw)
+
+
 def charging_state_plugged_status(value: Any) -> bool | None:
     """Infer plug state from Tesla charging-state text when available."""
     if value is None:
@@ -541,6 +557,27 @@ def _find_observation(
     return None, None
 
 
+def _has_ambiguous_default_observations(
+    observations: list[Mapping[str, Any]],
+    used_indexes: set[int],
+) -> bool:
+    matches = 0
+    for index, observation in enumerate(observations):
+        if index in used_indexes or _is_generic_observation(observation):
+            continue
+        power_kw = _float_value(
+            observation.get("ev_power_kw", observation.get("current_power_kw")),
+            0.0,
+        )
+        charging = bool(observation.get("is_charging")) or power_kw > ACTIVE_POWER_THRESHOLD_KW
+        connected = bool(observation.get("is_connected")) or charging
+        if connected:
+            matches += 1
+            if matches > 1:
+                return True
+    return False
+
+
 def _lookup_alias(
     values: Mapping[str, Mapping[str, Any]] | None,
     *keys: Any,
@@ -604,7 +641,12 @@ def _dynamic_loadpoint(
             loadpoint_id = observation_vehicle_id
 
     current_amps = _int_value(state.get("current_amps"), 0)
+    observed_amps = _int_value((observation or {}).get("current_amps"), 0)
+    if current_amps <= 0 and observed_amps > 0:
+        current_amps = observed_amps
     target_amps = _int_value(state.get("target_amps"), current_amps)
+    if target_amps <= 0 and observed_amps > 0:
+        target_amps = observed_amps
     voltage = _float_value(params.get("voltage"), 240.0)
     phases = _float_value(params.get("phases"), 1.0)
     commanded_power_kw = current_amps * voltage * phases / 1000
@@ -676,7 +718,12 @@ def _dynamic_loadpoint(
         "status": status,
         "owner": owner,
         "owner_mode": owner_mode,
-        "source": _status_source(power_kw, site_surplus_kw, allocated_surplus_kw),
+        "source": _loadpoint_source(
+            power_kw,
+            site_surplus_kw,
+            owner_mode,
+            allocated_surplus_kw,
+        ),
         "current_power_kw": round(power_kw, 2),
         "commanded_power_kw": round(commanded_power_kw, 2),
         "current_amps": current_amps,
@@ -735,7 +782,11 @@ def _observed_loadpoint(
         "status": status,
         "owner": (ownership or {}).get("owner") or "external",
         "owner_mode": (ownership or {}).get("owner_mode") or observation.get("owner_mode"),
-        "source": _status_source(power_kw, site_surplus_kw),
+        "source": _loadpoint_source(
+            power_kw,
+            site_surplus_kw,
+            (ownership or {}).get("owner_mode") or observation.get("owner_mode"),
+        ),
         "current_power_kw": round(power_kw, 2),
         "commanded_power_kw": None,
         "current_amps": current_amps,
@@ -765,22 +816,26 @@ def build_generic_charger_observation(
     switch_state: Any = None,
     amps_value: Any = None,
     status_state: Any = None,
+    power_value: Any = None,
     soc_value: Any = None,
 ) -> dict[str, Any]:
     """Build an observed loadpoint record for a generic HA charger."""
     normalized_status = _normal_key(status_state)
     switch_on = str(switch_state).lower() in ("on", "true", "1", "charging")
     current_amps = _int_value(amps_value, 0)
+    power_kw = _float_value(power_value, 0.0)
+    if power_kw > 100:
+        power_kw /= 1000
 
     status_says_connected = normalized_status in GENERIC_CONNECTED_STATES
     status_says_charging = normalized_status in GENERIC_CHARGING_STATES
 
-    is_connected = switch_on or status_says_connected
-    is_charging = status_says_charging
+    is_connected = switch_on or status_says_connected or power_kw > ACTIVE_POWER_THRESHOLD_KW
+    is_charging = status_says_charging or power_kw > ACTIVE_POWER_THRESHOLD_KW
     blocking_reason = None
     if normalized_status in {"paused", "suspendedevse", "suspendedev", "finishing", "faulted"}:
         blocking_reason = str(status_state)
-    elif current_amps > 0 and not is_charging:
+    elif current_amps > 0 and power_kw <= ACTIVE_POWER_THRESHOLD_KW and not status_says_charging:
         blocking_reason = f"Commanded {current_amps}A but no measured charge power"
 
     return {
@@ -790,7 +845,7 @@ def build_generic_charger_observation(
         "charger_type": "generic",
         "current_amps": current_amps,
         "target_amps": current_amps,
-        "ev_power_kw": 0.0,
+        "ev_power_kw": power_kw,
         "ev_soc": _optional_int(soc_value),
         "is_connected": is_connected,
         "is_charging": is_charging,
@@ -833,6 +888,12 @@ def build_loadpoint_status(
                     if _is_generic_observation(obs):
                         used_indexes.add(obs_index)
         ownership = _lookup_alias(ownerships, vehicle_id)
+        if (
+            index is None
+            and _is_default_loadpoint(vehicle_id, vehicle_name)
+            and _has_ambiguous_default_observations(observations, used_indexes)
+        ):
+            continue
         loadpoints.append(
             _dynamic_loadpoint(vehicle_id, state, observation, site_surplus_kw, ownership)
         )

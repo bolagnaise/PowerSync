@@ -583,6 +583,15 @@ def convert_amber_to_tesla_tariff(
         _LOGGER.warning("No forecast data provided")
         return None
 
+    if electricity_provider == "flow_power" and current_actual_interval:
+        # Flow Power current intervals from KWatch are raw 5-minute wholesale values.
+        # The canonical tariff schedule must use the same all-in 30-minute tariff
+        # formula as Flow Power's actual price chart, not a raw spike substitute.
+        _LOGGER.info(
+            "Ignoring raw Flow Power current interval for canonical tariff schedule"
+        )
+        current_actual_interval = None
+
     _LOGGER.info("Converting %d forecast points to tariff schedule", len(forecast_data))
 
     # Timezone handling:
@@ -1044,9 +1053,12 @@ def _build_rolling_24h_tariff(
                         period_key, last_valid_buy_price
                     )
                 else:
-                    # Mark as missing - will be counted below
+                    # First period(s) of the horizon with no earlier price to
+                    # carry forward (e.g. Flow Power's kwatch API publishes the
+                    # 00:00-00:30 slot only around midnight). Leave as None for
+                    # the leading-gap backfill below instead of flooding WARNINGs.
                     general_prices[period_key] = None
-                    _LOGGER.warning("%s: No price data available", period_key)
+                    _LOGGER.debug("%s: No buy price data yet, will backfill", period_key)
 
             if not include_sell_prices:
                 feedin_prices[period_key] = general_prices[period_key]
@@ -1088,9 +1100,33 @@ def _build_rolling_24h_tariff(
                         period_key, last_valid_sell_price
                     )
                 else:
-                    # Mark as missing - will be counted below
+                    # Leading-gap sell price (see buy-price note above): leave as
+                    # None for the backfill pass rather than warning every poll.
                     feedin_prices[period_key] = None
-                    _LOGGER.warning("%s: No sell price data available", period_key)
+                    _LOGGER.debug("%s: No sell price data yet, will backfill", period_key)
+
+    # Backfill leading gaps from the first published price. The forward
+    # carry-forward above can only fill a gap once an earlier valid price
+    # exists, so the very first period(s) of the horizon stay empty when a
+    # provider withholds them (e.g. Flow Power's kwatch API publishes the
+    # 00:00-00:30 slot only around midnight). Fill those leading Nones with the
+    # first available price so the midnight slot is no longer a gap.
+    def _backfill_leading_gaps(prices: dict, label: str) -> None:
+        first_valid = next((v for v in prices.values() if v is not None), None)
+        if first_valid is None:
+            return
+        for period_key, value in prices.items():
+            if value is not None:
+                break
+            prices[period_key] = first_valid
+            _LOGGER.info(
+                "%s: Backfilled missing %s price $%.4f from first published period",
+                period_key, label, first_valid,
+            )
+
+    _backfill_leading_gaps(general_prices, "buy")
+    if include_sell_prices:
+        _backfill_leading_gaps(feedin_prices, "sell")
 
     # Count missing periods and abort if too many are missing
     # This prevents sending bad tariffs when API is unreachable
@@ -1750,7 +1786,7 @@ def apply_flow_power_pea(
     Apply Flow Power base rate + PEA (Price Efficiency Adjustment) pricing model.
 
     V2 formula (when tariff_rate_lookup and avg_daily_tariff provided):
-        PEA = GST*Spot + Tariff - GST*TWAP - AvgDailyTariff - BPEA
+        PEA = GST*Spot + Tariff - GST*TWAP - BPEA
         Final = Base + PEA
 
     Legacy formula (no tariff data):
@@ -1819,13 +1855,12 @@ def apply_flow_power_pea(
                 wholesale_cents = wholesale_dollars * 100
 
                 if has_tariff:
-                    # V2 formula: GST*Spot + Tariff - GST*TWAP - AvgDailyTariff - BPEA
+                    # V2 formula: GST*Spot + Tariff - GST*TWAP - BPEA
                     period_tariff = tariff_rate_lookup.get(period, avg_daily_tariff)
                     pea = (
                         gst_multiplier * wholesale_cents
                         + period_tariff
                         - gst_multiplier * market_avg
-                        - avg_daily_tariff
                         - bpea
                     )
                 else:
@@ -1869,7 +1904,31 @@ def apply_flow_power_pea(
     return tariff
 
 
-def get_wholesale_lookup(forecast_data: list[dict[str, Any]]) -> dict[str, float]:
+def _period_key_from_price_interval(point: dict[str, Any]) -> str | None:
+    """Return the 30-minute PERIOD key covered by an Amber-compatible interval."""
+    nem_time = point.get("nemTime", "")
+    if not nem_time:
+        return None
+
+    try:
+        timestamp = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+    try:
+        duration = int(point.get("duration", 30) or 30)
+    except (TypeError, ValueError):
+        duration = 30
+
+    interval_start = timestamp - timedelta(minutes=duration)
+    start_minute_bucket = 0 if interval_start.minute < 30 else 30
+    return f"PERIOD_{interval_start.hour:02d}_{start_minute_bucket:02d}"
+
+
+def get_wholesale_lookup(
+    forecast_data: list[dict[str, Any]],
+    current_actual_interval: dict[str, Any] | None = None,
+) -> dict[str, float]:
     """
     Extract wholesale prices from forecast data into a period lookup.
 
@@ -1877,6 +1936,11 @@ def get_wholesale_lookup(forecast_data: list[dict[str, Any]]) -> dict[str, float
 
     Args:
         forecast_data: List of price forecast points (5-min or 30-min resolution)
+        current_actual_interval: Optional current/actual interval from a live price source.
+            When provided, its general-channel wholesale value overrides the active
+            30-minute period so Flow Power PEA uses the same spot input as the
+            current price sensor without treating that wholesale value as the final
+            retail tariff.
 
     Returns:
         Dict mapping PERIOD_HH_MM to wholesale price in $/kWh
@@ -1885,10 +1949,7 @@ def get_wholesale_lookup(forecast_data: list[dict[str, Any]]) -> dict[str, float
 
     for point in forecast_data:
         try:
-            nem_time = point.get("nemTime", "")
-            timestamp = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
             channel_type = point.get("channelType", "")
-            duration = point.get("duration", 30)
 
             # Only use general (import) prices
             if channel_type != "general":
@@ -1903,12 +1964,9 @@ def get_wholesale_lookup(forecast_data: list[dict[str, Any]]) -> dict[str, float
 
             wholesale_dollars = wholesale_cents / 100
 
-            # Use interval START time for bucketing (same as tariff converter)
-            interval_start = timestamp - timedelta(minutes=duration)
-
-            # Round to nearest 30-minute interval
-            start_minute_bucket = 0 if interval_start.minute < 30 else 30
-            period_key = f"PERIOD_{interval_start.hour:02d}_{start_minute_bucket:02d}"
+            period_key = _period_key_from_price_interval(point)
+            if period_key is None:
+                continue
 
             # Store in lookup (average if multiple intervals in same 30-min period)
             if period_key not in wholesale_lookup:
@@ -1923,6 +1981,26 @@ def get_wholesale_lookup(forecast_data: list[dict[str, Any]]) -> dict[str, float
     result: dict[str, float] = {}
     for period, prices in wholesale_lookup.items():
         result[period] = sum(prices) / len(prices)
+
+    if current_actual_interval and current_actual_interval.get("general"):
+        current_general = current_actual_interval["general"]
+        period_key = _period_key_from_price_interval(current_general)
+        if period_key:
+            wholesale_cents = current_general.get("wholesaleKWHPrice")
+            if wholesale_cents is None:
+                wholesale_cents = current_general.get("perKwh")
+            try:
+                result[period_key] = float(wholesale_cents) / 100
+                _LOGGER.info(
+                    "Using current wholesale interval for Flow Power PEA %s: %.2fc/kWh",
+                    period_key,
+                    float(wholesale_cents),
+                )
+            except (TypeError, ValueError):
+                _LOGGER.debug(
+                    "Skipping current wholesale interval with invalid price: %s",
+                    wholesale_cents,
+                )
 
     _LOGGER.debug("Built wholesale lookup with %d periods", len(result))
     return result
@@ -2078,6 +2156,7 @@ def apply_chip_mode(
     chip_start: str = "22:00",
     chip_end: str = "06:00",
     threshold_cents: float = 30.0,
+    reference_tariff: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """
     Apply Chip Mode - prevent Powerwall from exporting unless price exceeds threshold.
@@ -2085,6 +2164,9 @@ def apply_chip_mode(
     During the configured time window, this sets export prices to 0 (or very low)
     so Tesla's algorithm won't export. However, if the actual price is at or above
     the threshold, the original price is preserved to capture price spikes.
+    When reference_tariff is provided, that unadjusted tariff is used for the
+    threshold check so Export Boost cannot make a below-threshold slot pass Chip
+    Mode.
 
     This is the inverse of Export Boost:
     - Export Boost: Artificially increases prices to encourage export
@@ -2136,22 +2218,33 @@ def apply_chip_mode(
 
     # Process sell prices in the sell_tariff structure
     sell_tariff = tariff.get("sell_tariff", {})
+    reference_sell_tariff = (
+        reference_tariff.get("sell_tariff", {})
+        if isinstance(reference_tariff, dict)
+        else {}
+    )
     for season, season_data in sell_tariff.get("energy_charges", {}).items():
         sell_prices = season_data.get("rates", {})
+        reference_sell_prices = (
+            reference_sell_tariff.get("energy_charges", {})
+            .get(season, {})
+            .get("rates", {})
+        )
 
         for period in chip_periods:
             if period not in sell_prices:
                 continue
 
             original_dollars = sell_prices[period]
-            original_cents = original_dollars * 100
+            threshold_dollars = reference_sell_prices.get(period, original_dollars)
+            threshold_cents_actual = threshold_dollars * 100
 
             # If price is at or above threshold, allow export (keep original price)
-            if original_cents >= threshold_cents:
+            if threshold_cents_actual >= threshold_cents:
                 allowed_count += 1
                 _LOGGER.debug(
                     "%s: Chip Mode ALLOW - price %.2fc >= threshold %.1fc",
-                    period, original_cents, threshold_cents
+                    period, threshold_cents_actual, threshold_cents
                 )
                 continue
 
@@ -2159,7 +2252,7 @@ def apply_chip_mode(
             suppressed_count += 1
             _LOGGER.debug(
                 "%s: Chip Mode SUPPRESS - price %.2fc < threshold %.1fc → 0c",
-                period, original_cents, threshold_cents
+                period, threshold_cents_actual, threshold_cents
             )
             sell_prices[period] = 0.0
 

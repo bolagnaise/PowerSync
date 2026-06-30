@@ -8,7 +8,7 @@ import sys
 import time
 import types
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -219,6 +219,63 @@ def test_flow_power_import_price_uses_restored_state_before_coordinator_data():
     assert entity.native_value == 0.321
 
 
+def test_flow_power_current_import_price_prefers_tariff_schedule():
+    sensor = _sensor_module()
+    entity = sensor.FlowPowerPriceSensor(
+        SimpleNamespace(data={"current": [{"channelType": "general", "perKwh": 44.1}]}),
+        _entry("flow_power"),
+        "current_import_price",
+    )
+    entity.hass = SimpleNamespace(
+        config=SimpleNamespace(currency="AUD"),
+        data={
+            sensor.DOMAIN: {
+                "entry-1": {
+                    "tariff_schedule": {
+                        "currency": "AUD",
+                        "buy_prices": {"PEAK": 0.25},
+                        "sell_prices": {"PEAK": 0.08},
+                        "utility": "Flow Power",
+                        "plan_name": "PowerSync Flow Power",
+                    }
+                }
+            }
+        },
+    )
+
+    assert entity.native_value == 0.25
+    attrs = entity.extra_state_attributes
+    assert attrs["source"] == "tariff_schedule"
+    assert attrs["current_period"] == "PEAK"
+    assert attrs["final_rate_cents"] == 25.0
+    assert attrs["price_spike"] is None
+
+
+def test_dedicated_flow_power_import_price_keeps_coordinator_calculation():
+    sensor = _sensor_module()
+    entity = sensor.FlowPowerPriceSensor(
+        SimpleNamespace(data={"current": [{"channelType": "general", "perKwh": 44.1}]}),
+        _entry("flow_power"),
+        "flow_power_price",
+    )
+    entity.hass = SimpleNamespace(
+        config=SimpleNamespace(currency="AUD"),
+        data={
+            sensor.DOMAIN: {
+                "entry-1": {
+                    "tariff_schedule": {
+                        "currency": "AUD",
+                        "buy_prices": {"PEAK": 0.25},
+                        "sell_prices": {"PEAK": 0.08},
+                    }
+                }
+            }
+        },
+    )
+
+    assert entity.native_value != 0.25
+
+
 def test_daily_load_uses_total_state_class():
     sensor = _sensor_module()
     desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "daily_load")
@@ -232,6 +289,29 @@ def test_foxess_sensor_descriptions_include_pv4_power():
 
     assert {"pv1_power", "pv2_power", "pv3_power", "pv4_power", "pv5_power", "pv6_power"} <= keys
     assert sensor.SENSOR_KEY_TO_FAMILY["pv4_power"] == sensor.SENSOR_FAMILY_SOLAR_INVERTER
+
+
+def test_foxess_battery_energy_sensor_names_are_distinct_from_generic_totals():
+    sensor = _sensor_module()
+    generic_names = {
+        description.key: description.name
+        for description in sensor.ENERGY_SENSORS
+        if description.key in {"daily_battery_charge", "daily_battery_discharge"}
+    }
+    foxess_names = {
+        description.key: description.name
+        for description in sensor.FOXESS_SENSORS
+        if description.key
+        in {"daily_battery_charge_foxess", "daily_battery_discharge_foxess"}
+    }
+
+    assert foxess_names["daily_battery_charge_foxess"] != generic_names["daily_battery_charge"]
+    assert (
+        foxess_names["daily_battery_discharge_foxess"]
+        != generic_names["daily_battery_discharge"]
+    )
+    assert foxess_names["daily_battery_charge_foxess"] == "FoxESS Daily Battery Charge"
+    assert foxess_names["daily_battery_discharge_foxess"] == "FoxESS Daily Battery Discharge"
 
 
 def test_sungrow_solar_sensor_adds_configured_ac_inverter_output():
@@ -268,6 +348,42 @@ def test_sungrow_solar_sensor_adds_configured_ac_inverter_output():
     assert entity.extra_state_attributes["battery_inverter_solar_power_kw"] == 4.2
     assert entity.extra_state_attributes["ac_inverter_solar_power_kw"] == 5.1
     assert entity.extra_state_attributes["total_solar_power_kw"] == 9.3
+
+
+def test_energy_sensor_unavailable_when_coordinator_data_is_stale():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "solar_power")
+    entity = sensor.TeslaEnergySensor(
+        SimpleNamespace(
+            data={"solar_power": 3.131},
+            last_update_success=True,
+            last_update_success_time=datetime(2026, 5, 3, 11, 55, tzinfo=timezone.utc),
+            update_interval=timedelta(seconds=15),
+        ),
+        desc,
+        _entry("amber"),
+    )
+    entity.hass = _hass("AUD")
+
+    assert entity.available is False
+
+
+def test_energy_sensor_available_when_coordinator_data_is_recent():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "solar_power")
+    entity = sensor.TeslaEnergySensor(
+        SimpleNamespace(
+            data={"solar_power": 3.131},
+            last_update_success=True,
+            last_update_success_time=datetime(2026, 5, 3, 11, 59, 30, tzinfo=timezone.utc),
+            update_interval=timedelta(seconds=15),
+        ),
+        desc,
+        _entry("amber"),
+    )
+    entity.hass = _hass("AUD")
+
+    assert entity.available is True
 
 
 def test_local_powerwall_home_load_excludes_observed_ev_power():
@@ -413,6 +529,44 @@ def test_optimizer_force_discharge_windows_include_discharge_and_export():
     assert attrs["total_minutes"] == 120
     assert [w["action"] for w in attrs["windows"]] == ["export", "discharge"]
     assert attrs["next_power_w"] == 4200
+
+
+def test_optimizer_force_charge_window_uses_active_command_power():
+    sensor = _sensor_module()
+    desc = next(
+        d
+        for d in sensor.OPTIMIZER_ACTION_SENSORS
+        if d.key == "optimization_force_charge_windows"
+    )
+    payload = {
+        "current_action": "charge",
+        "effective_current_action": "charge",
+        "current_power_w": 1019,
+        "next_actions": [
+            {
+                "action": "charge",
+                "timestamp": "2026-05-03T11:30:00+00:00",
+                "end_time": "2026-05-03T13:00:00+00:00",
+                "power_w": 10000,
+                "soc": 0.52,
+            },
+            {
+                "action": "charge",
+                "timestamp": "2026-05-03T14:00:00+00:00",
+                "end_time": "2026-05-03T14:30:00+00:00",
+                "power_w": 5000,
+                "soc": 0.64,
+            },
+        ],
+    }
+    entity = sensor.OptimizerActionSensor(SimpleNamespace(data=payload), desc, _entry("amber"))
+
+    attrs = entity.extra_state_attributes
+    assert attrs["next_power_w"] == 1019
+    assert attrs["windows"][0]["power_w"] == 1019
+    assert attrs["windows"][0]["planned_power_w"] == 10000
+    assert attrs["windows"][1]["power_w"] == 5000
+    assert attrs["windows"][1]["planned_power_w"] == 5000
 
 
 def test_optimizer_current_action_exposes_reserve_recommendation():
@@ -659,8 +813,8 @@ def test_powerwall_pack_labels_leader_follower_and_expansions():
     ]
 
     assert [sensor._pack_label(packs, index) for index in range(len(packs))] == [
-        "Leader PW3",
-        "Follower PW3",
+        "Leader Powerwall",
+        "Follower Powerwall",
         "Expansion Pack 1",
         "Expansion Pack 2",
     ]

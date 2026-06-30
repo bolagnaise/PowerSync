@@ -19,7 +19,7 @@ def _function_source(name: str) -> str:
     for node in module.body:
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_setup_entry":
             for child in node.body:
-                if isinstance(child, ast.AsyncFunctionDef) and child.name == name:
+                if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef)) and child.name == name:
                     segment = ast.get_source_segment(source, child)
                     assert segment is not None
                     return segment
@@ -119,6 +119,24 @@ def test_ac_inverter_restore_keeps_heartbeat_but_skips_sungrow_verify_readback()
     assert controller_index < restore_index < verify_false_index
 
 
+def test_fronius_ac_inverter_uses_load_following_and_fast_refresh():
+    curtail_source = _function_source("apply_inverter_curtailment")
+    init_source = INIT_PATH.read_text()
+    refresh_source = init_source[
+        init_source.index("async def fast_load_following_update"):
+        init_source.index("# Set up automatic AEMO spike check")
+    ]
+
+    assert '"fronius"' in curtail_source[
+        curtail_source.index("if inverter_brand in ("):
+        curtail_source.index("_LOGGER.info(f\"🔴 Curtailing inverter")
+    ]
+    assert '"fronius"' in refresh_source[
+        refresh_source.index("if inverter_brand not in ("):
+        refresh_source.index("if not inverter_host:")
+    ]
+
+
 def test_sungrow_restore_can_skip_verification_readback():
     source = _class_method_source(SUNGROW_INVERTER_PATH, "SungrowController", "restore")
 
@@ -163,12 +181,73 @@ def test_goodwe_curtailment_periodically_reapplies_export_limit():
     assert 'entry_data.pop("_last_goodwe_curtailment_reapply", None)' in handler
 
 
+def test_goodwe_curtailment_releases_limit_before_force_discharge():
+    handler = _function_source("handle_force_discharge")
+    helper = _function_source("_restore_goodwe_curtailment_for_export")
+
+    assert handler.count("await _restore_goodwe_curtailment_for_export(") >= 2
+    release_index = handler.index(
+        'await _restore_goodwe_curtailment_for_export(\n                    entry_data,\n                    "optimizer force discharge",'
+    )
+    optimizer_force_index = handler.index(
+        "await goodwe_coord.force_discharge(duration, power_w=power_w)"
+    )
+    manual_release_index = handler.index(
+        'await _restore_goodwe_curtailment_for_export(\n                    entry_data,\n                    "force discharge",'
+    )
+    manual_force_index = handler.index(
+        "discharge_result = await goodwe_coord.force_discharge(duration, power_w=power_w)"
+    )
+
+    assert release_index < optimizer_force_index
+    assert manual_release_index < manual_force_index
+    assert "controller.restore(allow_zero_export_limit=False)" in helper
+
+
+def test_goodwe_curtailment_does_not_reapply_during_force_export():
+    handler = _function_source("handle_goodwe_curtailment")
+    helper = _function_source("_goodwe_force_export_active")
+
+    assert "get_active_force_state" in helper
+    assert 'active_force.get("type") == "discharge"' in helper
+    assert "if _goodwe_force_export_active(entry_data):" in handler
+    assert '"active force discharge"' in handler
+    assert "GoodWe curtailment skipped while force discharge/export is active" in handler
+
+
 def test_periodic_solar_curtailment_routes_to_sungrow_before_tesla_path():
     handler = _function_source("handle_solar_curtailment_check")
     pre_tesla_path = handler[: handler.index("if token_getter is None:")]
 
     assert "if is_sungrow:" in pre_tesla_path
     assert "await handle_sungrow_curtailment()" in pre_tesla_path
+
+
+def test_periodic_solar_curtailment_routes_ac_inverter_without_tesla_token():
+    handler = _function_source("handle_solar_curtailment_check")
+    token_guard = handler[handler.index("if token_getter is None:"):]
+
+    assert "CONF_AC_INVERTER_CURTAILMENT_ENABLED" in token_guard
+    assert "await handle_ac_inverter_curtailment_only(refresh_prices=True)" in token_guard
+    assert token_guard.index("await handle_ac_inverter_curtailment_only") < token_guard.index(
+        "Solar curtailment skipped - no Tesla API token getter available"
+    )
+
+
+def test_ac_curtailment_live_status_uses_non_tesla_coordinator_before_api():
+    helper = _function_source("_get_cached_live_status")
+    live_status = _function_source("get_live_status")
+
+    assert "coordinator_data_to_ev_live_status" in helper
+    assert '"fronius_reserva_coordinator"' in helper
+    assert '"goodwe_coordinator"' in helper
+    assert '"solaredge_coordinator"' in helper
+    assert 'live_status["is_curtailed"] = True' in helper
+    assert "cached_status = _get_cached_live_status()" in live_status
+    assert "if not callable(token_getter):" in live_status
+    assert live_status.index("cached_status = _get_cached_live_status()") < live_status.index(
+        "if not callable(token_getter):"
+    )
 
 
 def test_solar_curtailment_is_not_blocked_by_monitoring_mode():
@@ -200,6 +279,18 @@ def test_websocket_solar_curtailment_routes_to_sungrow_with_prices():
         "await handle_sungrow_curtailment("
         "feedin_price=feedin_price, import_price=import_price)"
     ) in pre_tesla_path
+
+
+def test_websocket_solar_curtailment_routes_ac_inverter_without_tesla_token():
+    handler = _function_source("handle_solar_curtailment_with_websocket_data")
+    token_guard = handler[handler.index("if token_getter is None:"):]
+
+    assert "CONF_AC_INVERTER_CURTAILMENT_ENABLED" in token_guard
+    assert "await handle_ac_inverter_curtailment_only(" in token_guard
+    assert 'price_source="websocket"' in token_guard
+    assert token_guard.index("await handle_ac_inverter_curtailment_only") < token_guard.index(
+        "Solar curtailment skipped - no Tesla API token getter available"
+    )
 
 
 def test_websocket_tesla_curtailment_falls_back_to_any_provider_price_source():

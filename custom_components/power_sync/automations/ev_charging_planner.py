@@ -22,7 +22,17 @@ import re
 
 from homeassistant.util import dt as dt_util
 
-from ..const import DOMAIN, TESLA_INTEGRATIONS
+from ..const import (
+    CONF_SOLAR_FORECAST_PROVIDER,
+    CONF_SOLCAST_ESTIMATE_TYPE,
+    DEFAULT_SOLAR_FORECAST_PROVIDER,
+    DEFAULT_SOLCAST_ESTIMATE_TYPE,
+    DOMAIN,
+    SOLAR_FORECAST_PROVIDER_OPEN_METEO,
+    SOLAR_FORECAST_PROVIDERS,
+    TESLA_INTEGRATIONS,
+)
+from ..optimization.load_estimator import SolcastForecaster as SharedSolarForecaster
 from ..solar_surplus_config import (
     DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC,
     get_solar_surplus_min_battery_soc,
@@ -76,6 +86,13 @@ _LOGGER.addFilter(SensitiveDataFilter())
 # via charger settings if your charger has a different minimum.
 MIN_CHARGING_POWER_KW = 1.4
 FULL_EV_SOC = 100
+EXTERNAL_SCHEDULED_STOP_SUPPRESS_SECONDS = 15 * 60
+
+
+def _format_price_log_value(price_cents: Optional[float]) -> str:
+    if price_cents is None:
+        return "unknown"
+    return f"{price_cents:.1f}c"
 
 
 def _configured_ble_prefixes(
@@ -101,43 +118,40 @@ def _valid_state(state: Any) -> bool:
     return bool(state and state.state not in ("unavailable", "unknown", "None", None))
 
 
-async def _read_sigenergy_charger_plugged_state(config_entry: "ConfigEntry") -> bool | None:
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+async def _read_sigenergy_charger_plugged_state(
+    config_entry: "ConfigEntry",
+    hass: Optional["HomeAssistant"] = None,
+) -> bool | None:
     """Read the configured Sigenergy EV charger connection state."""
     from ..const import (
         CONF_SIGENERGY_CHARGER_ENABLED,
-        CONF_SIGENERGY_CHARGER_HOST,
-        CONF_SIGENERGY_CHARGER_PORT,
-        CONF_SIGENERGY_CHARGER_SLAVE_ID,
-        CONF_SIGENERGY_CHARGER_TYPE,
-        CONF_SIGENERGY_MODBUS_HOST,
-        DEFAULT_SIGENERGY_CHARGER_PORT,
-        DEFAULT_SIGENERGY_CHARGER_SLAVE_ID,
         SIGENERGY_CHARGER_EVAC,
     )
+    from ..sigenergy_charger_config import resolve_sigenergy_charger_connection
     from ..sigenergy_charger import SigenergyEVChargerController
 
     opts = {**config_entry.data, **config_entry.options} if config_entry else {}
     if not opts.get(CONF_SIGENERGY_CHARGER_ENABLED):
         return None
 
-    host = (
-        opts.get(CONF_SIGENERGY_CHARGER_HOST)
-        or opts.get(CONF_SIGENERGY_MODBUS_HOST)
-        or ""
-    )
-    host = str(host).strip()
+    config = resolve_sigenergy_charger_connection(config_entry, hass=hass)
+    host = str(config["host"]).strip()
     if not host:
         _LOGGER.debug("Sigenergy charger plug check skipped: no Modbus host configured")
         return None
 
     controller = SigenergyEVChargerController(
         host=host,
-        port=opts.get(CONF_SIGENERGY_CHARGER_PORT, DEFAULT_SIGENERGY_CHARGER_PORT),
-        slave_id=opts.get(
-            CONF_SIGENERGY_CHARGER_SLAVE_ID,
-            DEFAULT_SIGENERGY_CHARGER_SLAVE_ID,
-        ),
-        charger_type=opts.get(CONF_SIGENERGY_CHARGER_TYPE, SIGENERGY_CHARGER_EVAC),
+        port=config["port"],
+        slave_id=config["slave_id"],
+        charger_type=config["charger_type"] or SIGENERGY_CHARGER_EVAC,
     )
     try:
         state = await controller.read_state()
@@ -391,8 +405,9 @@ async def get_ev_location(
     Args:
         hass: Home Assistant instance
         config_entry: Config entry
-        vehicle_vin: Optional VIN to check specific vehicle. If None, returns
-                     location of first vehicle found (backward compatible).
+        vehicle_vin: Optional VIN to check specific vehicle. If None, prefers
+                     any home vehicle before falling back to the first known
+                     vehicle location.
 
     Returns:
         Location string: "home", "work", "not_home", or "unknown"
@@ -437,16 +452,19 @@ async def get_ev_location(
                     loc_entity = f"device_tracker.{candidate}_location"
                     loc_state = hass.states.get(loc_entity)
                     if loc_state and loc_state.state not in ("unavailable", "unknown", "None", None):
-                        location = loc_state.state.lower()
-                        _LOGGER.debug(f"Teslemetry BT location from {loc_entity}: {location}")
-                        return location
+                        candidate_location = loc_state.state.lower()
+                        _LOGGER.debug(f"Teslemetry BT location from {loc_entity}: {candidate_location}")
+                        if vehicle_vin is not None or candidate_location == "home":
+                            return candidate_location
+                        if location == "unknown":
+                            location = candidate_location
 
     # Method 1: Check Tesla Fleet/Teslemetry device_tracker entities
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
 
     for device, device_vin in _iter_tesla_vehicle_devices(device_registry):
-        if location != "unknown":
+        if vehicle_vin is not None and location != "unknown":
             break
 
         # If specific VIN requested, skip other vehicles
@@ -463,8 +481,12 @@ async def get_ev_location(
             if entity_id.startswith("device_tracker.") and "_location" in entity_id_lower:
                 state = hass.states.get(entity_id)
                 if state and state.state not in ("unavailable", "unknown", "None", None):
-                    location = state.state.lower()
-                    _LOGGER.debug(f"Found EV location from {entity_id} (VIN: {device_vin}): {location}")
+                    candidate_location = state.state.lower()
+                    _LOGGER.debug(f"Found EV location from {entity_id} (VIN: {device_vin}): {candidate_location}")
+                    if vehicle_vin is not None or candidate_location == "home":
+                        location = candidate_location
+                    elif location == "unknown":
+                        location = candidate_location
                     break
 
             elif entity_id.startswith("binary_sensor.") and "located_at_home" in entity_id_lower:
@@ -473,6 +495,9 @@ async def get_ev_location(
                     location = "home"
                     _LOGGER.debug(f"Found EV at home from {entity_id} (VIN: {device_vin})")
                     break
+
+        if vehicle_vin is None and location == "home":
+            break
 
     # Method 2 (fallback): Tesla BLE - only current presence/plug signals imply home.
     # Do not treat the charger switch entity merely existing as presence; HA keeps
@@ -644,7 +669,7 @@ async def is_ev_plugged_in(
     if config_entry and vehicle_vin in (None, "sigenergy_charger"):
         opts = {**config_entry.data, **config_entry.options}
         if opts.get(CONF_SIGENERGY_CHARGER_ENABLED):
-            plugged = await _read_sigenergy_charger_plugged_state(config_entry)
+            plugged = await _read_sigenergy_charger_plugged_state(config_entry, hass)
             if plugged is True or (vehicle_vin == "sigenergy_charger" and plugged is not None):
                 return plugged
 
@@ -817,10 +842,14 @@ async def is_ev_plugged_in(
                                 f"Charge cable {entity_id} is {state.state} and car at {location}, "
                                 f"treating as unplugged"
                             )
-                            return False
+                            if vehicle_vin is not None:
+                                return False
+                            continue
                     is_plugged = state.state == "on"
                     _LOGGER.debug(f"Found plugged in state from {entity_id} (VIN: {device_vin}): {is_plugged}")
-                    return is_plugged
+                    if is_plugged or vehicle_vin is not None:
+                        return is_plugged
+                    continue
 
             elif entity_id.startswith("sensor.") and "_charging" in entity_id_lower and "charging_" not in entity_id_lower:
                 state = hass.states.get(entity_id)
@@ -1225,19 +1254,29 @@ class LoadProfileEstimator:
 class SolarForecaster:
     """Gets solar production forecast from Solcast or estimates."""
 
-    def __init__(self, hass):
+    def __init__(self, hass, config_entry=None):
         """Initialize the forecaster.
 
         Args:
             hass: Home Assistant instance
+            config_entry: Optional PowerSync config entry with provider settings
         """
         self.hass = hass
+        self.config_entry = config_entry
+
+    def _option(self, key: str, default: Any) -> Any:
+        if not self.config_entry:
+            return default
+        return self.config_entry.options.get(
+            key,
+            self.config_entry.data.get(key, default),
+        )
 
     async def get_solar_forecast(self, hours: int = 24) -> List[Dict[str, Any]]:
         """
         Get hourly solar forecast.
 
-        Tries Solcast integration first, falls back to simple estimation.
+        Uses the configured provider preference, then falls back to simple estimation.
 
         Args:
             hours: Number of hours to forecast
@@ -1245,10 +1284,46 @@ class SolarForecaster:
         Returns:
             List of dicts with hour, pv_estimate_kw, confidence
         """
-        # Try Solcast integration
-        solcast_forecast = await self._get_solcast_forecast(hours)
-        if solcast_forecast:
-            return solcast_forecast
+        provider = self._option(
+            CONF_SOLAR_FORECAST_PROVIDER,
+            DEFAULT_SOLAR_FORECAST_PROVIDER,
+        )
+        if provider not in SOLAR_FORECAST_PROVIDERS:
+            provider = DEFAULT_SOLAR_FORECAST_PROVIDER
+        shared_forecaster = SharedSolarForecaster(
+            self.hass,
+            interval_minutes=30,
+            estimate_type=self._option(
+                CONF_SOLCAST_ESTIMATE_TYPE,
+                DEFAULT_SOLCAST_ESTIMATE_TYPE,
+            ),
+            provider_preference=provider,
+        )
+        start_time = dt_util.now()
+        interval_forecast = await shared_forecaster.get_forecast(
+            horizon_hours=hours,
+            start_time=start_time,
+        )
+        if shared_forecaster.last_forecast_source:
+            confidence = (
+                0.7
+                if shared_forecaster.last_forecast_source
+                == SOLAR_FORECAST_PROVIDER_OPEN_METEO
+                else 0.8
+            )
+            result = []
+            intervals_per_hour = max(1, 60 // shared_forecaster.interval_minutes)
+            for hour_idx in range(hours):
+                start = hour_idx * intervals_per_hour
+                values = interval_forecast[start:start + intervals_per_hour]
+                avg_kw = sum(values) / len(values) / 1000 if values else 0.0
+                result.append({
+                    "hour": (start_time + timedelta(hours=hour_idx)).isoformat(),
+                    "pv_estimate_kw": avg_kw,
+                    "confidence": confidence,
+                    "source": shared_forecaster.last_forecast_source,
+                })
+            return result
 
         # Fall back to simple estimation
         return await self._estimate_solar(hours)
@@ -1410,10 +1485,11 @@ class SolarForecaster:
 class SurplusForecaster:
     """Combines solar forecast with load estimation for surplus prediction."""
 
-    def __init__(self, hass):
+    def __init__(self, hass, config_entry=None):
         """Initialize the forecaster."""
         self.hass = hass
-        self.solar_forecaster = SolarForecaster(hass)
+        self.config_entry = config_entry
+        self.solar_forecaster = SolarForecaster(hass, config_entry)
         self.load_estimator = LoadProfileEstimator(hass)
 
     async def forecast_surplus(
@@ -1957,7 +2033,7 @@ class ChargingPlanner:
         """
         self.hass = hass
         self.config_entry = config_entry
-        self.surplus_forecaster = SurplusForecaster(hass)
+        self.surplus_forecaster = SurplusForecaster(hass, config_entry)
         self.price_forecaster = PriceForecaster(hass, config_entry)
         self._get_battery_schedule = battery_schedule_getter
         self._grid_capacity_kw = grid_capacity_kw
@@ -2965,6 +3041,7 @@ class AutoScheduleSettings:
     consume_battery_level: int = 0  # Discharge home battery to X% for EV (0 = disabled)
     stop_at_battery_floor: bool = True  # When battery hits consume level, stop EV (no grid fallback)
     limit_grid_import: bool = False  # Dynamically adjust EV charge amps to match inverter capacity
+    preserve_home_battery: bool = False  # Request no-discharge mode while Smart Schedule is charging
     max_grid_price_cents: float = 25.0  # Don't charge from grid above this price (backend only, not in mobile UI)
 
     # Per-day constraint overrides (days without entries fall back to global settings above)
@@ -2972,6 +3049,7 @@ class AutoScheduleSettings:
     departure_consume_battery_level: Dict[int, int] = field(default_factory=dict)  # {day_index: percent}
     departure_stop_at_battery_floor: Dict[int, bool] = field(default_factory=dict)  # {day_index: True/False}
     departure_limit_grid_import: Dict[int, bool] = field(default_factory=dict)  # {day_index: True/False}
+    departure_preserve_home_battery: Dict[int, bool] = field(default_factory=dict)  # {day_index: True/False}
 
     # Charger settings
     charger_type: str = "tesla"  # tesla, ocpp, generic
@@ -3021,6 +3099,12 @@ class AutoScheduleSettings:
         if weekday in self.departure_stop_at_battery_floor:
             return self.departure_stop_at_battery_floor[weekday]
         return self.stop_at_battery_floor
+
+    def get_effective_preserve_home_battery(self, weekday: int) -> bool:
+        """Get the effective preserve_home_battery setting for a given weekday."""
+        if weekday in self.departure_preserve_home_battery:
+            return self.departure_preserve_home_battery[weekday]
+        return self.preserve_home_battery
 
     def get_effective_max_grid_price(self, weekday: int) -> float:
         """Get the effective max_grid_price_cents for a given weekday."""
@@ -3087,11 +3171,13 @@ class AutoScheduleSettings:
             "departure_consume_battery_level": {str(k): v for k, v in self.departure_consume_battery_level.items()},
             "departure_stop_at_battery_floor": {str(k): v for k, v in self.departure_stop_at_battery_floor.items()},
             "departure_limit_grid_import": {str(k): v for k, v in self.departure_limit_grid_import.items()},
+            "departure_preserve_home_battery": {str(k): v for k, v in self.departure_preserve_home_battery.items()},
             "priority": self.priority.value,
             "min_battery_to_start": self.min_battery_to_start,
             "consume_battery_level": self.consume_battery_level,
             "stop_at_battery_floor": self.stop_at_battery_floor,
             "limit_grid_import": self.limit_grid_import,
+            "preserve_home_battery": self.preserve_home_battery,
             "max_grid_price_cents": self.max_grid_price_cents,
             # Backward compat aliases for older mobile clients
             "home_battery_minimum": self.min_battery_to_start,
@@ -3137,6 +3223,9 @@ class AutoScheduleSettings:
         # New fields with defaults
         consume_battery_level = data.get("consume_battery_level", 0)
         stop_at_battery_floor = data.get("stop_at_battery_floor", True)
+        preserve_home_battery = data.get("preserve_home_battery", False)
+        if preserve_home_battery and consume_battery_level:
+            consume_battery_level = 0
 
         # Handle departure_priorities (per-day strategy overrides)
         departure_priorities: Dict[int, str] = {}
@@ -3173,6 +3262,14 @@ class AutoScheduleSettings:
         if isinstance(raw_dsabf, dict):
             departure_stop_at_battery_floor = {int(k): bool(v) for k, v in raw_dsabf.items()}
 
+        departure_preserve_home_battery: Dict[int, bool] = {}
+        raw_dphb = data.get("departure_preserve_home_battery")
+        if isinstance(raw_dphb, dict):
+            departure_preserve_home_battery = {int(k): bool(v) for k, v in raw_dphb.items()}
+            for day, preserve in departure_preserve_home_battery.items():
+                if preserve and departure_consume_battery_level.get(day, 0) > 0:
+                    departure_consume_battery_level[day] = 0
+
         # Handle departure_times migration from legacy format
         departure_times: Dict[int, str] = {}
         raw_departure_times = data.get("departure_times")
@@ -3199,11 +3296,13 @@ class AutoScheduleSettings:
             departure_consume_battery_level=departure_consume_battery_level,
             departure_stop_at_battery_floor=departure_stop_at_battery_floor,
             departure_limit_grid_import=departure_limit_grid_import,
+            departure_preserve_home_battery=departure_preserve_home_battery,
             priority=priority,
             min_battery_to_start=min_battery_to_start,
             consume_battery_level=consume_battery_level,
             stop_at_battery_floor=stop_at_battery_floor,
             limit_grid_import=limit_grid_import,
+            preserve_home_battery=preserve_home_battery,
             max_grid_price_cents=data.get("max_grid_price_cents", 25.0),
             charger_type=data.get("charger_type", "tesla"),
             min_charge_amps=data.get("min_charge_amps", 5),
@@ -3345,6 +3444,9 @@ class AutoScheduleExecutor:
         # Tracks when Smart Schedule is asking the battery optimiser to preserve
         # energy for a vehicle that is not currently available to charge.
         self._future_demand_preserve_active = False
+        self._future_demand_preserve_reason = ""
+        self._active_charging_preserve_vehicles: set[str] = set()
+        self._active_charging_preserve_reasons: Dict[str, str] = {}
 
     def _resolve_vehicle_vin(self, vehicle_id: str) -> Optional[str]:
         """Resolve sequential vehicle_id to actual VIN or BLE identifier.
@@ -3692,6 +3794,8 @@ class AutoScheduleExecutor:
                 value = {int(k): int(v) for k, v in value.items()}
             if key == "departure_stop_at_battery_floor" and isinstance(value, dict):
                 value = {int(k): bool(v) for k, v in value.items()}
+            if key == "departure_preserve_home_battery" and isinstance(value, dict):
+                value = {int(k): bool(v) for k, v in value.items()}
             # Backward compat: map old field names to new ones
             if key == "home_battery_minimum":
                 key = "min_battery_to_start"
@@ -3705,6 +3809,18 @@ class AutoScheduleExecutor:
                 value = {int(k): int(v) for k, v in value.items()}
             if hasattr(settings, key):
                 setattr(settings, key, value)
+                if key == "preserve_home_battery" and bool(value):
+                    settings.consume_battery_level = 0
+                elif key == "consume_battery_level" and _safe_int(value, 0) > 0:
+                    settings.preserve_home_battery = False
+                elif key == "departure_preserve_home_battery" and isinstance(value, dict):
+                    for day, preserve in value.items():
+                        if preserve:
+                            settings.departure_consume_battery_level[day] = 0
+                elif key == "departure_consume_battery_level" and isinstance(value, dict):
+                    for day, consume_level in value.items():
+                        if consume_level > 0:
+                            settings.departure_preserve_home_battery[day] = False
 
         return settings
 
@@ -4220,6 +4336,9 @@ class AutoScheduleExecutor:
 
         state = self.get_state(vehicle_id)
         now = datetime.now()
+        ha_now = dt_util.now()
+        weekday = ha_now.weekday() if hasattr(ha_now, "weekday") else now.weekday()
+        effective_preserve_home_battery = settings.get_effective_preserve_home_battery(weekday)
 
         # Resolve sequential vehicle_id to actual VIN/BLE identifier
         # so per-vehicle checks work correctly for multi-vehicle setups
@@ -4255,6 +4374,12 @@ class AutoScheduleExecutor:
                 state.is_charging = False
             state.last_decision = "away"
             state.last_decision_reason = f"Vehicle not at home (location: {location})"
+            self._sync_active_charging_preserve_intent(
+                vehicle_id,
+                effective_preserve_home_battery,
+                state,
+                state.last_decision_reason,
+            )
             _LOGGER.debug(f"Auto-schedule: Vehicle {vehicle_id} not at home ({location}), skipping")
             return
 
@@ -4265,6 +4390,12 @@ class AutoScheduleExecutor:
                 state.is_charging = False
             state.last_decision = "unplugged"
             state.last_decision_reason = "Vehicle not plugged in"
+            self._sync_active_charging_preserve_intent(
+                vehicle_id,
+                effective_preserve_home_battery,
+                state,
+                state.last_decision_reason,
+            )
             _LOGGER.debug(f"Auto-schedule: Vehicle {vehicle_id} not plugged in, skipping")
             return
 
@@ -4275,10 +4406,22 @@ class AutoScheduleExecutor:
                 await self._stop_charging(vehicle_id, settings, state)
                 state.last_decision = "complete"
                 state.last_decision_reason = f"EV reached target {settings.target_soc}%"
+                self._sync_active_charging_preserve_intent(
+                    vehicle_id,
+                    effective_preserve_home_battery,
+                    state,
+                    state.last_decision_reason,
+                )
                 return
             else:
                 state.last_decision = "complete"
                 state.last_decision_reason = f"EV at {ev_soc}% (target: {settings.target_soc}%)"
+                self._sync_active_charging_preserve_intent(
+                    vehicle_id,
+                    effective_preserve_home_battery,
+                    state,
+                    state.last_decision_reason,
+                )
                 return
 
         # =====================================================================
@@ -4317,6 +4460,12 @@ class AutoScheduleExecutor:
                 await self._set_vehicle_charge_rate(vehicle_id, power_w, settings)
                 state.last_decision = "charging"
                 state.last_decision_reason = reason
+                self._sync_active_charging_preserve_intent(
+                    vehicle_id,
+                    effective_preserve_home_battery,
+                    state,
+                    reason,
+                )
 
             else:
                 if next_start:
@@ -4328,12 +4477,24 @@ class AutoScheduleExecutor:
                     await self._stop_charging(vehicle_id, settings, state)
                     state.last_decision = "stopped"
                     state.last_decision_reason = reason
+                    self._sync_active_charging_preserve_intent(
+                        vehicle_id,
+                        effective_preserve_home_battery,
+                        state,
+                        reason,
+                    )
                     # Clear tracked charge rate
                     self._current_charge_amps.pop(vehicle_id, None)
                     _LOGGER.info(f"🤖 ML EV Charging: Stopping charge for {vehicle_id} - {reason}")
                 else:
                     state.last_decision = "waiting"
                     state.last_decision_reason = reason
+                    self._sync_active_charging_preserve_intent(
+                        vehicle_id,
+                        effective_preserve_home_battery,
+                        state,
+                        reason,
+                    )
 
             # Skip the normal planning logic when using Smart Optimization
             return
@@ -4345,6 +4506,12 @@ class AutoScheduleExecutor:
         if state.current_plan is None:
             state.last_decision = "no_plan"
             state.last_decision_reason = "No charging plan available"
+            self._sync_active_charging_preserve_intent(
+                vehicle_id,
+                effective_preserve_home_battery,
+                state,
+                state.last_decision_reason,
+            )
             return
 
         # Get current conditions
@@ -4363,7 +4530,7 @@ class AutoScheduleExecutor:
         # Note: min_battery_soc affects surplus calculation (prevents discharge),
         # but does NOT block EV charging from solar or grid.
         # The Powerwall's own backup reserve handles discharge protection.
-        weekday = dt_util.now().weekday()  # HA tz; container UTC would mis-classify weekday near midnight
+        # HA tz; container UTC would mis-classify weekday near midnight.
         effective_priority = settings.get_effective_priority(weekday)
         effective_limit_grid = settings.get_effective_limit_grid_import(weekday)
         effective_max_price = settings.get_effective_max_grid_price(weekday)
@@ -4386,6 +4553,12 @@ class AutoScheduleExecutor:
                     await self._stop_charging(vehicle_id, settings, state)
                 state.last_decision = "waiting"
                 state.last_decision_reason = reason
+                self._sync_active_charging_preserve_intent(
+                    vehicle_id,
+                    effective_preserve_home_battery,
+                    state,
+                    reason,
+                )
                 return
 
         # Use planner's should_charge_now logic
@@ -4545,6 +4718,12 @@ class AutoScheduleExecutor:
         else:
             state.last_decision = "charging" if state.is_charging else "waiting"
             state.last_decision_reason = reason
+        self._sync_active_charging_preserve_intent(
+            vehicle_id,
+            effective_preserve_home_battery,
+            state,
+            reason,
+        )
 
     async def _regenerate_plan(
         self,
@@ -4648,6 +4827,7 @@ class AutoScheduleExecutor:
         """Publish Smart Schedule preserve intent for future EV demand."""
         from ..const import DOMAIN
 
+        self._future_demand_preserve_reason = reason
         entry_data = self.hass.data.setdefault(DOMAIN, {}).setdefault(
             self.config_entry.entry_id,
             {},
@@ -4657,12 +4837,7 @@ class AutoScheduleExecutor:
             self._future_demand_preserve_active = True
             return
 
-        entry_data["scheduled_ev_preserve_state"] = {
-            "active": True,
-            "mode": "no_discharge_charge_allowed",
-            "source": "smart_schedule",
-            "reason": reason,
-        }
+        self._write_smart_schedule_preserve_state(reason)
         if not self._future_demand_preserve_active:
             _LOGGER.info(
                 "Smart Schedule: requested home battery preserve mode (%s)",
@@ -4683,19 +4858,102 @@ class AutoScheduleExecutor:
             self._future_demand_preserve_active = False
             return
 
+        self._future_demand_preserve_active = False
+        self._future_demand_preserve_reason = ""
+        if self._active_charging_preserve_vehicles:
+            self._write_smart_schedule_preserve_state(
+                self._smart_schedule_active_preserve_reason(reason)
+            )
+        else:
+            state.update({
+                "active": False,
+                "mode": "no_discharge_charge_allowed",
+                "source": "smart_schedule",
+                "reason": reason,
+            })
+        _LOGGER.info(
+            "Smart Schedule: cleared future-demand home battery preserve request%s",
+            f" ({reason})" if reason else "",
+        )
+
+    def _write_smart_schedule_preserve_state(self, reason: str) -> None:
+        """Publish Smart Schedule preserve state without overwriting other EV modes."""
+        from ..const import DOMAIN
+
+        entry_data = self.hass.data.setdefault(DOMAIN, {}).setdefault(
+            self.config_entry.entry_id,
+            {},
+        )
+        existing = entry_data.get("scheduled_ev_preserve_state", {})
+        if existing.get("active") and existing.get("source") not in (None, "smart_schedule"):
+            return
+        entry_data["scheduled_ev_preserve_state"] = {
+            "active": True,
+            "mode": "no_discharge_charge_allowed",
+            "source": "smart_schedule",
+            "reason": reason,
+        }
+
+    def _smart_schedule_active_preserve_reason(self, fallback: str = "") -> str:
+        """Return a representative reason for active Smart Schedule preserve."""
+        for vehicle_id in sorted(self._active_charging_preserve_vehicles):
+            reason = self._active_charging_preserve_reasons.get(vehicle_id)
+            if reason:
+                return reason
+        return fallback
+
+    def _set_active_charging_preserve_intent(self, vehicle_id: str, reason: str) -> None:
+        """Request no-discharge mode while Smart Schedule is actively charging."""
+        self._active_charging_preserve_vehicles.add(vehicle_id)
+        self._active_charging_preserve_reasons[vehicle_id] = reason
+        self._write_smart_schedule_preserve_state(reason)
+
+    def _clear_active_charging_preserve_intent(
+        self,
+        vehicle_id: str,
+        reason: str = "",
+    ) -> None:
+        """Clear Smart Schedule active-charge preserve intent."""
+        from ..const import DOMAIN
+
+        self._active_charging_preserve_vehicles.discard(vehicle_id)
+        self._active_charging_preserve_reasons.pop(vehicle_id, None)
+        entry_data = self.hass.data.get(DOMAIN, {}).get(
+            self.config_entry.entry_id,
+            {},
+        )
+        state = entry_data.setdefault("scheduled_ev_preserve_state", {})
+        if state.get("source") != "smart_schedule":
+            return
+        if self._active_charging_preserve_vehicles:
+            self._write_smart_schedule_preserve_state(
+                self._smart_schedule_active_preserve_reason(reason)
+            )
+            return
+        if self._future_demand_preserve_active:
+            self._write_smart_schedule_preserve_state(
+                self._future_demand_preserve_reason or reason
+            )
+            return
         state.update({
             "active": False,
             "mode": "no_discharge_charge_allowed",
             "source": "smart_schedule",
             "reason": reason,
         })
-        if not self._future_demand_preserve_active:
-            return
-        self._future_demand_preserve_active = False
-        _LOGGER.info(
-            "Smart Schedule: cleared home battery preserve request%s",
-            f" ({reason})" if reason else "",
-        )
+
+    def _sync_active_charging_preserve_intent(
+        self,
+        vehicle_id: str,
+        preserve_home_battery: bool,
+        state: AutoScheduleState,
+        reason: str,
+    ) -> None:
+        """Keep active Smart Schedule preserve aligned with charging state."""
+        if state.is_charging and preserve_home_battery:
+            self._set_active_charging_preserve_intent(vehicle_id, reason)
+        else:
+            self._clear_active_charging_preserve_intent(vehicle_id, reason)
 
     async def refresh_optimizer_forecast_plans(
         self,
@@ -5007,10 +5265,9 @@ class AutoScheduleExecutor:
         """Get backup reserve from Tesla Powerwall via Fleet API."""
         try:
             from ..const import (
+                CONF_FLEET_API_BASE_URL,
                 CONF_TESLA_ENERGY_SITE_ID,
-                TESLA_PROVIDER_TESLEMETRY,
-                TESLEMETRY_API_BASE_URL,
-                FLEET_API_BASE_URL,
+                get_tesla_api_base_url,
             )
             from .. import get_tesla_api_token
 
@@ -5028,7 +5285,9 @@ class AutoScheduleExecutor:
                 "Authorization": f"Bearer {current_token}",
                 "Content-Type": "application/json",
             }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            api_base = get_tesla_api_base_url(
+                provider, self.config_entry.data.get(CONF_FLEET_API_BASE_URL)
+            )
 
             async with session.get(
                 f"{api_base}/api/1/energy_sites/{site_id}/site_info",
@@ -5083,10 +5342,9 @@ class AutoScheduleExecutor:
         """Set backup reserve on Tesla Powerwall via Fleet API."""
         try:
             from ..const import (
+                CONF_FLEET_API_BASE_URL,
                 CONF_TESLA_ENERGY_SITE_ID,
-                TESLA_PROVIDER_TESLEMETRY,
-                TESLEMETRY_API_BASE_URL,
-                FLEET_API_BASE_URL,
+                get_tesla_api_base_url,
             )
             from .. import get_tesla_api_token
 
@@ -5104,7 +5362,9 @@ class AutoScheduleExecutor:
                 "Authorization": f"Bearer {current_token}",
                 "Content-Type": "application/json",
             }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            api_base = get_tesla_api_base_url(
+                provider, self.config_entry.data.get(CONF_FLEET_API_BASE_URL)
+            )
 
             async with session.post(
                 f"{api_base}/api/1/energy_sites/{site_id}/backup",
@@ -5136,10 +5396,9 @@ class AutoScheduleExecutor:
 
         try:
             from ..const import (
+                CONF_FLEET_API_BASE_URL,
                 CONF_TESLA_ENERGY_SITE_ID,
-                TESLA_PROVIDER_TESLEMETRY,
-                TESLEMETRY_API_BASE_URL,
-                FLEET_API_BASE_URL,
+                get_tesla_api_base_url,
             )
             from .. import get_tesla_api_token
 
@@ -5156,7 +5415,9 @@ class AutoScheduleExecutor:
                 "Authorization": f"Bearer {current_token}",
                 "Content-Type": "application/json",
             }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            api_base = get_tesla_api_base_url(
+                provider, self.config_entry.data.get(CONF_FLEET_API_BASE_URL)
+            )
 
             async with session.get(
                 f"{api_base}/api/1/energy_sites/{site_id}/site_info",
@@ -5199,10 +5460,9 @@ class AutoScheduleExecutor:
 
         try:
             from ..const import (
+                CONF_FLEET_API_BASE_URL,
                 CONF_TESLA_ENERGY_SITE_ID,
-                TESLA_PROVIDER_TESLEMETRY,
-                TESLEMETRY_API_BASE_URL,
-                FLEET_API_BASE_URL,
+                get_tesla_api_base_url,
             )
             from .. import get_tesla_api_token
 
@@ -5220,7 +5480,9 @@ class AutoScheduleExecutor:
                 "Authorization": f"Bearer {current_token}",
                 "Content-Type": "application/json",
             }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            api_base = get_tesla_api_base_url(
+                provider, self.config_entry.data.get(CONF_FLEET_API_BASE_URL)
+            )
 
             # Map our rule names to Tesla API
             disallow_export = rule == "never"
@@ -5773,6 +6035,7 @@ def _with_configured_charger_entities(
     if charger_type == "generic":
         from ..const import (
             CONF_GENERIC_CHARGER_AMPS_ENTITY,
+            CONF_GENERIC_CHARGER_POWER_ENTITY,
             CONF_GENERIC_CHARGER_STATUS_ENTITY,
             CONF_GENERIC_CHARGER_SWITCH_ENTITY,
         )
@@ -5789,6 +6052,10 @@ def _with_configured_charger_entities(
             CONF_GENERIC_CHARGER_STATUS_ENTITY,
             "",
         )
+        params["charger_power_entity"] = params.get("charger_power_entity") or opts.get(
+            CONF_GENERIC_CHARGER_POWER_ENTITY,
+            "",
+        )
     elif charger_type == "ocpp":
         params["ocpp_charger_id"] = _resolve_ocpp_charger_id(
             hass,
@@ -5796,11 +6063,15 @@ def _with_configured_charger_entities(
         )
     elif charger_type == "sigenergy":
         from ..const import (
+            CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY,
+            CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY,
             CONF_SIGENERGY_CHARGER_HOST,
             CONF_SIGENERGY_CHARGER_PORT,
             CONF_SIGENERGY_CHARGER_SLAVE_ID,
             CONF_SIGENERGY_CHARGER_TYPE,
             CONF_SIGENERGY_MODBUS_HOST,
+            DEFAULT_SIGENERGY_EVDC_CHARGE_POWER_LIMIT_ENTITY,
+            DEFAULT_SIGENERGY_EVDC_DISCHARGE_POWER_LIMIT_ENTITY,
         )
 
         params["sigenergy_charger_host"] = params.get("sigenergy_charger_host") or opts.get(
@@ -5816,13 +6087,39 @@ def _with_configured_charger_entities(
         params["sigenergy_charger_type"] = params.get("sigenergy_charger_type") or opts.get(
             CONF_SIGENERGY_CHARGER_TYPE
         )
+        charge_limit_entity = str(
+            params.get(CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY)
+            or opts.get(CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY)
+            or ""
+        ).strip()
+        discharge_limit_entity = str(
+            params.get(CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY)
+            or opts.get(CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY)
+            or ""
+        ).strip()
+        if not charge_limit_entity and _valid_state(
+            hass.states.get(DEFAULT_SIGENERGY_EVDC_CHARGE_POWER_LIMIT_ENTITY)
+        ):
+            charge_limit_entity = DEFAULT_SIGENERGY_EVDC_CHARGE_POWER_LIMIT_ENTITY
+        if not discharge_limit_entity and _valid_state(
+            hass.states.get(DEFAULT_SIGENERGY_EVDC_DISCHARGE_POWER_LIMIT_ENTITY)
+        ):
+            discharge_limit_entity = DEFAULT_SIGENERGY_EVDC_DISCHARGE_POWER_LIMIT_ENTITY
+        if charge_limit_entity:
+            params[CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY] = charge_limit_entity
+        if discharge_limit_entity:
+            params[CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY] = discharge_limit_entity
         normalized_type = str(params.get("sigenergy_charger_type") or "evac").lower()
         is_evdc = normalized_type == "evdc"
         params["sigenergy_charger_type"] = "evdc" if is_evdc else "evac"
-        params["supports_rate_control"] = not is_evdc
+        params["supports_rate_control"] = (not is_evdc) or bool(charge_limit_entity)
         params["supports_restart_while_plugged"] = not is_evdc
         params["control_strategy"] = "one_shot" if is_evdc else "dynamic_rate"
-        params["solar_control_strategy"] = "native_handoff" if is_evdc else "dynamic_rate"
+        params["solar_control_strategy"] = (
+            "dynamic_rate"
+            if params["supports_rate_control"]
+            else "native_handoff"
+        )
         params["charger_capabilities"] = {
             "charger_type": params["sigenergy_charger_type"],
             "supports_start_stop": True,
@@ -5830,6 +6127,8 @@ def _with_configured_charger_entities(
             "supports_restart_while_plugged": params["supports_restart_while_plugged"],
             "control_strategy": params["control_strategy"],
             "solar_control_strategy": params["solar_control_strategy"],
+            CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY: charge_limit_entity,
+            CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY: discharge_limit_entity,
         }
     return params
 
@@ -5885,6 +6184,8 @@ def get_solar_surplus_vehicle_configs(
         "sigenergy_charger_port",
         "sigenergy_charger_slave_id",
         "sigenergy_charger_type",
+        "sigenergy_charger_charge_power_limit_entity",
+        "sigenergy_charger_discharge_power_limit_entity",
         "supports_rate_control",
         "supports_restart_while_plugged",
         "control_strategy",
@@ -6007,6 +6308,48 @@ def _build_dynamic_stop_params(
     return params
 
 
+async def _resolve_unspecified_tesla_start_vin(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+    vehicle_vin: Optional[str],
+) -> Optional[str]:
+    """Resolve a default Tesla start to the single home plugged-in vehicle."""
+    if vehicle_vin:
+        return vehicle_vin
+
+    try:
+        vehicles = await discover_all_tesla_vehicles(hass, config_entry)
+    except Exception as err:
+        _LOGGER.debug("Tesla start VIN discovery unavailable: %s", err)
+        return None
+
+    candidates: list[str] = []
+    for vehicle in vehicles or []:
+        vin = str(vehicle.get("vin") or vehicle.get("vehicle_id") or "").strip()
+        if not vin:
+            continue
+        try:
+            location = await get_ev_location(hass, config_entry, vehicle_vin=vin)
+            if location not in ("home", "unknown"):
+                continue
+            if await is_ev_plugged_in(hass, config_entry, vehicle_vin=vin):
+                candidates.append(vin)
+        except Exception as err:
+            _LOGGER.debug("Tesla start VIN check failed for %s: %s", vin[:8], err)
+
+    if len(candidates) == 1:
+        _LOGGER.debug(
+            "Tesla coordinated start resolved default loadpoint to %s",
+            candidates[0][:8],
+        )
+        return candidates[0]
+    if len(candidates) > 1:
+        _LOGGER.debug(
+            "Tesla coordinated start found multiple plugged-in vehicles; keeping default loadpoint"
+        )
+    return None
+
+
 async def _start_coordinated_charging(
     hass: "HomeAssistant",
     domain: str,
@@ -6022,13 +6365,20 @@ async def _start_coordinated_charging(
 ) -> bool:
     """Start charging through the configured dynamic charger action."""
     opts = {**config_entry.data, **config_entry.options}
+    resolved_vehicle_vin = vehicle_vin
+    if _configured_charger_type(opts) == "tesla":
+        resolved_vehicle_vin = await _resolve_unspecified_tesla_start_vin(
+            hass,
+            config_entry,
+            vehicle_vin,
+        )
     params = _build_dynamic_charging_params(
         hass,
         domain,
         config_entry,
         opts,
         owner_mode=owner_mode,
-        vehicle_vin=vehicle_vin,
+        vehicle_vin=resolved_vehicle_vin,
         no_grid_import=no_grid_import,
         allow_ownership_takeover=allow_ownership_takeover,
     )
@@ -6217,6 +6567,8 @@ def _get_vehicle_charger_params(
                         "sigenergy_charger_port",
                         "sigenergy_charger_slave_id",
                         "sigenergy_charger_type",
+                        "sigenergy_charger_charge_power_limit_entity",
+                        "sigenergy_charger_discharge_power_limit_entity",
                         "pre_charge_wake_entity",
                         "pre_charge_wake_duration_seconds",
                         "pre_charge_wake_on_service",
@@ -6252,6 +6604,8 @@ def _get_vehicle_charger_params(
                     "sigenergy_charger_port",
                     "sigenergy_charger_slave_id",
                     "sigenergy_charger_type",
+                    "sigenergy_charger_charge_power_limit_entity",
+                    "sigenergy_charger_discharge_power_limit_entity",
                     "pre_charge_wake_entity",
                     "pre_charge_wake_duration_seconds",
                     "pre_charge_wake_on_service",
@@ -6672,6 +7026,26 @@ class PriceLevelChargingExecutor:
             reason: Reason for starting charging
             vehicle_vin: Optional VIN for specific vehicle. If None, uses default.
         """
+        from .ev_ownership import manual_stop_hold_reason
+
+        hold_reason = manual_stop_hold_reason(
+            self.hass,
+            self.config_entry,
+            vehicle_vin,
+        )
+        if hold_reason:
+            state = self._get_or_create_vehicle_state(vehicle_vin or "_default")
+            state.is_charging = False
+            state.last_decision = "waiting"
+            state.last_decision_reason = hold_reason
+            await self.apply_preserve_home_battery(False, hold_reason)
+            _LOGGER.info(
+                "Price-level charging: start suppressed for %s - %s",
+                vehicle_vin or "_default",
+                hold_reason,
+            )
+            return False
+
         success = await _start_coordinated_charging(
             self.hass,
             self._domain,
@@ -6760,7 +7134,7 @@ class PriceLevelChargingExecutor:
 
         _LOGGER.debug(
             f"Price-level charging decision: enabled={settings.get('enabled')}, "
-            f"price={current_price_cents}c, recovery_soc={settings.get('recovery_soc')}, "
+            f"price={_format_price_log_value(current_price_cents)}, recovery_soc={settings.get('recovery_soc')}, "
             f"recovery_price={settings.get('recovery_price_cents')}c, "
             f"opportunity_price={settings.get('opportunity_price_cents')}c"
         )
@@ -6898,7 +7272,7 @@ class PriceLevelChargingExecutor:
 
         _LOGGER.debug(
             f"Price-level charging decision for VIN {vehicle_vin}: enabled={settings.get('enabled')}, "
-            f"price={current_price_cents}c"
+            f"price={_format_price_log_value(current_price_cents)}"
         )
 
         # Check if enabled
@@ -7621,6 +7995,69 @@ async def _can_stop_external_scheduled_session(
     return False, f"vehicle location is {location or 'unknown'}"
 
 
+async def _find_external_scheduled_charging_vehicle(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+) -> Tuple[Optional[str], bool, str]:
+    """Return the active Tesla VIN that Scheduled Charging may stop."""
+    opts = {**getattr(config_entry, "data", {}), **getattr(config_entry, "options", {})}
+    charger_type = _configured_charger_type(opts)
+    if charger_type in ("generic", "ocpp", "sigenergy", "zaptec"):
+        can_stop, reason = await _can_stop_external_scheduled_session(hass, config_entry)
+        if not can_stop:
+            return None, False, reason
+        if await is_ev_actively_charging(hass, config_entry):
+            return None, True, reason
+        return None, False, "no active external scheduled session"
+
+    blocked_reason = ""
+    saw_home_vehicle = False
+    vehicles = await discover_all_tesla_vehicles(hass, config_entry)
+    for vehicle in vehicles:
+        vehicle_vin = vehicle.get("vin")
+        if not vehicle_vin:
+            continue
+
+        try:
+            from .ev_ownership import get_active_ev_owner_mode, owner_family
+
+            active_mode = (
+                _get_active_dynamic_ev_mode(hass, config_entry, vehicle_vin)
+                or get_active_ev_owner_mode(hass, config_entry, vehicle_vin)
+            )
+            if active_mode and owner_family(active_mode) != owner_family("scheduled"):
+                blocked_reason = f"{active_mode} owns the active loadpoint"
+                continue
+        except Exception as err:
+            _LOGGER.debug(
+                "Scheduled external-stop ownership guard failed for %s: %s",
+                vehicle_vin,
+                err,
+            )
+            continue
+
+        location = await get_ev_location(hass, config_entry, vehicle_vin)
+        if location != "home":
+            blocked_reason = f"vehicle location is {location or 'unknown'}"
+            continue
+
+        saw_home_vehicle = True
+        if await is_ev_actively_charging(hass, config_entry, vehicle_vin):
+            return vehicle_vin, True, "vehicle is at home"
+
+    if vehicles:
+        if saw_home_vehicle:
+            return None, False, "no active external scheduled session"
+        return None, False, blocked_reason or "no active external scheduled session"
+
+    can_stop, reason = await _can_stop_external_scheduled_session(hass, config_entry)
+    if not can_stop:
+        return None, False, reason
+    if await is_ev_actively_charging(hass, config_entry):
+        return None, True, reason
+    return None, False, "no active external scheduled session"
+
+
 # ============================================================================
 # EV CHARGING MODE COORDINATOR
 # ============================================================================
@@ -7661,6 +8098,7 @@ class EVChargingModeCoordinator:
         self._is_charging = False
         self._active_modes: List[str] = []
         self._last_reason = ""
+        self._last_external_scheduled_stop: Optional[Tuple[Optional[str], str, float]] = None
 
     async def _start_charging(self, modes: List[str], reason: str) -> bool:
         """Start EV charging."""
@@ -7681,6 +8119,7 @@ class EVChargingModeCoordinator:
         self._is_charging = True
         self._active_modes = modes
         self._last_reason = reason
+        self._last_external_scheduled_stop = None
         _LOGGER.info(f"EV Coordinator: Started charging - modes: {modes}, reason: {reason}")
         return True
 
@@ -7703,7 +8142,11 @@ class EVChargingModeCoordinator:
         _LOGGER.info(f"EV Coordinator: Stopped charging - {reason}")
         return True
 
-    async def _stop_external_scheduled_charging(self, reason: str) -> bool:
+    async def _stop_external_scheduled_charging(
+        self,
+        reason: str,
+        vehicle_vin: Optional[str] = None,
+    ) -> bool:
         """Stop an externally-started session that violates Scheduled Charging."""
         success = await _stop_coordinated_charging(
             self.hass,
@@ -7711,6 +8154,7 @@ class EVChargingModeCoordinator:
             self.config_entry,
             expected_owner_mode="scheduled",
             reason=reason,
+            vehicle_vin=vehicle_vin,
             command="stop_scheduled_external",
             stop_untracked=True,
             log_prefix="Scheduled charging",
@@ -7724,6 +8168,26 @@ class EVChargingModeCoordinator:
         _LOGGER.info("EV Coordinator: Stopped external scheduled charging - %s", reason)
         return True
 
+    def _external_scheduled_stop_recent(
+        self,
+        vehicle_vin: Optional[str],
+        reason: str,
+    ) -> bool:
+        """Return true when the same external scheduled stop was just sent."""
+        if not self._last_external_scheduled_stop:
+            return False
+        last_vin, last_reason, last_time = self._last_external_scheduled_stop
+        if last_vin != vehicle_vin or last_reason != reason:
+            return False
+        return (time.monotonic() - last_time) < EXTERNAL_SCHEDULED_STOP_SUPPRESS_SECONDS
+
+    def _record_external_scheduled_stop(
+        self,
+        vehicle_vin: Optional[str],
+        reason: str,
+    ) -> None:
+        self._last_external_scheduled_stop = (vehicle_vin, reason, time.monotonic())
+
     async def evaluate(
         self,
         live_status: dict,
@@ -7736,7 +8200,7 @@ class EVChargingModeCoordinator:
         For Price-Level charging, evaluates all discovered vehicles independently.
         """
         _LOGGER.debug(
-            f"EV Coordinator evaluating: price={current_price_cents}c, "
+            f"EV Coordinator evaluating: price={_format_price_log_value(current_price_cents)}, "
             f"currently_charging={self._is_charging}"
         )
 
@@ -7848,32 +8312,48 @@ class EVChargingModeCoordinator:
                 and not any_price_level_charging
                 and decisions[0].reason != "Scheduled charging is disabled"
             ):
-                can_stop_external, external_guard_reason = await _can_stop_external_scheduled_session(
-                    self.hass,
-                    self.config_entry,
+                external_vehicle_vin, external_charge, external_guard_reason = (
+                    await _find_external_scheduled_charging_vehicle(
+                        self.hass,
+                        self.config_entry,
+                    )
                 )
-                if not can_stop_external:
+                if not external_charge and external_guard_reason != "no active external scheduled session":
                     _LOGGER.info(
                         "Scheduled charging leaving external session alone: %s",
                         external_guard_reason,
                     )
-                    external_charge = False
-                else:
-                    external_charge = await is_ev_actively_charging(
-                        self.hass,
-                        self.config_entry,
-                    )
                 if external_charge:
                     scheduled_reason = decisions[0].reason or "Scheduled charging inactive"
-                    _LOGGER.info(
-                        "Scheduled charging stopping external session: %s",
+                    if self._external_scheduled_stop_recent(
+                        external_vehicle_vin,
                         scheduled_reason,
-                    )
-                    if await self._stop_external_scheduled_charging(scheduled_reason):
-                        scheduled_exec.update_charging_state(False, scheduled_reason)
-                        scheduled_exec._state.last_decision = "stopped"
-                        scheduled_exec._state.last_decision_reason = scheduled_reason
+                    ):
+                        _LOGGER.info(
+                            "Scheduled charging suppressing repeat external stop for %s: %s",
+                            external_vehicle_vin or "configured charger",
+                            scheduled_reason,
+                        )
                         stopped_external_scheduled = True
+                    else:
+                        _LOGGER.info(
+                            "Scheduled charging stopping external session: %s",
+                            scheduled_reason,
+                        )
+                        if await self._stop_external_scheduled_charging(
+                            scheduled_reason,
+                            vehicle_vin=external_vehicle_vin,
+                        ):
+                            self._record_external_scheduled_stop(
+                                external_vehicle_vin,
+                                scheduled_reason,
+                            )
+                            scheduled_exec.update_charging_state(False, scheduled_reason)
+                            scheduled_exec._state.last_decision = "stopped"
+                            scheduled_exec._state.last_decision_reason = scheduled_reason
+                            stopped_external_scheduled = True
+                else:
+                    self._last_external_scheduled_stop = None
 
             # Update executor states
             if scheduled_exec and not stopped_external_scheduled:

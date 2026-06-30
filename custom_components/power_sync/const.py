@@ -16,7 +16,7 @@ except (FileNotFoundError, json.JSONDecodeError):
     POWER_SYNC_VERSION = "0.0.0"
 
 # Dashboard JS version — bump this to cache-bust the strategy JS independently of the app version
-DASHBOARD_JS_VERSION = "40"
+DASHBOARD_JS_VERSION = "44"
 
 # User-Agent for API identification
 POWER_SYNC_USER_AGENT = f"PowerSync/{POWER_SYNC_VERSION} HomeAssistant"
@@ -43,6 +43,14 @@ CONF_BATTERY_CURTAILMENT_ENABLED = "battery_curtailment_enabled"
 CONF_OPENWEATHERMAP_API_KEY = "openweathermap_api_key"
 CONF_WEATHER_LOCATION = "weather_location"
 CONF_WEATHER_ENTITY = "weather_entity"
+CONF_SOLAR_FORECAST_PROVIDER = "solar_forecast_provider"
+SOLAR_FORECAST_PROVIDER_SOLCAST = "solcast"
+SOLAR_FORECAST_PROVIDER_OPEN_METEO = "open_meteo"
+DEFAULT_SOLAR_FORECAST_PROVIDER = SOLAR_FORECAST_PROVIDER_SOLCAST
+SOLAR_FORECAST_PROVIDERS = {
+    SOLAR_FORECAST_PROVIDER_SOLCAST: "Solcast",
+    SOLAR_FORECAST_PROVIDER_OPEN_METEO: "Open-Meteo",
+}
 CONF_SOLCAST_ESTIMATE_TYPE = "solcast_estimate_type"
 SOLCAST_ESTIMATE = "estimate"
 SOLCAST_ESTIMATE10 = "estimate10"
@@ -134,6 +142,7 @@ CONF_GENERIC_CHARGER_ENABLED = "generic_charger_enabled"
 CONF_GENERIC_CHARGER_SWITCH_ENTITY = "generic_charger_switch_entity"
 CONF_GENERIC_CHARGER_AMPS_ENTITY = "generic_charger_amps_entity"
 CONF_GENERIC_CHARGER_STATUS_ENTITY = "generic_charger_status_entity"
+CONF_GENERIC_CHARGER_POWER_ENTITY = "generic_charger_power_entity"
 CONF_GENERIC_CHARGER_SOC_ENTITY = "generic_charger_soc_entity"
 CONF_GENERIC_CHARGER_SOC_ENTITY_2 = "generic_charger_soc_entity_2"
 
@@ -143,6 +152,8 @@ CONF_SIGENERGY_CHARGER_TYPE = "sigenergy_charger_type"
 CONF_SIGENERGY_CHARGER_HOST = "sigenergy_charger_host"
 CONF_SIGENERGY_CHARGER_PORT = "sigenergy_charger_port"
 CONF_SIGENERGY_CHARGER_SLAVE_ID = "sigenergy_charger_slave_id"
+CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY = "sigenergy_charger_charge_power_limit_entity"
+CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY = "sigenergy_charger_discharge_power_limit_entity"
 SIGENERGY_CHARGER_EVAC = "evac"
 SIGENERGY_CHARGER_EVDC = "evdc"
 SIGENERGY_CHARGER_TYPES = {
@@ -151,6 +162,12 @@ SIGENERGY_CHARGER_TYPES = {
 }
 DEFAULT_SIGENERGY_CHARGER_PORT = 502
 DEFAULT_SIGENERGY_CHARGER_SLAVE_ID = 1
+DEFAULT_SIGENERGY_EVDC_CHARGE_POWER_LIMIT_ENTITY = (
+    "number.sigen_inverter_dc_charger_max_charging_power_limit"
+)
+DEFAULT_SIGENERGY_EVDC_DISCHARGE_POWER_LIMIT_ENTITY = (
+    "number.sigen_inverter_dc_charger_max_discharging_power_limit"
+)
 
 # Battery System Selection
 CONF_BATTERY_SYSTEM = "battery_system"
@@ -167,6 +184,7 @@ BATTERY_SYSTEM_SAJ_H2 = "saj_h2"
 BATTERY_SYSTEM_FRONIUS_RESERVA = "fronius_reserva"
 BATTERY_SYSTEM_NEOVOLT = "neovolt"
 BATTERY_SYSTEM_SOLAREDGE = "solaredge"
+BATTERY_SYSTEM_ANKER_SOLIX = "anker_solix"
 BATTERY_SYSTEM_CUSTOM = "custom"
 
 BATTERY_SYSTEMS = {
@@ -182,6 +200,7 @@ BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius GEN24 storage (BYD/Reserva) — via Fronius Modbus integration",
     BATTERY_SYSTEM_NEOVOLT: "Neovolt/Bytewatt — via Neovolt Modbus integration",
     BATTERY_SYSTEM_SOLAREDGE: "SolarEdge Home Battery / inverter curtailment — HA entity bridge + Modbus TCP",
+    BATTERY_SYSTEM_ANKER_SOLIX: "Anker Solix — X1 Modbus or Anker Solix HA integration",
     BATTERY_SYSTEM_CUSTOM: "Custom / external controller — planner only via Home Assistant entities",
 }
 
@@ -520,6 +539,32 @@ NEOVOLT_SURPLUS_BALANCER_MODES = (
 DEFAULT_NEOVOLT_SURPLUS_BALANCER_MODE = NEOVOLT_SURPLUS_BALANCER_AUTO
 DEFAULT_NEOVOLT_SOC_BALANCE_TOLERANCE = 5.0
 
+# Anker Solix battery system configuration.
+CONF_ANKER_SOLIX_CONNECTION_TYPE = "anker_solix_connection_type"
+CONF_ANKER_SOLIX_MODBUS_HOST = "anker_solix_modbus_host"
+CONF_ANKER_SOLIX_MODBUS_PORT = "anker_solix_modbus_port"
+CONF_ANKER_SOLIX_MODBUS_SLAVE_ID = "anker_solix_modbus_slave_id"
+CONF_ANKER_SOLIX_CONFIG_ENTRY_ID = "anker_solix_config_entry_id"
+CONF_ANKER_SOLIX_ENTITY_PREFIX = "anker_solix_entity_prefix"
+CONF_ANKER_SOLIX_BATTERY_CAPACITY_KWH = "anker_solix_battery_capacity_kwh"
+CONF_ANKER_SOLIX_MAX_CHARGE_KW = "anker_solix_max_charge_kw"
+CONF_ANKER_SOLIX_MAX_DISCHARGE_KW = "anker_solix_max_discharge_kw"
+
+ANKER_SOLIX_CONNECTION_MODBUS = "modbus"
+ANKER_SOLIX_CONNECTION_OFFICIAL_HA = "official_ha"
+ANKER_SOLIX_CONNECTION_CLOUD_HA = "cloud_ha"
+ANKER_SOLIX_CONNECTION_TYPES = {
+    ANKER_SOLIX_CONNECTION_MODBUS: "Direct X1 Modbus TCP",
+    ANKER_SOLIX_CONNECTION_OFFICIAL_HA: "Official Anker Solix HA integration",
+    ANKER_SOLIX_CONNECTION_CLOUD_HA: "Unofficial Anker Solix cloud HA integration",
+}
+
+DEFAULT_ANKER_SOLIX_MODBUS_PORT = 502
+DEFAULT_ANKER_SOLIX_MODBUS_SLAVE_ID = 1
+DEFAULT_ANKER_SOLIX_BATTERY_CAPACITY_KWH = 10.0
+DEFAULT_ANKER_SOLIX_MAX_CHARGE_KW = 5.0
+DEFAULT_ANKER_SOLIX_MAX_DISCHARGE_KW = 5.0
+
 # SolarEdge Home battery dispatch via HA storage-control entities, plus
 # SolarEdge inverter curtailment via Modbus TCP/entity fallback.
 CONF_SOLAREDGE_HOST = "solaredge_host"
@@ -595,6 +640,21 @@ ELECTRICITY_PROVIDERS = {
     "other": "Other / Custom TOU — enter your own rates manually",
 }
 
+NO_IDLE_MODE_PROVIDERS = frozenset({
+    "flow_power",
+    "globird",
+    "aemo_vpp",
+    "other",
+    "tou_only",
+    "nz",
+})
+
+
+def supports_no_idle_mode_provider(provider: str | None) -> bool:
+    """Return whether a provider can replace optimizer idle holds."""
+    return str(provider or "") in NO_IDLE_MODE_PROVIDERS
+
+
 # GloBird ZeroHero plan configuration
 CONF_GLOBIRD_PLAN = "globird_plan"
 GLOBIRD_PLAN_NOT_ZEROHERO = "not_zerohero"
@@ -657,6 +717,8 @@ CONF_EPEX_REGION = "epex_region"
 CONF_EPEX_SURCHARGE = "epex_surcharge"  # Fixed surcharge in ct/kWh (network fees, levies)
 CONF_EPEX_TAX_PERCENT = "epex_tax_percent"  # Tax percentage (e.g. 21% VAT in Belgium)
 CONF_EPEX_EXPORT_RATE = "epex_export_rate"  # Fixed feed-in rate in ct/kWh (0 = wholesale)
+CONF_EPEX_IMPORT_PRICE_ENTITY = "epex_import_price_entity"  # Optional HA sensor for import valuation
+CONF_EPEX_EXPORT_PRICE_ENTITY = "epex_export_price_entity"  # Optional HA sensor for export valuation
 EPEX_API_BASE_URL = "https://epexpredictor.batzill.com"
 EPEX_REGIONS = {
     "DE": "Germany",
@@ -781,12 +843,22 @@ FLOW_POWER_STATES = {
     "VIC1": "Victoria (35c export)",
     "QLD1": "Queensland (45c export)",
     "SA1": "South Australia (45c export)",
+    "TAS1": "Tasmania",
 }
 
 # Flow Power price source options
 FLOW_POWER_PRICE_SOURCES = {
     "amber": "Amber API",
     "aemo": "AEMO Direct (NEMWeb)",
+    "kwatch": "Flow Power API (KWatch)",
+}
+
+FLOW_POWER_KWATCH_REGIONS = {
+    "NSW1": "nsw",
+    "VIC1": "vic",
+    "QLD1": "qld",
+    "SA1": "sa",
+    "TAS1": "tas",
 }
 
 # Network Tariff configuration (for Flow Power + AEMO)
@@ -998,7 +1070,7 @@ FLOW_POWER_HAPPY_HOUR_PERIODS = [
 # Flow Power PEA (Price Efficiency Adjustment) configuration
 # PEA adjusts pricing based on wholesale market efficiency
 # Legacy formula: PEA = wholesale - TWAP - BPEA
-# V2 formula: PEA = GST*Spot + Tariff - GST*TWAP - AvgDailyTariff - BPEA
+# V2 formula: PEA = GST*Spot + Tariff - GST*TWAP - BPEA
 CONF_PEA_ENABLED = "pea_enabled"
 CONF_FLOW_POWER_BASE_RATE = "flow_power_base_rate"
 CONF_FLOW_POWER_EXPORT_RATE = "flow_power_export_rate"
@@ -1020,6 +1092,9 @@ FLOW_POWER_DEFAULT_BASE_RATE = 34.0  # Default Flow Power base rate (c/kWh)
 # Flow Power Portal configuration
 CONF_FLOWPOWER_EMAIL = "flowpower_email"
 CONF_FLOWPOWER_PASSWORD = "flowpower_password"
+CONF_FLOWPOWER_API_KEY = "flowpower_api_key"
+CONF_FLOWPOWER_NMI = "flowpower_nmi"
+CONF_FLOWPOWER_NETWORK_TARIFF = "flowpower_network_tariff"
 UPDATE_INTERVAL_FLOWPOWER = 1800  # 30 minutes
 
 # Portal account sensors — (sensor_type, name, data_key, unit, icon, source_label)
@@ -1203,6 +1278,7 @@ SWITCH_TYPE_FORCE_CHARGE = "force_charge"
 SWITCH_TYPE_MONITORING_MODE = "monitoring_mode"
 SWITCH_TYPE_AWAY_MODE = "away_mode"
 SWITCH_TYPE_PROFIT_MAX_MODE = "profit_max_mode"
+SWITCH_TYPE_CHARGE_BY_TIME = "charge_by_time"
 SWITCH_TYPE_OPTIMIZATION_DISABLE_IDLE = "optimization_disable_idle"
 SWITCH_TYPE_OPTIMIZATION_SPREAD_EXPORT = "optimization_spread_export"
 SWITCH_TYPE_OPTIMIZATION_SPREAD_IMPORT = "optimization_spread_import"
@@ -1230,6 +1306,8 @@ SERVICE_HOLD_BATTERY_SOC = "hold_battery_soc"
 SERVICE_RESTORE_NORMAL = "restore_normal"
 SERVICE_GET_CALENDAR_HISTORY = "get_calendar_history"
 SERVICE_SYNC_BATTERY_HEALTH = "sync_battery_health"
+SERVICE_PREVIEW_HISTORY_RELINK = "preview_history_relink"
+SERVICE_APPLY_HISTORY_RELINK = "apply_history_relink"
 SERVICE_SET_BACKUP_RESERVE = "set_backup_reserve"
 SERVICE_SET_OPERATION_MODE = "set_operation_mode"
 SERVICE_SET_GRID_EXPORT = "set_grid_export"
@@ -1237,8 +1315,40 @@ SERVICE_SET_GRID_CHARGING = "set_grid_charging"
 SERVICE_CURTAIL_INVERTER = "curtail_inverter"
 SERVICE_RESTORE_INVERTER = "restore_inverter"
 
+CONF_HISTORY_RELINKS = "history_relinks"
+
+INVERTER_CONTROL_MODE_NORMAL = "normal"
+INVERTER_CONTROL_MODE_LOAD_FOLLOWING = "load_following"
+INVERTER_CONTROL_MODE_SHUTDOWN = "shutdown"
+INVERTER_CONTROL_MODE_CURTAILED = "curtailed"
+INVERTER_CONTROL_MODES = {
+    INVERTER_CONTROL_MODE_NORMAL,
+    INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
+    INVERTER_CONTROL_MODE_SHUTDOWN,
+    INVERTER_CONTROL_MODE_CURTAILED,
+}
+
 # Manual discharge/charge duration options (minutes)
-DISCHARGE_DURATIONS = [5, 10, 15, 30, 45, 60, 75, 90, 105, 120, 150, 180, 210, 240]
+DISCHARGE_DURATIONS = [
+    5,
+    10,
+    15,
+    30,
+    45,
+    60,
+    75,
+    90,
+    105,
+    120,
+    135,
+    150,
+    165,
+    180,
+    195,
+    210,
+    225,
+    240,
+]
 DEFAULT_DISCHARGE_DURATION = 30
 
 # Duration dropdown entity option keys (stored in ConfigEntry.options)
@@ -1575,6 +1685,7 @@ SUNGROW_SH_RS_MODELS = {
     "sh4.6rs": "SH4.6RS",
     "sh5.0rs": "SH5.0RS",
     "sh6.0rs": "SH6.0RS",
+    "sh10rs": "SH10RS",
 }
 
 # Three phase RT series (residential)
@@ -1716,6 +1827,7 @@ OPTIMIZATION_PROVIDER_NATIVE_NAMES = {
     BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius GEN24 storage",
     BATTERY_SYSTEM_NEOVOLT: "Neovolt",
     BATTERY_SYSTEM_SOLAREDGE: "SolarEdge",
+    BATTERY_SYSTEM_ANKER_SOLIX: "Anker Solix",
     BATTERY_SYSTEM_CUSTOM: "Custom / external controller",
 }
 
@@ -1733,7 +1845,9 @@ CONF_OPTIMIZATION_MANUAL_RESERVE = "optimization_manual_reserve"
 CONF_HARDWARE_BACKUP_RESERVE = "hardware_backup_reserve"
 CONF_OPTIMIZATION_INTERVAL = "optimization_interval"
 CONF_OPTIMIZATION_HORIZON = "optimization_horizon"
+CONF_OPTIMIZATION_LOAD_ENTITY = "optimization_load_entity"
 CONF_OPTIMIZATION_EV_INTEGRATION = "optimization_ev_integration"
+CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY = "optimization_planned_ev_load_entity"
 CONF_OPTIMIZATION_VPP_ENABLED = "optimization_vpp_enabled"
 CONF_OPTIMIZATION_MULTI_BATTERY = "optimization_multi_battery"
 CONF_OPTIMIZATION_ML_FORECASTING = "optimization_ml_forecasting"
@@ -1741,7 +1855,10 @@ CONF_OPTIMIZATION_BATTERY_CAPACITY_WH = "optimization_battery_capacity_wh"
 CONF_OPTIMIZATION_MAX_CHARGE_W = "optimization_max_charge_w"
 CONF_OPTIMIZATION_MAX_DISCHARGE_W = "optimization_max_discharge_w"
 CONF_OPTIMIZATION_MAX_GRID_IMPORT_W = "optimization_max_grid_import_w"
+CONF_OPTIMIZATION_MAX_GRID_EXPORT_W = "optimization_max_grid_export_w"
 CONF_OPTIMIZATION_ALLOW_GRID_CHARGE = "optimization_allow_grid_charge"
+CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE = "optimization_max_grid_charge_price"
+CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP = "optimization_grid_charge_soc_cap"
 CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED = "optimization_spread_export_enabled"
 CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED = "optimization_spread_import_enabled"
 CONF_OPTIMIZATION_DISABLE_IDLE = "optimization_disable_idle"
@@ -1749,8 +1866,11 @@ CONF_OPTIMIZATION_WEATHER_INTEGRATION = "optimization_weather_integration"
 CONF_AWAY_ENABLED_AT = "away_enabled_at"    # ISO timestamp when away mode was turned on
 CONF_AWAY_DISABLED_AT = "away_disabled_at"  # ISO timestamp when away mode was turned off
 CONF_PROFIT_MAX_ENABLED = "profit_max_enabled"  # Whether profit maximisation mode is on
-CONF_PROFIT_MAX_TARGET_TIME = "profit_max_target_time"  # HH:MM time to be full by in profit maximisation mode
-CONF_PROFIT_MAX_TARGET_SOC = "profit_max_target_soc"  # Target SOC before the profit maximisation export window
+CONF_CHARGE_BY_TIME_ENABLED = "charge_by_time_enabled"  # Whether charge-by-time prefill is on
+CONF_CHARGE_BY_TIME_TARGET_TIME = "charge_by_time_target_time"  # HH:MM time to reach target SOC
+CONF_CHARGE_BY_TIME_TARGET_SOC = "charge_by_time_target_soc"  # Target SOC before the configured time
+CONF_PROFIT_MAX_TARGET_TIME = "profit_max_target_time"  # Legacy alias for charge_by_time_target_time
+CONF_PROFIT_MAX_TARGET_SOC = "profit_max_target_soc"  # Legacy alias for charge_by_time_target_soc
 
 TARGET_EXPORT_POWER_BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_GOODWE,
@@ -1762,6 +1882,7 @@ TARGET_EXPORT_POWER_BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_SAJ_H2,
     BATTERY_SYSTEM_FRONIUS_RESERVA,
     BATTERY_SYSTEM_NEOVOLT,
+    BATTERY_SYSTEM_ANKER_SOLIX,
 }
 
 TARGET_CHARGE_POWER_BATTERY_SYSTEMS = {
@@ -1773,6 +1894,7 @@ TARGET_CHARGE_POWER_BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_SOLAX,
     BATTERY_SYSTEM_FRONIUS_RESERVA,
     BATTERY_SYSTEM_NEOVOLT,
+    BATTERY_SYSTEM_ANKER_SOLIX,
 }
 
 # Optimization cost function (only cost minimization — self-consumption is the battery's native mode)
@@ -1782,8 +1904,10 @@ COST_FUNCTION_COST = "cost"
 DEFAULT_OPTIMIZATION_INTERVAL = 5      # Re-optimize every 5 minutes
 DEFAULT_OPTIMIZATION_HORIZON = 48      # 48-hour forecast horizon
 DEFAULT_OPTIMIZATION_BACKUP_RESERVE = 0.20  # 20% minimum SOC
-DEFAULT_PROFIT_MAX_TARGET_TIME = "17:15"  # 15 min before Flow Power Happy Hour
-DEFAULT_PROFIT_MAX_TARGET_SOC = 1.0  # 100% SOC before the profit maximisation export window
+DEFAULT_CHARGE_BY_TIME_TARGET_TIME = "17:15"
+DEFAULT_CHARGE_BY_TIME_TARGET_SOC = 1.0
+DEFAULT_PROFIT_MAX_TARGET_TIME = DEFAULT_CHARGE_BY_TIME_TARGET_TIME
+DEFAULT_PROFIT_MAX_TARGET_SOC = DEFAULT_CHARGE_BY_TIME_TARGET_SOC
 
 # Battery capacity defaults by system (Wh)
 BATTERY_CAPACITY_DEFAULTS = {
@@ -1799,6 +1923,7 @@ BATTERY_CAPACITY_DEFAULTS = {
     BATTERY_SYSTEM_FRONIUS_RESERVA: 9600,  # Fronius GEN24 storage varies by module count
     BATTERY_SYSTEM_NEOVOLT: 20100,    # Bytewatt pack is commonly 20.1 kWh
     BATTERY_SYSTEM_SOLAREDGE: 10000,  # SolarEdge Home Battery varies by stack
+    BATTERY_SYSTEM_ANKER_SOLIX: 10000, # Anker Solix X1/Solarbank varies by stack
     BATTERY_SYSTEM_CUSTOM: 10000,     # User-provided external system
 }
 
@@ -1816,6 +1941,7 @@ BATTERY_POWER_DEFAULTS = {
     BATTERY_SYSTEM_FRONIUS_RESERVA: 5000,  # Reserva/GEN24 common operating target
     BATTERY_SYSTEM_NEOVOLT: 5000,      # Configurable in the upstream Neovolt integration
     BATTERY_SYSTEM_SOLAREDGE: 5000,    # Active-power curtailment only in v1
+    BATTERY_SYSTEM_ANKER_SOLIX: 5000,  # X1/Solarbank stack varies by installation
     BATTERY_SYSTEM_CUSTOM: 5000,       # User-provided external system
 }
 

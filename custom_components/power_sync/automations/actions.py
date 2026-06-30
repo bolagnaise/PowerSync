@@ -3,7 +3,7 @@ Action execution logic for HA automations.
 
 Supported actions:
 - set_backup_reserve: Set battery backup reserve percentage (Tesla/Sigenergy)
-- preserve_charge: Prevent battery discharge (Tesla: set export to "never", Sigenergy: set discharge to 0)
+- preserve_charge: Prevent battery discharge (Tesla: hold current SOC via backup reserve, Sigenergy: set discharge to 0)
 - set_operation_mode: Set Powerwall operation mode (Tesla only)
 - force_discharge: Force battery discharge for a duration (Tesla/Sigenergy)
 - force_charge: Force battery charge for a duration (Tesla/Sigenergy)
@@ -76,6 +76,7 @@ PRE_CHARGE_WAKE_ENTITY_KEYS = (
 )
 OCPP_MIN_CHARGE_AMPS = 6
 FULL_EV_SOC = 100
+SIGENERGY_EVDC_DEFAULT_POWER_LIMIT_KW = 25.0
 PRE_CHARGE_WAKE_DURATION_KEYS = (
     "pre_charge_wake_duration_seconds",
     "pre_charge_wake_wait_seconds",
@@ -208,6 +209,105 @@ def _is_sigenergy(config_entry: ConfigEntry) -> bool:
     return bool(config_entry.data.get(CONF_SIGENERGY_STATION_ID))
 
 
+def _sigenergy_native_control_active(config_entry: ConfigEntry) -> bool:
+    """Return True when Sigenergy native/VPP control should own dispatch."""
+    from ..const import (
+        CONF_MONITORING_MODE,
+        CONF_OPTIMIZATION_ENABLED,
+        CONF_OPTIMIZATION_PROVIDER,
+        OPT_PROVIDER_NATIVE,
+        OPT_PROVIDER_POWERSYNC,
+    )
+
+    if not _is_sigenergy(config_entry):
+        return False
+    if config_entry.options.get(
+        CONF_MONITORING_MODE,
+        config_entry.data.get(CONF_MONITORING_MODE, False),
+    ):
+        return True
+    optimization_provider = config_entry.options.get(
+        CONF_OPTIMIZATION_PROVIDER,
+        config_entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE),
+    )
+    optimization_enabled = config_entry.options.get(
+        CONF_OPTIMIZATION_ENABLED,
+        config_entry.data.get(
+            CONF_OPTIMIZATION_ENABLED,
+            optimization_provider == OPT_PROVIDER_POWERSYNC,
+        ),
+    )
+    return (
+        optimization_provider != OPT_PROVIDER_POWERSYNC
+        or not bool(optimization_enabled)
+    )
+
+
+def _coerce_percent(value: Any) -> Optional[int]:
+    """Return a 0-100 percent integer from coordinator/entity values."""
+    if value in (None, "", "unknown", "unavailable"):
+        return None
+    try:
+        percent = float(value)
+    except (TypeError, ValueError):
+        return None
+    if 0 < percent <= 1:
+        percent *= 100
+    return max(0, min(100, int(round(percent))))
+
+
+def _tesla_preserve_reserve_percent(current_soc: int) -> int:
+    """Map current SOC to a Tesla-valid reserve value for preserve-charge."""
+    if current_soc >= 99:
+        return 100
+    if current_soc > 80:
+        return 80
+    return max(0, current_soc)
+
+
+def _get_current_home_battery_soc(hass: HomeAssistant, config_entry: ConfigEntry) -> Optional[int]:
+    """Resolve the current home battery SOC from runtime coordinators or HA states."""
+    entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+
+    for key in (
+        "tesla_coordinator",
+        "powerwall_local_coordinator",
+        "sigenergy_coordinator",
+        "sungrow_coordinator",
+        "foxess_coordinator",
+        "goodwe_coordinator",
+    ):
+        coord = entry_data.get(key)
+        data = getattr(coord, "data", None)
+        if isinstance(data, dict):
+            for data_key in ("battery_level", "percentage_charged", "battery_soc"):
+                percent = _coerce_percent(data.get(data_key))
+                if percent is not None:
+                    return percent
+
+    local_runtime = entry_data.get("powerwall_local")
+    local_coord = local_runtime.get("coordinator") if isinstance(local_runtime, dict) else None
+    local_data = getattr(local_coord, "data", None)
+    if isinstance(local_data, dict):
+        for data_key in ("battery_level", "percentage_charged", "battery_soc"):
+            percent = _coerce_percent(local_data.get(data_key))
+            if percent is not None:
+                return percent
+
+    states = getattr(hass, "states", None)
+    if states is not None:
+        for entity_id in (
+            "sensor.power_sync_battery_level",
+            "sensor.power_sync_tesla_battery_level",
+        ):
+            state = states.get(entity_id)
+            percent = _coerce_percent(getattr(state, "state", None))
+            if percent is not None:
+                return percent
+
+    return None
+
+
 async def _get_tesla_ev_entity(
     hass: HomeAssistant,
     entity_pattern: str,
@@ -236,7 +336,7 @@ async def _get_tesla_ev_entity(
     # EV-specific entity patterns that only vehicles have (not energy products)
     ev_entity_markers = [
         r"button\..*_charge",  # charge_start, force_data_update
-        r"switch\..*_charge$",  # charger switch
+        r"switch\..*(?<!dis)charge(?:_\d+)?$",  # charger switch
         r"number\..*_charge_limit",  # charge limit
         r"number\..*_charging_amps",  # charging amps
         r"sensor\..*_battery_level$",  # vehicle battery (not Powerwall)
@@ -1187,6 +1287,50 @@ def _session_energy_tracked_by_charger_poll(params: Dict[str, Any]) -> bool:
     return str(params.get("charger_type") or "").lower() == "ocpp"
 
 
+def _get_hass_state(hass: HomeAssistant | None, entity_id: str | None) -> Any:
+    """Return a HA state object when available."""
+    if not hass or not entity_id:
+        return None
+    try:
+        return hass.states.get(entity_id)
+    except Exception:
+        return None
+
+
+def _resolve_sigenergy_evdc_power_limit_entity(
+    hass: HomeAssistant | None,
+    config_entry: ConfigEntry | None,
+    params: Dict[str, Any],
+    *,
+    limit_type: str,
+) -> str:
+    """Resolve configured or auto-detected Sigenergy EVDC kW limit number entity."""
+    from ..const import (
+        CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY,
+        CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY,
+        DEFAULT_SIGENERGY_EVDC_CHARGE_POWER_LIMIT_ENTITY,
+        DEFAULT_SIGENERGY_EVDC_DISCHARGE_POWER_LIMIT_ENTITY,
+    )
+
+    if limit_type == "discharge":
+        key = CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY
+        default_entity = DEFAULT_SIGENERGY_EVDC_DISCHARGE_POWER_LIMIT_ENTITY
+    else:
+        key = CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY
+        default_entity = DEFAULT_SIGENERGY_EVDC_CHARGE_POWER_LIMIT_ENTITY
+
+    opts = (
+        {**getattr(config_entry, "data", {}), **getattr(config_entry, "options", {})}
+        if config_entry is not None
+        else {}
+    )
+    configured = str(params.get(key) or opts.get(key) or "").strip()
+    if configured:
+        return configured
+
+    return default_entity if _get_hass_state(hass, default_entity) else ""
+
+
 def _sigenergy_charger_config(config_entry: ConfigEntry, params: Dict[str, Any]) -> dict:
     """Resolve Sigenergy EV charger Modbus connection details."""
     from ..const import (
@@ -1230,6 +1374,7 @@ def _sigenergy_charger_config(config_entry: ConfigEntry, params: Dict[str, Any])
 def _sigenergy_charger_capability_payload(
     config_entry: ConfigEntry | None,
     params: Dict[str, Any],
+    hass: HomeAssistant | None = None,
 ) -> dict:
     """Return Sigenergy charger capability flags without touching Modbus."""
     charger_type = str(params.get("sigenergy_charger_type") or "").lower()
@@ -1246,11 +1391,11 @@ def _sigenergy_charger_capability_payload(
         )
 
         capabilities = sigenergy_charger_capabilities(charger_type or SIGENERGY_CHARGER_EVAC)
-        return capabilities.as_dict()
+        payload = capabilities.as_dict()
     except Exception:
         normalized = charger_type or "evac"
         if normalized == "evdc":
-            return {
+            payload = {
                 "charger_type": "evdc",
                 "supports_start_stop": True,
                 "supports_rate_control": False,
@@ -1258,31 +1403,65 @@ def _sigenergy_charger_capability_payload(
                 "control_strategy": "one_shot",
                 "solar_control_strategy": "native_handoff",
             }
-        return {
-            "charger_type": "evac",
-            "supports_start_stop": True,
-            "supports_rate_control": True,
-            "supports_restart_while_plugged": True,
-            "control_strategy": "dynamic_rate",
-            "solar_control_strategy": "dynamic_rate",
-        }
+        else:
+            payload = {
+                "charger_type": "evac",
+                "supports_start_stop": True,
+                "supports_rate_control": True,
+                "supports_restart_while_plugged": True,
+                "control_strategy": "dynamic_rate",
+                "solar_control_strategy": "dynamic_rate",
+            }
+
+    if payload.get("charger_type") == "evdc":
+        from ..const import (
+            CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY,
+            CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY,
+        )
+
+        charge_entity = _resolve_sigenergy_evdc_power_limit_entity(
+            hass,
+            config_entry,
+            params,
+            limit_type="charge",
+        )
+        discharge_entity = _resolve_sigenergy_evdc_power_limit_entity(
+            hass,
+            config_entry,
+            params,
+            limit_type="discharge",
+        )
+        payload[CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY] = charge_entity
+        payload[CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY] = discharge_entity
+        if charge_entity:
+            payload["supports_rate_control"] = True
+            payload["solar_control_strategy"] = "dynamic_rate"
+
+    return payload
 
 
 def _with_sigenergy_charger_capabilities(
     config_entry: ConfigEntry | None,
     params: Dict[str, Any],
+    hass: HomeAssistant | None = None,
 ) -> Dict[str, Any]:
     """Attach Sigenergy charger capability flags to action params."""
     if str(params.get("charger_type") or "").lower() != "sigenergy":
         return params
 
-    capabilities = _sigenergy_charger_capability_payload(config_entry, params)
+    capabilities = _sigenergy_charger_capability_payload(config_entry, params, hass)
     params["sigenergy_charger_type"] = capabilities["charger_type"]
     params["supports_rate_control"] = capabilities["supports_rate_control"]
     params["supports_restart_while_plugged"] = capabilities["supports_restart_while_plugged"]
     params["control_strategy"] = capabilities["control_strategy"]
     params["solar_control_strategy"] = capabilities["solar_control_strategy"]
     params["charger_capabilities"] = capabilities
+    for key in (
+        "sigenergy_charger_charge_power_limit_entity",
+        "sigenergy_charger_discharge_power_limit_entity",
+    ):
+        if capabilities.get(key):
+            params[key] = capabilities[key]
     return params
 
 
@@ -1386,6 +1565,7 @@ async def _start_sigenergy_charger(
     params: Dict[str, Any],
     amps: int | None = None,
 ) -> bool:
+    params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
     config = _sigenergy_charger_config(config_entry, params)
     if not config["host"]:
         _LOGGER.error("Sigenergy charger start: no Modbus host configured")
@@ -1394,9 +1574,15 @@ async def _start_sigenergy_charger(
     if not await _sigenergy_evdc_start_allowed(hass, config_entry, params):
         return False
 
+    start_amps = amps
+    if config["charger_type"] == "evdc" and amps is not None:
+        if not await _set_sigenergy_charger_amps(hass, config_entry, params, amps):
+            return False
+        start_amps = None
+
     controller = _new_sigenergy_charger(config)
     try:
-        success = await controller.start_charging(amps=amps)
+        success = await controller.start_charging(amps=start_amps)
         if success:
             _mark_sigenergy_evdc_started(hass, config_entry, params)
         return success
@@ -1425,25 +1611,84 @@ async def _stop_sigenergy_charger(
 
 
 async def _set_sigenergy_charger_amps(
+    hass: HomeAssistant | None,
     config_entry: ConfigEntry,
     params: Dict[str, Any],
     amps: int,
 ) -> bool:
+    params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
     config = _sigenergy_charger_config(config_entry, params)
+    if config["charger_type"] == "evdc":
+        return await _set_sigenergy_evdc_charge_power_limit(
+            hass,
+            config_entry,
+            params,
+            amps,
+        )
     if not config["host"]:
         _LOGGER.error("Sigenergy charger set amps: no Modbus host configured")
         return False
-    if config["charger_type"] == "evdc":
-        _LOGGER.info(
-            "Sigenergy EVDC does not expose writable charge-current control; treating amps update as unsupported no-op"
-        )
-        return True
 
     controller = _new_sigenergy_charger(config)
     try:
         return await controller.set_charging_amps(amps)
     finally:
         await controller.disconnect()
+
+
+async def _set_sigenergy_evdc_charge_power_limit(
+    hass: HomeAssistant | None,
+    config_entry: ConfigEntry | None,
+    params: Dict[str, Any],
+    amps: int,
+) -> bool:
+    """Set EVDC max charging power through the HA number entity when available."""
+    entity_id = _resolve_sigenergy_evdc_power_limit_entity(
+        hass,
+        config_entry,
+        params,
+        limit_type="charge",
+    )
+    if not entity_id:
+        _LOGGER.info(
+            "Sigenergy EVDC charge power limit entity unavailable; keeping start/stop-only control"
+        )
+        return True
+
+    if not hass:
+        _LOGGER.error("Sigenergy EVDC charge power limit requires Home Assistant context")
+        return False
+
+    voltage = _coerce_positive_float(params.get("voltage")) or 240.0
+    phases = _coerce_positive_int(params.get("phases"), 1) or 1
+    target_kw = max(0.0, round((int(amps) * voltage * phases) / 1000, 2))
+
+    state = _get_hass_state(hass, entity_id)
+    min_kw = 0.0
+    max_kw = SIGENERGY_EVDC_DEFAULT_POWER_LIMIT_KW
+    if state is not None:
+        try:
+            min_kw = float(state.attributes.get("min", min_kw))
+        except (TypeError, ValueError):
+            min_kw = 0.0
+        try:
+            max_kw = float(state.attributes.get("max", max_kw))
+        except (TypeError, ValueError):
+            max_kw = SIGENERGY_EVDC_DEFAULT_POWER_LIMIT_KW
+    target_kw = round(max(min_kw, min(max_kw, target_kw)), 2)
+
+    try:
+        await hass.services.async_call(
+            "number",
+            "set_value",
+            {"entity_id": entity_id, "value": target_kw},
+            blocking=True,
+        )
+        _LOGGER.info("Set Sigenergy EVDC charge power limit to %.2fkW via %s", target_kw, entity_id)
+        return True
+    except Exception as err:
+        _LOGGER.error("Sigenergy EVDC charge power limit update failed via %s: %s", entity_id, err)
+        return False
 
 
 
@@ -1519,10 +1764,19 @@ async def _execute_single_action(
     elif action_type == "stop_ev_charging":
         success = await _action_stop_ev_charging(hass, config_entry, params)
         if success and not params.get("skip_ownership"):
+            from .ev_ownership import record_manual_stop_hold
+
+            loadpoint_id = _ev_action_loadpoint_id(params)
             await clear_tracked_ev_charging_session(
                 hass,
                 config_entry,
-                _ev_action_loadpoint_id(params),
+                loadpoint_id,
+                reason=params.get("reason", "Manual automation stop"),
+            )
+            record_manual_stop_hold(
+                hass,
+                config_entry,
+                loadpoint_id,
                 reason=params.get("reason", "Manual automation stop"),
             )
         return success
@@ -1631,17 +1885,38 @@ async def _action_preserve_charge(
         finally:
             await controller.disconnect()
 
-    from ..const import CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA, DOMAIN, SERVICE_SET_GRID_EXPORT
+    from ..const import CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA, DOMAIN, SERVICE_SET_BACKUP_RESERVE
     if config_entry.data.get(CONF_BATTERY_SYSTEM) != BATTERY_SYSTEM_TESLA:
-        _LOGGER.debug("preserve_charge via grid export not supported for non-Tesla systems")
+        _LOGGER.debug("preserve_charge not supported for this non-Tesla system")
         return None
+
+    current_soc = _get_current_home_battery_soc(hass, config_entry)
+    if current_soc is None:
+        _LOGGER.error("preserve_charge: could not determine current home battery SOC")
+        return False
+
+    reserve_percent = _tesla_preserve_reserve_percent(current_soc)
+    if current_soc > 80 and reserve_percent == 80:
+        _LOGGER.info(
+            "preserve_charge: Tesla rejects backup reserve values 81-99%%; "
+            "holding at 80%% for current SOC %d%%",
+            current_soc,
+        )
 
     try:
         await hass.services.async_call(
             DOMAIN,
-            SERVICE_SET_GRID_EXPORT,
-            {"rule": "never", "source": "automation"},
+            SERVICE_SET_BACKUP_RESERVE,
+            {
+                "percent": reserve_percent,
+                "source": "automation_preserve_charge",
+            },
             blocking=True,
+        )
+        _LOGGER.info(
+            "preserve_charge: set Tesla backup reserve to %d%% (current SOC %d%%)",
+            reserve_percent,
+            current_soc,
         )
         return True
     except Exception as e:
@@ -1812,7 +2087,7 @@ async def _action_disable_optimizer(
             await hass.services.async_call(
                 DOMAIN,
                 SERVICE_RESTORE_NORMAL,
-                {"source": "automation"},
+                {"source": "automation", "_native_control": True},
                 blocking=True,
             )
         except Exception as restore_err:
@@ -2147,26 +2422,6 @@ async def _action_restore_normal(
     config_entry: ConfigEntry
 ) -> bool:
     """Restore normal battery operation (cancel force charge/discharge)."""
-    if _is_sigenergy(config_entry):
-        # Sigenergy: Disable Remote EMS to return to native EMS
-        controller = await _get_sigenergy_controller(config_entry)
-        if not controller:
-            _LOGGER.error("restore_normal: Sigenergy Modbus not configured")
-            return False
-        try:
-            result = await controller.restore_normal()
-            if result:
-                _LOGGER.info("Sigenergy: Restored normal operation (Remote EMS disabled)")
-                return True
-            else:
-                _LOGGER.error("Sigenergy restore_normal() failed")
-                return False
-        except Exception as e:
-            _LOGGER.error(f"Failed to restore normal (Sigenergy): {e}")
-            return False
-        finally:
-            await controller.disconnect()
-
     from ..const import DOMAIN, SERVICE_RESTORE_NORMAL
 
     try:
@@ -3037,12 +3292,12 @@ async def _action_start_ev_charging(
         # Tesla Fleet uses switch.X_charge, not button.X_charge_start
         charge_switch_entity = await _get_tesla_ev_entity(
             hass,
-            r"switch\..*_charge$",
+            r"switch\..*(?<!dis)charge(?:_\d+)?$",
             vehicle_vin
         )
 
         if not charge_switch_entity:
-            _LOGGER.error("Could not find Tesla charge switch entity (switch.*_charge)")
+            _LOGGER.error("Could not find Tesla charge switch entity (switch.*charge)")
             return False
 
         try:
@@ -3237,12 +3492,12 @@ async def _action_stop_ev_charging(
         # Tesla Fleet uses switch.X_charge, not button.X_charge_stop
         charge_switch_entity = await _get_tesla_ev_entity(
             hass,
-            r"switch\..*_charge$",
+            r"switch\..*(?<!dis)charge(?:_\d+)?$",
             vehicle_vin
         )
 
         if not charge_switch_entity:
-            _LOGGER.error("Could not find Tesla charge switch entity (switch.*_charge)")
+            _LOGGER.error("Could not find Tesla charge switch entity (switch.*charge)")
             return False
 
         try:
@@ -3384,13 +3639,13 @@ async def _action_set_ev_charging_amps(
 
     # Sigenergy EVAC direct Modbus charger
     if charger_type == "sigenergy":
-        params = _with_sigenergy_charger_capabilities(config_entry, params)
+        params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
         if not params.get("supports_rate_control", True):
             _LOGGER.info(
                 "Sigenergy EVDC does not expose writable charge-current control; ignoring amps update"
             )
             return True
-        return await _set_sigenergy_charger_amps(config_entry, params, int(amps))
+        return await _set_sigenergy_charger_amps(hass, config_entry, params, int(amps))
 
     # HA-native charger integrations
     if _is_ha_native_charger_type(charger_type):
@@ -4449,16 +4704,17 @@ async def _set_vehicle_amps(
         if config_entry is None:
             _LOGGER.error("Sigenergy charger control requires a config entry")
             return False
-        params = _with_sigenergy_charger_capabilities(config_entry, params)
+        params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
         if amps == 0:
             return await _stop_sigenergy_charger(hass, config_entry, params)
         config = _sigenergy_charger_config(config_entry, params)
         if config["charger_type"] == "evdc":
-            _LOGGER.debug(
-                "Sigenergy EVDC does not expose writable amps; starting charger without current limit"
-            )
-            return await _start_sigenergy_charger(hass, config_entry, params)
-        if not await _set_sigenergy_charger_amps(config_entry, params, amps):
+            if not await _set_sigenergy_charger_amps(hass, config_entry, params, amps):
+                return False
+            if params.get("_sigenergy_start_after_rate_limit"):
+                return await _start_sigenergy_charger(hass, config_entry, params)
+            return True
+        if not await _set_sigenergy_charger_amps(hass, config_entry, params, amps):
             return False
         return await _start_sigenergy_charger(hass, config_entry, params)
 
@@ -4844,6 +5100,8 @@ async def _dynamic_ev_update_surplus(
         return
 
     params = state.get("params", {})
+    params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
+    state["params"] = params
 
     if await _clear_ble_dynamic_session_if_unplugged(
         hass, config_entry, vehicle_id, params
@@ -5238,8 +5496,16 @@ async def _dynamic_ev_update_surplus(
                     )
                     return
 
-                # Send the actual start-charging command to the vehicle
-                start_success = await _action_start_ev_charging(hass, config_entry, params, context=None)
+                # Send the actual start-charging command to the vehicle.
+                start_params = dict(params)
+                if start_params.get("charger_type") == "sigenergy":
+                    start_params["amps"] = new_amps
+                start_success = await _action_start_ev_charging(
+                    hass,
+                    config_entry,
+                    start_params,
+                    context=None,
+                )
                 if not start_success:
                     # Check if failure was due to charge complete
                     if _is_vehicle_charge_complete(hass, vehicle_id):
@@ -5544,6 +5810,17 @@ async def _dynamic_ev_update_sigenergy_evdc_native_solar(
     live_status: dict,
 ) -> None:
     """Monitor EVDC solar handoff without sending dynamic rate commands."""
+    if _sigenergy_native_control_active(config_entry):
+        if not state.get("native_solar_mode_attempted"):
+            _LOGGER.info(
+                "Sigenergy EVDC solar surplus: native/VPP control active; "
+                "leaving Remote EMS disabled"
+            )
+        state["native_solar_mode_attempted"] = True
+        state["native_solar_mode_set"] = False
+        state["native_solar_mode_skipped"] = "native_control"
+        return
+
     if not state.get("native_solar_mode_attempted"):
         state["native_solar_mode_attempted"] = True
         controller = await _get_sigenergy_controller(config_entry)
@@ -5622,6 +5899,8 @@ async def _dynamic_ev_update(
         return
 
     params = state.get("params", {})
+    params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
+    state["params"] = params
 
     # Check which mode we're in
     mode = params.get("dynamic_mode", "battery_target")
@@ -5668,6 +5947,8 @@ async def _dynamic_ev_update(
     phases = params.get("phases", 1)
     fixed_charge_amps = _coerce_positive_int(params.get("fixed_charge_amps"))
     current_amps = state.get("current_amps", max_amps)
+    owner_mode = str(params.get("owner_mode") or "").lower()
+    scheduled_floor_active = owner_mode == "scheduled" and not no_grid_import
 
     if (
         params.get("charger_type") == "sigenergy"
@@ -5805,6 +6086,9 @@ async def _dynamic_ev_update(
     elif battery_full:
         # Battery is full — taper is natural, not a deficit. Use grid headroom directly.
         available_power_kw = grid_headroom_kw
+        if scheduled_floor_active and current_amps > 0:
+            min_power_delta_kw = ((min_amps - current_amps) * voltage * phases) / 1000
+            available_power_kw = max(available_power_kw, min_power_delta_kw)
     elif battery_deficit_kw > 0.1:
         # Battery has surplus beyond target — available for EV
         available_power_kw = battery_deficit_kw
@@ -5823,7 +6107,9 @@ async def _dynamic_ev_update(
 
     # Calculate new target amps
     raw_new_amps = current_amps + available_amps
-    if raw_new_amps < min_amps:
+    if scheduled_floor_active and current_amps > 0 and raw_new_amps < min_amps:
+        new_amps = min_amps
+    elif raw_new_amps < min_amps:
         new_amps = 0
     else:
         new_amps = int(round(max(min_amps, min(max_amps, raw_new_amps))))
@@ -6151,7 +6437,7 @@ async def _action_start_ev_charging_dynamic_locked(
     voltage = params.get("voltage", 240)
     stop_outside_window = params.get("stop_outside_window", False)
     charger_type = params.get("charger_type", "tesla")
-    params = _with_sigenergy_charger_capabilities(config_entry, params)
+    params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
     priority = params.get("priority", 1)
     allow_stale_entity_max_override = bool(
         params.get("allow_stale_entity_max_override")
@@ -6226,8 +6512,11 @@ async def _action_start_ev_charging_dynamic_locked(
     # For solar_surplus mode, we wait for sufficient surplus before starting
     if dynamic_mode == "battery_target":
         if charger_type in ("ocpp", "generic", "zaptec", "sigenergy") or _is_ha_native_charger_type(charger_type):
+            start_params = dict(params)
+            if charger_type == "sigenergy":
+                start_params["_sigenergy_start_after_rate_limit"] = True
             start_success = await _set_vehicle_amps(
-                hass, config_entry, vehicle_id, start_amps, params
+                hass, config_entry, vehicle_id, start_amps, start_params
             )
             if not start_success:
                 _LOGGER.info(
@@ -6315,8 +6604,14 @@ async def _action_start_ev_charging_dynamic_locked(
         "sigenergy_charger_port": params.get("sigenergy_charger_port"),
         "sigenergy_charger_slave_id": params.get("sigenergy_charger_slave_id"),
         "sigenergy_charger_type": params.get("sigenergy_charger_type"),
+        "sigenergy_charger_charge_power_limit_entity": params.get(
+            "sigenergy_charger_charge_power_limit_entity"
+        ),
+        "sigenergy_charger_discharge_power_limit_entity": params.get(
+            "sigenergy_charger_discharge_power_limit_entity"
+        ),
     }
-    full_params = _with_sigenergy_charger_capabilities(config_entry, full_params)
+    full_params = _with_sigenergy_charger_capabilities(config_entry, full_params, hass)
 
     # Initialize entry-level state dict if needed
     if entry_id not in _dynamic_ev_state:
@@ -6497,6 +6792,10 @@ async def _action_stop_ev_charging_dynamic(
             if cancel_timer:
                 cancel_timer()
                 _LOGGER.debug(f"Dynamic EV: Cancelled periodic timer for {vid}")
+            quick_stop_timer = state.get("quick_stop_timer")
+            if quick_stop_timer:
+                quick_stop_timer()
+                _LOGGER.debug(f"Dynamic EV: Cancelled quick-stop timer for {vid}")
 
             # End charging session tracking
             try:

@@ -143,6 +143,11 @@ from .const import (
     BATTERY_MODE_STATE_FORCE_DISCHARGE,
     BATTERY_MODE_STATE_HOLD_SOC,
     BATTERY_MODE_STATE_SELF_CONSUMPTION,
+    INVERTER_CONTROL_MODE_NORMAL,
+    INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
+    INVERTER_CONTROL_MODE_SHUTDOWN,
+    INVERTER_CONTROL_MODE_CURTAILED,
+    INVERTER_CONTROL_MODES,
     CONF_AC_INVERTER_CURTAILMENT_ENABLED,
     CONF_INVERTER_BRAND,
     CONF_INVERTER_MODEL,
@@ -167,6 +172,8 @@ from .const import (
     CONF_BATTERY_CURTAILMENT_ENABLED,
     CONF_ELECTRICITY_PROVIDER,
     CONF_FLOW_POWER_STATE,
+    CONF_FLOWPOWER_API_KEY,
+    CONF_FLOWPOWER_NETWORK_TARIFF,
     CONF_PEA_ENABLED,
     CONF_FLOW_POWER_BASE_RATE,
     CONF_FLOW_POWER_EXPORT_RATE,
@@ -756,7 +763,7 @@ FOXESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_BATTERY_CHARGE_FOXESS,
-        name="Daily Battery Charge",
+        name="FoxESS Daily Battery Charge",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
@@ -766,7 +773,7 @@ FOXESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_BATTERY_DISCHARGE_FOXESS,
-        name="Daily Battery Discharge",
+        name="FoxESS Daily Battery Discharge",
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
@@ -1166,12 +1173,27 @@ def _future_optimizer_action_windows(
         if end and end <= now:
             continue
 
+        planned_power_w = item.get("power_w")
+        display_power_w = planned_power_w
+        if start and end and start <= now < end:
+            effective_action = (
+                data.get("effective_current_action") or data.get("current_action")
+            )
+            if item_action == effective_action:
+                try:
+                    current_power_w = float(data.get("current_power_w") or 0)
+                except (TypeError, ValueError):
+                    current_power_w = 0
+                if current_power_w > 0:
+                    display_power_w = current_power_w
+
         window: dict[str, Any] = {
             "action": item_action,
             "start_time": item.get("timestamp"),
             "end_time": item.get("end_time"),
             "label": _format_optimizer_window(start, end),
-            "power_w": item.get("power_w"),
+            "power_w": display_power_w,
+            "planned_power_w": planned_power_w,
             "soc": item.get("soc"),
         }
 
@@ -1230,6 +1252,9 @@ OPTIMIZER_ACTION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         value_fn=lambda data: data.get("current_action") if data else None,
         attr_fn=lambda data: {
             "power_w": data.get("current_power_w"),
+            "planned_action": data.get("planned_current_action"),
+            "planned_power_w": data.get("planned_current_power_w"),
+            "effective_action": data.get("effective_current_action"),
             "actual_battery_power_w": data.get("actual_battery_power_w"),
             "status": data.get("status"),
             "until": data.get("current_action_end_time"),
@@ -1479,6 +1504,7 @@ async def async_setup_entry(
     fronius_reserva_coordinator = domain_data.get("fronius_reserva_coordinator")
     neovolt_coordinator = domain_data.get("neovolt_coordinator")
     solaredge_coordinator = domain_data.get("solaredge_coordinator")
+    anker_solix_coordinator = domain_data.get("anker_solix_coordinator")
     demand_charge_coordinator: DemandChargeCoordinator | None = domain_data.get("demand_charge_coordinator")
     aemo_spike_manager = domain_data.get("aemo_spike_manager")
     is_sigenergy = domain_data.get("is_sigenergy", False)
@@ -1492,6 +1518,7 @@ async def async_setup_entry(
     is_fronius_reserva = domain_data.get("is_fronius_reserva", False)
     is_neovolt = domain_data.get("is_neovolt", False)
     is_solaredge = domain_data.get("is_solaredge", False)
+    is_anker_solix = domain_data.get("is_anker_solix", False)
 
     entities: list[SensorEntity] = []
 
@@ -1587,6 +1614,8 @@ async def async_setup_entry(
         energy_coordinator = neovolt_coordinator
     elif is_solaredge:
         energy_coordinator = solaredge_coordinator
+    elif is_anker_solix:
+        energy_coordinator = anker_solix_coordinator
     else:
         energy_coordinator = tesla_coordinator
     if energy_coordinator:
@@ -1890,7 +1919,11 @@ async def async_setup_entry(
     )
     if electricity_provider == "flow_power":
         # Get the price coordinator (Amber or AEMO)
-        price_coordinator = amber_coordinator or domain_data.get("aemo_sensor_coordinator")
+        price_coordinator = (
+            amber_coordinator
+            or domain_data.get("aemo_sensor_coordinator")
+            or domain_data.get("flow_power_kwatch_coordinator")
+        )
         if price_coordinator:
             # Publish Flow Power-adjusted rates under the standard current_* sensor
             # ids so the mobile app and default dashboard read the retail price
@@ -1963,7 +1996,10 @@ async def async_setup_entry(
             fp_email = entry.options.get(
                 CONF_FLOWPOWER_EMAIL, entry.data.get(CONF_FLOWPOWER_EMAIL)
             )
-            if fp_email:
+            fp_api_key = entry.options.get(
+                CONF_FLOWPOWER_API_KEY, entry.data.get(CONF_FLOWPOWER_API_KEY)
+            )
+            if fp_email or fp_api_key:
                 for sensor_type, name, data_key, unit, icon, source in FLOW_POWER_PORTAL_SENSORS:
                     entities.append(
                         FlowPowerPortalSensor(
@@ -2007,6 +2043,8 @@ async def async_setup_entry(
         battery_system = "fronius_reserva"
     elif is_neovolt:
         battery_system = "neovolt"
+    elif is_anker_solix:
+        battery_system = "anker_solix"
     entities.append(BatteryHealthSensor(
         entry=entry,
         coordinator=energy_coordinator,
@@ -2079,20 +2117,24 @@ def _pack_label(packs: list[dict[str, Any]], index: int) -> str:
         powerwall_number = sum(1 for prior in packs[: index + 1] if prior.get("role") == "powerwall")
         return f"Powerwall {powerwall_number}"
     if role == "leader":
-        return "Leader PW3"
+        return "Leader Powerwall"
     if role == "follower" or pack.get("isFollower"):
         follower_number = sum(
             1
             for prior in packs[: index + 1]
             if prior.get("role") == "follower" or prior.get("isFollower")
         )
-        return "Follower PW3" if follower_number == 1 else f"Follower PW3 {follower_number}"
+        return (
+            "Follower Powerwall"
+            if follower_number == 1
+            else f"Follower Powerwall {follower_number}"
+        )
     if pack.get("isExpansion"):
         expansion_number = sum(1 for prior in packs[: index + 1] if prior.get("isExpansion"))
         return f"Expansion Pack {expansion_number}"
 
     base_number = sum(1 for prior in packs[: index + 1] if not prior.get("isExpansion"))
-    return "Leader PW3" if base_number == 1 else f"Follower PW3 {base_number - 1}"
+    return "Leader Powerwall" if base_number == 1 else f"Follower Powerwall {base_number - 1}"
 
 
 def _pack_metric_available(packs: list[dict[str, Any]], metric: str) -> bool:
@@ -2460,6 +2502,8 @@ _LOCAL_OVERRIDABLE = {
 # 30s is ~15 missed ticks — comfortably past transient blips, well before
 # the data turns into a "stuck at 41%" disaster.
 _LOCAL_STALE_SECONDS = 30
+_ENERGY_COORDINATOR_STALE_FACTOR = 4
+_ENERGY_COORDINATOR_MIN_STALE_SECONDS = 60
 
 
 def _local_data_is_fresh(local_coord: Any) -> bool:
@@ -2471,6 +2515,35 @@ def _local_data_is_fresh(local_coord: Any) -> bool:
         return False
     import time as _time
     return (_time.time() - last_ts) <= _LOCAL_STALE_SECONDS
+
+
+def _coordinator_data_is_fresh(coordinator: Any) -> bool:
+    """Return False when a coordinator is serving stale energy data."""
+    if not getattr(coordinator, "last_update_success", True):
+        return False
+    if getattr(coordinator, "data", None) is None:
+        return False
+
+    last_update = getattr(coordinator, "last_update_success_time", None)
+    update_interval = getattr(coordinator, "update_interval", None)
+    if last_update is None or update_interval is None:
+        return True
+
+    try:
+        stale_after = max(
+            update_interval * _ENERGY_COORDINATOR_STALE_FACTOR,
+            timedelta(seconds=_ENERGY_COORDINATOR_MIN_STALE_SECONDS),
+        )
+        now = dt_util.utcnow()
+        if getattr(now, "tzinfo", None) is None and getattr(last_update, "tzinfo", None) is not None:
+            now = now.replace(tzinfo=last_update.tzinfo)
+        elif getattr(now, "tzinfo", None) is not None and getattr(last_update, "tzinfo", None) is None:
+            last_update = last_update.replace(tzinfo=now.tzinfo)
+        age = now - last_update
+    except Exception:
+        return True
+
+    return age <= stale_after
 
 
 class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumericStateMixin, SensorEntity):
@@ -2520,6 +2593,11 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
             .get("powerwall_local", {})
         )
         return bucket.get("coordinator")
+
+    @property
+    def available(self) -> bool:
+        """Return False when the backing energy coordinator is stale."""
+        return _coordinator_data_is_fresh(self.coordinator)
 
     @property
     def native_value(self) -> Any:
@@ -3301,6 +3379,9 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         attr_fn=lambda data: {
             "peak_kw": data.get("load_peak_kw"),
             "forecast_values_kw": data.get("load_forecast"),
+            "planned_ev_load_peak_kw": data.get("planned_ev_load_peak_kw"),
+            "planned_ev_load_kwh": data.get("planned_ev_load_kwh"),
+            "planned_ev_load_forecast_w": data.get("planned_ev_load_forecast_w"),
         } if data and data.get("available") else {},
     ),
     PowerSyncSensorEntityDescription(
@@ -4166,10 +4247,23 @@ class InverterStatusSensor(SensorEntity):
             self._cached_attrs["brand"] = inverter_brand
             self._cached_attrs["last_poll"] = dt_util.now().isoformat()
 
-            # Also update hass.data for consistency with curtailment logic
+            # Also update hass.data for consistency with curtailment logic.
+            # Keep explicit manual/automatic control modes more specific than
+            # the inverter's generic curtailed/running status.
             entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
             if entry_data:
-                entry_data["inverter_last_state"] = self._cached_state
+                control_mode = entry_data.get("inverter_control_mode")
+                if control_mode in (
+                    INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
+                    INVERTER_CONTROL_MODE_SHUTDOWN,
+                ):
+                    entry_data["inverter_last_state"] = "curtailed"
+                else:
+                    entry_data["inverter_last_state"] = self._cached_state
+                    if self._cached_state == "running":
+                        entry_data["inverter_control_mode"] = INVERTER_CONTROL_MODE_NORMAL
+                    elif self._cached_state == "curtailed" and control_mode not in INVERTER_CONTROL_MODES:
+                        entry_data["inverter_control_mode"] = INVERTER_CONTROL_MODE_CURTAILED
                 entry_data["inverter_attributes"] = self._cached_attrs
 
             _LOGGER.info(f"Inverter poll: state={self._cached_state}, power={state.power_limit_percent}%")
@@ -4186,14 +4280,31 @@ class InverterStatusSensor(SensorEntity):
         """Get config value from options first, then data."""
         return self._entry.options.get(key, self._entry.data.get(key, default))
 
+    def _entry_data(self) -> dict[str, Any]:
+        """Return runtime data for this config entry."""
+        return self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+
+    def _control_mode(self) -> str:
+        """Return the current runtime AC inverter control mode."""
+        mode = self._entry_data().get("inverter_control_mode")
+        if mode in INVERTER_CONTROL_MODES:
+            return mode
+        if self._cached_state == "curtailed":
+            return INVERTER_CONTROL_MODE_CURTAILED
+        return INVERTER_CONTROL_MODE_NORMAL
+
+    def _target_power_w(self) -> int | None:
+        """Return the runtime inverter target limit when one is known."""
+        value = self._entry_data().get("inverter_power_limit_w")
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
     @property
     def native_value(self) -> str:
         """Return the inverter status."""
-        if self._cached_state == "curtailed":
-            return "Curtailed"
-        elif self._cached_state == "running":
-            return "Normal"
-        elif self._cached_state == "offline":
+        if self._cached_state == "offline":
             return "Offline"
         elif self._cached_state == "disabled":
             return "Disabled"
@@ -4201,6 +4312,16 @@ class InverterStatusSensor(SensorEntity):
             return "Not Configured"
         elif self._cached_state == "error":
             return "Error"
+
+        control_mode = self._control_mode()
+        if control_mode == INVERTER_CONTROL_MODE_LOAD_FOLLOWING:
+            return "Load Following"
+        elif control_mode == INVERTER_CONTROL_MODE_SHUTDOWN:
+            return "Shutdown"
+        elif control_mode == INVERTER_CONTROL_MODE_CURTAILED or self._cached_state == "curtailed":
+            return "Curtailed"
+        elif self._cached_state == "running":
+            return "Normal"
         else:
             return "Unknown"
 
@@ -4223,6 +4344,9 @@ class InverterStatusSensor(SensorEntity):
         inverter_host = self._get_config_value(CONF_INVERTER_HOST, "")
         inverter_model = self._get_config_value(CONF_INVERTER_MODEL, "")
 
+        control_mode = self._control_mode()
+        target_power_w = self._target_power_w()
+
         # Base attributes
         attrs = {
             "enabled": inverter_enabled,
@@ -4230,11 +4354,26 @@ class InverterStatusSensor(SensorEntity):
             "host": inverter_host,
             "model": inverter_model,
             "state": self._cached_state,
+            "control_mode": control_mode,
+            "target_power_w": target_power_w,
         }
 
-        # Add description based on state
-        if self._cached_state == "curtailed":
-            attrs["description"] = "Inverter power limited to prevent negative export"
+        # Add cached attributes from inverter polling
+        attrs.update(self._cached_attrs)
+        attrs["control_mode"] = control_mode
+        attrs["target_power_w"] = target_power_w
+
+        # Add description based on state after cached attrs so the public
+        # dashboard text remains specific to PowerSync's active control mode.
+        if control_mode == INVERTER_CONTROL_MODE_LOAD_FOLLOWING:
+            if target_power_w is not None and target_power_w > 0:
+                attrs["description"] = f"Inverter curtailed - load following at {target_power_w}W"
+            else:
+                attrs["description"] = "Inverter curtailed - load following"
+        elif control_mode == INVERTER_CONTROL_MODE_SHUTDOWN:
+            attrs["description"] = "Inverter curtailed - shutdown mode"
+        elif self._cached_state == "curtailed":
+            attrs["description"] = "Inverter curtailed"
         elif self._cached_state == "running":
             attrs["description"] = "Inverter operating normally"
         elif self._cached_state == "offline":
@@ -4252,9 +4391,6 @@ class InverterStatusSensor(SensorEntity):
             attrs["description"] = "Inverter host not configured"
         else:
             attrs["description"] = "Status unknown"
-
-        # Add cached attributes from inverter polling
-        attrs.update(self._cached_attrs)
 
         return attrs
 
@@ -4310,6 +4446,7 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
         self._attr_currency_unit = "major_rate"
         self._attr_currency_attrs = True
         self._attr_suggested_display_precision = 4
+        self._current_period = None
 
     @property
     def device_info(self):
@@ -4361,6 +4498,38 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
             domain_data,
         )
 
+    @property
+    def _uses_standard_current_price_id(self) -> bool:
+        """Return true for standard dashboard/mobile current price entities."""
+        return self._sensor_type in (
+            SENSOR_TYPE_CURRENT_IMPORT_PRICE,
+            SENSOR_TYPE_CURRENT_EXPORT_PRICE,
+        )
+
+    def _get_current_tariff_price(self) -> tuple[float, dict[str, Any]] | None:
+        """Read the canonical tariff schedule for standard current price sensors."""
+        if not self._uses_standard_current_price_id or not hasattr(self, "hass"):
+            return None
+
+        tariff_data = (
+            self.hass.data.get(DOMAIN, {})
+            .get(self._entry.entry_id, {})
+            .get("tariff_schedule")
+        )
+        if not tariff_data:
+            return None
+
+        buy_price_cents, sell_price_cents, current_period = (
+            get_current_price_from_tariff_schedule(tariff_data)
+        )
+        self._current_period = current_period
+        price_cents = (
+            buy_price_cents
+            if self._sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE
+            else sell_price_cents
+        )
+        return max(0.0, price_cents / 100), tariff_data
+
     def _get_effective_twap(self) -> float:
         """Get effective raw wholesale TWAP: override -> tracker -> fallback."""
         return self._get_pricing_context().twap
@@ -4373,7 +4542,7 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
         """Calculate Flow Power import price with PEA in $/kWh.
 
         V2 formula (when tariff configured):
-            PEA = GST*Spot + Tariff - GST*TWAP - AvgDailyTariff - BPEA
+            PEA = GST*Spot + Tariff - GST*TWAP - BPEA
             Final = Base + PEA
 
         Legacy formula (no tariff configured):
@@ -4443,6 +4612,11 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
     @property
     def native_value(self) -> float | None:
         """Return the current price in $/kWh."""
+        tariff_price = self._get_current_tariff_price()
+        if tariff_price is not None:
+            value, _tariff_data = tariff_price
+            return round(value, 4)
+
         if self._is_import_sensor:
             value = self._calculate_import_price()
         else:
@@ -4480,6 +4654,24 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
             "pea_enabled": pea_enabled,
             "base_rate_cents": base_rate,
         }
+
+        tariff_price = self._get_current_tariff_price()
+        if tariff_price is not None:
+            value, tariff_data = tariff_price
+            attributes.update(
+                {
+                    "source": "tariff_schedule",
+                    "current_period": self._current_period,
+                    "final_rate_cents": round(value * 100, 2),
+                    "utility": tariff_data.get("utility"),
+                    "plan_name": tariff_data.get("plan_name"),
+                }
+            )
+            if self._sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE:
+                attributes["price_spike"] = None
+            else:
+                attributes["channel_type"] = "feedIn"
+            return _entity_currency_attrs(self, attributes, tariff_data)
 
         if self._is_import_sensor:
             # Import price attributes
@@ -4844,7 +5036,17 @@ class FlowPowerPortalSensor(SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return {"source": self._source_label}
+        domain_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        portal_data = domain_data.get("flow_power_portal_data") or {}
+        source = portal_data.get("source", self._source_label)
+        attrs = {"source": source}
+        raw_network_tariff = self._entry.options.get(
+            CONF_FLOWPOWER_NETWORK_TARIFF,
+            self._entry.data.get(CONF_FLOWPOWER_NETWORK_TARIFF),
+        )
+        if raw_network_tariff:
+            attrs["network_tariff_raw"] = raw_network_tariff
+        return attrs
 
     @property
     def should_poll(self) -> bool:
@@ -5268,7 +5470,10 @@ class EVStatusSensor(SensorEntity):
                     self._ev_data["ev_power_kw"] = ev_power
 
             if not sigenergy_context_applied:
-                sigenergy_state = await _read_sigenergy_charger_state_for_entry(self._entry)
+                sigenergy_state = await _read_sigenergy_charger_state_for_entry(
+                    self._entry,
+                    self.hass,
+                )
             else:
                 sigenergy_state = None
             if sigenergy_state is not None:

@@ -51,6 +51,7 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 FORCE_POWER_FALLBACK_MAX_KW = 50.0
+FORCE_POWER_STEP_KW = 0.05
 FORCE_POWER_COORDINATOR_KEYS = (
     "foxess_coordinator",
     "goodwe_coordinator",
@@ -62,6 +63,7 @@ FORCE_POWER_COORDINATOR_KEYS = (
     "saj_h2_coordinator",
     "fronius_reserva_coordinator",
     "neovolt_coordinator",
+    "anker_solix_coordinator",
 )
 
 
@@ -263,7 +265,7 @@ class ForcePowerNumber(NumberEntity):
     _attr_has_entity_name = True
     _attr_mode = NumberMode.SLIDER
     _attr_native_min_value = 0
-    _attr_native_step = 0.5
+    _attr_native_step = FORCE_POWER_STEP_KW
     _attr_native_unit_of_measurement = UnitOfPower.KILO_WATT
     _attr_icon = "mdi:lightning-bolt"
     # User-facing power input for force charge/discharge — Controls, not Configuration.
@@ -291,7 +293,11 @@ class ForcePowerNumber(NumberEntity):
         max_kw = max((value for value in candidates if value), default=None)
         if max_kw is None:
             return FORCE_POWER_FALLBACK_MAX_KW
-        return min(FORCE_POWER_FALLBACK_MAX_KW, max(0.5, math.ceil(max_kw * 2) / 2))
+        rounded_max = math.ceil(max_kw / FORCE_POWER_STEP_KW) * FORCE_POWER_STEP_KW
+        return min(
+            FORCE_POWER_FALLBACK_MAX_KW,
+            max(FORCE_POWER_STEP_KW, round(rounded_max, 2)),
+        )
 
     def _configured_power_limits_kw(self) -> list[float]:
         entry = self._entry

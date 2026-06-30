@@ -167,3 +167,20 @@ def test_relaxed_5pct_fallback_is_gone(battery_optimizer_module):
 
     assert not hasattr(optimizer, "_solve_lp_relaxed")
     assert hasattr(optimizer, "_solve_self_consumption_hold")
+
+
+def test_hold_accepts_schedule_timestamps_from_lp_fallback(battery_optimizer_module):
+    """LP infeasible fallback passes timestamps through to the hold schedule."""
+    module = battery_optimizer_module
+    optimizer = _optimizer(module)
+    timestamps = [
+        datetime(2026, 5, 4, 18, step * 5, tzinfo=timezone.utc)
+        for step in range(12)
+    ]
+
+    result = optimizer._solve_self_consumption_hold(
+        **_hold_kwargs(soc_0=0.80),
+        schedule_timestamps=timestamps,
+    )
+
+    assert [action.timestamp for action in result.schedule.actions] == timestamps

@@ -23,7 +23,17 @@ _ha_config_entries = sys.modules.setdefault(
     "homeassistant.config_entries", types.ModuleType("homeassistant.config_entries")
 )
 _ha_core = sys.modules.setdefault("homeassistant.core", types.ModuleType("homeassistant.core"))
+_ha_exceptions = sys.modules.setdefault(
+    "homeassistant.exceptions", types.ModuleType("homeassistant.exceptions")
+)
 _ha_helpers = sys.modules.setdefault("homeassistant.helpers", types.ModuleType("homeassistant.helpers"))
+_ha_storage = sys.modules.setdefault(
+    "homeassistant.helpers.storage", types.ModuleType("homeassistant.helpers.storage")
+)
+_ha_update = sys.modules.setdefault(
+    "homeassistant.helpers.update_coordinator",
+    types.ModuleType("homeassistant.helpers.update_coordinator"),
+)
 _ha_er = sys.modules.setdefault(
     "homeassistant.helpers.entity_registry",
     types.ModuleType("homeassistant.helpers.entity_registry"),
@@ -35,19 +45,37 @@ _ha_dr = sys.modules.setdefault(
 _ha_event = sys.modules.setdefault(
     "homeassistant.helpers.event", types.ModuleType("homeassistant.helpers.event")
 )
+_ha_aiohttp_client = sys.modules.setdefault(
+    "homeassistant.helpers.aiohttp_client",
+    types.ModuleType("homeassistant.helpers.aiohttp_client"),
+)
 _ha_util = sys.modules.setdefault("homeassistant.util", types.ModuleType("homeassistant.util"))
 _ha_dt = sys.modules.setdefault("homeassistant.util.dt", types.ModuleType("homeassistant.util.dt"))
 _ha_core.HomeAssistant = type("HomeAssistant", (), {})
 _ha_config_entries.ConfigEntry = type("ConfigEntry", (), {})
+_ha_exceptions.ConfigEntryNotReady = type("ConfigEntryNotReady", (Exception,), {})
 _ha_er.async_get = lambda hass: getattr(hass, "entity_registry", SimpleNamespace(entities={}))
 _ha_dr.async_get = lambda hass: SimpleNamespace(devices={})
+_ha_storage.Store = type("Store", (), {"__init__": lambda self, *args, **kwargs: None})
+_ha_update.DataUpdateCoordinator = type(
+    "DataUpdateCoordinator",
+    (),
+    {
+        "__class_getitem__": classmethod(lambda cls, item: cls),
+        "__init__": lambda self, *args, **kwargs: None,
+    },
+)
 _ha_event.async_track_time_interval = lambda *args, **kwargs: (lambda: None)
+_ha_event.async_track_time_change = lambda *args, **kwargs: (lambda: None)
 _ha_event.async_track_point_in_time = lambda *args, **kwargs: (lambda: None)
 _ha_dt.now = getattr(_ha_dt, "now", lambda *args, **kwargs: None)
 _ha_dt.utcnow = getattr(_ha_dt, "utcnow", lambda *args, **kwargs: None)
 _ha_helpers.entity_registry = _ha_er
 _ha_helpers.device_registry = _ha_dr
+_ha_helpers.storage = _ha_storage
+_ha_helpers.update_coordinator = _ha_update
 _ha_helpers.event = _ha_event
+_ha_helpers.aiohttp_client = _ha_aiohttp_client
 _ha_root.helpers = _ha_helpers
 _ha_util.dt = _ha_dt
 _ha_root.util = _ha_util
@@ -67,6 +95,11 @@ ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner
 
 
 VIN = "LRWYHCEK3PC907290"
+
+
+def test_price_log_value_formats_unknown_without_cents_suffix():
+    assert ev_planner._format_price_log_value(None) == "unknown"
+    assert ev_planner._format_price_log_value(12) == "12.0c"
 
 
 class _FakeConfigEntry:
@@ -123,6 +156,45 @@ class _FakeStates:
         return [entity_id for entity_id in self._states if entity_id.startswith(prefix)]
 
 
+class _FakeTeslaResponse:
+    def __init__(self, status: int = 200, payload: dict | None = None, text: str = "") -> None:
+        self.status = status
+        self._payload = payload or {}
+        self._text = text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def json(self):
+        return self._payload
+
+    async def text(self):
+        return self._text
+
+
+class _FakeTeslaSession:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def get(self, url: str, **kwargs):
+        self.calls.append(("GET", url, kwargs))
+        return _FakeTeslaResponse(
+            payload={
+                "response": {
+                    "backup_reserve_percent": 42,
+                    "components": {"customer_preferred_export_rule": "pv_only"},
+                }
+            }
+        )
+
+    def post(self, url: str, **kwargs):
+        self.calls.append(("POST", url, kwargs))
+        return _FakeTeslaResponse()
+
+
 @pytest.fixture
 def fake_actions(monkeypatch):
     actions = types.ModuleType("power_sync.automations.actions")
@@ -159,6 +231,62 @@ async def _one_vehicle(*args, **kwargs):
 
 async def _no_vehicles(*args, **kwargs):
     return []
+
+
+def test_auto_schedule_tesla_helpers_use_powersync_proxy_base(monkeypatch):
+    const = importlib.import_module("power_sync.const")
+    fake_session = _FakeTeslaSession()
+    hass = _FakeHass()
+    hass.session = fake_session
+
+    class PowerSyncEntry(_FakeConfigEntry):
+        data = {
+            const.CONF_TESLA_ENERGY_SITE_ID: "site-1",
+            const.CONF_FLEET_API_BASE_URL: "https://fleet.example.test",
+        }
+
+    monkeypatch.setattr(
+        sys.modules["power_sync"],
+        "get_tesla_api_token",
+        lambda hass, entry: ("psync_test", const.TESLA_PROVIDER_POWERSYNC),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        _ha_aiohttp_client,
+        "async_get_clientsession",
+        lambda hass: hass.session,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        ev_planner.aiohttp,
+        "ClientTimeout",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+        raising=False,
+    )
+
+    async def run_helpers():
+        executor = ev_planner.AutoScheduleExecutor(
+            hass,
+            PowerSyncEntry(),
+            planner=SimpleNamespace(),
+        )
+        reserve = await executor._get_tesla_backup_reserve()
+        reserve_set = await executor._set_tesla_backup_reserve(35)
+        export_rule = await executor._get_current_export_rule()
+        export_set = await executor._set_export_rule("battery_ok")
+        return reserve, reserve_set, export_rule, export_set
+
+    assert asyncio.run(run_helpers()) == (42, True, "pv_only", True)
+    assert [call[0] for call in fake_session.calls] == ["GET", "POST", "GET", "POST"]
+    assert all(
+        url.startswith(f"{const.POWERSYNC_API_BASE_URL}/api/1/energy_sites/site-1/")
+        for _method, url, _kwargs in fake_session.calls
+    )
+    assert not any("fleet.example.test" in url for _method, url, _kwargs in fake_session.calls)
+    assert all(
+        kwargs["headers"]["Authorization"] == "Bearer psync_test"
+        for _method, _url, kwargs in fake_session.calls
+    )
 
 
 def test_price_level_leaves_solar_surplus_owned_session_alone(monkeypatch, fake_actions):
@@ -647,6 +775,43 @@ def test_scheduled_no_grid_import_passes_dynamic_start_param(fake_actions):
     assert params["no_grid_import"] is True
 
 
+def test_scheduled_tesla_start_targets_single_plugged_home_vehicle(
+    monkeypatch,
+    fake_actions,
+):
+    first_vin = "XP7YHCEL7TB811704"
+    second_vin = "LRWYHCEKXTC687964"
+    fake_actions._dynamic_ev_state = {}
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def two_vehicles(*args, **kwargs):
+        return [
+            {"vin": first_vin, "name": "Tesla_Flinn"},
+            {"vin": second_vin, "name": "Tesla_YF88"},
+        ]
+
+    async def at_home(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (first_vin, second_vin)
+        return "home"
+
+    async def plugged_in(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (first_vin, second_vin)
+        return vehicle_vin == second_vin
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", two_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+
+    executor = ev_planner.ScheduledChargingExecutor(_FakeHass(), _FakeConfigEntry())
+    result = asyncio.run(executor._start_charging("Scheduled window"))
+
+    assert result is True
+    fake_actions._action_start_ev_charging_dynamic.assert_awaited_once()
+    _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
+    assert params["vehicle_id"] == second_vin
+    assert params["vehicle_vin"] == second_vin
+
+
 def test_price_level_preserve_home_battery_sets_optimizer_intent(fake_actions):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
@@ -727,6 +892,250 @@ def test_scheduled_stops_external_charging_outside_window(monkeypatch, fake_acti
     assert params["stop_untracked"] is True
     assert params["stop_reason"] == "Outside schedule (11:00-14:00)"
     assert scheduled.get_state()["last_decision"] == "stopped"
+
+
+def test_scheduled_stops_active_second_tesla_outside_window(monkeypatch, fake_actions):
+    first_vin = "XP7YHCEL7TB811704"
+    second_vin = "LRWYHCEKXTC687964"
+    fake_actions._dynamic_ev_state = {}
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
+        "scheduled_charging"
+    ] = {
+        "enabled": True,
+        "start_time": "11:00",
+        "end_time": "14:00",
+        "max_price_cents": 35,
+    }
+
+    async def two_vehicles(*args, **kwargs):
+        return [
+            {"vin": first_vin, "name": "Tesla_Flinn"},
+            {"vin": second_vin, "name": "Tesla_YF88"},
+        ]
+
+    async def at_home(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (None, first_vin, second_vin)
+        return "home"
+
+    async def actively_charging(_hass, _entry, vehicle_vin=None):
+        return vehicle_vin == second_vin
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", two_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", actively_charging)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 5, 27, 15, 8, tzinfo=timezone.utc),
+    )
+
+    previous_executor = ev_planner.get_scheduled_charging_executor()
+    previous_price_executor = ev_planner.get_price_level_executor()
+    scheduled = ev_planner.ScheduledChargingExecutor(hass, _FakeConfigEntry())
+    coordinator = ev_planner.EVChargingModeCoordinator(hass, _FakeConfigEntry())
+
+    try:
+        ev_planner.set_scheduled_charging_executor(scheduled)
+        ev_planner.set_price_level_executor(None)
+
+        asyncio.run(coordinator.evaluate({}, 33))
+    finally:
+        ev_planner.set_scheduled_charging_executor(previous_executor)
+        ev_planner.set_price_level_executor(previous_price_executor)
+
+    fake_actions._action_stop_ev_charging_dynamic.assert_awaited_once()
+    _hass, _entry, params = fake_actions._action_stop_ev_charging_dynamic.await_args.args
+    assert params["vehicle_id"] == second_vin
+    assert params["vehicle_vin"] == second_vin
+    assert params["stop_untracked"] is True
+    assert params["stop_reason"] == "Outside schedule (11:00-14:00)"
+    assert scheduled.get_state()["last_decision"] == "stopped"
+
+
+def test_unspecified_ev_location_prefers_home_vehicle(monkeypatch):
+    first_vin = "XP7YHCEL7TB811704"
+    second_vin = "LRWYHCEKXTC687964"
+    hass = _FakeHass(
+        states={
+            "device_tracker.tesla_flinn_location": "not_home",
+            "binary_sensor.tesla_yf88_located_at_home": "on",
+        }
+    )
+    hass.device_registry = SimpleNamespace(
+        devices={
+            "device-1": SimpleNamespace(
+                id="device-1",
+                identifiers={("tesla_fleet", first_vin)},
+            ),
+            "device-2": SimpleNamespace(
+                id="device-2",
+                identifiers={("tesla_fleet", second_vin)},
+            ),
+        }
+    )
+    hass.entity_registry = SimpleNamespace(
+        entities={
+            "device_tracker.tesla_flinn_location": SimpleNamespace(
+                entity_id="device_tracker.tesla_flinn_location",
+                device_id="device-1",
+            ),
+            "binary_sensor.tesla_yf88_located_at_home": SimpleNamespace(
+                entity_id="binary_sensor.tesla_yf88_located_at_home",
+                device_id="device-2",
+            ),
+        }
+    )
+    monkeypatch.setattr(_ha_dr, "async_get", lambda _hass: _hass.device_registry)
+
+    assert asyncio.run(ev_planner.get_ev_location(hass, _FakeConfigEntry())) == "home"
+    assert (
+        asyncio.run(
+            ev_planner.get_ev_location(hass, _FakeConfigEntry(), vehicle_vin=first_vin)
+        )
+        == "not_home"
+    )
+
+
+def test_unspecified_ev_plug_state_checks_later_home_vehicle(monkeypatch):
+    first_vin = "XP7YHCEL7TB811704"
+    second_vin = "LRWYHCEKXTC687964"
+    hass = _FakeHass(
+        states={
+            "binary_sensor.tesla_flinn_charge_cable": "off",
+            "binary_sensor.tesla_yf88_charge_cable": "on",
+        }
+    )
+    hass.device_registry = SimpleNamespace(
+        devices={
+            "device-1": SimpleNamespace(
+                id="device-1",
+                identifiers={("tesla_fleet", first_vin)},
+            ),
+            "device-2": SimpleNamespace(
+                id="device-2",
+                identifiers={("tesla_fleet", second_vin)},
+            ),
+        }
+    )
+    hass.entity_registry = SimpleNamespace(
+        entities={
+            "binary_sensor.tesla_flinn_charge_cable": SimpleNamespace(
+                entity_id="binary_sensor.tesla_flinn_charge_cable",
+                device_id="device-1",
+            ),
+            "binary_sensor.tesla_yf88_charge_cable": SimpleNamespace(
+                entity_id="binary_sensor.tesla_yf88_charge_cable",
+                device_id="device-2",
+            ),
+        }
+    )
+    monkeypatch.setattr(_ha_dr, "async_get", lambda _hass: _hass.device_registry)
+
+    assert asyncio.run(ev_planner.is_ev_plugged_in(hass, _FakeConfigEntry())) is True
+    assert (
+        asyncio.run(
+            ev_planner.is_ev_plugged_in(hass, _FakeConfigEntry(), vehicle_vin=first_vin)
+        )
+        is False
+    )
+    assert (
+        asyncio.run(
+            ev_planner.is_ev_plugged_in(hass, _FakeConfigEntry(), vehicle_vin=second_vin)
+        )
+        is True
+    )
+
+
+def test_external_scheduled_guard_does_not_report_away_vehicle_when_home_vehicle_seen(
+    monkeypatch,
+    fake_actions,
+):
+    first_vin = "XP7YHCEL7TB811704"
+    second_vin = "LRWYHCEKXTC687964"
+    fake_actions._dynamic_ev_state = {}
+    hass = _FakeHass()
+
+    async def two_vehicles(*args, **kwargs):
+        return [
+            {"vin": first_vin, "name": "Tesla_Flinn"},
+            {"vin": second_vin, "name": "Tesla_YF88"},
+        ]
+
+    async def location(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (first_vin, second_vin)
+        return "home" if vehicle_vin == second_vin else "not_home"
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", two_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", location)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=False))
+
+    vehicle_vin, can_stop, reason = asyncio.run(
+        ev_planner._find_external_scheduled_charging_vehicle(hass, _FakeConfigEntry())
+    )
+
+    assert vehicle_vin is None
+    assert can_stop is False
+    assert reason == "no active external scheduled session"
+
+
+def test_scheduled_external_stop_is_not_repeated_while_tesla_state_is_stale(
+    monkeypatch,
+    fake_actions,
+):
+    second_vin = "LRWYHCEKXTC687964"
+    fake_actions._dynamic_ev_state = {}
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
+        "scheduled_charging"
+    ] = {
+        "enabled": True,
+        "start_time": "11:00",
+        "end_time": "14:00",
+        "max_price_cents": 35,
+    }
+
+    async def one_vehicle(*args, **kwargs):
+        return [{"vin": second_vin, "name": "Tesla_YF88"}]
+
+    async def at_home(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (None, second_vin)
+        return "home"
+
+    async def still_reports_charging(_hass, _entry, vehicle_vin=None):
+        return vehicle_vin == second_vin
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", one_vehicle)
+    monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", still_reports_charging)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 5, 27, 15, 8, tzinfo=timezone.utc),
+    )
+
+    previous_executor = ev_planner.get_scheduled_charging_executor()
+    previous_price_executor = ev_planner.get_price_level_executor()
+    scheduled = ev_planner.ScheduledChargingExecutor(hass, _FakeConfigEntry())
+    coordinator = ev_planner.EVChargingModeCoordinator(hass, _FakeConfigEntry())
+
+    try:
+        ev_planner.set_scheduled_charging_executor(scheduled)
+        ev_planner.set_price_level_executor(None)
+
+        asyncio.run(coordinator.evaluate({}, 33))
+        asyncio.run(coordinator.evaluate({}, 33))
+    finally:
+        ev_planner.set_scheduled_charging_executor(previous_executor)
+        ev_planner.set_price_level_executor(previous_price_executor)
+
+    fake_actions._action_stop_ev_charging_dynamic.assert_awaited_once()
 
 
 def test_scheduled_leaves_solar_surplus_owned_session_alone(
@@ -1049,6 +1458,63 @@ def test_auto_schedule_rate_update_skips_sigenergy_evdc(
         executor._set_vehicle_charge_rate("sigenergy_charger", 3680, settings)
     )
     assert set_amps_calls == []
+
+
+def test_auto_schedule_rate_update_uses_configured_sigenergy_evdc_rate_entity(
+    monkeypatch,
+    fake_actions,
+):
+    set_amps_calls = []
+
+    async def set_vehicle_amps(hass, entry, vehicle_id, amps, params):
+        set_amps_calls.append((vehicle_id, amps, params))
+        return True
+
+    fake_actions._set_vehicle_amps = set_vehicle_amps
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: SimpleNamespace(weekday=lambda: 0),
+    )
+
+    class SigenergyEntry(_FakeConfigEntry):
+        options = {
+            "sigenergy_charger_enabled": True,
+            "sigenergy_charger_host": "192.0.2.24",
+            "sigenergy_charger_port": 502,
+            "sigenergy_charger_slave_id": 2,
+            "sigenergy_charger_type": "evdc",
+            "sigenergy_charger_charge_power_limit_entity": "number.evdc_charge_limit",
+        }
+
+    executor = ev_planner.AutoScheduleExecutor(
+        _FakeHass(),
+        SigenergyEntry(),
+        planner=SimpleNamespace(),
+    )
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id="sigenergy_charger",
+        display_name="Sigenergy EVDC",
+        charger_type="",
+        min_charge_amps=6,
+        max_charge_amps=32,
+        voltage=230,
+        phases=1,
+    )
+
+    assert asyncio.run(
+        executor._set_vehicle_charge_rate("sigenergy_charger", 3680, settings)
+    )
+
+    assert len(set_amps_calls) == 1
+    vehicle_id, amps, params = set_amps_calls[0]
+    assert vehicle_id == "sigenergy_charger"
+    assert amps == 16
+    assert params["charger_type"] == "sigenergy"
+    assert params["sigenergy_charger_type"] == "evdc"
+    assert params["supports_rate_control"] is True
+    assert params["solar_control_strategy"] == "dynamic_rate"
+    assert params["sigenergy_charger_charge_power_limit_entity"] == "number.evdc_charge_limit"
 
 
 def test_price_level_ocpp_start_uses_detected_hacs_prefix(monkeypatch, fake_actions):
@@ -1404,6 +1870,112 @@ def test_auto_schedule_preserve_does_not_overwrite_price_level_intent(
     preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is True
     assert preserve_state["source"] == "price_level_charging"
+
+
+def test_auto_schedule_active_preserve_sets_optimizer_intent():
+    hass = _FakeHass()
+    executor = ev_planner.AutoScheduleExecutor(
+        hass,
+        _FakeConfigEntry(),
+        planner=SimpleNamespace(),
+    )
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id=VIN,
+        preserve_home_battery=True,
+    )
+    state = ev_planner.AutoScheduleState(vehicle_id=VIN, is_charging=True)
+
+    executor._sync_active_charging_preserve_intent(
+        VIN,
+        True,
+        state,
+        "Smart Schedule charging",
+    )
+
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
+    assert preserve_state["active"] is True
+    assert preserve_state["source"] == "smart_schedule"
+    assert preserve_state["mode"] == "no_discharge_charge_allowed"
+    assert preserve_state["reason"] == "Smart Schedule charging"
+
+
+def test_auto_schedule_active_preserve_waits_for_all_vehicles_before_clear():
+    hass = _FakeHass()
+    executor = ev_planner.AutoScheduleExecutor(
+        hass,
+        _FakeConfigEntry(),
+        planner=SimpleNamespace(),
+    )
+    settings = ev_planner.AutoScheduleSettings(preserve_home_battery=True)
+    first = ev_planner.AutoScheduleState(vehicle_id="ev-1", is_charging=True)
+    second = ev_planner.AutoScheduleState(vehicle_id="ev-2", is_charging=True)
+
+    executor._sync_active_charging_preserve_intent(
+        "ev-1",
+        True,
+        first,
+        "first vehicle charging",
+    )
+    executor._sync_active_charging_preserve_intent(
+        "ev-2",
+        True,
+        second,
+        "second vehicle charging",
+    )
+
+    first.is_charging = False
+    executor._sync_active_charging_preserve_intent(
+        "ev-1",
+        True,
+        first,
+        "first vehicle stopped",
+    )
+
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
+    assert preserve_state["active"] is True
+    assert preserve_state["source"] == "smart_schedule"
+    assert preserve_state["reason"] == "second vehicle charging"
+
+    second.is_charging = False
+    executor._sync_active_charging_preserve_intent(
+        "ev-2",
+        True,
+        second,
+        "all smart schedule charging stopped",
+    )
+
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
+    assert preserve_state["active"] is False
+    assert preserve_state["source"] == "smart_schedule"
+
+
+def test_auto_schedule_active_preserve_does_not_overwrite_other_ev_mode():
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"] = {
+        "active": True,
+        "mode": "no_discharge_charge_allowed",
+        "source": "price_level_charging",
+        "reason": "cheap price",
+    }
+    executor = ev_planner.AutoScheduleExecutor(
+        hass,
+        _FakeConfigEntry(),
+        planner=SimpleNamespace(),
+    )
+    settings = ev_planner.AutoScheduleSettings(preserve_home_battery=True)
+    state = ev_planner.AutoScheduleState(vehicle_id=VIN, is_charging=True)
+
+    executor._sync_active_charging_preserve_intent(
+        VIN,
+        True,
+        state,
+        "Smart Schedule charging",
+    )
+
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
+    assert preserve_state["active"] is True
+    assert preserve_state["source"] == "price_level_charging"
+    assert preserve_state["reason"] == "cheap price"
 
 
 def test_auto_schedule_grid_start_uses_optimizer_battery_target(monkeypatch, fake_actions):
@@ -1786,6 +2358,35 @@ def test_price_level_zaptec_start_is_blocked_by_manual_owner(fake_actions):
     assert "manual already owns" in last_command["reason"]
 
 
+def test_price_level_start_respects_manual_stop_hold(fake_actions):
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    hass = _FakeHass()
+    entry = _FakeConfigEntry()
+    ev_ownership.record_manual_stop_hold(
+        hass,
+        entry,
+        "generic_ev",
+        reason="Manual stop from mobile",
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    result = asyncio.run(
+        executor._start_charging(
+            "price_level_opportunity",
+            "cheap price",
+            vehicle_vin="generic_ev",
+        )
+    )
+
+    assert result is False
+    fake_actions._action_start_ev_charging_dynamic.assert_not_awaited()
+    state = executor._get_or_create_vehicle_state("generic_ev")
+    assert state.last_decision == "waiting"
+    assert "Manual stop hold active" in state.last_decision_reason
+
+
 def test_price_level_disabled_does_not_stop_unowned_charging(monkeypatch, fake_actions):
     fake_actions._dynamic_ev_state = {}
 
@@ -1878,7 +2479,7 @@ def test_sigenergy_plug_detection_wins_before_ocpp_false(monkeypatch):
         },
     )
 
-    async def sigenergy_plugged(config_entry):
+    async def sigenergy_plugged(config_entry, hass=None):
         assert config_entry is entry
         return True
 
@@ -1902,7 +2503,7 @@ def test_sigenergy_plug_detection_can_report_unplugged(monkeypatch):
         options={"sigenergy_charger_enabled": True},
     )
 
-    async def sigenergy_unplugged(config_entry):
+    async def sigenergy_unplugged(config_entry, hass=None):
         return False
 
     monkeypatch.setattr(
@@ -1932,7 +2533,7 @@ def test_disconnected_sigenergy_does_not_block_any_vehicle_fallback(monkeypatch)
         },
     )
 
-    async def sigenergy_unplugged(config_entry):
+    async def sigenergy_unplugged(config_entry, hass=None):
         return False
 
     monkeypatch.setattr(

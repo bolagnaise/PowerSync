@@ -44,6 +44,7 @@ def test_sungrow_battery_system_can_select_hybrid_model_for_curtailment():
     models = const["get_models_for_brand"]("sungrow", const["BATTERY_SYSTEM_SUNGROW"])
 
     assert "sh20t" in models
+    assert "sh10rs" in models
     assert "sg2.5rs" in models
 
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import bisect
 import functools
+import inspect
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -21,7 +22,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 from ..const import (
+    DEFAULT_SOLAR_FORECAST_PROVIDER,
     DEFAULT_SOLCAST_ESTIMATE_TYPE,
+    SOLAR_FORECAST_PROVIDER_OPEN_METEO,
+    SOLAR_FORECAST_PROVIDER_SOLCAST,
+    SOLAR_FORECAST_PROVIDERS,
     SOLCAST_ESTIMATE,
     SOLCAST_ESTIMATE10,
     SOLCAST_ESTIMATE90,
@@ -446,9 +451,17 @@ class LoadEstimator:
         if not actual_values or matched_coverage < RECENT_LOAD_MIN_COVERAGE_HOURS:
             return None
 
+        ratios = [
+            actual / expected
+            for actual, expected in zip(actual_values, expected_values)
+            if expected > 0
+        ]
+        if not ratios:
+            return None
+
         recent_avg = sum(actual_values) / len(actual_values)
         baseline_avg = sum(expected_values) / len(expected_values)
-        ratio = recent_avg / baseline_avg
+        ratio = self._median(ratios)
         if abs(ratio - 1.0) < RECENT_LOAD_DEADBAND:
             return None
 
@@ -456,10 +469,11 @@ class LoadEstimator:
         scale = max(RECENT_LOAD_MIN_SCALE, min(RECENT_LOAD_MAX_SCALE, scale))
         _LOGGER.info(
             "Recent load regime adjustment: recent=%.0fW over %.1fh, "
-            "matched_history=%.0fW, scale=%.2fx",
+            "matched_history=%.0fW, median_ratio=%.2fx, scale=%.2fx",
             recent_avg,
             matched_coverage,
             baseline_avg,
+            ratio,
             scale,
         )
         return scale
@@ -1011,8 +1025,8 @@ class SolcastForecaster:
     Wrapper for solar production forecasts.
 
     Retrieves solar production forecasts from supported Home Assistant
-    integrations, preferring Solcast and falling back to Open-Meteo Solar
-    Forecast when available.
+    integrations, using the configured provider preference and falling back to
+    the other supported provider when available.
     """
 
     def __init__(
@@ -1021,6 +1035,7 @@ class SolcastForecaster:
         solcast_entity: str | None = None,
         interval_minutes: int = 5,
         estimate_type: str = DEFAULT_SOLCAST_ESTIMATE_TYPE,
+        provider_preference: str = DEFAULT_SOLAR_FORECAST_PROVIDER,
     ):
         """
         Initialize Solcast forecaster.
@@ -1030,15 +1045,28 @@ class SolcastForecaster:
             solcast_entity: Solcast sensor entity ID
             interval_minutes: Forecast interval in minutes
             estimate_type: Solcast estimate to use: estimate, estimate10, or estimate90
+            provider_preference: Preferred forecast source: solcast or open_meteo
         """
         self.hass = hass
         self.solcast_entity = solcast_entity
         self.interval_minutes = interval_minutes
+        self.provider_preference = (
+            provider_preference
+            if provider_preference in SOLAR_FORECAST_PROVIDERS
+            else DEFAULT_SOLAR_FORECAST_PROVIDER
+        )
+        self.last_forecast_source: str | None = None
         self.estimate_type = (
             estimate_type
             if estimate_type in _SOLCAST_ESTIMATE_FIELDS
             else DEFAULT_SOLCAST_ESTIMATE_TYPE
         )
+
+    def _provider_order(self) -> tuple[str, str]:
+        """Return preferred provider first, then fallback provider."""
+        if self.provider_preference == SOLAR_FORECAST_PROVIDER_OPEN_METEO:
+            return (SOLAR_FORECAST_PROVIDER_OPEN_METEO, SOLAR_FORECAST_PROVIDER_SOLCAST)
+        return (SOLAR_FORECAST_PROVIDER_SOLCAST, SOLAR_FORECAST_PROVIDER_OPEN_METEO)
 
     def _get_pv_estimate(self, period: dict[str, Any]) -> float:
         """Return the configured Solcast estimate value for a forecast period."""
@@ -1059,6 +1087,29 @@ class SolcastForecaster:
                 return state
         return None
 
+    def _iter_solcast_detailed_states(self) -> list[Any]:
+        """Return Solcast sensor states that expose detailed forecast periods."""
+        async_all = getattr(self.hass.states, "async_all", None)
+        if not callable(async_all):
+            return []
+
+        try:
+            states = async_all("sensor")
+        except TypeError:
+            states = async_all()
+
+        detailed_states: list[Any] = []
+        for state in states or []:
+            entity_id = getattr(state, "entity_id", "")
+            if "solcast" not in entity_id:
+                continue
+            attributes = getattr(state, "attributes", {}) or {}
+            detailed = attributes.get("detailedForecast")
+            if isinstance(detailed, list) and detailed:
+                detailed_states.append(state)
+
+        return detailed_states
+
     async def get_forecast(
         self,
         horizon_hours: int = 48,
@@ -1075,22 +1126,54 @@ class SolcastForecaster:
 
         n_intervals = horizon_hours * 60 // self.interval_minutes
 
-        # Try to get Solcast forecast from coordinator data
-        forecast = await self._get_solcast_forecast(start_time, n_intervals)
-        if forecast is not None:
-            return forecast
-
-        forecast = self._get_open_meteo_forecast(start_time, n_intervals)
-        if forecast is not None:
-            return forecast
+        for provider in self._provider_order():
+            if provider == SOLAR_FORECAST_PROVIDER_SOLCAST:
+                forecast = await self._get_solcast_forecast(start_time, n_intervals)
+            else:
+                forecast = self._get_open_meteo_forecast(start_time, n_intervals)
+            if forecast is not None:
+                self.last_forecast_source = provider
+                return forecast
 
         # No solar forecast available — use zero solar so LP makes
         # purely price-based decisions rather than guessing production
+        self.last_forecast_source = None
         _LOGGER.warning(
             "Solar forecast not available — using zero solar forecast. "
             "Install Solcast Solar or Open-Meteo Solar Forecast for optimal battery scheduling."
         )
         return [0.0] * n_intervals
+
+    async def get_daily_summary(
+        self,
+        horizon_hours: int = 48,
+        start_time: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Return today/tomorrow kWh summary using the configured provider order."""
+        if start_time is None:
+            start_time = dt_util.now()
+
+        forecast = await self.get_forecast(horizon_hours=horizon_hours, start_time=start_time)
+        interval_hours = self.interval_minutes / 60
+        today = start_time.date()
+        tomorrow = today + timedelta(days=1)
+        today_kwh = 0.0
+        tomorrow_kwh = 0.0
+
+        for idx, watts in enumerate(forecast):
+            slot_time = start_time + timedelta(minutes=idx * self.interval_minutes)
+            kwh = max(0.0, float(watts or 0.0)) * interval_hours / 1000
+            if slot_time.date() == today:
+                today_kwh += kwh
+            elif slot_time.date() == tomorrow:
+                tomorrow_kwh += kwh
+
+        return {
+            "today_kwh": today_kwh,
+            "tomorrow_kwh": tomorrow_kwh,
+            "today_forecast_kwh": today_kwh,
+            "source": self.last_forecast_source,
+        }
 
     def _get_open_meteo_forecast(
         self,
@@ -1329,7 +1412,7 @@ class SolcastForecaster:
             # Fallback: try the Solcast Solar integration hass.data
             solcast_solar_data = self.hass.data.get("solcast_solar")
             if solcast_solar_data:
-                forecast = self._extract_from_solcast_solar_integration(
+                forecast = await self._extract_from_solcast_solar_integration(
                     solcast_solar_data, start_time, n_intervals
                 )
                 if forecast:
@@ -1406,12 +1489,19 @@ class SolcastForecaster:
             "sensor.solcast_forecast_today",
             "sensor.solcast_pv_forecast_today",
         ])
-        if not today_state:
+        fallback_states = self._iter_solcast_detailed_states()
+        if not today_state and not fallback_states:
             return None
 
-        today_detailed = today_state.attributes.get("detailedForecast")
+        today_detailed = (
+            today_state.attributes.get("detailedForecast") if today_state else None
+        )
         if not today_detailed or not isinstance(today_detailed, list):
-            return None
+            if fallback_states:
+                today_state = fallback_states[0]
+                today_detailed = today_state.attributes["detailedForecast"]
+            else:
+                return None
 
         # Combine today + tomorrow for 48h coverage
         combined_forecast = list(today_detailed)
@@ -1430,6 +1520,18 @@ class SolcastForecaster:
             )
             if tomorrow_detailed and isinstance(tomorrow_detailed, list):
                 combined_forecast.extend(tomorrow_detailed)
+
+        seen_entity_ids = {
+            getattr(state, "entity_id", None)
+            for state in (today_state, tomorrow_state)
+            if state is not None
+        }
+        for state in fallback_states:
+            entity_id = getattr(state, "entity_id", None)
+            if entity_id in seen_entity_ids:
+                continue
+            combined_forecast.extend(state.attributes["detailedForecast"])
+            seen_entity_ids.add(entity_id)
 
         if not combined_forecast:
             return None
@@ -1513,7 +1615,7 @@ class SolcastForecaster:
 
         return result
 
-    def _extract_from_solcast_solar_integration(
+    async def _extract_from_solcast_solar_integration(
         self,
         solcast_data: Any,
         start_time: datetime,
@@ -1556,6 +1658,8 @@ class SolcastForecaster:
                         if hasattr(solcast_api, 'get_forecast_list'):
                             try:
                                 forecast_list = solcast_api.get_forecast_list()
+                                if inspect.isawaitable(forecast_list):
+                                    forecast_list = await forecast_list
                                 if forecast_list:
                                     parsed = self._parse_detailed_forecast(
                                         forecast_list, start_time, n_intervals

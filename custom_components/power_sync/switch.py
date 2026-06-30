@@ -34,6 +34,7 @@ from .const import (
     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
     CONF_POWERWALL_LOCAL_PAIRED,
+    CONF_SIGENERGY_STATION_ID,
     CONF_TESLA_ENERGY_SITE_ID,
     BATTERY_SYSTEM_TESLA,
     OPT_PROVIDER_POWERSYNC,
@@ -46,11 +47,13 @@ from .const import (
     SWITCH_TYPE_MONITORING_MODE,
     SWITCH_TYPE_AWAY_MODE,
     SWITCH_TYPE_PROFIT_MAX_MODE,
+    SWITCH_TYPE_CHARGE_BY_TIME,
     SWITCH_TYPE_OPTIMIZATION_DISABLE_IDLE,
     SWITCH_TYPE_OPTIMIZATION_SPREAD_EXPORT,
     SWITCH_TYPE_OPTIMIZATION_SPREAD_IMPORT,
     SWITCH_TYPE_OPTIMIZATION_ENABLED,
     SWITCH_TYPE_OPTIMIZATION_AUTO_APPLY_RESERVE,
+    SERVICE_RESTORE_NORMAL,
     DEFAULT_DISCHARGE_DURATION,
     ATTR_LAST_SYNC,
     ATTR_SYNC_STATUS,
@@ -61,6 +64,7 @@ from .const import (
     TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS,
     TESLA_CAPABILITY_WAIT_SECONDS,
     POWERWALL_LOCAL_POLL_INTERVAL,
+    supports_no_idle_mode_provider,
 )
 
 # Providers that use TOU schedule syncing (Amber, Octopus, Flow Power)
@@ -272,7 +276,7 @@ async def async_setup_entry(
             OnGridSwitch(hass=hass, entry=entry),
         ])
 
-    # Away Mode and Profit Max switches — added later via deferred callbacks once
+    # Away Mode and optimizer mode switches — added later via deferred callbacks once
     # the OptimizationCoordinator is created (it's set up after platforms start).
     def _add_away_mode_switch(coordinator: Any) -> None:
         async_add_entities([AwayModeSwitch(hass=hass, entry=entry, coordinator=coordinator)])
@@ -286,7 +290,12 @@ async def async_setup_entry(
 
     hass.data[DOMAIN][entry.entry_id]["switch_add_profit_max"] = _add_profit_max_switch
 
-    if electricity_provider == "flow_power":
+    def _add_charge_by_time_switch(coordinator: Any) -> None:
+        async_add_entities([ChargeByTimeSwitch(hass=hass, entry=entry, coordinator=coordinator)])
+
+    hass.data[DOMAIN][entry.entry_id]["switch_add_charge_by_time"] = _add_charge_by_time_switch
+
+    if supports_no_idle_mode_provider(electricity_provider):
         def _add_disable_idle_switch(coordinator: Any) -> None:
             async_add_entities([
                 DisableIdleModeSwitch(hass=hass, entry=entry, coordinator=coordinator)
@@ -1157,6 +1166,22 @@ class MonitoringModeSwitch(SwitchEntity):
             options=new_options,
         )
 
+        restore_data = {"source": "manual", "_force_restore": True}
+        if self._entry.data.get(CONF_SIGENERGY_STATION_ID):
+            restore_data["_native_control"] = True
+        try:
+            await self.hass.services.async_call(
+                DOMAIN,
+                SERVICE_RESTORE_NORMAL,
+                restore_data,
+                blocking=True,
+            )
+        except Exception as err:
+            _LOGGER.warning(
+                "Monitoring mode enabled but restore normal failed: %s",
+                err,
+            )
+
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
@@ -1282,8 +1307,76 @@ class ProfitMaxModeSwitch(SwitchEntity):
         self.async_write_ha_state()
 
 
+class ChargeByTimeSwitch(SwitchEntity):
+    """Switch to enforce a target battery SOC by a configured time."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: Any) -> None:
+        """Initialize the switch."""
+        self.hass = hass
+        self._entry = entry
+        self._coordinator = coordinator
+        self._attr_unique_id = f"{entry.entry_id}_{SWITCH_TYPE_CHARGE_BY_TIME}"
+        self._attr_suggested_object_id = f"power_sync_{SWITCH_TYPE_CHARGE_BY_TIME}"
+        self._attr_name = "Charge By Time"
+        self._attr_icon = "mdi:battery-clock"
+        from .const import CONF_CHARGE_BY_TIME_ENABLED, CONF_PROFIT_MAX_ENABLED
+        enabled = entry.options.get(
+            CONF_CHARGE_BY_TIME_ENABLED,
+            entry.data.get(
+                CONF_CHARGE_BY_TIME_ENABLED,
+                entry.options.get(
+                    CONF_PROFIT_MAX_ENABLED,
+                    entry.data.get(CONF_PROFIT_MAX_ENABLED, False),
+                ),
+            ),
+        )
+        self._attr_is_on = bool(enabled)
+
+    async def async_added_to_hass(self) -> None:
+        """Register for optimizer setting changes made outside this switch."""
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{DOMAIN}_{self._entry.entry_id}_charge_by_time",
+                self._handle_charge_by_time_update,
+            )
+        )
+
+    @callback
+    def _handle_charge_by_time_update(self, enabled: bool) -> None:
+        """Update the HA switch state after API-driven changes."""
+        self._attr_is_on = bool(enabled)
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self):
+        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_LP_OPTIMIZER)
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if charge-by-time mode is active."""
+        return self._coordinator.charge_by_time_enabled
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable charge-by-time mode."""
+        self._attr_is_on = True
+        changed = self._coordinator.set_charge_by_time_enabled(True)
+        await _reoptimize_if_enabled(self._coordinator, changed)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disable charge-by-time mode."""
+        self._attr_is_on = False
+        changed = self._coordinator.set_charge_by_time_enabled(False)
+        await _reoptimize_if_enabled(self._coordinator, changed)
+        self.async_write_ha_state()
+
+
 class DisableIdleModeSwitch(SwitchEntity):
-    """Switch to replace Flow Power optimizer idle holds with self-consumption."""
+    """Switch to replace optimizer idle holds with self-consumption."""
 
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.CONFIG
@@ -1327,18 +1420,18 @@ class DisableIdleModeSwitch(SwitchEntity):
 
     @property
     def is_on(self) -> bool:
-        """Return True if Flow Power no-idle mode is active."""
+        """Return True if no-idle mode is active."""
         return self._coordinator.disable_idle_enabled
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Enable Flow Power no-idle mode."""
+        """Enable no-idle mode."""
         self._attr_is_on = True
         changed = self._coordinator.set_disable_idle_enabled(True)
         await _reoptimize_if_enabled(self._coordinator, changed)
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Disable Flow Power no-idle mode."""
+        """Disable no-idle mode."""
         self._attr_is_on = False
         changed = self._coordinator.set_disable_idle_enabled(False)
         await _reoptimize_if_enabled(self._coordinator, changed)

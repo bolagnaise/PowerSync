@@ -88,22 +88,27 @@ def _schedule_extra_params(
     fd_soc: float = 100,
     fd_pwr: float = 0,
     max_soc: float = 100,
-    import_limit: float = 30000,
-    export_limit: float = 30000,
-    pv_limit: float = 30000,
-    reactive_power: float = 0,
+    import_limit: Optional[float] = None,
+    export_limit: Optional[float] = None,
+    pv_limit: Optional[float] = None,
+    reactive_power: Optional[float] = None,
 ) -> dict:
-    """Return Scheduler V3 extraParam with conservative defaults."""
-    return {
+    """Return Scheduler V3 extraParam without overwriting omitted device limits."""
+    params = {
         "minSocOnGrid": float(min_soc),
         "fdSoc": float(fd_soc),
         "fdPwr": float(fd_pwr),
         "maxSoc": float(max_soc),
-        "importLimit": float(import_limit),
-        "exportLimit": float(export_limit),
-        "pvLimit": float(pv_limit),
-        "reactivePower": float(reactive_power),
     }
+    if import_limit is not None:
+        params["importLimit"] = float(import_limit)
+    if export_limit is not None:
+        params["exportLimit"] = float(export_limit)
+    if pv_limit is not None:
+        params["pvLimit"] = float(pv_limit)
+    if reactive_power is not None:
+        params["reactivePower"] = float(reactive_power)
+    return params
 
 
 class FoxESSCloudClient:
@@ -513,10 +518,10 @@ def to_scheduler_v3_group(group: dict) -> dict:
             fd_soc=group.get("fdSoc", group.get("fdsoc", 100)),
             fd_pwr=group.get("fdPwr", group.get("fdpwr", 0)),
             max_soc=group.get("maxSoc", group.get("maxsoc", 100)),
-            import_limit=group.get("importLimit", 30000),
-            export_limit=group.get("exportLimit", 30000),
-            pv_limit=group.get("pvLimit", 30000),
-            reactive_power=group.get("reactivePower", 0),
+            import_limit=group.get("importLimit"),
+            export_limit=group.get("exportLimit"),
+            pv_limit=group.get("pvLimit"),
+            reactive_power=group.get("reactivePower"),
         )
 
     return {

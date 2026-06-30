@@ -127,6 +127,7 @@ class SungrowSHController(InverterController):
 
     # Forced Charge/Discharge Power
     REG_CHARGE_DISCHARGE_POWER = 13051  # 13052 - Forced charge/discharge power (W)
+    MIN_FORCED_POWER_W = 200             # Practical SH forced-mode floor
 
     # Max Battery Charge/Discharge Power (0.01kW / 10W units in mkaiser mapping)
     REG_MAX_CHARGE_POWER = 33046       # 33047 - Max battery charge power (W / 10)
@@ -761,7 +762,15 @@ class SungrowSHController(InverterController):
         to avoid exception code 4), then EMS mode and command. Retries once on
         verification failure (covers silent Modbus collisions).
         """
-        target_power_w = max(0, int(round(power_w)))
+        requested_power_w = max(0, int(round(power_w)))
+        target_power_w = max(self.MIN_FORCED_POWER_W, requested_power_w)
+        if requested_power_w != target_power_w:
+            _LOGGER.debug(
+                "Sungrow %s: clamping requested force power %dW to %dW",
+                label,
+                requested_power_w,
+                target_power_w,
+            )
         max_attempts = 2
         for attempt in range(1, max_attempts + 1):
             try:
@@ -1180,6 +1189,10 @@ class SungrowSHController(InverterController):
             daily_charge = await self._read_input_register(self.REG_DAILY_BATTERY_CHARGE, 1)
             if daily_charge:
                 data["daily_battery_charge"] = round(daily_charge[0] * 0.1, 2)
+
+            inv_temp = await self._read_input_register(self.REG_INVERTER_TEMP, 1)
+            if inv_temp:
+                data["inverter_temperature"] = round(self._to_signed16(inv_temp[0]) * 0.1, 1)
 
             # Read daily energy registers (hardware-tracked, more reliable than
             # software accumulator which can be polluted by transient bad reads)

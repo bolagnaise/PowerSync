@@ -63,5 +63,8 @@ def test_flow_power_portal_sensors_use_provider_device_and_object_ids():
     assert '"fp_account_lwap"' in const_source
     assert '"fp_account_avg_usage"' in const_source
     assert '"fp_account_max_usage"' in const_source
+    assert "CONF_FLOWPOWER_API_KEY" in source
+    assert "fp_email or fp_api_key" in source
     assert "return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)" in source
     assert 'self._attr_suggested_object_id = f"power_sync_{sensor_type}"' in source
+    assert "network_tariff_raw" in source

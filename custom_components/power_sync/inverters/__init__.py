@@ -186,6 +186,7 @@ SUNGROW_SH_RS_MODELS = {
     "sh4.6rs": "SH4.6RS",
     "sh5.0rs": "SH5.0RS",
     "sh6.0rs": "SH6.0RS",
+    "sh10rs": "SH10RS",
 }
 
 # Three phase RT series (residential)

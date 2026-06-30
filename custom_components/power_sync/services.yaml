@@ -9,6 +9,35 @@ sync_now:
   description: Immediately refresh data from Amber and Tesla
   fields: {}
 
+preview_history_relink:
+  name: Preview History Relink
+  description: Preview Sungrow mkaiser-to-PowerSync entity relinks without changing entities.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Optional PowerSync config entry ID. Omit to use the Sungrow entry.
+      required: false
+      selector:
+        text:
+
+apply_history_relink:
+  name: Apply History Relink
+  description: Apply ready Sungrow mkaiser-to-PowerSync entity relinks. Does not rewrite recorder statistics.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Optional PowerSync config entry ID. Omit to use the Sungrow entry.
+      required: false
+      selector:
+        text:
+    confirm:
+      name: Confirm
+      description: Must be true to apply the relinks.
+      required: true
+      default: false
+      selector:
+        boolean:
+
 force_discharge:
   name: Force Discharge
   description: Force battery discharge mode - switches to autonomous with high export tariff to maximise export
@@ -38,12 +67,20 @@ force_discharge:
               value: "105"
             - label: "2 hours"
               value: "120"
+            - label: "2 hours 15 min"
+              value: "135"
             - label: "2 hours 30 min"
               value: "150"
+            - label: "2 hours 45 min"
+              value: "165"
             - label: "3 hours"
               value: "180"
+            - label: "3 hours 15 min"
+              value: "195"
             - label: "3 hours 30 min"
               value: "210"
+            - label: "3 hours 45 min"
+              value: "225"
             - label: "4 hours"
               value: "240"
     power_w:
@@ -88,12 +125,20 @@ force_charge:
               value: "105"
             - label: "2 hours"
               value: "120"
+            - label: "2 hours 15 min"
+              value: "135"
             - label: "2 hours 30 min"
               value: "150"
+            - label: "2 hours 45 min"
+              value: "165"
             - label: "3 hours"
               value: "180"
+            - label: "3 hours 15 min"
+              value: "195"
             - label: "3 hours 30 min"
               value: "210"
+            - label: "3 hours 45 min"
+              value: "225"
             - label: "4 hours"
               value: "240"
     power_w:

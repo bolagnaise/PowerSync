@@ -13,10 +13,45 @@ ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_syn
 sys.modules.setdefault("aiohttp", types.ModuleType("aiohttp"))
 
 _ha_root = sys.modules.setdefault("homeassistant", types.ModuleType("homeassistant"))
+_ha_core = sys.modules.setdefault("homeassistant.core", types.ModuleType("homeassistant.core"))
+_ha_config_entries = sys.modules.setdefault(
+    "homeassistant.config_entries", types.ModuleType("homeassistant.config_entries")
+)
+_ha_exceptions = sys.modules.setdefault(
+    "homeassistant.exceptions", types.ModuleType("homeassistant.exceptions")
+)
+_ha_helpers = sys.modules.setdefault("homeassistant.helpers", types.ModuleType("homeassistant.helpers"))
+_ha_storage = sys.modules.setdefault(
+    "homeassistant.helpers.storage", types.ModuleType("homeassistant.helpers.storage")
+)
+_ha_update = sys.modules.setdefault(
+    "homeassistant.helpers.update_coordinator",
+    types.ModuleType("homeassistant.helpers.update_coordinator"),
+)
+_ha_event = sys.modules.setdefault(
+    "homeassistant.helpers.event", types.ModuleType("homeassistant.helpers.event")
+)
 _ha_util = sys.modules.setdefault("homeassistant.util", types.ModuleType("homeassistant.util"))
 _ha_dt = sys.modules.setdefault("homeassistant.util.dt", types.ModuleType("homeassistant.util.dt"))
+_ha_core.HomeAssistant = type("HomeAssistant", (), {})
+_ha_config_entries.ConfigEntry = type("ConfigEntry", (), {})
+_ha_exceptions.ConfigEntryNotReady = type("ConfigEntryNotReady", (Exception,), {})
+_ha_storage.Store = type("Store", (), {"__init__": lambda self, *args, **kwargs: None})
+_ha_update.DataUpdateCoordinator = type(
+    "DataUpdateCoordinator",
+    (),
+    {
+        "__class_getitem__": classmethod(lambda cls, item: cls),
+        "__init__": lambda self, *args, **kwargs: None,
+    },
+)
+_ha_event.async_track_time_change = lambda *args, **kwargs: (lambda: None)
+_ha_helpers.storage = _ha_storage
+_ha_helpers.update_coordinator = _ha_update
+_ha_helpers.event = _ha_event
 _ha_dt.now = getattr(_ha_dt, "now", lambda *args, **kwargs: None)
 _ha_util.dt = _ha_dt
+_ha_root.helpers = _ha_helpers
 _ha_root.util = _ha_util
 
 _ps = types.ModuleType("power_sync")
@@ -71,6 +106,101 @@ def test_generic_status_entity_round_trips_with_auto_schedule_settings():
 
     assert settings.charger_status_entity == "sensor.garage_ev_status"
     assert settings.to_dict()["charger_status_entity"] == "sensor.garage_ev_status"
+
+
+def test_preserve_home_battery_round_trips_with_auto_schedule_settings():
+    settings = ev_planner.AutoScheduleSettings.from_dict({
+        "preserve_home_battery": True,
+    })
+
+    assert settings.preserve_home_battery is True
+    assert settings.to_dict()["preserve_home_battery"] is True
+
+
+def test_preserve_home_battery_disables_consume_battery_level_on_load():
+    settings = ev_planner.AutoScheduleSettings.from_dict({
+        "preserve_home_battery": True,
+        "consume_battery_level": 50,
+    })
+
+    assert settings.preserve_home_battery is True
+    assert settings.consume_battery_level == 0
+
+
+def test_departure_preserve_home_battery_round_trips_and_overrides_default():
+    settings = ev_planner.AutoScheduleSettings.from_dict({
+        "preserve_home_battery": True,
+        "departure_preserve_home_battery": {"0": False, "1": True},
+    })
+
+    assert settings.departure_preserve_home_battery == {0: False, 1: True}
+    assert settings.get_effective_preserve_home_battery(0) is False
+    assert settings.get_effective_preserve_home_battery(1) is True
+    assert settings.get_effective_preserve_home_battery(2) is True
+    assert settings.to_dict()["departure_preserve_home_battery"] == {
+        "0": False,
+        "1": True,
+    }
+
+
+def test_departure_preserve_home_battery_disables_day_consume_on_load():
+    settings = ev_planner.AutoScheduleSettings.from_dict({
+        "departure_consume_battery_level": {"0": 45, "1": 35},
+        "departure_preserve_home_battery": {"0": True, "1": False},
+    })
+
+    assert settings.departure_consume_battery_level == {0: 0, 1: 35}
+    assert settings.departure_preserve_home_battery == {0: True, 1: False}
+
+
+def test_auto_schedule_preserve_and_consume_settings_are_mutually_exclusive():
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor._settings = {}
+    executor._state = {}
+
+    settings = executor.update_settings(
+        "ev-1",
+        {
+            "consume_battery_level": 40,
+            "preserve_home_battery": True,
+        },
+    )
+
+    assert settings.preserve_home_battery is True
+    assert settings.consume_battery_level == 0
+
+    settings = executor.update_settings(
+        "ev-1",
+        {"consume_battery_level": 30},
+    )
+
+    assert settings.consume_battery_level == 30
+    assert settings.preserve_home_battery is False
+
+
+def test_auto_schedule_departure_preserve_and_consume_settings_are_mutually_exclusive():
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor._settings = {}
+    executor._state = {}
+
+    settings = executor.update_settings(
+        "ev-1",
+        {
+            "departure_consume_battery_level": {0: 40},
+            "departure_preserve_home_battery": {0: True},
+        },
+    )
+
+    assert settings.departure_preserve_home_battery == {0: True}
+    assert settings.departure_consume_battery_level == {0: 0}
+
+    settings = executor.update_settings(
+        "ev-1",
+        {"departure_consume_battery_level": {0: 30}},
+    )
+
+    assert settings.departure_consume_battery_level == {0: 30}
+    assert settings.departure_preserve_home_battery == {0: False}
 
 
 def test_vehicle_charger_config_syncs_generic_status_entity():

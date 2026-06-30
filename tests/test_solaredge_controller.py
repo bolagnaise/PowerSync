@@ -260,6 +260,46 @@ class _SEStates:
         ]
 
 
+def test_solaredge_energy_bridge_does_not_map_battery_dc_power_as_solar():
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(
+                {
+                    "sensor.solaredge_b1_state_of_energy": _SEState(
+                        "sensor.solaredge_b1_state_of_energy",
+                        "8",
+                        {"unit_of_measurement": "%"},
+                    ),
+                    "sensor.solaredge_b1_dc_power": _SEState(
+                        "sensor.solaredge_b1_dc_power",
+                        "-1800",
+                        {"unit_of_measurement": "W"},
+                    ),
+                    "sensor.solaredge_m1_ac_power": _SEState(
+                        "sensor.solaredge_m1_ac_power",
+                        "-1800",
+                        {"unit_of_measurement": "W"},
+                    ),
+                    "sensor.solaredge_load_power": _SEState(
+                        "sensor.solaredge_load_power",
+                        "1800",
+                        {"unit_of_measurement": "W"},
+                    ),
+                }
+            )
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert controller._entity_map["battery_power"] == "sensor.solaredge_b1_dc_power"
+    assert "solar_power" not in controller._entity_map
+    assert status["battery_power"] == pytest.approx(1.8)
+    assert status["solar_power"] == 0.0
+    assert status["load_power"] == pytest.approx(1.8)
+
+
 def test_solaredge_m1_kwh_counters_are_reported_as_lifetime_totals():
     class Hass:
         def __init__(self) -> None:

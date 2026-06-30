@@ -46,6 +46,19 @@ def _find_setup_child(
     raise AssertionError(f"async_setup_entry.{child_name} not found")
 
 
+def _find_nested_setup_child(
+    setup: ast.AsyncFunctionDef,
+    child_name: str,
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    for node in ast.walk(setup):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == child_name
+        ):
+            return node
+    raise AssertionError(f"async_setup_entry.{child_name} not found")
+
+
 def _find_module_function(
     tree: ast.AST,
     name: str,
@@ -54,6 +67,26 @@ def _find_module_function(
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return node
     raise AssertionError(f"{name} not found")
+
+
+def _walk_excluding_nested_functions(nodes: list[ast.AST]):
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            yield from _walk_excluding_nested_functions([child])
+
+
+def _is_check_aemo_spike_await(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Await)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "check_aemo_spike_for_vpp"
+    )
 
 
 def test_mobile_config_endpoint_registered_before_slow_refreshes():
@@ -148,7 +181,35 @@ def test_initial_optimizer_pass_is_deferred_after_enable():
         in polling_loop_source
     )
     assert "await asyncio.sleep(startup_delay)" in polling_loop_source
-    assert "if self._initial_opt_task is not None:" in polling_loop_source
+    assert "not initial_task.done()" in polling_loop_source
+    assert "self._initial_opt_task = None" in initial_run_source
+
+
+def test_initial_vpp_aemo_spike_check_is_backgrounded():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    setup = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_setup_entry"
+    )
+    initial_check = _find_nested_setup_child(setup, "_run_initial_aemo_spike_check")
+
+    setup_source = ast.get_source_segment(source, setup)
+    initial_check_source = ast.get_source_segment(source, initial_check)
+
+    assert setup_source is not None
+    assert initial_check_source is not None
+    assert "await check_aemo_spike_for_vpp(None)" in initial_check_source
+    assert "except asyncio.CancelledError" in initial_check_source
+    assert "hass.async_create_background_task" in setup_source
+    assert "powersync_vpp_aemo_initial_check" in setup_source
+    assert "vpp_aemo_initial_task" in setup_source
+    direct_setup_awaits = [
+        node for node in _walk_excluding_nested_functions(setup.body)
+        if _is_check_aemo_spike_await(node)
+    ]
+    assert direct_setup_awaits == []
 
 
 def test_aemo_dispatch_sync_debounces_during_startup():

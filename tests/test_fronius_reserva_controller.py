@@ -170,6 +170,20 @@ def test_connect_discovers_reserva_entities_and_reads_status():
     assert status["battery_max_charge_power_w"] == 5000.0
 
 
+def test_status_keeps_unavailable_soc_unknown_instead_of_zero():
+    states = _reserva_states()
+    for state in states:
+        if state.entity_id == "sensor.reserva_state_of_charge_2":
+            state.state = "unavailable"
+    hass = _FakeHass(states)
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["battery_level"] is None
+
+
 def test_connect_discovers_callifo_byd_entities_and_reads_status():
     hass = _FakeHass(_callifo_byd_states())
     controller = _controller(hass)
@@ -191,6 +205,28 @@ def test_connect_discovers_callifo_byd_entities_and_reads_status():
     assert status["battery_max_charge_power_w"] == 6200.0
     assert status["battery_max_discharge_power_w"] == 6400.0
     assert status["backup_reserve"] == 15.0
+
+
+def test_connect_discovers_generic_byd_state_of_charge_suffix():
+    states = [
+        state
+        for state in _callifo_byd_states()
+        if state.entity_id != "sensor.fronius_battery_storage_state_of_charge"
+    ]
+    states.append(
+        _FakeState("sensor.byd_battery_box_premium_hv_state_of_charge_2", "74.2")
+    )
+    hass = _FakeHass(states)
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.connect())
+    assert (
+        controller._entity_map["battery_level"]
+        == "sensor.byd_battery_box_premium_hv_state_of_charge_2"
+    )
+
+    status = controller.get_status()
+    assert status["battery_level"] == 74.2
 
 
 def test_status_uses_configured_power_fallback_when_callifo_limits_missing():

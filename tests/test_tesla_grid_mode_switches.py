@@ -101,6 +101,7 @@ _ps_const.CONF_OPTIMIZATION_DISABLE_IDLE = "optimization_disable_idle"
 _ps_const.CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED = "optimization_spread_export_enabled"
 _ps_const.CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED = "optimization_spread_import_enabled"
 _ps_const.CONF_POWERWALL_LOCAL_PAIRED = "powerwall_local_paired"
+_ps_const.CONF_SIGENERGY_STATION_ID = "sigenergy_station_id"
 _ps_const.CONF_TESLA_ENERGY_SITE_ID = "tesla_energy_site_id"
 _ps_const.BATTERY_SYSTEM_TESLA = "tesla"
 _ps_const.OPT_PROVIDER_POWERSYNC = "powersync"
@@ -118,11 +119,13 @@ _ps_const.SWITCH_TYPE_FORCE_CHARGE = "force_charge"
 _ps_const.SWITCH_TYPE_MONITORING_MODE = "monitoring_mode"
 _ps_const.SWITCH_TYPE_AWAY_MODE = "away_mode"
 _ps_const.SWITCH_TYPE_PROFIT_MAX_MODE = "profit_max_mode"
+_ps_const.SWITCH_TYPE_CHARGE_BY_TIME = "charge_by_time"
 _ps_const.SWITCH_TYPE_OPTIMIZATION_DISABLE_IDLE = "optimization_disable_idle"
 _ps_const.SWITCH_TYPE_OPTIMIZATION_SPREAD_EXPORT = "optimization_spread_export"
 _ps_const.SWITCH_TYPE_OPTIMIZATION_SPREAD_IMPORT = "optimization_spread_import"
 _ps_const.SWITCH_TYPE_OPTIMIZATION_ENABLED = "optimization_enabled"
 _ps_const.SWITCH_TYPE_OPTIMIZATION_AUTO_APPLY_RESERVE = "optimization_auto_apply_reserve"
+_ps_const.SERVICE_RESTORE_NORMAL = "restore_normal"
 _ps_const.DEFAULT_DISCHARGE_DURATION = 60
 _ps_const.ATTR_LAST_SYNC = "last_sync"
 _ps_const.ATTR_SYNC_STATUS = "sync_status"
@@ -135,6 +138,7 @@ _ps_const.POWERWALL_LOCAL_POLL_INTERVAL = 2
 _ps_const.family_device_info = lambda entry_id, family: {
     "identifiers": {("power_sync", entry_id, family)}
 }
+_ps_const.supports_no_idle_mode_provider = lambda provider: False
 sys.modules["power_sync.const"] = _ps_const
 
 sys.modules.pop("power_sync.switch", None)
@@ -162,10 +166,19 @@ class _Services:
         self.calls.append((domain, service, data, blocking))
 
 
+class _ConfigEntries:
+    def async_update_entry(self, entry, *, options=None, data=None):
+        if options is not None:
+            entry.options = options
+        if data is not None:
+            entry.data = data
+
+
 class _Hass:
     def __init__(self, grid_status: str | None) -> None:
         self.states = _States()
         self.services = _Services()
+        self.config_entries = _ConfigEntries()
         snap = types.SimpleNamespace(grid_status=grid_status)
         coord = types.SimpleNamespace(data=snap)
         self.data = {
@@ -270,6 +283,35 @@ def test_monitoring_switch_reads_updated_config_entry_options():
 
     assert monitoring_switch.is_on is False
     assert monitoring_switch.write_count == 1
+
+
+def test_monitoring_switch_restores_sigenergy_native_control_when_enabled():
+    hass = _Hass("SystemGridConnected")
+    entry = types.SimpleNamespace(
+        entry_id="entry-1",
+        data={"sigenergy_station_id": "123"},
+        options={},
+    )
+    monitoring_switch = switch.MonitoringModeSwitch(
+        hass,
+        entry,
+        types.SimpleNamespace(
+            key="monitoring_mode",
+            name="Monitoring mode",
+        ),
+    )
+
+    asyncio.run(monitoring_switch.async_turn_on())
+
+    assert entry.options["monitoring_mode"] is True
+    assert hass.services.calls == [
+        (
+            "power_sync",
+            "restore_normal",
+            {"source": "manual", "_force_restore": True, "_native_control": True},
+            True,
+        ),
+    ]
 
 
 def test_force_discharge_switch_uses_selected_duration_and_force_power():

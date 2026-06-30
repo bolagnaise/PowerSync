@@ -195,13 +195,44 @@ def test_scheduler_set_uses_v3_groups_and_extra_param(foxess_api_module, monkeyp
         "fdSoc": 90.0,
         "fdPwr": 5000.0,
         "maxSoc": 95.0,
-        "importLimit": 30000.0,
-        "exportLimit": 30000.0,
-        "pvLimit": 30000.0,
-        "reactivePower": 0.0,
     }
     assert "minSocOnGrid" not in payload["groups"][0]
     assert "fdPwr" not in payload["groups"][0]
+
+
+def test_scheduler_set_preserves_explicit_extra_limits(foxess_api_module, monkeypatch):
+    client = foxess_api_module.FoxESSCloudClient("api-key", "INV123")
+    calls = []
+
+    async def fake_post(path, payload, *, write=False):
+        calls.append((path, payload, write))
+        return {"ok": True}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+
+    asyncio.run(
+        client.set_scheduler(
+            "INV123",
+            [
+                {
+                    "startHour": 0,
+                    "startMinute": 0,
+                    "endHour": 23,
+                    "endMinute": 59,
+                    "workMode": "SelfUse",
+                    "exportLimit": 12000,
+                    "pvLimit": 8000,
+                    "reactivePower": 0,
+                }
+            ],
+        )
+    )
+
+    extra = calls[0][1]["groups"][0]["extraParam"]
+    assert extra["exportLimit"] == 12000.0
+    assert extra["pvLimit"] == 8000.0
+    assert extra["reactivePower"] == 0.0
+    assert "importLimit" not in extra
 
 
 def test_setting_soc_and_modbus_passthrough_payloads(foxess_api_module, monkeypatch):

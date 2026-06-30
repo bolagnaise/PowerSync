@@ -60,6 +60,18 @@ class EnphaseController(InverterController):
     # Token refresh interval (tokens are valid for ~12 hours, refresh at 11)
     TOKEN_REFRESH_HOURS = 11
 
+    @staticmethod
+    def _dpel_relay_config(pct_limit: float) -> dict:
+        """Return explicit DPEL relay limits expected by newer AU firmware."""
+        pct_limit = max(0.0, min(100.0, float(pct_limit)))
+        return {
+            "default_pct_limit": pct_limit,
+            "limit_levels": [
+                {"relays": f"{relay_state:04b}", "pct_limit": pct_limit}
+                for relay_state in range(16)
+            ],
+        }
+
     def __init__(
         self,
         host: str,
@@ -1034,6 +1046,14 @@ class EnphaseController(InverterController):
         # doesn't enforce — so the user thinks they're curtailed but isn't.
         installed_capacity_w = await self._get_installed_capacity_w()
 
+        if not enabled:
+            relay_pct_limit = 100.0
+        elif installed_capacity_w is not None and installed_capacity_w > 0:
+            relay_pct_limit = (float(limit_watts) / float(installed_capacity_w)) * 100.0
+        else:
+            relay_pct_limit = 0.0 if limit_watts <= 0 else 100.0
+        relay_config = self._dpel_relay_config(relay_pct_limit)
+
         # Strategy: read the gateway's current DPEL settings, merge in the
         # values we want to change, and POST the full thing. This handles
         # firmware that requires extra fields (relay_config, installed_capacity,
@@ -1054,18 +1074,10 @@ class EnphaseController(InverterController):
             # gateway returned a missing/zero value.
             if installed_capacity_w is not None and installed_capacity_w > 0:
                 merged_settings["installed_capacity"] = float(installed_capacity_w)
-            # Some Envoy firmware (specifically gateways that have ANY
-            # relay control configured in Enlighten Manager — even with the
-            # relays sitting inert) demand a `relay_config` field on every
-            # DPEL POST, but the matching GET /ivp/ss/dpel does NOT return
-            # it, so we can't echo it back from the base settings. Send a
-            # disabled-relay sentinel by default — gateways without relay
-            # configuration ignore it, gateways with it should accept it
-            # since "no relay" is the safest neutral value. If the gateway
-            # rejects this, the user can disable the relay controls in
-            # Enlighten Manager as a workaround.
-            if "relay_config" not in merged_settings:
-                merged_settings["relay_config"] = False
+            # Some Envoy firmware (observed on AU D8.3.x with IQ8 systems)
+            # needs explicit 16-state relay coverage. Sparse or neutral
+            # relay_config values can return HTTP 200 without curtailing.
+            merged_settings["relay_config"] = relay_config
             _LOGGER.debug(
                 "Built DPEL payload by merging into gateway base: %s",
                 sorted(merged_settings.keys()),
@@ -1083,26 +1095,36 @@ class EnphaseController(InverterController):
         if installed_capacity_w is not None and installed_capacity_w > 0:
             primary_settings["installed_capacity"] = float(installed_capacity_w)
         # Same relay_config default as merged_settings — see comment above.
-        primary_settings["relay_config"] = False
+        primary_settings["relay_config"] = relay_config
 
         payloads = []
         # Preferred: merged payload (echoes back all gateway-required fields)
         if merged_settings:
             payloads.append({"dynamic_pel_settings": merged_settings})
-            # Also try with relay_config=True if the gateway rejected False
-            if merged_settings.get("relay_config") is False:
+            # Older gateways have accepted boolean relay_config variants, so
+            # keep them after the structured object for compatibility.
+            if isinstance(merged_settings.get("relay_config"), dict):
+                merged_relay_false = dict(merged_settings)
+                merged_relay_false["relay_config"] = False
+                payloads.append({"dynamic_pel_settings": merged_relay_false})
                 merged_relay_true = dict(merged_settings)
                 merged_relay_true["relay_config"] = True
                 payloads.append({"dynamic_pel_settings": merged_relay_true})
-        # Build relay_config=True variant (some AU gateways with relay hardware configured
-        # reject relay_config=False even when no relay is physically wired)
+            elif merged_settings.get("relay_config") is False:
+                merged_relay_true = dict(merged_settings)
+                merged_relay_true["relay_config"] = True
+                payloads.append({"dynamic_pel_settings": merged_relay_true})
+        # Boolean relay_config variants for gateways that reject the structured object.
+        primary_settings_relay_false = dict(primary_settings)
+        primary_settings_relay_false["relay_config"] = False
         primary_settings_relay_true = dict(primary_settings)
         primary_settings_relay_true["relay_config"] = True
 
         payloads += [
             # Synthesised payload with installed_capacity (AU/NZ firmware)
             {"dynamic_pel_settings": primary_settings},
-            # Same but with relay_config=True — some AU gateways reject False
+            # Boolean relay_config compatibility fallbacks for older firmware
+            {"dynamic_pel_settings": primary_settings_relay_false},
             {"dynamic_pel_settings": primary_settings_relay_true},
             # Bare format — EU firmware doesn't need installed_capacity
             {"dynamic_pel_settings": {

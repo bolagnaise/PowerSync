@@ -8,6 +8,7 @@ from typing import Any
 
 
 DEFAULT_VEHICLE_ID = "_default"
+MANUAL_STOP_HOLD_SECONDS = 15 * 60
 
 
 def owner_family(owner_mode: Any = None) -> str:
@@ -63,6 +64,62 @@ def normalize_vehicle_id(vehicle_id: Any = None) -> str:
     return str(vehicle_id or DEFAULT_VEHICLE_ID)
 
 
+def record_manual_stop_hold(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any = None,
+    *,
+    seconds: int = MANUAL_STOP_HOLD_SECONDS,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Temporarily suppress automated EV restarts after a user stop."""
+    vid = normalize_vehicle_id(vehicle_id)
+    now = datetime.now(timezone.utc)
+    expires_at = now.timestamp() + max(1, int(seconds))
+    holds = _entry_data(hass, config_entry.entry_id).setdefault("ev_manual_stop_holds", {})
+    hold = {
+        "vehicle_id": vid,
+        "created_at": now.isoformat(),
+        "expires_at": datetime.fromtimestamp(expires_at, timezone.utc).isoformat(),
+        "reason": reason or "manual stop",
+    }
+    holds[vid] = hold
+    _schedule_runtime_save(hass, config_entry)
+    return hold
+
+
+def manual_stop_hold_reason(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any = None,
+) -> str | None:
+    """Return a restart-blocking reason while a manual stop hold is active."""
+    now = datetime.now(timezone.utc)
+    entry = _entry_data(hass, config_entry.entry_id)
+    holds = entry.setdefault("ev_manual_stop_holds", {})
+    candidates = [normalize_vehicle_id(vehicle_id)]
+    if candidates[0] != DEFAULT_VEHICLE_ID:
+        candidates.append(DEFAULT_VEHICLE_ID)
+
+    for vid in candidates:
+        hold = holds.get(vid)
+        if not isinstance(hold, dict):
+            continue
+        try:
+            expires_at = datetime.fromisoformat(str(hold.get("expires_at")))
+        except (TypeError, ValueError):
+            holds.pop(vid, None)
+            continue
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= now:
+            holds.pop(vid, None)
+            continue
+        return "Manual stop hold active until " + expires_at.astimezone().strftime("%H:%M")
+
+    return None
+
+
 def _entry_data(hass: Any, entry_id: str) -> dict[str, Any]:
     from ..const import DOMAIN
 
@@ -74,6 +131,9 @@ def _runtime_snapshot(hass: Any, config_entry: Any) -> dict[str, Any]:
     return {
         "active_ownership": dict(get_ev_ownerships(hass, config_entry)),
         "last_commands": dict(get_ev_last_commands(hass, config_entry)),
+        "manual_stop_holds": dict(
+            _entry_data(hass, config_entry.entry_id).get("ev_manual_stop_holds", {})
+        ),
         "saved_at": _now_iso(),
     }
 
@@ -124,6 +184,7 @@ def restore_ev_runtime_state(
     runtime_state = runtime_store._data.get("ev_runtime_state") or {}
     stored_commands = runtime_state.get("last_commands") or {}
     stored_ownership = runtime_state.get("active_ownership") or {}
+    stored_manual_stop_holds = runtime_state.get("manual_stop_holds") or {}
 
     if isinstance(stored_commands, dict):
         get_ev_last_commands(hass, config_entry).update(
@@ -133,6 +194,13 @@ def restore_ev_runtime_state(
                 if isinstance(command, Mapping)
             }
         )
+
+    if isinstance(stored_manual_stop_holds, dict):
+        entry["ev_manual_stop_holds"] = {
+            normalize_vehicle_id(vehicle_id): dict(hold)
+            for vehicle_id, hold in stored_manual_stop_holds.items()
+            if isinstance(hold, Mapping)
+        }
 
     recovered: dict[str, dict[str, Any]] = {}
     if isinstance(stored_ownership, dict):

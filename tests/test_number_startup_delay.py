@@ -208,7 +208,10 @@ def test_force_power_slider_max_is_site_relative():
     source = NUMBER_PATH.read_text()
 
     assert "FORCE_POWER_FALLBACK_MAX_KW = 50.0" in source
+    assert "FORCE_POWER_STEP_KW = 0.05" in source
+    assert "_attr_native_step = FORCE_POWER_STEP_KW" in source
     assert "def native_max_value(self) -> float:" in source
+    assert "math.ceil(max_kw / FORCE_POWER_STEP_KW)" in source
     assert "CONF_OPTIMIZATION_MAX_CHARGE_W" in source
     assert "CONF_OPTIMIZATION_MAX_DISCHARGE_W" in source
     assert "CONF_SAJ_INVERTER_RATED_KW" in source

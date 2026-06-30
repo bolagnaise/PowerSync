@@ -312,7 +312,7 @@ class GoodWeBatteryController:
             _LOGGER.error("GoodWe curtail() failed: %s", e)
             return False
 
-    async def restore(self) -> bool:
+    async def restore(self, *, allow_zero_export_limit: bool = True) -> bool:
         """Remove export limit to restore normal grid export."""
         try:
             if not await self.connect():
@@ -327,6 +327,17 @@ class GoodWeBatteryController:
                 if self._saved_grid_export_enabled is not None
                 else 0
             )
+            if (
+                not allow_zero_export_limit
+                and restore_enabled
+                and restore_limit <= 0
+            ):
+                _LOGGER.info(
+                    "GoodWe restore: saved export limit is 0W; disabling limiter "
+                    "for active export command"
+                )
+                restore_limit = _GOODWE_EXPORT_LIMIT_MAX_W
+                restore_enabled = 0
             await self._inverter.set_grid_export_limit(restore_limit)
             await self._write_grid_export_enabled(restore_enabled)
             self._saved_grid_export_enabled = None

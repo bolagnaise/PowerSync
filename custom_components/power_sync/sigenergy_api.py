@@ -806,6 +806,7 @@ def convert_amber_prices_to_sigenergy(
         "Ergon Energy": "QLD1",
         # SA networks
         "SA Power Networks": "SA1",
+        "SA Power": "SA1",
         # TAS networks
         "TasNetworks": "TAS1",
     }

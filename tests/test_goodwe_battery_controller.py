@@ -139,3 +139,28 @@ def test_restore_returns_goodwe_export_limit_to_saved_state():
         assert controller._grid_export_state_saved is False
     finally:
         restore_module()
+
+
+def test_restore_for_export_command_does_not_keep_saved_zero_export_limit():
+    module, restore_module = _load_goodwe_controller_module()
+    try:
+        inverter = _FakeGoodWeInverter()
+        inverter.settings["grid_export"] = 1
+        inverter.settings["grid_export_limit"] = 0
+        controller = module.GoodWeBatteryController("192.0.2.10")
+        controller._inverter = inverter
+
+        async def connect() -> bool:
+            return True
+
+        controller.connect = connect
+
+        assert asyncio.run(controller.curtail())
+        assert asyncio.run(controller.restore(allow_zero_export_limit=False))
+        assert inverter.export_limits == [0, 65535]
+        assert inverter.setting_writes == [("grid_export", 1), ("grid_export", 0)]
+        assert controller._saved_grid_export_enabled is None
+        assert controller._saved_grid_export_limit is None
+        assert controller._grid_export_state_saved is False
+    finally:
+        restore_module()

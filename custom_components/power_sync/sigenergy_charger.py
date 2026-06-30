@@ -90,6 +90,18 @@ def sigenergy_charger_display_name(charger_type: str | None) -> str:
     return "Sigenergy EVAC"
 
 
+def _capabilities_payload(
+    charger_type: str | None,
+    capabilities: SigenergyChargerCapabilities | dict | None = None,
+) -> dict:
+    """Return capability payload, allowing config-aware callers to override defaults."""
+    if capabilities is None:
+        return sigenergy_charger_capabilities(charger_type).as_dict()
+    if isinstance(capabilities, SigenergyChargerCapabilities):
+        return capabilities.as_dict()
+    return dict(capabilities)
+
+
 def sigenergy_charger_charging_state(state: SigenergyChargerState) -> str:
     """Map normalized Modbus state to the app's EV charging-state labels."""
     if state.is_discharging:
@@ -108,9 +120,10 @@ def sigenergy_charger_state_to_vehicle(
     *,
     updated_at: str,
     online: bool = True,
+    capabilities: SigenergyChargerCapabilities | dict | None = None,
 ) -> dict:
     """Convert Sigenergy charger telemetry to the mobile app vehicle shape."""
-    capabilities = sigenergy_charger_capabilities(state.charger_type)
+    capability_payload = _capabilities_payload(state.charger_type, capabilities)
     return {
         "id": "sigenergy_charger",
         "vehicle_id": "sigenergy_charger",
@@ -127,18 +140,28 @@ def sigenergy_charger_state_to_vehicle(
         "data_updated_at": updated_at,
         "source": "sigenergy_charger",
         "brand": "sigenergy",
-        "supports_rate_control": capabilities.supports_rate_control,
-        "supports_restart_while_plugged": capabilities.supports_restart_while_plugged,
-        "control_strategy": capabilities.control_strategy,
-        "solar_control_strategy": capabilities.solar_control_strategy,
-        "charger_capabilities": capabilities.as_dict(),
+        "supports_rate_control": capability_payload.get("supports_rate_control", False),
+        "supports_restart_while_plugged": capability_payload.get(
+            "supports_restart_while_plugged",
+            False,
+        ),
+        "control_strategy": capability_payload.get("control_strategy", "one_shot"),
+        "solar_control_strategy": capability_payload.get(
+            "solar_control_strategy",
+            "native_handoff",
+        ),
+        "charger_capabilities": capability_payload,
     }
 
 
-def sigenergy_charger_state_to_loadpoint_observation(state: SigenergyChargerState) -> dict:
+def sigenergy_charger_state_to_loadpoint_observation(
+    state: SigenergyChargerState,
+    *,
+    capabilities: SigenergyChargerCapabilities | dict | None = None,
+) -> dict:
     """Convert Sigenergy charger telemetry to a normalized loadpoint observation."""
     power_kw = state.power_kw or 0.0
-    capabilities = sigenergy_charger_capabilities(state.charger_type)
+    capability_payload = _capabilities_payload(state.charger_type, capabilities)
     is_charging = state.is_charging or power_kw > 0.05
     is_discharging = state.is_discharging or power_kw < -0.05
     return {
@@ -155,11 +178,17 @@ def sigenergy_charger_state_to_loadpoint_observation(state: SigenergyChargerStat
         "target_amps": int(state.current_a or 0),
         "blocking_reason": None if is_charging or is_discharging else state.status,
         "include_idle": True,
-        "supports_rate_control": capabilities.supports_rate_control,
-        "supports_restart_while_plugged": capabilities.supports_restart_while_plugged,
-        "control_strategy": capabilities.control_strategy,
-        "solar_control_strategy": capabilities.solar_control_strategy,
-        "charger_capabilities": capabilities.as_dict(),
+        "supports_rate_control": capability_payload.get("supports_rate_control", False),
+        "supports_restart_while_plugged": capability_payload.get(
+            "supports_restart_while_plugged",
+            False,
+        ),
+        "control_strategy": capability_payload.get("control_strategy", "one_shot"),
+        "solar_control_strategy": capability_payload.get(
+            "solar_control_strategy",
+            "native_handoff",
+        ),
+        "charger_capabilities": capability_payload,
     }
 
 
@@ -167,10 +196,11 @@ def sigenergy_charger_state_to_widget(
     state: SigenergyChargerState,
     *,
     surplus_kw: float = 0.0,
+    capabilities: SigenergyChargerCapabilities | dict | None = None,
 ) -> dict:
     """Convert Sigenergy charger telemetry to the EV dashboard widget shape."""
     power_kw = state.power_kw or 0.0
-    capabilities = sigenergy_charger_capabilities(state.charger_type)
+    capability_payload = _capabilities_payload(state.charger_type, capabilities)
     source = "idle"
     is_charging = state.is_charging or power_kw > 0.05
     is_discharging = state.is_discharging or power_kw < -0.05
@@ -190,10 +220,16 @@ def sigenergy_charger_state_to_widget(
         "source": source,
         "eta_minutes": None,
         "surplus_kw": round(surplus_kw, 2),
-        "supports_rate_control": capabilities.supports_rate_control,
-        "supports_restart_while_plugged": capabilities.supports_restart_while_plugged,
-        "control_strategy": capabilities.control_strategy,
-        "solar_control_strategy": capabilities.solar_control_strategy,
+        "supports_rate_control": capability_payload.get("supports_rate_control", False),
+        "supports_restart_while_plugged": capability_payload.get(
+            "supports_restart_while_plugged",
+            False,
+        ),
+        "control_strategy": capability_payload.get("control_strategy", "one_shot"),
+        "solar_control_strategy": capability_payload.get(
+            "solar_control_strategy",
+            "native_handoff",
+        ),
     }
 
 
