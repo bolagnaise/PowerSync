@@ -52,6 +52,7 @@ from .const import (
     SIGENERGY_CHARGER_EVAC,
     SIGENERGY_CHARGER_EVDC,
 )
+from .sensitive_logging import obfuscate_vin_tokens
 from .sigenergy_model import sigenergy_home_load_kw
 
 _SOLCAST_ESTIMATE_FIELDS = {
@@ -587,6 +588,7 @@ class SensitiveDataFilter(logging.Filter):
             text,
             flags=re.IGNORECASE
         )
+        text = obfuscate_vin_tokens(text, self.obfuscate)
 
         # Handle DIN numbers in JSON format
         text = re.sub(

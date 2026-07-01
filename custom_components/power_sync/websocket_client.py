@@ -9,6 +9,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 import websockets
 
+from .sensitive_logging import obfuscate_vin_tokens
+
 
 class SensitiveDataFilter(logging.Filter):
     """
@@ -105,6 +107,7 @@ class SensitiveDataFilter(logging.Filter):
             text,
             flags=re.IGNORECASE
         )
+        text = obfuscate_vin_tokens(text, self.obfuscate)
 
         # Handle DIN numbers in JSON format
         text = re.sub(

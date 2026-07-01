@@ -22,6 +22,7 @@ import re
 
 from homeassistant.util import dt as dt_util
 
+from ..sensitive_logging import obfuscate_vin_tokens
 from ..const import (
     CONF_SOLAR_FORECAST_PROVIDER,
     CONF_SOLCAST_ESTIMATE_TYPE,
@@ -53,12 +54,13 @@ class SensitiveDataFilter(logging.Filter):
         if not text:
             return text
 
-        return re.sub(
+        text = re.sub(
             r"(\bvin[\s:=]+)([A-HJ-NPR-Z0-9]{17})\b",
             lambda m: m.group(1) + self._obfuscate(m.group(2)),
             text,
             flags=re.IGNORECASE,
         )
+        return obfuscate_vin_tokens(text, self._obfuscate)
 
     def _obfuscate_arg(self, arg: Any) -> Any:
         str_value = str(arg)

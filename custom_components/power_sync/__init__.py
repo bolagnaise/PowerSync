@@ -681,6 +681,7 @@ from .coordinator import (
     OctopusPriceCoordinator,
     LocalvoltsPriceCoordinator,
 )
+from .sensitive_logging import obfuscate_vin_tokens
 import re
 
 
@@ -1533,6 +1534,7 @@ class SensitiveDataFilter(logging.Filter):
             text,
             flags=re.IGNORECASE
         )
+        text = obfuscate_vin_tokens(text, self.obfuscate)
 
         # Handle DIN numbers in JSON format
         text = re.sub(
