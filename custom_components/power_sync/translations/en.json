@@ -61,7 +61,7 @@
           "connect_portal": "Connect Flow Power portal account"
         },
         "data_description": {
-          "connect_portal": "When enabled, PowerSync fetches billing components from your Flow Power account while keeping raw wholesale TWAP for PEA pricing."
+          "connect_portal": "When enabled, PowerSync fetches account TWAP, BPEA, GST, and billing components from your Flow Power account for account-specific PEA pricing."
         },
         "submit": "Next"
       },

@@ -254,6 +254,40 @@ def test_dashboard_battery_controls_include_self_consumption_action():
     assert "Set battery to self-consumption mode?" in battery_controls
 
 
+def test_dashboard_manual_battery_controls_show_active_mode_countdown():
+    """Manual battery controls should highlight active modes from Battery Mode."""
+    source = STRATEGY_PATH.read_text()
+    battery_controls = source[
+        source.index("function _batteryControls(hass)"):
+        source.index("function _teslaEnergySiteControls", source.index("function _batteryControls(hass)"))
+    ]
+
+    assert "const batteryModeEntity = 'sensor.power_sync_battery_mode'" in battery_controls
+    assert "entity: batteryModeEntity" in battery_controls
+    assert "triggers_update: [batteryModeEntity]" in battery_controls
+    assert "modeState.attributes?.remaining_minutes" in battery_controls
+    assert "Math.max(0, Math.ceil(remaining)) + ' min'" in battery_controls
+    assert "return '${label} active'" in battery_controls
+
+    for mode in (
+        "force_charge",
+        "force_discharge",
+        "hold_soc",
+        "self_consumption",
+    ):
+        assert mode in battery_controls
+
+    assert "name: activeModeName('force_charge', 'Charge')" in battery_controls
+    assert "name: activeModeName('force_discharge', 'Discharge')" in battery_controls
+    assert "name: activeModeName('hold_soc', 'Hold SoC')" in battery_controls
+    self_consumption = battery_controls[
+        battery_controls.index("name: 'Self Consumption'"):
+        battery_controls.index("service: 'power_sync.set_self_consumption'")
+    ]
+    assert "activeModeName('self_consumption'" not in self_consumption
+    assert "states['${batteryModeEntity}']?.state === 'self_consumption'" in self_consumption
+
+
 def test_dashboard_setup_preserves_user_managed_lovelace_layout():
     """Reloads must not overwrite a dashboard the user has edited manually."""
     source = INIT_PATH.read_text()

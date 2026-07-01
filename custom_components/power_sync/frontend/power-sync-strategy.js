@@ -5588,12 +5588,31 @@ function _priceGauges(e, hass) {
 }
 
 function _batteryControls(hass) {
+  const batteryModeEntity = 'sensor.power_sync_battery_mode';
+  const activeModeName = (mode, label) => `[[[
+    const modeState = states['${batteryModeEntity}'];
+    if (!modeState || modeState.state !== '${mode}') return '${label}';
+    const remaining = Number(modeState.attributes?.remaining_minutes);
+    if (Number.isFinite(remaining)) return '${label} ' + Math.max(0, Math.ceil(remaining)) + ' min';
+    return '${label} active';
+  ]]]`;
+  const modeAwareChipStyle = (base, mode, colorName, fallbackRgb) => ({
+    ...base,
+    card: [
+      ...base.card,
+      { background: `[[[ const active = states['${batteryModeEntity}']?.state === '${mode}'; return active ? 'rgba(var(--rgb-${colorName}-color, ${fallbackRgb}), 0.24)' : 'rgba(var(--rgb-${colorName}-color, ${fallbackRgb}), 0.1)'; ]]]` },
+      { border: `[[[ const active = states['${batteryModeEntity}']?.state === '${mode}'; return active ? '1px solid rgba(var(--rgb-${colorName}-color, ${fallbackRgb}), 0.6)' : '1px solid transparent'; ]]]` },
+      { 'box-shadow': `[[[ const active = states['${batteryModeEntity}']?.state === '${mode}'; return active ? '0 0 0 1px rgba(var(--rgb-${colorName}-color, ${fallbackRgb}), 0.16), 0 0 16px rgba(var(--rgb-${colorName}-color, ${fallbackRgb}), 0.2)' : 'none'; ]]]` },
+    ],
+  });
   const chipStyle = (bg) => ({
     card: [
       { height: '36px' },
       { 'border-radius': '18px' },
       { padding: '0px 12px' },
       { background: bg },
+      { border: '1px solid transparent' },
+      { 'box-shadow': 'none' },
     ],
     grid: [
       { 'grid-template-areas': '"i n"' },
@@ -5618,6 +5637,11 @@ function _batteryControls(hass) {
 
   const blueChip = chipStyle('rgba(var(--rgb-blue-color, 33, 150, 243), 0.1)');
   const orangeChip = chipStyle('rgba(var(--rgb-orange-color, 255, 152, 0), 0.1)');
+  const greenChip = chipStyle('rgba(var(--rgb-green-color, 76, 175, 80), 0.1)');
+  const forceChargeChip = modeAwareChipStyle(blueChip, 'force_charge', 'blue', '33, 150, 243');
+  const forceDischargeChip = modeAwareChipStyle(orangeChip, 'force_discharge', 'orange', '255, 152, 0');
+  const holdSocChip = modeAwareChipStyle(blueChip, 'hold_soc', 'blue', '33, 150, 243');
+  const selfConsumptionChip = modeAwareChipStyle(greenChip, 'self_consumption', 'green', '76, 175, 80');
 
   const hasForcePower = !!(hass && hass.states['number.power_sync_force_power_kw']);
 
@@ -5662,9 +5686,11 @@ function _batteryControls(hass) {
           },
           {
             type: 'custom:button-card',
-            name: 'Charge',
+            entity: batteryModeEntity,
+            triggers_update: [batteryModeEntity],
+            name: activeModeName('force_charge', 'Charge'),
             icon: 'mdi:battery-charging',
-            styles: blueChip,
+            styles: forceChargeChip,
             tap_action: {
               action: 'call-service',
               service: 'power_sync.force_charge',
@@ -5689,10 +5715,12 @@ function _batteryControls(hass) {
           },
           {
             type: 'custom:button-card',
-            name: 'Discharge',
+            entity: batteryModeEntity,
+            triggers_update: [batteryModeEntity],
+            name: activeModeName('force_discharge', 'Discharge'),
             icon: 'mdi:battery-arrow-down',
             styles: {
-              ...orangeChip,
+              ...forceDischargeChip,
               name: [
                 { 'grid-area': 'n' },
                 { 'font-size': '12px' },
@@ -5716,14 +5744,19 @@ function _batteryControls(hass) {
       },
       {
         type: 'custom:button-card',
+        entity: batteryModeEntity,
+        triggers_update: [batteryModeEntity],
         name: 'Self Consumption',
         icon: 'mdi:home-battery',
         styles: {
+          ...selfConsumptionChip,
           card: [
             { height: '40px' },
             { 'border-radius': '18px' },
             { padding: '4px 12px' },
-            { background: 'rgba(var(--rgb-green-color, 76, 175, 80), 0.1)' },
+            { background: `[[[ const active = states['${batteryModeEntity}']?.state === 'self_consumption'; return active ? 'rgba(var(--rgb-green-color, 76, 175, 80), 0.24)' : 'rgba(var(--rgb-green-color, 76, 175, 80), 0.1)'; ]]]` },
+            { border: `[[[ const active = states['${batteryModeEntity}']?.state === 'self_consumption'; return active ? '1px solid rgba(var(--rgb-green-color, 76, 175, 80), 0.6)' : '1px solid transparent'; ]]]` },
+            { 'box-shadow': `[[[ const active = states['${batteryModeEntity}']?.state === 'self_consumption'; return active ? '0 0 0 1px rgba(var(--rgb-green-color, 76, 175, 80), 0.16), 0 0 16px rgba(var(--rgb-green-color, 76, 175, 80), 0.2)' : 'none'; ]]]` },
           ],
           grid: [
             { 'grid-template-areas': '"i n"' },
@@ -5755,14 +5788,19 @@ function _batteryControls(hass) {
         cards: [
           {
             type: 'custom:button-card',
-            name: 'Hold SoC',
+            entity: batteryModeEntity,
+            triggers_update: [batteryModeEntity],
+            name: activeModeName('hold_soc', 'Hold SoC'),
             icon: 'mdi:battery-lock',
             styles: {
+              ...holdSocChip,
               card: [
                 { height: '40px' },
                 { 'border-radius': '18px' },
                 { padding: '4px 12px' },
-                { background: 'rgba(var(--rgb-blue-color, 33, 150, 243), 0.1)' },
+                { background: `[[[ const active = states['${batteryModeEntity}']?.state === 'hold_soc'; return active ? 'rgba(var(--rgb-blue-color, 33, 150, 243), 0.24)' : 'rgba(var(--rgb-blue-color, 33, 150, 243), 0.1)'; ]]]` },
+                { border: `[[[ const active = states['${batteryModeEntity}']?.state === 'hold_soc'; return active ? '1px solid rgba(var(--rgb-blue-color, 33, 150, 243), 0.6)' : '1px solid transparent'; ]]]` },
+                { 'box-shadow': `[[[ const active = states['${batteryModeEntity}']?.state === 'hold_soc'; return active ? '0 0 0 1px rgba(var(--rgb-blue-color, 33, 150, 243), 0.16), 0 0 16px rgba(var(--rgb-blue-color, 33, 150, 243), 0.2)' : 'none'; ]]]` },
               ],
               grid: [
                 { 'grid-template-areas': '"i n"' },

@@ -1077,7 +1077,7 @@ FLOW_POWER_HAPPY_HOUR_PERIODS = [
 # Flow Power PEA (Price Efficiency Adjustment) configuration
 # PEA adjusts pricing based on wholesale market efficiency
 # Legacy formula: PEA = wholesale - TWAP - BPEA
-# V2 formula: PEA = GST*Spot + Tariff - GST*TWAP - BPEA
+# V2 formula: PEA = GST*Spot + Tariff - GST*TWAP - AvgDailyTariff - BPEA
 CONF_PEA_ENABLED = "pea_enabled"
 CONF_FLOW_POWER_BASE_RATE = "flow_power_base_rate"
 CONF_FLOW_POWER_EXPORT_RATE = "flow_power_export_rate"

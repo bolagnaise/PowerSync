@@ -4542,7 +4542,7 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
         """Calculate Flow Power import price with PEA in $/kWh.
 
         V2 formula (when tariff configured):
-            PEA = GST*Spot + Tariff - GST*TWAP - BPEA
+            PEA = GST*Spot + Tariff - GST*TWAP - AvgDailyTariff - BPEA
             Final = Base + PEA
 
         Legacy formula (no tariff configured):
@@ -4704,6 +4704,10 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
             if has_tariff:
                 attributes["network_cents"] = round(tariff_rate, 2)
                 attributes["avg_daily_tariff"] = round(avg_daily_tariff, 2)
+                attributes["network_tou_adjustment_cents"] = round(
+                    tariff_rate - avg_daily_tariff,
+                    2,
+                )
 
             if wholesale_cents is not None:
                 attributes["wholesale_cents"] = round(wholesale_cents, 2)
@@ -4718,7 +4722,18 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
                         pea = self._calculate_pea_auto(wholesale_cents)
 
                     attributes["pea_cents"] = round(pea, 2)
-                    attributes["final_rate_cents"] = round(base_rate + pea, 2)
+                    final_rate_cents = base_rate + pea
+                    attributes["final_rate_cents"] = round(final_rate_cents, 2)
+                    if has_tariff:
+                        without_network_tou = final_rate_cents - (
+                            tariff_rate - avg_daily_tariff
+                        )
+                        attributes[
+                            "price_without_network_tou_adjustment_cents"
+                        ] = round(without_network_tou, 2)
+                        attributes[
+                            "price_without_network_tou_adjustment_dollars"
+                        ] = round(without_network_tou / 100, 4)
                 else:
                     attributes["pea_cents"] = 0
                     attributes["final_rate_cents"] = base_rate

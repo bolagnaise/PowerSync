@@ -112,6 +112,67 @@ class FlowPowerAPIClient:
         return []
 
     @staticmethod
+    def _mapping_price_records(payload: Any) -> list[dict[str, Any]]:
+        """Extract timestamp->price mappings from nested endpoint payloads."""
+        if isinstance(payload, list):
+            for item in payload:
+                records = FlowPowerAPIClient._mapping_price_records(item)
+                if records:
+                    return records
+            return []
+
+        if not isinstance(payload, dict):
+            return []
+
+        records: list[dict[str, Any]] = []
+        for key, value in payload.items():
+            timestamp = FlowPowerAPIClient._parse_time(key)
+            if timestamp is None:
+                continue
+
+            price = None
+            if isinstance(value, dict):
+                price = FlowPowerAPIClient._first_number(
+                    value,
+                    "price",
+                    "Price",
+                    "priceMwh",
+                    "price_mwh",
+                    "rrp",
+                    "RRP",
+                    "Rrp",
+                    "value",
+                    "Value",
+                    "dispatchPrice",
+                    "DispatchPrice",
+                )
+            else:
+                try:
+                    price = float(value)
+                except (TypeError, ValueError):
+                    price = None
+
+            if price is None or not isfinite(price):
+                continue
+
+            records.append({"key": key, "price": price, "raw": value})
+
+        if records:
+            records.sort(
+                key=lambda item: (
+                    FlowPowerAPIClient._parse_time(item["key"])
+                    or datetime.min.replace(tzinfo=dt_util.UTC)
+                )
+            )
+            return records
+
+        for value in payload.values():
+            records = FlowPowerAPIClient._mapping_price_records(value)
+            if records:
+                return records
+        return []
+
+    @staticmethod
     def _normalize_key(key: str) -> str:
         return "".join(ch for ch in key.lower() if ch.isalnum())
 
@@ -265,6 +326,37 @@ class FlowPowerAPIClient:
         )
         normalized: list[dict[str, Any]] = []
         fallback_start = self._align_to_interval(dt_util.utcnow(), duration)
+        for idx, record in enumerate(records):
+            explicit_time = self._parse_time(
+                self._first_text(
+                    record,
+                    "time",
+                    "Time",
+                    "timestamp",
+                    "Timestamp",
+                    "settlementDate",
+                    "SettlementDate",
+                    "dateTime",
+                    "DateTime",
+                    "periodDateTime",
+                    "PeriodDateTime",
+                    "intervalDateTime",
+                    "IntervalDateTime",
+                    "forecastDateTime",
+                    "ForecastDateTime",
+                    "tradingInterval",
+                    "TradingInterval",
+                    "tradingIntervalStart",
+                    "TradingIntervalStart",
+                    "startTime",
+                    "StartTime",
+                    "key",
+                    "Key",
+                )
+            )
+            if explicit_time is not None:
+                fallback_start = explicit_time - timedelta(minutes=duration * idx)
+                break
         inferred_timestamps = 0
         for idx, record in enumerate(records):
             price_mwh = self._first_number(
@@ -317,17 +409,17 @@ class FlowPowerAPIClient:
                 {
                     "nemTime": period_time.isoformat(),
                     "perKwh": price_mwh / 10.0,
+                    "wholesaleKWHPrice": price_mwh / 1000.0,
+                    "price_mwh": price_mwh,
                     "duration": duration,
                     "raw": record,
                 }
             )
 
         if not normalized:
-            _LOGGER.debug(
-                "Flow Power API returned no parseable price records from shape %s",
-                type(payload).__name__,
-            )
-            return []
+            mapped_records = self._mapping_price_records(payload)
+            if mapped_records and mapped_records != records:
+                return self._normalize_price_records(mapped_records, duration=duration)
 
         if inferred_timestamps:
             _LOGGER.debug(
@@ -342,34 +434,44 @@ class FlowPowerAPIClient:
 
 def normalize_site_summary(user_obj: dict[str, Any]) -> dict[str, Any]:
     """Normalize KWatch residential summary fields to the portal sensor shape."""
-    lwap = user_obj.get("LWAP")
-    twap = user_obj.get("TWAP")
-    lwap_imp = user_obj.get("LWAPImp")
-    twap_imp = user_obj.get("TWAPImp")
+    def number(key: str) -> float | None:
+        value = user_obj.get(key)
+        if value in (None, ""):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if isfinite(parsed) else None
+
+    lwap = number("LWAP")
+    twap = number("TWAP")
+    lwap_imp = number("LWAPImp")
+    twap_imp = number("TWAPImp")
     return {
         "lwap": lwap,
         "lwap_import": lwap_imp,
-        "lwap_actual": user_obj.get("LWAPActual"),
-        "lwap_import_actual": user_obj.get("LWAPImpActual"),
+        "lwap_actual": number("LWAPActual"),
+        "lwap_import_actual": number("LWAPImpActual"),
         "twap": twap,
         "twap_import": twap_imp,
-        "avg_rrp": user_obj.get("AvgRRP"),
-        "avg_usage_kw": user_obj.get("AvgUsage"),
-        "avg_import_usage_kw": user_obj.get("AvgImpUsage"),
-        "max_usage_kw": user_obj.get("MaxUsage"),
-        "total_intervals": user_obj.get("TotalInterval"),
-        "pea_30_days": user_obj.get("PEA30Days"),
-        "pea_30_import": user_obj.get("PEA30ImportDays"),
-        "pea_actual": user_obj.get("PEAActual"),
-        "pea_target": user_obj.get("PEATarget"),
-        "pea_actual_import": user_obj.get("PEAActualImport"),
-        "pea_target_import": user_obj.get("PEATargetImport"),
-        "bpea": user_obj.get("PEATarget"),
-        "bpea_import": user_obj.get("PEATargetImport"),
+        "avg_rrp": number("AvgRRP"),
+        "avg_usage_kw": number("AvgUsage"),
+        "avg_import_usage_kw": number("AvgImpUsage"),
+        "max_usage_kw": number("MaxUsage"),
+        "total_intervals": number("TotalInterval"),
+        "pea_30_days": number("PEA30Days"),
+        "pea_30_import": number("PEA30ImportDays"),
+        "pea_actual": number("PEAActual"),
+        "pea_target": number("PEATarget"),
+        "pea_actual_import": number("PEAActualImport"),
+        "pea_target_import": number("PEATargetImport"),
+        "bpea": number("PEATarget"),
+        "bpea_import": number("PEATargetImport"),
         "cpea": (lwap or 0) - (twap or 0),
         "cpea_import": (lwap_imp or 0) - (twap_imp or 0),
-        "site_losses_dlf": user_obj.get("SiteLosses"),
-        "gst_multiplier": user_obj.get("GST"),
+        "site_losses_dlf": number("SiteLosses"),
+        "gst_multiplier": number("GST"),
         "source": "api",
     }
 

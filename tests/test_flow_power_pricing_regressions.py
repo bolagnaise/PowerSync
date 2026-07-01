@@ -100,6 +100,31 @@ def _flow_power_api_module():
                 sys.modules[name] = saved
 
 
+def _flow_power_pricing_module():
+    saved_power_sync = sys.modules.get("power_sync")
+    saved_const = sys.modules.get("power_sync.const")
+    saved_helper = sys.modules.get("power_sync.flow_power_pricing")
+    try:
+        package = types.ModuleType("power_sync")
+        package.__path__ = [str(COMPONENT_ROOT)]
+        sys.modules["power_sync"] = package
+        sys.modules.pop("power_sync.flow_power_pricing", None)
+        return importlib.import_module("power_sync.flow_power_pricing")
+    finally:
+        if saved_power_sync is None:
+            sys.modules.pop("power_sync", None)
+        else:
+            sys.modules["power_sync"] = saved_power_sync
+        if saved_helper is None:
+            sys.modules.pop("power_sync.flow_power_pricing", None)
+        else:
+            sys.modules["power_sync.flow_power_pricing"] = saved_helper
+        if saved_const is None:
+            sys.modules.pop("power_sync.const", None)
+        else:
+            sys.modules["power_sync.const"] = saved_const
+
+
 def test_flow_power_api_client_posts_key_and_normalizes_sites_summary_and_prices():
     api = _flow_power_api_module()
     session = _FakeSession(
@@ -144,6 +169,7 @@ def test_flow_power_api_client_posts_key_and_normalizes_sites_summary_and_prices
     ]
     assert summary["source"] == "api"
     assert summary["bpea"] == 0.0
+    assert isinstance(summary["bpea"], float)
     assert summary["gst_multiplier"] == 1.1
     assert dispatch[0]["perKwh"] == 12.34
     assert forecast[0]["perKwh"] == 9.8
@@ -250,6 +276,33 @@ def test_flow_power_api_client_normalizes_uppercase_kwatch_fields():
     assert forecast[0]["perKwh"] == 9.8
 
 
+def test_flow_power_api_client_infers_timestamps_from_first_explicit_record():
+    api = _flow_power_api_module()
+    session = _FakeSession(
+        {
+            "predispatch30mins": {
+                "RESULT": [
+                    {"FORECAST_DATETIME": "2026/06/08 10:30:00", "PRICE": 100.0},
+                    {"RRP": 200.0},
+                    {"price_mwh": 300.0},
+                ]
+            }
+        }
+    )
+    client = api.FlowPowerAPIClient("secret-key", session)
+
+    forecast = asyncio.run(client.predispatch30mins("nsw"))
+
+    assert [entry["nemTime"] for entry in forecast] == [
+        "2026-06-08T10:30:00+00:00",
+        "2026-06-08T11:00:00+00:00",
+        "2026-06-08T11:30:00+00:00",
+    ]
+    assert [entry["perKwh"] for entry in forecast] == [10.0, 20.0, 30.0]
+    assert forecast[0]["wholesaleKWHPrice"] == 0.1
+    assert forecast[0]["price_mwh"] == 100.0
+
+
 def test_flow_power_api_client_does_not_collapse_untimestamped_forecasts():
     api = _flow_power_api_module()
     client = api.FlowPowerAPIClient("secret-key", None)
@@ -271,6 +324,32 @@ def test_flow_power_api_client_does_not_collapse_untimestamped_forecasts():
         "2026-06-08T01:00:00+00:00",
     ]
     assert [entry["perKwh"] for entry in forecast] == [10.0, 20.0, 30.0]
+
+
+def test_flow_power_api_client_reads_timestamp_price_mappings():
+    api = _flow_power_api_module()
+    session = _FakeSession(
+        {
+            "predispatch5mins": {
+                "data": {
+                    "2026-06-23T06:45:00+10:00": 100.0,
+                    "2026-06-23T06:50:00+10:00": 110.0,
+                    "2026-06-23T06:55:00+10:00": 120.0,
+                }
+            }
+        }
+    )
+    client = api.FlowPowerAPIClient("secret-key", session)
+
+    forecast = asyncio.run(client.predispatch5mins("nsw", period=60))
+
+    assert [entry["nemTime"] for entry in forecast] == [
+        "2026-06-23T06:45:00+10:00",
+        "2026-06-23T06:50:00+10:00",
+        "2026-06-23T06:55:00+10:00",
+    ]
+    assert [entry["perKwh"] for entry in forecast] == [10.0, 11.0, 12.0]
+    assert all(entry["duration"] == 5 for entry in forecast)
 
 
 def test_flow_power_price_endpoints_can_work_when_site_lookup_fails():
@@ -424,7 +503,7 @@ def test_flow_power_pricing_context_uses_account_twap_with_portal_account_values
         context,
         tariff_rate=12.0,
         avg_daily_tariff=5.0,
-    ), 2) == 9.3
+    ), 2) == 4.3
 
 
 def test_flow_power_pricing_context_uses_portal_twap_for_pea():
@@ -472,10 +551,41 @@ def test_flow_power_pricing_context_uses_portal_twap_for_pea():
         context,
         tariff_rate=5.85,
         avg_daily_tariff=10.48,
-    ), 2) == -6.85
+    ), 2) == -17.33
 
 
-def test_flow_power_v2_pea_does_not_subtract_average_daily_tariff():
+def test_flow_power_pricing_context_falls_back_from_zero_import_bpea():
+    helper = _flow_power_pricing_module()
+
+    context = helper.resolve_flow_power_pricing_context(
+        options={},
+        data={},
+        domain_data={
+            "flow_power_twap_tracker": SimpleNamespace(twap=11.49),
+            "flow_power_portal_data": {
+                "twap": 18.56,
+                "twap_import": 18.56,
+                "bpea": 2.057245,
+                "bpea_import": 0.0,
+                "gst_multiplier": 1.1,
+            },
+        },
+    )
+
+    pea = helper.calculate_flow_power_pea(
+        7.527,
+        context,
+        tariff_rate=5.1535,
+        avg_daily_tariff=11.1764,
+    )
+
+    assert context.bpea == 2.057245
+    assert context.bpea_source == "portal"
+    assert round(pea, 2) == -20.22
+    assert round(34.0 + pea, 2) == 13.78
+
+
+def test_flow_power_v2_pea_subtracts_average_daily_tariff():
     saved_power_sync = sys.modules.get("power_sync")
     saved_const = sys.modules.get("power_sync.const")
     saved_helper = sys.modules.get("power_sync.flow_power_pricing")
@@ -516,8 +626,21 @@ def test_flow_power_v2_pea_does_not_subtract_average_daily_tariff():
         avg_daily_tariff=11.18,
     )
 
-    assert round(pea, 2) == 17.41
-    assert round(34.0 + pea, 2) == 51.41
+    assert round(pea, 2) == 6.23
+    assert round(34.0 + pea, 2) == 40.23
+
+
+def test_flow_power_price_attributes_expose_network_tou_adjustment():
+    source = _method_source(
+        COMPONENT_ROOT / "sensor.py",
+        "FlowPowerPriceSensor",
+        "extra_state_attributes",
+    )
+
+    assert "network_tou_adjustment_cents" in source
+    assert "price_without_network_tou_adjustment_cents" in source
+    assert "price_without_network_tou_adjustment_dollars" in source
+    assert "tariff_rate - avg_daily_tariff" in source
 
 
 def test_flow_power_pricing_context_uses_override_before_portal_twap():
