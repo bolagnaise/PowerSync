@@ -62,12 +62,12 @@
       },
       "flow_power_portal": {
         "title": "Flow Power portal",
-        "description": "Connect your portal account to expose actual billing data (PEA, LWAP, TWAP, DLF) and account-specific pricing inputs. Requires SMS verification.",
+        "description": "Connect your portal account to expose actual billing data (PEA, LWAP, TWAP, DLF) and account-specific BPEA/GST pricing inputs. Requires SMS verification.",
         "data": {
           "connect_portal": "Connect Flow Power portal account"
         },
         "data_description": {
-          "connect_portal": "When enabled, PowerSync fetches account TWAP, BPEA, GST, and billing components from your Flow Power account for account-specific PEA pricing."
+          "connect_portal": "When enabled, PowerSync fetches account TWAP for sensors and account BPEA/GST for PEA pricing."
         },
         "submit": "Next"
       },
@@ -1678,7 +1678,7 @@
       },
       "flow_power_portal_options": {
         "title": "Flow Power portal account",
-        "description": "This section connects PowerSync to the Flow Power customer portal for account-specific metrics such as PEA, LWAP, TWAP, DLF, and demand. It is separate from the tariff formula settings above and requires SMS verification.",
+        "description": "This section connects PowerSync to the Flow Power customer portal for account-specific metrics such as PEA, LWAP, TWAP, DLF, and demand, plus BPEA/GST pricing inputs. It is separate from the tariff formula settings above and requires SMS verification.",
         "data": {
           "connect_portal": "Connect or refresh Flow Power portal login"
         },

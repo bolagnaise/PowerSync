@@ -454,7 +454,7 @@ def test_flow_power_tariff_generation_uses_portal_aware_context():
     assert "gst_multiplier=pricing.gst_multiplier" in source
 
 
-def test_flow_power_pricing_context_uses_account_twap_with_portal_account_values():
+def test_flow_power_pricing_context_uses_raw_twap_with_portal_account_values():
     saved_power_sync = sys.modules.get("power_sync")
     saved_const = sys.modules.get("power_sync.const")
     saved_helper = sys.modules.get("power_sync.flow_power_pricing")
@@ -493,8 +493,8 @@ def test_flow_power_pricing_context_uses_account_twap_with_portal_account_values
         },
     )
 
-    assert context.twap == 20.5
-    assert context.twap_source == "portal"
+    assert context.twap == 8.25
+    assert context.twap_source == "dynamic"
     assert context.bpea == 2.1
     assert context.bpea_source == "portal"
     assert context.gst_multiplier == 1.2
@@ -503,10 +503,10 @@ def test_flow_power_pricing_context_uses_account_twap_with_portal_account_values
         context,
         tariff_rate=12.0,
         avg_daily_tariff=5.0,
-    ), 2) == 4.3
+    ), 2) == 19.0
 
 
-def test_flow_power_pricing_context_uses_portal_twap_for_pea():
+def test_flow_power_pricing_context_uses_raw_wholesale_twap_for_pea():
     saved_power_sync = sys.modules.get("power_sync")
     saved_const = sys.modules.get("power_sync.const")
     saved_helper = sys.modules.get("power_sync.flow_power_pricing")
@@ -544,14 +544,14 @@ def test_flow_power_pricing_context_uses_portal_twap_for_pea():
         },
     )
 
-    assert context.twap == 21.02
-    assert context.twap_source == "portal"
+    assert context.twap == 11.49
+    assert context.twap_source == "dynamic"
     assert round(helper.calculate_flow_power_pea(
         11.02,
         context,
         tariff_rate=5.85,
         avg_daily_tariff=10.48,
-    ), 2) == -17.33
+    ), 2) == -6.85
 
 
 def test_flow_power_pricing_context_falls_back_from_zero_import_bpea():
@@ -581,8 +581,40 @@ def test_flow_power_pricing_context_falls_back_from_zero_import_bpea():
 
     assert context.bpea == 2.057245
     assert context.bpea_source == "portal"
-    assert round(pea, 2) == -20.22
-    assert round(34.0 + pea, 2) == 13.78
+    assert round(pea, 2) == -12.44
+    assert round(34.0 + pea, 2) == 21.56
+
+
+def test_flow_power_portal_account_twap_does_not_double_subtract_network_average():
+    helper = _flow_power_pricing_module()
+
+    context = helper.resolve_flow_power_pricing_context(
+        options={},
+        data={},
+        domain_data={
+            "flow_power_twap_tracker": SimpleNamespace(twap=8.42),
+            "flow_power_portal_data": {
+                "twap": 19.50647193287,
+                "twap_import": 19.50647193287,
+                "bpea": 2.30677,
+                "bpea_import": 2.30677,
+                "gst_multiplier": 1.1,
+            },
+        },
+    )
+
+    pea = helper.calculate_flow_power_pea(
+        11.101,
+        context,
+        tariff_rate=32.5164,
+        avg_daily_tariff=12.1468,
+    )
+
+    assert context.twap == 8.42
+    assert context.twap_source == "dynamic"
+    assert context.bpea == 2.30677
+    assert round(pea, 2) == 21.01
+    assert round(34.0 + pea, 2) == 55.01
 
 
 def test_flow_power_v2_pea_subtracts_average_daily_tariff():
@@ -643,7 +675,7 @@ def test_flow_power_price_attributes_expose_network_tou_adjustment():
     assert "tariff_rate - avg_daily_tariff" in source
 
 
-def test_flow_power_pricing_context_uses_override_before_portal_twap():
+def test_flow_power_pricing_context_uses_override_before_raw_twap():
     saved_power_sync = sys.modules.get("power_sync")
     saved_const = sys.modules.get("power_sync.const")
     saved_helper = sys.modules.get("power_sync.flow_power_pricing")

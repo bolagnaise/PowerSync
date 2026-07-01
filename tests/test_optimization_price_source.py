@@ -1163,7 +1163,7 @@ def test_flow_power_optimizer_uses_base_rate_from_entry_data(opt_module, monkeyp
     assert coordinator._last_display_import_prices[0] == pytest.approx(0.5443)
 
 
-def test_flow_power_optimizer_uses_portal_twap_with_portal_pricing_inputs(opt_module, monkeypatch):
+def test_flow_power_optimizer_uses_raw_twap_with_portal_pricing_inputs(opt_module, monkeypatch):
     async def _executor(fn, *args):
         return fn(*args)
 
@@ -1229,9 +1229,9 @@ def test_flow_power_optimizer_uses_portal_twap_with_portal_pricing_inputs(opt_mo
 
     import_prices, _ = asyncio.run(coordinator._get_price_forecast())
 
-    # Base 34c + PEA (1.2*20c + 12c - 1.2*10c - 5c - 2c) = 51c/kWh.
-    assert import_prices[0] == pytest.approx(0.51)
-    assert coordinator._last_display_import_prices[0] == pytest.approx(0.51)
+    # Base 34c + PEA (1.2*20c + 12c - 1.2*8c - 5c - 2c) = 53.4c/kWh.
+    assert import_prices[0] == pytest.approx(0.534)
+    assert coordinator._last_display_import_prices[0] == pytest.approx(0.534)
 
 
 def test_flow_power_optimizer_uses_current_interval_for_active_tariff_slot(
@@ -1318,8 +1318,8 @@ def test_flow_power_optimizer_uses_current_interval_for_active_tariff_slot(
     # The forecast for the active half-hour would produce 94c/kWh. The live
     # KWatch current interval must override that active tariff slot, matching
     # the canonical Flow Power tariff schedule/current-price sensor.
-    assert import_prices[0] == pytest.approx(0.51)
-    assert coordinator._last_display_import_prices[0] == pytest.approx(0.51)
+    assert import_prices[0] == pytest.approx(0.534)
+    assert coordinator._last_display_import_prices[0] == pytest.approx(0.534)
 
 
 def test_flow_power_decays_far_future_import_spikes_but_keeps_happy_hour_export(
