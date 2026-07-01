@@ -57,6 +57,7 @@ from .const import (
     CONF_DEMAND_CHARGE_DAYS,
     CONF_DEMAND_CHARGE_BILLING_DAY,
     CONF_DEMAND_CHARGE_APPLY_TO,
+    CONF_DEMAND_CHARGE_AVERAGING_MINUTES,
     CONF_DEMAND_ARTIFICIAL_PRICE,
     CONF_DEMAND_ALLOW_GRID_CHARGING,
     CONF_DAILY_SUPPLY_CHARGE,
@@ -11037,6 +11038,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 default=self._get_option(CONF_DEMAND_CHARGE_BILLING_DAY, 1),
             ): NumberSelector(NumberSelectorConfig(
                 min=1, max=31, step=1, mode=NumberSelectorMode.BOX,
+            )),
+            vol.Optional(
+                CONF_DEMAND_CHARGE_AVERAGING_MINUTES,
+                default=self._get_option(CONF_DEMAND_CHARGE_AVERAGING_MINUTES, 30),
+            ): NumberSelector(NumberSelectorConfig(
+                min=1, max=60, step=1, mode=NumberSelectorMode.BOX,
             )),
             vol.Optional(
                 CONF_DEMAND_CHARGE_APPLY_TO,

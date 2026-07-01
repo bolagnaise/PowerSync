@@ -585,6 +585,7 @@ CONF_DEMAND_CHARGE_END_TIME = "demand_charge_end_time"
 CONF_DEMAND_CHARGE_DAYS = "demand_charge_days"
 CONF_DEMAND_CHARGE_BILLING_DAY = "demand_charge_billing_day"
 CONF_DEMAND_CHARGE_APPLY_TO = "demand_charge_apply_to"
+CONF_DEMAND_CHARGE_AVERAGING_MINUTES = "demand_charge_averaging_minutes"
 CONF_DEMAND_ARTIFICIAL_PRICE = "demand_artificial_price_enabled"
 CONF_DEMAND_ALLOW_GRID_CHARGING = "demand_allow_grid_charging"
 
