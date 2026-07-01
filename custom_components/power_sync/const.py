@@ -657,14 +657,16 @@ def supports_no_idle_mode_provider(provider: str | None) -> bool:
 # GloBird ZeroHero plan configuration
 CONF_GLOBIRD_PLAN = "globird_plan"
 GLOBIRD_PLAN_NOT_ZEROHERO = "not_zerohero"
+GLOBIRD_PLAN_ZEROHERO_JUL_2026 = "zerohero_jul_2026"
 GLOBIRD_PLAN_ZEROHERO_CURRENT = "zerohero_current"
 GLOBIRD_PLAN_ZEROHERO_LEGACY = "zerohero_legacy"
 GLOBIRD_PLAN_ZEROHERO_CUSTOM = "zerohero_custom"
 GLOBIRD_PLANS = {
     GLOBIRD_PLAN_NOT_ZEROHERO: "Not on ZeroHero",
-    GLOBIRD_PLAN_ZEROHERO_CURRENT: "ZeroHero current (15 kWh, 6pm-9pm)",
-    GLOBIRD_PLAN_ZEROHERO_LEGACY: "ZeroHero legacy (10 kWh, 6pm-8pm)",
-    GLOBIRD_PLAN_ZEROHERO_CUSTOM: "ZeroHero custom",
+    GLOBIRD_PLAN_ZEROHERO_JUL_2026: "ZeroHero Jul 2026 (10c, 15 kWh, 6pm-9pm, free 12pm-3pm)",
+    GLOBIRD_PLAN_ZEROHERO_CURRENT: "ZeroHero previous 3-hour (15c, 15 kWh, 6pm-9pm)",
+    GLOBIRD_PLAN_ZEROHERO_LEGACY: "ZeroHero legacy 2-hour (15c, 10 kWh, 6pm-8pm)",
+    GLOBIRD_PLAN_ZEROHERO_CUSTOM: "ZeroHero custom / account-specific",
 }
 CONF_GLOBIRD_ZEROHERO_START = "globird_zerohero_start"
 CONF_GLOBIRD_ZEROHERO_END = "globird_zerohero_end"
@@ -672,6 +674,9 @@ CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH = "globird_zerohero_export_cap_kwh"
 CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE = "globird_zerohero_super_export_rate"
 CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT = "globird_zerohero_credit_amount"
 CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW = "globird_zerohero_import_limit_kw"
+CONF_GLOBIRD_ZEROCHARGE_START = "globird_zerocharge_start"
+CONF_GLOBIRD_ZEROCHARGE_END = "globird_zerocharge_end"
+CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH = "globird_zerocharge_import_cap_kwh"
 CONF_GLOBIRD_EMAIL = "globird_email"
 CONF_GLOBIRD_PASSWORD = "globird_password"
 GLOBIRD_BASE_URL = "https://myaccount.globirdenergy.com.au"
@@ -704,6 +709,9 @@ DEFAULT_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH = 15.0
 DEFAULT_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE = 15.0
 DEFAULT_GLOBIRD_ZEROHERO_CREDIT_AMOUNT = 1.0
 DEFAULT_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW = 0.03
+DEFAULT_GLOBIRD_ZEROCHARGE_START = "12:00"
+DEFAULT_GLOBIRD_ZEROCHARGE_END = "15:00"
+DEFAULT_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH = 50.0
 
 # Localvolts configuration
 CONF_LOCALVOLTS_API_KEY = "localvolts_api_key"

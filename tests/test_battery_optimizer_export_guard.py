@@ -570,6 +570,40 @@ def test_zerohero_bonus_cap_limits_intentional_battery_export(
     assert any(action.action == "export" for action in result.schedule.actions)
 
 
+def test_zerocharge_import_bonus_cap_limits_free_grid_import_value(
+    battery_optimizer_module,
+):
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("ZeroCharge import cap is enforced by the LP optimizer")
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=50000,
+        max_charge_w=10000,
+        max_discharge_w=10000,
+        backup_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=3,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.40] * 36,
+        export_prices=[0.0] * 36,
+        import_bonus_prices=[0.40] * 36,
+        import_bonus_cap_kwh=1.0,
+        solar_forecast=[0.0] * 36,
+        load_forecast=[0.0] * 36,
+        current_soc=0.20,
+        allow_battery_export=False,
+        allow_grid_charge=True,
+    )
+
+    imported_kwh = sum(w / 1000 * optimizer.dt_hours for w in result.grid_import_w)
+
+    assert result.feasible is True
+    assert imported_kwh <= 1.001
+    assert any(action.action == "charge" for action in result.schedule.actions)
+
+
 def test_zerohero_solar_surplus_shares_bonus_bucket_before_battery_export(
     battery_optimizer_module,
 ):

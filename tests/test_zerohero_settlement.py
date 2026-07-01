@@ -50,6 +50,23 @@ def test_current_plan_topup_applies_only_to_first_15kwh_in_window():
     assert result.export_earnings == pytest.approx(2.70)
 
 
+def test_jul_2026_plan_uses_10c_super_export_and_zerocharge_window():
+    config = zerohero.zerohero_config_from_settings(
+        {"globird_plan": "zerohero_jul_2026"}
+    )
+
+    assert config.start == "18:00"
+    assert config.end == "21:00"
+    assert config.export_cap_kwh == pytest.approx(15.0)
+    assert config.super_export_rate == pytest.approx(0.10)
+    assert config.import_allowance_kwh == pytest.approx(0.09)
+    assert config.zerocharge_start == "12:00"
+    assert config.zerocharge_end == "15:00"
+    assert config.zerocharge_import_cap_kwh == pytest.approx(50.0)
+    assert zerohero.zerocharge_is_in_window(_ts(12, 0), config)
+    assert not zerohero.zerocharge_is_in_window(_ts(15, 0), config)
+
+
 def test_legacy_plan_topup_applies_only_to_first_10kwh_before_8pm():
     config = zerohero.zerohero_config_from_settings(
         {"globird_plan": "zerohero_legacy"}
@@ -106,3 +123,35 @@ def test_credit_is_included_when_window_stays_under_threshold():
     assert result.import_window_kwh == pytest.approx(0.03)
     assert result.credit_status == "earned"
     assert result.credit_value == pytest.approx(1.0)
+
+
+def test_zerocharge_import_credit_applies_only_to_capped_window_imports():
+    config = zerohero.zerohero_config_from_settings(
+        {"globird_plan": "zerohero_jul_2026"}
+    )
+
+    used, credit = zerohero.settle_zerocharge_imports(
+        config,
+        [_ts(11, 55), _ts(12, 0), _ts(13, 0), _ts(15, 0)],
+        [10.0, 30.0, 30.0, 10.0],
+        [0.40, 0.50, 0.60, 0.70],
+    )
+
+    assert used == pytest.approx(60.0)
+    assert credit == pytest.approx(15.0 + 12.0)
+
+
+def test_existing_custom_zerohero_does_not_enable_zerocharge_by_default():
+    config = zerohero.zerohero_config_from_settings(
+        {
+            "globird_plan": "zerohero_custom",
+            "globird_zerohero_start": "18:00",
+            "globird_zerohero_end": "21:00",
+            "globird_zerohero_export_cap_kwh": 15,
+            "globird_zerohero_super_export_rate": 10,
+            "globird_zerohero_credit_amount": 1,
+            "globird_zerohero_import_limit_kw": 0.03,
+        }
+    )
+
+    assert not config.zerocharge_enabled

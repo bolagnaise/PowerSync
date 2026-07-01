@@ -31,6 +31,19 @@ When enabled, Smart Optimization may plan forced battery charging from grid
 import when prices make it worthwhile. When disabled, Charge By Time cannot force
 grid charging, but solar surplus can still charge the battery naturally.
 
+### GloBird ZeroHero and ZeroCharge
+
+GloBird ZeroHero terms vary by account and start date. Select the preset that
+matches your written GloBird plan, such as `ZeroHero Jul 2026`, `previous
+3-hour`, `legacy 2-hour`, or `custom / account-specific`. PowerSync does not
+auto-migrate existing saved ZeroHero settings.
+
+Base import and feed-in rates still come from the Tesla tariff or PowerSync
+custom tariff. ZeroHero Super Export is modeled separately as a capped export
+top-up, and ZeroCharge is modeled separately as a capped free-import window.
+For Jul 2026 terms this means a 12:00-15:00 free-import window with a 50 kWh
+daily cap, plus the 18:00-21:00 Super Export/no-import window.
+
 ## Advanced optimizer controls
 
 Advanced controls change the LP solver's decision boundaries. Leave them at their

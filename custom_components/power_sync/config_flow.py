@@ -239,6 +239,9 @@ from .const import (
     GLOBIRD_PLANS,
     GLOBIRD_PLAN_NOT_ZEROHERO,
     GLOBIRD_PLAN_ZEROHERO_CUSTOM,
+    CONF_GLOBIRD_ZEROCHARGE_START,
+    CONF_GLOBIRD_ZEROCHARGE_END,
+    CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
     CONF_GLOBIRD_ZEROHERO_START,
     CONF_GLOBIRD_ZEROHERO_END,
     CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
@@ -251,6 +254,9 @@ from .const import (
     DEFAULT_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
     DEFAULT_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
     DEFAULT_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+    DEFAULT_GLOBIRD_ZEROCHARGE_START,
+    DEFAULT_GLOBIRD_ZEROCHARGE_END,
+    DEFAULT_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
     FLOW_POWER_STATES,
     FLOW_POWER_PRICE_SOURCES,
     FLOW_POWER_KWATCH_REGIONS,
@@ -644,6 +650,45 @@ def _build_globird_plan_schema(
                     max=5.0,
                     step=0.001,
                     unit_of_measurement="kW",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROCHARGE_START,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROCHARGE_START,
+                    DEFAULT_GLOBIRD_ZEROCHARGE_START,
+                ),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=hour_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROCHARGE_END,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROCHARGE_END,
+                    DEFAULT_GLOBIRD_ZEROCHARGE_END,
+                ),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=hour_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
+                    DEFAULT_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0.0,
+                    max=200.0,
+                    step=0.1,
+                    unit_of_measurement="kWh",
                     mode=NumberSelectorMode.BOX,
                 )
             ),
@@ -5512,6 +5557,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
                     CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
                     CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                    CONF_GLOBIRD_ZEROCHARGE_START,
+                    CONF_GLOBIRD_ZEROCHARGE_END,
+                    CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
                 ):
                     self._globird_data[key] = user_input.get(key)
             return await self.async_step_globird_portal()
@@ -12512,6 +12560,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
                         CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
                         CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                        CONF_GLOBIRD_ZEROCHARGE_START,
+                        CONF_GLOBIRD_ZEROCHARGE_END,
+                        CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
                     ):
                         user_input.pop(key, None)
 

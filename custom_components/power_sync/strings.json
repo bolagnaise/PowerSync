@@ -186,7 +186,7 @@
       },
       "globird_plan": {
         "title": "GloBird plan",
-        "description": "Select your exact GloBird plan. ZeroHero's Super Export rate is capped and its daily credit is lost if imports exceed the evening threshold.",
+        "description": "Select your exact GloBird plan. ZeroHero and ZeroCharge terms vary by account and date, so choose the preset that matches your written GloBird plan.",
         "data": {
           "globird_plan": "GloBird ZeroHero plan",
           "globird_zerohero_start": "Custom Super Export start",
@@ -194,16 +194,22 @@
           "globird_zerohero_export_cap_kwh": "Super Export cap",
           "globird_zerohero_super_export_rate": "Custom Super Export rate",
           "globird_zerohero_credit_amount": "Custom no-import credit",
-          "globird_zerohero_import_limit_kw": "No-import threshold"
+          "globird_zerohero_import_limit_kw": "No-import threshold",
+          "globird_zerocharge_start": "Custom ZeroCharge start",
+          "globird_zerocharge_end": "Custom ZeroCharge end",
+          "globird_zerocharge_import_cap_kwh": "ZeroCharge import cap"
         },
         "data_description": {
-          "globird_plan": "Choose the current ZeroHero plan (15 kWh from 18:00-21:00), the older legacy window, a custom ZeroHero setup, or Not on ZeroHero. PowerSync uses this to model ZeroHero export caps and no-import credits.",
+          "globird_plan": "Choose ZeroHero Jul 2026 (10c, 15 kWh, 18:00-21:00, free 12:00-15:00), an older ZeroHero preset, a custom/account-specific setup, or Not on ZeroHero. Existing saved plans are not migrated automatically.",
           "globird_zerohero_start": "Only used when GloBird plan is ZeroHero custom.",
           "globird_zerohero_end": "Only used when GloBird plan is ZeroHero custom.",
           "globird_zerohero_export_cap_kwh": "Only used when GloBird plan is ZeroHero custom. This is the daily kWh cap that receives the Super Export rate.",
           "globird_zerohero_super_export_rate": "Only used when GloBird plan is ZeroHero custom. This is the total export rate, not an amount added to the base feed-in tariff.",
           "globird_zerohero_credit_amount": "Only used when GloBird plan is ZeroHero custom.",
-          "globird_zerohero_import_limit_kw": "Only used when GloBird plan is ZeroHero custom. Current ZeroHero uses 0.03 kWh per hour over 18:00-21:00, giving a 0.09 kWh total import allowance for the evening credit."
+          "globird_zerohero_import_limit_kw": "Only used when GloBird plan is ZeroHero custom. Jul 2026 uses 0.03 kWh per hour over 18:00-21:00, giving a 0.09 kWh total import allowance for the evening credit.",
+          "globird_zerocharge_start": "Only used when GloBird plan is ZeroHero custom. Jul 2026 free import starts at 12:00.",
+          "globird_zerocharge_end": "Only used when GloBird plan is ZeroHero custom. Jul 2026 free import ends at 15:00.",
+          "globird_zerocharge_import_cap_kwh": "Only used when GloBird plan is ZeroHero custom. This is the daily kWh cap that receives the ZeroCharge free-import credit."
         },
         "submit": "Next"
       },
@@ -1775,19 +1781,25 @@
           "globird_zerohero_super_export_rate": "Custom Super Export rate",
           "globird_zerohero_credit_amount": "Custom no-import credit",
           "globird_zerohero_import_limit_kw": "No-import threshold",
+          "globird_zerocharge_start": "Custom ZeroCharge start",
+          "globird_zerocharge_end": "Custom ZeroCharge end",
+          "globird_zerocharge_import_cap_kwh": "ZeroCharge import cap",
           "aemo_spike_enabled": "Enable spike detection",
           "aemo_region": "NEM region",
           "aemo_spike_threshold": "Spike threshold",
           "configure_custom_tariff": "Configure custom tariff"
         },
         "data_description": {
-          "globird_plan": "Choose the current ZeroHero plan (15 kWh from 18:00-21:00), the older legacy window, a custom ZeroHero setup, or Not on ZeroHero. PowerSync uses this to model ZeroHero export caps and no-import credits.",
+          "globird_plan": "Choose ZeroHero Jul 2026 (10c, 15 kWh, 18:00-21:00, free 12:00-15:00), an older ZeroHero preset, a custom/account-specific setup, or Not on ZeroHero. Existing saved plans are not migrated automatically.",
           "globird_zerohero_start": "Only used when GloBird plan is ZeroHero custom.",
           "globird_zerohero_end": "Only used when GloBird plan is ZeroHero custom.",
           "globird_zerohero_export_cap_kwh": "Only used when GloBird plan is ZeroHero custom. This is the daily kWh cap that receives the Super Export rate.",
           "globird_zerohero_super_export_rate": "Only used when GloBird plan is ZeroHero custom. This is the total export rate, not an amount added to the base feed-in tariff.",
           "globird_zerohero_credit_amount": "Only used when GloBird plan is ZeroHero custom.",
-          "globird_zerohero_import_limit_kw": "Only used when GloBird plan is ZeroHero custom. Current ZeroHero uses 0.03 kWh per hour over 18:00-21:00, giving a 0.09 kWh total import allowance for the evening credit.",
+          "globird_zerohero_import_limit_kw": "Only used when GloBird plan is ZeroHero custom. Jul 2026 uses 0.03 kWh per hour over 18:00-21:00, giving a 0.09 kWh total import allowance for the evening credit.",
+          "globird_zerocharge_start": "Only used when GloBird plan is ZeroHero custom. Jul 2026 free import starts at 12:00.",
+          "globird_zerocharge_end": "Only used when GloBird plan is ZeroHero custom. Jul 2026 free import ends at 15:00.",
+          "globird_zerocharge_import_cap_kwh": "Only used when GloBird plan is ZeroHero custom. This is the daily kWh cap that receives the ZeroCharge free-import credit.",
           "aemo_spike_enabled": "Required for Globird and AEMO VPP plans that include spike export payments. Disable if your plan does not pay for spike exports.",
           "aemo_region": "Your NEM region determines which AEMO price feed is monitored. Check your electricity bill if unsure.",
           "aemo_spike_threshold": "Battery exports when the AEMO wholesale price exceeds this value. Default 3,000 in the selected market price unit matches most Globird and VPP plans. Only change if your plan specifies a different threshold.",

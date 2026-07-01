@@ -277,6 +277,9 @@ from .const import (
     CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
     CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
     CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+    CONF_GLOBIRD_ZEROCHARGE_START,
+    CONF_GLOBIRD_ZEROCHARGE_END,
+    CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
     CONF_GLOBIRD_EMAIL,
     CONF_GLOBIRD_PASSWORD,
     GLOBIRD_PLAN_NOT_ZEROHERO,
@@ -287,6 +290,9 @@ from .const import (
     DEFAULT_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
     DEFAULT_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
     DEFAULT_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+    DEFAULT_GLOBIRD_ZEROCHARGE_START,
+    DEFAULT_GLOBIRD_ZEROCHARGE_END,
+    DEFAULT_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
     # Solcast solar forecasting
     CONF_SOLAR_FORECAST_PROVIDER,
     DEFAULT_SOLAR_FORECAST_PROVIDER,
@@ -8540,7 +8546,33 @@ class ProviderConfigView(HomeAssistantView):
                             CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
                             entry.data.get(CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW, DEFAULT_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW)
                         ),
+                        "globird_zerocharge_start": entry.options.get(
+                            CONF_GLOBIRD_ZEROCHARGE_START,
+                            entry.data.get(CONF_GLOBIRD_ZEROCHARGE_START, DEFAULT_GLOBIRD_ZEROCHARGE_START)
+                        ),
+                        "globird_zerocharge_end": entry.options.get(
+                            CONF_GLOBIRD_ZEROCHARGE_END,
+                            entry.data.get(CONF_GLOBIRD_ZEROCHARGE_END, DEFAULT_GLOBIRD_ZEROCHARGE_END)
+                        ),
+                        "globird_zerocharge_import_cap_kwh": entry.options.get(
+                            CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
+                            entry.data.get(CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH, DEFAULT_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH)
+                        ),
                     })
+                    if (
+                        config.get("globird_plan") == GLOBIRD_PLAN_ZEROHERO_CUSTOM
+                        and not any(
+                            key in entry.options or key in entry.data
+                            for key in (
+                                CONF_GLOBIRD_ZEROCHARGE_START,
+                                CONF_GLOBIRD_ZEROCHARGE_END,
+                                CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
+                            )
+                        )
+                    ):
+                        config.pop("globird_zerocharge_start", None)
+                        config.pop("globird_zerocharge_end", None)
+                        config.pop("globird_zerocharge_import_cap_kwh", None)
 
             elif electricity_provider == "nz":
                 # NZ TOU settings
@@ -8758,6 +8790,9 @@ class ProviderConfigView(HomeAssistantView):
                 "globird_zerohero_super_export_rate": CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
                 "globird_zerohero_credit_amount": CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
                 "globird_zerohero_import_limit_kw": CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                "globird_zerocharge_start": CONF_GLOBIRD_ZEROCHARGE_START,
+                "globird_zerocharge_end": CONF_GLOBIRD_ZEROCHARGE_END,
+                "globird_zerocharge_import_cap_kwh": CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
             }
 
             # Build new options dict starting with existing options
@@ -8779,6 +8814,9 @@ class ProviderConfigView(HomeAssistantView):
                     CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
                     CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
                     CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                    CONF_GLOBIRD_ZEROCHARGE_START,
+                    CONF_GLOBIRD_ZEROCHARGE_END,
+                    CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH,
                 ):
                     new_options.pop(key, None)
 

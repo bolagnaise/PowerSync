@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_FLOW_PATH = ROOT / "custom_components" / "power_sync" / "config_flow.py"
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
+CONST_PATH = ROOT / "custom_components" / "power_sync" / "const.py"
 STRINGS_PATH = ROOT / "custom_components" / "power_sync" / "strings.json"
 TRANSLATIONS_PATH = ROOT / "custom_components" / "power_sync" / "translations" / "en.json"
 
@@ -603,8 +604,47 @@ def test_globird_plan_strings_are_available_in_setup_and_options():
             assert step["data"]["globird_plan"] == "GloBird ZeroHero plan"
             assert step["data"]["globird_zerohero_export_cap_kwh"] == "Super Export cap"
             assert step["data"]["globird_zerohero_import_limit_kw"] == "No-import threshold"
+            assert step["data"]["globird_zerocharge_start"] == "Custom ZeroCharge start"
+            assert step["data"]["globird_zerocharge_end"] == "Custom ZeroCharge end"
+            assert step["data"]["globird_zerocharge_import_cap_kwh"] == "ZeroCharge import cap"
+            assert "Jul 2026" in step["data_description"]["globird_plan"]
             assert "15 kWh" in step["data_description"]["globird_plan"]
+            assert "12:00" in step["data_description"]["globird_zerocharge_start"]
+            assert "15:00" in step["data_description"]["globird_zerocharge_end"]
             assert "0.09 kWh total import allowance" in step["data_description"]["globird_zerohero_import_limit_kw"]
+
+
+def test_globird_plan_schema_exposes_jul_2026_and_zerocharge_fields():
+    source = CONFIG_FLOW_PATH.read_text()
+    helper = ast.get_source_segment(source, _top_level_function("_build_globird_plan_schema"))
+    setup_step = ast.get_source_segment(
+        source, _config_flow_method("async_step_globird_plan")
+    )
+    options_step = ast.get_source_segment(
+        source, _options_flow_method("async_step_globird_options")
+    )
+    api_source = INIT_PATH.read_text()
+
+    assert helper is not None
+    assert setup_step is not None
+    assert options_step is not None
+    assert "GLOBIRD_PLAN_ZEROHERO_JUL_2026" in CONST_PATH.read_text()
+    assert "ZeroHero Jul 2026" in CONST_PATH.read_text()
+    assert "CONF_GLOBIRD_ZEROCHARGE_START" in helper
+    assert "CONF_GLOBIRD_ZEROCHARGE_END" in helper
+    assert "CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH" in helper
+    assert "CONF_GLOBIRD_ZEROCHARGE_START" in setup_step
+    assert "CONF_GLOBIRD_ZEROCHARGE_END" in setup_step
+    assert "CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH" in setup_step
+    assert "CONF_GLOBIRD_ZEROCHARGE_START" in options_step
+    assert "CONF_GLOBIRD_ZEROCHARGE_END" in options_step
+    assert "CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH" in options_step
+    assert '"globird_zerocharge_start": CONF_GLOBIRD_ZEROCHARGE_START' in api_source
+    assert '"globird_zerocharge_end": CONF_GLOBIRD_ZEROCHARGE_END' in api_source
+    assert (
+        '"globird_zerocharge_import_cap_kwh": CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH'
+        in api_source
+    )
 
 
 def test_provider_portal_login_has_dedicated_options_sections():

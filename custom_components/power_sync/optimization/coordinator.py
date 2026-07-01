@@ -34,11 +34,13 @@ from ..flow_power_pricing import (
 from ..tariff_time import find_matching_tou_period, period_entries
 from ..zerohero import (
     ZeroHeroConfig,
+    settle_zerocharge_imports,
     settle_zerohero_series,
     zerohero_config_from_entry,
     zerohero_credit_status,
     zerohero_is_in_window,
     zerohero_window_end_for,
+    zerocharge_is_in_window,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -321,6 +323,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_planned_ev_load_forecast_w: list[float] | None = None
         self._last_zerohero_bonus_prices: list[float] | None = None
         self._last_zerohero_bonus_cap_kwh: float | None = None
+        self._last_zerocharge_bonus_prices: list[float] | None = None
+        self._last_zerocharge_bonus_cap_kwh: float | None = None
         self._solar_nowcast_derate: float = 1.0
         self._last_solar_nowcast_ratio: float | None = None
         self._last_logged_solar_nowcast_derate: float | None = None
@@ -345,9 +349,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._actual_zerohero_base_export_earnings_today = 0.0
         self._actual_zerohero_bonus_export_earnings_today = 0.0
         self._actual_zerohero_credit_value_today = 0.0
+        self._actual_zerocharge_import_kwh_today = 0.0
+        self._actual_zerocharge_credit_value_today = 0.0
         self._baseline_zerohero_import_kwh_today = 0.0
         self._baseline_zerohero_bonus_export_kwh_today = 0.0
         self._baseline_zerohero_credit_value_today = 0.0
+        self._baseline_zerocharge_import_kwh_today = 0.0
+        self._baseline_zerocharge_credit_value_today = 0.0
         self._cost_store = Store(
             hass,
             COST_STORE_VERSION,
@@ -1802,6 +1810,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for ts in self._price_timestamps(n)
         ]
 
+    def _zerocharge_window_slots(self, n: int) -> list[bool]:
+        """Return optimizer slots inside the configured ZeroCharge window."""
+        config = self._zerohero_config()
+        if config is None or n <= 0 or not config.zerocharge_enabled:
+            return [False] * max(0, n)
+        return [
+            zerocharge_is_in_window(ts, config)
+            for ts in self._price_timestamps(n)
+        ]
+
     def _zerohero_credit_status(self, now: datetime | None = None) -> str:
         """Return current ZeroHero import-threshold status."""
         config = self._zerohero_config()
@@ -1827,10 +1845,34 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         n = min(len(import_prices), len(export_prices))
         self._last_zerohero_bonus_prices = [0.0] * n
         self._last_zerohero_bonus_cap_kwh = None
+        self._last_zerocharge_bonus_prices = [0.0] * n
+        self._last_zerocharge_bonus_cap_kwh = None
 
         config = self._zerohero_config()
         if config is None or n <= 0:
             return
+
+        timestamps = self._price_timestamps(n)
+        if config.zerocharge_enabled:
+            remaining_import_cap = max(
+                0.0,
+                config.zerocharge_import_cap_kwh
+                - self._actual_zerocharge_import_kwh_today,
+            )
+            for idx, ts in enumerate(timestamps):
+                if zerocharge_is_in_window(ts, config):
+                    self._last_zerocharge_bonus_prices[idx] = max(
+                        0.0,
+                        import_prices[idx] if idx < len(import_prices) else 0.0,
+                    )
+            self._last_zerocharge_bonus_cap_kwh = remaining_import_cap
+            if remaining_import_cap > 0 and any(self._last_zerocharge_bonus_prices):
+                _LOGGER.info(
+                    "ZeroCharge optimizer: %.2fkWh free-import cap remaining, %s-%s",
+                    remaining_import_cap,
+                    config.zerocharge_start,
+                    config.zerocharge_end,
+                )
 
         if self._zerohero_credit_lost():
             self._last_zerohero_bonus_cap_kwh = 0.0
@@ -1841,7 +1883,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return
 
-        timestamps = self._price_timestamps(n)
         remaining_cap = max(
             0.0,
             config.export_cap_kwh - self._actual_zerohero_bonus_export_kwh_today,
@@ -1881,11 +1922,35 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             0.0,
             config.import_allowance_kwh - self._actual_zerohero_import_kwh_today,
         )
+        remaining_zerocharge = (
+            max(
+                0.0,
+                config.zerocharge_import_cap_kwh
+                - self._actual_zerocharge_import_kwh_today,
+            )
+            if config.zerocharge_enabled
+            else 0.0
+        )
         return {
             "status": "enabled",
             "plan": config.plan,
             "window_start": config.start,
             "window_end": config.end,
+            "super_export_rate": round(config.super_export_rate, 4),
+            "bonus_export_cap_kwh": round(config.export_cap_kwh, 4),
+            "zerocharge_enabled": config.zerocharge_enabled,
+            "zerocharge_window_start": config.zerocharge_start,
+            "zerocharge_window_end": config.zerocharge_end,
+            "zerocharge_import_cap_kwh": round(config.zerocharge_import_cap_kwh, 4),
+            "zerocharge_import_kwh_used": round(
+                self._actual_zerocharge_import_kwh_today,
+                4,
+            ),
+            "zerocharge_import_kwh_remaining": round(remaining_zerocharge, 4),
+            "zerocharge_credit_value": round(
+                self._actual_zerocharge_credit_value_today,
+                4,
+            ),
             "bonus_export_kwh_used": round(
                 self._actual_zerohero_bonus_export_kwh_today,
                 4,
@@ -3141,6 +3206,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         grid_charge_allowed,
                         self._last_zerohero_bonus_prices,
                         self._last_zerohero_bonus_cap_kwh,
+                        self._last_zerocharge_bonus_prices,
+                        self._last_zerocharge_bonus_cap_kwh,
                         export_reserve_floor,
                         schedule_timestamps,
                     )
@@ -8699,9 +8766,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._actual_zerohero_base_export_earnings_today = float(zerohero.get("base_export_earnings", 0.0))
             self._actual_zerohero_bonus_export_earnings_today = float(zerohero.get("bonus_export_earnings", 0.0))
             self._actual_zerohero_credit_value_today = float(zerohero.get("credit_value", 0.0))
+            self._actual_zerocharge_import_kwh_today = float(zerohero.get("zerocharge_import_kwh", 0.0))
+            self._actual_zerocharge_credit_value_today = float(zerohero.get("zerocharge_credit_value", 0.0))
             self._baseline_zerohero_import_kwh_today = float(zerohero.get("baseline_import_window_kwh", 0.0))
             self._baseline_zerohero_bonus_export_kwh_today = float(zerohero.get("baseline_bonus_export_kwh", 0.0))
             self._baseline_zerohero_credit_value_today = float(zerohero.get("baseline_credit_value", 0.0))
+            self._baseline_zerocharge_import_kwh_today = float(zerohero.get("baseline_zerocharge_import_kwh", 0.0))
+            self._baseline_zerocharge_credit_value_today = float(zerohero.get("baseline_zerocharge_credit_value", 0.0))
             self._last_cost_date = stored_date
             _LOGGER.info(
                 "Restored daily costs: actual=$%.2f, baseline=$%.2f, "
@@ -8744,9 +8815,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "base_export_earnings": round(self._actual_zerohero_base_export_earnings_today, 4),
                 "bonus_export_earnings": round(self._actual_zerohero_bonus_export_earnings_today, 4),
                 "credit_value": round(self._actual_zerohero_credit_value_today, 4),
+                "zerocharge_import_kwh": round(self._actual_zerocharge_import_kwh_today, 4),
+                "zerocharge_credit_value": round(self._actual_zerocharge_credit_value_today, 4),
                 "baseline_import_window_kwh": round(self._baseline_zerohero_import_kwh_today, 4),
                 "baseline_bonus_export_kwh": round(self._baseline_zerohero_bonus_export_kwh_today, 4),
                 "baseline_credit_value": round(self._baseline_zerohero_credit_value_today, 4),
+                "baseline_zerocharge_import_kwh": round(self._baseline_zerocharge_import_kwh_today, 4),
+                "baseline_zerocharge_credit_value": round(self._baseline_zerocharge_credit_value_today, 4),
             },
         }
 
@@ -8942,9 +9017,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._actual_zerohero_base_export_earnings_today = 0.0
             self._actual_zerohero_bonus_export_earnings_today = 0.0
             self._actual_zerohero_credit_value_today = 0.0
+            self._actual_zerocharge_import_kwh_today = 0.0
+            self._actual_zerocharge_credit_value_today = 0.0
             self._baseline_zerohero_import_kwh_today = 0.0
             self._baseline_zerohero_bonus_export_kwh_today = 0.0
             self._baseline_zerohero_credit_value_today = 0.0
+            self._baseline_zerocharge_import_kwh_today = 0.0
+            self._baseline_zerocharge_credit_value_today = 0.0
             self._last_cost_tracking_time = None
             self._last_cost_date = today
 
@@ -9014,6 +9093,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._actual_zerohero_bonus_export_kwh_today += settlement.bonus_export_kwh
             self._actual_zerohero_base_export_earnings_today += settlement.base_export_earnings
             self._actual_zerohero_bonus_export_earnings_today += settlement.bonus_export_earnings
+            zerocharge_import, zerocharge_credit = settle_zerocharge_imports(
+                zerohero_config,
+                [now],
+                [grid_import_kwh],
+                [import_price],
+                initial_import_kwh=self._actual_zerocharge_import_kwh_today,
+            )
+            self._actual_zerocharge_import_kwh_today = zerocharge_import
+            self._actual_zerocharge_credit_value_today += zerocharge_credit
+            actual_import_cost -= zerocharge_credit
 
         actual_cost = actual_import_cost - actual_export_earnings
 
@@ -9053,6 +9142,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             baseline_export_earnings = baseline_settlement.export_earnings
             self._baseline_zerohero_import_kwh_today = baseline_settlement.import_window_kwh
             self._baseline_zerohero_bonus_export_kwh_today += baseline_settlement.bonus_export_kwh
+            baseline_zerocharge_import, baseline_zerocharge_credit = (
+                settle_zerocharge_imports(
+                    zerohero_config,
+                    [now],
+                    [baseline_import_kwh],
+                    [import_price],
+                    initial_import_kwh=self._baseline_zerocharge_import_kwh_today,
+                )
+            )
+            self._baseline_zerocharge_import_kwh_today = baseline_zerocharge_import
+            self._baseline_zerocharge_credit_value_today += baseline_zerocharge_credit
+            baseline_import_cost -= baseline_zerocharge_credit
 
         baseline_cost = baseline_import_cost - baseline_export_earnings
 
@@ -9203,13 +9304,43 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 credit_already_applied=self._baseline_zerohero_credit_value_today > 0,
                 include_credit=True,
             )
+            predicted_zerocharge_import, predicted_zerocharge_credit = (
+                settle_zerocharge_imports(
+                    zerohero_config,
+                    future_timestamps,
+                    predicted_import_kwh,
+                    [
+                        prices_import[
+                            min(offset + idx + 1, len(prices_import) - 1)
+                        ]
+                        for idx in range(len(predicted_import_kwh))
+                    ],
+                    initial_import_kwh=self._actual_zerocharge_import_kwh_today,
+                )
+            )
+            baseline_zerocharge_import, baseline_zerocharge_credit = (
+                settle_zerocharge_imports(
+                    zerohero_config,
+                    future_timestamps,
+                    baseline_import_kwh,
+                    [
+                        prices_import[
+                            min(offset + idx + 1, len(prices_import) - 1)
+                        ]
+                        for idx in range(len(baseline_import_kwh))
+                    ],
+                    initial_import_kwh=self._baseline_zerocharge_import_kwh_today,
+                )
+            )
             predicted_cost = (
                 predicted_import_cost
+                - predicted_zerocharge_credit
                 - predicted_settlement.export_earnings
                 - predicted_settlement.credit_value
             )
             baseline_cost = (
                 baseline_import_cost
+                - baseline_zerocharge_credit
                 - baseline_settlement.export_earnings
                 - baseline_settlement.credit_value
             )

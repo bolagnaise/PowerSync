@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 GLOBIRD_PLAN_NOT_ZEROHERO = "not_zerohero"
+GLOBIRD_PLAN_ZEROHERO_JUL_2026 = "zerohero_jul_2026"
 GLOBIRD_PLAN_ZEROHERO_CURRENT = "zerohero_current"
 GLOBIRD_PLAN_ZEROHERO_LEGACY = "zerohero_legacy"
 GLOBIRD_PLAN_ZEROHERO_CUSTOM = "zerohero_custom"
@@ -22,6 +23,9 @@ _CONF_EXPORT_CAP = "globird_zerohero_export_cap_kwh"
 _CONF_EXPORT_RATE = "globird_zerohero_super_export_rate"
 _CONF_CREDIT = "globird_zerohero_credit_amount"
 _CONF_IMPORT_LIMIT = "globird_zerohero_import_limit_kw"
+_CONF_ZEROCHARGE_START = "globird_zerocharge_start"
+_CONF_ZEROCHARGE_END = "globird_zerocharge_end"
+_CONF_ZEROCHARGE_IMPORT_CAP = "globird_zerocharge_import_cap_kwh"
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,9 @@ class ZeroHeroConfig:
     super_export_rate: float
     credit_amount: float
     import_limit_kw: float
+    zerocharge_start: str | None = None
+    zerocharge_end: str | None = None
+    zerocharge_import_cap_kwh: float = 0.0
 
     @property
     def window_hours(self) -> float:
@@ -44,6 +51,14 @@ class ZeroHeroConfig:
     @property
     def import_allowance_kwh(self) -> float:
         return max(0.0, self.import_limit_kw * self.window_hours)
+
+    @property
+    def zerocharge_enabled(self) -> bool:
+        return (
+            bool(self.zerocharge_start)
+            and bool(self.zerocharge_end)
+            and self.zerocharge_import_cap_kwh > 0
+        )
 
 
 @dataclass
@@ -58,9 +73,22 @@ class ZeroHeroSettlement:
     import_window_kwh: float = 0.0
     credit_value: float = 0.0
     credit_status: str = "disabled"
+    zerocharge_import_kwh: float = 0.0
+    zerocharge_credit_value: float = 0.0
 
 
 ZEROHERO_PRESETS: dict[str, dict[str, Any]] = {
+    GLOBIRD_PLAN_ZEROHERO_JUL_2026: {
+        "start": "18:00",
+        "end": "21:00",
+        "export_cap_kwh": 15.0,
+        "super_export_rate": 0.10,
+        "credit_amount": 1.0,
+        "import_limit_kw": 0.03,
+        "zerocharge_start": "12:00",
+        "zerocharge_end": "15:00",
+        "zerocharge_import_cap_kwh": 50.0,
+    },
     GLOBIRD_PLAN_ZEROHERO_CURRENT: {
         "start": "18:00",
         "end": "21:00",
@@ -68,6 +96,9 @@ ZEROHERO_PRESETS: dict[str, dict[str, Any]] = {
         "super_export_rate": 0.15,
         "credit_amount": 1.0,
         "import_limit_kw": 0.03,
+        "zerocharge_start": None,
+        "zerocharge_end": None,
+        "zerocharge_import_cap_kwh": 0.0,
     },
     GLOBIRD_PLAN_ZEROHERO_LEGACY: {
         "start": "18:00",
@@ -76,6 +107,9 @@ ZEROHERO_PRESETS: dict[str, dict[str, Any]] = {
         "super_export_rate": 0.15,
         "credit_amount": 1.0,
         "import_limit_kw": 0.03,
+        "zerocharge_start": None,
+        "zerocharge_end": None,
+        "zerocharge_import_cap_kwh": 0.0,
     },
 }
 
@@ -95,6 +129,31 @@ def zerohero_config_from_settings(settings: dict[str, Any] | None) -> ZeroHeroCo
         super_rate = _cents_or_dollars(settings.get(_CONF_EXPORT_RATE), preset["super_export_rate"])
         credit = _float_setting(settings.get(_CONF_CREDIT), preset["credit_amount"])
         import_limit = _float_setting(settings.get(_CONF_IMPORT_LIMIT), preset["import_limit_kw"])
+        zerocharge_supplied = any(
+            key in settings
+            for key in (
+                _CONF_ZEROCHARGE_START,
+                _CONF_ZEROCHARGE_END,
+                _CONF_ZEROCHARGE_IMPORT_CAP,
+            )
+        )
+        if zerocharge_supplied:
+            zerocharge_start = _string_setting(
+                settings.get(_CONF_ZEROCHARGE_START),
+                ZEROHERO_PRESETS[GLOBIRD_PLAN_ZEROHERO_JUL_2026]["zerocharge_start"],
+            )
+            zerocharge_end = _string_setting(
+                settings.get(_CONF_ZEROCHARGE_END),
+                ZEROHERO_PRESETS[GLOBIRD_PLAN_ZEROHERO_JUL_2026]["zerocharge_end"],
+            )
+            zerocharge_cap = _float_setting(
+                settings.get(_CONF_ZEROCHARGE_IMPORT_CAP),
+                ZEROHERO_PRESETS[GLOBIRD_PLAN_ZEROHERO_JUL_2026]["zerocharge_import_cap_kwh"],
+            )
+        else:
+            zerocharge_start = None
+            zerocharge_end = None
+            zerocharge_cap = 0.0
     else:
         start = preset["start"]
         end = preset["end"]
@@ -102,6 +161,9 @@ def zerohero_config_from_settings(settings: dict[str, Any] | None) -> ZeroHeroCo
         super_rate = preset["super_export_rate"]
         credit = preset["credit_amount"]
         import_limit = preset["import_limit_kw"]
+        zerocharge_start = preset.get("zerocharge_start")
+        zerocharge_end = preset.get("zerocharge_end")
+        zerocharge_cap = preset.get("zerocharge_import_cap_kwh", 0.0)
 
     if export_cap <= 0 or super_rate <= 0:
         return None
@@ -114,6 +176,9 @@ def zerohero_config_from_settings(settings: dict[str, Any] | None) -> ZeroHeroCo
         super_export_rate=max(0.0, super_rate),
         credit_amount=max(0.0, credit),
         import_limit_kw=max(0.0, import_limit),
+        zerocharge_start=zerocharge_start,
+        zerocharge_end=zerocharge_end,
+        zerocharge_import_cap_kwh=max(0.0, float(zerocharge_cap or 0.0)),
     )
 
 
@@ -128,12 +193,50 @@ def zerohero_config_from_entry(entry: Any | None) -> ZeroHeroConfig | None:
 
 def zerohero_is_in_window(ts: datetime, config: ZeroHeroConfig) -> bool:
     """Return True when a timestamp is in the configured local window."""
+    return _is_in_window(ts, config.start, config.end)
+
+
+def zerocharge_is_in_window(ts: datetime, config: ZeroHeroConfig) -> bool:
+    """Return True when a timestamp is in the configured ZeroCharge window."""
+    if not config.zerocharge_enabled:
+        return False
+    return _is_in_window(ts, config.zerocharge_start, config.zerocharge_end)
+
+
+def _is_in_window(ts: datetime, start_value: str, end_value: str) -> bool:
+    """Return True when a timestamp is inside a local HH:MM window."""
     minute = ts.hour * 60 + ts.minute
-    start = _hhmm_to_minutes(config.start)
-    end = _hhmm_to_minutes(config.end)
+    start = _hhmm_to_minutes(start_value)
+    end = _hhmm_to_minutes(end_value)
     if end <= start:
         return minute >= start or minute < end
     return start <= minute < end
+
+
+def settle_zerocharge_imports(
+    config: ZeroHeroConfig | None,
+    timestamps: list[datetime],
+    import_kwh: list[float],
+    import_prices: list[float],
+    *,
+    initial_import_kwh: float = 0.0,
+) -> tuple[float, float]:
+    """Return (window import kWh, import credit value) for ZeroCharge imports."""
+    if config is None or not config.zerocharge_enabled:
+        return max(0.0, initial_import_kwh), 0.0
+
+    used = max(0.0, initial_import_kwh)
+    credit = 0.0
+    for idx, ts in enumerate(timestamps):
+        if not zerocharge_is_in_window(ts, config):
+            continue
+        imported = max(0.0, import_kwh[idx] if idx < len(import_kwh) else 0.0)
+        price = max(0.0, import_prices[idx] if idx < len(import_prices) else 0.0)
+        remaining = max(0.0, config.zerocharge_import_cap_kwh - used)
+        eligible = min(imported, remaining)
+        used += imported
+        credit += eligible * price
+    return used, credit
 
 
 def zerohero_window_end_for(ts: datetime, config: ZeroHeroConfig) -> datetime:
