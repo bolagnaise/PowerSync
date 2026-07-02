@@ -151,10 +151,10 @@ _ENERGY_READ_ENTITIES: dict[str, tuple[str, ...]] = {
         "battery1_state_of_charge",
     ),
     "battery_power": (
-        "dc_power",
         "battery_power",
         "battery1_power",
         "battery_power_charge",
+        "dc_power",
     ),
     "battery_charge": (
         "battery_charge_power",

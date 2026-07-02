@@ -300,6 +300,50 @@ def test_solaredge_energy_bridge_does_not_map_battery_dc_power_as_solar():
     assert status["load_power"] == pytest.approx(1.8)
 
 
+def test_solaredge_energy_bridge_prefers_battery1_power_over_inverter_dc_power():
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(
+                {
+                    "sensor.solaredge_battery1_state_of_energy": _SEState(
+                        "sensor.solaredge_battery1_state_of_energy",
+                        "81",
+                        {"unit_of_measurement": "%"},
+                    ),
+                    "sensor.solaredge_dc_power": _SEState(
+                        "sensor.solaredge_dc_power",
+                        "1898.5",
+                        {"unit_of_measurement": "W"},
+                    ),
+                    "sensor.solaredge_battery1_power": _SEState(
+                        "sensor.solaredge_battery1_power",
+                        "-4419",
+                        {"unit_of_measurement": "W"},
+                    ),
+                    "sensor.solaredge_ac_power": _SEState(
+                        "sensor.solaredge_ac_power",
+                        "1930.8",
+                        {"unit_of_measurement": "W"},
+                    ),
+                    "sensor.solaredge_m1_ac_power": _SEState(
+                        "sensor.solaredge_m1_ac_power",
+                        "0",
+                        {"unit_of_measurement": "W"},
+                    ),
+                }
+            )
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert controller._entity_map["battery_power"] == "sensor.solaredge_battery1_power"
+    assert status["battery_power"] == pytest.approx(4.419)
+    assert status["solar_power"] == pytest.approx(1.9308)
+    assert status["load_power"] == pytest.approx(6.3498)
+
+
 def test_solaredge_m1_kwh_counters_are_reported_as_lifetime_totals():
     class Hass:
         def __init__(self) -> None:
