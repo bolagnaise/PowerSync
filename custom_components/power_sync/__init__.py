@@ -681,7 +681,7 @@ from .coordinator import (
     OctopusPriceCoordinator,
     LocalvoltsPriceCoordinator,
 )
-from .sensitive_logging import obfuscate_vin_tokens
+from .sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
 import re
 
 
@@ -1620,15 +1620,7 @@ class SensitiveDataFilter(logging.Filter):
 
     def _obfuscate_arg(self, arg: Any) -> Any:
         """Obfuscate an argument only if it contains sensitive data, preserving type otherwise."""
-        # Convert to string for pattern matching
-        str_value = str(arg)
-        obfuscated = self._obfuscate_string(str_value)
-
-        # Only return string version if obfuscation actually changed something
-        # This preserves numeric types for format specifiers like %d and %.3f
-        if obfuscated != str_value:
-            return obfuscated
-        return arg
+        return obfuscate_log_arg(arg, self._obfuscate_string)
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Filter log record to obfuscate sensitive data."""

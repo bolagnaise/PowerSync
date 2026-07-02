@@ -9761,13 +9761,26 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     planned_current_action,
                     ca.timestamp,
                 )
+                force_state = self._get_active_force_state()
+                force_type = force_state.get("type") if force_state.get("active") else None
                 last_executed_action = getattr(self, "_last_executed_action", None)
                 last_executed_planned_action = getattr(
                     self,
                     "_last_executed_planned_action",
                     None,
                 )
-                if (
+                if force_type in ("charge", "discharge"):
+                    effective_current_action = (
+                        "charge" if force_type == "charge" else "discharge"
+                    )
+                    current_action = effective_current_action
+                    try:
+                        force_power_w = float(force_state.get("power_w") or 0)
+                    except (TypeError, ValueError):
+                        force_power_w = 0
+                    if force_power_w > 0:
+                        current_power_w = force_power_w
+                elif (
                     last_executed_action
                     and last_executed_planned_action == planned_current_action
                 ):

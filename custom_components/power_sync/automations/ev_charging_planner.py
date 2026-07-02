@@ -22,7 +22,7 @@ import re
 
 from homeassistant.util import dt as dt_util
 
-from ..sensitive_logging import obfuscate_vin_tokens
+from ..sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
 from ..const import (
     CONF_SOLAR_FORECAST_PROVIDER,
     CONF_SOLCAST_ESTIMATE_TYPE,
@@ -63,9 +63,7 @@ class SensitiveDataFilter(logging.Filter):
         return obfuscate_vin_tokens(text, self._obfuscate)
 
     def _obfuscate_arg(self, arg: Any) -> Any:
-        str_value = str(arg)
-        obfuscated = self._obfuscate_string(str_value)
-        return obfuscated if obfuscated != str_value else arg
+        return obfuscate_log_arg(arg, self._obfuscate_string)
 
     def filter(self, record: logging.LogRecord) -> bool:
         if record.msg:

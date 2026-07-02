@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from typing import Any
 
 
 _VIN_TOKEN_RE = re.compile(
@@ -20,3 +21,17 @@ _VIN_TOKEN_RE = re.compile(
 def obfuscate_vin_tokens(text: str, obfuscate: Callable[[str], str]) -> str:
     """Mask standalone VIN tokens wherever they appear in a log message."""
     return _VIN_TOKEN_RE.sub(lambda match: obfuscate(match.group(1)), text)
+
+
+def obfuscate_log_arg(
+    arg: Any,
+    obfuscate_string: Callable[[str], str],
+) -> Any:
+    """Redact string log args while preserving non-string formatting types."""
+    if not isinstance(arg, str):
+        return arg
+
+    obfuscated = obfuscate_string(arg)
+    if obfuscated != arg:
+        return obfuscated
+    return arg

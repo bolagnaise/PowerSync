@@ -18,6 +18,7 @@ _MODULE = importlib.util.module_from_spec(_SPEC)
 assert _SPEC.loader is not None
 _SPEC.loader.exec_module(_MODULE)
 obfuscate_vin_tokens = _MODULE.obfuscate_vin_tokens
+obfuscate_log_arg = _MODULE.obfuscate_log_arg
 
 
 VIN = "LRWYHCFS3PC901374"
@@ -51,3 +52,9 @@ def test_obfuscate_vin_tokens_ignores_non_vin_tokens() -> None:
     text = "site 12345678901234567 and token ABCDEFGHJKLMNPRST"
 
     assert obfuscate_vin_tokens(text, _mask) == text
+
+
+def test_obfuscate_log_arg_preserves_non_string_types() -> None:
+    assert obfuscate_log_arg(4.939078848884e-05, _mask) == 4.939078848884e-05
+    assert obfuscate_log_arg(42, _mask) == 42
+    assert obfuscate_log_arg(True, _mask) is True
