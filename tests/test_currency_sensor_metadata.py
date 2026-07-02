@@ -645,6 +645,42 @@ def test_nzd_tariff_schedule_prefers_tariff_currency_metadata():
     assert attrs["minor_price_unit"] == "c/kWh"
 
 
+def test_tariff_schedule_wall_clock_periods_do_not_roll_elapsed_slots_to_tomorrow(monkeypatch):
+    sensor = _sensor_module()
+    hass = _hass("AUD")
+    entry = _entry("other")
+    monkeypatch.setattr(
+        sensor.dt_util,
+        "now",
+        lambda *args, **kwargs: datetime(2026, 7, 2, 13, 30, tzinfo=timezone.utc),
+    )
+    hass.data = {
+        "power_sync": {
+            entry.entry_id: {
+                "tariff_schedule": {
+                    "buy_prices": {
+                        "PERIOD_12_30": 0.19,
+                        "PERIOD_13_30": 0.19,
+                    },
+                    "sell_prices": {
+                        "PERIOD_12_30": 0.0,
+                        "PERIOD_13_30": 0.0,
+                    },
+                    "last_sync": "2026-07-02T13:26:00+10:00",
+                }
+            }
+        }
+    }
+    entity = sensor.TariffScheduleSensor(hass, entry)
+
+    schedule = entity.extra_state_attributes["schedule"]
+
+    assert schedule[0]["time"] == "12:30"
+    assert schedule[0]["date"] == "2026-07-02"
+    assert schedule[0]["date_label"] == "Today"
+    assert schedule[1]["date_label"] == "Today"
+
+
 def test_tariff_price_sensor_unit_prefers_tariff_currency_metadata():
     sensor = _sensor_module()
     hass = _hass("GBP")

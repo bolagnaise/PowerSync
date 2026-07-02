@@ -3650,23 +3650,13 @@ class TariffScheduleSensor(SensorEntity):
             schedule_list = []
             now = dt_util.now()
             today = now.date()
-            tomorrow = today + timedelta(days=1)
-            current_slot_minutes = now.hour * 60 + (0 if now.minute < 30 else 30)
             for period_key in sorted(buy_prices.keys()):
                 parts = period_key.replace("PERIOD_", "").split("_")
                 time_str = f"{parts[0]}:{parts[1]}"
-                period_minutes = int(parts[0]) * 60 + int(parts[1])
-                period_date = tomorrow if period_minutes < current_slot_minutes else today
-                if period_date == today:
-                    date_label = "Today"
-                elif period_date == tomorrow:
-                    date_label = "Tomorrow"
-                else:
-                    date_label = period_date.isoformat()
                 schedule_list.append({
                     "time": time_str,
-                    "date": period_date.isoformat(),
-                    "date_label": date_label,
+                    "date": today.isoformat(),
+                    "date_label": "Today",
                     "buy": buy_prices.get(period_key, 0),
                     "sell": sell_prices.get(period_key, 0),
                 })
