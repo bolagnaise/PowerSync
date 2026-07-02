@@ -1772,6 +1772,87 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         )
         return should_notify, failure_duration
 
+    def _local_powerwall_energy_data(self) -> dict[str, Any] | None:
+        """Return energy data from the paired local Powerwall coordinator."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
+        local_runtime = entry_data.get("powerwall_local") or {}
+        local_coordinator = local_runtime.get("coordinator")
+        snap = getattr(local_coordinator, "data", None)
+        if snap is None:
+            return None
+
+        def _kw(value: Any) -> float:
+            try:
+                return round(float(value or 0.0) / 1000.0, 3)
+            except (TypeError, ValueError):
+                return 0.0
+
+        solar_kw = _kw(getattr(snap, "solar_w", None))
+        grid_kw = _kw(getattr(snap, "grid_w", None))
+        battery_kw = _kw(getattr(snap, "battery_w", None))
+        load_kw = _kw(getattr(snap, "load_w", None))
+
+        self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, 0.0, 0.0)
+
+        raw_grid_status = str(getattr(snap, "grid_status", "") or "")
+        grid_status = "Off-Grid" if "island" in raw_grid_status.lower() else "Active"
+        soc_pct = getattr(snap, "soc", None)
+        if soc_pct is not None:
+            try:
+                soc_pct = float(soc_pct)
+            except (TypeError, ValueError):
+                soc_pct = None
+            else:
+                self._last_valid_battery_level_pct = soc_pct
+
+        total_pack_kwh: float | None = None
+        total_pack_wh = getattr(snap, "total_pack_full_wh", None)
+        if total_pack_wh is not None:
+            try:
+                total_pack_kwh = round(float(total_pack_wh) / 1000.0, 2)
+            except (TypeError, ValueError):
+                total_pack_kwh = None
+        if total_pack_kwh is None:
+            total_pack_kwh = _stored_battery_health_capacity_kwh(self.hass, self._entry_id)
+
+        energy_left_kwh: float | None = None
+        remaining_wh = getattr(snap, "total_pack_remaining_wh", None)
+        if remaining_wh is not None:
+            try:
+                energy_left_kwh = round(float(remaining_wh) / 1000.0, 2)
+            except (TypeError, ValueError):
+                energy_left_kwh = None
+        if energy_left_kwh is None and total_pack_kwh is not None and soc_pct is not None:
+            energy_left_kwh = round(total_pack_kwh * (soc_pct / 100.0), 2)
+
+        backup_hours: float | None = None
+        if energy_left_kwh is not None and load_kw and load_kw > 0.05:
+            backup_hours = round(min(999.0, energy_left_kwh / load_kw), 1)
+
+        return {
+            "solar_power": solar_kw,
+            "grid_power": grid_kw,
+            "battery_power": battery_kw,
+            "load_power": load_kw,
+            "battery_level": soc_pct,
+            "grid_status": grid_status,
+            "ev_power": 0.0,
+            "last_update": dt_util.utcnow(),
+            "energy_summary": self._energy_acc.as_dict(),
+            "firmware": self._firmware,
+            "battery_max_charge_power": None,
+            "battery_max_discharge_power": None,
+            "battery_max_charge_power_w": None,
+            "battery_max_discharge_power_w": None,
+            "total_pack_energy_kwh": total_pack_kwh,
+            "energy_left_kwh": energy_left_kwh,
+            "backup_time_remaining_hours": backup_hours,
+            "grid_services_active": False,
+            "grid_services_power_kw": 0.0,
+            "lifetime_totals": self._lifetime_totals,
+            "data_source": "powerwall_local",
+        }
+
     def _get_current_token(self) -> str | None:
         """Get the current API token, fetching fresh if token_getter is available.
 
@@ -1900,6 +1981,13 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             live_status = data.get("response") or {}
             _LOGGER.debug("Tesla API live_status response: %s", live_status)
             if not live_status:
+                local_energy_data = self._local_powerwall_energy_data()
+                if local_energy_data is not None:
+                    _LOGGER.warning(
+                        "Tesla returned empty live_status response; using paired "
+                        "Powerwall local snapshot for energy telemetry"
+                    )
+                    return local_energy_data
                 raise UpdateFailed("Tesla returned empty live_status response")
 
             # Extract EV charging power from Tesla Wall Connectors

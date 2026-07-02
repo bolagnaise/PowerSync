@@ -17614,6 +17614,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             fleet_base_url=entry.data.get(CONF_FLEET_API_BASE_URL),
         )
 
+    # Warm the local Powerwall coordinator before Tesla's first cloud refresh.
+    # If Tesla live_status returns an empty response during startup, the Tesla
+    # coordinator can still publish local LAN telemetry instead of making the
+    # config entry unavailable.
+    if tesla_coordinator and entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
+        try:
+            await hass.async_add_executor_job(_preload_powerwall_local_modules)
+            from .powerwall_local.views import (
+                ensure_coordinator as _ensure_pwlocal_coordinator,
+            )
+
+            await _ensure_pwlocal_coordinator(hass, entry)
+        except Exception as _err:
+            _LOGGER.debug(
+                "Powerwall local coordinator early warmup skipped before Tesla refresh: %s",
+                _err,
+            )
+
     # Fetch initial data
     if amber_coordinator:
         await amber_coordinator.async_config_entry_first_refresh()
@@ -18410,6 +18428,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # capability probe can publish early while the first refresh is running, so
     # preserve those values when replacing the setup entry with the full data.
     existing_entry_data = hass.data.setdefault(DOMAIN, {}).get(entry.entry_id, {})
+    powerwall_local_runtime = existing_entry_data.get("powerwall_local")
     tesla_capabilities = existing_entry_data.get("tesla_capabilities")
     if tesla_capabilities is None and tesla_coordinator:
         tesla_capabilities = dict(getattr(tesla_coordinator, "tesla_capabilities", {}) or {})
@@ -18433,6 +18452,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "neovolt_coordinator": neovolt_coordinator,  # For Neovolt / Bytewatt (bridges via Neovolt integration)
         "solaredge_coordinator": solaredge_coordinator,  # For SolarEdge Home battery telemetry
         "anker_solix_coordinator": anker_solix_coordinator,  # For Anker Solix X1/HA bridge telemetry and control
+        "powerwall_local": powerwall_local_runtime or {"client": None, "coordinator": None, "pairing_manager": None},
         "demand_charge_coordinator": demand_charge_coordinator,
         "aemo_spike_manager": aemo_spike_manager,
         "generic_aemo_spike_manager": generic_aemo_spike_manager,  # For non-Tesla AEMO spike detection
