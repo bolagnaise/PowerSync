@@ -121,6 +121,7 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_OPTIMIZATION_BACKUP_RESERVE = "optimization_backup_reserve"
     const_module.CONF_OPTIMIZATION_AUTO_APPLY_RESERVE = "optimization_auto_apply_reserve"
     const_module.CONF_OPTIMIZATION_MANUAL_RESERVE = "optimization_manual_reserve"
+    const_module.CONF_GENERIC_CHARGER_POWER_ENTITY = "generic_charger_power_entity"
     const_module.CONF_OPTIMIZATION_HORIZON = "optimization_horizon"
     const_module.CONF_OPTIMIZATION_BATTERY_CAPACITY_WH = "battery_capacity_wh"
     const_module.CONF_OPTIMIZATION_ALLOW_GRID_CHARGE = "allow_grid_charge"

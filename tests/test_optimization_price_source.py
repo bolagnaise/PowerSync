@@ -131,6 +131,7 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_OPTIMIZATION_LOAD_ENTITY = "optimization_load_entity"
     const_module.CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY = "optimization_planned_ev_load_entity"
     const_module.CONF_OPTIMIZATION_MANUAL_RESERVE = "optimization_manual_reserve"
+    const_module.CONF_GENERIC_CHARGER_POWER_ENTITY = "generic_charger_power_entity"
     const_module.DEFAULT_SOLAR_FORECAST_PROVIDER = "solcast"
     const_module.DEFAULT_SOLCAST_ESTIMATE_TYPE = "estimate"
     const_module.SOLAR_FORECAST_PROVIDER_OPEN_METEO = "open_meteo"
@@ -646,6 +647,48 @@ def test_ev_integration_defaults_to_initial_config_data(opt_module):
     )
 
     assert coordinator._ev_integration_enabled is True
+
+
+def test_ev_load_subtraction_uses_monitoring_only_generic_charger_entity(opt_module):
+    entry = SimpleNamespace(
+        data={},
+        options={
+            "optimization_ev_integration": True,
+            "generic_charger_power_entity": "sensor.tesla_wall_connector_load",
+        },
+    )
+
+    coordinator = opt_module.OptimizationCoordinator(
+        hass=SimpleNamespace(),
+        entry_id="entry-1",
+        battery_system="sungrow",
+        battery_controller=SimpleNamespace(),
+        entry=entry,
+    )
+
+    assert coordinator._ev_load_subtraction_entities() == [
+        "sensor.tesla_wall_connector_load"
+    ]
+
+
+def test_ev_load_subtraction_entry_fallback_respects_battery_skip_guard(opt_module):
+    entry = SimpleNamespace(
+        data={},
+        options={
+            "optimization_ev_integration": True,
+            "generic_charger_power_entity": "sensor.tesla_wall_connector_load",
+        },
+    )
+
+    coordinator = opt_module.OptimizationCoordinator(
+        hass=SimpleNamespace(),
+        entry_id="entry-1",
+        battery_system="tesla",
+        battery_controller=SimpleNamespace(),
+        entry=entry,
+    )
+
+    assert coordinator._ev_load_subtraction_entities() == []
 
 
 def test_load_sensor_auto_discovery_skips_generated_forecast_sensor(opt_module):

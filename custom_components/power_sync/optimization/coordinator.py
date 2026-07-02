@@ -25,7 +25,11 @@ from .schedule_reader import OptimizationSchedule, ScheduleAction
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
 from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode
-from ..const import DEFAULT_OPTIMIZATION_INTERVAL, supports_no_idle_mode_provider
+from ..const import (
+    CONF_GENERIC_CHARGER_POWER_ENTITY,
+    DEFAULT_OPTIMIZATION_INTERVAL,
+    supports_no_idle_mode_provider,
+)
 from ..flow_power_pricing import (
     FlowPowerPricingContext,
     calculate_flow_power_pea,
@@ -8345,14 +8349,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             executor = get_auto_schedule_executor()
         except Exception:
             executor = None
-        if not executor:
-            return []
-        settings = getattr(executor, "_settings", {}) or {}
         entities: list[str] = []
-        for cfg in settings.values():
-            entity = getattr(cfg, "charger_power_entity", None)
-            if entity and entity not in entities:
-                entities.append(entity)
+        if executor:
+            settings = getattr(executor, "_settings", {}) or {}
+            for cfg in settings.values():
+                entity = getattr(cfg, "charger_power_entity", None)
+                if entity and entity not in entities:
+                    entities.append(entity)
+        if self._entry:
+            entry_entity = self._entry.options.get(
+                CONF_GENERIC_CHARGER_POWER_ENTITY,
+                self._entry.data.get(CONF_GENERIC_CHARGER_POWER_ENTITY),
+            )
+            if entry_entity and entry_entity not in entities:
+                entities.append(entry_entity)
         return entities
 
     async def _refresh_ev_forecast_inputs(self) -> None:
