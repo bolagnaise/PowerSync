@@ -823,6 +823,19 @@ class EVCoordinator:
         """
         entity_id = config.entity_id
 
+        # Only adjust a session we actually own — otherwise we would fight
+        # another automation (e.g. a solar-surplus tracker) that owns the
+        # loadpoint. Mirrors the ownership checks on the start/stop paths.
+        if not self._owns_loadpoint(config):
+            _LOGGER.debug(
+                "Skipping amp adjustment for %s — loadpoint not owned by optimizer",
+                entity_id,
+            )
+            return False
+
+        # Clamp to charger limits and the 6A minimum, as the start path does.
+        amps = max(6, min(int(amps), config.max_charging_power_w // 230))
+
         shared_result = await self._set_shared_action_amps(config, amps)
         if shared_result is not None:
             return shared_result

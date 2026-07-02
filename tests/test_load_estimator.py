@@ -284,6 +284,75 @@ def test_away_window_is_excluded_from_30_day_history(monkeypatch):
     ]
 
 
+def test_ev_charger_power_subtracted_from_load_history(monkeypatch):
+    """Configured EV charger power is removed from the load history so recurring
+    EV charging embedded in the whole-home sensor is not double-counted against
+    the planned-EV overlay."""
+    module = _load_estimator_module(monkeypatch)
+    calls = {}
+    load_states = [
+        SimpleNamespace(state="500", last_changed=datetime(2026, 5, 5, tzinfo=timezone.utc)),
+        SimpleNamespace(state="7500", last_changed=datetime(2026, 5, 6, tzinfo=timezone.utc)),
+        SimpleNamespace(state="7500", last_changed=datetime(2026, 5, 7, tzinfo=timezone.utc)),
+        SimpleNamespace(state="500", last_changed=datetime(2026, 5, 8, tzinfo=timezone.utc)),
+    ]
+    ev_states = [
+        SimpleNamespace(state="7000", last_changed=datetime(2026, 5, 6, tzinfo=timezone.utc)),
+        SimpleNamespace(state="0", last_changed=datetime(2026, 5, 8, tzinfo=timezone.utc)),
+    ]
+    _install_fake_recorder(
+        monkeypatch,
+        {"sensor.load": load_states, "sensor.ev_power": ev_states},
+        calls,
+    )
+    hass = SimpleNamespace(
+        states=SimpleNamespace(
+            get=lambda entity_id: SimpleNamespace(
+                attributes={"unit_of_measurement": "W"}
+            )
+        ),
+        async_add_executor_job=_fake_executor,
+    )
+    estimator = module.LoadEstimator(hass, "sensor.load", interval_minutes=5)
+    estimator.ev_power_entity_ids = ["sensor.ev_power"]
+
+    history = _run(estimator._get_load_history())
+
+    assert history == [
+        (load_states[0].last_changed, 500.0),  # before EV history -> unchanged
+        (load_states[1].last_changed, 500.0),  # 7500 - 7000
+        (load_states[2].last_changed, 500.0),  # EV step held from 05-06
+        (load_states[3].last_changed, 500.0),  # 500 - 0
+    ]
+
+
+def test_ev_subtraction_noop_without_configured_entity(monkeypatch):
+    """No EV entity configured -> load history is unchanged (zero regression)."""
+    module = _load_estimator_module(monkeypatch)
+    calls = {}
+    load_states = [
+        SimpleNamespace(state="7500", last_changed=datetime(2026, 5, 6, tzinfo=timezone.utc)),
+        SimpleNamespace(state="500", last_changed=datetime(2026, 5, 8, tzinfo=timezone.utc)),
+    ]
+    _install_fake_recorder(monkeypatch, {"sensor.load": load_states}, calls)
+    hass = SimpleNamespace(
+        states=SimpleNamespace(
+            get=lambda entity_id: SimpleNamespace(
+                attributes={"unit_of_measurement": "W"}
+            )
+        ),
+        async_add_executor_job=_fake_executor,
+    )
+    estimator = module.LoadEstimator(hass, "sensor.load", interval_minutes=5)
+
+    history = _run(estimator._get_load_history())
+
+    assert history == [
+        (load_states[0].last_changed, 7500.0),
+        (load_states[1].last_changed, 500.0),
+    ]
+
+
 def test_active_away_mode_records_departure_without_excluding_history(monkeypatch):
     module = _load_estimator_module(monkeypatch)
     now = datetime(2026, 5, 9, tzinfo=timezone.utc)

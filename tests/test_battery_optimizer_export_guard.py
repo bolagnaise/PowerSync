@@ -914,6 +914,46 @@ def test_below_optimizer_reserve_greedy_allows_natural_self_consumption(
     assert result.schedule.actions[0].battery_charge_w == 0
 
 
+def test_greedy_fallback_export_clamp_respects_export_reserve_after_self_use(
+    battery_optimizer_module,
+    monkeypatch,
+):
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=10000,
+        max_discharge_w=10000,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.50, 0.05, 0.50],
+        export_prices=[0.05, 1.00, 0.05],
+        solar_forecast=[0.0, 0.0, 0.0],
+        load_forecast=[1.0, 0.0, 0.0],
+        current_soc=0.80,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=[False, True, False],
+        export_reserve_floor=0.60,
+    )
+
+    assert result.solver_used == "greedy"
+    assert result.schedule.actions[0].action == "self_consumption"
+    assert result.schedule.actions[1].action == "export"
+    assert result.schedule.actions[1].soc >= 0.60 - 1e-6
+    # Raw result grid flows must match the reserve-clamped emitted schedule; the
+    # fallback must not report the larger pre-clamp export below the reserve.
+    assert result.grid_export_w[1] == pytest.approx(
+        result.schedule.actions[1].battery_discharge_w,
+        abs=1.0,
+    )
+    assert result.grid_export_w[1] <= 850.0
+
+
 def test_reserve_floor_self_consumption_forecasts_net_load_drain(
     battery_optimizer_module,
 ):

@@ -76,6 +76,7 @@ FIXED_OPTIMIZATION_INTERVAL_MINUTES = DEFAULT_OPTIMIZATION_INTERVAL
 FLOW_POWER_NEM_TZ = timezone(timedelta(hours=10))
 EXPORT_ACTIONS = {"discharge", "export"}
 SELF_USE_ACTIONS = {"consume", "self_consumption"}
+CHARGE_ACTIONS = {"charge"}
 OPTIMIZER_FORCE_CHARGE_MIN_COMMITMENT = timedelta(minutes=20)
 OPTIMIZER_FORCE_DISCHARGE_MIN_COMMITMENT = timedelta(minutes=20)
 
@@ -343,6 +344,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._actual_discharge_kwh_today = 0.0
         self._actual_import_cost_today = 0.0    # Gross import cost ($)
         self._actual_export_earnings_today = 0.0  # Gross export earnings ($)
+        # Grid-sourced battery charging only (excludes solar charging and
+        # house-load import). Their ratio is the true $/kWh acquisition cost of
+        # stored grid energy used by the export-profitability gate.
+        self._actual_grid_charge_kwh_today = 0.0
+        self._actual_grid_charge_cost_today = 0.0
         self._actual_zerohero_import_kwh_today = 0.0
         self._actual_zerohero_export_kwh_today = 0.0
         self._actual_zerohero_bonus_export_kwh_today = 0.0
@@ -1008,7 +1014,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self, "_enabled", False
             ):
                 self._settings_reoptimize_requested = False
-                await self._run_optimization()
+                await self._run_optimization(force=True)
         finally:
             self._settings_reoptimize_task = None
 
@@ -2975,8 +2981,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         _LOGGER.info("Optimization disabled")
 
-    async def _run_optimization(self) -> None:
-        """Run the built-in LP optimizer with current forecast data."""
+    async def _run_optimization(self, force: bool = False) -> None:
+        """Run the built-in LP optimizer with current forecast data.
+
+        When ``force`` is True (user-initiated re-optimization), queue behind
+        any in-flight solve instead of skipping, so the request is never
+        silently dropped.
+        """
         if not self._optimizer or not self._enabled:
             return
 
@@ -2988,15 +2999,40 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # fire at the same 5-min boundary; serialise them so only one runs.
         # The locked() check + acquire() are safe without await between them
         # because asyncio is single-threaded on the event loop.
+        #
+        # A forced (user-initiated) re-optimization must NOT be dropped when a
+        # periodic solve is mid-flight — the in-flight run may have baked in
+        # now-stale config (e.g. a just-saved reserve). Queue behind it and run
+        # a fresh solve once the lock frees, rather than returning a stale one.
         if self._optimization_lock.locked():
-            _LOGGER.debug("Optimization already in progress — skipping concurrent request")
-            return
+            if not force:
+                _LOGGER.debug("Optimization already in progress — skipping concurrent request")
+                return
+            _LOGGER.debug("Optimization in progress — queuing forced re-optimization")
         await self._optimization_lock.acquire()
         try:
             # Retry battery auto-detection if still on defaults
             # (site_info may not have been available during initial setup)
             if self._battery_specs_source == "default":
                 await self._auto_detect_battery_specs()
+                # If detection just succeeded, push the corrected specs into
+                # the optimizer. Nothing else syncs capacity/charge after
+                # construction unless the user saves a setting, so without this
+                # the LP would keep modelling the default 13.5 kWh / 5 kW
+                # indefinitely while the rest of the run uses the real specs.
+                if self._battery_specs_source != "default" and self._optimizer:
+                    self._optimizer.update_config(
+                        capacity_wh=self._config.battery_capacity_wh,
+                        max_charge_w=self._config.max_charge_w,
+                        max_discharge_w=self._config.max_discharge_w,
+                    )
+                    _LOGGER.info(
+                        "Optimizer: synced auto-detected battery specs "
+                        "(%.1f kWh, %.1f kW charge, %.1f kW discharge)",
+                        self._config.battery_capacity_wh / 1000,
+                        self._config.max_charge_w / 1000,
+                        self._config.max_discharge_w / 1000,
+                    )
 
             # Warn if battery specs haven't been configured — optimization
             # will still run but may produce suboptimal results with defaults.
@@ -3111,11 +3147,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     soc * 100,
                 )
 
-            # Compute acquisition cost: actual cost per kWh of grid-charged energy
-            if self._actual_charge_kwh_today > 0.1:
-                acq_cost = self._actual_import_cost_today / self._actual_charge_kwh_today
+            # Compute acquisition cost: actual cost per kWh of GRID-charged
+            # energy. Use the grid-charge-specific accumulators (cost of grid
+            # energy that went into the battery / kWh of grid charging), not
+            # total household import cost over total charge (which includes
+            # house-load import in the numerator and solar charging in the
+            # denominator, inflating the value and wrongly blocking exports).
+            if self._actual_grid_charge_kwh_today > 0.1:
+                acq_cost = (
+                    self._actual_grid_charge_cost_today
+                    / self._actual_grid_charge_kwh_today
+                )
             else:
-                # No meaningful charge data yet — use median import price as proxy
+                # No meaningful grid-charge data yet — use median import price
+                # as proxy.
                 acq_cost = (
                     sorted(import_prices)[len(import_prices) // 2]
                     if import_prices
@@ -4177,6 +4222,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _optimizer_force_charge_commitment_remaining(
         self,
         force_state: dict[str, Any],
+        action: Any,
     ) -> timedelta | None:
         """Return remaining minimum hold time for optimizer-owned force charge."""
         if (
@@ -4194,6 +4240,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             - (dt_util.utcnow() - started_at)
         )
         if remaining <= timedelta(0):
+            return None
+
+        # Release the anti-thrash hold if the schedule no longer wants to
+        # charge anywhere in the remaining window. A price spike flips every
+        # remaining slot away from "charge" (e.g. to self_consumption), so
+        # without this the battery would keep grid-charging at the spike price
+        # for the full 20-minute commitment. Mirrors the discharge variant,
+        # which releases when no future export action remains.
+        if not self._schedule_has_future_action(action, CHARGE_ACTIONS, remaining):
             return None
         return remaining
 
@@ -4915,7 +4970,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if force_type == "charge":
                         commitment_remaining = (
                             self._optimizer_force_charge_commitment_remaining(
-                                force_state
+                                force_state,
+                                action,
                             )
                         )
                     else:
@@ -8258,10 +8314,46 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             dt_util.now(),
                             n_intervals,
                         )
+            # Feed the estimator the EV charger power sensors to subtract from
+            # load history (removes recurring EV charging that would otherwise
+            # be double-counted against the planned-EV overlay).
+            self._load_estimator.ev_power_entity_ids = (
+                self._ev_load_subtraction_entities()
+            )
             return await self._load_estimator.get_forecast(
                 horizon_hours=self._config.horizon_hours
             )
         return None
+
+    def _ev_load_subtraction_entities(self) -> list[str]:
+        """EV charger power sensors to subtract from load history.
+
+        Only returned for battery brands whose home-load sensor does NOT
+        already exclude EV charging (Tesla and Sigenergy subtract it upstream,
+        so subtracting again would under-forecast household load), and only when
+        the user has configured a generic charger power entity. Returning an
+        empty list leaves the forecast unchanged — zero regression for setups
+        without a configured charger power sensor.
+        """
+        if not getattr(self, "_ev_integration_enabled", False):
+            return []
+        if getattr(self, "battery_system", None) in ("tesla", "sigenergy"):
+            return []
+        try:
+            from ..automations.ev_charging_planner import get_auto_schedule_executor
+
+            executor = get_auto_schedule_executor()
+        except Exception:
+            executor = None
+        if not executor:
+            return []
+        settings = getattr(executor, "_settings", {}) or {}
+        entities: list[str] = []
+        for cfg in settings.values():
+            entity = getattr(cfg, "charger_power_entity", None)
+            if entity and entity not in entities:
+                entities.append(entity)
+        return entities
 
     async def _refresh_ev_forecast_inputs(self) -> None:
         """Refresh EV schedule inputs before an LP solve without charger commands."""
@@ -8759,6 +8851,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._actual_discharge_kwh_today = float(data.get("discharge_kwh", 0.0))
             self._actual_import_cost_today = float(data.get("import_cost", 0.0))
             self._actual_export_earnings_today = float(data.get("export_earnings", 0.0))
+            self._actual_grid_charge_kwh_today = float(data.get("grid_charge_kwh", 0.0))
+            self._actual_grid_charge_cost_today = float(data.get("grid_charge_cost", 0.0))
             zerohero = data.get("zerohero", {}) or {}
             self._actual_zerohero_import_kwh_today = float(zerohero.get("import_window_kwh", 0.0))
             self._actual_zerohero_export_kwh_today = float(zerohero.get("export_window_kwh", 0.0))
@@ -8808,6 +8902,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "discharge_kwh": round(self._actual_discharge_kwh_today, 4),
             "import_cost": round(self._actual_import_cost_today, 4),
             "export_earnings": round(self._actual_export_earnings_today, 4),
+            "grid_charge_kwh": round(self._actual_grid_charge_kwh_today, 4),
+            "grid_charge_cost": round(self._actual_grid_charge_cost_today, 4),
             "zerohero": {
                 "import_window_kwh": round(self._actual_zerohero_import_kwh_today, 4),
                 "export_window_kwh": round(self._actual_zerohero_export_kwh_today, 4),
@@ -8874,9 +8970,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _apply_offgrid_overlay(
         self,
-        schedule: list,
+        schedule: "OptimizationSchedule",
         export_prices: list[float],
-    ) -> list:
+    ) -> "OptimizationSchedule":
         """Post-LP overlay: mark eligible slots as OFF_GRID.
 
         A slot is eligible when:
@@ -8889,30 +8985,34 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Inserts a reconnect buffer (self_consumption) before any CHARGE
         slot that follows an off-grid run.
         """
-        if not schedule or not export_prices:
+        actions = getattr(schedule, "actions", None)
+        if not actions or not export_prices:
             return schedule
 
-        n = min(len(schedule), len(export_prices))
+        # ScheduleAction.soc is a 0-1 fraction; the threshold constant is a
+        # percentage, so compare against the fractional equivalent.
+        soc_floor = self._OFFGRID_FULL_SOC_THRESHOLD / 100.0
+        n = min(len(actions), len(export_prices))
 
         # Step 1: flag each slot as eligible
         eligible = []
         for t in range(n):
-            action = schedule[t]
-            act = action.action if hasattr(action, "action") else str(action)
+            action = actions[t]
+            act = action.action
             price = export_prices[t] if t < len(export_prices) else 1.0
-            soc = action.soc if hasattr(action, "soc") else None
+            soc = action.soc
 
             is_eligible = (
                 price < self._OFFGRID_EXPORT_THRESHOLD
                 and act in ("self_consumption", "idle")
                 and soc is not None
-                and soc >= self._OFFGRID_FULL_SOC_THRESHOLD
+                and soc >= soc_floor
             )
             eligible.append(is_eligible)
 
         # Step 2: find contiguous runs of eligible slots
         # and mark them as off_grid if long enough
-        result = list(schedule)
+        result = list(actions)
         t = 0
         while t < n:
             if not eligible[t]:
@@ -8930,9 +9030,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Check if a CHARGE slot follows — need reconnect buffer
             next_action = ""
-            if run_end < len(schedule):
-                a = schedule[run_end]
-                next_action = a.action if hasattr(a, "action") else str(a)
+            if run_end < len(actions):
+                next_action = actions[run_end].action
 
             # Mark slots as off_grid
             mark_end = run_end
@@ -8942,31 +9041,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             for i in range(run_start, mark_end):
                 slot = result[i]
-                if hasattr(slot, "action"):
-                    # ScheduleAction dataclass — create a copy with new action
-                    from .schedule_reader import ScheduleAction
-                    result[i] = ScheduleAction(
-                        timestamp=slot.timestamp,
-                        action="off_grid",
-                        power_w=slot.power_w,
-                        soc=slot.soc,
-                        battery_charge_w=slot.battery_charge_w,
-                        battery_discharge_w=slot.battery_discharge_w,
-                    )
+                # ScheduleAction dataclass — create a copy with new action
+                from .schedule_reader import ScheduleAction
+                result[i] = ScheduleAction(
+                    timestamp=slot.timestamp,
+                    action="off_grid",
+                    power_w=slot.power_w,
+                    soc=slot.soc,
+                    battery_charge_w=slot.battery_charge_w,
+                    battery_discharge_w=slot.battery_discharge_w,
+                )
 
-        offgrid_count = sum(
-            1
-            for s in result
-            if (hasattr(s, "action") and s.action == "off_grid")
-        )
+        offgrid_count = sum(1 for s in result if s.action == "off_grid")
         if offgrid_count > 0:
             _LOGGER.info(
                 "Off-grid overlay: marked %d/%d slots as OFF_GRID "
                 "(export threshold=%.1fc, SOC floor=%d%%)",
-                offgrid_count, n, self._OFFGRID_EXPORT_THRESHOLD * 100, soc_floor,
+                offgrid_count, n, self._OFFGRID_EXPORT_THRESHOLD * 100,
+                self._OFFGRID_FULL_SOC_THRESHOLD,
             )
 
-        return result
+        schedule.actions = result
+        return schedule
 
     def _track_actual_cost(self) -> None:
         """Track actual electricity cost using real elapsed time.
@@ -9011,6 +9107,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._actual_discharge_kwh_today = 0.0
             self._actual_import_cost_today = 0.0
             self._actual_export_earnings_today = 0.0
+            self._actual_grid_charge_kwh_today = 0.0
+            self._actual_grid_charge_cost_today = 0.0
             self._actual_zerohero_import_kwh_today = 0.0
             self._actual_zerohero_export_kwh_today = 0.0
             self._actual_zerohero_bonus_export_kwh_today = 0.0
@@ -9117,6 +9215,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         battery_discharge_kw = max(0.0, battery_power_kw)  # positive = discharging
         self._actual_charge_kwh_today += battery_charge_kw * dt_hours
         self._actual_discharge_kwh_today += battery_discharge_kw * dt_hours
+
+        # Grid-sourced portion of battery charging. With solar serving load and
+        # battery first, the grid-charged power equals min(battery_charge,
+        # grid_import): when solar covers the charge, grid_import is ~0; when it
+        # does not, the shortfall is exactly the grid contribution. Costing only
+        # this energy (not all household import, and not solar charging) gives
+        # the true acquisition cost of stored grid energy.
+        grid_charge_kw = min(battery_charge_kw, grid_import_kw)
+        grid_charge_kwh = grid_charge_kw * dt_hours
+        self._actual_grid_charge_kwh_today += grid_charge_kwh
+        self._actual_grid_charge_cost_today += grid_charge_kwh * import_price
 
         # Baseline cost: what would happen without a battery
         # Power balance: load = solar + grid + battery (Tesla sign convention)
@@ -9489,7 +9598,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if key == "max_grid_export_w":
                 value = self._normalize_optional_export_power_w(value)
             if key == "max_grid_charge_price":
-                value = self._normalize_optional_price(value)
+                # Already normalized to $/kWh by the caller (set_settings /
+                # config-flow / startup restore). Do NOT re-apply the cents->
+                # dollars heuristic here: it is non-idempotent, so a valid cap
+                # above $1/kWh (>100 c/kWh) would be divided by 100 a second
+                # time (e.g. 150c -> $1.50 -> $0.015), silently disabling grid
+                # charging. Just guard the type.
+                value = self._coerce_optional_price(value)
             if key == "grid_charge_soc_cap":
                 value = self._soc_ratio(value, 1.0)
             if hasattr(self._config, key):
@@ -9550,6 +9665,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             parsed = parsed / 100.0
         return parsed
 
+    @staticmethod
+    def _coerce_optional_price(value: Any) -> float | None:
+        """Validate an already-normalized $/kWh price without unit conversion.
+
+        Unlike _normalize_optional_price this applies NO cents->dollars
+        heuristic, so it is safe to call on values that are already in dollars
+        (idempotent) — used for stored config values that must not be scaled
+        down a second time.
+        """
+        if value in (None, "", []):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
     def _grid_charge_allowed_slots(
         self,
         import_prices: list[float],
@@ -9559,7 +9691,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> list[bool]:
         """Return per-slot permission for forced grid battery charging."""
         allowed = [True] * len(import_prices)
-        price_cap = self._normalize_optional_price(
+        # The stored config value is already $/kWh — coerce, do not re-normalize
+        # (re-applying the cents heuristic would divide a >$1/kWh cap by 100).
+        price_cap = self._coerce_optional_price(
             getattr(self._config, "max_grid_charge_price", None)
         )
         if price_cap is not None:
@@ -9599,7 +9733,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def force_reoptimize(self) -> Any:
         """Force immediate re-optimization."""
-        await self._run_optimization()
+        await self._run_optimization(force=True)
         return self._current_schedule
 
     @staticmethod

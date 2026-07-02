@@ -32367,7 +32367,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return None
                 if parsed <= 0:
                     return None
-                return parsed / 100.0 if parsed > 1 else parsed
+                # Persisted values are already stored in $/kWh (both the mobile
+                # set_settings path and the config-flow _form_optional_cents_to_price
+                # convert cents->dollars before persisting). Do NOT re-apply the
+                # cents heuristic: a valid cap above $1/kWh would be divided by
+                # 100 again, silently disabling grid charging on every restart.
+                return parsed
 
             def _ratio_setting(key: str, default: float) -> float:
                 value = entry.options.get(key, entry.data.get(key, default))

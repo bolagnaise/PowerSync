@@ -94,6 +94,12 @@ class LoadEstimator:
         self.load_entity_id = load_entity_id
         self.interval_minutes = interval_minutes
         self.weather_entity_id = weather_entity_id
+        # Optional EV charger power sensor entity ids. When set (by the
+        # coordinator, only for battery brands whose home-load sensor does NOT
+        # already exclude EV charging), their recorded power is subtracted from
+        # the load history so recurring EV charging is not double-counted once
+        # the planned-EV overlay is added back on top of the forecast.
+        self.ev_power_entity_ids: list[str] = []
         self.away_enabled_at: datetime | None = None   # when switch turned ON (departure)
         self.away_disabled_at: datetime | None = None  # when switch turned OFF (return)
         self._history_cache: dict[str, list[tuple[datetime, float]]] = {}
@@ -223,7 +229,10 @@ class LoadEstimator:
         else:
             days = HISTORY_LOOKBACK_DAYS
 
-        cache_key = f"{self.load_entity_id}:en={self.away_enabled_at}:dis={self.away_disabled_at}"
+        cache_key = (
+            f"{self.load_entity_id}:en={self.away_enabled_at}"
+            f":dis={self.away_disabled_at}:ev={','.join(self.ev_power_entity_ids)}"
+        )
 
         # Check cache
         if (
@@ -233,13 +242,16 @@ class LoadEstimator:
         ):
             return self._history_cache[cache_key]
 
-        # Determine unit multiplier from current state
-        multiplier = 1.0
+        # Determine unit multiplier from current state. Match _get_current_load:
+        # a missing/absent unit defaults to kW (PowerSync's own home-load sensor
+        # reports kW), so kW history is not silently parsed 1000x low as Watts.
+        # Only an explicit non-kW unit (e.g. "W") is treated as Watts.
+        multiplier = 1000.0
         current_state = self.hass.states.get(self.load_entity_id)
         if current_state:
-            unit = (current_state.attributes.get("unit_of_measurement") or "").lower()
-            if unit == "kw":
-                multiplier = 1000.0
+            unit = (current_state.attributes.get("unit_of_measurement") or "").strip().lower()
+            if unit and unit != "kw":
+                multiplier = 1.0
             _LOGGER.debug(
                 "Load sensor %s: unit=%s, multiplier=%.0f",
                 self.load_entity_id, unit, multiplier,
@@ -277,6 +289,29 @@ class LoadEstimator:
                 self.away_enabled_at,
                 away_end,
             )
+
+            # Subtract configured EV charger power from the load history so a
+            # recurring EV charging pattern embedded in the whole-home load
+            # sensor is not double-counted against the planned-EV overlay the
+            # coordinator adds on top of the forecast.
+            if result and self.ev_power_entity_ids:
+                ev_multipliers = self._resolve_power_multipliers(
+                    self.ev_power_entity_ids
+                )
+                ev_history = await instance.async_add_executor_job(
+                    get_significant_states,
+                    self.hass,
+                    start_time,
+                    end_time,
+                    self.ev_power_entity_ids,
+                )
+                result = await self.hass.async_add_executor_job(
+                    self._subtract_ev_power,
+                    result,
+                    ev_history,
+                    self.ev_power_entity_ids,
+                    ev_multipliers,
+                )
 
             # Cache the result
             self._history_cache[cache_key] = result
@@ -821,9 +856,94 @@ class LoadEstimator:
             excluded = before - len(result)
             if result:
                 result.sort(key=lambda h: h[0])
-                cutoff = result[-1][0] - timedelta(days=HISTORY_LOOKBACK_DAYS)
+                # Extend the retention window back by the away duration so
+                # ~HISTORY_LOOKBACK_DAYS of *actual* (non-away) history survive.
+                # A flat calendar cutoff from the newest sample would let the
+                # excluded away gap eat into the window, discarding the extra
+                # pre-away history that _get_load_history deliberately fetched
+                # and collapsing per-bucket sample counts after long trips.
+                away_span = timedelta(0)
+                if away_start is not None and away_end is not None:
+                    away_span = max(timedelta(0), away_end - away_start)
+                cutoff = (
+                    result[-1][0]
+                    - timedelta(days=HISTORY_LOOKBACK_DAYS)
+                    - away_span
+                )
                 result = [h for h in result if h[0] >= cutoff]
         return result, excluded
+
+    def _resolve_power_multipliers(
+        self, entity_ids: list[str]
+    ) -> dict[str, float]:
+        """Return a W multiplier per entity from its current unit (kW -> 1000).
+
+        Runs on the event loop (reads hass.states). Charger power sensors
+        usually report Watts; only an explicit "kW" unit is scaled. Defaulting
+        an unknown unit to Watts is deliberately conservative — it can only
+        under-subtract EV power (leaving some double-count), never over-subtract
+        (which would under-forecast household load).
+        """
+        multipliers: dict[str, float] = {}
+        for eid in entity_ids:
+            state = self.hass.states.get(eid)
+            unit = ""
+            if state is not None:
+                unit = (
+                    state.attributes.get("unit_of_measurement") or ""
+                ).strip().lower()
+            multipliers[eid] = 1000.0 if unit == "kw" else 1.0
+        return multipliers
+
+    @staticmethod
+    def _subtract_ev_power(
+        load_samples: list[tuple[datetime, float]],
+        ev_history: dict | None,
+        ev_entity_ids: list[str],
+        ev_multipliers: dict[str, float],
+    ) -> list[tuple[datetime, float]]:
+        """Subtract concurrent EV charger power from each load sample (Watts).
+
+        Pure/CPU-bound (executor-safe). For each load sample, the EV power at
+        that instant is the most recent recorded value of each EV entity at or
+        before the sample time (states are step functions). The load is clamped
+        at zero so a noisy over-subtraction can never produce negative load.
+        """
+        import bisect
+
+        timelines: list[tuple[list[datetime], list[float]]] = []
+        for eid in ev_entity_ids:
+            states = ev_history.get(eid) if ev_history else None
+            if not states:
+                continue
+            mult = ev_multipliers.get(eid, 1.0)
+            ts_list: list[datetime] = []
+            w_list: list[float] = []
+            for state in states:
+                try:
+                    watts = float(state.state) * mult
+                except (ValueError, TypeError):
+                    continue
+                # Ignore implausible/negative charger readings.
+                if not (0 <= watts < 100_000):
+                    continue
+                ts_list.append(state.last_changed)
+                w_list.append(watts)
+            if ts_list:
+                timelines.append((ts_list, w_list))
+
+        if not timelines:
+            return load_samples
+
+        adjusted: list[tuple[datetime, float]] = []
+        for ts, load_w in load_samples:
+            ev_w = 0.0
+            for ts_list, w_list in timelines:
+                idx = bisect.bisect_right(ts_list, ts) - 1
+                if idx >= 0:
+                    ev_w += w_list[idx]
+            adjusted.append((ts, max(0.0, load_w - ev_w)))
+        return adjusted
 
     def _compute_temperature_fit(
         self,
