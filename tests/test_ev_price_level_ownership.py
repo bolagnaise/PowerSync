@@ -812,6 +812,97 @@ def test_scheduled_tesla_start_targets_single_plugged_home_vehicle(
     assert params["vehicle_vin"] == second_vin
 
 
+def test_scheduled_tesla_start_targets_all_plugged_home_vehicles(
+    monkeypatch,
+    fake_actions,
+):
+    first_vin = "XP7YHCEL7TB811704"
+    second_vin = "LRWYHCEKXTC687964"
+    fake_actions._dynamic_ev_state = {}
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def two_vehicles(*args, **kwargs):
+        return [
+            {"vin": first_vin, "name": "Tesla_Flinn"},
+            {"vin": second_vin, "name": "Tesla_YF88"},
+        ]
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", two_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=False))
+
+    executor = ev_planner.ScheduledChargingExecutor(_FakeHass(), _FakeConfigEntry())
+    result = asyncio.run(executor._start_charging("Scheduled window"))
+
+    assert result is True
+    assert fake_actions._action_start_ev_charging_dynamic.await_count == 2
+    started_vins = {
+        call.args[2]["vehicle_vin"]
+        for call in fake_actions._action_start_ev_charging_dynamic.await_args_list
+    }
+    assert started_vins == {first_vin, second_vin}
+
+
+def test_scheduled_coordinator_starts_second_tesla_when_first_already_charging(
+    monkeypatch,
+    fake_actions,
+):
+    first_vin = "XP7YHCEL7TB811704"
+    second_vin = "LRWYHCEKXTC687964"
+    fake_actions._dynamic_ev_state = {}
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
+        "scheduled_charging"
+    ] = {
+        "enabled": True,
+        "start_time": "11:00",
+        "end_time": "14:00",
+        "max_price_cents": 50,
+    }
+
+    async def two_vehicles(*args, **kwargs):
+        return [
+            {"vin": first_vin, "name": "Tesla_Flinn"},
+            {"vin": second_vin, "name": "Tesla_YF88"},
+        ]
+
+    async def active_state(_hass, _entry, vehicle_vin=None):
+        return vehicle_vin == first_vin
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", two_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", active_state)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 5, 27, 11, 30, tzinfo=timezone.utc),
+    )
+
+    previous_executor = ev_planner.get_scheduled_charging_executor()
+    previous_price_executor = ev_planner.get_price_level_executor()
+    scheduled = ev_planner.ScheduledChargingExecutor(hass, _FakeConfigEntry())
+    coordinator = ev_planner.EVChargingModeCoordinator(hass, _FakeConfigEntry())
+    coordinator._is_charging = True
+
+    try:
+        ev_planner.set_scheduled_charging_executor(scheduled)
+        ev_planner.set_price_level_executor(None)
+
+        asyncio.run(coordinator.evaluate({}, 0))
+    finally:
+        ev_planner.set_scheduled_charging_executor(previous_executor)
+        ev_planner.set_price_level_executor(previous_price_executor)
+
+    fake_actions._action_start_ev_charging_dynamic.assert_awaited_once()
+    _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
+    assert params["vehicle_id"] == second_vin
+    assert params["vehicle_vin"] == second_vin
+
+
 def test_price_level_preserve_home_battery_sets_optimizer_intent(fake_actions):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)

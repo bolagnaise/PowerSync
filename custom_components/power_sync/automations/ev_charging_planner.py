@@ -7812,6 +7812,11 @@ class ScheduledChargingExecutor:
     async def _start_charging(self, reason: str) -> bool:
         """Start EV charging."""
         await self.apply_preserve_home_battery(True, reason)
+        if _configured_charger_type({**self.config_entry.data, **self.config_entry.options}) == "tesla":
+            tesla_started = await self._start_scheduled_tesla_vehicles(reason)
+            if tesla_started is not None:
+                return tesla_started
+
         success = await _start_coordinated_charging(
             self.hass,
             self._domain,
@@ -7830,6 +7835,103 @@ class ScheduledChargingExecutor:
         self._state.last_decision = "started"
         self._state.last_decision_reason = reason
         _LOGGER.info(f"Scheduled charging: Started - {reason}")
+        return True
+
+    async def _start_scheduled_tesla_vehicles(self, reason: str) -> Optional[bool]:
+        """Start every eligible Tesla in the scheduled window.
+
+        The legacy scheduled path used the default Tesla loadpoint. In multi-car
+        homes that can start the first matching Tesla and then mark the shared
+        scheduled mode as active, leaving another home/plugged car idle.
+        """
+        if (
+            _configured_charger_type({**self.config_entry.data, **self.config_entry.options})
+            != "tesla"
+        ):
+            return None
+
+        try:
+            vehicles = await discover_all_tesla_vehicles(self.hass, self.config_entry)
+        except Exception as err:
+            _LOGGER.debug("Scheduled charging Tesla discovery unavailable: %s", err)
+            return None
+
+        if not vehicles:
+            return None
+
+        eligible_vins: list[str] = []
+        missing_vins: list[str] = []
+        for vehicle in vehicles:
+            vin = str(vehicle.get("vin") or vehicle.get("vehicle_id") or "").strip()
+            if not vin:
+                continue
+            try:
+                location = await get_ev_location(self.hass, self.config_entry, vehicle_vin=vin)
+                if location not in ("home", "unknown"):
+                    continue
+                if not await is_ev_plugged_in(self.hass, self.config_entry, vehicle_vin=vin):
+                    continue
+                eligible_vins.append(vin)
+                if not await is_ev_actively_charging(
+                    self.hass,
+                    self.config_entry,
+                    vehicle_vin=vin,
+                ):
+                    missing_vins.append(vin)
+            except Exception as err:
+                _LOGGER.debug(
+                    "Scheduled charging Tesla eligibility check failed for %s: %s",
+                    vin[:8],
+                    err,
+                )
+
+        if not eligible_vins:
+            return None
+
+        if not missing_vins:
+            self._state.is_charging = True
+            self._state.last_decision = "charging"
+            self._state.last_decision_reason = reason
+            _LOGGER.debug("Scheduled charging: all eligible Tesla vehicles already charging")
+            return True
+
+        started_any = False
+        failed_vins: list[str] = []
+        for vin in missing_vins:
+            success = await _start_coordinated_charging(
+                self.hass,
+                self._domain,
+                self.config_entry,
+                owner_mode="scheduled",
+                reason=reason,
+                vehicle_vin=vin,
+                no_grid_import=self._get_settings().get("no_grid_import", False),
+                allow_ownership_takeover=True,
+                log_prefix="Scheduled charging",
+            )
+            if success:
+                started_any = True
+            else:
+                failed_vins.append(vin)
+
+        if failed_vins:
+            _LOGGER.warning(
+                "Scheduled charging: Failed to start Tesla vehicle(s): %s",
+                ", ".join(vin[:8] for vin in failed_vins),
+            )
+
+        if not started_any:
+            _LOGGER.warning(f"Scheduled charging: Failed to start - {reason}")
+            return False
+
+        self._state.is_charging = True
+        self._state.last_decision = "started"
+        self._state.last_decision_reason = reason
+        _LOGGER.info(
+            "Scheduled charging: Started %d Tesla vehicle(s) - %s",
+            len(missing_vins) - len(failed_vins),
+            reason,
+        )
         return True
 
     async def _stop_charging(self, reason: str) -> bool:
@@ -8289,6 +8391,8 @@ class EVChargingModeCoordinator:
             scheduled_wanting = [d for d in decisions if d.wants_charge]
             if scheduled_wanting and not self._is_charging:
                 await self._start_charging(active_modes, combined_reason)
+            elif scheduled_wanting and scheduled_exec:
+                await scheduled_exec._start_scheduled_tesla_vehicles(combined_reason)
 
             # Update executor states
             for d in decisions:
