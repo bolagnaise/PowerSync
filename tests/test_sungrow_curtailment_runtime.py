@@ -67,10 +67,23 @@ def test_sungrow_has_native_export_limit_curtailment_handler():
     assert "sungrow_curtailment_state" in handler
     assert "sungrow_power_limit_w" in handler
     assert "get_current_prices_for_curtailment" in handler
-    assert "await sungrow_coord.set_export_limit(home_load_w)" in handler
+    assert "export_limit_w = 0" in handler
+    assert "await sungrow_coord.set_export_limit(export_limit_w)" in handler
     assert "await sungrow_coord.set_export_limit(None)" in handler
     assert "ac_inverter_is_same_hybrid" in handler
     assert "await apply_inverter_curtailment(" in handler
+
+
+def test_sungrow_native_curtailment_uses_zero_site_export_not_home_load_limit():
+    handler = _function_source("handle_sungrow_curtailment")
+
+    load_index = handler.index("home_load_w = int(live_status.get(\"load_power\", 0))")
+    target_index = handler.index("export_limit_w = 0")
+    command_index = handler.index("await sungrow_coord.set_export_limit(export_limit_w)")
+
+    assert load_index < target_index < command_index
+    assert "await sungrow_coord.set_export_limit(home_load_w)" not in handler
+    assert "zero-export limit" in handler
 
 
 def test_sungrow_curtailment_releases_limit_for_active_solar_surplus_ev():
@@ -221,6 +234,20 @@ def test_periodic_solar_curtailment_routes_to_sungrow_before_tesla_path():
 
     assert "if is_sungrow:" in pre_tesla_path
     assert "await handle_sungrow_curtailment()" in pre_tesla_path
+
+
+def test_solar_curtailment_runs_startup_check_before_first_periodic_tick():
+    source = INIT_PATH.read_text()
+    setup_section = source[
+        source.index("# Set up automatic curtailment check every 5 minutes"):
+        source.index("# Set up Flow Power v2 tariff rate refresh")
+    ]
+
+    assert "async def _startup_curtailment_check" in setup_section
+    assert "await asyncio.sleep(5)" in setup_section
+    assert "await handle_solar_curtailment_check(None)" in setup_section
+    assert "hass.async_create_task(_startup_curtailment_check())" in setup_section
+    assert "EVENT_HOMEASSISTANT_STARTED" in setup_section
 
 
 def test_periodic_solar_curtailment_routes_ac_inverter_without_tesla_token():

@@ -22256,28 +22256,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "Sungrow load-following data unavailable, using zero-export limit"
                     )
 
+                # On SH hybrids this register is the allowed grid export, not
+                # the PV output target. A zero site-export limit lets the
+                # inverter load-follow internally while blocking paid export.
+                export_limit_w = 0
                 current_limit = entry_data.get("sungrow_power_limit_w")
-                if current_state == "curtailed" and current_limit == home_load_w:
+                if current_state == "curtailed" and current_limit == export_limit_w:
                     _LOGGER.debug(
                         "Sungrow already curtailed at %dW, no action needed",
-                        home_load_w,
+                        export_limit_w,
                     )
                 else:
                     _LOGGER.info(
-                        "Sungrow curtailment TRIGGERED: export_earnings=%.2fc (<1c) -> export limit %dW",
+                        "Sungrow curtailment TRIGGERED: export_earnings=%.2fc (<1c), load=%dW -> zero-export limit",
                         export_earnings,
                         home_load_w,
                     )
-                    success = await sungrow_coord.set_export_limit(home_load_w)
+                    success = await sungrow_coord.set_export_limit(export_limit_w)
                     if success:
                         hass.data[DOMAIN][entry.entry_id][
                             "sungrow_curtailment_state"
                         ] = "curtailed"
                         hass.data[DOMAIN][entry.entry_id][
                             "sungrow_power_limit_w"
-                        ] = home_load_w
+                        ] = export_limit_w
                     else:
-                        _LOGGER.error("Sungrow set_export_limit(%d) failed", home_load_w)
+                        _LOGGER.error("Sungrow set_export_limit(%d) failed", export_limit_w)
             elif native_available:
                 if current_state != "normal":
                     _LOGGER.info(
@@ -31351,6 +31355,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Store the curtailment cancel function
     hass.data[DOMAIN][entry.entry_id]["curtailment_cancel"] = curtailment_cancel_timer
     _LOGGER.info("Solar curtailment check scheduled every 5 minutes at :01 (same as TOU sync)")
+
+    async def _startup_curtailment_check(_event=None) -> None:
+        await asyncio.sleep(5)
+        if entry.entry_id not in hass.data.get(DOMAIN, {}):
+            return
+        await handle_solar_curtailment_check(None)
+
+    if hass.is_running:
+        hass.async_create_task(_startup_curtailment_check())
+    else:
+        hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STARTED,
+            _startup_curtailment_check,
+        )
 
     # Set up Flow Power v2 tariff rate refresh (every 5 minutes + midnight avg recalc)
     fp_network_cfg = entry.options.get(CONF_FP_NETWORK, entry.data.get(CONF_FP_NETWORK))
