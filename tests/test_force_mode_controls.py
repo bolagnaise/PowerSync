@@ -178,6 +178,18 @@ def test_tesla_hold_soc_backup_reserve_write_does_not_replace_user_reserve():
     assert '{"percent": target_reserve, "source": "hold_soc"}' in function_source
 
 
+def test_restore_normal_restores_user_reserve_after_tesla_hold_soc():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_restore_normal")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert "restore_was_hold_soc = bool(hold_soc_state.get(\"active\"))" in function_source
+    assert 'entry.options.get("_user_backup_reserve")' in function_source
+    assert "Restore normal: restoring Hold SoC backup reserve to user reserve" in function_source
+
+
 def test_monitoring_mode_optimizer_shutdown_releases_active_control():
     coordinator_source = OPTIMIZATION_COORDINATOR_PATH.read_text()
     coordinator_tree = ast.parse(coordinator_source)

@@ -26907,6 +26907,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         restore_was_force_discharging = bool(force_discharge_state.get("active"))
         restore_was_force_charging = bool(force_charge_state.get("active"))
+        restore_was_hold_soc = bool(hold_soc_state.get("active"))
         force_mode_cleanup_restore = restore_was_force_discharging or restore_was_force_charging
         sigenergy_native_control = _sigenergy_restore_native_control(call)
         allow_monitoring_restore = bool(
@@ -27805,6 +27806,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     saved_backup_reserve = force_discharge_state.get("saved_backup_reserve")
                 if saved_backup_reserve is None:
                     saved_backup_reserve = force_charge_state.get("saved_backup_reserve")
+                if saved_backup_reserve is None and restore_was_hold_soc:
+                    user_backup_reserve = entry.options.get("_user_backup_reserve")
+                    if user_backup_reserve is not None:
+                        try:
+                            user_backup_reserve = int(user_backup_reserve)
+                        except (TypeError, ValueError):
+                            user_backup_reserve = None
+                    if (
+                        user_backup_reserve is not None
+                        and 0 <= user_backup_reserve <= 100
+                    ):
+                        saved_backup_reserve = user_backup_reserve
+                        _LOGGER.info(
+                            "Restore normal: restoring Hold SoC backup reserve to user reserve %d%%",
+                            saved_backup_reserve,
+                        )
                 was_discharging = restore_was_force_discharging
 
                 if saved_backup_reserve is None:
