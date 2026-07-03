@@ -6,7 +6,7 @@ import asyncio
 import importlib
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -100,6 +100,122 @@ VIN = "LRWYHCEK3PC907290"
 def test_price_log_value_formats_unknown_without_cents_suffix():
     assert ev_planner._format_price_log_value(None) == "unknown"
     assert ev_planner._format_price_log_value(12) == "12.0c"
+
+
+def test_amber_forecast_utc_start_times_normalize_to_ha_local(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda *args, **kwargs: datetime(2026, 7, 3, 19, 20, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(
+        data={
+            "forecast": [
+                {
+                    "startTime": "2026-07-03T10:00:00Z",
+                    "channelType": "general",
+                    "perKwh": 18.0,
+                },
+                {
+                    "startTime": "2026-07-03T10:00:00Z",
+                    "channelType": "feedIn",
+                    "perKwh": 5.0,
+                },
+            ]
+        }
+    )
+    config_entry = _FakeConfigEntry()
+    config_entry.data = {"amber_api_token": "token"}
+
+    forecaster = ev_planner.PriceForecaster(hass, config_entry)
+
+    forecast = asyncio.run(forecaster._get_amber_forecast(1))
+
+    assert forecast is not None
+    assert forecast[0].hour == "2026-07-03T20:00:00"
+    assert forecast[0].import_cents == 18.0
+    assert forecast[0].export_cents == 5.0
+
+
+def test_cost_optimized_uses_ha_local_clock_for_window_filtering(monkeypatch):
+    real_datetime = datetime
+    brisbane_tz = timezone(timedelta(hours=10))
+
+    class HostClockDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            wrong_host_now = real_datetime(2026, 7, 4, 8, 20)
+            if tz is not None:
+                return wrong_host_now.replace(tzinfo=timezone.utc).astimezone(tz)
+            return wrong_host_now
+
+        @classmethod
+        def fromisoformat(cls, value):
+            return real_datetime.fromisoformat(value)
+
+    monkeypatch.setattr(ev_planner, "datetime", HostClockDatetime)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda *args, **kwargs: real_datetime(2026, 7, 3, 19, 20, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    price_forecast = [
+        ev_planner.PriceForecast(
+            hour="2026-07-03T20:00:00",
+            import_cents=12.0,
+            export_cents=5.0,
+            period="offpeak",
+        ),
+        ev_planner.PriceForecast(
+            hour="2026-07-03T21:00:00",
+            import_cents=14.0,
+            export_cents=5.0,
+            period="offpeak",
+        ),
+    ]
+    surplus_forecast = [
+        ev_planner.SurplusForecast(
+            hour=price.hour,
+            solar_kw=0.0,
+            load_kw=0.0,
+            surplus_kw=0.0,
+            confidence=0.8,
+        )
+        for price in price_forecast
+    ]
+
+    plan = asyncio.run(
+        planner._plan_cost_optimized(
+            vehicle_id=VIN,
+            current_soc=50,
+            target_soc=60,
+            target_time=real_datetime(2026, 7, 4, 7, 30, tzinfo=brisbane_tz),
+            energy_needed_kwh=8.0,
+            charger_power_kw=7.36,
+            surplus_forecast=surplus_forecast,
+            price_forecast=price_forecast,
+        )
+    )
+
+    assert plan.windows
+    assert plan.estimated_grid_kwh > 0
 
 
 class _FakeConfigEntry:

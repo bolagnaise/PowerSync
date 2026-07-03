@@ -95,6 +95,33 @@ def _format_price_log_value(price_cents: Optional[float]) -> str:
     return f"{price_cents:.1f}c"
 
 
+def _ha_local_now_naive() -> datetime:
+    """Return Home Assistant local time without tzinfo for schedule comparisons."""
+    try:
+        now = dt_util.now()
+        if now is not None:
+            return now.replace(tzinfo=None) if now.tzinfo is not None else now
+    except Exception:
+        pass
+    return datetime.now()
+
+
+def _as_ha_local_naive(value: datetime) -> datetime:
+    """Normalize a datetime to Home Assistant local time without tzinfo."""
+    if value.tzinfo is None:
+        return value
+    try:
+        return dt_util.as_local(value).replace(tzinfo=None)
+    except Exception:
+        try:
+            ha_now = dt_util.now()
+            if ha_now is not None and ha_now.tzinfo is not None:
+                return value.astimezone(ha_now.tzinfo).replace(tzinfo=None)
+        except Exception:
+            pass
+    return value.replace(tzinfo=None)
+
+
 def _configured_ble_prefixes(
     config_entry: Optional["ConfigEntry"],
     vehicle_vin: Optional[str] = None,
@@ -1367,7 +1394,7 @@ class SolarForecaster:
                 return None
 
             result = []
-            now = datetime.now()
+            now = _ha_local_now_naive()
 
             # Solcast provides 30-minute intervals, so we need 2x entries for hourly data
             # Aggregate into hourly buckets
@@ -1420,7 +1447,7 @@ class SolarForecaster:
         Uses a bell curve centered on solar noon with seasonal adjustment.
         """
         result = []
-        now = datetime.now()
+        now = _ha_local_now_naive()
 
         # Get system size from current peak or estimate
         system_size_kw = await self._estimate_system_size()
@@ -1515,7 +1542,7 @@ class SurplusForecaster:
 
         # Build surplus forecast
         forecasts = []
-        now = datetime.now()
+        now = _ha_local_now_naive()
 
         for i, solar_data in enumerate(solar_forecast):
             hour_dt = now + timedelta(hours=i)
@@ -1622,7 +1649,7 @@ class PriceForecaster:
             # Parse Amber forecast into our format
             # Group by hour and separate import/export prices
             hourly_prices = {}
-            now = datetime.now()
+            now = _ha_local_now_naive()
 
             for price_item in forecast_data:
                 # Parse the NEM time
@@ -1634,8 +1661,7 @@ class PriceForecaster:
                     # Parse ISO format time
                     if "T" in nem_time:
                         hour_dt = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
-                        # Convert to local time
-                        hour_dt = hour_dt.replace(tzinfo=None)
+                        hour_dt = _as_ha_local_naive(hour_dt)
                     else:
                         continue
 
@@ -1737,7 +1763,7 @@ class PriceForecaster:
             _LOGGER.debug(f"Tariff forecast using rates: {buy_rates}, TOU periods: {list(tou_periods.keys())}")
 
             forecasts = []
-            now = datetime.now()
+            now = _ha_local_now_naive()
 
             for h in range(hours):
                 hour_dt = now + timedelta(hours=h)
@@ -1855,7 +1881,7 @@ class PriceForecaster:
 
             # Generate hourly forecasts
             forecasts = []
-            now = datetime.now()
+            now = _ha_local_now_naive()
 
             for h in range(hours):
                 hour_dt = now + timedelta(hours=h)
@@ -1956,7 +1982,7 @@ class PriceForecaster:
         Uses common Australian TOU patterns.
         """
         forecasts = []
-        now = datetime.now()
+        now = _ha_local_now_naive()
 
         # Typical TOU rates (cents/kWh)
         OFFPEAK_RATE = 15
@@ -2198,13 +2224,12 @@ class ChargingPlanner:
 
         # Calculate hours until deadline
         if target_time:
-            now = datetime.now()
+            now = _ha_local_now_naive()
             # Convert target_time to naive local time for comparison
             target_time_local = target_time
             if target_time.tzinfo is not None:
                 try:
-                    local_tz = datetime.now().astimezone().tzinfo
-                    target_time_local = target_time.astimezone(local_tz).replace(tzinfo=None)
+                    target_time_local = _as_ha_local_naive(target_time)
                 except Exception:
                     target_time_local = target_time.replace(tzinfo=None)
             # Exact hours available until departure — ceil to include the partial final hour
@@ -2512,7 +2537,7 @@ class ChargingPlanner:
         - Arrive home 6pm at 58c/kWh, depart 6am with 15-20c overnight -> wait for cheap overnight
         - Battery charging at 5kW during cheap period -> EV charges at reduced rate
         """
-        now = datetime.now()
+        now = _ha_local_now_naive()
         battery_power_schedule = battery_power_schedule or {}
 
         # Convert target_time to naive local time for comparison
@@ -2520,15 +2545,7 @@ class ChargingPlanner:
         target_time_local = None
         if target_time:
             if target_time.tzinfo is not None:
-                # Convert UTC target_time to local time, then strip timezone
-                try:
-                    import zoneinfo
-                    # Try to get local timezone
-                    local_tz = datetime.now().astimezone().tzinfo
-                    target_time_local = target_time.astimezone(local_tz).replace(tzinfo=None)
-                except Exception:
-                    # Fallback: assume price hours are in same tz as target, strip both
-                    target_time_local = target_time.replace(tzinfo=None)
+                target_time_local = _as_ha_local_naive(target_time)
             else:
                 target_time_local = target_time
 
@@ -2760,17 +2777,13 @@ class ChargingPlanner:
 
         # Calculate minimum hours needed (0.85 efficiency: AC-DC losses, ramp-up, thermal)
         hours_needed = energy_needed_kwh / (charger_power_kw * 0.85)
-        now = datetime.now()
+        now = _ha_local_now_naive()
 
         # Convert target_time to naive local time for comparison
         # Price forecast hours are stored as naive local time strings
         target_time_local = target_time
         if target_time.tzinfo is not None:
-            try:
-                local_tz = datetime.now().astimezone().tzinfo
-                target_time_local = target_time.astimezone(local_tz).replace(tzinfo=None)
-            except Exception:
-                target_time_local = target_time.replace(tzinfo=None)
+            target_time_local = _as_ha_local_naive(target_time)
 
         # Exact hours available until departure — no padding
         import math
@@ -2901,7 +2914,7 @@ class ChargingPlanner:
         Returns:
             Tuple of (should_charge, reason, source)
         """
-        now = datetime.now()
+        now = _ha_local_now_naive()
 
         # For time_critical mode with a deadline, check if we need to charge NOW to meet target
         if is_time_critical and plan.target_time and not plan.can_meet_target:
@@ -2913,9 +2926,7 @@ class ChargingPlanner:
             try:
                 target_dt = datetime.fromisoformat(plan.target_time)
                 if target_dt.tzinfo is not None:
-                    # Convert to local naive time
-                    local_tz = datetime.now().astimezone().tzinfo
-                    target_dt = target_dt.astimezone(local_tz).replace(tzinfo=None)
+                    target_dt = _as_ha_local_naive(target_dt)
 
                 hours_remaining = (target_dt - now).total_seconds() / 3600
                 hours_needed = plan.energy_needed_kwh / 7.0  # Assume ~7kW charger
@@ -4806,7 +4817,7 @@ class AutoScheduleExecutor:
 
         now = dt_util.now()
         if not isinstance(now, datetime):
-            now = datetime.now()
+            now = _ha_local_now_naive()
         for window in plan.windows:
             try:
                 end = datetime.fromisoformat(window.end_time)
@@ -4967,7 +4978,7 @@ class AutoScheduleExecutor:
             try:
                 self._sync_charger_params_from_vehicle_configs(vehicle_id, settings)
                 state = self.get_state(vehicle_id)
-                now = datetime.now()
+                now = _ha_local_now_naive()
                 vehicle_vin = self._resolve_vehicle_vin(vehicle_id)
 
                 ev_soc = await self._get_vehicle_soc(vehicle_id)
