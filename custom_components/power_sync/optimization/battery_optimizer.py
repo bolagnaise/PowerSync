@@ -745,11 +745,10 @@ class BatteryOptimizer:
 
         # Some tariffs fill the battery cheaply before a lower-FIT export
         # window. The current import price is still relevant to self-consumption,
-        # but it should not completely block exporting surplus charged at the
-        # earlier cheap/free rate.
+        # but it should not completely block exporting energy that was acquired
+        # below the export rate.
         return (
             acquisition_cost_kwh > 0
-            and effective_acquisition_cost_kwh < acquisition_cost_kwh
             and export_price >= effective_acquisition_cost_kwh
         )
 

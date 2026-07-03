@@ -1399,6 +1399,48 @@ def test_cheap_import_charge_not_blocked_by_lower_fit_than_acquisition_cost(
     assert result.schedule.actions[-1].soc > 0.20
 
 
+def test_fit_export_above_acquisition_not_blocked_by_peak_import(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=32000,
+        max_charge_w=10000,
+        max_discharge_w=10000,
+        backup_reserve=0.20,
+        interval_minutes=5,
+        horizon_hours=48,
+    )
+    n = 48 * 12
+    import_prices = [0.334] * n
+    export_prices = [0.0] * n
+    allow_export = [False] * n
+
+    # Current time is 16:35: today's Flow Power Happy Hour starts in 55 minutes.
+    # The coincident peak network tariff makes import more expensive than the
+    # FIT, but the battery's acquisition cost is still below that FIT.
+    today_start = 11
+    tomorrow_start = today_start + 24 * 12
+    for start, import_price in ((today_start, 0.498), (tomorrow_start, 0.3474)):
+        for idx in range(start, start + 24):
+            import_prices[idx] = import_price
+            export_prices[idx] = 0.45
+            allow_export[idx] = True
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.4] * n,
+        current_soc=0.99,
+        acquisition_cost_kwh=0.322,
+        allow_battery_export=allow_export,
+    )
+
+    today_window = result.schedule.actions[today_start:today_start + 24]
+    assert any(action.action == "export" for action in today_window)
+    assert max(result.grid_export_w[today_start:today_start + 24]) > 1000
+
+
 @pytest.mark.parametrize("acquisition_cost", [0.0, 0.069, 0.12])
 def test_cheap_import_charge_not_blocked_by_positive_fit_at_reserve(
     battery_optimizer_module,
