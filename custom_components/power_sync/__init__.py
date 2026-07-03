@@ -16925,6 +16925,100 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return bool(current_actions.intersection(("discharge", "export")))
         return False
 
+    def _solaredge_force_dispatch_active(entry_data: dict) -> bool:
+        """Return true while SolarEdge battery dispatch should own inverter output."""
+        if force_charge_state.get("active") or force_discharge_state.get("active"):
+            return True
+
+        active_getter = getattr(entry_data.get("optimization_coordinator"), "get_active_force_state", None)
+        if callable(active_getter):
+            try:
+                active_force = active_getter() or {}
+            except Exception as err:
+                _LOGGER.debug("SolarEdge curtailment: active force check failed: %s", err)
+            else:
+                return bool(active_force.get("active")) and active_force.get("type") in {
+                    "charge",
+                    "discharge",
+                    "export",
+                }
+
+        return (
+            _optimizer_current_force_action_matches("charge")
+            or _optimizer_current_force_action_matches("discharge")
+        )
+
+    def _get_solaredge_curtailment_controller(entry_data: dict):
+        """Return the cached SolarEdge active-power curtailment controller."""
+        from .inverters.solaredge import SolarEdgeController
+
+        host = entry.options.get(
+            CONF_SOLAREDGE_HOST,
+            entry.data.get(CONF_SOLAREDGE_HOST, ""),
+        )
+        port = entry.options.get(
+            CONF_SOLAREDGE_PORT,
+            entry.data.get(CONF_SOLAREDGE_PORT, DEFAULT_SOLAREDGE_PORT),
+        )
+        slave_id = entry.options.get(
+            CONF_SOLAREDGE_SLAVE_ID,
+            entry.data.get(CONF_SOLAREDGE_SLAVE_ID, DEFAULT_SOLAREDGE_SLAVE_ID),
+        )
+        rated_power_w = entry.options.get(
+            CONF_SOLAREDGE_RATED_POWER_W,
+            entry.data.get(CONF_SOLAREDGE_RATED_POWER_W, DEFAULT_SOLAREDGE_RATED_POWER_W),
+        )
+        entity_prefix = entry.options.get(
+            CONF_SOLAREDGE_ENTITY_PREFIX,
+            entry.data.get(CONF_SOLAREDGE_ENTITY_PREFIX, ""),
+        )
+
+        controller = entry_data.get("solaredge_controller")
+        controller_key = (host, int(port), int(slave_id), float(rated_power_w), entity_prefix)
+        if (
+            not isinstance(controller, SolarEdgeController)
+            or entry_data.get("solaredge_controller_key") != controller_key
+        ):
+            controller = SolarEdgeController(
+                host=host,
+                port=int(port),
+                slave_id=int(slave_id),
+                rated_power_w=float(rated_power_w),
+                entity_prefix=entity_prefix,
+                hass=hass,
+            )
+            entry_data["solaredge_controller"] = controller
+            entry_data["solaredge_controller_key"] = controller_key
+        return controller
+
+    async def _restore_solaredge_curtailment_for_dispatch(
+        entry_data: dict,
+        reason: str,
+    ) -> bool:
+        """Release SolarEdge active-power curtailment before force dispatch."""
+        if entry_data.get("solaredge_curtailment_state", "normal") == "normal":
+            return True
+
+        controller = _get_solaredge_curtailment_controller(entry_data)
+        try:
+            _LOGGER.info(
+                "SolarEdge curtailment RELEASED before %s: restoring active power",
+                reason,
+            )
+            success = await controller.restore()
+            if success:
+                entry_data["solaredge_curtailment_state"] = "normal"
+                return True
+            _LOGGER.error("SolarEdge curtailment release before %s failed", reason)
+        except Exception as err:
+            _LOGGER.error(
+                "SolarEdge curtailment release before %s failed: %s",
+                reason,
+                err,
+                exc_info=True,
+            )
+        return False
+
     async def _clear_force_timer_state_without_restore(force_type: str, reason: str) -> None:
         """Clear an expired manual force timer without changing hardware state."""
         if force_type == "charge":
@@ -21847,48 +21941,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             current_state,
         )
 
-        host = entry.options.get(
-            CONF_SOLAREDGE_HOST,
-            entry.data.get(CONF_SOLAREDGE_HOST, ""),
-        )
-        port = entry.options.get(
-            CONF_SOLAREDGE_PORT,
-            entry.data.get(CONF_SOLAREDGE_PORT, DEFAULT_SOLAREDGE_PORT),
-        )
-        slave_id = entry.options.get(
-            CONF_SOLAREDGE_SLAVE_ID,
-            entry.data.get(CONF_SOLAREDGE_SLAVE_ID, DEFAULT_SOLAREDGE_SLAVE_ID),
-        )
-        rated_power_w = entry.options.get(
-            CONF_SOLAREDGE_RATED_POWER_W,
-            entry.data.get(CONF_SOLAREDGE_RATED_POWER_W, DEFAULT_SOLAREDGE_RATED_POWER_W),
-        )
-        entity_prefix = entry.options.get(
-            CONF_SOLAREDGE_ENTITY_PREFIX,
-            entry.data.get(CONF_SOLAREDGE_ENTITY_PREFIX, ""),
-        )
-
-        from .inverters.solaredge import SolarEdgeController
-
-        controller = entry_data.get("solaredge_controller")
-        controller_key = (host, int(port), int(slave_id), float(rated_power_w), entity_prefix)
-        if (
-            not isinstance(controller, SolarEdgeController)
-            or entry_data.get("solaredge_controller_key") != controller_key
-        ):
-            controller = SolarEdgeController(
-                host=host,
-                port=int(port),
-                slave_id=int(slave_id),
-                rated_power_w=float(rated_power_w),
-                entity_prefix=entity_prefix,
-                hass=hass,
-            )
-            entry_data["solaredge_controller"] = controller
-            entry_data["solaredge_controller_key"] = controller_key
+        controller = _get_solaredge_curtailment_controller(entry_data)
 
         try:
             if export_earnings < 1:
+                if _solaredge_force_dispatch_active(entry_data):
+                    if current_state != "normal":
+                        await _restore_solaredge_curtailment_for_dispatch(
+                            entry_data,
+                            "active force dispatch",
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "SolarEdge curtailment skipped while force dispatch is active"
+                        )
+                    return
+
                 if current_state == "normal":
                     _LOGGER.info(
                         "SolarEdge curtailment TRIGGERED: export_earnings=%.2fc (<1c) -> active power 0%%",
@@ -24053,6 +24121,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             solaredge_coord = entry_data.get("solaredge_coordinator")
             if solaredge_coord:
+                await _restore_solaredge_curtailment_for_dispatch(
+                    entry_data,
+                    "optimizer force discharge",
+                )
                 await solaredge_coord.force_discharge(duration, power_w=power_w)
                 _LOGGER.debug(f"SolarEdge force discharge hardware refreshed ({duration}min, {power_w}W)")
                 return
@@ -24718,6 +24790,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 power_w = command_power_w
+                await _restore_solaredge_curtailment_for_dispatch(
+                    entry_data,
+                    "force discharge",
+                )
                 discharge_result = await solaredge_coord.force_discharge(duration, power_w=power_w)
 
                 if discharge_result:
@@ -25541,6 +25617,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             solaredge_coord = entry_data.get("solaredge_coordinator")
             if solaredge_coord:
+                await _restore_solaredge_curtailment_for_dispatch(
+                    entry_data,
+                    "optimizer force charge",
+                )
                 await solaredge_coord.force_charge(duration, power_w=power_w)
                 _LOGGER.debug(f"SolarEdge force charge hardware refreshed ({duration}min, {power_w}W)")
                 return
@@ -26330,6 +26410,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state["expires_at"] = None
 
                 power_w = command_power_w
+                await _restore_solaredge_curtailment_for_dispatch(
+                    entry_data,
+                    "force charge",
+                )
                 charge_result = await solaredge_coord.force_charge(duration, power_w=power_w)
 
                 if charge_result:

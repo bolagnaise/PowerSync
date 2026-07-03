@@ -228,6 +228,59 @@ def test_goodwe_curtailment_does_not_reapply_during_force_export():
     assert "GoodWe curtailment skipped while force discharge/export is active" in handler
 
 
+def test_solaredge_curtailment_releases_limit_during_force_dispatch():
+    handler = _function_source("handle_solaredge_curtailment")
+    active_helper = _function_source("_solaredge_force_dispatch_active")
+    restore_helper = _function_source("_restore_solaredge_curtailment_for_dispatch")
+
+    assert "force_charge_state.get(\"active\")" in active_helper
+    assert "get_active_force_state" in active_helper
+    assert "_optimizer_current_force_action_matches(\"charge\")" in active_helper
+    assert "controller.restore()" in restore_helper
+    assert "solaredge_curtailment_state" in restore_helper
+    assert "if _solaredge_force_dispatch_active(entry_data):" in handler
+    assert '"active force dispatch"' in handler
+    assert "SolarEdge curtailment skipped while force dispatch is active" in handler
+
+
+def test_solaredge_force_dispatch_releases_active_power_curtailment_first():
+    charge_handler = _function_source("handle_force_charge")
+    discharge_handler = _function_source("handle_force_discharge")
+
+    assert charge_handler.count("await _restore_solaredge_curtailment_for_dispatch(") >= 2
+    optimizer_charge_release = charge_handler.index(
+        'await _restore_solaredge_curtailment_for_dispatch(\n                    entry_data,\n                    "optimizer force charge",'
+    )
+    optimizer_charge_call = charge_handler.index(
+        "await solaredge_coord.force_charge(duration, power_w=power_w)"
+    )
+    manual_charge_release = charge_handler.rindex(
+        'await _restore_solaredge_curtailment_for_dispatch(\n                    entry_data,\n                    "force charge",'
+    )
+    manual_charge_call = charge_handler.rindex(
+        "charge_result = await solaredge_coord.force_charge(duration, power_w=power_w)"
+    )
+
+    assert discharge_handler.count("await _restore_solaredge_curtailment_for_dispatch(") >= 2
+    optimizer_discharge_release = discharge_handler.index(
+        'await _restore_solaredge_curtailment_for_dispatch(\n                    entry_data,\n                    "optimizer force discharge",'
+    )
+    optimizer_discharge_call = discharge_handler.index(
+        "await solaredge_coord.force_discharge(duration, power_w=power_w)"
+    )
+    manual_discharge_release = discharge_handler.rindex(
+        'await _restore_solaredge_curtailment_for_dispatch(\n                    entry_data,\n                    "force discharge",'
+    )
+    manual_discharge_call = discharge_handler.rindex(
+        "discharge_result = await solaredge_coord.force_discharge(duration, power_w=power_w)"
+    )
+
+    assert optimizer_charge_release < optimizer_charge_call
+    assert manual_charge_release < manual_charge_call
+    assert optimizer_discharge_release < optimizer_discharge_call
+    assert manual_discharge_release < manual_discharge_call
+
+
 def test_periodic_solar_curtailment_routes_to_sungrow_before_tesla_path():
     handler = _function_source("handle_solar_curtailment_check")
     pre_tesla_path = handler[: handler.index("if token_getter is None:")]
