@@ -2027,7 +2027,6 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           gap: 8px;
           max-height: min(58vh, 620px);
           overflow-y: auto;
-          overscroll-behavior: contain;
           padding-right: 2px;
           scrollbar-gutter: stable;
         }

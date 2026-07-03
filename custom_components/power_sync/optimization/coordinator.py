@@ -4344,18 +4344,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _export_command_power_w(self, action: Any) -> float:
         """Return the hardware export command power for an optimizer action."""
         command_w = float(self._config.max_discharge_w)
-        if self.battery_system == "goodwe":
-            try:
-                discharge_w = float(getattr(action, "battery_discharge_w", 0.0) or 0.0)
-            except (TypeError, ValueError):
-                discharge_w = 0.0
-            if discharge_w > 0:
-                return min(command_w, discharge_w)
         if self._supports_target_export_power():
             try:
                 requested_w = float(getattr(action, "power_w", 0.0) or 0.0)
             except (TypeError, ValueError):
                 requested_w = 0.0
+            if requested_w <= 0 and self.battery_system == "goodwe":
+                try:
+                    requested_w = float(
+                        getattr(action, "battery_discharge_w", 0.0) or 0.0
+                    )
+                except (TypeError, ValueError):
+                    requested_w = 0.0
             if requested_w > 0:
                 command_w = min(command_w, requested_w)
             if self._config.max_grid_export_w is not None:

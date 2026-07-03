@@ -4177,7 +4177,7 @@ def test_export_command_power_respects_grid_export_cap(opt_module):
     assert battery.force_discharge_calls == [(15, 5000, False, None)]
 
 
-def test_goodwe_export_command_uses_planned_battery_discharge(opt_module):
+def test_goodwe_export_command_uses_site_export_target_for_ems_limit(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
     coordinator.battery_system = "goodwe"
@@ -4197,7 +4197,7 @@ def test_goodwe_export_command_uses_planned_battery_discharge(opt_module):
 
     asyncio.run(coordinator._execute_optimizer_action(actions[0]))
 
-    assert battery.force_discharge_calls == [(15, 7000, False, None)]
+    assert battery.force_discharge_calls == [(15, 5000, False, None)]
 
 
 @pytest.mark.parametrize(

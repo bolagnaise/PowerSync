@@ -65,6 +65,7 @@ def test_optimizer_action_plan_renders_full_scrollable_list():
     assert "overflow-y: auto;" in actions_css
     assert "max-height: min(58vh, 620px);" in actions_css
     assert "scrollbar-gutter: stable;" in actions_css
+    assert "overscroll-behavior: contain;" not in actions_css
     assert "actions.map(action =>" in source
     assert "actions.slice(0, 10)" not in source
     assert "more actions" not in source
