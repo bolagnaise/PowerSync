@@ -122,6 +122,15 @@ def _as_ha_local_naive(value: datetime) -> datetime:
     return value.replace(tzinfo=None)
 
 
+def _parse_forecast_hour_local_naive(value: str) -> Optional[datetime]:
+    """Parse a forecast timestamp as Home Assistant local time without tzinfo."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return _as_ha_local_naive(parsed)
+
+
 def _configured_ble_prefixes(
     config_entry: Optional["ConfigEntry"],
     vehicle_vin: Optional[str] = None,
@@ -2306,7 +2315,9 @@ class ChargingPlanner:
                 break
 
             if forecast.surplus_kw >= 1.0:  # Minimum 1kW to charge
-                hour_dt = datetime.fromisoformat(forecast.hour)
+                hour_dt = _parse_forecast_hour_local_naive(forecast.hour)
+                if hour_dt is None:
+                    continue
                 hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
 
                 # Dynamic power sharing: calculate available power for EV
@@ -2329,7 +2340,7 @@ class ChargingPlanner:
                 end_dt = hour_dt + timedelta(hours=1)
 
                 windows.append(PlannedChargingWindow(
-                    start_time=forecast.hour,
+                    start_time=hour_dt.isoformat(),
                     end_time=end_dt.isoformat(),
                     source="solar_surplus",
                     estimated_power_kw=available_power,
@@ -2388,7 +2399,9 @@ class ChargingPlanner:
                 break
 
             if forecast.surplus_kw >= 1.0:
-                hour_dt = datetime.fromisoformat(forecast.hour)
+                hour_dt = _parse_forecast_hour_local_naive(forecast.hour)
+                if hour_dt is None:
+                    continue
                 hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
 
                 # Dynamic power sharing with battery
@@ -2406,7 +2419,7 @@ class ChargingPlanner:
                 end_dt = hour_dt + timedelta(hours=1)
 
                 windows.append(PlannedChargingWindow(
-                    start_time=forecast.hour,
+                    start_time=hour_dt.isoformat(),
                     end_time=end_dt.isoformat(),
                     source="solar_surplus",
                     estimated_power_kw=available_power,
@@ -2437,7 +2450,9 @@ class ChargingPlanner:
                 if already_covered:
                     continue
 
-                hour_dt = datetime.fromisoformat(price_data.hour)
+                hour_dt = _parse_forecast_hour_local_naive(price_data.hour)
+                if hour_dt is None:
+                    continue
                 hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
 
                 # Skip hours that fall inside a demand window (unless override set)
@@ -2463,7 +2478,7 @@ class ChargingPlanner:
                 reason = "offpeak_rate" if price_data.period == "offpeak" else "cheap_rate"
 
                 windows.append(PlannedChargingWindow(
-                    start_time=price_data.hour,
+                    start_time=hour_dt.isoformat(),
                     end_time=end_dt.isoformat(),
                     source=source,
                     estimated_power_kw=available_power,
@@ -2559,11 +2574,10 @@ class ChargingPlanner:
 
         for i, price in enumerate(price_forecast):
             try:
-                hour_dt = datetime.fromisoformat(price.hour)
-                # Price hours are naive local time - strip any timezone to ensure naive comparison
-                if hour_dt.tzinfo is not None:
-                    hour_dt = hour_dt.replace(tzinfo=None)
-            except:
+                hour_dt = _parse_forecast_hour_local_naive(price.hour)
+                if hour_dt is None:
+                    continue
+            except Exception:
                 continue
 
             # Skip if past departure time (compare naive local times)
@@ -2591,8 +2605,9 @@ class ChargingPlanner:
             # Solar surplus is free
             if solar_available >= 1.0:
                 charging_options.append({
-                    "hour": price.hour,
+                    "hour": hour_dt.isoformat(),
                     "hour_dt": hour_dt,
+                    "end_dt": hour_end,
                     "source": "solar_surplus",
                     "power_kw": min(solar_available, charger_power_kw),
                     "cost_cents": 0,  # Solar is free
@@ -2615,8 +2630,9 @@ class ChargingPlanner:
 
             if grid_power > 0.5 and not grid_blocked:  # At least 0.5kW from grid
                 charging_options.append({
-                    "hour": price.hour,
+                    "hour": hour_dt.isoformat(),
                     "hour_dt": hour_dt,
+                    "end_dt": hour_end,
                     "source": f"grid_{price.period}",
                     "power_kw": grid_power,
                     "cost_cents": price.import_cents,
@@ -2694,7 +2710,7 @@ class ChargingPlanner:
             usable = option.get("usable_fraction", 1.0)
             energy_this_hour = min(option["power_kw"] * usable, energy_needed_kwh - energy_allocated)
             hour_dt = option["hour_dt"]
-            end_dt = hour_dt + timedelta(hours=1)
+            end_dt = option.get("end_dt", hour_dt + timedelta(hours=1))
 
             windows.append(PlannedChargingWindow(
                 start_time=option["hour"],
@@ -2810,10 +2826,9 @@ class ChargingPlanner:
             if energy_allocated >= energy_needed_kwh:
                 break
 
-            hour_dt = datetime.fromisoformat(surplus.hour)
-            # Price hours are naive local time - strip any timezone
-            if hour_dt.tzinfo is not None:
-                hour_dt = hour_dt.replace(tzinfo=None)
+            hour_dt = _parse_forecast_hour_local_naive(surplus.hour)
+            if hour_dt is None:
+                continue
 
             if target_time_local and hour_dt >= target_time_local:
                 continue  # Skip hours that start at or after deadline
@@ -2849,7 +2864,7 @@ class ChargingPlanner:
             energy_this_hour = min(energy_this_hour, energy_needed_kwh - energy_allocated)
 
             windows.append(PlannedChargingWindow(
-                start_time=surplus.hour,
+                start_time=hour_dt.isoformat(),
                 end_time=end_dt.isoformat(),
                 source=source,
                 estimated_power_kw=charger_power_kw,

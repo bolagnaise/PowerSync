@@ -218,6 +218,66 @@ def test_cost_optimized_uses_ha_local_clock_for_window_filtering(monkeypatch):
     assert plan.estimated_grid_kwh > 0
 
 
+def test_cost_optimized_converts_utc_forecast_rows_before_filtering(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda *args, **kwargs: datetime(2026, 7, 3, 21, 19, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    price_forecast = [
+        ev_planner.PriceForecast(
+            hour="2026-07-03T12:00:00+00:00",
+            import_cents=16.0,
+            export_cents=5.0,
+            period="offpeak",
+        ),
+        ev_planner.PriceForecast(
+            hour="2026-07-03T13:00:00+00:00",
+            import_cents=12.0,
+            export_cents=5.0,
+            period="offpeak",
+        ),
+    ]
+    surplus_forecast = [
+        ev_planner.SurplusForecast(
+            hour=price.hour,
+            solar_kw=0.0,
+            load_kw=0.0,
+            surplus_kw=0.0,
+            confidence=0.8,
+        )
+        for price in price_forecast
+    ]
+
+    plan = asyncio.run(
+        planner._plan_cost_optimized(
+            vehicle_id=VIN,
+            current_soc=68,
+            target_soc=90,
+            target_time=datetime(2026, 7, 4, 7, 30, tzinfo=brisbane_tz),
+            energy_needed_kwh=10.0,
+            charger_power_kw=7.36,
+            surplus_forecast=surplus_forecast,
+            price_forecast=price_forecast,
+        )
+    )
+
+    assert len(plan.windows) == 2
+    assert plan.windows[0].start_time == "2026-07-03T22:00:00"
+    assert plan.windows[1].start_time == "2026-07-03T23:00:00"
+    assert plan.windows[1].price_cents_kwh == 12.0
+    assert plan.estimated_grid_kwh > 0
+
+
 class _FakeConfigEntry:
     entry_id = "entry-1"
     data = {}

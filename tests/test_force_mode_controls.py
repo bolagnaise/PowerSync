@@ -164,7 +164,18 @@ def test_preserve_charge_backup_reserve_write_does_not_replace_user_reserve():
 
     assert function_source is not None
     assert '"automation_preserve_charge"' in function_source
-    assert 'reserve_source in ("optimizer", "automation_preserve_charge")' in function_source
+    assert 'reserve_source in ("optimizer", "automation_preserve_charge", "hold_soc")' in function_source
+
+
+def test_tesla_hold_soc_backup_reserve_write_does_not_replace_user_reserve():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_hold_battery_soc")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert 'DOMAIN, SERVICE_SET_BACKUP_RESERVE' in function_source
+    assert '{"percent": target_reserve, "source": "hold_soc"}' in function_source
 
 
 def test_monitoring_mode_optimizer_shutdown_releases_active_control():
@@ -1111,7 +1122,7 @@ def test_optimizer_backup_reserve_writes_do_not_persist_as_user_reserve():
 
     assert function_source is not None
     assert 'reserve_source = call.data.get("source")' in function_source
-    assert 'reserve_source in ("optimizer", "automation_preserve_charge")' in function_source
+    assert 'reserve_source in ("optimizer", "automation_preserve_charge", "hold_soc")' in function_source
     assert "if not optimizer_write:" in function_source
     persistence_branch = function_source.split("if not optimizer_write:", 1)[1]
     assert '"_user_backup_reserve": percent' in persistence_branch

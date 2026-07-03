@@ -28152,7 +28152,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 await hass.services.async_call(
                     DOMAIN, SERVICE_SET_BACKUP_RESERVE,
-                    {"percent": target_reserve},
+                    {"percent": target_reserve, "source": "hold_soc"},
                     blocking=True,
                 )
                 await hass.services.async_call(
@@ -29031,7 +29031,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 and getattr(opt_coord, "_idle_reserve_adjustment", False)
             )
             optimizer_write = (
-                reserve_source in ("optimizer", "automation_preserve_charge")
+                reserve_source in ("optimizer", "automation_preserve_charge", "hold_soc")
                 or optimizer_is_idle
             )
             if not optimizer_write:
