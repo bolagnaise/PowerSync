@@ -550,6 +550,31 @@ def test_solaredge_force_charge_writes_remote_charge_entities_and_restores():
     assert hass.states.get("select.solaredge_storage_command_mode").state == "Stop"
 
 
+def test_solaredge_restore_normal_discards_saved_active_dispatch_snapshot():
+    hass = _SEHass()
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    controller._saved_control_state = {
+        "storage_control_mode": "Remote Control",
+        "storage_command_mode": "Charge",
+        "charge_power_limit": "4200",
+        "discharge_power_limit": "0",
+        "command_timeout": "5400",
+        "allow_grid_charge": "on",
+    }
+
+    assert asyncio.run(controller.restore_normal())
+
+    assert hass.states.get("select.solaredge_storage_control_mode").state == (
+        "Maximize Self Consumption"
+    )
+    assert hass.states.get("select.solaredge_storage_command_mode").state == "Stop"
+    assert hass.states.get("number.solaredge_storage_charge_limit").state == "0.0"
+    assert hass.states.get("number.solaredge_storage_discharge_limit").state == "0.0"
+    assert hass.states.get("number.solaredge_storage_command_timeout").state == "0.0"
+
+
 def test_solaredge_force_discharge_writes_remote_discharge_entities():
     hass = _SEHass()
     controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")

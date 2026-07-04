@@ -725,10 +725,17 @@ class SolarEdgeEnergyController:
         """Restore SolarEdge storage controls to the saved or self-use state."""
         self._ensure_entity_map()
         if self._saved_control_state:
-            ok = await self._restore_saved_control_state()
-            if ok:
+            if self._saved_control_state_contains_active_dispatch():
+                _LOGGER.info(
+                    "SolarEdge saved control state contains active dispatch; "
+                    "falling back to self-consumption restore"
+                )
                 self._saved_control_state = None
-            return ok
+            else:
+                ok = await self._restore_saved_control_state()
+                if ok:
+                    self._saved_control_state = None
+                return ok
 
         ok = True
         ok &= await self._set_number_if_mapped("charge_power_limit", 0)
@@ -737,6 +744,24 @@ class SolarEdgeEnergyController:
         ok &= await self._set_select_by_alias("storage_command_mode", _IDLE_OPTIONS)
         ok &= await self._set_select_by_alias("storage_control_mode", _SELF_USE_OPTIONS)
         return bool(ok)
+
+    def _saved_control_state_contains_active_dispatch(self) -> bool:
+        """Return true when a saved snapshot would reapply forced dispatch."""
+        saved = self._saved_control_state or {}
+
+        command = _normalize_option(str(saved.get("storage_command_mode") or ""))
+        active_commands = {
+            _normalize_option(alias)
+            for alias in (*_CHARGE_OPTIONS, *_DISCHARGE_OPTIONS)
+        }
+        if command in active_commands:
+            return True
+
+        try:
+            timeout = float(saved.get("command_timeout") or 0)
+        except (TypeError, ValueError):
+            timeout = 0
+        return timeout > 0
 
     async def set_backup_reserve(self, percent: int) -> bool:
         """Set SolarEdge backup reserve / minimum SOC when exposed by HA."""
