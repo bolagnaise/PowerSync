@@ -28,6 +28,8 @@ from .schedule_reader import ScheduleAction, OptimizationSchedule
 
 _LOGGER = logging.getLogger(__name__)
 
+BELOW_RESERVE_RECOVERY_HOLD_MARGIN_SOC = 0.02
+
 # Try to import the HiGHS solver; fall back to greedy if unavailable.
 try:
     import highspy
@@ -2822,6 +2824,25 @@ class BatteryOptimizer:
         optimizer_reserve = max(0.0, min(1.0, self.backup_reserve))
         self_consumption_floor = self._natural_self_consumption_floor(soc_0)
 
+        def _future_grid_charge_planned(start_idx: int) -> bool:
+            for future_idx in range(start_idx + 1, n):
+                if future_idx >= len(battery_charge) or future_idx >= len(grid_import):
+                    break
+                future_charge_kw = battery_charge[future_idx]
+                future_import_kw = grid_import[future_idx]
+                if future_charge_kw <= threshold_kw:
+                    continue
+                if (
+                    import_prices is not None
+                    and future_idx < len(import_prices)
+                    and import_prices[future_idx] <= 0.001
+                ):
+                    return True
+                net_load_kw = max(0.0, load[future_idx] - solar[future_idx])
+                if future_import_kw > net_load_kw + threshold_kw:
+                    return True
+            return False
+
         for t in range(n):
             ts = (
                 schedule_timestamps[t]
@@ -2906,6 +2927,18 @@ class BatteryOptimizer:
                     else:
                         action = "self_consumption"
                 elif meaningful_hold:
+                    action = "idle"
+                elif (
+                    soc <= optimizer_reserve
+                    and soc
+                    <= self_consumption_floor + BELOW_RESERVE_RECOVERY_HOLD_MARGIN_SOC
+                    and _future_grid_charge_planned(t)
+                ):
+                    # The LP is deliberately importing to hold a below-reserve
+                    # battery near the hardware floor until a planned recovery
+                    # charge. Mapping that hold back to native self-consumption
+                    # lets the inverter drain through the floor before the
+                    # later charge starts.
                     action = "idle"
                 else:
                     # At or below the optimizer reserve, stay in

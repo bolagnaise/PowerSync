@@ -240,6 +240,42 @@ def test_self_consumption_schedule_uses_hardware_floor_when_below_optimizer_rese
     assert schedule.actions[-1].soc == pytest.approx(0.05, abs=0.001)
 
 
+def test_below_reserve_lp_hold_preserved_before_planned_charge(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=42000,
+        max_charge_w=10000,
+        max_discharge_w=10000,
+        backup_reserve=0.35,
+        hardware_reserve=0.10,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+    n = 12
+    battery_charge = [0.0] * n
+    battery_charge[4] = 10.0
+    grid_import = [1.0] * n
+    grid_import[4] = 11.0
+
+    schedule = optimizer._build_schedule(
+        n=n,
+        grid_import=grid_import,
+        grid_export=[0.0] * n,
+        battery_charge=battery_charge,
+        battery_discharge=[0.0] * n,
+        solar=[0.0] * n,
+        load=[1.0] * n,
+        soc_0=0.11,
+        import_prices=[0.30] * n,
+        export_prices=[0.0] * n,
+    )
+
+    assert schedule.actions[0].action == "idle"
+    assert schedule.actions[0].soc == pytest.approx(0.11, abs=0.001)
+    assert schedule.actions[4].action == "charge"
+
+
 def test_pre_window_target_is_capped_by_grid_import_limit(
     battery_optimizer_module,
 ):
