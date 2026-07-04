@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import ast
 from pathlib import Path
+import textwrap
 from types import SimpleNamespace
 
 
@@ -328,6 +330,31 @@ def test_ac_curtailment_live_status_uses_non_tesla_coordinator_before_api():
     assert live_status.index("cached_status = _get_cached_live_status()") < live_status.index(
         "if not callable(token_getter):"
     )
+
+
+def test_ac_coupled_curtails_zero_export_when_exporting_and_battery_not_absorbing():
+    async def get_live_status():
+        return {
+            "solar_power": 3958,
+            "battery_power": 5,
+            "grid_power": -2851.2,
+            "load_power": 1112,
+            "battery_soc": 98.9,
+        }
+
+    namespace = {
+        "CONF_INVERTER_RESTORE_SOC": "inverter_restore_soc",
+        "DEFAULT_INVERTER_RESTORE_SOC": 90,
+        "_LOGGER": SimpleNamespace(
+            debug=lambda *args, **kwargs: None,
+            info=lambda *args, **kwargs: None,
+        ),
+        "entry": SimpleNamespace(options={}, data={}),
+        "get_live_status": get_live_status,
+    }
+    exec(textwrap.dedent(_function_source("should_curtail_ac_coupled")), namespace)
+
+    assert asyncio.run(namespace["should_curtail_ac_coupled"](20.09, 0.0)) is True
 
 
 def test_solar_curtailment_is_not_blocked_by_monitoring_mode():
