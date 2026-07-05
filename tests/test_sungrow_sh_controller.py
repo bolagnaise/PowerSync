@@ -464,6 +464,7 @@ class _FakeSungrowController:
         self.fail_discharge_limit = False
         self._rate_limit_writable: bool | None = None
         self.force_discharge_result = True
+        self.disconnect_calls = 0
 
     async def __aenter__(self):
         return self
@@ -509,6 +510,9 @@ class _FakeSungrowController:
 
     async def get_battery_data(self) -> dict:
         return self.battery_data
+
+    async def disconnect(self) -> None:
+        self.disconnect_calls += 1
 
     @property
     def rate_limit_writable(self) -> bool | None:
@@ -1070,3 +1074,28 @@ def test_sungrow_coordinator_serializes_force_charge_with_modbus_lock():
     assert result
     assert fake_controller.charge_rate_limits == []
     assert fake_controller.force_charge_power_w == [12000]
+
+
+def test_sungrow_coordinator_shutdown_waits_for_modbus_lock():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_shutdown_while_locked():
+        fake_controller = _FakeSungrowController()
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.update_interval = object()
+
+        async with coordinator._modbus_lock:
+            task = asyncio.create_task(coordinator.async_shutdown())
+            await asyncio.sleep(0)
+            assert fake_controller.disconnect_calls == 0
+            assert coordinator.update_interval is None
+
+        await task
+        return fake_controller
+
+    try:
+        fake_controller = asyncio.run(run_shutdown_while_locked())
+    finally:
+        restore()
+
+    assert fake_controller.disconnect_calls == 1

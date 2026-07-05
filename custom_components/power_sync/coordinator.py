@@ -4939,8 +4939,10 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             return await self._controller.set_export_limit(watts)
 
     async def async_shutdown(self) -> None:
-        """Disconnect from Sungrow system on shutdown."""
-        await self._controller.disconnect()
+        """Stop polling and disconnect from Sungrow after active Modbus work."""
+        self.update_interval = None
+        async with self._modbus_lock:
+            await self._controller.disconnect()
 
 
 class DualSungrowCoordinator(DataUpdateCoordinator):

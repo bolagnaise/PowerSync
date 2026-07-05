@@ -33980,6 +33980,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except Exception as e:
                 _LOGGER.debug("Failed to flush lifetime totals for %s: %s", coord_key, e)
 
+    if sungrow_coordinator := entry_data.get("sungrow_coordinator"):
+        try:
+            await sungrow_coordinator.async_shutdown()
+            entry_data["sungrow_coordinator"] = None
+            _LOGGER.debug("Stopped Sungrow Modbus coordinator")
+        except Exception as e:
+            _LOGGER.debug("Sungrow coordinator shutdown error: %s", e)
+
     # Unload platforms
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
