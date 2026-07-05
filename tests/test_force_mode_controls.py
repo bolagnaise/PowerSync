@@ -100,6 +100,43 @@ def test_force_mode_persistence_uses_setup_store_reference():
     assert "await store.async_load()" in function_source
 
 
+def test_disabled_optimizer_self_heals_stale_idle_reserve_for_supported_batteries():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    helper = _find_function(
+        tree,
+        "_restore_disabled_optimizer_reserve_if_stale",
+    )
+    helper_source = ast.get_source_segment(source, helper)
+    setup = _find_function(tree, "async_setup_entry")
+    setup_source = ast.get_source_segment(source, setup)
+
+    assert helper_source is not None
+    assert setup_source is not None
+    assert '"tesla", "sigenergy", "goodwe", BATTERY_SYSTEM_CUSTOM' in helper_source
+    assert "hasattr(battery_coordinator, \"set_backup_reserve\")" in helper_source
+    assert "live_reserve <= target_reserve + 5" in helper_source
+    assert "soc_near_live_reserve" in helper_source
+    assert "grid_importing" in helper_source
+    assert "battery_idle" in helper_source
+    assert "restore_work_mode_from_idle" in helper_source
+    assert "restore_normal" in helper_source
+    assert "await battery_coordinator.set_backup_reserve(target_reserve)" in helper_source
+    assert "not optimization_enabled" in setup_source
+    assert "disabled_optimizer_cleanup_targets" in setup_source
+    for battery_system in (
+        "sungrow",
+        "foxess",
+        "solax",
+        "fronius_reserva",
+        "neovolt",
+        "solaredge",
+        "anker_solix",
+    ):
+        assert f'"{battery_system}"' in setup_source
+    assert "_restore_disabled_optimizer_reserve_if_stale(" in setup_source
+
+
 def test_sungrow_force_charge_timer_preserves_optimizer_charge_window():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

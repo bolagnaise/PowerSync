@@ -61,6 +61,157 @@ def _optimizer_settings_groups() -> dict[str, Any]:
     }
 
 
+def _entry_percent_int(value: Any) -> int | None:
+    """Parse config-entry ratio/percent values into an integer percent."""
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 1:
+        parsed *= 100
+    return max(0, min(100, int(round(parsed))))
+
+
+def _disabled_optimizer_backup_reserve_target(entry: Any) -> tuple[int | None, str]:
+    """Return the user reserve target when the PowerSync optimizer is disabled."""
+    if entry is None:
+        return None, "missing config entry"
+
+    data = getattr(entry, "data", {}) or {}
+    options = getattr(entry, "options", {}) or {}
+    candidates = (
+        (
+            data.get(
+                CONF_HARDWARE_BACKUP_RESERVE,
+                options.get(CONF_HARDWARE_BACKUP_RESERVE),
+            ),
+            "hardware backup reserve config",
+        ),
+        (options.get("_user_backup_reserve"), "persisted user backup reserve"),
+        (
+            options.get(
+                CONF_OPTIMIZATION_MANUAL_RESERVE,
+                data.get(CONF_OPTIMIZATION_MANUAL_RESERVE),
+            ),
+            "manual optimizer reserve",
+        ),
+        (
+            data.get(
+                CONF_OPTIMIZATION_BACKUP_RESERVE,
+                options.get(CONF_OPTIMIZATION_BACKUP_RESERVE),
+            ),
+            "optimizer floor config",
+        ),
+    )
+
+    for value, source in candidates:
+        target = _entry_percent_int(value)
+        if target is not None:
+            return target, source
+
+    return _entry_percent_int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE), "optimizer floor"
+
+
+async def _restore_disabled_optimizer_reserve_if_stale(
+    entry: Any,
+    battery_coordinator: Any,
+    battery_system: str,
+    *,
+    force_charge_state: dict[str, Any] | None = None,
+    force_discharge_state: dict[str, Any] | None = None,
+    hold_soc_state: dict[str, Any] | None = None,
+) -> bool:
+    """Undo a stale IDLE reserve left behind while the optimizer is disabled."""
+    if not battery_coordinator:
+        return False
+    if battery_system in {"tesla", "sigenergy", "goodwe", BATTERY_SYSTEM_CUSTOM}:
+        return False
+    if (
+        (force_charge_state or {}).get("active")
+        or (force_discharge_state or {}).get("active")
+        or (hold_soc_state or {}).get("active")
+    ):
+        return False
+
+    target_reserve, target_source = _disabled_optimizer_backup_reserve_target(entry)
+    if target_reserve is None:
+        return False
+
+    if not hasattr(battery_coordinator, "set_backup_reserve"):
+        return False
+
+    data = getattr(battery_coordinator, "data", None) or {}
+    live_reserve = _entry_percent_int(
+        data.get("backup_reserve")
+        if data.get("backup_reserve") is not None
+        else data.get("min_soc")
+    )
+    if live_reserve is None or live_reserve <= target_reserve + 5:
+        return False
+
+    try:
+        soc = float(
+            data.get("battery_level")
+            if data.get("battery_level") is not None
+            else data.get("battery_soc")
+        )
+        battery_kw = abs(float(data.get("battery_power", 0) or 0))
+        grid_kw = float(data.get("grid_power", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+
+    soc_near_live_reserve = abs(soc - live_reserve) <= 2.0
+    grid_importing = grid_kw >= 0.5
+    battery_idle = battery_kw <= 0.15
+    if not (soc_near_live_reserve and grid_importing and battery_idle):
+        return False
+
+    charge_cmd = data.get("charge_cmd")
+    try:
+        charge_cmd_int = int(charge_cmd) if charge_cmd is not None else None
+    except (TypeError, ValueError):
+        charge_cmd_int = None
+
+    restore_method = getattr(battery_coordinator, "restore_work_mode_from_idle", None)
+    if restore_method is None and charge_cmd_int in (0xAA, 0xBB):
+        restore_method = getattr(battery_coordinator, "restore_normal", None)
+
+    if restore_method is not None:
+        if not await restore_method():
+            _LOGGER.warning(
+                "Disabled optimizer %s reserve cleanup: mode restore failed; "
+                "leaving reserve at %d%%",
+                battery_system,
+                live_reserve,
+            )
+            return False
+
+    if not await battery_coordinator.set_backup_reserve(target_reserve):
+        _LOGGER.warning(
+            "Disabled optimizer %s reserve cleanup: failed to restore "
+            "reserve from %d%% to %d%%",
+            battery_system,
+            live_reserve,
+            target_reserve,
+        )
+        return False
+
+    refresh = getattr(battery_coordinator, "async_request_refresh", None)
+    if refresh:
+        await refresh()
+    _LOGGER.info(
+        "Disabled optimizer %s reserve cleanup: restored stale reserve "
+        "from %d%% to %d%% using %s",
+        battery_system,
+        live_reserve,
+        target_reserve,
+        target_source,
+    )
+    return True
+
+
 def _parse_battery_health_timestamp(value: Any) -> datetime | None:
     """Parse a battery-health scan timestamp into a comparable datetime."""
     if not value:
@@ -32865,6 +33016,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     else:
         if optimization_provider == OPT_PROVIDER_POWERSYNC and not optimization_enabled:
             _LOGGER.info("Smart Optimization is configured but DISABLED by user toggle")
+            disabled_optimizer_cleanup_targets = (
+                ("sungrow", sungrow_coordinator if is_sungrow else None),
+                ("foxess", foxess_coordinator if is_foxess else None),
+                ("esy_sunhome", esy_sunhome_coordinator if is_esy_sunhome else None),
+                ("solax", solax_coordinator if is_solax else None),
+                ("saj_h2", saj_h2_coordinator if is_saj_h2 else None),
+                (
+                    "fronius_reserva",
+                    fronius_reserva_coordinator if is_fronius_reserva else None,
+                ),
+                ("neovolt", neovolt_coordinator if is_neovolt else None),
+                ("solaredge", solaredge_coordinator if is_solaredge else None),
+                ("anker_solix", anker_solix_coordinator if is_anker_solix else None),
+            )
+            for cleanup_system, cleanup_coordinator in disabled_optimizer_cleanup_targets:
+                if not cleanup_coordinator:
+                    continue
+                try:
+                    await _restore_disabled_optimizer_reserve_if_stale(
+                        entry,
+                        cleanup_coordinator,
+                        cleanup_system,
+                        force_charge_state=force_charge_state,
+                        force_discharge_state=force_discharge_state,
+                        hold_soc_state=hold_soc_state,
+                    )
+                except Exception as err:
+                    _LOGGER.debug(
+                        "Disabled optimizer %s reserve cleanup skipped: %s",
+                        cleanup_system,
+                        err,
+                    )
         else:
             _LOGGER.info("Using battery's native optimization (Smart Optimization not configured)")
 
