@@ -4205,6 +4205,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
     _TEMPORARY_DISCHARGE_CAP_MAX_KW = 0.1
     _OPTIMIZATION_MAX_DISCHARGE_W_KEY = "optimization_max_discharge_w"
+    _BLOCKED_DISCHARGE_IMPORT_KW = 0.5
+    _BLOCKED_DISCHARGE_BATTERY_KW = 0.1
+    _BLOCKED_DISCHARGE_RESERVE_MARGIN = 2.0
 
     def __init__(
         self,
@@ -4548,6 +4551,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 limit_changed = await self._controller.set_discharge_rate_limit(normal_limit_kw)
                 if not limit_changed:
                     if getattr(self._controller, "rate_limit_writable", None) is False:
+                        self._pre_control_discharge_limit_kw = None
                         _LOGGER.warning(
                             "Sungrow spread export: discharge limit register is not writable; "
                             "continuing with grid export limit only"
@@ -4786,8 +4790,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             return await self._restore_stale_low_discharge_limit()
 
         if getattr(self._controller, "rate_limit_writable", None) is False:
-            self._pre_control_discharge_limit_kw = None
-            return True
+            _LOGGER.debug(
+                "Retrying Sungrow discharge limit restore despite a previous failed write"
+            )
 
         restore_limit_kw = await self._resolve_normal_discharge_limit_kw()
         if restore_limit_kw is None:
@@ -4800,33 +4805,99 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         limit_ok = await self._controller.set_discharge_rate_limit(restore_limit_kw)
         if limit_ok:
             self._pre_control_discharge_limit_kw = None
+        else:
+            _LOGGER.warning(
+                "Sungrow discharge limit restore to %.2fkW failed; keeping restore target for retry",
+                restore_limit_kw,
+            )
         return bool(limit_ok)
 
     async def _restore_stale_low_discharge_limit(self) -> bool:
         """Repair a stale near-zero Sungrow discharge cap after reload/restart."""
         current_limit_kw = await self._read_current_discharge_limit_kw()
+        blocked_without_cap_read = (
+            current_limit_kw is None and self._discharge_appears_blocked_after_restore()
+        )
         if (
-            current_limit_kw is None
-            or current_limit_kw <= 0
-            or current_limit_kw > self._TEMPORARY_DISCHARGE_CAP_MAX_KW
+            (current_limit_kw is None and not blocked_without_cap_read)
+            or (current_limit_kw is not None and current_limit_kw <= 0)
+            or (
+                current_limit_kw is not None
+                and current_limit_kw > self._TEMPORARY_DISCHARGE_CAP_MAX_KW
+            )
         ):
             return True
 
         restore_limit_kw = await self._resolve_normal_discharge_limit_kw()
+        current_limit_label = (
+            f"{current_limit_kw:.2f}kW"
+            if current_limit_kw is not None
+            else "unknown"
+        )
+        restore_source_label = (
+            current_limit_label
+            if current_limit_kw is not None
+            else "from blocked telemetry"
+        )
         if restore_limit_kw is None or restore_limit_kw <= self._TEMPORARY_DISCHARGE_CAP_MAX_KW:
             _LOGGER.warning(
-                "Sungrow discharge limit is still %.2fkW after restore, "
+                "Sungrow discharge limit is still %s after restore, "
                 "but no safe normal discharge limit could be resolved",
-                current_limit_kw,
+                current_limit_label,
             )
             return True
 
         _LOGGER.info(
-            "Restoring stale Sungrow discharge cap %.2fkW to %.2fkW",
-            current_limit_kw,
+            "Restoring stale Sungrow discharge cap %s to %.2fkW",
+            restore_source_label,
             restore_limit_kw,
         )
-        return bool(await self._controller.set_discharge_rate_limit(restore_limit_kw))
+        self._pre_control_discharge_limit_kw = restore_limit_kw
+        limit_ok = await self._controller.set_discharge_rate_limit(restore_limit_kw)
+        if limit_ok:
+            self._pre_control_discharge_limit_kw = None
+        else:
+            _LOGGER.warning(
+                "Sungrow stale discharge cap repair to %.2fkW failed; keeping restore target for retry",
+                restore_limit_kw,
+            )
+        return bool(limit_ok)
+
+    def _discharge_appears_blocked_after_restore(self) -> bool:
+        """Return True when self-consumption telemetry looks discharge-capped.
+
+        Some SH10RS/SBH firmware does not expose the writable max-discharge
+        register, so we cannot always read the stale 10 W cap directly.
+        """
+        coord_data = getattr(self, "data", None) or {}
+
+        def read_float(*keys: str) -> float | None:
+            for key in keys:
+                try:
+                    value = coord_data.get(key)
+                    if value is None:
+                        continue
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        battery_kw = read_float("battery_power", "battery_power_kw")
+        grid_kw = read_float("grid_power", "grid_power_kw")
+        soc = read_float("battery_level", "battery_soc")
+        reserve = read_float("backup_reserve", "min_soc")
+
+        if battery_kw is None or grid_kw is None or soc is None:
+            return False
+        if soc <= 0:
+            return False
+        if reserve is not None and soc <= reserve + self._BLOCKED_DISCHARGE_RESERVE_MARGIN:
+            return False
+
+        return (
+            abs(battery_kw) <= self._BLOCKED_DISCHARGE_BATTERY_KW
+            and grid_kw >= self._BLOCKED_DISCHARGE_IMPORT_KW
+        )
 
     async def _read_current_discharge_limit_kw(self) -> float | None:
         """Return the current Sungrow discharge cap from coordinator or live data."""
