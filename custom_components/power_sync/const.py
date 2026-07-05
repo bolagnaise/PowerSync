@@ -1087,6 +1087,7 @@ CONF_PEA_CUSTOM_VALUE = "pea_custom_value"
 CONF_FP_NETWORK = "fp_network"                # DNSP display name (e.g. "SAPN")
 CONF_FP_TARIFF_CODE = "fp_tariff_code"        # Tariff code (e.g. "RESELE")
 CONF_FP_TWAP_OVERRIDE = "fp_twap_override"    # Manual TWAP override (c/kWh)
+CONF_FP_BILLING_DAY = "fp_billing_day"        # Billing-period start day-of-month (1-28) for TWAP anchoring
 CONF_FP_AMBER_MARKUP = "fp_amber_markup"      # Amber comparison markup (c/kWh)
 
 # PEA Constants

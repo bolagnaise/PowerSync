@@ -1748,6 +1748,7 @@
         "title": "Flow Power advanced options",
         "description": "Advanced network tariff overrides. Most users do not need to change these settings.",
         "data": {
+          "fp_billing_day": "Billing day of month",
           "pea_custom_value": "Custom PEA override",
           "network_use_manual_rates": "Use manual network rates",
           "network_tariff_type": "Network tariff type",
@@ -1763,6 +1764,7 @@
           "network_include_gst": "Include GST (10%)"
         },
         "data_description": {
+          "fp_billing_day": "Day of the month your Flow Power billing period starts (1–28). Anchors the TWAP reference to your billing cycle so it converges to the price you're actually settled on. Default 1.",
           "pea_custom_value": "Override the calculated PEA with a fixed amount. Leave empty for automatic calculation.",
           "network_use_manual_rates": "Enter network tariff rates manually instead of using the automatic lookup.",
           "network_other_fees": "Additional per-kWh fees not covered by the network tariff (metering, environmental charges, etc.).",

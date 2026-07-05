@@ -9502,9 +9502,18 @@ class FlowPowerTWAPTracker:
     Fallback: PEA = wholesale - 8.0 - 1.7 when < 12 samples available
     """
 
-    def __init__(self, hass: HomeAssistant, region: str, entry_id: str) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        region: str,
+        entry_id: str,
+        billing_day: int = 1,
+    ) -> None:
         self.hass = hass
         self.region = region
+        # Day-of-month the billing period resets on. Clamped to 1-28 so the
+        # anchor is valid in every month (short Februaries included).
+        self.billing_day = max(1, min(int(billing_day or 1), 28))
         self._price_history: list[dict] = []
         self._store = Store(hass, 1, f"power_sync.flow_power_twap.{entry_id}")
         self._last_store_save: float | None = None
@@ -9519,11 +9528,16 @@ class FlowPowerTWAPTracker:
             self._prune_history()
             self._twap = self._calculate_twap()
             _LOGGER.info(
-                "Loaded TWAP history: %d samples over %.1f days, TWAP=%.2f c/kWh%s",
+                "Loaded TWAP history: %d samples over %.1f days, TWAP=%.2f c/kWh%s "
+                "(billing-anchored day %d: mtd=%s, trailing=%s, progress=%.0f%%)",
                 len(self._price_history),
                 self.twap_days,
                 self._twap if self._twap is not None else FLOW_POWER_MARKET_AVG,
                 " (fallback)" if self.using_fallback else "",
+                self.billing_day,
+                f"{self.mtd_twap:.2f}" if self.mtd_twap is not None else "n/a",
+                f"{self.trailing_twap:.2f}" if self.trailing_twap is not None else "n/a",
+                self.period_progress * 100,
             )
         self._loaded = True
 
@@ -9541,19 +9555,79 @@ class FlowPowerTWAPTracker:
             self.hass.async_create_task(self._async_save())
             self._last_store_save = now
 
+    def _billing_period_start_ts(self, now_ts: float | None = None) -> float:
+        """Epoch of the current billing period's local-midnight start.
+
+        The period starts on ``billing_day`` each month; if we're earlier in the
+        month than that day, the current period began last month.
+        """
+        now = (
+            dt_util.now()
+            if now_ts is None
+            else dt_util.as_local(dt_util.utc_from_timestamp(now_ts))
+        )
+        day = min(self.billing_day, 28)
+        if now.day >= day:
+            start = now.replace(day=day, hour=0, minute=0, second=0, microsecond=0)
+        else:
+            first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            prev_month_last = first - timedelta(days=1)
+            start = prev_month_last.replace(
+                day=day, hour=0, minute=0, second=0, microsecond=0
+            )
+        return start.timestamp()
+
+    def _mean_since(self, cutoff_ts: float) -> tuple[float | None, int]:
+        """Mean price (c/kWh) and sample count for samples at/after ``cutoff_ts``."""
+        prices = [e["price"] for e in self._price_history if e["ts"] >= cutoff_ts]
+        if not prices:
+            return None, 0
+        return round(sum(prices) / len(prices), 2), len(prices)
+
     def _prune_history(self) -> None:
-        """Remove entries older than the TWAP window."""
-        cutoff = time.time() - (DEFAULT_TWAP_WINDOW_DAYS * 86400)
+        """Drop samples we no longer need.
+
+        Retain the whole billing-period-to-date plus a trailing window (the
+        forward proxy for the remainder of the period), capped to bound storage.
+        """
+        now_ts = time.time()
+        period_elapsed_days = (now_ts - self._billing_period_start_ts(now_ts)) / 86400
+        retain_days = min(max(DEFAULT_TWAP_WINDOW_DAYS, period_elapsed_days) + 5, 45)
+        cutoff = now_ts - retain_days * 86400
         self._price_history = [
             entry for entry in self._price_history if entry["ts"] > cutoff
         ]
 
     def _calculate_twap(self) -> float | None:
-        """Calculate TWAP from price history. Returns None if insufficient data."""
+        """Billing-period-anchored TWAP reference.
+
+        Flow Power settles PEA against the time-weighted average price over the
+        billing period, not a flat trailing window. We blend billing-period-to-
+        date actuals with the trailing-window mean (a zero-dependency proxy for
+        the remainder of the period) weighted by how far through the period we
+        are. Early in the period this ~= the old trailing-30d behaviour (no
+        regression, stable); near period end it converges to the actual
+        billing-period TWAP the customer is billed on. Returns None when there is
+        not yet enough data to be meaningful.
+
+        (Future: swap the trailing-mean forward proxy for the live KWatch/
+        predispatch forecast mean over the remaining period.)
+        """
         if len(self._price_history) < MIN_TWAP_SAMPLES:
             return None
-        total = sum(entry["price"] for entry in self._price_history)
-        return round(total / len(self._price_history), 2)
+        now_ts = time.time()
+        period_start = self._billing_period_start_ts(now_ts)
+        trailing_mean, _ = self._mean_since(0.0)
+        if trailing_mean is None:
+            return None
+        mtd_mean, mtd_n = self._mean_since(period_start)
+        if mtd_mean is None or mtd_n < MIN_TWAP_SAMPLES:
+            # Too little billing-period data yet — lean on the trailing mean.
+            return trailing_mean
+        # Progress through the period, normalised to a nominal 30-day cycle.
+        elapsed = max(now_ts - period_start, 0.0)
+        w = min(elapsed / (DEFAULT_TWAP_WINDOW_DAYS * 86400), 1.0)
+        return round(w * mtd_mean + (1.0 - w) * trailing_mean, 2)
 
     async def _async_save(self) -> None:
         """Save price history to persistent storage."""
@@ -9591,3 +9665,21 @@ class FlowPowerTWAPTracker:
     def using_fallback(self) -> bool:
         """Return True if we're using the hardcoded fallback instead of dynamic TWAP."""
         return self._twap is None
+
+    @property
+    def mtd_twap(self) -> float | None:
+        """Billing-period-to-date time-weighted average price (c/kWh)."""
+        mean, _ = self._mean_since(self._billing_period_start_ts())
+        return mean
+
+    @property
+    def trailing_twap(self) -> float | None:
+        """Trailing-window mean price (c/kWh) — the forward proxy / fallback."""
+        mean, _ = self._mean_since(0.0)
+        return mean
+
+    @property
+    def period_progress(self) -> float:
+        """Fraction (0-1) through the current billing period, 30-day nominal."""
+        elapsed = max(time.time() - self._billing_period_start_ts(), 0.0)
+        return round(min(elapsed / (DEFAULT_TWAP_WINDOW_DAYS * 86400), 1.0), 3)

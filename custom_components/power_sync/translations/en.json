@@ -1710,6 +1710,7 @@
         "data": {
           "fp_network_tariff_combined": "Network & tariff code",
           "fp_twap_override": "TWAP override",
+          "fp_billing_day": "Billing day of month",
           "fp_amber_markup": "Amber comparison markup",
           "pea_custom_value": "Custom PEA override",
           "network_use_manual_rates": "Use manual network rates",
@@ -1728,6 +1729,7 @@
         "data_description": {
           "fp_network_tariff_combined": "Your DNSP and tariff code (e.g. 'Ausgrid — RESELE'). Filtered by your NEM region. Select None for the simple formula.",
           "fp_twap_override": "Override the dynamic 30-day TWAP with a fixed value. Set to 0 for automatic rolling average.",
+          "fp_billing_day": "Day of the month your Flow Power billing period starts (1–28). Anchors the TWAP reference to your billing cycle so it converges to the price you're actually settled on. Default 1.",
           "fp_amber_markup": "Retailer margin for the Amber comparison sensor. Regional default is pre-filled.",
           "pea_custom_value": "Override the calculated PEA with a fixed amount. Set to 0 for automatic calculation.",
           "network_use_manual_rates": "Enter network tariff rates manually instead of using the automatic lookup.",

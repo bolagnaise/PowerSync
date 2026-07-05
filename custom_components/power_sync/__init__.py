@@ -18177,7 +18177,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     fp_avg_daily_tariff = None
     if electricity_provider == "flow_power":
         from .coordinator import FlowPowerTWAPTracker
-        flow_power_twap_tracker = FlowPowerTWAPTracker(hass, flow_power_state, entry.entry_id)
+        from .const import CONF_FP_BILLING_DAY
+        fp_billing_day = entry.options.get(
+            CONF_FP_BILLING_DAY, entry.data.get(CONF_FP_BILLING_DAY, 1)
+        )
+        flow_power_twap_tracker = FlowPowerTWAPTracker(
+            hass, flow_power_state, entry.entry_id, billing_day=fp_billing_day
+        )
         await flow_power_twap_tracker.async_load()
 
         # Initialize v2 tariff data if configured

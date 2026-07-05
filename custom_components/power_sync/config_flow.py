@@ -339,6 +339,7 @@ from .const import (
     CONF_FP_NETWORK,
     CONF_FP_TARIFF_CODE,
     CONF_FP_TWAP_OVERRIDE,
+    CONF_FP_BILLING_DAY,
     CONF_FP_AMBER_MARKUP,
     REGION_NETWORKS,
     DEFAULT_FP_AMBER_MARKUP,
@@ -12431,6 +12432,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         default=self._get_option(CONF_FP_TWAP_OVERRIDE, None) or 0.0,
                     ): NumberSelector(NumberSelectorConfig(
                         min=0.0, max=50.0, step=0.01, unit_of_measurement=self._selector_unit(),
+                        mode=NumberSelectorMode.BOX,
+                    )),
+                    vol.Optional(
+                        CONF_FP_BILLING_DAY,
+                        default=self._get_option(CONF_FP_BILLING_DAY, 1) or 1,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=28, step=1, unit_of_measurement="day",
                         mode=NumberSelectorMode.BOX,
                     )),
                     vol.Optional(
