@@ -8,7 +8,7 @@ import importlib
 import inspect
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -108,6 +108,7 @@ def _install_power_sync_stubs() -> None:
 
     const_module = types.ModuleType("power_sync.const")
     const_module.DOMAIN = "power_sync"
+    const_module.CONF_AMBER_FORECAST_TYPE = "amber_forecast_type"
     const_module.CONF_ELECTRICITY_PROVIDER = "electricity_provider"
     const_module.CONF_FLOW_POWER_BASE_RATE = "flow_power_base_rate"
     const_module.CONF_FLOW_POWER_EXPORT_RATE = "flow_power_export_rate"
@@ -632,6 +633,62 @@ def _coordinator_with_epex_provider(
     return coordinator
 
 
+def _coordinator_with_dynamic_price_provider(
+    opt_coordinator,
+    provider: str,
+    forecast: list[dict],
+    current: list[dict] | None = None,
+    amber_forecast_type: str | None = None,
+    horizon_hours: float = 1,
+):
+    options = {"electricity_provider": provider}
+    if amber_forecast_type is not None:
+        options["amber_forecast_type"] = amber_forecast_type
+
+    coordinator = object.__new__(opt_coordinator.OptimizationCoordinator)
+    coordinator.hass = SimpleNamespace(data={"power_sync": {"entry-1": {}}})
+    coordinator.entry_id = "entry-1"
+    coordinator._entry = SimpleNamespace(entry_id="entry-1", data={}, options=options)
+    coordinator._config = opt_coordinator.OptimizationConfig(horizon_hours=horizon_hours)
+    coordinator.price_coordinator = SimpleNamespace(
+        data={"current": current or [], "forecast": forecast}
+    )
+    coordinator._last_display_import_prices = None
+    coordinator._last_display_export_prices = None
+    coordinator._apply_export_boost = lambda export, import_prices=None: (export, [])
+    coordinator._apply_saving_session_prices = lambda imports, exports: (imports, exports)
+    coordinator._apply_chip_mode = lambda exports, *args: exports
+    coordinator._apply_demand_charge_penalty = lambda imports: imports
+    coordinator._apply_confidence_decay = lambda imports, exports, **kwargs: (
+        imports,
+        exports,
+    )
+    return coordinator
+
+
+def _dynamic_price_entry(
+    start: datetime,
+    import_cents: float,
+    channel: str,
+    *,
+    interval_type: str = "ForecastInterval",
+    advanced_price: dict | float | None = None,
+) -> dict:
+    end = start + timedelta(minutes=30)
+    entry = {
+        "valid_from": start.isoformat(),
+        "valid_to": end.isoformat(),
+        "nemTime": end.isoformat(),
+        "duration": 30,
+        "perKwh": -import_cents if channel == "feedIn" else import_cents,
+        "channelType": channel,
+        "type": interval_type,
+    }
+    if advanced_price is not None:
+        entry["advancedPrice"] = advanced_price
+    return entry
+
+
 def test_ev_integration_defaults_to_initial_config_data(opt_module):
     entry = SimpleNamespace(
         data={"optimization_ev_integration": True},
@@ -1043,6 +1100,125 @@ def test_epex_export_price_sensor_is_ignored_for_other_providers(opt_module):
     assert _import_prices == [0.24] * 12
     assert export_prices == [0.08] * 12
     assert coordinator._last_display_export_prices == [0.08] * 12
+
+
+def test_amber_dynamic_import_forecast_uses_advanced_price_predicted(opt_module):
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    forecast = []
+    for offset, per_kwh, predicted in (
+        (0, 33.0, 194.0),
+        (30, 44.0, 244.0),
+    ):
+        slot_start = start + timedelta(minutes=offset)
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                per_kwh,
+                "general",
+                advanced_price={"predicted": predicted, "low": 150.0, "high": 280.0},
+            )
+        )
+        forecast.append(_dynamic_price_entry(slot_start, 8.0, "feedIn"))
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+    )
+
+    import_prices, _export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert import_prices[:6] == pytest.approx([1.94] * 6)
+    assert import_prices[6:] == pytest.approx([2.44] * 6)
+    assert coordinator._last_display_import_prices == pytest.approx(import_prices)
+
+
+def test_amber_dynamic_import_forecast_honors_configured_forecast_type(opt_module):
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    forecast = []
+    for offset in (0, 30):
+        slot_start = start + timedelta(minutes=offset)
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                12.0,
+                "general",
+                advanced_price={"predicted": 30.0, "low": 18.0, "high": 65.0},
+            )
+        )
+        forecast.append(_dynamic_price_entry(slot_start, 8.0, "feedIn"))
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+        amber_forecast_type="high",
+    )
+
+    import_prices, _export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert import_prices == pytest.approx([0.65] * 12)
+    assert coordinator._last_display_import_prices == pytest.approx([0.65] * 12)
+
+
+def test_amber_dynamic_import_missing_retail_price_does_not_use_wholesale(opt_module):
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    current = [
+        _dynamic_price_entry(
+            start,
+            4.0,
+            "general",
+            interval_type="CurrentInterval",
+        ),
+        _dynamic_price_entry(start, 8.0, "feedIn", interval_type="CurrentInterval"),
+    ]
+    forecast = [
+        _dynamic_price_entry(
+            start + timedelta(minutes=30),
+            33.0,
+            "general",
+            advanced_price={"predicted": 30.0, "low": 20.0, "high": 40.0},
+        ),
+        _dynamic_price_entry(start + timedelta(minutes=30), 8.0, "feedIn"),
+        _dynamic_price_entry(start + timedelta(minutes=60), 5.0, "general"),
+        _dynamic_price_entry(start + timedelta(minutes=60), 8.0, "feedIn"),
+    ]
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+        current=current,
+        horizon_hours=1.5,
+    )
+
+    import_prices, _export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert import_prices == pytest.approx([0.30] * 18)
+    assert coordinator._last_display_import_prices == pytest.approx([0.30] * 18)
+
+
+def test_non_amber_dynamic_import_forecast_still_uses_per_kwh(opt_module):
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    forecast = []
+    for offset in (0, 30):
+        slot_start = start + timedelta(minutes=offset)
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                12.0,
+                "general",
+                advanced_price={"predicted": 99.0},
+            )
+        )
+        forecast.append(_dynamic_price_entry(slot_start, 8.0, "feedIn"))
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "octopus",
+        forecast,
+    )
+
+    import_prices, _export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert import_prices == pytest.approx([0.12] * 12)
+    assert coordinator._last_display_import_prices == pytest.approx([0.12] * 12)
 
 
 def test_static_tou_provider_does_not_attach_dynamic_aemo_listener(opt_module):

@@ -7327,6 +7327,41 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             filled.append(last)
         return filled
 
+    @staticmethod
+    def _dynamic_import_price_dollar(
+        entry: dict,
+        provider: str,
+        amber_forecast_type: str = "predicted",
+    ) -> float | None:
+        """Resolve the retail import price for a dynamic pricing entry."""
+        if provider != "amber":
+            return entry.get("perKwh", 0) / 100
+
+        interval_type = entry.get("type")
+        if interval_type == "ActualInterval":
+            return entry.get("perKwh", 0) / 100
+
+        if interval_type not in ("CurrentInterval", "ForecastInterval"):
+            return entry.get("perKwh", 0) / 100
+
+        advanced_price = entry.get("advancedPrice")
+        if isinstance(advanced_price, dict):
+            if interval_type == "CurrentInterval":
+                price_cents = advanced_price.get(
+                    amber_forecast_type,
+                    advanced_price.get("predicted"),
+                )
+            else:
+                price_cents = advanced_price.get(amber_forecast_type)
+        elif isinstance(advanced_price, (int, float)):
+            price_cents = advanced_price
+        else:
+            price_cents = None
+
+        if price_cents is None:
+            return None
+        return price_cents / 100
+
     def _epex_price_entity_id(self, conf_key: str) -> str | None:
         """Return a configured EPEX price valuation sensor, if any."""
         if not self._entry:
@@ -7736,9 +7771,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     fp_network = None
                     fp_tariff_code = None
                     fp_tariff_rates: dict[int, float] = {}
+                    _provider = self._electricity_provider()
+                    amber_forecast_type = "predicted"
                     if self._entry:
                         from ..const import (
-                            CONF_ELECTRICITY_PROVIDER,
+                            CONF_AMBER_FORECAST_TYPE,
                             CONF_FP_NETWORK,
                             CONF_FP_TARIFF_CODE,
                             CONF_PEA_ENABLED,
@@ -7748,9 +7785,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             NETWORK_API_NAME,
                             DOMAIN as _DOMAIN,
                         )
-                        _provider = self._entry.options.get(
-                            CONF_ELECTRICITY_PROVIDER,
-                            self._entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
+                        amber_forecast_type = self._entry.options.get(
+                            CONF_AMBER_FORECAST_TYPE,
+                            self._entry.data.get(
+                                CONF_AMBER_FORECAST_TYPE, "predicted"
+                            ),
                         )
                         is_flow_power = _provider == "flow_power"
                         if is_flow_power:
@@ -7928,7 +7967,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             else:
                                 price_dollar = max(0, fp_base_rate / 100)
                         else:
-                            price_dollar = e.get("perKwh", 0) / 100
+                            price_dollar = self._dynamic_import_price_dollar(
+                                e,
+                                _provider,
+                                amber_forecast_type,
+                            )
+                            if price_dollar is None:
+                                last_import_slot = max(last_import_slot, end_idx)
+                                continue
                         for pos in range(start_idx, end_idx):
                             import_slots[pos] = price_dollar
                         last_import_slot = max(last_import_slot, end_idx)
