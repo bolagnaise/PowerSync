@@ -4203,6 +4203,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
     power data (solar, battery, grid, load), battery SOC/SOH, and control settings.
     """
 
+    _TEMPORARY_DISCHARGE_CAP_MAX_KW = 0.1
+    _OPTIMIZATION_MAX_DISCHARGE_W_KEY = "optimization_max_discharge_w"
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -4712,7 +4715,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 parsed = float(value)
             except (TypeError, ValueError):
                 return
-            if parsed > 0:
+            if parsed > self._TEMPORARY_DISCHARGE_CAP_MAX_KW:
                 candidates.append(parsed)
 
         def add_w(value: Any) -> None:
@@ -4720,7 +4723,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 parsed = float(value)
             except (TypeError, ValueError):
                 return
-            if parsed > 0:
+            if parsed / 1000.0 > self._TEMPORARY_DISCHARGE_CAP_MAX_KW:
                 candidates.append(parsed / 1000.0)
 
         coord_data = getattr(self, "data", None) or {}
@@ -4730,6 +4733,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         add_kw(coord_data.get("battery_max_charge_power"))
         add_w(coord_data.get("battery_max_charge_power_w"))
         add_kw(coord_data.get("charge_rate_limit_kw"))
+        add_kw(self._configured_optimization_discharge_limit_kw())
 
         try:
             live_data = await self._controller.get_battery_data()
@@ -4779,7 +4783,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         """Restore a Sungrow discharge limit saved before temporary control."""
         captured_limit_kw = getattr(self, "_pre_control_discharge_limit_kw", None)
         if captured_limit_kw is None:
-            return True
+            return await self._restore_stale_low_discharge_limit()
 
         if getattr(self._controller, "rate_limit_writable", None) is False:
             self._pre_control_discharge_limit_kw = None
@@ -4797,6 +4801,82 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         if limit_ok:
             self._pre_control_discharge_limit_kw = None
         return bool(limit_ok)
+
+    async def _restore_stale_low_discharge_limit(self) -> bool:
+        """Repair a stale near-zero Sungrow discharge cap after reload/restart."""
+        current_limit_kw = await self._read_current_discharge_limit_kw()
+        if (
+            current_limit_kw is None
+            or current_limit_kw <= 0
+            or current_limit_kw > self._TEMPORARY_DISCHARGE_CAP_MAX_KW
+        ):
+            return True
+
+        restore_limit_kw = await self._resolve_normal_discharge_limit_kw()
+        if restore_limit_kw is None or restore_limit_kw <= self._TEMPORARY_DISCHARGE_CAP_MAX_KW:
+            _LOGGER.warning(
+                "Sungrow discharge limit is still %.2fkW after restore, "
+                "but no safe normal discharge limit could be resolved",
+                current_limit_kw,
+            )
+            return True
+
+        _LOGGER.info(
+            "Restoring stale Sungrow discharge cap %.2fkW to %.2fkW",
+            current_limit_kw,
+            restore_limit_kw,
+        )
+        return bool(await self._controller.set_discharge_rate_limit(restore_limit_kw))
+
+    async def _read_current_discharge_limit_kw(self) -> float | None:
+        """Return the current Sungrow discharge cap from coordinator or live data."""
+        coord_data = getattr(self, "data", None) or {}
+        for value in (
+            coord_data.get("discharge_rate_limit_kw"),
+            coord_data.get("battery_max_discharge_power"),
+        ):
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                return parsed
+
+        try:
+            live_data = await self._controller.get_battery_data()
+        except Exception as err:
+            _LOGGER.debug("Could not read live Sungrow discharge cap for restore: %s", err)
+            return None
+
+        try:
+            parsed = float(live_data.get("discharge_rate_limit_kw"))
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    def _configured_optimization_discharge_limit_kw(self) -> float | None:
+        """Return configured optimiser max discharge limit, if available."""
+        hass = getattr(self, "hass", None)
+        entry_id = getattr(self, "_entry_id", None)
+        if not hass or not entry_id:
+            return None
+
+        try:
+            entry = hass.config_entries.async_get_entry(entry_id)
+        except Exception:
+            return None
+        if not entry:
+            return None
+
+        value = entry.options.get(
+            self._OPTIMIZATION_MAX_DISCHARGE_W_KEY,
+            entry.data.get(self._OPTIMIZATION_MAX_DISCHARGE_W_KEY),
+        )
+        try:
+            watts = float(value)
+        except (TypeError, ValueError):
+            return None
+        return watts / 1000.0 if watts > 0 else None
 
     async def _restore_captured_export_limit(self) -> bool:
         """Restore a Sungrow export limit saved before temporary control."""

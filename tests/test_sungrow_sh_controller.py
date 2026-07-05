@@ -749,6 +749,73 @@ def test_sungrow_no_discharge_falls_back_to_ten_watts_when_zero_rejected():
     assert fake_controller.discharge_rate_limits == [0, 0.01, 15.0]
 
 
+def test_sungrow_restore_repairs_stale_ten_watt_discharge_cap_without_capture():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 10.6,
+            "discharge_rate_limit_kw": 0.01,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "charge_rate_limit_kw": 10.6,
+            "discharge_rate_limit_kw": 0.01,
+            "battery_max_charge_power": 10.6,
+            "battery_max_discharge_power": 0.01,
+        }
+
+        restore_result = await coordinator.restore_normal()
+        return restore_result, fake_controller
+
+    try:
+        restore_result, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == [10.6]
+
+
+def test_sungrow_restore_uses_configured_limit_for_stale_discharge_cap():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "discharge_rate_limit_kw": 0.01,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "discharge_rate_limit_kw": 0.01,
+            "battery_max_discharge_power": 0.01,
+        }
+        entry = types.SimpleNamespace(
+            data={"optimization_max_discharge_w": 9200},
+            options={},
+        )
+        coordinator.hass = types.SimpleNamespace(
+            config_entries=types.SimpleNamespace(
+                async_get_entry=lambda entry_id: entry,
+            ),
+        )
+        coordinator._entry_id = "entry-1"
+
+        restore_result = await coordinator.restore_normal()
+        return restore_result, fake_controller
+
+    try:
+        restore_result, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == [9.2]
+
+
 def test_sungrow_force_discharge_restore_reinstates_previous_discharge_limit():
     SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
 
