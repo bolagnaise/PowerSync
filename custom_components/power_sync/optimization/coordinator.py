@@ -1265,8 +1265,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         load_forecast: list[float] | None,
     ) -> tuple[list[float] | None, dict[str, Any]]:
         """Build export-only reserve floors from the final candidate schedule."""
-        if not self.auto_apply_reserve_enabled:
-            return None, {}
         actions = list(getattr(schedule, "actions", None) or [])
         if not actions:
             return None, {}
@@ -3259,6 +3257,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         self._last_zerocharge_bonus_cap_kwh,
                         export_reserve_floor,
                         schedule_timestamps,
+                        battery_export_allowed,
+                        True,
                     )
                 finally:
                     if reserve_floor is not None:

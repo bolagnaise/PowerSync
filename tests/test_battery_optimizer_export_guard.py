@@ -1447,7 +1447,7 @@ def test_fit_export_above_acquisition_not_blocked_by_peak_import(
         horizon_hours=48,
     )
     n = 48 * 12
-    import_prices = [0.334] * n
+    import_prices = [0.42] * n
     export_prices = [0.0] * n
     allow_export = [False] * n
 
@@ -1475,6 +1475,170 @@ def test_fit_export_above_acquisition_not_blocked_by_peak_import(
     today_window = result.schedule.actions[today_start:today_start + 24]
     assert any(action.action == "export" for action in today_window)
     assert max(result.grid_export_w[today_start:today_start + 24]) > 1000
+
+
+def test_priority_export_uses_surplus_above_bridge_floor(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=24200,
+        max_charge_w=12000,
+        max_discharge_w=12000,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        interval_minutes=5,
+        horizon_hours=12,
+    )
+    n = 12 * 12
+    export_start = 12
+    export_end = export_start + 24
+    next_charge_start = export_end + 36
+    import_prices = [0.42] * n
+    export_prices = [0.0] * n
+    allow_export = [False] * n
+    block_charge = [False] * n
+    for idx in range(export_start, export_end):
+        import_prices[idx] = 0.486
+        export_prices[idx] = 0.45
+        allow_export[idx] = True
+        block_charge[idx] = True
+    for idx in range(next_charge_start, next_charge_start + 24):
+        import_prices[idx] = 0.303
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.4] * n,
+        current_soc=0.49,
+        acquisition_cost_kwh=0.334,
+        allow_battery_export=allow_export,
+        block_battery_charge=block_charge,
+        priority_export_enabled=True,
+    )
+
+    export_window = result.schedule.actions[export_start:export_end]
+    export_actions = [action for action in export_window if action.action == "export"]
+    assert export_actions
+    assert max(result.grid_export_w[export_start:export_end]) > 1000
+    assert min(action.soc for action in export_actions) >= 0.15
+    assert result.reserve_recommendation["home_load_bridge_next_charge_reason"] == (
+        "scheduled_grid_charge"
+    )
+
+
+def test_priority_export_skips_when_bridge_floor_consumes_surplus(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=24200,
+        max_charge_w=12000,
+        max_discharge_w=12000,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        interval_minutes=5,
+        horizon_hours=4,
+    )
+    n = 4 * 12
+    export_prices = [0.45] * 12 + [0.0] * (n - 12)
+    allow_export = [idx < 12 for idx in range(n)]
+
+    result = optimizer.optimize(
+        import_prices=[0.486] * 12 + [0.42] * (n - 24) + [0.303] * 12,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.4] * 12 + [4.0] * (n - 12),
+        current_soc=0.18,
+        acquisition_cost_kwh=0.334,
+        allow_battery_export=allow_export,
+        block_battery_charge=allow_export,
+        priority_export_enabled=True,
+    )
+
+    export_window = result.schedule.actions[:12]
+    assert not any(action.action == "export" for action in export_window)
+    assert max(result.grid_export_w[:12]) == pytest.approx(0.0)
+
+
+def test_priority_export_applies_to_generic_export_windows(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=13500,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.20,
+        interval_minutes=5,
+        horizon_hours=4,
+    )
+    n = 4 * 12
+    allow_export = [12 <= idx < 24 for idx in range(n)]
+    import_prices = [0.30] * n
+    export_prices = [0.0] * n
+    for idx in range(12, 24):
+        import_prices[idx] = 0.42
+        export_prices[idx] = 0.35
+    for idx in range(36, 48):
+        import_prices[idx] = 0.20
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.3] * n,
+        current_soc=0.70,
+        acquisition_cost_kwh=0.20,
+        allow_battery_export=allow_export,
+        priority_export_enabled=True,
+    )
+
+    export_window = result.schedule.actions[12:24]
+    assert any(action.action == "export" for action in export_window)
+    assert max(result.grid_export_w[12:24]) > 1000
+
+
+def test_priority_export_bonus_is_not_counted_in_predicted_cost(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=24200,
+        max_charge_w=12000,
+        max_discharge_w=12000,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        interval_minutes=5,
+        horizon_hours=4,
+    )
+    n = 4 * 12
+    import_prices = [0.42] * n
+    export_prices = [0.0] * n
+    allow_export = [False] * n
+    for idx in range(12, 24):
+        import_prices[idx] = 0.486
+        export_prices[idx] = 0.45
+        allow_export[idx] = True
+    for idx in range(36, 48):
+        import_prices[idx] = 0.303
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.4] * n,
+        current_soc=0.49,
+        acquisition_cost_kwh=0.334,
+        allow_battery_export=allow_export,
+        block_battery_charge=allow_export,
+        priority_export_enabled=True,
+    )
+
+    dt = optimizer.dt_hours
+    actual_cost = sum(
+        import_prices[idx] * result.grid_import_w[idx] / 1000 * dt
+        - export_prices[idx] * result.grid_export_w[idx] / 1000 * dt
+        for idx in range(n)
+    )
+    assert result.schedule.predicted_cost == round(actual_cost, 2)
 
 
 @pytest.mark.parametrize("acquisition_cost", [0.0, 0.069, 0.12])
