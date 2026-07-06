@@ -3213,6 +3213,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._sync_grid_export_cap_to_optimizer()
             self._sync_optimizer_discharge_limits()
             schedule_timestamps = self._price_timestamps(len(import_prices))
+            priority_export_slots = self._priority_export_slots_for_run(
+                len(import_prices),
+                export_prices,
+            )
 
             def _auto_reserve_baseline_floor() -> float | None:
                 if not self.auto_apply_reserve_enabled:
@@ -3257,8 +3261,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         self._last_zerocharge_bonus_cap_kwh,
                         export_reserve_floor,
                         schedule_timestamps,
-                        battery_export_allowed,
-                        True,
+                        priority_export_slots,
+                        any(priority_export_slots),
                     )
                 finally:
                     if reserve_floor is not None:
@@ -5585,6 +5589,35 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if allowed_count:
             _LOGGER.debug(
                 "Battery export allowed in %d/%d optimizer intervals",
+                allowed_count,
+                n,
+            )
+        return allowed
+
+    def _priority_export_slots_for_run(
+        self,
+        n: int,
+        export_prices: list[float] | None = None,
+    ) -> list[bool]:
+        """Return explicit export windows that may override self-consumption."""
+        if n <= 0:
+            return []
+
+        allowed = [False] * n
+        slot_sources = [
+            self._flow_power_profit_export_slots(n),
+            self._export_boost_mask_for_run(n, export_prices),
+            self._saving_session_export_slots(n),
+        ]
+
+        for slots in slot_sources:
+            for idx, value in enumerate(slots[:n]):
+                allowed[idx] = allowed[idx] or value
+
+        allowed_count = sum(allowed)
+        if allowed_count:
+            _LOGGER.debug(
+                "Priority export enabled in %d/%d optimizer intervals",
                 allowed_count,
                 n,
             )

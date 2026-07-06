@@ -1641,6 +1641,56 @@ def test_priority_export_bonus_is_not_counted_in_predicted_cost(
     assert result.schedule.predicted_cost == round(actual_cost, 2)
 
 
+def test_zerohero_low_value_export_does_not_force_paid_prefill_without_priority(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=32200,
+        max_charge_w=10000,
+        max_discharge_w=5000,
+        max_battery_export_w=5000,
+        backup_reserve=0.24,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=8,
+    )
+    n = 8 * 12
+    export_start = 40
+    export_end = export_start + 36
+    import_prices = [0.407] * 16 + [0.528] * 24 + [0.528] * 36 + [0.407] * 20
+    export_prices = [0.0] * n
+    export_bonus_prices = [0.0] * n
+    allow_export = [False] * n
+    block_charge = [False] * n
+    load = [0.4] * n
+    for idx in range(16, 40):
+        load[idx] = 3.6
+    for idx in range(export_start, export_end):
+        export_prices[idx] = 0.10
+        export_bonus_prices[idx] = 0.05
+        allow_export[idx] = True
+        block_charge[idx] = True
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=load,
+        current_soc=0.608,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=allow_export,
+        block_battery_charge=block_charge,
+        export_bonus_prices=export_bonus_prices,
+        export_bonus_cap_kwh=15.0,
+        priority_export_slots=[False] * n,
+        priority_export_enabled=False,
+    )
+
+    pre_export = result.schedule.actions[:export_start]
+    assert max(action.battery_charge_w for action in pre_export) == pytest.approx(0.0)
+    assert max(result.grid_export_w[export_start:export_end]) == pytest.approx(0.0)
+
+
 @pytest.mark.parametrize("acquisition_cost", [0.0, 0.069, 0.12])
 def test_cheap_import_charge_not_blocked_by_positive_fit_at_reserve(
     battery_optimizer_module,
