@@ -1576,7 +1576,7 @@ def test_zerohero_positive_base_fit_does_not_allow_export_outside_bonus_window(
     assert _true_indexes(slots) == list(range(6, 42))
 
 
-def test_zerohero_export_window_is_not_priority_export(opt_module):
+def test_zerohero_bonus_window_is_priority_export_while_cap_remains(opt_module):
     coordinator = _coordinator(
         opt_module,
         "globird",
@@ -1592,6 +1592,25 @@ def test_zerohero_export_window_is_not_priority_export(opt_module):
     priority_slots = coordinator._priority_export_slots_for_run(48, [0.05] * 48)
 
     assert _true_indexes(export_allowed) == list(range(6, 42))
+    assert _true_indexes(priority_slots) == list(range(6, 42))
+
+
+def test_zerohero_priority_export_disabled_when_bonus_cap_exhausted(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_current",
+    )
+    coordinator._last_zerohero_bonus_cap_kwh = 0.0
+    coordinator._last_price_timestamps = [
+        datetime(2026, 5, 3, 17, 30, tzinfo=timezone.utc) + timedelta(minutes=5 * idx)
+        for idx in range(48)
+    ]
+
+    export_allowed = coordinator._battery_export_allowed_slots(48, [0.05] * 48)
+    priority_slots = coordinator._priority_export_slots_for_run(48, [0.05] * 48)
+
+    assert export_allowed == [False] * 48
     assert priority_slots == [False] * 48
 
 

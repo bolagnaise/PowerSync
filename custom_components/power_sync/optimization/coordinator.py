@@ -5609,6 +5609,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._export_boost_mask_for_run(n, export_prices),
             self._saving_session_export_slots(n),
         ]
+        zerohero_config = self._zerohero_config()
+        zerohero_cap = self._last_zerohero_bonus_cap_kwh
+        if zerohero_config is not None and zerohero_cap is not None and zerohero_cap > 1e-6:
+            slot_sources.append(self._zerohero_window_slots(n))
 
         for slots in slot_sources:
             for idx, value in enumerate(slots[:n]):
