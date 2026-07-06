@@ -104,6 +104,8 @@ def test_import_above_hourly_allowance_loses_credit():
     assert result.import_window_kwh == pytest.approx(0.10)
     assert result.credit_status == "lost"
     assert result.credit_value == 0.0
+    assert result.bonus_export_kwh == pytest.approx(3.0)
+    assert result.bonus_export_earnings == pytest.approx(0.30)
 
 
 def test_credit_is_included_when_window_stays_under_threshold():

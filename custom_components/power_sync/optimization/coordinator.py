@@ -1883,13 +1883,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
 
         if self._zerohero_credit_lost():
-            self._last_zerohero_bonus_cap_kwh = 0.0
             _LOGGER.info(
-                "ZeroHero bonus disabled for today: import %.3fkWh exceeded allowance %.3fkWh",
+                "ZeroHero no-import credit lost for today: import %.3fkWh exceeded allowance %.3fkWh",
                 self._actual_zerohero_import_kwh_today,
                 config.import_allowance_kwh,
             )
-            return
 
         remaining_cap = max(
             0.0,

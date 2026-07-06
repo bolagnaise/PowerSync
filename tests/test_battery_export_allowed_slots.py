@@ -1595,6 +1595,31 @@ def test_zerohero_bonus_window_is_priority_export_while_cap_remains(opt_module):
     assert _true_indexes(priority_slots) == list(range(6, 42))
 
 
+def test_zerohero_priority_export_survives_lost_no_import_credit(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_current",
+    )
+    coordinator._actual_zerohero_import_kwh_today = 1.0
+    coordinator._actual_zerohero_bonus_export_kwh_today = 6.0
+    coordinator._last_price_timestamps = [
+        datetime(2026, 5, 3, 17, 30, tzinfo=timezone.utc) + timedelta(minutes=5 * idx)
+        for idx in range(48)
+    ]
+    import_prices = [0.40] * 48
+    export_prices = [0.05] * 48
+
+    coordinator._apply_zerohero_optimizer_inputs(import_prices, export_prices)
+    export_allowed = coordinator._battery_export_allowed_slots(48, export_prices)
+    priority_slots = coordinator._priority_export_slots_for_run(48, export_prices)
+
+    assert coordinator._zerohero_credit_lost()
+    assert coordinator._last_zerohero_bonus_cap_kwh == pytest.approx(9.0)
+    assert _true_indexes(export_allowed) == list(range(6, 42))
+    assert _true_indexes(priority_slots) == list(range(6, 42))
+
+
 def test_zerohero_priority_export_disabled_when_bonus_cap_exhausted(opt_module):
     coordinator = _coordinator(
         opt_module,
