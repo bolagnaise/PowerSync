@@ -877,11 +877,11 @@
         "description": "Configure automatic curtailment when export earnings drop below 1c/kWh. These settings stop battery export and optionally shut down solar.",
         "data": {
           "battery_curtailment_enabled": "Enable battery export curtailment",
-          "ac_inverter_curtailment_enabled": "Enable AC-coupled inverter shutdown"
+          "ac_inverter_curtailment_enabled": "Enable separate AC-coupled inverter shutdown"
         },
         "data_description": {
           "battery_curtailment_enabled": "Stop battery from exporting to grid when export earnings drop below 1c/kWh. This is the main toggle -- must be enabled for any curtailment to work.",
-          "ac_inverter_curtailment_enabled": "Shut down AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase) when export earnings drop below 1c/kWh. Use if solar bypasses your battery and exports directly."
+          "ac_inverter_curtailment_enabled": "Shut down a separate AC-coupled or string solar inverter (Fronius, Sungrow, GoodWe, Enphase) when export earnings drop below 1c/kWh. Do not enable this for the hybrid battery inverter already configured as the battery system."
         },
         "submit": "Next"
       },
@@ -1027,7 +1027,7 @@
       "modbus_host_required": "IP address is required -- enter the local IP of your Sigenergy inverter or gateway.",
       "sungrow_host_required": "IP address is required -- enter the local IP of your Sungrow inverter or WiNet-S dongle.",
       "modbus_conflict": "Connected but received invalid data (SOC > 100%). Another integration is likely using Modbus on the same port. Disable other Modbus integrations for this inverter and retry.",
-      "sungrow_modbus_conflict": "The AC inverter and Sungrow battery share the same IP, port, and slave ID. Change the AC inverter's slave ID to a different value.",
+      "sungrow_modbus_conflict": "The AC inverter curtailment path cannot use the same Sungrow Modbus IP, port, and slave ID as the battery system. Disable this option for a hybrid-only setup, or configure a separate AC-coupled/string inverter endpoint.",
       "foxess_host_required": "IP address is required -- enter the local IP of your FoxESS inverter.",
       "foxess_tcp_failed": "Cannot connect via Modbus TCP. Check: (1) IP is correct (H3 Smart shows as 'espressif'), (2) firmware is current, (3) port 502 is reachable from Home Assistant.",
       "foxess_serial_required": "Serial port path is required -- e.g. /dev/ttyUSB0 for a USB-to-RS485 adapter.",
@@ -1622,7 +1622,7 @@
           "chip_mode_start": "Chip mode start (HH:MM)",
           "chip_mode_end": "Chip mode end (HH:MM)",
           "chip_mode_threshold": "Price threshold",
-          "ac_inverter_curtailment_enabled": "Enable AC-coupled inverter shutdown",
+          "ac_inverter_curtailment_enabled": "Enable separate AC-coupled inverter shutdown",
           "inverter_brand": "Inverter brand",
           "inverter_model": "Inverter model",
           "inverter_host": "IP address / hostname",
@@ -1635,7 +1635,7 @@
           "amber_forecast_type": "Predicted is balanced. Low assumes cheaper prices (more aggressive charging). High assumes expensive prices (more conservative).",
           "battery_curtailment_enabled": "Stop battery from exporting to grid when export earnings drop below 1c/kWh. This is the main toggle -- must be enabled for any curtailment to work.",
           "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent your battery from charging from grid.",
-          "ac_inverter_curtailment_enabled": "Shut down AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase) when export earnings drop below 1c/kWh. Use if solar bypasses your battery and exports directly.",
+          "ac_inverter_curtailment_enabled": "Shut down a separate AC-coupled or string solar inverter (Fronius, Sungrow, GoodWe, Enphase) when export earnings drop below 1c/kWh. Do not enable this for the hybrid battery inverter already configured as the battery system.",
           "forecast_discrepancy_alert": "Send a mobile notification when Amber predicted and High (higher-price) forecasts diverge significantly. Indicates the forecast spread is large and conservative scheduling may be preferable.",
           "forecast_discrepancy_threshold": "Average price difference between Amber predicted and High forecasts that triggers the alert. Default 10 in the selected price unit.",
           "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force immediate recalculation. Tesla only, causes a ~5 second interruption.",
@@ -1986,14 +1986,14 @@
         "description": "Configure automatic curtailment when export earnings drop below 1c/kWh. Changes take effect immediately.",
         "data": {
           "battery_curtailment_enabled": "Enable battery export curtailment",
-          "ac_inverter_curtailment_enabled": "Enable AC-coupled inverter shutdown",
+          "ac_inverter_curtailment_enabled": "Enable separate AC-coupled inverter shutdown",
           "powerwall_offgrid_as_curtailment": "Enable Powerwall off-grid fallback",
           "sigenergy_dc_curtailment_enabled": "Enable DC solar curtailment",
           "openweathermap_api_key": "OpenWeatherMap API key"
         },
         "data_description": {
           "battery_curtailment_enabled": "Stop battery from exporting to grid when export earnings drop below 1c/kWh. This is the main toggle -- must be enabled for any curtailment to work.",
-          "ac_inverter_curtailment_enabled": "Shut down AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase) when export earnings drop below 1c/kWh. Use if solar bypasses your battery and exports directly.",
+          "ac_inverter_curtailment_enabled": "Shut down a separate AC-coupled or string solar inverter (Fronius, Sungrow, GoodWe, Enphase) when export earnings drop below 1c/kWh. Do not enable this for the hybrid battery inverter already configured as the battery system.",
           "powerwall_offgrid_as_curtailment": "Allow PowerSync to temporarily island the Powerwall when export curtailment is needed but no AC inverter curtailment path is configured or available.",
           "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export earnings drop below 1c/kWh. Requires Modbus write access to the Sigenergy system.",
           "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny, cloudy, rain, snow, and storm triggers). Leave blank to disable."

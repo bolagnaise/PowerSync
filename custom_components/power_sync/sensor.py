@@ -155,6 +155,13 @@ from .const import (
     CONF_INVERTER_PORT,
     CONF_INVERTER_SLAVE_ID,
     CONF_INVERTER_TOKEN,
+    CONF_SUNGROW_HOST,
+    CONF_SUNGROW_PORT,
+    CONF_SUNGROW_SLAVE_ID,
+    DEFAULT_SUNGROW_PORT,
+    DEFAULT_SUNGROW_SLAVE_ID,
+    DEFAULT_INVERTER_PORT,
+    DEFAULT_INVERTER_SLAVE_ID,
     CONF_ENPHASE_USERNAME,
     CONF_ENPHASE_PASSWORD,
     CONF_ENPHASE_SERIAL,
@@ -283,6 +290,8 @@ def _sungrow_ac_inverter_power_kw(entry: ConfigEntry, hass: HomeAssistant) -> fl
     """Return separately configured Sungrow SG inverter output in kW."""
     if entry.data.get(CONF_BATTERY_SYSTEM) != BATTERY_SYSTEM_SUNGROW:
         return 0.0
+    if _sungrow_ac_inverter_matches_battery(entry):
+        return 0.0
     if not entry.options.get(
         CONF_AC_INVERTER_CURTAILMENT_ENABLED,
         entry.data.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
@@ -307,6 +316,35 @@ def _sungrow_ac_inverter_power_kw(entry: ConfigEntry, hass: HomeAssistant) -> fl
         return max(0.0, float(power_w or 0) / 1000.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _sungrow_ac_inverter_matches_battery(entry: ConfigEntry) -> bool:
+    """Return true when AC inverter config points at the Sungrow battery endpoint."""
+    if entry.data.get(CONF_BATTERY_SYSTEM) != BATTERY_SYSTEM_SUNGROW:
+        return False
+    if (
+        entry.options.get(CONF_INVERTER_BRAND, entry.data.get(CONF_INVERTER_BRAND))
+        != "sungrow"
+    ):
+        return False
+
+    inverter_host = entry.options.get(
+        CONF_INVERTER_HOST, entry.data.get(CONF_INVERTER_HOST, "")
+    )
+    inverter_port = entry.options.get(
+        CONF_INVERTER_PORT,
+        entry.data.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT),
+    )
+    inverter_slave_id = entry.options.get(
+        CONF_INVERTER_SLAVE_ID,
+        entry.data.get(CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID),
+    )
+    return (
+        inverter_host == entry.data.get(CONF_SUNGROW_HOST, "")
+        and inverter_port == entry.data.get(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
+        and inverter_slave_id
+        == entry.data.get(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID)
+    )
 
 
 def _home_load_power_kw(data: Any) -> float | None:
@@ -1903,7 +1941,7 @@ async def async_setup_entry(
         CONF_AC_INVERTER_CURTAILMENT_ENABLED,
         entry.data.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
     )
-    if inverter_enabled:
+    if inverter_enabled and not _sungrow_ac_inverter_matches_battery(entry):
         entities.append(
             InverterStatusSensor(
                 hass=hass,
@@ -1911,6 +1949,11 @@ async def async_setup_entry(
             )
         )
         _LOGGER.info("Inverter status sensor added")
+    elif inverter_enabled:
+        _LOGGER.warning(
+            "Skipping AC inverter status poller because the Sungrow inverter "
+            "curtailment endpoint matches the configured Sungrow battery endpoint"
+        )
 
     # Add Flow Power price sensors if Flow Power provider is selected
     electricity_provider = entry.options.get(

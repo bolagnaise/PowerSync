@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG_FLOW_PATH = ROOT / "custom_components" / "power_sync" / "config_flow.py"
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
 CONST_PATH = ROOT / "custom_components" / "power_sync" / "const.py"
+SENSOR_PATH = ROOT / "custom_components" / "power_sync" / "sensor.py"
 STRINGS_PATH = ROOT / "custom_components" / "power_sync" / "strings.json"
 TRANSLATIONS_PATH = ROOT / "custom_components" / "power_sync" / "translations" / "en.json"
 
@@ -1731,7 +1732,7 @@ def test_direct_ac_inverter_menu_enables_runtime_polling():
     assert "True" in menu_block
 
 
-def test_sungrow_hybrid_model_can_share_battery_modbus_endpoint():
+def test_sungrow_hybrid_model_cannot_share_battery_modbus_endpoint():
     source = CONFIG_FLOW_PATH.read_text()
     method = _options_flow_method("async_step_inverter_config")
     method_source = ast.get_source_segment(source, method)
@@ -1741,7 +1742,18 @@ def test_sungrow_hybrid_model_can_share_battery_modbus_endpoint():
     conflict_block = method_source[conflict_index - 350 : conflict_index + 80]
 
     assert "inverter_model = user_input.get(CONF_INVERTER_MODEL)" in method_source
-    assert 'not str(inverter_model or "").lower().startswith("sh")' in conflict_block
+    assert 'not str(inverter_model or "").lower().startswith("sh")' not in conflict_block
+    assert "inverter_host == sungrow_host" in conflict_block
+    assert "inverter_port == sungrow_port" in conflict_block
+    assert "inverter_slave_id == sungrow_slave_id" in conflict_block
+
+
+def test_sungrow_same_endpoint_ac_inverter_poller_is_skipped():
+    source = SENSOR_PATH.read_text()
+
+    assert "def _sungrow_ac_inverter_matches_battery" in source
+    assert "if inverter_enabled and not _sungrow_ac_inverter_matches_battery(entry)" in source
+    assert "Skipping AC inverter status poller" in source
 
 
 def test_sungrow_ac_inverter_models_include_three_phase_sg_rt():

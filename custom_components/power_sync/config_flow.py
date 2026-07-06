@@ -11434,14 +11434,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
                 )
 
-                # Same host, port, AND slave ID is only a conflict for a separate
-                # SG/string inverter. For SH hybrids the AC-curtailment form is
-                # configuring the same battery inverter's export-limit path.
+                # AC inverter curtailment uses its own polling/controller path.
+                # Pointing it at the same Sungrow hybrid endpoint as the battery
+                # coordinator creates a second Modbus client against the SH.
                 if (
                     inverter_host == sungrow_host
                     and inverter_port == sungrow_port
                     and inverter_slave_id == sungrow_slave_id
-                    and not str(inverter_model or "").lower().startswith("sh")
                 ):
                     errors["base"] = "sungrow_modbus_conflict"
 
