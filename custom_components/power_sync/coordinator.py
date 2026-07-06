@@ -4418,14 +4418,14 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 no_pv_load_kw = max(0.0, grid_kw + battery_kw)
                 pv_tracks_battery_discharge = (
                     _is_night_for_solar_telemetry(self.hass)
-                    and solar_kw > 1.0
-                    and battery_kw > 1.0
-                    and grid_kw < -0.5
-                    and abs(solar_kw - battery_kw) <= max(1.0, battery_kw * 0.25)
+                    and solar_kw > 0.05
+                    and battery_kw > 0.05
+                    and abs(solar_kw - battery_kw) <= max(0.1, battery_kw * 0.1)
                 )
                 if pv_tracks_battery_discharge:
+                    aliased_solar_kw = solar_kw
                     _LOGGER.debug(
-                        "Sungrow SH PV register appears to be reporting forced-discharge power "
+                        "Sungrow SH PV register appears to be reporting battery discharge power "
                         "at night (pv=%.2fkW battery=%.2fkW grid=%.2fkW load=%.2fkW); "
                         "using zero solar and inferred home load %.2fkW",
                         solar_kw,
@@ -4436,9 +4436,13 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                     )
                     solar_kw = 0.0
                     inflated_load_floor = no_pv_load_kw + max(
-                        1.0, no_pv_load_kw * 1.5
+                        0.1, aliased_solar_kw * 0.5
                     )
-                    if load_power_w is None or load_kw > inflated_load_floor:
+                    if (
+                        load_power_w is None
+                        or load_kw <= 0.01
+                        or load_kw > inflated_load_floor
+                    ):
                         load_kw = no_pv_load_kw
                     calc_load_kw = no_pv_load_kw
                 if abs(load_kw) > 100:
