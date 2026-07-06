@@ -95,6 +95,22 @@ def _configured_ac_inverter_power_kw(hass: HomeAssistant, entry_id: str) -> floa
         return 0.0
 
 
+def _is_night_for_solar_telemetry(hass: HomeAssistant) -> bool:
+    """Return whether real solar telemetry should be impossible or near-zero."""
+    try:
+        sun_state = getattr(hass, "states", None).get("sun.sun")
+        if sun_state is not None:
+            if sun_state.state == "below_horizon":
+                return True
+            if sun_state.state == "above_horizon":
+                return False
+    except Exception:
+        pass
+
+    local_hour = dt_util.now().hour
+    return local_hour >= 18 or local_hour < 6
+
+
 def _stored_battery_health_capacity_kwh(hass: HomeAssistant, entry_id: str) -> float | None:
     """Return the latest BMS-scanned current Powerwall capacity in kWh."""
     health = (
@@ -4399,6 +4415,32 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 # Derive load from energy balance: Load = Solar + Grid_Import + Battery_Discharge
                 # (more reliable than the load register on some firmware)
                 calc_load_kw = max(0.0, solar_kw + grid_kw + battery_kw)
+                no_pv_load_kw = max(0.0, grid_kw + battery_kw)
+                pv_tracks_battery_discharge = (
+                    _is_night_for_solar_telemetry(self.hass)
+                    and solar_kw > 1.0
+                    and battery_kw > 1.0
+                    and grid_kw < -0.5
+                    and abs(solar_kw - battery_kw) <= max(1.0, battery_kw * 0.25)
+                )
+                if pv_tracks_battery_discharge:
+                    _LOGGER.debug(
+                        "Sungrow SH PV register appears to be reporting forced-discharge power "
+                        "at night (pv=%.2fkW battery=%.2fkW grid=%.2fkW load=%.2fkW); "
+                        "using zero solar and inferred home load %.2fkW",
+                        solar_kw,
+                        battery_kw,
+                        grid_kw,
+                        load_kw,
+                        no_pv_load_kw,
+                    )
+                    solar_kw = 0.0
+                    inflated_load_floor = no_pv_load_kw + max(
+                        1.0, no_pv_load_kw * 1.5
+                    )
+                    if load_power_w is None or load_kw > inflated_load_floor:
+                        load_kw = no_pv_load_kw
+                    calc_load_kw = no_pv_load_kw
                 if abs(load_kw) > 100:
                     # Load register is garbage, use calculated value
                     load_kw = calc_load_kw
