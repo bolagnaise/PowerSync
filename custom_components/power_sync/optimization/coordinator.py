@@ -5380,6 +5380,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if effective_action != "off_grid":
                     apply_self_consumption = self._last_executed_action != "self_consumption"
                     reapply_backup_reserve = False
+                    sungrow_reapply_reserve_pct: int | None = None
                     configured_reserve_pct = int(self._config.backup_reserve * 100)
                     reserve_pct: int | None = None
                     if not apply_self_consumption:
@@ -5473,6 +5474,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 apply_self_consumption = True
                         if self.battery_system == "sungrow" and self.energy_coordinator:
                             coord_data = getattr(self.energy_coordinator, "data", None) or {}
+
+                            def _coord_float(*keys: str) -> float | None:
+                                for key in keys:
+                                    try:
+                                        value = coord_data.get(key)
+                                        if value is None:
+                                            continue
+                                        return float(value)
+                                    except (TypeError, ValueError):
+                                        continue
+                                return None
+
                             mode_value = (
                                 coord_data.get("ems_mode_name")
                                 or coord_data.get("mode")
@@ -5510,6 +5523,47 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     "restore_normal"
                                 )
                                 apply_self_consumption = True
+                            else:
+                                battery_kw = _coord_float("battery_power", "battery_power_kw")
+                                grid_kw = _coord_float("grid_power", "grid_power_kw")
+                                load_kw = _coord_float("load_power", "home_load")
+                                soc_pct_float = _coord_float("battery_level", "battery_soc")
+                                current_reserve = _coord_float("backup_reserve", "min_soc")
+                                target_reserve = self._startup_backup_reserve
+                                grid_serving_load = (
+                                    grid_kw is not None
+                                    and grid_kw >= 0.15
+                                    and (
+                                        load_kw is None
+                                        or (
+                                            load_kw >= 0.15
+                                            and grid_kw >= load_kw * 0.6
+                                        )
+                                    )
+                                )
+                                if (
+                                    target_reserve is not None
+                                    and current_reserve is not None
+                                    and soc_pct_float is not None
+                                    and battery_kw is not None
+                                    and abs(battery_kw) <= 0.1
+                                    and grid_serving_load
+                                    and current_reserve > target_reserve
+                                    and soc_pct_float <= current_reserve + 2.0
+                                    and soc_pct_float > target_reserve + 2.0
+                                ):
+                                    sungrow_reapply_reserve_pct = max(
+                                        0, min(100, int(target_reserve))
+                                    )
+                                    _LOGGER.info(
+                                        "Optimizer: Sungrow reserve/min-SOC is %.1f%% "
+                                        "while cached hardware reserve is %d%% and "
+                                        "battery is not discharging; reapplying "
+                                        "self-consumption reserve",
+                                        current_reserve,
+                                        sungrow_reapply_reserve_pct,
+                                    )
+                                    apply_self_consumption = True
                         if not apply_self_consumption and not reapply_backup_reserve:
                             _LOGGER.debug(
                                 "Optimizer: Already in self-consumption mode — "
@@ -5522,6 +5576,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         elif hasattr(battery, "restore_normal"):
                             if apply_self_consumption:
                                 await battery.restore_normal()
+                        if (
+                            sungrow_reapply_reserve_pct is not None
+                            and hasattr(battery, "set_backup_reserve")
+                        ):
+                            await battery.set_backup_reserve(sungrow_reapply_reserve_pct)
                         # Tesla only: reset hardware backup_reserve to prevent
                         # grid charging when the user's hardware reserve
                         # (restored by restore_normal after force_discharge) is

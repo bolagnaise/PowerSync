@@ -3023,6 +3023,31 @@ def test_self_consumption_reapplies_sungrow_when_discharge_is_blocked(opt_module
     assert coordinator._last_executed_action == "self_consumption"
 
 
+def test_self_consumption_repairs_sungrow_reserve_when_it_blocks_discharge(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.149)
+    coordinator.battery_system = "sungrow"
+    coordinator._startup_backup_reserve = 5
+    coordinator.energy_coordinator = _FakeEnergyCoordinator()
+    coordinator.energy_coordinator.data = {
+        "battery_power": 0.0,
+        "grid_power": 0.232,
+        "load_power": 0.227,
+        "battery_level": 14.9,
+        "backup_reserve": 15.0,
+    }
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=418)
+        )
+    )
+
+    assert battery.self_consumption_calls == 1
+    assert battery.backup_reserve_calls == [5]
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_idle_at_reserve_floor_is_not_overridden_to_self_consumption(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.20)
