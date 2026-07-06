@@ -1195,6 +1195,129 @@ def test_amber_dynamic_import_missing_retail_price_does_not_use_wholesale(opt_mo
     assert coordinator._last_display_import_prices == pytest.approx([0.30] * 18)
 
 
+def test_amber_dynamic_export_forecast_uses_advanced_price_predicted(opt_module):
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    forecast = []
+    for offset, per_kwh, predicted in (
+        (0, 33.0, -194.0),
+        (30, 44.0, -244.0),
+    ):
+        slot_start = start + timedelta(minutes=offset)
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                30.0,
+                "general",
+                advanced_price={"predicted": 30.0},
+            )
+        )
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                per_kwh,
+                "feedIn",
+                advanced_price={"predicted": predicted, "low": -150.0, "high": -280.0},
+            )
+        )
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+    )
+
+    _import_prices, export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert export_prices[:6] == pytest.approx([1.94] * 6)
+    assert export_prices[6:] == pytest.approx([2.44] * 6)
+    assert coordinator._last_display_export_prices == pytest.approx(export_prices)
+
+
+def test_amber_dynamic_export_forecast_honors_configured_forecast_type(opt_module):
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    forecast = []
+    for offset in (0, 30):
+        slot_start = start + timedelta(minutes=offset)
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                30.0,
+                "general",
+                advanced_price={"predicted": 30.0, "high": 30.0},
+            )
+        )
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                12.0,
+                "feedIn",
+                advanced_price={"predicted": -30.0, "low": -18.0, "high": -65.0},
+            )
+        )
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+        amber_forecast_type="high",
+    )
+
+    _import_prices, export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert export_prices == pytest.approx([0.65] * 12)
+    assert coordinator._last_display_export_prices == pytest.approx([0.65] * 12)
+
+
+def test_amber_dynamic_export_missing_retail_price_does_not_use_wholesale(opt_module):
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    current = [
+        _dynamic_price_entry(
+            start,
+            30.0,
+            "general",
+            interval_type="CurrentInterval",
+            advanced_price={"predicted": 30.0},
+        ),
+        _dynamic_price_entry(
+            start,
+            4.0,
+            "feedIn",
+            interval_type="CurrentInterval",
+        ),
+    ]
+    forecast = [
+        _dynamic_price_entry(
+            start + timedelta(minutes=30),
+            30.0,
+            "general",
+            advanced_price={"predicted": 30.0},
+        ),
+        _dynamic_price_entry(
+            start + timedelta(minutes=30),
+            33.0,
+            "feedIn",
+            advanced_price={"predicted": -30.0, "low": -20.0, "high": -40.0},
+        ),
+        _dynamic_price_entry(
+            start + timedelta(minutes=60),
+            30.0,
+            "general",
+            advanced_price={"predicted": 30.0},
+        ),
+        _dynamic_price_entry(start + timedelta(minutes=60), 5.0, "feedIn"),
+    ]
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+        current=current,
+        horizon_hours=1.5,
+    )
+
+    _import_prices, export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert export_prices == pytest.approx([0.30] * 18)
+    assert coordinator._last_display_export_prices == pytest.approx([0.30] * 18)
+
+
 def test_non_amber_dynamic_import_forecast_still_uses_per_kwh(opt_module):
     start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
     forecast = []
