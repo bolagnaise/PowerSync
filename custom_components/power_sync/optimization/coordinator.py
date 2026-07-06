@@ -5497,6 +5497,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     charge_cmd,
                                 )
                                 apply_self_consumption = True
+                            elif (
+                                hasattr(
+                                    self.energy_coordinator,
+                                    "_discharge_appears_blocked_after_restore",
+                                )
+                                and self.energy_coordinator._discharge_appears_blocked_after_restore()
+                            ):
+                                _LOGGER.info(
+                                    "Optimizer: Sungrow appears discharge-blocked while "
+                                    "LP action is self_consumption — reapplying "
+                                    "restore_normal"
+                                )
+                                apply_self_consumption = True
                         if not apply_self_consumption and not reapply_backup_reserve:
                             _LOGGER.debug(
                                 "Optimizer: Already in self-consumption mode — "

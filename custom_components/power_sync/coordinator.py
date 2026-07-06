@@ -4221,7 +4221,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
     _TEMPORARY_DISCHARGE_CAP_MAX_KW = 0.1
     _OPTIMIZATION_MAX_DISCHARGE_W_KEY = "optimization_max_discharge_w"
-    _BLOCKED_DISCHARGE_IMPORT_KW = 0.5
+    _BLOCKED_DISCHARGE_IMPORT_KW = 0.15
+    _BLOCKED_DISCHARGE_LOAD_KW = 0.15
+    _BLOCKED_DISCHARGE_GRID_LOAD_RATIO = 0.6
     _BLOCKED_DISCHARGE_BATTERY_KW = 0.1
     _BLOCKED_DISCHARGE_RESERVE_MARGIN = 2.0
 
@@ -4930,6 +4932,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
         battery_kw = read_float("battery_power", "battery_power_kw")
         grid_kw = read_float("grid_power", "grid_power_kw")
+        load_kw = read_float("load_power", "home_load")
         soc = read_float("battery_level", "battery_soc")
         reserve = read_float("backup_reserve", "min_soc")
 
@@ -4940,9 +4943,16 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         if reserve is not None and soc <= reserve + self._BLOCKED_DISCHARGE_RESERVE_MARGIN:
             return False
 
+        if abs(battery_kw) > self._BLOCKED_DISCHARGE_BATTERY_KW:
+            return False
+        if grid_kw < self._BLOCKED_DISCHARGE_IMPORT_KW:
+            return False
+        if load_kw is None:
+            return True
+
         return (
-            abs(battery_kw) <= self._BLOCKED_DISCHARGE_BATTERY_KW
-            and grid_kw >= self._BLOCKED_DISCHARGE_IMPORT_KW
+            load_kw >= self._BLOCKED_DISCHARGE_LOAD_KW
+            and grid_kw >= load_kw * self._BLOCKED_DISCHARGE_GRID_LOAD_RATIO
         )
 
     async def _read_current_discharge_limit_kw(self) -> float | None:

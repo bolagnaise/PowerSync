@@ -978,6 +978,70 @@ def test_sungrow_restore_repairs_blocked_discharge_when_cap_unreadable():
     assert fake_controller.discharge_rate_limits == [10.6]
 
 
+def test_sungrow_restore_repairs_low_load_blocked_discharge_when_cap_unreadable():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 10.6,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "battery_power": 0.0,
+            "grid_power": 0.232,
+            "load_power": 0.227,
+            "battery_level": 15.0,
+            "backup_reserve": 5.0,
+            "charge_rate_limit_kw": 10.6,
+            "battery_max_charge_power": 10.6,
+        }
+
+        restore_result = await coordinator.restore_normal()
+        return restore_result, fake_controller
+
+    try:
+        restore_result, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == [10.6]
+
+
+def test_sungrow_restore_does_not_repair_when_low_import_is_not_serving_load():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 10.6,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "battery_power": 0.0,
+            "grid_power": 0.16,
+            "load_power": 0.5,
+            "battery_level": 15.0,
+            "backup_reserve": 5.0,
+            "charge_rate_limit_kw": 10.6,
+            "battery_max_charge_power": 10.6,
+        }
+
+        restore_result = await coordinator.restore_normal()
+        return restore_result, fake_controller
+
+    try:
+        restore_result, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == []
+
+
 def test_sungrow_restore_retries_failed_stale_cap_repair():
     SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
 

@@ -2025,6 +2025,7 @@ class _FakeEnergyCoordinator:
         self.restore_work_mode_from_idle_calls = 0
         self.no_discharge_calls = 0
         self.restore_no_discharge_calls = 0
+        self.discharge_blocked_after_restore = False
 
     async def restore_work_mode_from_idle(self):
         self.restore_work_mode_from_idle_calls += 1
@@ -2036,6 +2037,9 @@ class _FakeEnergyCoordinator:
     async def restore_no_discharge_mode(self):
         self.restore_no_discharge_calls += 1
         return True
+
+    def _discharge_appears_blocked_after_restore(self):
+        return self.discharge_blocked_after_restore
 
 
 def _execution_coordinator(opt_module, battery: _FakeBattery, soc: float):
@@ -2993,6 +2997,24 @@ def test_self_consumption_reapplies_goodwe_when_battery_is_exporting_to_grid(opt
     asyncio.run(
         coordinator._execute_optimizer_action(
             SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.self_consumption_calls == 1
+    assert battery.backup_reserve_calls == []
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_self_consumption_reapplies_sungrow_when_discharge_is_blocked(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.15)
+    coordinator.battery_system = "sungrow"
+    coordinator.energy_coordinator = _FakeEnergyCoordinator()
+    coordinator.energy_coordinator.discharge_blocked_after_restore = True
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=435)
         )
     )
 
