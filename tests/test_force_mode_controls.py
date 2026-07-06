@@ -1389,6 +1389,24 @@ def test_foxess_curtailment_restore_defers_during_force_remote_control():
     assert 'entry_data.pop("_last_foxess_curtailment_reapply", None)' in force_charge_source
 
 
+def test_foxess_curtailment_skips_apply_during_force_remote_control():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    handler = _find_function(tree, "handle_foxess_curtailment")
+    handler_source = ast.get_source_segment(source, handler)
+
+    assert handler_source is not None
+    assert "def _foxess_force_dispatch_active()" in handler_source
+    assert 'active_getter = getattr(entry_data.get("optimization_coordinator"), "get_active_force_state", None)' in handler_source
+    assert '_optimizer_current_force_action_matches("charge")' in handler_source
+    assert '_optimizer_current_force_action_matches("discharge")' in handler_source
+    assert "if _foxess_force_dispatch_active():" in handler_source
+    assert 'entry_data["foxess_curtailment_state"] = "normal"' in handler_source
+    assert 'entry_data.pop("_last_foxess_curtailment_reapply", None)' in handler_source
+    assert "FoxESS curtailment skipped while force dispatch is active" in handler_source
+    assert "remote-control override remains owned by force mode" in handler_source
+
+
 def test_sigenergy_curtailment_reapplies_when_live_export_continues():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

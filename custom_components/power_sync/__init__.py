@@ -21753,6 +21753,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         current_state = entry_data.get("foxess_curtailment_state", "normal")
 
+        def _foxess_force_dispatch_active() -> bool:
+            """Return true while FoxESS force dispatch owns remote control."""
+            if force_charge_state.get("active") or force_discharge_state.get("active"):
+                return True
+
+            active_getter = getattr(entry_data.get("optimization_coordinator"), "get_active_force_state", None)
+            if callable(active_getter):
+                try:
+                    active_force = active_getter() or {}
+                except Exception as err:
+                    _LOGGER.debug("FoxESS curtailment: active force check failed: %s", err)
+                else:
+                    return bool(active_force.get("active")) and active_force.get("type") in {
+                        "charge",
+                        "discharge",
+                        "export",
+                    }
+
+            return (
+                _optimizer_current_force_action_matches("charge")
+                or _optimizer_current_force_action_matches("discharge")
+            )
+
         # Get prices from any available price coordinator if not provided
         if feedin_price is None:
             feedin_price, import_price, price_source = get_current_prices_for_curtailment(
@@ -21788,6 +21811,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         try:
             if export_earnings < 1:
+                if _foxess_force_dispatch_active():
+                    if current_state != "normal":
+                        entry_data["foxess_curtailment_state"] = "normal"
+                        entry_data.pop("_last_foxess_curtailment_reapply", None)
+                    _LOGGER.info(
+                        "FoxESS curtailment skipped while force dispatch is active; "
+                        "remote-control override remains owned by force mode"
+                    )
+                    return
+
                 import time as _time_mod
                 _foxess_reapply_interval = 480  # Keep ahead of FoxESS 600s remote-control timeout
                 _last_reapply = entry_data.get("_last_foxess_curtailment_reapply", 0)
@@ -21835,7 +21868,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             else:
                 # Positive export earnings → restore
                 if current_state != "normal":
-                    if force_charge_state.get("active") or force_discharge_state.get("active"):
+                    if _foxess_force_dispatch_active():
                         active_mode = "charge" if force_charge_state.get("active") else "discharge"
                         _LOGGER.info(
                             "FoxESS curtailment restore deferred: force %s is active; "
