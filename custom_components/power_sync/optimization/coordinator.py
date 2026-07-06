@@ -7362,6 +7362,49 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
         return price_cents / 100
 
+    @staticmethod
+    def _dynamic_export_price_dollar(
+        entry: dict,
+        provider: str,
+        amber_forecast_type: str = "predicted",
+    ) -> float | None:
+        """Resolve the retail feed-in (export) price for a dynamic pricing entry.
+
+        Returns $/kWh in Amber's native feedIn sign convention (negative = you get
+        paid). Caller negates it. Mirrors _dynamic_import_price_dollar: Amber
+        Current/Forecast intervals use advancedPrice (retail forecast); everything
+        else falls back to perKwh. Returns None when an Amber forecast/current
+        interval has no advancedPrice so the caller can skip and let gap-fill carry
+        the last retail price forward instead of a wholesale value.
+        """
+        if provider != "amber":
+            return entry.get("perKwh", 0) / 100
+
+        interval_type = entry.get("type")
+        if interval_type == "ActualInterval":
+            return entry.get("perKwh", 0) / 100
+
+        if interval_type not in ("CurrentInterval", "ForecastInterval"):
+            return entry.get("perKwh", 0) / 100
+
+        advanced_price = entry.get("advancedPrice")
+        if isinstance(advanced_price, dict):
+            if interval_type == "CurrentInterval":
+                price_cents = advanced_price.get(
+                    amber_forecast_type,
+                    advanced_price.get("predicted"),
+                )
+            else:
+                price_cents = advanced_price.get(amber_forecast_type)
+        elif isinstance(advanced_price, (int, float)):
+            price_cents = advanced_price
+        else:
+            price_cents = None
+
+        if price_cents is None:
+            return None
+        return price_cents / 100
+
     def _epex_price_entity_id(self, conf_key: str) -> str | None:
         """Return a configured EPEX price valuation sensor, if any."""
         if not self._entry:
@@ -8010,7 +8053,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         # negative dips during oversupply (when you'd pay to export).
                         # lp_price clamps to 0 so the LP doesn't see paying-to-export
                         # as profitable revenue.
-                        display_price = -(e.get("perKwh", 0)) / 100
+                        raw_export_dollar = self._dynamic_export_price_dollar(
+                            e, _provider, amber_forecast_type
+                        )
+                        if raw_export_dollar is None:
+                            # No retail forecast this interval: leave slot empty so
+                            # _fill_price_gaps forward-fills the last retail feed-in
+                            # price instead of a wholesale number.
+                            continue
+                        display_price = -raw_export_dollar
                         lp_price = max(0.0, display_price)
                         for pos in range(start_idx, end_idx):
                             export_slots[pos] = lp_price
