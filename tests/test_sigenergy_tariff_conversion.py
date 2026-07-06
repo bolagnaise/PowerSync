@@ -532,6 +532,9 @@ def test_sigenergy_tariff_sync_caches_numeric_id_without_overwriting_configured_
     assert "new_data[CONF_SIGENERGY_STATION_ID] = tariff_station_id" not in helper_source
     assert "configured station ID remains" in helper_source
     assert "station_id=tariff_station_id" in helper_source
+    assert helper_source.count("hass.data.setdefault(DOMAIN, {}).setdefault") >= 2
+    assert 'entry_data["tariff_schedule"]' in helper_source
+    assert 'entry_data["sigenergy_tariff"]' in helper_source
 
 
 def test_sigenergy_station_picker_preserves_system_id_and_caches_tariff_id():

@@ -121,6 +121,7 @@ class SungrowSHController(InverterController):
     # Export Control (holding registers, FC 0x03)
     REG_EXPORT_LIMIT_SETTING = 13073   # 13074 - Export power limit setting (W)
     REG_EXPORT_LIMIT_ENABLED = 13086   # 13087 - Export limit (0xAA=enable, 0x55=disable)
+    MIN_ENABLED_EXPORT_LIMIT_W = 50     # WiNet-S can reject/crash on enabled 0W export limit
 
     # Backup Reserve
     REG_BACKUP_RESERVE = 13099         # 13100 - Reserved SOC for backup (%)
@@ -571,8 +572,14 @@ class SungrowSHController(InverterController):
         Returns:
             True if curtailment successful
         """
-        export_limit_w = int(home_load_w) if home_load_w is not None and home_load_w > 0 else 0
-        mode_str = f"load-following: {export_limit_w}W" if export_limit_w > 0 else "zero export"
+        requested_export_limit_w = (
+            int(home_load_w) if home_load_w is not None and home_load_w > 0 else 0
+        )
+        export_limit_w = self._enabled_export_limit_w(requested_export_limit_w)
+        if requested_export_limit_w > 0:
+            mode_str = f"load-following: {export_limit_w}W"
+        else:
+            mode_str = f"zero export ({export_limit_w}W WiNet-S floor)"
         _LOGGER.info(f"Curtailing Sungrow SH inverter at {self.host} ({mode_str})")
 
         try:
@@ -1132,8 +1139,14 @@ class SungrowSHController(InverterController):
                 success = await self._write_register(self.REG_EXPORT_LIMIT_ENABLED, self.EXPORT_LIMIT_DISABLE)
             else:
                 # Set and enable export limit (0xAA)
-                _LOGGER.info(f"Setting Sungrow SH at {self.host} export limit to {watts} W")
-                success = await self._write_register(self.REG_EXPORT_LIMIT_SETTING, watts)
+                safe_watts = self._enabled_export_limit_w(watts)
+                _LOGGER.info(
+                    "Setting Sungrow SH at %s export limit to %d W%s",
+                    self.host,
+                    safe_watts,
+                    f" (requested {watts} W)" if safe_watts != watts else "",
+                )
+                success = await self._write_register(self.REG_EXPORT_LIMIT_SETTING, safe_watts)
                 if success:
                     success = await self._write_register(self.REG_EXPORT_LIMIT_ENABLED, self.EXPORT_LIMIT_ENABLE)
 
@@ -1142,6 +1155,11 @@ class SungrowSHController(InverterController):
         except Exception as e:
             _LOGGER.error(f"Error setting export limit: {e}")
             return False
+
+    @classmethod
+    def _enabled_export_limit_w(cls, watts: int | float) -> int:
+        """Return a safe non-zero export limit before enabling export limiting."""
+        return max(cls.MIN_ENABLED_EXPORT_LIMIT_W, int(round(watts or 0)))
 
     async def get_battery_data(self) -> dict:
         """Read all battery-related registers for coordinator use.

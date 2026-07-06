@@ -20123,7 +20123,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 buy_prices = convert_tariff_rates_to_sigenergy(canonical_buy_rates)
                 sell_prices = convert_tariff_rates_to_sigenergy(canonical_sell_rates)
                 if buy_prices:
-                    hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
+                    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(
+                        entry.entry_id, {}
+                    )
+                    entry_data["tariff_schedule"] = {
                         "buy_prices": canonical_buy_rates,
                         "sell_prices": canonical_sell_rates,
                         **currency_metadata(canonical_tariff.get("currency")),
@@ -20314,7 +20317,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if result.get("success"):
                     _LOGGER.info(f"✅ Sigenergy tariff synced successfully ({sync_mode})")
                     # Store tariff data for mobile app API
-                    hass.data[DOMAIN][entry.entry_id]["sigenergy_tariff"] = {
+                    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(
+                        entry.entry_id, {}
+                    )
+                    entry_data["sigenergy_tariff"] = {
                         "buy_prices": buy_prices,
                         "sell_prices": sell_prices if sell_prices else buy_prices,
                         "synced_at": dt_util.now().isoformat(),

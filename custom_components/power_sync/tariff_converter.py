@@ -1786,7 +1786,7 @@ def apply_flow_power_pea(
     Apply Flow Power base rate + PEA (Price Efficiency Adjustment) pricing model.
 
     V2 formula (when tariff_rate_lookup and avg_daily_tariff provided):
-        PEA = GST*Spot + Tariff - GST*TWAP - AvgDailyTariff - BPEA
+        PEA = GST*Spot + Tariff - GST*TWAP - BPEA
         Final = Base + PEA
 
     Legacy formula (no tariff data):
@@ -1855,13 +1855,12 @@ def apply_flow_power_pea(
                 wholesale_cents = wholesale_dollars * 100
 
                 if has_tariff:
-                    # V2 formula: GST*Spot + Tariff - GST*TWAP - AvgDailyTariff - BPEA
+                    # V2 formula: GST*Spot + Tariff - GST*TWAP - BPEA
                     period_tariff = tariff_rate_lookup.get(period, avg_daily_tariff)
                     pea = (
                         gst_multiplier * wholesale_cents
                         + period_tariff
                         - gst_multiplier * market_avg
-                        - avg_daily_tariff
                         - bpea
                     )
                 else:

@@ -289,6 +289,35 @@ def test_force_discharge_clamps_below_practical_minimum():
     ]
 
 
+def test_set_export_limit_clamps_enabled_zero_limit_to_winet_floor():
+    async def run_set_export_limit():
+        controller, writes = _controller_with_recorded_writes()
+        result = await controller.set_export_limit(0)
+        return result, controller, writes
+
+    result, controller, writes = asyncio.run(run_set_export_limit())
+
+    assert result
+    assert writes == [
+        (controller.REG_EXPORT_LIMIT_SETTING, controller.MIN_ENABLED_EXPORT_LIMIT_W),
+        (controller.REG_EXPORT_LIMIT_ENABLED, controller.EXPORT_LIMIT_ENABLE),
+    ]
+
+
+def test_set_export_limit_none_disables_without_floor_write():
+    async def run_set_export_limit():
+        controller, writes = _controller_with_recorded_writes()
+        result = await controller.set_export_limit(None)
+        return result, controller, writes
+
+    result, controller, writes = asyncio.run(run_set_export_limit())
+
+    assert result
+    assert writes == [
+        (controller.REG_EXPORT_LIMIT_ENABLED, controller.EXPORT_LIMIT_DISABLE),
+    ]
+
+
 def test_setup_battery_data_reads_only_core_battery_block():
     async def run_read():
         controller = SungrowSHController("192.0.2.10")
