@@ -28651,11 +28651,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 sig_coord = entry_data.get("sigenergy_coordinator")
                 if sig_coord and hasattr(sig_coord, '_controller') and sig_coord._controller:
                     controller = sig_coord._controller
-                    result = await controller.set_self_consumption_mode()
+                    # Route through restore_normal (like Sungrow/FoxESS/GoodWe/ESY)
+                    # rather than the bare EMS mode write: a prior no-discharge or
+                    # force window may have left REG_ESS_MAX_DISCHARGE_LIMIT at 0,
+                    # and only restore_normal resets the ESS limits to rated.
+                    result = await controller.restore_normal()
                     if result:
-                        _LOGGER.info("Sigenergy self-consumption mode set (Remote EMS mode 2)")
+                        _LOGGER.info(
+                            "Sigenergy self-consumption mode set (Remote EMS mode 2, "
+                            "ESS limits restored)"
+                        )
                     else:
-                        _LOGGER.warning("Sigenergy set_self_consumption_mode failed")
+                        _LOGGER.warning("Sigenergy self-consumption restore failed")
                 else:
                     _LOGGER.error("Self-consumption: Sigenergy coordinator/controller not available")
                 return
