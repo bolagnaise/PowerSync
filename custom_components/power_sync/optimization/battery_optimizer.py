@@ -2769,7 +2769,8 @@ class BatteryOptimizer:
                 if (
                     not battery_export_allowed
                     or (
-                        acquisition_cost_kwh > 0
+                        not priority_export_slot
+                        and acquisition_cost_kwh > 0
                         and effective_export_prices[t] < effective_acquisition_costs[t]
                     )
                 ):
