@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from typing import Any
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
@@ -13,6 +15,7 @@ from .const import (
     DOMAIN,
     CONF_FORCE_CHARGE_DURATION,
     CONF_FORCE_DISCHARGE_DURATION,
+    CONF_POWERWALL_LOCAL_PAIRED,
     DEFAULT_DISCHARGE_DURATION,
     DISCHARGE_DURATIONS,
     family_device_info,
@@ -22,6 +25,26 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
+
+
+def _fresh_powerwall_local_snapshot(hass: HomeAssistant, entry: ConfigEntry) -> Any | None:
+    """Return fresh local Powerwall data when paired, otherwise None."""
+    if not entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
+        return None
+    coordinator = (
+        hass.data.get(DOMAIN, {})
+        .get(entry.entry_id, {})
+        .get("powerwall_local", {})
+        .get("coordinator")
+    )
+    data = getattr(coordinator, "data", None)
+    last_success_ts = getattr(coordinator, "last_success_ts", None)
+    if data is None or last_success_ts is None:
+        return None
+    if time.time() - last_success_ts > TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS:
+        return None
+    return data
 
 
 async def async_setup_entry(
@@ -224,6 +247,11 @@ class TeslaOperationModeSelect(_TeslaSiteSelectBase):
 
     @property
     def current_option(self) -> str | None:
+        local_snap = _fresh_powerwall_local_snapshot(self.hass, self._entry)
+        local_mode = getattr(local_snap, "operation_mode", None)
+        if local_mode in self._OPTIONS:
+            return local_mode
+
         coord = self._tesla_coord()
         site_info = getattr(coord, "_site_info_cache", None) if coord else None
         if not site_info:

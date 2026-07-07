@@ -1192,6 +1192,41 @@ def test_tesla_local_backup_reserve_write_uses_hidden_reserve_offset():
     assert 'json={"backup_reserve_percent": percent}' in function_source
 
 
+def test_tesla_setting_writes_refresh_local_readback_and_invalidate_fleet_cache():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+
+    for function_name, refresh_label in (
+        ("handle_set_backup_reserve", "set_backup_reserve"),
+        ("handle_set_operation_mode", "set_operation_mode"),
+        ("handle_set_grid_export", "set_grid_export"),
+    ):
+        function_source = ast.get_source_segment(
+            source,
+            _find_function(tree, function_name),
+        )
+
+        assert function_source is not None
+        assert "_tesla_coord_for_cache.invalidate_site_info_cache()" in function_source
+        assert (
+            f'await refresh_powerwall_local_after_settings_write("{refresh_label}")'
+            in function_source
+        )
+
+
+def test_tesla_grid_export_write_updates_cached_rule_immediately():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_set_grid_export")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert "await update_cached_export_rule(rule)" in function_source
+    assert function_source.index("await update_cached_export_rule(rule)") < (
+        function_source.index("manual_export_override")
+    )
+
+
 def test_foxess_force_charge_accepts_optimizer_min_timeout():
     source = COORDINATOR_PATH.read_text()
     tree = ast.parse(source)

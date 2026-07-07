@@ -18857,6 +18857,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Signal sensor to update
         async_dispatcher_send(hass, f"power_sync_curtailment_updated_{entry.entry_id}")
 
+    async def refresh_powerwall_local_after_settings_write(label: str) -> None:
+        """Refresh local Powerwall settings readback after a successful write."""
+        try:
+            entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            local_coord = (entry_data.get("powerwall_local") or {}).get("coordinator")
+            refresh = getattr(local_coord, "async_request_refresh", None)
+            if refresh:
+                await refresh()
+        except Exception as err:
+            _LOGGER.debug(
+                "Powerwall local readback refresh after %s failed: %s",
+                label,
+                err,
+            )
+
     def _get_cached_live_status() -> dict | None:
         """Get live status from the active site coordinator when available."""
         try:
@@ -29316,6 +29331,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
                     if _tesla_coord_for_cache is not None:
                         _tesla_coord_for_cache.invalidate_site_info_cache()
+                    await refresh_powerwall_local_after_settings_write("set_backup_reserve")
                     if percent == 100:
                         hass.async_create_task(_tesla_charge_kick("backup_reserve_100"))
 
@@ -29622,6 +29638,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 if _tesla_coord_for_cache is not None:
                     _tesla_coord_for_cache.invalidate_site_info_cache()
+                await refresh_powerwall_local_after_settings_write("set_operation_mode")
                 if mode == "self_consumption":
                     if entry.entry_id in hass.data[DOMAIN]:
                         hass.data[DOMAIN][entry.entry_id].pop("last_force_toggle_time", None)
@@ -29744,6 +29761,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
                 if _tesla_coord_for_cache is not None:
                     _tesla_coord_for_cache.invalidate_site_info_cache()
+                await update_cached_export_rule(rule)
+                await refresh_powerwall_local_after_settings_write("set_grid_export")
                 solar_curtailment_enabled = entry.options.get(
                     CONF_BATTERY_CURTAILMENT_ENABLED,
                     entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
