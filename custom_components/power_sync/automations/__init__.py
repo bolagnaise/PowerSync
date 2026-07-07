@@ -439,11 +439,16 @@ class AutomationEngine:
             "TAS1": "Australia/Hobart",
         }
 
-        # Default timezone - will be overridden by site info or NEM region
-        user_timezone = self._config_entry.options.get(
-            "timezone",
-            self._config_entry.data.get("timezone", "Australia/Sydney")
+        # Default timezone - will be overridden by site info or NEM region.
+        # For non-Tesla/custom-tariff installs there may be no site/NEM
+        # timezone in PowerSync, so prefer Home Assistant's configured local
+        # timezone before falling back to Sydney.
+        configured_timezone = (
+            self._config_entry.options.get("timezone")
+            or self._config_entry.data.get("timezone")
         )
+        ha_timezone = getattr(getattr(self._hass, "config", None), "time_zone", None)
+        user_timezone = configured_timezone or ha_timezone or "Australia/Sydney"
 
         # Try to get timezone from coordinator's site info (most accurate for Tesla)
         entry_id = self._config_entry.entry_id
