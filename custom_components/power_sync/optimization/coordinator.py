@@ -3208,6 +3208,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 load_forecast,
                 soc,
             )
+            spread_import_blocked = [
+                bool(blocked) or not bool(allowed)
+                for blocked, allowed in zip(
+                    battery_charge_blocked,
+                    grid_charge_allowed,
+                    strict=False,
+                )
+            ]
             self._sync_grid_export_cap_to_optimizer()
             self._sync_optimizer_discharge_limits()
             schedule_timestamps = self._price_timestamps(len(import_prices))
@@ -3281,7 +3289,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._current_schedule = self._spread_import_schedule(
                     self._current_schedule,
                     import_prices,
-                    battery_charge_blocked,
+                    spread_import_blocked,
                     soc,
                     solar_forecast=solar_forecast,
                     load_forecast=load_forecast,
@@ -3357,7 +3365,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self._current_schedule = self._spread_import_schedule(
                         self._current_schedule,
                         import_prices,
-                        battery_charge_blocked,
+                        spread_import_blocked,
                         soc,
                         solar_forecast=solar_forecast,
                         load_forecast=load_forecast,
@@ -9933,6 +9941,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         projected_soc
                         + min(surplus_kw, max_charge_kw) * dt_hours / capacity_kwh,
                     )
+
+        zerohero_config = self._zerohero_config()
+        if zerohero_config is not None and zerohero_config.zerocharge_enabled:
+            remaining_zerocharge_kwh = max(
+                0.0,
+                zerohero_config.zerocharge_import_cap_kwh
+                - self._actual_zerocharge_import_kwh_today,
+            )
+            zerocharge_slots = (
+                self._zerocharge_window_slots(len(import_prices))
+                if remaining_zerocharge_kwh > 1e-6
+                else [False] * len(import_prices)
+            )
+            allowed = [
+                bool(is_allowed) and bool(is_zerocharge)
+                for is_allowed, is_zerocharge in zip(
+                    allowed,
+                    zerocharge_slots,
+                    strict=False,
+                )
+            ]
 
         return allowed
 

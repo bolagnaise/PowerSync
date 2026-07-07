@@ -292,6 +292,8 @@ def _coordinator(
     coordinator._actual_zerohero_base_export_earnings_today = 0.0
     coordinator._actual_zerohero_bonus_export_earnings_today = 0.0
     coordinator._actual_zerohero_credit_value_today = 0.0
+    coordinator._actual_zerocharge_import_kwh_today = 0.0
+    coordinator._actual_zerocharge_credit_value_today = 0.0
     coordinator._pre_idle_backup_reserve = None
     coordinator._idle_hold_reserve = None
     coordinator._optimizer = None
@@ -1477,6 +1479,39 @@ def test_grid_charge_allowed_slots_apply_price_and_soc_caps(opt_module):
     )
 
     assert allowed == [True, False, False, False]
+
+
+def test_globird_zerocharge_limits_grid_charge_to_configured_window(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_custom",
+        globird_zerocharge_start="11:00",
+        globird_zerocharge_end="14:00",
+        globird_zerocharge_import_cap_kwh=50.0,
+    )
+    coordinator._last_price_timestamps = [
+        datetime(2026, 7, 7, 13, 50, tzinfo=timezone(timedelta(hours=10)))
+        + timedelta(minutes=5 * idx)
+        for idx in range(6)
+    ]
+
+    allowed = coordinator._grid_charge_allowed_slots(
+        import_prices=[0.0] * 6,
+        solar_forecast=[0.0] * 6,
+        load_forecast=[0.0] * 6,
+        current_soc=0.50,
+    )
+
+    assert allowed == [True, True, False, False, False, False]
+
+    coordinator._actual_zerocharge_import_kwh_today = 50.0
+    assert coordinator._grid_charge_allowed_slots(
+        import_prices=[0.0] * 6,
+        solar_forecast=[0.0] * 6,
+        load_forecast=[0.0] * 6,
+        current_soc=0.50,
+    ) == [False] * 6
 
 
 @pytest.mark.parametrize(
