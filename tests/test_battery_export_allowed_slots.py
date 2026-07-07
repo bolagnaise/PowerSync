@@ -1687,6 +1687,19 @@ def test_flow_power_profit_window_is_priority_export(opt_module):
     assert _true_indexes(slots) == list(range(108, 132))
 
 
+def test_flow_power_happy_hour_is_priority_export_without_profit_max(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        profit_max=False,
+        flow_power_state="NSW1",
+    )
+
+    slots = coordinator._priority_export_slots_for_run(288, [0.45] * 288)
+
+    assert _true_indexes(slots) == list(range(108, 132))
+
+
 def test_zerohero_blocks_battery_charge_during_no_import_window(opt_module):
     coordinator = _coordinator(
         opt_module,

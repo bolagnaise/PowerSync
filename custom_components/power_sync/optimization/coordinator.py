@@ -5705,7 +5705,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         allowed = [False] * n
         slot_sources = [
-            self._flow_power_profit_export_slots(n),
+            self._flow_power_export_window_slots(n),
             self._export_boost_mask_for_run(n, export_prices),
             self._saving_session_export_slots(n),
         ]
