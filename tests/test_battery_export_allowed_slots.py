@@ -4691,6 +4691,53 @@ def test_spread_export_schedule_carries_reserve_soc_after_capped_export(opt_modu
     assert [action.soc for action in spread.actions[2:]] == [0.30] * 4
 
 
+def test_export_reserve_floor_bridges_after_contiguous_export_run(opt_module):
+    coordinator = _coordinator(opt_module, "globird", profit_max=True)
+    coordinator._config.backup_reserve = 0.0
+    coordinator._config.battery_capacity_wh = 10000
+    coordinator._config.interval_minutes = 5
+    coordinator._optimizer = SimpleNamespace(efficiency=1.0)
+    start = datetime(2026, 7, 7, 18, 0, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="export" if idx < 3 else "self_consumption",
+            power_w=5000 if idx < 3 else 0,
+            soc=0.9,
+            battery_discharge_w=5000 if idx < 3 else 0,
+        )
+        for idx in range(5)
+    ]
+    actions.append(
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=25),
+            action="charge",
+            power_w=5000,
+            soc=0.7,
+            battery_charge_w=5000,
+        )
+    )
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    floors, metadata = coordinator._post_processed_export_reserve_floor_slots(
+        schedule,
+        solar_forecast=[0.0] * 6,
+        load_forecast=[6.0] * 6,
+    )
+
+    assert floors is not None
+    assert floors[:3] == pytest.approx([0.1, 0.1, 0.1])
+    assert floors[3:] == [0.0, 0.0, 0.0]
+    assert metadata["home_load_bridge_kwh"] == pytest.approx(1.0)
+    assert metadata["home_load_bridge_start"] == actions[3].timestamp.isoformat()
+    assert metadata["home_load_bridge_until"] == actions[5].timestamp.isoformat()
+
+
 def test_schedule_display_grid_export_uses_post_processed_battery_export(opt_module):
     coordinator = _coordinator(opt_module, "flow_power", profit_max=True)
     coordinator._last_solar_forecast = [0.0, 0.0, 1.5]

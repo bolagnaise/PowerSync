@@ -1312,8 +1312,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return True, "forecast_solar_surplus"
             return False, None
 
-        for idx, action in enumerate(actions):
+        idx = 0
+        while idx < len(actions):
+            action = actions[idx]
             if getattr(action, "action", None) not in EXPORT_ACTIONS:
+                idx += 1
                 continue
             discharge_w = float(
                 getattr(action, "battery_discharge_w", None)
@@ -1321,12 +1324,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 or 0.0
             )
             if discharge_w <= 100.0:
+                idx += 1
                 continue
+
+            run_start = idx
+            while idx < len(actions):
+                run_action = actions[idx]
+                if getattr(run_action, "action", None) not in EXPORT_ACTIONS:
+                    break
+                run_discharge_w = float(
+                    getattr(run_action, "battery_discharge_w", None)
+                    or getattr(run_action, "power_w", 0.0)
+                    or 0.0
+                )
+                if run_discharge_w <= 100.0:
+                    break
+                idx += 1
+            run_end = idx
 
             bridge_kwh = 0.0
             next_charge_idx: int | None = None
             next_charge_reason: str | None = None
-            for scan_idx in range(idx + 1, len(actions)):
+            for scan_idx in range(run_end, len(actions)):
                 is_charge, reason = _charge_opportunity(scan_idx)
                 if is_charge:
                     next_charge_idx = scan_idx
@@ -1343,13 +1362,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if floor <= active_floor + 0.0001:
                 continue
 
-            floors[idx] = floor
+            for floor_idx in range(run_start, run_end):
+                floors[floor_idx] = floor
             if floor > best_floor:
                 best_floor = floor
                 protects_until_idx = (
                     next_charge_idx if next_charge_idx is not None else len(actions) - 1
                 )
-                bridge_start_idx = min(idx + 1, len(actions) - 1)
+                bridge_start_idx = min(run_end, len(actions) - 1)
                 best_meta = {
                     "home_load_export_floor_percent": max(
                         0,
@@ -1365,7 +1385,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "home_load_bridge_next_charge_reason": (
                         next_charge_reason or "no_charge_in_horizon"
                     ),
-                    "home_load_bridge_after_export_start": action.timestamp.isoformat(),
+                    "home_load_bridge_after_export_start": actions[
+                        run_start
+                    ].timestamp.isoformat(),
                 }
 
         if best_floor <= 0.0:
