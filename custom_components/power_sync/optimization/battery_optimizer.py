@@ -2214,6 +2214,7 @@ class BatteryOptimizer:
             schedule_timestamps,
             allow_grid_charge,
             grid_charge_allowed,
+            priority_export_slots,
         )
 
         # _build_schedule re-models "hold" slots (LP imports to serve load while
@@ -2934,6 +2935,7 @@ class BatteryOptimizer:
             schedule_timestamps,
             allow_grid_charge,
             grid_charge_allowed,
+            priority_export_slots,
         )
 
         # Calculate costs for first 24 hours only (display as daily cost)
@@ -3012,6 +3014,7 @@ class BatteryOptimizer:
         schedule_timestamps: list[datetime] | None = None,
         allow_grid_charge: bool = True,
         grid_charge_allowed: list[bool] | None = None,
+        priority_export_slots: list[bool] | None = None,
     ) -> OptimizationSchedule:
         """
         Map LP solution to battery actions.
@@ -3045,6 +3048,7 @@ class BatteryOptimizer:
 
         block_battery_charge = block_battery_charge or [False] * n
         grid_charge_allowed = grid_charge_allowed or [True] * n
+        priority_export_slots = priority_export_slots or [False] * n
         actions = []
         soc = soc_0
         optimizer_reserve = max(0.0, min(1.0, self.backup_reserve))
@@ -3090,6 +3094,13 @@ class BatteryOptimizer:
             import_kw = grid_import[t]
             export_kw = grid_export[t]
             charge_blocked = block_battery_charge[t]
+            priority_export_slot = (
+                t < len(priority_export_slots)
+                and priority_export_slots[t]
+                and export_prices is not None
+                and t < len(export_prices)
+                and export_prices[t] > 0.001
+            )
             free_import_slot = (
                 import_prices is not None
                 and import_prices[t] <= 0.001
@@ -3185,6 +3196,56 @@ class BatteryOptimizer:
 
             reported_charge_w = charge_kw * 1000
             reported_discharge_w = discharge_kw * 1000
+            if priority_export_slot and action == "idle":
+                export_room_kw = (
+                    max(0.0, soc - export_floor) * cap * eff / dt
+                    if cap > 0 and dt > 0
+                    else 0.0
+                )
+                net_home_kw = max(0.0, load[t] - solar[t])
+                grid_export_cap_kw = (
+                    max(0.0, self.max_grid_export_w / 1000.0)
+                    if self.max_grid_export_w is not None
+                    else self.max_discharge_kw
+                )
+                battery_export_cap_kw = (
+                    self.max_battery_export_kw
+                    if self.max_battery_export_kw is not None
+                    else self.max_discharge_kw
+                )
+                discharge_export_cap_kw = max(
+                    0.0,
+                    min(self.max_discharge_kw, export_room_kw) - net_home_kw,
+                )
+                export_target_kw = min(
+                    grid_export_cap_kw,
+                    battery_export_cap_kw,
+                    discharge_export_cap_kw,
+                )
+                if export_target_kw > threshold_kw:
+                    action = "export"
+                    power_w = export_target_kw * 1000
+                    reported_charge_w = 0.0
+                    reported_discharge_w = min(
+                        self.max_discharge_kw,
+                        export_room_kw,
+                        net_home_kw + export_target_kw,
+                    ) * 1000
+                else:
+                    natural_room_kw = (
+                        max(0.0, soc - self_consumption_floor) * cap * eff / dt
+                        if cap > 0 and dt > 0
+                        else 0.0
+                    )
+                    natural_discharge_kw = min(
+                        self.max_discharge_kw,
+                        net_home_kw,
+                        max(0.0, natural_room_kw),
+                    )
+                    action = "self_consumption"
+                    power_w = natural_discharge_kw * 1000
+                    reported_charge_w = 0.0
+                    reported_discharge_w = natural_discharge_kw * 1000
             if free_import_slot and action == "charge":
                 reported_charge_w = power_w
                 reported_discharge_w = 0.0
@@ -3210,7 +3271,11 @@ class BatteryOptimizer:
                     power_w = natural_discharge_kw * 1000
                     reported_charge_w = 0.0
                     reported_discharge_w = natural_discharge_kw * 1000
-                    if active_export_floor and natural_discharge_kw <= threshold_kw:
+                    if (
+                        active_export_floor
+                        and not priority_export_slot
+                        and natural_discharge_kw <= threshold_kw
+                    ):
                         action = "idle"
                         power_w = 0.0
                 elif discharge_kw > export_room_kw:
@@ -3236,7 +3301,11 @@ class BatteryOptimizer:
                     reported_discharge_w = natural_discharge_kw * 1000
                     reported_charge_w = 0.0
                     power_w = natural_discharge_kw * 1000
-                    if active_export_floor and natural_discharge_kw <= threshold_kw:
+                    if (
+                        active_export_floor
+                        and not priority_export_slot
+                        and natural_discharge_kw <= threshold_kw
+                    ):
                         action = "idle"
                         power_w = 0.0
                 elif net_home_kw < -threshold_kw and not charge_blocked:

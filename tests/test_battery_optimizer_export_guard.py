@@ -2081,6 +2081,72 @@ def test_build_schedule_caps_export_actions_at_optimizer_reserve(
     )
 
 
+def test_build_schedule_converts_priority_export_idle_to_export(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.20,
+        hardware_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+    n = 3
+
+    schedule = optimizer._build_schedule(
+        n,
+        grid_import=[0.5, 0.5, 0.5],
+        grid_export=[0.0, 0.0, 0.0],
+        battery_charge=[0.0, 0.0, 0.0],
+        battery_discharge=[0.0, 0.0, 0.0],
+        solar=[0.0, 0.0, 0.0],
+        load=[0.5, 0.5, 0.5],
+        soc_0=0.66,
+        import_prices=[0.30, 0.30, 0.30],
+        export_prices=[0.45, 0.45, 0.45],
+        block_battery_charge=[True, True, True],
+        priority_export_slots=[True, True, True],
+    )
+
+    assert schedule.actions[0].action == "export"
+    assert schedule.actions[0].power_w == 4500.0
+    assert schedule.actions[0].battery_discharge_w == 5000.0
+    assert all(action.action != "idle" for action in schedule.actions)
+
+
+def test_build_schedule_keeps_non_priority_profitable_hold_idle(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.20,
+        hardware_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+
+    schedule = optimizer._build_schedule(
+        1,
+        grid_import=[0.5],
+        grid_export=[0.0],
+        battery_charge=[0.0],
+        battery_discharge=[0.0],
+        solar=[0.0],
+        load=[0.5],
+        soc_0=0.66,
+        import_prices=[0.30],
+        export_prices=[0.45],
+        block_battery_charge=[True],
+        priority_export_slots=[False],
+    )
+
+    assert schedule.actions[0].action == "idle"
+
+
 def test_positive_fit_iog_charge_does_not_create_all_day_export_loop(
     battery_optimizer_module,
 ):
