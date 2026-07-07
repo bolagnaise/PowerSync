@@ -5846,6 +5846,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         ]
         day_options = {
             "weekdays": "Weekdays only (Mon-Fri)",
+            "weekends": "Weekends only (Sat-Sun)",
             "all_days": "All days (Mon-Sun)",
         }
         period_types = {
@@ -5860,10 +5861,16 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if count > 0:
             lines = []
             minor_unit = self._selector_unit()
+            day_labels = {
+                "weekdays": "Mon-Fri",
+                "weekends": "Sat-Sun",
+                "all_days": "Mon-Sun",
+            }
             for idx, period in enumerate(self._tariff_periods, 1):
                 lines.append(
                     f"{idx}. {period['name']} {period['start']:02d}:00-"
-                    f"{period['end']:02d}:00, import "
+                    f"{period['end']:02d}:00 "
+                    f"{day_labels.get(period.get('days'), 'Mon-Sun')}, import "
                     f"{period['import_rate'] * 100:.1f}{minor_unit}, export "
                     f"{period['export_rate'] * 100:.1f}{minor_unit}"
                 )
@@ -5937,17 +5944,23 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         Each period with different rates gets a unique internal name (e.g. PEAK_1,
         PEAK_2) so the optimizer sees distinct prices for each time block.
-        Remaining weekday hours not covered by any period become OFF_PEAK.
+        Remaining hours not covered by any period become OFF_PEAK.
         """
         tou_periods: dict[str, list] = {}
         energy_charges: dict[str, float] = {}
         sell_charges: dict[str, float] = {}
 
+        def _day_ranges(scope: str) -> list[tuple[int, int]]:
+            if scope == "weekdays":
+                return [(1, 5)]
+            if scope == "weekends":
+                return [(0, 0), (6, 6)]
+            return [(0, 6)]
+
         # Assign unique names when the same period type has different rates
         name_counters: dict[str, int] = {}
         for period in periods:
             base_name = period["name"]
-            rate_key = (base_name, period["import_rate"], period["export_rate"])
 
             # Check if an existing period with same name has the same rates
             existing_key = None
@@ -5985,63 +5998,81 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     name_counters[base_name] += 1
                     unique_name = f"{base_name}_{name_counters[base_name]}"
 
-            # Build day range
-            if period["days"] == "weekdays":
-                from_day, to_day = 1, 5
-            else:
-                from_day, to_day = 0, 6
-
-            time_range = {
-                "fromDayOfWeek": from_day,
-                "toDayOfWeek": to_day,
-                "fromHour": period["start"],
-                "toHour": period["end"],
-            }
-
             if unique_name not in tou_periods:
                 tou_periods[unique_name] = []
-            tou_periods[unique_name].append(time_range)
+            for from_day, to_day in _day_ranges(period.get("days", "weekdays")):
+                tou_periods[unique_name].append(
+                    {
+                        "fromDayOfWeek": from_day,
+                        "toDayOfWeek": to_day,
+                        "fromHour": period["start"],
+                        "toHour": period["end"],
+                    }
+                )
             energy_charges[unique_name] = period["import_rate"]
             sell_charges[unique_name] = period["export_rate"]
 
-        # Auto-fill remaining weekday hours as OFF_PEAK
-        defined_hours = set()
+        # Auto-fill remaining hours as OFF_PEAK per day. This lets tariffs have
+        # different weekday and weekend definitions while still covering gaps.
+        defined_hours_by_day = {day: set() for day in range(7)}
+
+        def _days_between(start: int, end: int) -> list[int]:
+            start %= 7
+            end %= 7
+            if start <= end:
+                return list(range(start, end + 1))
+            return list(range(start, 7)) + list(range(0, end + 1))
+
+        def _mark_hours(day: int, start: int, end: int) -> None:
+            defined_hours_by_day[day % 7].update(range(start, end))
+
         for period_list in tou_periods.values():
             for p in period_list:
-                if p["fromDayOfWeek"] <= 5 and p["toDayOfWeek"] >= 1:
-                    for h in range(p["fromHour"], p["toHour"]):
-                        defined_hours.add(h)
+                start_hour = int(p["fromHour"])
+                end_hour = int(p["toHour"])
+                for day in _days_between(p["fromDayOfWeek"], p["toDayOfWeek"]):
+                    if start_hour == end_hour:
+                        _mark_hours(day, 0, 24)
+                    elif start_hour < end_hour:
+                        _mark_hours(day, start_hour, end_hour)
+                    else:
+                        _mark_hours(day, start_hour, 24)
+                        _mark_hours(day + 1, 0, end_hour)
 
         offpeak_periods = []
-        gap_start = None
-        for h in range(25):
-            if h < 24 and h not in defined_hours:
-                if gap_start is None:
-                    gap_start = h
-            else:
-                if gap_start is not None:
-                    offpeak_periods.append(
-                        {
-                            "fromDayOfWeek": 1,
-                            "toDayOfWeek": 5,
-                            "fromHour": gap_start,
-                            "toHour": h,
-                        }
-                    )
+        offpeak_gaps: dict[tuple[int, int], list[int]] = {}
+        for day, defined_hours in defined_hours_by_day.items():
+            gap_start = None
+            for h in range(25):
+                if h < 24 and h not in defined_hours:
+                    if gap_start is None:
+                        gap_start = h
+                elif gap_start is not None:
+                    offpeak_gaps.setdefault((gap_start, h), []).append(day)
                     gap_start = None
 
-        # Weekends are off-peak unless a period covers all days
-        weekend_defined = any(
-            p["fromDayOfWeek"] == 0 and p["toDayOfWeek"] == 6
-            for period_list in tou_periods.values()
-            for p in period_list
-        )
-        if not weekend_defined:
+        for (from_hour, to_hour), days in offpeak_gaps.items():
+            sorted_days = sorted(days)
+            range_start = sorted_days[0]
+            previous_day = range_start
+            for day in sorted_days[1:] + [None]:
+                if day is not None and day == previous_day + 1:
+                    previous_day = day
+                    continue
+                offpeak_periods.append(
+                    {
+                        "fromDayOfWeek": range_start,
+                        "toDayOfWeek": previous_day,
+                        "fromHour": from_hour,
+                        "toHour": to_hour,
+                    }
+                )
+                if day is not None:
+                    range_start = previous_day = day
+
+        if not offpeak_periods and not tou_periods:
             offpeak_periods.append(
-                {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 0, "toHour": 24}
-            )
-            offpeak_periods.append(
-                {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24}
+                {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24}
             )
 
         offpeak_rate = getattr(self, "_tariff_offpeak_rate", 0.15)
@@ -13480,6 +13511,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         ]
         day_options = {
             "weekdays": "Weekdays only (Mon-Fri)",
+            "weekends": "Weekends only (Sat-Sun)",
             "all_days": "All days (Mon-Sun)",
         }
         period_types = {
@@ -13494,6 +13526,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         if count > 0:
             lines = []
             minor_unit = self._selector_unit()
+            day_labels = {
+                "weekdays": "Mon-Fri",
+                "weekends": "Sat-Sun",
+                "all_days": "Mon-Sun",
+            }
             for i, p in enumerate(self._tariff_periods, 1):
                 label = {
                     "PEAK": "Peak",
@@ -13503,6 +13540,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 }.get(p["name"], p["name"])
                 lines.append(
                     f"{i}. {label} {p['start']:02d}:00-{p['end']:02d}:00 "
+                    f"{day_labels.get(p.get('days'), 'Mon-Sun')} "
                     f"({p['import_rate'] * 100:.0f}{minor_unit} import, "
                     f"{p['export_rate'] * 100:.0f}{minor_unit} export)"
                 )

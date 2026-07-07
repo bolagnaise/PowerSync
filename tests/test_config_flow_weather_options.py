@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import textwrap
 from pathlib import Path
 
 
@@ -593,6 +594,108 @@ def test_other_custom_tou_initial_setup_routes_directly_to_custom_tariff():
     assert create_entry is not None
     assert 'data["initial_custom_tariff"] = self._custom_tariff_data' in create_entry
     assert 'title = "PowerSync Custom TOU"' in create_entry
+
+
+def test_custom_tou_tariff_periods_support_weekend_only_ranges():
+    source = CONFIG_FLOW_PATH.read_text()
+    initial_period_step = ast.get_source_segment(
+        source,
+        _config_flow_method("async_step_tariff_period"),
+    )
+    options_period_step = ast.get_source_segment(
+        source,
+        _options_flow_method("async_step_tariff_period_options"),
+    )
+    builder_source = ast.get_source_segment(
+        source,
+        _config_flow_method("_build_tariff_from_periods"),
+    )
+
+    assert initial_period_step is not None
+    assert options_period_step is not None
+    assert builder_source is not None
+    assert '"weekends": "Weekends only (Sat-Sun)"' in initial_period_step
+    assert '"weekends": "Weekends only (Sat-Sun)"' in options_period_step
+
+    namespace = {
+        "normalize_currency": lambda value, fallback: value or fallback,
+        "currency_for_provider": lambda provider, hass: "AUD",
+    }
+    exec(textwrap.dedent(builder_source), namespace)
+
+    ctx = type(
+        "Ctx",
+        (),
+        {
+            "_tariff_offpeak_rate": 0.15,
+            "_tariff_fit_rate": 0.05,
+            "_tariff_plan_name": "Red Energy TOU",
+            "_selected_electricity_provider": "other",
+            "_tariff_currency": None,
+            "hass": None,
+        },
+    )()
+
+    tariff = namespace["_build_tariff_from_periods"](
+        ctx,
+        [
+            {
+                "name": "PEAK",
+                "start": 14,
+                "end": 20,
+                "days": "weekdays",
+                "import_rate": 0.48,
+                "export_rate": 0.04,
+            },
+            {
+                "name": "SHOULDER",
+                "start": 7,
+                "end": 22,
+                "days": "weekends",
+                "import_rate": 0.28,
+                "export_rate": 0.04,
+            },
+        ],
+    )
+
+    tou_periods = tariff["seasons"]["All Year"]["tou_periods"]
+
+    assert {
+        "fromDayOfWeek": 0,
+        "toDayOfWeek": 0,
+        "fromHour": 7,
+        "toHour": 22,
+    } in tou_periods["SHOULDER"]
+    assert {
+        "fromDayOfWeek": 6,
+        "toDayOfWeek": 6,
+        "fromHour": 7,
+        "toHour": 22,
+    } in tou_periods["SHOULDER"]
+    assert {
+        "fromDayOfWeek": 1,
+        "toDayOfWeek": 5,
+        "fromHour": 0,
+        "toHour": 14,
+    } in tou_periods["OFF_PEAK"]
+    assert {
+        "fromDayOfWeek": 1,
+        "toDayOfWeek": 5,
+        "fromHour": 20,
+        "toHour": 24,
+    } in tou_periods["OFF_PEAK"]
+    assert {
+        "fromDayOfWeek": 0,
+        "toDayOfWeek": 0,
+        "fromHour": 22,
+        "toHour": 24,
+    } in tou_periods["OFF_PEAK"]
+    assert {
+        "fromDayOfWeek": 6,
+        "toDayOfWeek": 6,
+        "fromHour": 0,
+        "toHour": 7,
+    } in tou_periods["OFF_PEAK"]
 
 
 def test_globird_plan_strings_are_available_in_setup_and_options():
