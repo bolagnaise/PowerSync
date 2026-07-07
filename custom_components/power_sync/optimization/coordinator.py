@@ -531,7 +531,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return False
 
-        self._scheduled_ev_no_discharge_active = False
+        # Keep the active flag set until the hardware restore is confirmed:
+        # clearing it first made a failed release unretryable (the early-return
+        # above short-circuits every later attempt) and left discharge capped.
         try:
             if (
                 self.energy_coordinator
@@ -552,15 +554,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ok = True
         except Exception as err:
             _LOGGER.warning(
-                "Scheduled EV preserve: failed to release no-discharge mode: %s",
+                "Scheduled EV preserve: failed to release no-discharge mode (will retry): %s",
                 err,
             )
             return False
 
         if ok is False:
-            _LOGGER.warning("Scheduled EV preserve: no-discharge release returned False")
+            _LOGGER.warning(
+                "Scheduled EV preserve: no-discharge release returned False (will retry)"
+            )
             return False
 
+        self._scheduled_ev_no_discharge_active = False
         _LOGGER.info(
             "Scheduled EV preserve: battery no-discharge mode released%s",
             f" ({reason})" if reason else "",
@@ -5599,13 +5604,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 "Optimizer: Already in self-consumption mode — "
                                 "skipping redundant API call"
                             )
+                    mode_apply_failed = False
                     if apply_self_consumption or reapply_backup_reserve:
                         if hasattr(battery, "set_self_consumption_mode"):
                             if apply_self_consumption:
-                                await battery.set_self_consumption_mode()
+                                if await battery.set_self_consumption_mode() is False:
+                                    mode_apply_failed = True
                         elif hasattr(battery, "restore_normal"):
                             if apply_self_consumption:
-                                await battery.restore_normal()
+                                if await battery.restore_normal() is False:
+                                    mode_apply_failed = True
                         if (
                             sungrow_reapply_reserve_pct is not None
                             and hasattr(battery, "set_backup_reserve")
@@ -5649,6 +5657,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 configured_reserve_pct,
                                 soc_pct,
                             )
+                    if mode_apply_failed:
+                        # Do not record success: the base BatteryController
+                        # returns False instead of raising, and advancing the
+                        # marker here masked the failure — the change-detection
+                        # above then skipped the command forever, leaving the
+                        # inverter in its prior forced mode. Keeping the old
+                        # marker makes the next cycle retry.
+                        _LOGGER.warning(
+                            "Optimizer: self-consumption mode command failed — "
+                            "keeping previous action marker so the next cycle retries"
+                        )
+                        return
                     _LOGGER.debug("Optimizer: Self-consumption mode (action=%s)", effective_action)
 
             self._last_executed_planned_action = planned_action
