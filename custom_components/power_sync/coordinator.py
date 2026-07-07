@@ -4591,25 +4591,45 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             normal_limit_kw = await self._resolve_normal_discharge_limit_kw()
             if normal_limit_kw is None or normal_limit_kw <= 0:
                 normal_limit_kw = max(target_export_w / 1000.0, 5.0)
+            configured_limit_kw = self._configured_optimization_discharge_limit_kw()
+            if (
+                configured_limit_kw is not None
+                and configured_limit_kw > 0
+                and normal_limit_kw > configured_limit_kw
+            ):
+                _LOGGER.info(
+                    "Sungrow spread export: clamping discharge headroom from %.2fkW "
+                    "to configured max %.2fkW",
+                    normal_limit_kw,
+                    configured_limit_kw,
+                )
+                normal_limit_kw = configured_limit_kw
 
             forced_power_w = int(round(normal_limit_kw * 1000))
             limit_changed = False
             export_limit_changed = False
             try:
-                limit_changed = await self._controller.set_discharge_rate_limit(normal_limit_kw)
-                if not limit_changed:
-                    if getattr(self._controller, "rate_limit_writable", None) is False:
-                        self._pre_control_discharge_limit_kw = None
-                        _LOGGER.warning(
-                            "Sungrow spread export: discharge limit register is not writable; "
-                            "continuing with grid export limit only"
-                        )
-                    else:
-                        _LOGGER.warning(
-                            "Sungrow spread export: failed to set discharge limit to %.2fkW",
-                            normal_limit_kw,
-                        )
-                        return False
+                if getattr(self._controller, "rate_limit_writable", None) is False:
+                    self._pre_control_discharge_limit_kw = None
+                    _LOGGER.debug(
+                        "Sungrow spread export: discharge limit register already known "
+                        "not writable; continuing with grid export limit only"
+                    )
+                else:
+                    limit_changed = await self._controller.set_discharge_rate_limit(normal_limit_kw)
+                    if not limit_changed:
+                        if getattr(self._controller, "rate_limit_writable", None) is False:
+                            self._pre_control_discharge_limit_kw = None
+                            _LOGGER.warning(
+                                "Sungrow spread export: discharge limit register is not writable; "
+                                "continuing with grid export limit only"
+                            )
+                        else:
+                            _LOGGER.warning(
+                                "Sungrow spread export: failed to set discharge limit to %.2fkW",
+                                normal_limit_kw,
+                            )
+                            return False
 
                 export_limit_changed = await self._controller.set_export_limit(target_export_w)
                 if not export_limit_changed:
