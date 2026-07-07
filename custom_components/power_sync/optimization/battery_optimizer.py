@@ -517,19 +517,22 @@ class BatteryOptimizer:
         grid_charge_allowed = self._normalize_grid_charge_allowed(
             grid_charge_allowed, n_steps
         )
+        effective_priority_export_prices = [
+            export_prices[idx] + export_bonus_prices[idx]
+            for idx in range(n_steps)
+        ]
         priority_export_slots = self._normalize_priority_export_slots(
             priority_export_slots,
             allow_battery_export,
             n_steps,
             priority_export_enabled,
             import_prices,
-            export_prices,
-            acquisition_cost_kwh,
+            effective_priority_export_prices,
             grid_charge_allowed,
         )
         priority_export_floor = self._priority_export_reserve_floor_slots(
             import_prices,
-            export_prices,
+            effective_priority_export_prices,
             solar_forecast,
             load_forecast,
             priority_export_slots,
@@ -700,7 +703,6 @@ class BatteryOptimizer:
         enabled: bool,
         import_prices: list[float],
         export_prices: list[float],
-        acquisition_cost_kwh: float,
         grid_charge_allowed: list[bool],
     ) -> list[bool]:
         """Return export-priority slots that should prefer surplus export."""
@@ -729,9 +731,6 @@ class BatteryOptimizer:
                 flags.append(False)
                 continue
             if export_price <= 0.001:
-                flags.append(False)
-                continue
-            if acquisition_cost_kwh > 0 and export_price < acquisition_cost_kwh:
                 flags.append(False)
                 continue
             # If this slot is already cheap enough to refill the battery after
@@ -1336,10 +1335,6 @@ class BatteryOptimizer:
                 and idx < len(priority_export_slots)
                 and priority_export_slots[idx]
                 and effective_export_price > 0.001
-                and (
-                    acquisition_cost_kwh <= 0
-                    or effective_export_price >= acquisition_cost_kwh
-                )
             )
             # Use this slot's own floor, not the horizon-wide maximum: a high
             # floor scoped to a later window (e.g. tomorrow's export bridge)
@@ -1460,10 +1455,6 @@ class BatteryOptimizer:
                 p_priority_export[t]
                 and p_allow_export[t]
                 and export_value > 0.001
-                and (
-                    acquisition_cost_kwh <= 0
-                    or export_value >= p_effective_acquisition[t]
-                )
             )
 
         def _profitable_export_slot(t: int) -> bool:
@@ -2066,7 +2057,8 @@ class BatteryOptimizer:
                 suppress_generic_battery_export
                 or not p_allow_export[t]
                 or (
-                    acquisition_cost_kwh > 0
+                    not priority_export_slot
+                    and acquisition_cost_kwh > 0
                     and (p_export[t] + p_export_bonus[t])
                     < p_effective_acquisition[t]
                 )
@@ -2685,10 +2677,6 @@ class BatteryOptimizer:
                 priority_export_slots[t]
                 and allow_battery_export[t]
                 and export_value > 0.001
-                and (
-                    acquisition_cost_kwh <= 0
-                    or export_value >= effective_acquisition_costs[t]
-                )
             )
 
         max_grid_export_kw = (

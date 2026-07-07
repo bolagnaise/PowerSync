@@ -1641,6 +1641,61 @@ def test_priority_export_bonus_is_not_counted_in_predicted_cost(
     assert result.schedule.predicted_cost == round(actual_cost, 2)
 
 
+def test_priority_export_bonus_window_exports_below_acquisition_cost(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=32200,
+        max_charge_w=10000,
+        max_discharge_w=5000,
+        max_battery_export_w=5000,
+        backup_reserve=0.18,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=24,
+    )
+    n = 24 * 12
+    export_start = 44
+    export_end = export_start + 36
+    zerocharge_start = 248
+    zerocharge_end = zerocharge_start + 36
+    import_prices = [0.418] * n
+    export_prices = [0.0] * n
+    export_bonus_prices = [0.0] * n
+    import_bonus_prices = [0.0] * n
+    allow_export = [False] * n
+    block_charge = [False] * n
+    for idx in range(export_start, export_end):
+        # ZeroHero models Super Export as a capped bonus on top of a 0c base FiT.
+        export_bonus_prices[idx] = 0.15
+        allow_export[idx] = True
+        block_charge[idx] = True
+    for idx in range(zerocharge_start, zerocharge_end):
+        import_bonus_prices[idx] = import_prices[idx]
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=export_prices,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.2] * n,
+        current_soc=1.0,
+        acquisition_cost_kwh=0.418,
+        allow_battery_export=allow_export,
+        block_battery_charge=block_charge,
+        export_bonus_prices=export_bonus_prices,
+        export_bonus_cap_kwh=15.0,
+        import_bonus_prices=import_bonus_prices,
+        import_bonus_cap_kwh=50.0,
+        priority_export_slots=allow_export,
+        priority_export_enabled=True,
+    )
+
+    export_window = result.schedule.actions[export_start:export_end]
+    assert any(action.action == "export" for action in export_window)
+    assert max(result.grid_export_w[export_start:export_end]) > 1000
+    assert min(action.soc for action in export_window) >= 0.25
+
+
 def test_zerohero_low_value_export_does_not_force_paid_prefill_without_priority(
     battery_optimizer_module,
 ):
