@@ -23481,6 +23481,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # This allows the endpoint to return real tariff instead of fake ML tariff
     hass.data[DOMAIN][entry.entry_id]["force_charge_state"] = force_charge_state
     hass.data[DOMAIN][entry.entry_id]["force_discharge_state"] = force_discharge_state
+    # HD-13: also register hold_soc_state — sensor.py's Battery Mode sensor
+    # reads entry_data.get("hold_soc_state", {}) and without this it always
+    # sees an empty dict, so Hold SoC can never be reflected in the sensor.
+    hass.data[DOMAIN][entry.entry_id]["hold_soc_state"] = hold_soc_state
 
     async def _cache_restorable_tesla_tariff(tariff: Any, source: str) -> dict[str, Any] | None:
         """Cache a normal Tesla TOU tariff; ignore temporary force tariffs."""
@@ -23596,7 +23600,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Helper function to persist force mode state to storage
     async def persist_force_mode_state() -> None:
-        """Persist current force charge/discharge state to storage."""
+        """Persist current force charge/discharge/hold state to storage."""
         stored_data = await store.async_load() or {}
 
         # Only save what's needed to restore after restart
@@ -23627,6 +23631,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "saved_backup_reserve": force_discharge_state["saved_backup_reserve"],
                 "saved_export_rule": force_discharge_state["saved_export_rule"],
                 "saved_grid_charging_enabled": force_discharge_state.get("saved_grid_charging_enabled"),
+            }
+        elif hold_soc_state["active"]:
+            # OB-5: Hold SoC is a third force-like mode (battery locked in
+            # backup/standby) and must be persisted the same way force
+            # charge/discharge are, or a restart/reload mid-hold leaves the
+            # hardware stuck in standby with nothing tracking it. Without
+            # this branch, state_to_save stays None here and the write below
+            # clobbers any previously-persisted force state with None.
+            state_to_save = {
+                "mode": "hold_soc",
+                "expires_at": hold_soc_state["expires_at"].isoformat() if hold_soc_state.get("expires_at") else None,
+                "locked_soc": hold_soc_state.get("locked_soc"),
+                "saved_operation_mode": hold_soc_state.get("saved_operation_mode"),
+                "saved_backup_reserve": hold_soc_state.get("saved_backup_reserve"),
             }
 
         stored_data["force_mode_state"] = state_to_save
@@ -23673,6 +23691,89 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             persisted_power_w = _coerce_force_power_w(
                 persisted_force_state.get("power_w", 0)
             )
+
+            # OB-5: Hold SoC is not a charge/discharge tariff replay — it's a
+            # standby/backup lock — so it gets its own branch instead of the
+            # "state = force_charge_state if mode == 'charge' else
+            # force_discharge_state" selection used below. It also never
+            # persists with source == "optimizer" (handle_hold_battery_soc
+            # skips state management/persistence entirely for optimizer-
+            # sourced holds), so there is no optimizer-replay branch to
+            # mirror here.
+            if mode == "hold_soc":
+                locked_soc = persisted_force_state.get("locked_soc")
+                saved_operation_mode = persisted_force_state.get("saved_operation_mode")
+                saved_backup_reserve = persisted_force_state.get("saved_backup_reserve")
+
+                if now >= expires_at:
+                    _LOGGER.info(
+                        f"⏰ Persisted Hold SoC has expired (was {expires_at_str}), restoring normal operation"
+                    )
+
+                    # Populate hold_soc_state so handle_restore_normal can do
+                    # a full cleanup (mirrors the charge/discharge expired
+                    # path immediately below).
+                    hold_soc_state["active"] = True
+                    hold_soc_state["expires_at"] = expires_at
+                    hold_soc_state["locked_soc"] = locked_soc
+                    hold_soc_state["saved_operation_mode"] = saved_operation_mode
+                    hold_soc_state["saved_backup_reserve"] = saved_backup_reserve
+
+                    try:
+                        await hass.services.async_call(
+                            DOMAIN, SERVICE_RESTORE_NORMAL, {"source": "user"}, blocking=True
+                        )
+                        _LOGGER.info("✅ Restored normal operation after expired Hold SoC")
+                    except Exception as e:
+                        _LOGGER.error(f"Error restoring after expired Hold SoC: {e}", exc_info=True)
+
+                    stored_data = await store.async_load() or {}
+                    stored_data["force_mode_state"] = None
+                    await store.async_save(stored_data)
+                else:
+                    # Hold SoC is still active - the inverter/gateway itself
+                    # stays in standby/backup mode across a restart (that's
+                    # the hardware fault this bug is about), so there is
+                    # nothing to re-issue here — just re-arm the in-memory
+                    # state, its expiry timer, and the dispatcher so the
+                    # mobile Controls screen and the eventual auto-restore
+                    # both work again.
+                    remaining_seconds = (expires_at - now).total_seconds()
+                    remaining_minutes = remaining_seconds / 60
+                    _LOGGER.info(
+                        f"🔄 Restoring Hold SoC from persistence ({remaining_minutes:.1f} min remaining)"
+                    )
+
+                    hold_soc_state["active"] = True
+                    hold_soc_state["expires_at"] = expires_at
+                    hold_soc_state["locked_soc"] = locked_soc
+                    hold_soc_state["saved_operation_mode"] = saved_operation_mode
+                    hold_soc_state["saved_backup_reserve"] = saved_backup_reserve
+
+                    # OB-7: async_unload_entry now cancels this timer on every
+                    # unload/reload, so re-arming it here can never collide
+                    # with an orphaned pre-reload timer.
+                    _restore_gen_hold_persisted = _command_generation[0]
+
+                    async def auto_restore_hold_soc_persisted(_now):
+                        if _command_generation[0] != _restore_gen_hold_persisted:
+                            _LOGGER.debug("Persisted Hold SoC timer superseded — skipping restore")
+                            return
+                        if hold_soc_state["active"]:
+                            _LOGGER.info("⏰ Hold SoC expired (restored timer), auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    hold_soc_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass, auto_restore_hold_soc_persisted, expires_at
+                    )
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_hold_soc_state", {
+                        "active": True,
+                        "expires_at": expires_at.isoformat(),
+                        "locked_soc": locked_soc,
+                    })
+                    _LOGGER.info(f"✅ Hold SoC restored from persistence, expires in {remaining_minutes:.1f} min")
+                return
 
             if _is_monitoring_mode():
                 saved_tariff = _select_restorable_tesla_tariff(
@@ -34310,6 +34411,27 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.debug("Stopped %s", coord_key)
             except Exception as e:
                 _LOGGER.debug("%s shutdown error: %s", coord_key, e)
+
+    # OB-7: cancel any pending force-mode / Hold SoC expiry + hardware-
+    # refresh timers before tearing down the entry. These callbacks close
+    # over this setup's hass/entry/state-dict closures; a reload rebuilds
+    # fresh force_charge_state / force_discharge_state / hold_soc_state
+    # dicts (and a fresh persist/restore pass — see OB-5), so an orphaned
+    # pre-reload timer left running here would fire later against the *new*
+    # setup's state, coordinators, or a config entry that's already gone.
+    for _state_key in ("force_charge_state", "force_discharge_state", "hold_soc_state"):
+        _state = entry_data.get(_state_key)
+        if not _state:
+            continue
+        for _timer_key in ("cancel_expiry_timer", "cancel_hardware_refresh_timer"):
+            _cancel = _state.get(_timer_key)
+            if callable(_cancel):
+                try:
+                    _cancel()
+                except Exception as e:
+                    _LOGGER.debug("Error cancelling %s.%s on unload: %s", _state_key, _timer_key, e)
+                _state[_timer_key] = None
+    _LOGGER.debug("Cancelled force/hold expiry timers on unload")
 
     # Unload platforms
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
