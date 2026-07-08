@@ -7564,10 +7564,28 @@ class PriceLevelChargingExecutor:
 
             # Get charging decision for this vehicle
             decision = await self.get_charging_decision_for_vehicle(vin, current_price_cents)
-            results[vin] = decision
 
             should_charge, reason, mode = decision
             vehicle_state = self._get_or_create_vehicle_state(vin)
+
+            if (
+                should_charge
+                and mode == "price_level_recovery"
+                and vin.startswith("ble_")
+                and "EV SOC unknown" in reason
+                and any(not v["vin"].startswith("ble_") for v in vehicles)
+            ):
+                reason = (
+                    "Tesla BLE SOC unavailable while another Tesla vehicle is "
+                    "already discovered; waiting for a vehicle-specific SOC source"
+                )
+                decision = (False, reason, "")
+                should_charge = False
+                mode = ""
+                vehicle_state.last_decision = "waiting"
+                vehicle_state.last_decision_reason = reason
+
+            results[vin] = decision
 
             _LOGGER.debug(
                 f"Multi-vehicle decision for {name} ({vin}): "
