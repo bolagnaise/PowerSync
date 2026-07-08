@@ -549,6 +549,7 @@ from .const import (
     DEFAULT_INVERTER_SLAVE_ID,
     DEFAULT_INVERTER_RESTORE_SOC,
     # Sigenergy configuration
+    BATTERY_SYSTEM_SIGENERGY,
     CONF_SIGENERGY_STATION_ID,
     CONF_SIGENERGY_TARIFF_STATION_ID,
     CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID,
@@ -1818,6 +1819,73 @@ def _get_neovolt_entry_ids(
         except Exception:
             _LOGGER.debug("Could not expand legacy Neovolt config entry ids", exc_info=True)
     return [legacy_entry_id] if legacy_entry_id else []
+
+
+def _active_battery_system(
+    entry: ConfigEntry,
+    hass: HomeAssistant | None = None,
+) -> str | None:
+    """Return the effective battery/control brand for a config entry.
+
+    The user's explicit CONF_BATTERY_SYSTEM selection (options override data) is
+    authoritative. This matters after a brand switch: the per-brand save helpers
+    historically merged the new brand's connection keys additively without
+    removing the previous brand's host/station keys, so an entry could carry a
+    stale CONF_SUNGROW_HOST while the user has since selected GoodWe. The old
+    host-key-presence dispatch would then build a Sungrow coordinator against a
+    dead endpoint while every CONF_BATTERY_SYSTEM reader believed it was GoodWe
+    — a split-brain. Gating on CONF_BATTERY_SYSTEM mirrors the tariff layer,
+    where a stale Amber token no longer masks the real price provider.
+
+    Legacy entries created before CONF_BATTERY_SYSTEM existed carry no brand, so
+    we fall back to detecting it from whichever connection key is present, using
+    the same precedence as the historical if/elif dispatch chain. This keeps
+    working single-brand installs untouched.
+    """
+    data = getattr(entry, "data", None) or {}
+    options = getattr(entry, "options", None) or {}
+
+    def _value(key: str) -> Any:
+        return options.get(key, data.get(key))
+
+    battery_system = _value(CONF_BATTERY_SYSTEM)
+    if battery_system:
+        return battery_system
+
+    # Legacy entry: infer from connection keys (historical dispatch precedence).
+    merged = {**data, **options}
+    if _value(CONF_SIGENERGY_STATION_ID):
+        return BATTERY_SYSTEM_SIGENERGY
+    if _value(CONF_SUNGROW_HOST):
+        return BATTERY_SYSTEM_SUNGROW
+    if (
+        _value(CONF_FOXESS_HOST)
+        or _value(CONF_FOXESS_SERIAL_PORT)
+        or _value(CONF_FOXESS_ENTITY_CONFIG_ENTRY_ID)
+        or _value(CONF_FOXESS_ENTITY_PREFIX)
+    ):
+        return BATTERY_SYSTEM_FOXESS
+    if _value(CONF_GOODWE_HOST):
+        return BATTERY_SYSTEM_GOODWE
+    if _value(CONF_ALPHAESS_MODBUS_HOST):
+        return BATTERY_SYSTEM_ALPHAESS
+    if _value(CONF_ESY_CONFIG_ENTRY_ID):
+        return BATTERY_SYSTEM_ESY_SUNHOME
+    if _value(CONF_SOLAX_CONFIG_ENTRY_ID) or _value(CONF_SOLAX_ENTITY_PREFIX):
+        return BATTERY_SYSTEM_SOLAX
+    if _value(CONF_SAJ_CONFIG_ENTRY_ID):
+        return BATTERY_SYSTEM_SAJ_H2
+    if _value(CONF_FRONIUS_RESERVA_CONFIG_ENTRY_ID):
+        return BATTERY_SYSTEM_FRONIUS_RESERVA
+    if _get_neovolt_entry_ids(merged, hass):
+        return BATTERY_SYSTEM_NEOVOLT
+    if _value(CONF_SOLAREDGE_HOST) or _value(CONF_SOLAREDGE_ENTITY_PREFIX):
+        return BATTERY_SYSTEM_SOLAREDGE
+
+    # Anker Solix and custom controllers were only ever detected via an explicit
+    # CONF_BATTERY_SYSTEM selection (no host-key fallback), so there is nothing
+    # to infer for legacy entries here. Fall through to None → Tesla default.
+    return None
 
 
 PLATFORMS: list[Platform] = [
@@ -17302,32 +17370,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             amber_usage_coordinator = None
 
     # Check if this is a non-Tesla setup that can operate without Tesla APIs.
-    is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
-    is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
-    is_foxess = bool(
-        entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_FOXESS
-        or entry.data.get(CONF_FOXESS_HOST)
-        or entry.data.get(CONF_FOXESS_SERIAL_PORT)
-        or entry.data.get(CONF_FOXESS_ENTITY_CONFIG_ENTRY_ID)
-        or entry.data.get(CONF_FOXESS_ENTITY_PREFIX)
-    )
-    is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
-    is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
-    is_esy_sunhome = bool(entry.data.get(CONF_ESY_CONFIG_ENTRY_ID))
-    is_solax = bool(
-        entry.data.get(CONF_SOLAX_CONFIG_ENTRY_ID)
-        or entry.data.get(CONF_SOLAX_ENTITY_PREFIX)
-    )
-    is_saj_h2 = bool(entry.data.get(CONF_SAJ_CONFIG_ENTRY_ID))
-    is_fronius_reserva = bool(entry.data.get(CONF_FRONIUS_RESERVA_CONFIG_ENTRY_ID))
-    is_neovolt = bool(_get_neovolt_entry_ids(entry.data, hass))
-    is_solaredge = bool(
-        entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_SOLAREDGE
-        or entry.data.get(CONF_SOLAREDGE_HOST)
-        or entry.data.get(CONF_SOLAREDGE_ENTITY_PREFIX)
-    )
-    is_anker_solix = entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_ANKER_SOLIX
-    is_custom_battery = entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_CUSTOM
+    #
+    # Resolve the effective brand ONCE and gate each is_<brand> on it. Detecting
+    # the brand from raw host-key presence (the historical behaviour) is unsafe
+    # after a battery-system switch: the per-brand save helpers merged the new
+    # brand's keys additively without popping the previous brand's host/station
+    # key, so a stale CONF_SUNGROW_HOST could still activate the Sungrow
+    # coordinator against a dead endpoint even after the user selected GoodWe —
+    # split-brain against every CONF_BATTERY_SYSTEM reader. _active_battery_system
+    # honours the explicit selection and only falls back to host-key detection
+    # for legacy entries that predate CONF_BATTERY_SYSTEM. This mirrors the
+    # tariff-provider gating above, where a stale Amber token no longer masks
+    # the real price provider.
+    active_battery_system = _active_battery_system(entry, hass)
+    is_sigenergy = active_battery_system == BATTERY_SYSTEM_SIGENERGY
+    is_sungrow = active_battery_system == BATTERY_SYSTEM_SUNGROW
+    is_foxess = active_battery_system == BATTERY_SYSTEM_FOXESS
+    is_goodwe = active_battery_system == BATTERY_SYSTEM_GOODWE
+    is_alphaess = active_battery_system == BATTERY_SYSTEM_ALPHAESS
+    is_esy_sunhome = active_battery_system == BATTERY_SYSTEM_ESY_SUNHOME
+    is_solax = active_battery_system == BATTERY_SYSTEM_SOLAX
+    is_saj_h2 = active_battery_system == BATTERY_SYSTEM_SAJ_H2
+    is_fronius_reserva = active_battery_system == BATTERY_SYSTEM_FRONIUS_RESERVA
+    is_neovolt = active_battery_system == BATTERY_SYSTEM_NEOVOLT
+    is_solaredge = active_battery_system == BATTERY_SYSTEM_SOLAREDGE
+    is_anker_solix = active_battery_system == BATTERY_SYSTEM_ANKER_SOLIX
+    is_custom_battery = active_battery_system == BATTERY_SYSTEM_CUSTOM
     tesla_coordinator = None
     sigenergy_coordinator = None
     sungrow_coordinator = None

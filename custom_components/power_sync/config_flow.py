@@ -543,6 +543,73 @@ SUNGROW_LEGACY_DUAL_KEYS = (
     CONF_SUNGROW_BATTERY_CAPACITY_2,
 )
 
+# Per-brand connection/detection keys. When the options flow switches the
+# battery system we pop every OTHER brand's keys so a stale host/station/entry
+# key can never re-activate the wrong coordinator (see the runtime guard
+# _active_battery_system in __init__.py). Only connection-identifying keys are
+# listed — brand-agnostic settings (backup reserve, tariff, EV) are left alone.
+BATTERY_SYSTEM_CONNECTION_KEYS: dict[str, tuple[str, ...]] = {
+    BATTERY_SYSTEM_TESLA: (CONF_TESLA_ENERGY_SITE_ID,),
+    BATTERY_SYSTEM_SIGENERGY: (
+        CONF_SIGENERGY_STATION_ID,
+        CONF_SIGENERGY_MODBUS_HOST,
+        CONF_SIGENERGY_MODBUS_PORT,
+        CONF_SIGENERGY_MODBUS_SLAVE_ID,
+    ),
+    BATTERY_SYSTEM_SUNGROW: (
+        CONF_SUNGROW_HOST,
+        CONF_SUNGROW_PORT,
+        CONF_SUNGROW_SLAVE_ID,
+    ),
+    BATTERY_SYSTEM_FOXESS: (
+        CONF_FOXESS_HOST,
+        CONF_FOXESS_PORT,
+        CONF_FOXESS_SLAVE_ID,
+        CONF_FOXESS_CONNECTION_TYPE,
+        CONF_FOXESS_SERIAL_PORT,
+        CONF_FOXESS_ENTITY_CONFIG_ENTRY_ID,
+        CONF_FOXESS_ENTITY_PREFIX,
+        CONF_FOXESS_CLOUD_API_KEY,
+        CONF_FOXESS_CLOUD_DEVICE_SN,
+    ),
+    BATTERY_SYSTEM_GOODWE: (
+        CONF_GOODWE_HOST,
+        CONF_GOODWE_PORT,
+        CONF_GOODWE_PROTOCOL,
+        CONF_GOODWE_EMS_ENTITY_PREFIX,
+        CONF_GOODWE_EMS_CONTROL_MODE,
+    ),
+    BATTERY_SYSTEM_ALPHAESS: (
+        CONF_ALPHAESS_MODBUS_HOST,
+        CONF_ALPHAESS_MODBUS_PORT,
+        CONF_ALPHAESS_MODBUS_SLAVE_ID,
+    ),
+    BATTERY_SYSTEM_ESY_SUNHOME: (CONF_ESY_CONFIG_ENTRY_ID,),
+    BATTERY_SYSTEM_SOLAX: (
+        CONF_SOLAX_CONFIG_ENTRY_ID,
+        CONF_SOLAX_ENTITY_PREFIX,
+    ),
+    BATTERY_SYSTEM_SAJ_H2: (CONF_SAJ_CONFIG_ENTRY_ID,),
+    BATTERY_SYSTEM_FRONIUS_RESERVA: (CONF_FRONIUS_RESERVA_CONFIG_ENTRY_ID,),
+    BATTERY_SYSTEM_NEOVOLT: (
+        CONF_NEOVOLT_CONFIG_ENTRY_ID,
+        CONF_NEOVOLT_CONFIG_ENTRY_IDS,
+    ),
+    BATTERY_SYSTEM_SOLAREDGE: (
+        CONF_SOLAREDGE_HOST,
+        CONF_SOLAREDGE_PORT,
+        CONF_SOLAREDGE_SLAVE_ID,
+        CONF_SOLAREDGE_ENTITY_PREFIX,
+    ),
+    BATTERY_SYSTEM_ANKER_SOLIX: (
+        CONF_ANKER_SOLIX_MODBUS_HOST,
+        CONF_ANKER_SOLIX_MODBUS_PORT,
+        CONF_ANKER_SOLIX_MODBUS_SLAVE_ID,
+        CONF_ANKER_SOLIX_CONFIG_ENTRY_ID,
+        CONF_ANKER_SOLIX_ENTITY_PREFIX,
+    ),
+}
+
 
 def _build_globird_plan_schema(
     current: dict[str, Any] | None = None,
@@ -6639,11 +6706,25 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         )
 
     def _save_battery_system_selection(self, battery_system: str) -> None:
-        """Persist the selected battery/control method in data and options."""
+        """Persist the selected battery/control method in data and options.
+
+        Popping every OTHER brand's connection/detection keys is essential: the
+        per-brand save helpers merge additively, so without this a stale
+        CONF_SUNGROW_HOST (etc.) would survive a Sungrow -> GoodWe switch and let
+        the runtime dispatch build the wrong coordinator against a dead endpoint.
+        """
         new_data = dict(self.config_entry.data)
         new_options = dict(self.config_entry.options)
         new_data[CONF_BATTERY_SYSTEM] = battery_system
         new_options[CONF_BATTERY_SYSTEM] = battery_system
+
+        for brand, keys in BATTERY_SYSTEM_CONNECTION_KEYS.items():
+            if brand == battery_system:
+                continue
+            for key in keys:
+                new_data.pop(key, None)
+                new_options.pop(key, None)
+
         self.hass.config_entries.async_update_entry(
             self.config_entry,
             data=new_data,

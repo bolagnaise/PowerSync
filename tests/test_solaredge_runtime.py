@@ -29,11 +29,8 @@ def test_solaredge_runtime_bypasses_tesla_credentials():
         )
     ]
 
-    assert "is_solaredge = bool(" in pre_tesla_setup
-    assert (
-        "entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_SOLAREDGE"
-        in pre_tesla_setup
-    )
+    assert "active_battery_system = _active_battery_system(entry, hass)" in pre_tesla_setup
+    assert "is_solaredge = active_battery_system == BATTERY_SYSTEM_SOLAREDGE" in pre_tesla_setup
     assert "elif is_solaredge:" in pre_tesla_setup
     assert (
         "Running in SolarEdge mode - Tesla credentials not required"
