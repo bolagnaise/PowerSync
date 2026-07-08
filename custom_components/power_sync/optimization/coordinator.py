@@ -1157,14 +1157,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return the software floor used before force discharge/export commands."""
         floor = self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
         action_timestamp = getattr(action, "timestamp", None)
+        matched_per_slot = False
         if action_timestamp is not None:
             timestamps = getattr(self, "_active_export_reserve_floor_timestamps", None) or []
             floors = getattr(self, "_active_export_reserve_floor_slots", None) or []
             for idx, timestamp in enumerate(timestamps):
                 if timestamp == action_timestamp and idx < len(floors):
                     floor = max(floor, floors[idx])
+                    matched_per_slot = True
                     break
-        if self.auto_apply_reserve_enabled:
+        if not matched_per_slot and self.auto_apply_reserve_enabled:
             recommendation = (
                 getattr(getattr(self, "_last_optimizer_result", None), "reserve_recommendation", {})
                 or {}
