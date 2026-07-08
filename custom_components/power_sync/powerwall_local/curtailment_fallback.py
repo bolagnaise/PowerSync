@@ -228,14 +228,26 @@ class PowerwallCurtailmentFallback:
             _LOGGER.debug("Off-grid activation push failed: %s", err)
         return True
 
-    async def release(self, trigger_reason: str | None = None) -> bool:
+    async def release(
+        self, trigger_reason: str | None = None, force: bool = False
+    ) -> bool:
         """Reconnect to the grid if we own the current off-grid session.
 
         Safe to call when not active — returns True (nothing to do).
         The ``trigger_reason`` argument is only used for logging so an
         operator can see which restore path triggered the release.
+
+        ``force=True`` bypasses the "not active" early-return and issues
+        the real ``reconnect_grid()`` command anyway. This exists for the
+        startup orphan-cleanup path: a HA reload/restart rebuilds this
+        state machine fresh with ``_active=False`` even though the
+        Powerwall's grid contactor may still be physically open from a
+        session that predates the reload. Without ``force``, that stale
+        in-memory flag would silently skip the reconnect and strand the
+        house off-grid. All other callers keep the default (``force=False``)
+        behavior, which is unchanged.
         """
-        if not self._active:
+        if not self._active and not force:
             return True
 
         coord = self._get_coordinator()
@@ -272,14 +284,15 @@ class PowerwallCurtailmentFallback:
         self._active = False
         self._started_at = None
         self._reason = None
-        session_s = int(time.time() - (prev_started or time.time()))
+        session_s = int(time.time() - prev_started) if prev_started is not None else 0
         _LOGGER.info(
             "⚡ Powerwall off-grid curtailment RELEASED (was reason=%s, "
-            "trigger=%s, session=%ss, daily=%ss)",
+            "trigger=%s, session=%ss, daily=%ss, forced=%s)",
             prev_reason,
             trigger_reason,
             session_s,
             int(self._daily_duration_s),
+            force,
         )
         try:
             await coord.async_request_refresh()

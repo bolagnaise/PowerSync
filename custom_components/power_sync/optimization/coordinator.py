@@ -2923,7 +2923,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 "session — reconnecting",
                                 gs,
                             )
-                            await fallback.release(trigger_reason="startup_orphan_cleanup")
+                            await fallback.release(
+                                trigger_reason="startup_orphan_cleanup", force=True
+                            )
             except Exception as e:
                 _LOGGER.debug("Optimizer startup: off-grid orphan check failed: %s", e)
 
