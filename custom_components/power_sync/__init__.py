@@ -22453,14 +22453,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 CONF_INVERTER_BRAND,
                 entry.data.get(CONF_INVERTER_BRAND, ""),
             )
-            inverter_model = entry.options.get(
-                CONF_INVERTER_MODEL,
-                entry.data.get(CONF_INVERTER_MODEL, ""),
-            )
-            if (
-                inverter_brand != "sungrow"
-                or not str(inverter_model or "").lower().startswith("sh")
-            ):
+            if inverter_brand != "sungrow":
                 return False
 
             inverter_host = entry.options.get(
