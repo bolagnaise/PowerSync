@@ -24,12 +24,15 @@ def _load_aemo_api_module():
 
 
 class _FakeResponse:
-    def __init__(self, *, text=None, json_data=None, error=None):
+    def __init__(self, *, text=None, json_data=None, error=None, enter_error=None):
         self._text = text
         self._json_data = json_data
         self._error = error
+        self._enter_error = enter_error
 
     async def __aenter__(self):
+        if self._enter_error is not None:
+            raise self._enter_error
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -49,9 +52,10 @@ class _FakeResponse:
 class _FakeSession:
     closed = False
 
-    def __init__(self, module, *, dispatch_error=None):
+    def __init__(self, module, *, dispatch_error=None, json_enter_error=None):
         self._module = module
         self._dispatch_error = dispatch_error
+        self._json_enter_error = json_enter_error
         self.urls = []
 
     def get(self, url, **kwargs):
@@ -60,6 +64,7 @@ class _FakeSession:
             return _FakeResponse(error=self._dispatch_error)
         if url == self._module.AEMOAPIClient.BASE_URL:
             return _FakeResponse(
+                enter_error=self._json_enter_error,
                 json_data={
                     "ELEC_NEM_SUMMARY": [
                         {
@@ -128,3 +133,24 @@ def test_nemweb_backoff_uses_cached_dispatch_without_network(monkeypatch):
     assert is_new is False
     assert result_file == filename
     assert session.urls == []
+
+
+def test_json_fallback_timeout_returns_none(caplog):
+    module = _load_aemo_api_module()
+    session = _FakeSession(
+        module,
+        dispatch_error=Exception("403 Forbidden"),
+        json_enter_error=asyncio.TimeoutError(),
+    )
+    client = module.AEMOAPIClient(session)
+    caplog.set_level(logging.ERROR, logger=module._LOGGER.name)
+
+    prices, is_new, filename = asyncio.run(client.get_current_prices_with_file())
+
+    assert prices is None
+    assert is_new is False
+    assert filename == ""
+    assert any(
+        "Error fetching AEMO prices (JSON fallback)" in record.getMessage()
+        for record in caplog.records
+    )

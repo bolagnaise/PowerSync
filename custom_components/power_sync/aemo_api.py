@@ -5,6 +5,7 @@ No authentication required - uses public API endpoints.
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import logging
@@ -296,7 +297,7 @@ class AEMOAPIClient:
             _LOGGER.info("JSON fallback fetched AEMO prices for %d regions", len(prices))
             return prices
 
-        except aiohttp.ClientError as err:
+        except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError) as err:
             _LOGGER.error("Error fetching AEMO prices (JSON fallback): %s", err)
             return None
         except (KeyError, ValueError) as err:
