@@ -149,6 +149,110 @@ def test_grid_import_limit_still_allows_solar_assisted_full_charge(
     )
 
 
+def test_grid_charge_soc_cap_chooses_cheapest_eligible_slot(battery_optimizer_module):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=0.50,
+        interval_minutes=60,
+        horizon_hours=4,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 0.50
+    optimizer.pre_window_slot = 4
+
+    result = optimizer.optimize(
+        import_prices=[0.30, 0.28, 0.05, 0.04],
+        export_prices=[0.0, 0.0, 0.0, 0.0],
+        solar_forecast=[0.0, 0.0, 0.0, 0.0],
+        load_forecast=[0.0, 0.0, 0.0, 0.0],
+        current_soc=0.20,
+        allow_battery_export=[False] * 4,
+        block_battery_charge=[False] * 4,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 4,
+    )
+
+    assert result.feasible is True
+    assert result.grid_import_w[:3] == pytest.approx([0.0, 0.0, 0.0])
+    assert result.grid_import_w[3] == pytest.approx(2950.0)
+
+
+def test_grid_charge_soc_cap_blocks_grid_energy_but_allows_solar_charge(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=0.50,
+        interval_minutes=60,
+        horizon_hours=1,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 0.70
+    optimizer.pre_window_slot = 1
+
+    result = optimizer.optimize(
+        import_prices=[0.01],
+        export_prices=[0.0],
+        solar_forecast=[5.0],
+        load_forecast=[0.0],
+        current_soc=0.50,
+        allow_battery_export=[False],
+        block_battery_charge=[False],
+        allow_grid_charge=True,
+        grid_charge_allowed=[True],
+    )
+
+    assert result.feasible is True
+    assert result.grid_import_w == pytest.approx([0.0])
+    assert result.schedule.actions[0].battery_charge_w > 0
+
+
+def test_grid_charge_soc_cap_caps_unreachable_deadline_without_solar(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=0.50,
+        interval_minutes=60,
+        horizon_hours=4,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 0.70
+    optimizer.pre_window_slot = 4
+
+    result = optimizer.optimize(
+        import_prices=[0.30, 0.28, 0.05, 0.04],
+        export_prices=[0.0, 0.0, 0.0, 0.0],
+        solar_forecast=[0.0, 0.0, 0.0, 0.0],
+        load_forecast=[0.0, 0.0, 0.0, 0.0],
+        current_soc=0.20,
+        allow_battery_export=[False] * 4,
+        block_battery_charge=[False] * 4,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 4,
+    )
+
+    assert result.feasible is True
+    assert result.solver_used == "highs"
+    assert sum(result.grid_import_w) == pytest.approx(2950.0)
+    assert result.grid_import_w[3] == pytest.approx(2950.0)
+
+
 def test_zero_grid_import_limit_is_treated_as_unset_cap(
     battery_optimizer_module,
 ):
@@ -805,7 +909,7 @@ def test_below_optimizer_reserve_blocks_lp_battery_export(
     )
 
     assert result.solver_used == "highs"
-    period_count = (captured["variable_count"] - 1) // 6
+    period_count = (captured["variable_count"] - 1) // 7
     grid_export_bounds = captured["bounds"][period_count:period_count * 2]
     assert grid_export_bounds
     assert all(bound[1] == 0.0 for bound in grid_export_bounds)
@@ -2660,6 +2764,6 @@ def test_sparse_lp_stats_and_schedule_expansion(
     assert result.lp_stats["backend"] == "highspy"
     assert result.lp_stats["base_steps"] == n
     assert result.lp_stats["period_count"] == 132
-    assert result.lp_stats["variables"] == 6 * 132 + 1
+    assert result.lp_stats["variables"] == 7 * 132 + 1
     assert result.lp_stats["constraints"] == captured["A_eq"].shape[0] + captured["A_ub"].shape[0]
     assert len(captured["bounds"]) == result.lp_stats["variables"]

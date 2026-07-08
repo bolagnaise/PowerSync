@@ -1464,7 +1464,7 @@ def test_grid_charge_advanced_settings_persist_and_reoptimize(opt_module):
     assert background_tasks == ["powersync_settings_reoptimize"]
 
 
-def test_grid_charge_allowed_slots_apply_price_and_soc_caps(opt_module):
+def test_grid_charge_allowed_slots_apply_price_caps_before_lp_soc_cap(opt_module):
     coordinator = _coordinator(opt_module, "flow_power")
     coordinator._config.battery_capacity_wh = 10000
     coordinator._config.max_charge_w = 5000
@@ -1478,7 +1478,7 @@ def test_grid_charge_allowed_slots_apply_price_and_soc_caps(opt_module):
         current_soc=0.79,
     )
 
-    assert allowed == [True, False, False, False]
+    assert allowed == [True, True, False, True]
 
 
 def test_globird_zerocharge_limits_grid_charge_to_configured_window(opt_module):

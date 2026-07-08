@@ -2165,6 +2165,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             efficiency=0.92,
             backup_reserve=self._config.backup_reserve,
             hardware_reserve=hw_reserve_pct,
+            grid_charge_soc_cap=self._config.grid_charge_soc_cap,
             interval_minutes=self._config.interval_minutes,
             horizon_hours=self._config.horizon_hours,
         )
@@ -9980,6 +9981,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 max_grid_import_w=self._config.max_grid_import_w,
                 max_grid_export_w=self._config.max_grid_export_w,
                 backup_reserve=self._config.backup_reserve,
+                grid_charge_soc_cap=self._config.grid_charge_soc_cap,
                 horizon_hours=self._config.horizon_hours,
             )
             self._optimizer.terminal_weight = self._profit_max_terminal_weight()
@@ -10077,46 +10079,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         allowed[idx] = False
                 except (TypeError, ValueError):
                     continue
-
-        soc_cap = self._soc_ratio(
-            getattr(self._config, "grid_charge_soc_cap", 1.0),
-            1.0,
-        )
-        if soc_cap < 0.999:
-            capacity_kwh = max(0.0, float(self._config.battery_capacity_wh or 0) / 1000.0)
-            max_charge_kw = max(0.0, float(self._config.max_charge_w or 0) / 1000.0)
-            dt_hours = self._config.interval_minutes / 60.0
-            projected_soc = max(0.0, min(1.0, float(current_soc or 0.0)))
-            for idx in range(len(import_prices)):
-                if projected_soc >= soc_cap - 1e-6:
-                    allowed[idx] = False
-                if capacity_kwh <= 0:
-                    continue
-                # Project the grid charging this permission slot allows, so the
-                # cap can trip on its own contribution and not just on solar
-                # surplus (OB-13: without this a low/no-solar cap never trips).
-                # Only slots still allowed at this point in the loop advance —
-                # a slot already blocked (price cap or a prior cap trip) can't
-                # fill via grid, mirroring the LP's real permission mask.
-                if allowed[idx] and max_charge_kw > 0:
-                    headroom_kwh = max(0.0, (soc_cap - projected_soc) * capacity_kwh)
-                    grid_charge_kwh = min(max_charge_kw * dt_hours, headroom_kwh)
-                    if grid_charge_kwh > 0:
-                        projected_soc = min(
-                            1.0, projected_soc + grid_charge_kwh / capacity_kwh
-                        )
-                if idx >= len(solar_forecast) or idx >= len(load_forecast):
-                    continue
-                surplus_kw = max(
-                    0.0,
-                    float(solar_forecast[idx] or 0.0) - float(load_forecast[idx] or 0.0),
-                )
-                if surplus_kw > 0:
-                    projected_soc = min(
-                        1.0,
-                        projected_soc
-                        + min(surplus_kw, max_charge_kw) * dt_hours / capacity_kwh,
-                    )
 
         zerohero_config = self._zerohero_config()
         if zerohero_config is not None and zerohero_config.zerocharge_enabled:

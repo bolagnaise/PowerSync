@@ -1,9 +1,10 @@
-"""Regression tests for OB-13: grid_charge_soc_cap must trip without solar.
+"""Regression tests for grid_charge_soc_cap slot eligibility.
 
-`_grid_charge_allowed_slots`'s soc_cap projection previously only advanced on
-solar surplus, never on the grid charging the cap itself is supposed to be
-permitting. With low/no solar the projected SOC never rose, so the cap never
-tripped and the LP could grid-charge straight past a configured cap.
+The coordinator's `_grid_charge_allowed_slots` helper is only a source
+eligibility mask: price caps and provider import-credit windows can make a slot
+unavailable before the LP runs. The SOC cap is an energy constraint inside the
+LP so the optimizer can still compare all eligible slots by price instead of
+assuming earliest-possible charging fills the cap first.
 """
 
 from __future__ import annotations
@@ -293,16 +294,8 @@ def _coordinator(opt_module, provider: str = "flow_power", **options):
     return coordinator
 
 
-def test_grid_charge_soc_cap_trips_without_solar(opt_module):
-    """OB-13 failing-first case: cap 50%, SOC 20%, no solar, cheap import.
-
-    The LP is permitted to grid-charge at max_charge_w for every allowed
-    slot. With a 10 kWh battery and a 5 kW charger, 5-minute slots each add
-    ~4.17% SOC. Starting at 20% with a 50% cap, the cap must trip once the
-    cumulative *grid* charge alone would cross it -- it must NOT stay allowed
-    for the full 12-slot horizon just because there is no solar to drive the
-    old solar-only projection.
-    """
+def test_grid_charge_soc_cap_does_not_prune_future_cheaper_slots(opt_module):
+    """The SOC cap must not make earliest allowed slots win before the LP runs."""
     coordinator = _coordinator(opt_module)
     coordinator._config.battery_capacity_wh = 10000
     coordinator._config.max_charge_w = 5000
@@ -311,15 +304,13 @@ def test_grid_charge_soc_cap_trips_without_solar(opt_module):
 
     n = 12
     allowed = coordinator._grid_charge_allowed_slots(
-        import_prices=[0.10] * n,
+        import_prices=[0.30] * 6 + [0.10] * 6,
         solar_forecast=[0.0] * n,
         load_forecast=[0.0] * n,
         current_soc=0.20,
     )
 
-    # Before the fix this was [True] * 12 (cap never trips without solar).
-    assert allowed == [True] * 8 + [False] * 4
-    assert not all(allowed), "grid_charge_soc_cap must trip even with zero solar"
+    assert allowed == [True] * n
 
 
 def test_grid_charge_soc_cap_full_cap_stays_allowed(opt_module):
@@ -341,8 +332,8 @@ def test_grid_charge_soc_cap_full_cap_stays_allowed(opt_module):
     assert allowed == [True] * n
 
 
-def test_grid_charge_soc_cap_soc_already_at_cap_blocks_immediately(opt_module):
-    """Existing behavior preserved: SOC already at/above the cap blocks every slot."""
+def test_grid_charge_soc_cap_soc_already_at_cap_keeps_price_eligible_slots(opt_module):
+    """The LP, not the pre-solve slot mask, blocks grid energy at/above the cap."""
     coordinator = _coordinator(opt_module)
     coordinator._config.battery_capacity_wh = 10000
     coordinator._config.max_charge_w = 5000
@@ -357,18 +348,11 @@ def test_grid_charge_soc_cap_soc_already_at_cap_blocks_immediately(opt_module):
         current_soc=0.50,
     )
 
-    assert allowed == [False] * n
+    assert allowed == [True] * n
 
 
-def test_grid_charge_soc_cap_solar_advance_still_trips_cap(opt_module):
-    """Solar-surplus advance is preserved alongside the new grid-charge term.
-
-    Matches the pre-existing regression coverage in
-    tests/test_battery_export_allowed_slots.py::test_grid_charge_allowed_slots_apply_price_and_soc_caps
-    (cap 80%, SOC 79%, solar present for the first two slots, a price-capped
-    third slot) to confirm the solar-driven projection still trips the cap
-    identically after the grid-charge contribution was added.
-    """
+def test_grid_charge_price_cap_still_prunes_slots(opt_module):
+    """Price caps remain a pre-solve eligibility mask."""
     coordinator = _coordinator(opt_module)
     coordinator._config.battery_capacity_wh = 10000
     coordinator._config.max_charge_w = 5000
@@ -382,4 +366,4 @@ def test_grid_charge_soc_cap_solar_advance_still_trips_cap(opt_module):
         current_soc=0.79,
     )
 
-    assert allowed == [True, False, False, False]
+    assert allowed == [True, True, False, True]

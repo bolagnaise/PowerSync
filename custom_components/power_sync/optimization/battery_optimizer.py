@@ -243,6 +243,7 @@ class BatteryOptimizer:
         efficiency: float = DEFAULT_EFFICIENCY,
         backup_reserve: float = 0.20,
         hardware_reserve: float | None = None,
+        grid_charge_soc_cap: float = 1.0,
         interval_minutes: int = 5,
         horizon_hours: int = 48,
         terminal_weight: float = 1.0,
@@ -257,6 +258,10 @@ class BatteryOptimizer:
         self.backup_reserve = backup_reserve
         self.hardware_reserve = max(0.0, min(1.0, float(hardware_reserve or 0.0)))
         self.hardware_reserve_known = hardware_reserve is not None
+        self.grid_charge_soc_cap = max(
+            0.0,
+            min(1.0, float(grid_charge_soc_cap if grid_charge_soc_cap is not None else 1.0)),
+        )
         self.interval_minutes = interval_minutes
         self.horizon_hours = horizon_hours
         self.terminal_weight = terminal_weight
@@ -319,6 +324,7 @@ class BatteryOptimizer:
         max_battery_export_w: float | None | object = _UNSET,
         efficiency: float | None = None,
         backup_reserve: float | None = None,
+        grid_charge_soc_cap: float | None = None,
         horizon_hours: int | None = None,
     ) -> None:
         """Update optimizer configuration."""
@@ -351,6 +357,11 @@ class BatteryOptimizer:
             self.efficiency = efficiency
         if backup_reserve is not None:
             self.backup_reserve = backup_reserve
+        if grid_charge_soc_cap is not None:
+            self.grid_charge_soc_cap = max(
+                0.0,
+                min(1.0, float(grid_charge_soc_cap)),
+            )
         if horizon_hours is not None:
             try:
                 parsed_horizon = int(float(horizon_hours))
@@ -1520,6 +1531,16 @@ class BatteryOptimizer:
         future_self_consumption_values = self._future_self_consumption_values(
             p_n, p_import, p_solar, p_load
         )
+        grid_charge_soc_cap = max(
+            0.0,
+            min(1.0, float(getattr(self, "grid_charge_soc_cap", 1.0) or 0.0)),
+        )
+        grid_charge_cap_active = allow_grid_charge and grid_charge_soc_cap < 0.999
+        grid_charge_cap_headroom_kwh = max(
+            0.0,
+            (grid_charge_soc_cap - soc_0) * cap,
+        )
+
         # Periods where the LP pins battery_charge to zero (see charge bounds
         # below): explicitly blocked windows, or export-profitable slots with
         # no future self-consumption value. No charge — solar or grid — can
@@ -1638,8 +1659,9 @@ class BatteryOptimizer:
         bonus_import_periods = [
             idx for idx, price in enumerate(p_import_bonus) if price > 1e-6
         ]
-        curtail_offset = 4 * p_n
-        next_offset = 5 * p_n
+        grid_charge_offset = 4 * p_n
+        curtail_offset = 5 * p_n
+        next_offset = 6 * p_n
         bonus_export_offset = next_offset
         if bonus_export_active:
             next_offset += p_n
@@ -1660,6 +1682,9 @@ class BatteryOptimizer:
 
         def discharge_var(t: int) -> int:
             return 3 * p_n + t
+
+        def grid_charge_var(t: int) -> int:
+            return grid_charge_offset + t
 
         def curtail_var(t: int) -> int:
             return curtail_offset + t
@@ -1787,6 +1812,11 @@ class BatteryOptimizer:
             # at the better of avoided import or export value so the LP only
             # uses it after available charge/export outlets are exhausted.
             c[curtail_var(t)] = max(0.01, p_import[t], p_export[t]) * p_dt[t]
+            if grid_charge_cap_active:
+                # Keep the grid-charge accounting variable at its minimum
+                # feasible value so the cap constrains real grid-to-battery
+                # energy, not arbitrary solver slack.
+                c[grid_charge_var(t)] = 1e-9 * p_dt[t]
 
         # === Terminal valuation: incentivize keeping charge at end of horizon ===
         # Use the cheapest available recharge price as the replacement cost.
@@ -1883,6 +1913,8 @@ class BatteryOptimizer:
             A_ub_rows += 2 * len(bonus_export_periods) + 1
         if bonus_import_active:
             A_ub_rows += len(bonus_import_periods) + 1
+        if grid_charge_cap_active:
+            A_ub_rows += 3 * p_n + 1
         if (
             allow_grid_charge
             and self.pre_window_slot is not None
@@ -1914,15 +1946,31 @@ class BatteryOptimizer:
                         allow_grid_charge and p_grid_charge_allowed[t],
                     )
 
-                max_soc_gain = (
-                    sum(
-                        _deadline_charge_limit_kw(t)
-                        * p_dt[t]
-                        for t in range(slots_to_window)
-                    )
-                    * eff
-                    / cap
-                )
+                max_stored_kwh = 0.0
+                remaining_grid_stored_kwh = grid_charge_cap_headroom_kwh
+                for t in range(slots_to_window):
+                    charge_limit_kw = _deadline_charge_limit_kw(t)
+                    if charge_limit_kw <= 0:
+                        continue
+                    solar_surplus_kw = max(0.0, p_solar[t] - p_load[t])
+                    solar_charge_kw = min(charge_limit_kw, solar_surplus_kw)
+                    max_stored_kwh += solar_charge_kw * eff * p_dt[t]
+                    grid_charge_kw = max(0.0, charge_limit_kw - solar_charge_kw)
+                    if grid_charge_kw <= 0:
+                        continue
+                    grid_stored_kwh = grid_charge_kw * eff * p_dt[t]
+                    if grid_charge_cap_active:
+                        grid_stored_kwh = min(
+                            grid_stored_kwh,
+                            remaining_grid_stored_kwh,
+                        )
+                        remaining_grid_stored_kwh = max(
+                            0.0,
+                            remaining_grid_stored_kwh - grid_stored_kwh,
+                        )
+                    max_stored_kwh += grid_stored_kwh
+
+                max_soc_gain = max_stored_kwh / cap
                 max_reachable = min(1.0, soc_0 + max_soc_gain)
                 # 0.5% buffer so a tight LP doesn't flip infeasible from rounding
                 pre_window_effective_target = min(
@@ -1978,6 +2026,29 @@ class BatteryOptimizer:
             for t in bonus_import_periods:
                 A_ub[len(b_ub), bonus_import_var(t)] = p_dt[t]
             b_ub.append(max(0.0, float(import_bonus_cap_kwh or 0.0)))
+
+        if grid_charge_cap_active:
+            for t in range(p_n):
+                # grid_charge[t] <= battery_charge[t]
+                A_ub[len(b_ub), grid_charge_var(t)] = 1.0
+                A_ub[len(b_ub), charge_var(t)] = -1.0
+                b_ub.append(0.0)
+
+                # grid_charge[t] <= grid_import[t]
+                A_ub[len(b_ub), grid_charge_var(t)] = 1.0
+                A_ub[len(b_ub), grid_import_var(t)] = -1.0
+                b_ub.append(0.0)
+
+                # battery_charge[t] - grid_charge[t] <= available solar surplus.
+                # This lets solar charge above the cap while every kW of charge
+                # beyond exogenous surplus is counted as grid-to-battery energy.
+                A_ub[len(b_ub), charge_var(t)] = 1.0
+                A_ub[len(b_ub), grid_charge_var(t)] = -1.0
+                b_ub.append(max(0.0, p_solar[t] - p_load[t]))
+
+            for t in range(p_n):
+                A_ub[len(b_ub), grid_charge_var(t)] = eff * p_dt[t]
+            b_ub.append(grid_charge_cap_headroom_kwh)
 
         # === Pre-window SOC floor ===
         # Force soc[pre_window_slot - 1] >= target so the battery is filled
@@ -2132,6 +2203,22 @@ class BatteryOptimizer:
                 ))
             else:
                 bounds.append((0, self.max_discharge_kw))  # battery_discharge
+
+        for t in range(p_n):
+            if not grid_charge_cap_active:
+                bounds.append((0, 0.0))
+                continue
+            if p_block_charge[t] or not p_grid_charge_allowed[t]:
+                bounds.append((0, 0.0))
+            else:
+                bounds.append((
+                    0,
+                    self._charge_limit_kw(
+                        p_load[t],
+                        p_solar[t],
+                        p_grid_charge_allowed[t],
+                    ),
+                ))
 
         for t in range(p_n):
             bounds.append((0, max(0.0, p_solar[t])))  # solar_curtail
