@@ -9971,7 +9971,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for idx in range(len(import_prices)):
                 if projected_soc >= soc_cap - 1e-6:
                     allowed[idx] = False
-                if capacity_kwh <= 0 or idx >= len(solar_forecast) or idx >= len(load_forecast):
+                if capacity_kwh <= 0:
+                    continue
+                # Project the grid charging this permission slot allows, so the
+                # cap can trip on its own contribution and not just on solar
+                # surplus (OB-13: without this a low/no-solar cap never trips).
+                # Only slots still allowed at this point in the loop advance —
+                # a slot already blocked (price cap or a prior cap trip) can't
+                # fill via grid, mirroring the LP's real permission mask.
+                if allowed[idx] and max_charge_kw > 0:
+                    headroom_kwh = max(0.0, (soc_cap - projected_soc) * capacity_kwh)
+                    grid_charge_kwh = min(max_charge_kw * dt_hours, headroom_kwh)
+                    if grid_charge_kwh > 0:
+                        projected_soc = min(
+                            1.0, projected_soc + grid_charge_kwh / capacity_kwh
+                        )
+                if idx >= len(solar_forecast) or idx >= len(load_forecast):
                     continue
                 surplus_kw = max(
                     0.0,
