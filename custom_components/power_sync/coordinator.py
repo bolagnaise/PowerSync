@@ -6389,6 +6389,8 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
             )
         self._connected = False
         self._telemetry_validated = False
+        self._entity_telemetry_rated_power_w: int | None = None
+        self._entity_telemetry_rated_power_probe_attempted = False
         self._energy_acc = EnergyAccumulator(hass, "goodwe")
         self._discharge_floor_pct: int = 10  # updated by set_backup_reserve
 
@@ -6398,6 +6400,37 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
             name="GoodWe Energy",
             update_interval=timedelta(seconds=30),
         )
+
+    async def _probe_entity_telemetry_rated_power(self) -> int | None:
+        """Best-effort one-time direct probe for GoodWe nameplate power."""
+        if self._entity_telemetry_rated_power_probe_attempted:
+            return self._entity_telemetry_rated_power_w
+
+        self._entity_telemetry_rated_power_probe_attempted = True
+        try:
+            await asyncio.wait_for(self._controller.connect(), timeout=5.0)
+            direct_data = await asyncio.wait_for(
+                self._controller.get_runtime_data(),
+                timeout=5.0,
+            )
+            rated_power_w = direct_data.get("rated_power_w")
+            value = int(round(float(rated_power_w)))
+            if value <= 0:
+                raise ValueError("rated_power_w missing")
+        except Exception as exc:
+            _LOGGER.debug(
+                "GoodWe entity telemetry rated-power probe failed; "
+                "continuing without direct physical discharge limit: %s",
+                exc,
+            )
+            return None
+
+        self._entity_telemetry_rated_power_w = value
+        _LOGGER.info(
+            "GoodWe entity telemetry cached rated_power_w=%dW from one-time direct capability probe",
+            value,
+        )
+        return value
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from GoodWe inverter."""
@@ -6409,6 +6442,10 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
                     await self._telemetry_controller.connect()
                     self._telemetry_validated = True
                 data = self._telemetry_controller.get_runtime_data()
+                if not data.get("rated_power_w"):
+                    rated_power_w = await self._probe_entity_telemetry_rated_power()
+                    if rated_power_w:
+                        data["rated_power_w"] = rated_power_w
             else:
                 if not self._connected:
                     await self._controller.connect()

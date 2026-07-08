@@ -1570,25 +1570,38 @@ def test_goodwe_entity_mode_prefers_solar_first_charge_and_export_discharge_mode
     assert "fallback_option" in ems_source
 
 
-def test_goodwe_entity_telemetry_does_not_use_direct_polling_for_refresh():
+def test_goodwe_entity_telemetry_uses_direct_polling_only_for_rated_power_probe():
     source = COORDINATOR_PATH.read_text()
     tree = ast.parse(source)
     init = _find_class_method(tree, "GoodWeEnergyCoordinator", "__init__")
     update = _find_class_method(tree, "GoodWeEnergyCoordinator", "_async_update_data")
+    probe = _find_class_method(
+        tree,
+        "GoodWeEnergyCoordinator",
+        "_probe_entity_telemetry_rated_power",
+    )
 
     init_source = ast.get_source_segment(source, init)
     update_source = ast.get_source_segment(source, update)
+    probe_source = ast.get_source_segment(source, probe)
 
     assert init_source is not None
     assert update_source is not None
+    assert probe_source is not None
     assert "GoodWeEntityTelemetryController" in init_source
     assert "entity_telemetry_prefix" in init_source
+    assert "_entity_telemetry_rated_power_probe_attempted" in init_source
     entity_branch = update_source.split("if self._using_entity_telemetry:", 1)[1]
     entity_branch = entity_branch.split("else:", 1)[0]
     assert "self._telemetry_controller.connect()" in entity_branch
     assert "self._telemetry_controller.get_runtime_data()" in entity_branch
+    assert "self._probe_entity_telemetry_rated_power()" in entity_branch
     assert "self._controller.connect()" not in entity_branch
     assert "self._controller.get_runtime_data()" not in entity_branch
+    assert "self._controller.connect()" in probe_source
+    assert "self._controller.get_runtime_data()" in probe_source
+    assert "self._entity_telemetry_rated_power_probe_attempted = True" in probe_source
+    assert "timeout=5.0" in probe_source
 
 
 def test_amber_nem_region_map_accepts_sa_power_short_name():
