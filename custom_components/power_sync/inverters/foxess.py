@@ -1054,14 +1054,17 @@ class FoxESSController(InverterController):
 
         reg = self._register_map
 
-        # Save current work mode for restore
-        if reg.work_mode and reg.supports_work_mode_rw:
+        # Save current work mode for restore (only on first call, not re-entry).
+        # The optimizer re-issues force every cycle to keep the hardware
+        # timeout alive; without this guard, a later cycle would read back
+        # the temporary work mode and overwrite the real baseline.
+        if self._original_work_mode is None and reg.work_mode and reg.supports_work_mode_rw:
             wm_raw = await self._read_holding_registers(reg.work_mode, 1)
             if wm_raw:
                 self._original_work_mode = wm_raw[0]
 
-        # Save current min_soc for restore
-        if reg.min_soc and reg.supports_work_mode_rw:
+        # Save current min_soc for restore (only on first call, not re-entry)
+        if self._original_min_soc is None and reg.min_soc and reg.supports_work_mode_rw:
             ms_raw = await self._read_holding_registers(reg.min_soc, 1)
             if ms_raw:
                 self._original_min_soc = ms_raw[0]
@@ -1089,14 +1092,17 @@ class FoxESSController(InverterController):
 
         reg = self._register_map
 
-        # Save current work mode for restore
-        if reg.work_mode and reg.supports_work_mode_rw:
+        # Save current work mode for restore (only on first call, not re-entry).
+        # The optimizer re-issues force every cycle to keep the hardware
+        # timeout alive; without this guard, a later cycle would read back
+        # the temporary work mode and overwrite the real baseline.
+        if self._original_work_mode is None and reg.work_mode and reg.supports_work_mode_rw:
             wm_raw = await self._read_holding_registers(reg.work_mode, 1)
             if wm_raw:
                 self._original_work_mode = wm_raw[0]
 
-        # Save current min_soc for restore
-        if reg.min_soc and reg.supports_work_mode_rw:
+        # Save current min_soc for restore (only on first call, not re-entry)
+        if self._original_min_soc is None and reg.min_soc and reg.supports_work_mode_rw:
             ms_raw = await self._read_holding_registers(reg.min_soc, 1)
             if ms_raw:
                 self._original_min_soc = ms_raw[0]
