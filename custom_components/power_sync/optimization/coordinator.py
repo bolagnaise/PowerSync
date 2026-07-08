@@ -6029,7 +6029,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if export_wh <= 0:
                 continue
 
-            spread_positions = list(range(start, end))
+            spread_positions = [
+                pos
+                for pos in range(start, end)
+                if getattr(actions[pos], "action", None) != "charge"
+                and not (
+                    float(getattr(actions[pos], "battery_charge_w", 0.0) or 0.0) > 0
+                )
+            ]
             floor = self._reserve_ratio(window_floor, None)
             if floor is not None and any(_action_soc(pos) is not None for pos in spread_positions):
                 spread_positions = [
