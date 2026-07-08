@@ -272,6 +272,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             asyncio.set_event_loop(loop)
             self._optimization_lock = asyncio.Lock()
 
+        # Reentrancy guard around _execute_optimizer_action. The polling
+        # loop's cached-action path (_execute_cached_current_action_if_changed)
+        # and the DataUpdateCoordinator's refresh cycle can both cross the
+        # same wall-clock boundary and try to apply an action transition at
+        # once. _last_executed_action is only written at the END of
+        # _execute_optimizer_action (after awaited hardware I/O), so both
+        # callers can pass the dedup check before either has updated the
+        # marker, producing a double hardware command (double force-timer
+        # extension, double Tesla TOU upload). This lock is independent of
+        # _optimization_lock: _run_optimization acquires _optimization_lock
+        # first and then this lock around its call to
+        # _execute_optimizer_action (consistent nesting order), while
+        # _execute_cached_current_action_if_changed only ever acquires this
+        # lock on its own — so the two locks can never deadlock each other.
+        try:
+            self._execute_lock = asyncio.Lock()
+        except RuntimeError:
+            self._execute_lock = asyncio.Lock()
+
         # Built-in optimizer
         self._optimizer: BatteryOptimizer | None = None
         self._last_optimizer_result: OptimizerResult | None = None
@@ -423,6 +442,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._deferred_restore_task: asyncio.Task | None = None
         self._settings_reoptimize_task: asyncio.Task | None = None
         self._settings_reoptimize_requested = False
+        # Price-triggered re-optimization spawned by _on_price_update. Must be
+        # tracked and cancelled on disable() like the other background tasks —
+        # otherwise a price-triggered LP solve in flight during disable() can
+        # complete and re-command the battery after disable() already
+        # restored normal operation.
+        self._price_reoptimize_task: asyncio.Task | None = None
 
     def _monitoring_mode_active(self) -> bool:
         """Return True when monitoring mode should block hardware writes."""
@@ -2682,8 +2707,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return
         self._last_price_triggered_optimization = now
 
-        # Re-optimize with new prices and update dashboard sensors
-        self.hass.async_create_background_task(
+        # Re-optimize with new prices and update dashboard sensors. Track the
+        # task handle so disable() can cancel it — otherwise a price-solve
+        # already in flight when disable() runs would complete afterwards
+        # and re-command the battery (see OB-10).
+        self._price_reoptimize_task = self.hass.async_create_background_task(
             self._run_optimization(), "powersync_price_reoptimize"
         )
 
@@ -2985,6 +3013,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._settings_reoptimize_task and not self._settings_reoptimize_task.done():
             self._settings_reoptimize_task.cancel()
             self._settings_reoptimize_task = None
+        price_reoptimize_task = getattr(self, "_price_reoptimize_task", None)
+        if price_reoptimize_task and not price_reoptimize_task.done():
+            price_reoptimize_task.cancel()
+            self._price_reoptimize_task = None
 
         if self._price_listener_unsub:
             self._price_listener_unsub()
@@ -3523,8 +3555,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # (up to 5 minutes away).  The polling loop still re-applies the
             # action as a heartbeat, but this removes the initial delay.
             current_action = self._get_current_action()
-            if current_action and self._executor:
-                await self._execute_optimizer_action(current_action)
+            # Defensive re-check: disable() may have flipped _enabled to False
+            # while this solve was awaiting forecast/battery-state I/O above
+            # (see OB-10). _execute_optimizer_action also guards on _enabled
+            # internally, but skip the call — and the lock acquisition below —
+            # entirely once disabled rather than relying solely on that.
+            if current_action and self._executor and self._enabled:
+                # Serialise against _execute_cached_current_action_if_changed
+                # (OB-11): both this in-cycle execution and the cached-action
+                # path issue hardware commands, and at an action-transition
+                # boundary they can otherwise interleave and double-command
+                # the battery. _execute_lock is independent of
+                # _optimization_lock (held for this whole solve) so nesting
+                # it here cannot deadlock — _execute_cached_current_action_if_changed
+                # never acquires _optimization_lock.
+                async with self._execute_lock:
+                    await self._execute_optimizer_action(current_action)
 
         except Exception as e:
             _LOGGER.error("Optimization failed: %s", e, exc_info=True)
@@ -3630,11 +3676,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if action_name == getattr(self, "_last_executed_action", None):
             return
 
-        _LOGGER.info(
-            "Optimizer: applying cached schedule action %s on coordinator refresh",
-            action_name,
-        )
-        await self._execute_optimizer_action(current_action)
+        # Reentrancy guard (OB-11): the polling loop and the
+        # DataUpdateCoordinator refresh cycle can both cross the same
+        # wall-clock boundary and reach this point concurrently at an action
+        # transition. _last_executed_action is only written at the end of
+        # _execute_optimizer_action after awaited hardware I/O, so both
+        # callers can pass the dedup check above before either has updated
+        # the marker. Serialise on _execute_lock and re-check the dedup
+        # condition once inside — if the other caller already applied this
+        # action while we were waiting for the lock, skip instead of issuing
+        # a second (duplicate) hardware command.
+        execute_lock = getattr(self, "_execute_lock", None)
+        if execute_lock is None:
+            execute_lock = asyncio.Lock()
+            self._execute_lock = execute_lock
+
+        async with execute_lock:
+            if action_name == getattr(self, "_last_executed_action", None):
+                return
+
+            _LOGGER.info(
+                "Optimizer: applying cached schedule action %s on coordinator refresh",
+                action_name,
+            )
+            await self._execute_optimizer_action(current_action)
 
     def _seconds_until_next_interval(self) -> float:
         """Return seconds until the next optimizer interval boundary."""
@@ -4724,6 +4789,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _execute_optimizer_action(self, action: Any) -> None:
         """Execute an optimizer action on the battery."""
+        # Guard against a solve that was in flight when disable() ran (e.g. an
+        # untracked price-triggered re-optimization) completing afterwards and
+        # re-commanding the battery. disable() sets _enabled=False before
+        # cancelling background tasks, so any execution reaching this point
+        # after that must be a no-op. Default to True (enabled) when the
+        # attribute is entirely unset — real coordinators always set it
+        # explicitly in __init__/enable()/disable(); only lightweight test
+        # doubles built via object.__new__() omit it, and they expect this
+        # method to behave as if the optimizer is running.
+        if not getattr(self, "_enabled", True):
+            return
         if not self._executor or not self._executor.battery_controller:
             return
 
