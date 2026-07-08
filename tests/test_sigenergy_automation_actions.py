@@ -74,6 +74,37 @@ def test_disable_optimizer_requests_sigenergy_native_handoff():
     assert '{"source": "automation", "_native_control": True}' in function_source
 
 
+def test_enable_optimizer_without_coordinator_allows_reload():
+    source = ACTIONS_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "_action_enable_optimizer")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert 'entry_data["_skip_reload"] = True' not in function_source
+    assert (
+        "new_options[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC"
+        in function_source
+    )
+    assert "new_options[CONF_OPTIMIZATION_ENABLED] = True" in function_source
+    assert "reload required" in function_source
+
+
+def test_disable_optimizer_without_coordinator_persists_native_provider_option():
+    source = ACTIONS_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "_action_disable_optimizer")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert "new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_NATIVE" in function_source
+    assert (
+        "new_options[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_NATIVE"
+        in function_source
+    )
+    assert "new_options[CONF_OPTIMIZATION_ENABLED] = False" in function_source
+
+
 def test_sigenergy_evdc_native_solar_skips_remote_ems_in_native_control():
     source = ACTIONS_PATH.read_text()
     tree = ast.parse(source)

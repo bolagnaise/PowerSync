@@ -2109,15 +2109,17 @@ async def _action_enable_optimizer(
             await opt_coordinator.set_settings({"enabled": True})
             _LOGGER.info("Optimizer enabled via automation action (set_settings path)")
         else:
-            # Fallback: no coordinator yet, update config directly with skip flag
-            entry_data["_skip_reload"] = True
+            # Fallback: no coordinator exists because Smart Optimization was
+            # disabled at setup. Persist enabled state and let the options
+            # listener reload so setup can create the coordinator.
             from ..const import CONF_OPTIMIZATION_ENABLED, CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_POWERSYNC
             new_data = dict(config_entry.data)
             new_options = dict(config_entry.options)
             new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
+            new_options[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
             new_options[CONF_OPTIMIZATION_ENABLED] = True
             hass.config_entries.async_update_entry(config_entry, data=new_data, options=new_options)
-            _LOGGER.info("Optimizer enabled via automation action (direct config path)")
+            _LOGGER.info("Optimizer enabled via automation action (direct config path; reload required)")
         return True
     except Exception as e:
         _LOGGER.error(f"Failed to enable optimizer: {e}")
@@ -2148,6 +2150,7 @@ async def _action_disable_optimizer(
             new_data = dict(config_entry.data)
             new_options = dict(config_entry.options)
             new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_NATIVE
+            new_options[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_NATIVE
             new_options[CONF_OPTIMIZATION_ENABLED] = False
             hass.config_entries.async_update_entry(config_entry, data=new_data, options=new_options)
             _LOGGER.info("Optimizer disabled via automation action (direct config path)")
