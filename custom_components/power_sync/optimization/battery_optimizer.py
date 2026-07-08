@@ -1311,6 +1311,36 @@ class BatteryOptimizer:
         if soc_0 >= export_floor:
             return allow_battery_export
 
+        round_trip_eff = max(0.0, min(1.0, self.efficiency)) ** 2
+        future_recovery_prices = [0.0] * len(allow_battery_export)
+        best_future_export = 0.0
+        for idx in range(len(allow_battery_export) - 1, -1, -1):
+            effective_export_price = (
+                export_prices[idx]
+                + (export_bonus_prices[idx] if idx < len(export_bonus_prices) else 0.0)
+                if idx < len(export_prices)
+                else 0.0
+            )
+            export_profitable = (
+                bool(allow_battery_export[idx])
+                and idx < len(import_prices)
+                and self._is_export_profitable(
+                    effective_export_price,
+                    import_prices[idx],
+                    acquisition_cost_kwh,
+                    acquisition_cost_kwh,
+                )
+            )
+            priority_export = (
+                bool(allow_battery_export[idx])
+                and idx < len(priority_export_slots)
+                and priority_export_slots[idx]
+                and effective_export_price > 0.001
+            )
+            if export_profitable or priority_export:
+                best_future_export = max(best_future_export, effective_export_price)
+            future_recovery_prices[idx] = best_future_export
+
         reachable_soc = max(0.0, min(1.0, soc_0))
         recovered: list[bool] = []
         for idx, allowed in enumerate(allow_battery_export):
@@ -1363,9 +1393,28 @@ class BatteryOptimizer:
                 blocked = export_profitable or priority_export
             if blocked:
                 continue
-            charge_kw = self._charge_limit_kw(load[idx], solar[idx], allow_grid_charge)
-            if not grid_charge_allowed[idx]:
-                charge_kw = self._charge_limit_kw(load[idx], solar[idx], False)
+            solar_only_charge_kw = self._charge_limit_kw(load[idx], solar[idx], False)
+            charge_kw = solar_only_charge_kw
+            if (
+                allow_grid_charge
+                and idx < len(grid_charge_allowed)
+                and grid_charge_allowed[idx]
+            ):
+                future_export_value = (
+                    future_recovery_prices[idx + 1]
+                    if idx + 1 < len(future_recovery_prices)
+                    else 0.0
+                )
+                try:
+                    import_price = float(import_prices[idx])
+                except (IndexError, TypeError, ValueError):
+                    import_price = None
+                if (
+                    import_price is not None
+                    and future_export_value > 0.001
+                    and import_price <= future_export_value * round_trip_eff + 1e-9
+                ):
+                    charge_kw = self._charge_limit_kw(load[idx], solar[idx], True)
             if charge_kw <= 0:
                 continue
             reachable_soc = min(
