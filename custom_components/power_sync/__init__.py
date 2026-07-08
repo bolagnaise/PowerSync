@@ -27402,6 +27402,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     else:
                         _LOGGER.warning("Sigenergy restore_normal failed")
 
+                if _restore_superseded("Sigenergy restore"):
+                    return
+
                 # Clear state
                 force_discharge_state["active"] = False
                 force_discharge_state["saved_tariff"] = None
@@ -27460,6 +27463,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     entry_data["foxess_curtailment_state"] = "normal"
                     entry_data.pop("_last_foxess_curtailment_reapply", None)
 
+                if _restore_superseded("FoxESS restore"):
+                    return
+
                 force_charge_state["active"] = False
                 force_discharge_state["active"] = False
                 force_charge_state["expires_at"] = None
@@ -27495,6 +27501,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 goodwe_coord = entry_data.get("goodwe_coordinator")
                 if goodwe_coord:
                     await goodwe_coord.restore_normal()
+
+                if _restore_superseded("GoodWe restore"):
+                    return
 
                 force_charge_state["active"] = False
                 force_discharge_state["active"] = False
@@ -27532,6 +27541,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if alphaess_coord:
                     await alphaess_coord.restore_normal()
 
+                if _restore_superseded("AlphaESS restore"):
+                    return
+
                 force_charge_state["active"] = False
                 force_discharge_state["active"] = False
                 force_charge_state["expires_at"] = None
@@ -27567,6 +27579,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 esy_coord = entry_data.get("esy_sunhome_coordinator")
                 if esy_coord:
                     await esy_coord.restore_normal()
+
+                if _restore_superseded("ESY Sunhome restore"):
+                    return
 
                 force_charge_state["active"] = False
                 force_discharge_state["active"] = False
@@ -27607,6 +27622,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if solax_coord:
                     await solax_coord.restore_normal()
 
+                if _restore_superseded("Solax restore"):
+                    return
+
                 force_charge_state["active"] = False
                 force_discharge_state["active"] = False
                 force_charge_state["expires_at"] = None
@@ -27641,6 +27659,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 saj_coord = entry_data.get("saj_h2_coordinator")
                 if saj_coord:
                     await saj_coord.restore_normal()
+
+                if _restore_superseded("SAJ H2 restore"):
+                    return
 
                 force_charge_state["active"] = False
                 force_discharge_state["active"] = False
@@ -27677,6 +27698,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if fronius_coord:
                     await fronius_coord.restore_normal()
 
+                if _restore_superseded("Fronius Reserva restore"):
+                    return
+
                 force_charge_state["active"] = False
                 force_discharge_state["active"] = False
                 force_charge_state["expires_at"] = None
@@ -27711,6 +27735,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 neovolt_coord = entry_data.get("neovolt_coordinator")
                 if neovolt_coord:
                     await neovolt_coord.restore_normal()
+
+                if _restore_superseded("Neovolt restore"):
+                    return
 
                 force_charge_state["active"] = False
                 force_discharge_state["active"] = False
@@ -27753,6 +27780,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 else:
                     _LOGGER.warning("Restore normal: SolarEdge coordinator not available")
 
+                if _restore_superseded("SolarEdge restore"):
+                    return
+
                 force_charge_state["active"] = False
                 force_discharge_state["active"] = False
                 force_charge_state["expires_at"] = None
@@ -27789,6 +27819,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await anker_coord.restore_normal()
                 else:
                     _LOGGER.warning("Restore normal: Anker Solix coordinator not available")
+
+                if _restore_superseded("Anker Solix restore"):
+                    return
 
                 force_charge_state["active"] = False
                 force_discharge_state["active"] = False
@@ -27844,6 +27877,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             "Sungrow coordinator unavailable",
                         )
                     )
+                    return
+
+                if _restore_superseded("Sungrow restore"):
                     return
 
                 force_charge_state["active"] = False
