@@ -1282,6 +1282,65 @@ def _ev_action_loadpoint_id(params: Dict[str, Any]) -> str:
     return DEFAULT_VEHICLE_ID
 
 
+async def _resolve_manual_stop_hold_vehicle_id(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any],
+) -> Optional[str]:
+    """Resolve which vehicle a no-VIN manual stop's restart-suppression hold
+    should be scoped to.
+
+    ``_ev_action_loadpoint_id`` falls back to DEFAULT_VEHICLE_ID (``_default``)
+    whenever a ``stop_ev_charging`` call carries no vehicle_id/vin (Tesla or
+    unset charger type). ``manual_stop_hold_reason`` treats ``_default`` as a
+    fallback candidate for EVERY vin (see ``ev_ownership.py``), so recording
+    the hold under ``_default`` suppresses every configured vehicle's
+    automated restart for 15 minutes — not just the one the user actually
+    stopped. Prefer the VIN of the vehicle that is actually charging; if that
+    can't be determined and more than one vehicle is configured, return None
+    so the caller skips the hold entirely rather than blocking a vehicle that
+    was never touched. Single-vehicle installs keep falling back to
+    ``_default`` exactly as before.
+    """
+    loadpoint_id = _ev_action_loadpoint_id(params)
+    if loadpoint_id != DEFAULT_VEHICLE_ID:
+        return loadpoint_id
+
+    entry_id = config_entry.entry_id
+    vehicles = _dynamic_ev_state.get(entry_id, {})
+    active_vins = [
+        vid
+        for vid, state in vehicles.items()
+        if vid != DEFAULT_VEHICLE_ID and isinstance(state, dict) and state.get("active")
+    ]
+    if len(active_vins) == 1:
+        return active_vins[0]
+
+    # No single actively-tracked session to attribute the stop to. If more
+    # than one vehicle is configured we can't safely tell which one this stop
+    # was for — skip the hold rather than scope it under "_default" and
+    # accidentally block the other vehicle's scheduled/price start.
+    try:
+        from .ev_charging_planner import discover_all_tesla_vehicles
+
+        configured = await discover_all_tesla_vehicles(hass, config_entry)
+    except Exception as err:
+        _LOGGER.debug("Manual stop hold: could not discover configured vehicles: %s", err)
+        configured = []
+
+    if len(configured) > 1:
+        _LOGGER.info(
+            "⚡ Manual stop hold: no VIN supplied, %d active dynamic session(s), "
+            "%d vehicles configured — skipping restart-suppression hold to avoid "
+            "blocking the other vehicle",
+            len(active_vins),
+            len(configured),
+        )
+        return None
+
+    return loadpoint_id
+
+
 def _session_energy_tracked_by_charger_poll(params: Dict[str, Any]) -> bool:
     """Return true when a charger poll provides authoritative session metering."""
     return str(params.get("charger_type") or "").lower() == "ocpp"
@@ -1767,18 +1826,28 @@ async def _execute_single_action(
             from .ev_ownership import record_manual_stop_hold
 
             loadpoint_id = _ev_action_loadpoint_id(params)
+            # Resolve which vehicle to scope the restart-suppression hold to
+            # BEFORE clearing tracked session state below — a "_default"
+            # loadpoint_id makes clear_tracked_ev_charging_session drop every
+            # tracked vehicle's dynamic-session entry (the "_default ↔ VIN
+            # overlap" stop-all behavior), which would erase the very
+            # "who was actively charging" signal this resolution depends on.
+            hold_vehicle_id = await _resolve_manual_stop_hold_vehicle_id(
+                hass, config_entry, params
+            )
             await clear_tracked_ev_charging_session(
                 hass,
                 config_entry,
                 loadpoint_id,
                 reason=params.get("reason", "Manual automation stop"),
             )
-            record_manual_stop_hold(
-                hass,
-                config_entry,
-                loadpoint_id,
-                reason=params.get("reason", "Manual automation stop"),
-            )
+            if hold_vehicle_id is not None:
+                record_manual_stop_hold(
+                    hass,
+                    config_entry,
+                    hold_vehicle_id,
+                    reason=params.get("reason", "Manual automation stop"),
+                )
         return success
     elif action_type == "set_ev_charge_limit":
         return await _action_set_ev_charge_limit(hass, config_entry, params)
@@ -4500,30 +4569,92 @@ def _dynamic_ev_vehicle_vin(vehicle_id: str, params: Dict[str, Any]) -> Optional
     )
 
 
+# Number of CONSECUTIVE "not plugged in" reads required before tearing down an
+# active NON-BLE dynamic session. ``is_ev_plugged_in`` returns False both for a
+# genuine unplug AND for a transient loss of telemetry (cloud integration
+# momentarily down, empty entity registry, OCPP "no connector shows present").
+# Clearing on a single False would falsely stop an actively-charging car and
+# drop its lease on any brief telemetry blip — worse than the lease leak we are
+# fixing. Requiring 2 consecutive reads makes a one-cycle blip harmless while a
+# genuinely unplugged car still clears ~one cycle (~30-60s) later.
+#
+# BLE sessions are exempt: their plug status is a direct local ESPHome read
+# (``binary_sensor.{prefix}_status`` + charge-cable sensor), not a cloud/
+# registry lookup, so it was already trusted for single-cycle clearing before
+# OB-18 generalized this helper. Keeping BLE on clear-on-first-read preserves
+# that established behavior.
+_DYNAMIC_UNPLUG_DEBOUNCE_CYCLES = 2
+
+
 async def _clear_ble_dynamic_session_if_unplugged(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     vehicle_id: str,
     params: Dict[str, Any],
 ) -> bool:
-    """Clear stale BLE dynamic sessions when the vehicle is definitively unplugged."""
+    """Clear a stale dynamic session when the vehicle is definitively unplugged.
+
+    Despite the name (kept to avoid touching every call site), this checks
+    plug state for ALL providers via ``is_ev_plugged_in`` — not just BLE.
+    ``is_ev_plugged_in`` itself dispatches to the right provider (Sigenergy,
+    Zaptec, OCPP, generic charger, Fleet/Teslemetry, or Tesla BLE) and already
+    treats an asleep/unavailable vehicle as "assume plugged in" rather than
+    unplugged, so this is safe to call unconditionally from both the
+    battery-target and solar-surplus dynamic loops. Without this, only BLE
+    vehicles ever had their mid-session unplug detected — Fleet/Teslemetry/
+    OCPP/generic loadpoints kept a stale ev_ownership lease (blocking the
+    other vehicle's cross-family start) and kept issuing amp commands against
+    an unplugged car.
+
+    Non-BLE teardown is debounced: the session is only cleared after
+    ``_DYNAMIC_UNPLUG_DEBOUNCE_CYCLES`` CONSECUTIVE unplugged reads, tracked on
+    ``state["consecutive_unplugged"]`` in the dynamic-session dict. A single
+    unplugged read (which may just be a momentary cloud-telemetry gap) keeps the
+    session; a plugged read resets the counter. BLE sessions (local plug read)
+    keep the original clear-on-first-read behavior. Returns True only on the
+    cycle that actually clears the session.
+    """
     vehicle_vin = _dynamic_ev_vehicle_vin(vehicle_id, params)
-    if not (vehicle_vin and str(vehicle_vin).startswith("ble_")):
-        return False
+    is_ble = bool(vehicle_vin) and str(vehicle_vin).startswith("ble_")
 
     try:
         from .ev_charging_planner import is_ev_plugged_in
 
         plugged_in = await is_ev_plugged_in(hass, config_entry, vehicle_vin=vehicle_vin)
     except Exception as err:
-        _LOGGER.debug("Dynamic EV: could not verify BLE plug state for %s: %s", vehicle_id, err)
+        _LOGGER.debug("Dynamic EV: could not verify plug state for %s: %s", vehicle_id, err)
         return False
+
+    state = _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id)
 
     if plugged_in:
+        # Reset the debounce counter on any confirmed-plugged read.
+        if isinstance(state, dict) and state.get("consecutive_unplugged"):
+            state["consecutive_unplugged"] = 0
         return False
 
+    # Not plugged in — for non-BLE providers this could be a genuine unplug OR a
+    # transient cloud-telemetry gap, so debounce over consecutive reads. BLE
+    # reads locally and clears on the first unplugged read (original behavior).
+    if not is_ble:
+        consecutive = 0
+        if isinstance(state, dict):
+            consecutive = int(state.get("consecutive_unplugged", 0) or 0) + 1
+            state["consecutive_unplugged"] = consecutive
+
+        if consecutive < _DYNAMIC_UNPLUG_DEBOUNCE_CYCLES:
+            _LOGGER.debug(
+                "⚡ Dynamic EV: %s read as not plugged in (%d/%d) — keeping "
+                "session in case plug telemetry is momentarily unavailable",
+                vehicle_id,
+                consecutive,
+                _DYNAMIC_UNPLUG_DEBOUNCE_CYCLES,
+            )
+            return False
+
     _LOGGER.info(
-        "⚡ Dynamic EV: clearing stale BLE session for %s because vehicle is not plugged in",
+        "⚡ Dynamic EV: clearing stale session for %s because vehicle is not "
+        "plugged in",
         vehicle_id,
     )
     await _action_stop_ev_charging_dynamic(
