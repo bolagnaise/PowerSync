@@ -22052,6 +22052,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         current_state = entry_data.get("alphaess_curtailment_state", "normal")
 
+        def _alphaess_force_dispatch_active() -> bool:
+            """Return true while AlphaESS force/optimizer dispatch owns the inverter."""
+            if force_charge_state.get("active") or force_discharge_state.get("active"):
+                return True
+
+            active_getter = getattr(entry_data.get("optimization_coordinator"), "get_active_force_state", None)
+            if callable(active_getter):
+                try:
+                    active_force = active_getter() or {}
+                except Exception as err:
+                    _LOGGER.debug("AlphaESS curtailment: active force check failed: %s", err)
+                else:
+                    return bool(active_force.get("active")) and active_force.get("type") in {
+                        "charge",
+                        "discharge",
+                        "export",
+                    }
+
+            return (
+                _optimizer_current_force_action_matches("charge")
+                or _optimizer_current_force_action_matches("discharge")
+            )
+
         if feedin_price is None:
             feedin_price, import_price, price_source = get_current_prices_for_curtailment(
                 entry_data,
@@ -22085,6 +22108,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         try:
             if export_earnings < 1:
+                if _alphaess_force_dispatch_active():
+                    _LOGGER.info(
+                        "AlphaESS curtailment skipped while force dispatch is active; "
+                        "active dispatch (0x0880) overrides the export limit register "
+                        "on Smile firmware, and curtail() would otherwise release it"
+                    )
+                    return
+
                 if current_state == "normal":
                     _LOGGER.info(
                         "AlphaESS curtailment TRIGGERED: export_earnings=%.2fc (<1c) → zero export",
