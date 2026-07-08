@@ -1229,8 +1229,9 @@ class LoadProfileEstimator:
                 try:
                     power_w = float(state.state)
                     power_kw = power_w / 1000
-                    hour = state.last_updated.hour
-                    is_weekend = state.last_updated.weekday() >= 5
+                    local_last_updated = dt_util.as_local(state.last_updated)
+                    hour = local_last_updated.hour
+                    is_weekend = local_last_updated.weekday() >= 5
 
                     if is_weekend:
                         weekend_hours[hour].append(power_kw)
