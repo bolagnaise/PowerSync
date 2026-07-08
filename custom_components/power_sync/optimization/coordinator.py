@@ -1158,7 +1158,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         floor = self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
         action_timestamp = getattr(action, "timestamp", None)
         matched_per_slot = False
-        if action_timestamp is not None:
+        if self.auto_apply_reserve_enabled and action_timestamp is not None:
             timestamps = getattr(self, "_active_export_reserve_floor_timestamps", None) or []
             floors = getattr(self, "_active_export_reserve_floor_slots", None) or []
             for idx, timestamp in enumerate(timestamps):
@@ -3400,13 +3400,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 reserve_recommendation = dict(
                     getattr(result, "reserve_recommendation", {}) or {}
                 )
-            export_reserve_floor, export_reserve_metadata = (
-                self._post_processed_export_reserve_floor_slots(
-                    self._current_schedule,
-                    solar_forecast,
-                    load_forecast,
+            export_reserve_floor = None
+            export_reserve_metadata: dict[str, Any] = {}
+            if self.auto_apply_reserve_enabled:
+                export_reserve_floor, export_reserve_metadata = (
+                    self._post_processed_export_reserve_floor_slots(
+                        self._current_schedule,
+                        solar_forecast,
+                        load_forecast,
+                    )
                 )
-            )
             if export_reserve_metadata:
                 reserve_recommendation.update(export_reserve_metadata)
             if export_reserve_floor is None:
@@ -3491,13 +3494,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
                 self._last_update_time = dt_util.now()
 
-            final_export_reserve_floor, final_export_reserve_metadata = (
-                self._post_processed_export_reserve_floor_slots(
-                    self._current_schedule,
-                    solar_forecast,
-                    load_forecast,
+            final_export_reserve_floor = None
+            final_export_reserve_metadata: dict[str, Any] = {}
+            if self.auto_apply_reserve_enabled:
+                final_export_reserve_floor, final_export_reserve_metadata = (
+                    self._post_processed_export_reserve_floor_slots(
+                        self._current_schedule,
+                        solar_forecast,
+                        load_forecast,
+                    )
                 )
-            )
             if final_export_reserve_floor is not None:
                 self._set_active_export_reserve_floor_slots(
                     final_export_reserve_floor,

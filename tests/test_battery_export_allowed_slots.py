@@ -2440,7 +2440,7 @@ def test_solar_forecast_warning_waits_for_forecast_attempt(opt_module):
     assert coordinator._get_warnings() == []
 
 
-def test_coordinator_refresh_applies_cached_charge_at_action_boundary(opt_module):
+def test_coordinator_refresh_skips_cached_charge_at_action_boundary(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.25)
     coordinator._enabled = True
@@ -2474,8 +2474,8 @@ def test_coordinator_refresh_applies_cached_charge_at_action_boundary(opt_module
         opt_module.dt_util.now = original_now
 
     assert result == {"ok": True}
-    assert battery.force_charge_calls == [(5, 5000, False)]
-    assert coordinator._last_executed_action == "charge"
+    assert battery.force_charge_calls == []
+    assert coordinator._last_executed_action == "self_consumption"
 
 
 def _enable_scheduled_ev_preserve(coordinator):
@@ -5420,6 +5420,33 @@ def test_profit_max_export_floor_does_not_block_when_auto_apply_disabled(opt_mod
     asyncio.run(coordinator._execute_optimizer_action(actions[0]))
 
     assert battery.force_discharge_calls == [(5, 6000, False, None)]
+    assert battery.self_consumption_calls == 0
+    assert coordinator._last_executed_action == "export"
+
+
+def test_active_export_floor_does_not_block_when_auto_apply_disabled(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.38)
+    coordinator.battery_system = "foxess"
+    coordinator._config.backup_reserve = 0.16
+    coordinator._config.max_discharge_w = 23000
+    coordinator._auto_apply_reserve_enabled = False
+    start = datetime(2026, 7, 8, 9, 0, tzinfo=timezone.utc)
+    action = SimpleNamespace(
+        action="export",
+        power_w=21600,
+        soc=0.326,
+        timestamp=start,
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+    coordinator._set_active_export_reserve_floor_slots(
+        [0.35],
+        coordinator._current_schedule,
+    )
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_discharge_calls == [(5, 21600, False, None)]
     assert battery.self_consumption_calls == 0
     assert coordinator._last_executed_action == "export"
 
