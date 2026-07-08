@@ -1007,9 +1007,21 @@ class SolaxBatteryController:
         await self._set_select("export_duration", best_option or options[0])
 
     def _save_force_time_states(self, keys: tuple[str, ...]) -> None:
-        """Remember Gen2/Gen3 entities so restore_normal can unwind cleanly."""
-        saved: dict[str, str] = {}
+        """Remember Gen2/Gen3 entities so restore_normal can unwind cleanly.
+
+        Guarded per-key (only on first capture, not re-entry) — the optimizer
+        re-issues force_charge/force_discharge every cycle to keep the
+        hardware timeout alive, so a later cycle would otherwise read back
+        the already-force-modified entities (grid_export_limit, currents,
+        charge window, allow_grid_charge) and overwrite the real restore
+        baseline. Keys already captured this force session are left alone;
+        only keys not yet captured are read fresh, so a force direction
+        switch without an intervening restore still saves its own keys.
+        """
+        saved = self._saved_force_time_states or {}
         for key in keys:
+            if key in saved:
+                continue
             entity_id = self._entity_map.get(key)
             state = self.hass.states.get(entity_id) if entity_id else None
             if state and state.state not in ("unknown", "unavailable", ""):
