@@ -4531,6 +4531,28 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
             domain_data,
         )
 
+    def _coordinator_source_attributes(self) -> dict[str, Any]:
+        """Expose the effective dynamic price source used by the coordinator."""
+        data = getattr(self.coordinator, "data", None)
+        if not isinstance(data, dict):
+            return {}
+
+        attrs: dict[str, Any] = {}
+        source = data.get("source")
+        if source:
+            attrs["price_source"] = source
+        attrs["using_price_fallback"] = bool(data.get("using_fallback"))
+        for key in (
+            "fallback_reason",
+            "fallback_source",
+            "primary_source",
+            "kwatch_last_success",
+        ):
+            value = data.get(key)
+            if value not in (None, ""):
+                attrs[key] = value
+        return attrs
+
     @property
     def _uses_standard_current_price_id(self) -> bool:
         """Return true for standard dashboard/mobile current price entities."""
@@ -4686,6 +4708,7 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
             "state": state,
             "pea_enabled": pea_enabled,
             "base_rate_cents": base_rate,
+            **self._coordinator_source_attributes(),
         }
 
         tariff_price = self._get_current_tariff_price()
@@ -4694,12 +4717,31 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
             attributes.update(
                 {
                     "source": "tariff_schedule",
+                    "price_source": tariff_data.get(
+                        "price_source",
+                        attributes.get("price_source", "tariff_schedule"),
+                    ),
+                    "using_price_fallback": bool(
+                        tariff_data.get(
+                            "using_price_fallback",
+                            attributes.get("using_price_fallback", False),
+                        )
+                    ),
                     "current_period": self._current_period,
                     "final_rate_cents": round(value * 100, 2),
                     "utility": tariff_data.get("utility"),
                     "plan_name": tariff_data.get("plan_name"),
                 }
             )
+            for key in (
+                "fallback_reason",
+                "fallback_source",
+                "primary_source",
+                "kwatch_last_success",
+            ):
+                value = tariff_data.get(key)
+                if value not in (None, ""):
+                    attributes[key] = value
             if self._sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE:
                 attributes["price_spike"] = None
             else:

@@ -20562,6 +20562,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             electricity_provider_check == "octopus"
         )
 
+        def _flow_power_price_source_metadata() -> dict[str, Any]:
+            """Return user-visible metadata for the effective Flow Power price source."""
+            if electricity_provider_check != "flow_power":
+                return {}
+
+            source_data = None
+            if use_kwatch and flow_power_kwatch_coordinator is not None:
+                source_data = getattr(flow_power_kwatch_coordinator, "data", None)
+            elif use_aemo_sensor and aemo_sensor_coordinator is not None:
+                source_data = getattr(aemo_sensor_coordinator, "data", None)
+            elif amber_coordinator is not None and flow_power_price_source == "amber":
+                source_data = getattr(amber_coordinator, "data", None)
+
+            metadata = {
+                "price_source": flow_power_price_source,
+                "using_price_fallback": False,
+            }
+            if not isinstance(source_data, dict):
+                return metadata
+
+            metadata["price_source"] = source_data.get(
+                "source",
+                flow_power_price_source,
+            )
+            metadata["using_price_fallback"] = bool(source_data.get("using_fallback"))
+            for key in (
+                "fallback_reason",
+                "fallback_source",
+                "primary_source",
+                "kwatch_last_success",
+            ):
+                value = source_data.get(key)
+                if value not in (None, ""):
+                    metadata[key] = value
+            return metadata
+
         if use_localvolts:
             _LOGGER.info("Using Localvolts for pricing data")
         elif use_octopus:
@@ -21036,6 +21072,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "buy_prices": buy_prices,
                     "sell_prices": sell_prices,
                     **currency_metadata(tariff.get("currency")),
+                    **_flow_power_price_source_metadata(),
                     "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
                 async_dispatcher_send(hass, f"power_sync_tariff_updated_{entry.entry_id}")
@@ -21081,6 +21118,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "buy_prices": buy_prices,
                     "sell_prices": sell_prices,
                     **currency_metadata(tariff.get("currency")),
+                    **_flow_power_price_source_metadata(),
                     "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
                 async_dispatcher_send(hass, f"power_sync_tariff_updated_{entry.entry_id}")
@@ -21292,6 +21330,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "buy_prices": buy_prices,
             "sell_prices": sell_prices,
             **currency_metadata(tariff.get("currency")),
+            **_flow_power_price_source_metadata(),
             "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 

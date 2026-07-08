@@ -3469,6 +3469,10 @@ class FlowPowerKWatchPriceCoordinator(DataUpdateCoordinator):
         self.region = region
         self.api_region = FLOW_POWER_KWATCH_REGIONS.get(region, region.lower())
         self._client = FlowPowerAPIClient(api_key, session)
+        self._aemo_fallback = AEMOPriceCoordinator(hass, region, session)
+        self._using_fallback = False
+        self._fallback_reason: str | None = None
+        self._kwatch_last_success: datetime | None = None
 
         super().__init__(
             hass,
@@ -3477,60 +3481,139 @@ class FlowPowerKWatchPriceCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(minutes=5),
         )
 
-    async def _async_update_data(self) -> dict[str, Any]:
+    @staticmethod
+    def _format_update_time(value: datetime | None) -> str | None:
+        if value is None:
+            return None
+        return value.isoformat()
+
+    @staticmethod
+    def _fallback_reason_from_error(err: Exception) -> str | None:
+        reason = str(err) or type(err).__name__
+        if reason == "invalid_api_key":
+            return None
+        if reason.startswith("api_status_"):
+            try:
+                status = int(reason.rsplit("_", 1)[-1])
+            except ValueError:
+                return None
+            return reason if status >= 500 else None
+        if reason == "invalid_json":
+            return reason
+        if isinstance(err, (aiohttp.ClientError, asyncio.TimeoutError)):
+            return type(err).__name__
+        if isinstance(err, UpdateFailed) and "KWatch" in reason:
+            return reason
+        return None
+
+    async def _fetch_kwatch_data(self) -> dict[str, Any]:
         """Fetch current and forecast prices from Flow Power's KWatch API."""
         from .flow_power_api import kwatch_prices_to_amber_format
 
-        try:
-            dispatch = await self._client.dispatch5mins(self.api_region, period=60)
-            # Keep the first upcoming half-hour slot; period=2 skips it.
-            forecast_30 = await self._client.predispatch30mins(self.api_region, period=1)
-            forecast_5 = await self._client.predispatch5mins(self.api_region, period=60)
+        dispatch = await self._client.dispatch5mins(self.api_region, period=60)
+        # Keep the first upcoming half-hour slot; period=2 skips it.
+        forecast_30 = await self._client.predispatch30mins(self.api_region, period=1)
+        forecast_5 = await self._client.predispatch5mins(self.api_region, period=60)
 
-            if not dispatch:
-                raise UpdateFailed(f"No KWatch dispatch prices returned for {self.region}")
+        if not dispatch:
+            raise UpdateFailed(f"No KWatch dispatch prices returned for {self.region}")
 
-            latest_dispatch = dispatch[-1:]
-            current_prices = kwatch_prices_to_amber_format(
-                latest_dispatch,
-                interval_type="CurrentInterval",
-                default_duration=5,
+        latest_dispatch = dispatch[-1:]
+        current_prices = kwatch_prices_to_amber_format(
+            latest_dispatch,
+            interval_type="CurrentInterval",
+            default_duration=5,
+        )
+        forecast = kwatch_prices_to_amber_format(
+            forecast_30,
+            interval_type="ForecastInterval",
+            default_duration=30,
+        )
+        forecast_5min = kwatch_prices_to_amber_format(
+            forecast_5,
+            interval_type="ForecastInterval",
+            default_duration=5,
+        )
+
+        if not forecast:
+            forecast = forecast_5min
+        if not forecast:
+            raise UpdateFailed(f"No KWatch forecast prices returned for {self.region}")
+
+        latest_cents = latest_dispatch[0]["perKwh"]
+        _LOGGER.info(
+            "Flow Power KWatch data for %s: current=%.2fc/kWh, forecast_periods=%d",
+            self.region,
+            latest_cents,
+            len(forecast) // 2,
+        )
+
+        return {
+            "current": current_prices,
+            "forecast": forecast,
+            "forecast_5min": forecast_5min,
+            "last_update": dt_util.utcnow(),
+            "source": "flow_power_kwatch",
+            "using_fallback": False,
+        }
+
+    async def _fetch_aemo_fallback_data(self, reason: str) -> dict[str, Any]:
+        """Fetch AEMO Direct prices when KWatch is temporarily unavailable."""
+        await self._aemo_fallback.async_request_refresh()
+        fallback_data = dict(self._aemo_fallback.data or {})
+        if not fallback_data.get("current") or not fallback_data.get("forecast"):
+            raise UpdateFailed(
+                f"Flow Power KWatch unavailable ({reason}); AEMO fallback unavailable"
             )
-            forecast = kwatch_prices_to_amber_format(
-                forecast_30,
-                interval_type="ForecastInterval",
-                default_duration=30,
-            )
-            forecast_5min = kwatch_prices_to_amber_format(
-                forecast_5 or dispatch,
-                interval_type="ForecastInterval",
-                default_duration=5,
-            )
 
-            if not forecast:
-                forecast = forecast_5min
-            if not forecast:
-                raise UpdateFailed(f"No KWatch forecast prices returned for {self.region}")
-
-            latest_cents = latest_dispatch[0]["perKwh"]
-            _LOGGER.info(
-                "Flow Power KWatch data for %s: current=%.2fc/kWh, forecast_periods=%d",
+        if not self._using_fallback or self._fallback_reason != reason:
+            _LOGGER.warning(
+                "Flow Power KWatch unavailable for %s (%s); using AEMO Direct fallback",
                 self.region,
-                latest_cents,
-                len(forecast) // 2,
+                reason,
             )
-
-            return {
-                "current": current_prices,
-                "forecast": forecast,
-                "forecast_5min": forecast_5min,
-                "last_update": dt_util.utcnow(),
-                "source": "flow_power_kwatch",
+        self._using_fallback = True
+        self._fallback_reason = reason
+        fallback_data.update(
+            {
+                "source": "flow_power_kwatch_fallback_aemo",
+                "primary_source": "flow_power_kwatch",
+                "fallback_source": "aemo_api",
+                "using_fallback": True,
+                "fallback_reason": reason,
+                "kwatch_last_success": self._format_update_time(
+                    self._kwatch_last_success
+                ),
+                "last_update": fallback_data.get("last_update") or dt_util.utcnow(),
             }
-        except UpdateFailed:
-            raise
+        )
+        return fallback_data
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch KWatch prices, falling back to AEMO during transient outages."""
+        try:
+            data = await self._fetch_kwatch_data()
         except Exception as err:
-            raise UpdateFailed(f"Error fetching Flow Power KWatch data: {err}") from err
+            reason = self._fallback_reason_from_error(err)
+            if reason is None:
+                raise
+            try:
+                return await self._fetch_aemo_fallback_data(reason)
+            except Exception as fallback_err:
+                raise UpdateFailed(
+                    f"Flow Power KWatch unavailable ({reason}); "
+                    f"AEMO fallback failed: {fallback_err}"
+                ) from fallback_err
+
+        self._kwatch_last_success = data.get("last_update")
+        if self._using_fallback:
+            _LOGGER.info(
+                "Flow Power KWatch recovered for %s; returning to primary pricing",
+                self.region,
+            )
+        self._using_fallback = False
+        self._fallback_reason = None
+        return data
 
 
 class EPEXPriceCoordinator(DataUpdateCoordinator):
@@ -3571,6 +3654,9 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
         self._tax_percent = tax_percent
         self._export_rate = export_rate
         self._client = EPEXAPIClient(session)
+        # Tracks whether we've already logged the "no export rate configured"
+        # warning so it fires once per coordinator lifetime, not every poll.
+        self._warned_export_rate_unset = False
 
         super().__init__(
             hass,
@@ -3631,12 +3717,33 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
                     "duration": 60,
                 }
 
-                # Export price: use fixed rate if configured, otherwise wholesale (no surcharge/tax)
+                # Export price: use fixed rate if configured. The EPEX
+                # Predictor API only returns "total" — the final consumer
+                # price with surcharge/tax already applied server-side
+                # (see class docstring) — it does not expose a separate
+                # wholesale/spot component we could use for export
+                # valuation. Previously this fell back to -total_ct, which
+                # valued exports at the *retail* import rate (surcharge +
+                # tax included) instead of wholesale, causing the optimizer
+                # to export midday energy it should have held for the
+                # evening peak. Default to 0 instead of guessing a price we
+                # don't actually have.
                 if self._export_rate > 0:
                     export_ct = -self._export_rate
                 else:
-                    # Use negative of import price (wholesale approximation)
-                    export_ct = -total_ct
+                    export_ct = 0.0
+                    if not self._warned_export_rate_unset:
+                        _LOGGER.warning(
+                            "EPEX export rate not configured for %s and no "
+                            "wholesale/spot price is available from the API "
+                            "(only the final consumer price is returned); "
+                            "valuing exports at 0 ct/kWh so PowerSync never "
+                            "assumes an export price it doesn't have. Set a "
+                            "Fixed Export Rate (or export price entity) to "
+                            "value exports correctly.",
+                            self.region,
+                        )
+                        self._warned_export_rate_unset = True
 
                 export_entry = {
                     "nemTime": ends_at.isoformat(),
