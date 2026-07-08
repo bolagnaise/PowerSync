@@ -1743,6 +1743,79 @@ def test_flow_power_decays_far_future_import_spikes_but_keeps_happy_hour_export(
     assert export_prices[happy_hour_slot] == pytest.approx(0.45)
 
 
+def test_flow_power_grid_charge_cap_uses_display_import_before_lp_decay(
+    opt_module,
+    monkeypatch,
+):
+    now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda *args, **kwargs: now)
+
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator.hass = SimpleNamespace(data={"power_sync": {"entry-1": {}}})
+    coordinator._entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "electricity_provider": "flow_power",
+            "flow_power_state": "NSW1",
+        },
+    )
+    coordinator._config = opt_module.OptimizationConfig(
+        horizon_hours=24,
+        interval_minutes=5,
+        profit_max_enabled=True,
+        max_grid_charge_price=0.30,
+    )
+    coordinator._last_display_import_prices = None
+    coordinator._last_display_export_prices = None
+    coordinator._last_grid_charge_cap_import_prices = None
+    coordinator._apply_export_boost = lambda export, import_prices=None: (export, [])
+    coordinator._apply_saving_session_prices = lambda imports, exports: (imports, exports)
+    coordinator._apply_chip_mode = lambda exports, *args: exports
+    coordinator._apply_demand_charge_penalty = lambda imports: imports
+
+    def price_entry(start: datetime, import_cents: float, channel: str) -> dict:
+        end = start + opt_module.timedelta(minutes=30)
+        return {
+            "valid_from": start.isoformat(),
+            "valid_to": end.isoformat(),
+            "nemTime": end.isoformat(),
+            "duration": 30,
+            "perKwh": -1.0 if channel == "feedIn" else import_cents,
+            "channelType": channel,
+            "type": "ForecastInterval",
+        }
+
+    forecast = []
+    spike_start = now + opt_module.timedelta(hours=23)
+    for slot in range(48):
+        start = now + opt_module.timedelta(minutes=30 * slot)
+        import_cents = 20.0 if start == spike_start else 0.0
+        forecast.append(price_entry(start, import_cents, "general"))
+        forecast.append(price_entry(start, import_cents, "feedIn"))
+
+    coordinator.price_coordinator = SimpleNamespace(
+        data={"current": [], "forecast": forecast}
+    )
+
+    import_prices, _ = asyncio.run(coordinator._get_price_forecast())
+    spike_slot = int((spike_start - now).total_seconds() // (5 * 60))
+    cap_prices = coordinator._grid_charge_cap_import_prices(import_prices)
+    allowed = coordinator._grid_charge_allowed_slots(
+        cap_prices,
+        solar_forecast=[0.0] * len(import_prices),
+        load_forecast=[0.0] * len(import_prices),
+        current_soc=0.20,
+    )
+
+    assert coordinator._last_display_import_prices[spike_slot] > 0.30
+    assert import_prices[spike_slot] < 0.30
+    assert cap_prices[spike_slot] == pytest.approx(
+        coordinator._last_display_import_prices[spike_slot]
+    )
+    assert allowed[spike_slot] is False
+
+
 def test_dynamic_price_forecast_preserves_boundaries_after_leading_gap(
     opt_module,
     monkeypatch,

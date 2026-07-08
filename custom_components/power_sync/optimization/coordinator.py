@@ -342,6 +342,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_export_prices: list[float] | None = None     # $/kWh values (LP-adjusted)
         self._last_display_import_prices: list[float] | None = None  # $/kWh actual tariff
         self._last_display_export_prices: list[float] | None = None  # $/kWh actual tariff
+        self._last_grid_charge_cap_import_prices: list[float] | None = None  # $/kWh hard cap reference
         self._last_export_boost_allowed_slots: list[bool] = []
         self._last_price_timestamps: list[datetime] | None = None
         self._last_planned_ev_load_forecast_w: list[float] | None = None
@@ -3263,8 +3264,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             battery_charge_blocked = self._battery_charge_blocked_slots(
                 len(import_prices),
             )
+            grid_charge_cap_import_prices = self._grid_charge_cap_import_prices(
+                import_prices
+            )
             grid_charge_allowed = self._grid_charge_allowed_slots(
-                import_prices,
+                grid_charge_cap_import_prices,
                 solar_forecast,
                 load_forecast,
                 soc,
@@ -8398,6 +8402,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         # (Amber feedIn perKwh > 0 → you pay to export).
                         self._last_display_import_prices = list(import_prices[:actual_price_intervals])
                         self._last_display_export_prices = list(display_export_raw[:actual_price_intervals])
+                        self._last_grid_charge_cap_import_prices = list(import_prices)
 
                         # Apply export boost, saving session overlay, and chip mode to LP prices.
                         # Chip mode uses the real export price as its threshold reference so
@@ -8592,6 +8597,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Store actual tariff prices for mobile app display
         self._last_display_import_prices = display_import
         self._last_display_export_prices = display_export
+        self._last_grid_charge_cap_import_prices = list(import_prices)
         self._last_price_timestamps = timestamps
 
         # Apply saving session overlay to TOU prices
@@ -10021,6 +10027,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except (TypeError, ValueError):
             return None
         return parsed if parsed > 0 else None
+
+    def _grid_charge_cap_import_prices(
+        self,
+        import_prices: list[float],
+    ) -> list[float]:
+        """Return the user-facing import prices used for hard grid-charge caps."""
+        reference = getattr(self, "_last_grid_charge_cap_import_prices", None)
+        if not reference:
+            return import_prices
+
+        cap_prices = list(reference[:len(import_prices)])
+        if len(cap_prices) < len(import_prices):
+            cap_prices.extend(import_prices[len(cap_prices):])
+        return cap_prices
 
     def _grid_charge_allowed_slots(
         self,
