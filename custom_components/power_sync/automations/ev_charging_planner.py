@@ -4388,7 +4388,10 @@ class AutoScheduleExecutor:
             (
                 state.current_plan is None or
                 state.last_plan_update is None or
-                now - state.last_plan_update > self._plan_update_interval
+                # last_plan_update is stamped with HA-local time in
+                # _regenerate_plan(); read it back on the same clock (OB-31),
+                # not the OS-local `now` used elsewhere in this method.
+                _ha_local_now_naive() - state.last_plan_update > self._plan_update_interval
             )
         ):
             await self._regenerate_plan(vehicle_id, settings, state, current_soc=ev_soc)
@@ -4760,7 +4763,14 @@ class AutoScheduleExecutor:
         current_soc: Optional[int] = None,
     ) -> None:
         """Regenerate the charging plan based on current forecasts."""
-        now = datetime.now()
+        # HA-local, not OS-local: on UTC-container installs with a non-UTC HA
+        # timezone, datetime.now() can disagree with the true local weekday
+        # for the whole UTC-offset window each day, picking the wrong day's
+        # departure_times entry/priority (OB-15). last_plan_update is also
+        # stamped from this same value below, so refresh_optimizer_forecast_plans()
+        # and _evaluate_vehicle() must read staleness against this same
+        # HA-local clock (OB-31) rather than a mismatched datetime.now().
+        now = _ha_local_now_naive()
 
         # Determine target time from per-day departure_times
         target_time = None
