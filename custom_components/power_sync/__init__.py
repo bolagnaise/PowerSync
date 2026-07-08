@@ -34209,6 +34209,32 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"Error stopping Tesla signaling WebSocket: {e}")
 
+    # Stop the local Powerwall (TEDAPI) poller if it exists. A keep-alive
+    # no-op listener is anchored at construction time (see
+    # PowerwallLocalCoordinator.__init__ / self._keepalive_unsub) so the
+    # coordinator's periodic schedule stays armed even with zero entity
+    # listeners — just popping entry_data does not stop the 2s poll timer,
+    # leaking one TEDAPI poller per reload. Mirrors the teardown pattern in
+    # powerwall_local/views.py ensure_coordinator().
+    if pw_local_coordinator := pw_local.get("coordinator"):
+        try:
+            pw_local_coordinator.update_interval = None
+        except Exception as e:
+            _LOGGER.debug("Error clearing powerwall_local update_interval: %s", e)
+        keepalive_unsub = getattr(pw_local_coordinator, "_keepalive_unsub", None)
+        if callable(keepalive_unsub):
+            try:
+                keepalive_unsub()
+            except Exception as e:
+                _LOGGER.debug("Error unsubscribing powerwall_local keepalive listener: %s", e)
+        if hasattr(pw_local_coordinator, "async_shutdown"):
+            try:
+                await pw_local_coordinator.async_shutdown()
+            except Exception as e:
+                _LOGGER.debug("Error shutting down powerwall_local coordinator: %s", e)
+        pw_local["coordinator"] = None
+        _LOGGER.debug("Stopped Powerwall local (TEDAPI) coordinator")
+
     # Flush energy accumulator so the next restore has the latest values
     # (prevents total_increasing sensors from going backwards after reload)
     for coord_key in ("tesla_coordinator", "sigenergy_coordinator", "sungrow_coordinator",
@@ -34228,13 +34254,26 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except Exception as e:
                 _LOGGER.debug("Failed to flush lifetime totals for %s: %s", coord_key, e)
 
-    if sungrow_coordinator := entry_data.get("sungrow_coordinator"):
-        try:
-            await sungrow_coordinator.async_shutdown()
-            entry_data["sungrow_coordinator"] = None
-            _LOGGER.debug("Stopped Sungrow Modbus coordinator")
-        except Exception as e:
-            _LOGGER.debug("Sungrow coordinator shutdown error: %s", e)
+    # Shut down every brand coordinator's controller connection on unload.
+    # Each of these holds an AsyncModbusTcpClient (or equivalent) that is
+    # never closed unless we call async_shutdown() explicitly — without this,
+    # a reload orphans one connection per configured brand until the
+    # inverter's connection pool exhausts ("Failed to connect"). AlphaESS's
+    # async_shutdown() also releases forced dispatch (0722H) first since it
+    # has no auto-revert; guard each brand independently so one failure
+    # doesn't block the others from shutting down.
+    for coord_key in ("sigenergy_coordinator", "sungrow_coordinator", "foxess_coordinator",
+                      "goodwe_coordinator", "alphaess_coordinator", "esy_sunhome_coordinator",
+                      "solax_coordinator", "saj_h2_coordinator", "fronius_reserva_coordinator",
+                      "neovolt_coordinator", "solaredge_coordinator", "anker_solix_coordinator"):
+        coord = entry_data.get(coord_key)
+        if coord and hasattr(coord, "async_shutdown"):
+            try:
+                await coord.async_shutdown()
+                entry_data[coord_key] = None
+                _LOGGER.debug("Stopped %s", coord_key)
+            except Exception as e:
+                _LOGGER.debug("%s shutdown error: %s", coord_key, e)
 
     # Unload platforms
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
