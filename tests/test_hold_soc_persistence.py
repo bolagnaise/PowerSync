@@ -304,14 +304,14 @@ def test_async_unload_entry_cancels_force_and_hold_timers():
     source = _function_source("async_unload_entry")
 
     assert (
-        'for _state_key in ("force_charge_state", "force_discharge_state", "hold_soc_state"):'
+        'for _state_key in ("force_charge_state", "force_discharge_state", "hold_soc_state", "self_consumption_state"):'
         in source
     )
     assert 'for _timer_key in ("cancel_expiry_timer", "cancel_hardware_refresh_timer"):' in source
     assert "if callable(_cancel):" in source
 
     cancel_index = source.index(
-        'for _state_key in ("force_charge_state", "force_discharge_state", "hold_soc_state"):'
+        'for _state_key in ("force_charge_state", "force_discharge_state", "hold_soc_state", "self_consumption_state"):'
     )
     unload_platforms_index = source.index("async_unload_platforms")
     assert cancel_index < unload_platforms_index

@@ -23569,12 +23569,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "locked_soc": None,  # SoC at the moment Hold was engaged, for diagnostics
     }
 
-    # Self-consumption override: persistent toggle (no timer). When active,
-    # battery ignores TOU optimisation and runs pure self-consumption until
-    # the user switches it off or calls restore_normal.
+    # Self-consumption override: duration-based like force charge/discharge.
+    # When active, battery ignores TOU optimisation and runs pure
+    # self-consumption until the timer expires or the user calls
+    # restore_normal.
     self_consumption_state = {
         "active": False,
         "engaged_at": None,
+        "expires_at": None,
+        "duration": 0,
+        "cancel_expiry_timer": None,
     }
 
     # Generation counter — incremented synchronously at the start of every
@@ -23601,12 +23605,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         if reason:
             _LOGGER.debug("Cancelling pending force timers: %s", reason)
-        for _state in (force_discharge_state, force_charge_state):
+        for _state in (force_discharge_state, force_charge_state, hold_soc_state, self_consumption_state):
             for _timer_key in ("cancel_expiry_timer", "cancel_hardware_refresh_timer"):
                 _cancel = _state.get(_timer_key)
                 if _cancel:
                     _cancel()
                     _state[_timer_key] = None
+
+    def _clear_self_consumption_state(send_update: bool = True) -> None:
+        """Clear the user-facing self-consumption override/timer state."""
+        if self_consumption_state.get("cancel_expiry_timer"):
+            try:
+                self_consumption_state["cancel_expiry_timer"]()
+            except Exception:
+                pass
+        self_consumption_state["active"] = False
+        self_consumption_state["engaged_at"] = None
+        self_consumption_state["expires_at"] = None
+        self_consumption_state["duration"] = 0
+        self_consumption_state["cancel_expiry_timer"] = None
+        if send_update:
+            async_dispatcher_send(hass, f"{DOMAIN}_self_consumption_state", {
+                "active": False,
+                "expires_at": None,
+                "duration": 0,
+            })
 
     # Store force states in hass.data so TariffPriceView can access them
     # This allows the endpoint to return real tariff instead of fake ML tariff
@@ -23616,6 +23639,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # reads entry_data.get("hold_soc_state", {}) and without this it always
     # sees an empty dict, so Hold SoC can never be reflected in the sensor.
     hass.data[DOMAIN][entry.entry_id]["hold_soc_state"] = hold_soc_state
+    hass.data[DOMAIN][entry.entry_id]["self_consumption_state"] = self_consumption_state
 
     async def _cache_restorable_tesla_tariff(tariff: Any, source: str) -> dict[str, Any] | None:
         """Cache a normal Tesla TOU tariff; ignore temporary force tariffs."""
@@ -23777,6 +23801,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "saved_operation_mode": hold_soc_state.get("saved_operation_mode"),
                 "saved_backup_reserve": hold_soc_state.get("saved_backup_reserve"),
             }
+        elif self_consumption_state["active"]:
+            state_to_save = {
+                "mode": "self_consumption",
+                "expires_at": self_consumption_state["expires_at"].isoformat() if self_consumption_state.get("expires_at") else None,
+                "duration": self_consumption_state.get("duration"),
+                "engaged_at": self_consumption_state["engaged_at"].isoformat() if self_consumption_state.get("engaged_at") else None,
+                "source": "user",
+            }
 
         stored_data["force_mode_state"] = state_to_save
         await store.async_save(stored_data)
@@ -23822,6 +23854,76 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             persisted_power_w = _coerce_force_power_w(
                 persisted_force_state.get("power_w", 0)
             )
+
+            if mode == "self_consumption":
+                duration = persisted_force_state.get("duration")
+                engaged_at_str = persisted_force_state.get("engaged_at")
+                engaged_at = None
+                if engaged_at_str:
+                    try:
+                        engaged_at = datetime.fromisoformat(engaged_at_str)
+                        if engaged_at.tzinfo is None:
+                            engaged_at = engaged_at.replace(tzinfo=dt_util.UTC)
+                    except (TypeError, ValueError):
+                        engaged_at = None
+
+                if now >= expires_at:
+                    _LOGGER.info(
+                        f"⏰ Persisted self-consumption override has expired (was {expires_at_str}), restoring normal operation"
+                    )
+
+                    self_consumption_state["active"] = True
+                    self_consumption_state["expires_at"] = expires_at
+                    self_consumption_state["duration"] = duration or 0
+                    self_consumption_state["engaged_at"] = engaged_at
+
+                    try:
+                        await hass.services.async_call(
+                            DOMAIN, SERVICE_RESTORE_NORMAL, {"source": "user"}, blocking=True
+                        )
+                        _LOGGER.info("✅ Restored normal operation after expired self-consumption override")
+                    except Exception as e:
+                        _LOGGER.error(f"Error restoring after expired self-consumption override: {e}", exc_info=True)
+
+                    stored_data = await store.async_load() or {}
+                    stored_data["force_mode_state"] = None
+                    await store.async_save(stored_data)
+                else:
+                    remaining_seconds = (expires_at - now).total_seconds()
+                    remaining_minutes = remaining_seconds / 60
+                    _LOGGER.info(
+                        f"🔄 Restoring self-consumption override from persistence ({remaining_minutes:.1f} min remaining)"
+                    )
+
+                    self_consumption_state["active"] = True
+                    self_consumption_state["expires_at"] = expires_at
+                    self_consumption_state["duration"] = duration or int(remaining_minutes)
+                    self_consumption_state["engaged_at"] = engaged_at or now
+
+                    _restore_gen_self_persisted = _command_generation[0]
+
+                    async def auto_restore_self_consumption_persisted(_now):
+                        if _command_generation[0] != _restore_gen_self_persisted:
+                            _LOGGER.debug("Persisted self-consumption timer superseded — skipping restore")
+                            return
+                        if self_consumption_state["active"]:
+                            _LOGGER.info("⏰ Self-consumption override expired (restored timer), auto-restoring")
+                            await hass.services.async_call(
+                                DOMAIN, SERVICE_RESTORE_NORMAL, {"source": "user"}, blocking=True
+                            )
+
+                    self_consumption_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass, auto_restore_self_consumption_persisted, expires_at
+                    )
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_self_consumption_state", {
+                        "active": True,
+                        "expires_at": expires_at.isoformat(),
+                        "duration": self_consumption_state["duration"],
+                        "engaged_at": self_consumption_state["engaged_at"].isoformat(),
+                    })
+                    _LOGGER.info(f"✅ Self-consumption override restored from persistence, expires in {remaining_minutes:.1f} min")
+                return
 
             # OB-5: Hold SoC is not a charge/discharge tariff replay — it's a
             # standby/backup lock — so it gets its own branch instead of the
@@ -24589,6 +24691,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _cancel_all_force_timers("new force_discharge command")
         _command_generation[0] += 1
         _restore_gen = _command_generation[0]
+        if self_consumption_state.get("active"):
+            _clear_self_consumption_state()
 
         # Mutual exclusion + baseline inheritance: if a force_charge is
         # active when this command lands, we transition directly without
@@ -26099,6 +26203,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _cancel_all_force_timers("new force_charge command")
         _command_generation[0] += 1
         _restore_gen = _command_generation[0]
+        if self_consumption_state.get("active"):
+            _clear_self_consumption_state()
 
         # Mutual exclusion + baseline inheritance: if a force_discharge is
         # active when this command lands, transition directly without
@@ -27462,13 +27568,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # These are mobile-only visual flags; clearing them on user-sourced
         # restores keeps the Controls screen in sync without forcing the
         # optimizer to touch them.
-        if source == "user":
+        if source in ("user", "manual", "unknown"):
             if self_consumption_state.get("active"):
-                self_consumption_state["active"] = False
-                self_consumption_state["engaged_at"] = None
-                async_dispatcher_send(hass, f"{DOMAIN}_self_consumption_state", {
-                    "active": False,
-                })
+                _clear_self_consumption_state()
             if hold_soc_state.get("active"):
                 if hold_soc_state.get("cancel_expiry_timer"):
                     try:
@@ -28706,6 +28808,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "🔒 HOLD SoC: activating for %d minutes on %s (source=%s)",
             duration, brand, source,
         )
+        if source != "optimizer" and self_consumption_state.get("active"):
+            _clear_self_consumption_state()
 
         # Tesla does not have a single 'set_backup_mode' coordinator
         # primitive — it doesn't expose any way to strictly lock SoC.
@@ -28737,7 +28841,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 await hass.services.async_call(
                     DOMAIN, "set_self_consumption",
-                    {"source": "user"},
+                    {"source": "hold_soc"},
                     blocking=True,
                 )
                 result = True
@@ -28834,25 +28938,90 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
 
         source = _control_call_source(call)
-        _LOGGER.info("Setting pure self-consumption mode (source=%s)", source)
+        raw_duration = call.data.get("duration", DEFAULT_DISCHARGE_DURATION)
+        try:
+            duration = int(raw_duration)
+        except (ValueError, TypeError):
+            _LOGGER.warning(
+                "Could not convert self-consumption duration %r to int, using default %d",
+                raw_duration,
+                DEFAULT_DISCHARGE_DURATION,
+            )
+            duration = DEFAULT_DISCHARGE_DURATION
+        if duration not in DISCHARGE_DURATIONS:
+            _LOGGER.warning(
+                "Self-consumption duration %s not in allowed values %s, using default %d",
+                duration,
+                DISCHARGE_DURATIONS,
+                DEFAULT_DISCHARGE_DURATION,
+            )
+            duration = DEFAULT_DISCHARGE_DURATION
+
+        _LOGGER.info(
+            "Setting pure self-consumption mode for %d minutes (source=%s)",
+            duration,
+            source,
+        )
 
         if _monitoring_mode_should_block_control(call):
             _LOGGER.info(
-                "[MONITORING] Would set self-consumption mode (source=%s) — blocked by monitoring mode",
+                "[MONITORING] Would set self-consumption mode for %d minutes (source=%s) — blocked by monitoring mode",
+                duration,
                 source,
             )
             return
 
+        user_owned_override = source in ("user", "manual", "unknown")
+
+        if user_owned_override and (
+            force_charge_state.get("active")
+            or force_discharge_state.get("active")
+            or hold_soc_state.get("active")
+        ):
+            _LOGGER.info(
+                "Self-consumption override preempting active force/hold mode; restoring first"
+            )
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_RESTORE_NORMAL,
+                {"source": "user", "_force_restore": True},
+                blocking=True,
+            )
+
         # Mark the mobile toggle on for user-sourced calls. The hardware
         # calls below are idempotent so we set the flag up front; optimizer
         # calls skip this and go straight to executing the brand action.
-        if source == "user":
+        if user_owned_override:
+            _cancel_all_force_timers("new self_consumption command")
+            _command_generation[0] += 1
             self_consumption_state["active"] = True
             self_consumption_state["engaged_at"] = dt_util.utcnow()
+            self_consumption_state["expires_at"] = (
+                self_consumption_state["engaged_at"] + timedelta(minutes=duration)
+            )
+            self_consumption_state["duration"] = duration
+            _restore_gen_self = _command_generation[0]
+
+            async def auto_restore_self_consumption(_now):
+                if _command_generation[0] != _restore_gen_self:
+                    _LOGGER.debug("Self-consumption timer superseded — skipping restore")
+                    return
+                if self_consumption_state["active"]:
+                    _LOGGER.info("⏰ Self-consumption override expired, auto-restoring")
+                    await hass.services.async_call(
+                        DOMAIN, SERVICE_RESTORE_NORMAL, {"source": "user"}, blocking=True
+                    )
+
+            self_consumption_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                hass, auto_restore_self_consumption, self_consumption_state["expires_at"],
+            )
             async_dispatcher_send(hass, f"{DOMAIN}_self_consumption_state", {
                 "active": True,
                 "engaged_at": self_consumption_state["engaged_at"].isoformat(),
+                "expires_at": self_consumption_state["expires_at"].isoformat(),
+                "duration": duration,
             })
+            await persist_force_mode_state()
 
         # Check if this is a FoxESS system
         is_foxess = bool(entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_FOXESS or entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
@@ -32908,6 +33077,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "expires_at": force_discharge_state.get("expires_at"),
                         "source": force_discharge_state.get("source", "user"),
                     }
+                if self_consumption_state.get("active"):
+                    return {
+                        "active": True,
+                        "type": "self_consumption",
+                        "expires_at": self_consumption_state.get("expires_at"),
+                        "source": "user",
+                    }
                 return {"active": False}
 
             def clear_force_state() -> None:
@@ -32923,6 +33099,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_charge_state["expires_at"] = None
                 force_discharge_state["active"] = False
                 force_discharge_state["expires_at"] = None
+                self_consumption_state["active"] = False
+                self_consumption_state["expires_at"] = None
+                self_consumption_state["duration"] = 0
 
             # Load settings from config entry (persisted from previous sessions)
             # Prefer data so stale options from older API writes cannot override
@@ -34550,7 +34729,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # dicts (and a fresh persist/restore pass — see OB-5), so an orphaned
     # pre-reload timer left running here would fire later against the *new*
     # setup's state, coordinators, or a config entry that's already gone.
-    for _state_key in ("force_charge_state", "force_discharge_state", "hold_soc_state"):
+    for _state_key in ("force_charge_state", "force_discharge_state", "hold_soc_state", "self_consumption_state"):
         _state = entry_data.get(_state_key)
         if not _state:
             continue

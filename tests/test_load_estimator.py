@@ -178,6 +178,23 @@ def test_recent_load_regime_ignores_short_ev_charging_spike(monkeypatch):
     assert max(forecast) < 900.0
 
 
+def test_active_away_mode_scales_forecast_to_current_low_load(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    estimator = module.LoadEstimator(SimpleNamespace(), "sensor.load", interval_minutes=5)
+    start = datetime(2026, 6, 2, 12, tzinfo=timezone.utc)
+    estimator.away_enabled_at = start - timedelta(days=2)
+
+    history = []
+    for hour_offset in range(30 * 24, 48, -1):
+        history.append((start - timedelta(hours=hour_offset), 2000.0))
+    for hour_offset in range(48, 0, -1):
+        history.append((start - timedelta(hours=hour_offset), 300.0))
+
+    forecast = estimator._forecast_from_history(history, start, 12)
+
+    assert max(forecast) < 700.0
+
+
 def test_history_outlier_does_not_dominate_bucket(monkeypatch):
     module = _load_estimator_module(monkeypatch)
     estimator = module.LoadEstimator(SimpleNamespace(), "sensor.load", interval_minutes=5)

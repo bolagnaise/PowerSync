@@ -50,6 +50,8 @@ RECENT_LOAD_DEADBAND = 0.15
 RECENT_LOAD_BLEND = 0.7
 RECENT_LOAD_MIN_SCALE = 0.8
 RECENT_LOAD_MAX_SCALE = 2.5
+ACTIVE_AWAY_LOAD_BLEND = 1.0
+ACTIVE_AWAY_LOAD_MIN_SCALE = 0.2
 
 _SOLCAST_ESTIMATE_FIELDS = {
     SOLCAST_ESTIMATE: ("pv_estimate", "pv_estimate50"),
@@ -434,8 +436,25 @@ class LoadEstimator:
 
         ref_time = dt_util.as_local(start_time) if start_time.tzinfo else start_time
         recent_end = ref_time
-        recent_start = recent_end - timedelta(hours=RECENT_LOAD_WINDOW_HOURS)
-        baseline_end = recent_start - timedelta(hours=RECENT_LOAD_BASELINE_EXCLUDE_HOURS)
+        active_away = self.away_mode and self.away_enabled_at is not None
+        if active_away:
+            away_start = (
+                dt_util.as_local(self.away_enabled_at)
+                if self.away_enabled_at.tzinfo
+                else self.away_enabled_at
+            )
+            if ref_time.tzinfo and not away_start.tzinfo:
+                away_start = away_start.replace(tzinfo=ref_time.tzinfo)
+            elif away_start.tzinfo and not ref_time.tzinfo:
+                away_start = away_start.replace(tzinfo=None)
+            recent_start = max(
+                away_start,
+                recent_end - timedelta(hours=RECENT_LOAD_WINDOW_HOURS),
+            )
+            baseline_end = away_start
+        else:
+            recent_start = recent_end - timedelta(hours=RECENT_LOAD_WINDOW_HOURS)
+            baseline_end = recent_start - timedelta(hours=RECENT_LOAD_BASELINE_EXCLUDE_HOURS)
 
         older_pattern: dict[tuple[int, int, int], list[tuple[datetime, float]]] = defaultdict(list)
         recent_samples: list[tuple[datetime, float]] = []
@@ -500,11 +519,14 @@ class LoadEstimator:
         if abs(ratio - 1.0) < RECENT_LOAD_DEADBAND:
             return None
 
-        scale = 1.0 + (ratio - 1.0) * RECENT_LOAD_BLEND
-        scale = max(RECENT_LOAD_MIN_SCALE, min(RECENT_LOAD_MAX_SCALE, scale))
+        blend = ACTIVE_AWAY_LOAD_BLEND if active_away else RECENT_LOAD_BLEND
+        min_scale = ACTIVE_AWAY_LOAD_MIN_SCALE if active_away else RECENT_LOAD_MIN_SCALE
+        scale = 1.0 + (ratio - 1.0) * blend
+        scale = max(min_scale, min(RECENT_LOAD_MAX_SCALE, scale))
         _LOGGER.info(
-            "Recent load regime adjustment: recent=%.0fW over %.1fh, "
+            "%sload regime adjustment: recent=%.0fW over %.1fh, "
             "matched_history=%.0fW, median_ratio=%.2fx, scale=%.2fx",
+            "Away mode " if active_away else "Recent ",
             recent_avg,
             matched_coverage,
             baseline_avg,

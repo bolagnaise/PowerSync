@@ -5731,7 +5731,7 @@ class BatteryModeSensor(SensorEntity):
         if hold_soc_state.get("active", False):
             return BATTERY_MODE_STATE_HOLD_SOC
 
-        # Check Self-Consumption override (persistent toggle, no timer)
+        # Check Self-Consumption override (duration-based manual override)
         self_consumption_state = entry_data.get("self_consumption_state", {})
         if self_consumption_state.get("active", False):
             return BATTERY_MODE_STATE_SELF_CONSUMPTION
@@ -5803,6 +5803,7 @@ class BatteryModeSensor(SensorEntity):
                 attributes["locked_soc"] = hold_soc_state["locked_soc"]
         elif mode == BATTERY_MODE_STATE_SELF_CONSUMPTION:
             attributes["description"] = "Pure self-consumption (TOU optimisation off)"
+            _populate_timer_attrs(attributes, self_consumption_state)
             engaged_at = self_consumption_state.get("engaged_at")
             if engaged_at:
                 attributes["engaged_at"] = (

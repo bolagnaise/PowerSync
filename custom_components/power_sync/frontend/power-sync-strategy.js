@@ -5745,7 +5745,7 @@ function _batteryControls(hass) {
         type: 'custom:button-card',
         entity: batteryModeEntity,
         triggers_update: [batteryModeEntity],
-        name: 'Self Consumption',
+        name: activeModeName('self_consumption', 'Self Consumption'),
         icon: 'mdi:home-battery',
         styles: {
           ...selfConsumptionChip,
@@ -5777,7 +5777,12 @@ function _batteryControls(hass) {
         tap_action: {
           action: 'call-service',
           service: 'power_sync.set_self_consumption',
-          confirmation: { text: 'Set battery to self-consumption mode?' },
+          data: {
+            duration: "[[[ return (states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '30'); ]]]",
+          },
+          confirmation: {
+            text: "[[[ const dur = states['select.power_sync_force_discharge_duration']?.state ?? '30'; return 'Set battery to self-consumption mode for ' + dur + ' min?'; ]]]",
+          },
         },
       },
       {

@@ -249,10 +249,11 @@ def test_dashboard_battery_controls_include_self_consumption_action():
         source.index("function _teslaEnergySiteControls", source.index("function _batteryControls(hass)"))
     ]
 
-    assert "name: 'Self Consumption'" in battery_controls
+    assert "name: activeModeName('self_consumption', 'Self Consumption')" in battery_controls
     assert "icon: 'mdi:home-battery'" in battery_controls
     assert "service: 'power_sync.set_self_consumption'" in battery_controls
-    assert "Set battery to self-consumption mode?" in battery_controls
+    assert "Set battery to self-consumption mode for ' + dur + ' min?'" in battery_controls
+    assert "select.power_sync_force_discharge_duration" in battery_controls
 
 
 def test_dashboard_manual_battery_controls_show_active_mode_countdown():
@@ -281,11 +282,11 @@ def test_dashboard_manual_battery_controls_show_active_mode_countdown():
     assert "name: activeModeName('force_charge', 'Charge')" in battery_controls
     assert "name: activeModeName('force_discharge', 'Discharge')" in battery_controls
     assert "name: activeModeName('hold_soc', 'Hold SoC')" in battery_controls
+    assert "name: activeModeName('self_consumption', 'Self Consumption')" in battery_controls
     self_consumption = battery_controls[
-        battery_controls.index("name: 'Self Consumption'"):
+        battery_controls.index("name: activeModeName('self_consumption', 'Self Consumption')"):
         battery_controls.index("service: 'power_sync.set_self_consumption'")
     ]
-    assert "activeModeName('self_consumption'" not in self_consumption
     assert "states['${batteryModeEntity}']?.state === 'self_consumption'" in self_consumption
 
 

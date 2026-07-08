@@ -22,6 +22,7 @@ SELECT_PATH = ROOT / "custom_components" / "power_sync" / "select.py"
 NUMBER_PATH = ROOT / "custom_components" / "power_sync" / "number.py"
 SWITCH_PATH = ROOT / "custom_components" / "power_sync" / "switch.py"
 FOXESS_INVERTER_PATH = ROOT / "custom_components" / "power_sync" / "inverters" / "foxess.py"
+SERVICES_PATH = ROOT / "custom_components" / "power_sync" / "services.yaml"
 
 
 def _find_class_method(
@@ -679,6 +680,44 @@ def test_tesla_self_consumption_clears_force_toggle_state():
     assert 'pop("retoggle_attempted", None)' in function_source
 
 
+def test_self_consumption_service_is_timed_and_persisted():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    handler = ast.get_source_segment(
+        source, _find_function(tree, "handle_set_self_consumption")
+    )
+    persist = ast.get_source_segment(
+        source, _find_function(tree, "persist_force_mode_state")
+    )
+    restore = ast.get_source_segment(
+        source, _find_function(tree, "restore_force_mode_from_persistence")
+    )
+
+    assert handler is not None
+    assert persist is not None
+    assert restore is not None
+    assert 'raw_duration = call.data.get("duration", DEFAULT_DISCHARGE_DURATION)' in handler
+    assert '_cancel_all_force_timers("new self_consumption command")' in handler
+    assert 'self_consumption_state["expires_at"] = (' in handler
+    assert 'async_track_point_in_utc_time(' in handler
+    assert 'await persist_force_mode_state()' in handler
+    assert '"mode": "self_consumption"' in persist
+    assert 'self_consumption_state["expires_at"].isoformat()' in persist
+    assert 'if mode == "self_consumption":' in restore
+    assert "auto_restore_self_consumption_persisted" in restore
+
+
+def test_self_consumption_service_schema_exposes_duration():
+    source = SERVICES_PATH.read_text()
+    section = source.split("set_self_consumption:", 1)[1].split(
+        "set_backup_reserve:", 1
+    )[0]
+
+    assert "duration:" in section
+    assert "default: 30" in section
+    assert 'value: "240"' in section
+
+
 def test_aemo_vpp_restore_uses_saved_tariff_not_dynamic_sync():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
@@ -951,6 +990,8 @@ def test_optimizer_restart_restore_is_hidden_from_force_getter():
     assert function_source is not None
     assert "hass.data.get(DOMAIN, {}).get(entry.entry_id, {})" in function_source
     assert '"optimizer_force_restart_restore_pending"' in function_source
+    assert 'self_consumption_state.get("active")' in function_source
+    assert '"type": "self_consumption"' in function_source
     assert 'return {"active": False}' in function_source
 
 
