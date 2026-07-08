@@ -291,7 +291,11 @@ class FroniusReservaBatteryController:
 
     async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
         """Force charge from grid at the requested wattage."""
-        await self._ensure_connected()
+        if not self._ensure_command_entities(
+            ("battery_api_mode", "storage_control_mode", "grid_charge_power"),
+            available_required=("battery_api_mode", "storage_control_mode"),
+        ):
+            return False
         target_w = self._target_power_w(power_w, self._max_charge_w)
         try:
             await self._set_select("battery_api_mode", _MODE_MANUAL)
@@ -312,7 +316,11 @@ class FroniusReservaBatteryController:
 
     async def force_discharge(self, duration_minutes: int, power_w: int) -> bool:
         """Force discharge/export to grid at the requested wattage."""
-        await self._ensure_connected()
+        if not self._ensure_command_entities(
+            ("battery_api_mode", "storage_control_mode", "grid_discharge_power"),
+            available_required=("battery_api_mode", "storage_control_mode"),
+        ):
+            return False
         target_w = self._target_power_w(power_w, self._max_discharge_w)
         try:
             await self._set_select("battery_api_mode", _MODE_MANUAL)
@@ -333,7 +341,11 @@ class FroniusReservaBatteryController:
 
     async def set_idle(self) -> bool:
         """Hold battery SOC by zeroing PV-charge and discharge limits."""
-        await self._ensure_connected()
+        if not self._ensure_command_entities(
+            ("battery_api_mode", "storage_control_mode", "pv_charge_limit", "discharge_limit"),
+            available_required=("battery_api_mode", "storage_control_mode"),
+        ):
+            return False
         try:
             await self._set_select("battery_api_mode", _MODE_MANUAL)
             await self._set_select("storage_control_mode", _MODE_PV_AND_DISCHARGE_LIMIT)
@@ -354,28 +366,41 @@ class FroniusReservaBatteryController:
 
     async def block_charging(self) -> bool:
         """Block battery charging."""
-        await self._ensure_connected()
+        if not self._ensure_command_entities(
+            ("battery_api_mode", "storage_control_mode"),
+            available_required=("battery_api_mode", "storage_control_mode"),
+        ):
+            return False
         await self._set_select("battery_api_mode", _MODE_MANUAL)
         await self._set_select("storage_control_mode", _MODE_BLOCK_CHARGING)
         return True
 
     async def block_discharging(self) -> bool:
         """Block battery discharging."""
-        await self._ensure_connected()
+        if not self._ensure_command_entities(
+            ("battery_api_mode", "storage_control_mode"),
+            available_required=("battery_api_mode", "storage_control_mode"),
+        ):
+            return False
         await self._set_select("battery_api_mode", _MODE_MANUAL)
         await self._set_select("storage_control_mode", _MODE_BLOCK_DISCHARGING)
         return True
 
     async def restore_normal(self) -> bool:
         """Restore Fronius GEN24 storage to automatic control."""
-        await self._ensure_connected()
+        if not self._ensure_command_entities(
+            ("storage_control_mode",),
+            available_required=("storage_control_mode",),
+        ):
+            return False
         await self._set_select("storage_control_mode", _MODE_AUTO)
         _LOGGER.info("Fronius GEN24 storage restored to Auto storage control")
         return True
 
     async def set_backup_reserve(self, percent: int) -> bool:
         """Set Fronius storage minimum SOC."""
-        await self._ensure_connected()
+        if not self._ensure_command_entities(("backup_reserve",)):
+            return False
         if not self._entity_map.get("backup_reserve"):
             _LOGGER.warning("Fronius GEN24 storage backup reserve entity not found")
             return False
@@ -397,6 +422,37 @@ class FroniusReservaBatteryController:
     async def _ensure_connected(self) -> None:
         if not self._entity_map:
             await self.connect()
+
+    def _ensure_command_entities(
+        self,
+        required: tuple[str, ...],
+        *,
+        available_required: tuple[str, ...] = (),
+    ) -> bool:
+        """Refresh a partial entity map and validate command-critical entities."""
+        if not self._entity_map or any(key not in self._entity_map for key in required):
+            self._discover_entities()
+
+        missing = [key for key in required if key not in self._entity_map]
+        if missing:
+            _LOGGER.warning(
+                "Fronius GEN24 storage command unavailable; missing entities: %s",
+                ", ".join(self._expected_entity_hint(key) or key for key in missing),
+            )
+            return False
+
+        unavailable = [key for key in available_required if not self._entity_state_available(key)]
+        if unavailable:
+            self._discover_entities()
+            unavailable = [key for key in available_required if not self._entity_state_available(key)]
+        if unavailable:
+            _LOGGER.warning(
+                "Fronius GEN24 storage command unavailable; entities not available: %s",
+                ", ".join(self._entity_map.get(key) or self._expected_entity_hint(key) or key for key in unavailable),
+            )
+            return False
+
+        return True
 
     @staticmethod
     def _target_power_w(requested_w: int | float, fallback_w: float) -> int:
@@ -447,7 +503,9 @@ class FroniusReservaBatteryController:
         return True
 
     async def _set_select(self, key: str, option: str) -> None:
-        entity_id = self._entity_map[key]
+        entity_id = self._entity_map.get(key)
+        if not entity_id:
+            raise ValueError(f"fronius_reserva_missing_entity:{self._expected_entity_hint(key) or key}")
         _LOGGER.debug("Fronius GEN24 storage: selecting %s = %s", entity_id, option)
         await self.hass.services.async_call(
             "select",
@@ -457,7 +515,9 @@ class FroniusReservaBatteryController:
         )
 
     async def _set_number(self, key: str, value: int | float) -> None:
-        entity_id = self._entity_map[key]
+        entity_id = self._entity_map.get(key)
+        if not entity_id:
+            raise ValueError(f"fronius_reserva_missing_entity:{self._expected_entity_hint(key) or key}")
         _LOGGER.debug("Fronius GEN24 storage: setting %s = %s", entity_id, value)
         await self.hass.services.async_call(
             "number",

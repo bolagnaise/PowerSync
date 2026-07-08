@@ -380,6 +380,68 @@ def test_restore_normal_sets_auto_storage_control():
     ]
 
 
+def test_restore_normal_refreshes_partial_entity_map_before_command():
+    hass = _FakeHass(_reserva_states())
+    controller = _controller(hass)
+    controller._entity_map = {
+        "battery_level": "sensor.reserva_state_of_charge_2",
+        "storage_control_mode_sensor": "sensor.reserva_storage_control_mode_2",
+    }
+
+    assert asyncio.run(controller.restore_normal())
+    assert controller._entity_map["storage_control_mode"] == "select.reserva_storage_control_mode_2"
+    assert hass.services.calls == [
+        (
+            "select",
+            "select_option",
+            {"entity_id": "select.reserva_storage_control_mode_2", "option": "Auto"},
+        )
+    ]
+
+
+def test_restore_normal_returns_false_when_storage_control_write_entity_missing():
+    states = [
+        state
+        for state in _reserva_states()
+        if state.entity_id != "select.reserva_storage_control_mode_2"
+    ]
+    hass = _FakeHass(states)
+    controller = _controller(hass)
+    controller._entity_map = {
+        "battery_level": "sensor.reserva_state_of_charge_2",
+        "storage_control_mode_sensor": "sensor.reserva_storage_control_mode_2",
+    }
+
+    assert not asyncio.run(controller.restore_normal())
+    assert hass.services.calls == []
+
+
+def test_restore_normal_returns_false_when_storage_control_write_entity_unavailable():
+    states = _reserva_states()
+    for state in states:
+        if state.entity_id == "select.reserva_storage_control_mode_2":
+            state.state = "unavailable"
+    hass = _FakeHass(states)
+    controller = _controller(hass)
+
+    assert not asyncio.run(controller.restore_normal())
+    assert hass.services.calls == []
+
+
+def test_force_charge_returns_false_when_api_mode_write_entity_missing():
+    states = [
+        state
+        for state in _reserva_states()
+        if state.entity_id != "select.reserva_battery_api_mode"
+    ]
+    hass = _FakeHass(states)
+    controller = _controller(hass)
+    controller._entity_map = {"battery_level": "sensor.reserva_state_of_charge_2"}
+
+    assert not asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
+    assert hass.services.calls == []
+
+
 def test_force_charge_uses_callifo_byd_control_entities():
     hass = _FakeHass(_callifo_byd_states())
     controller = _controller(hass)
