@@ -672,7 +672,13 @@ def _snapshot_from_dcq(
     # Operation mode + backup reserve from config.json (RSA-read, same
     # transport, fired in parallel).
     site_info = (cfg or {}).get("site_info") or {}
-    operation_mode = site_info.get("default_real_mode") if isinstance(site_info, dict) else None
+    # default_real_mode lives at the TOP LEVEL of config.json (confirmed by the
+    # write path in __init__.py::handle_set_operation_mode, which writes and
+    # reads it back undotted). Some gateways may also mirror it under
+    # site_info, so keep that as a fallback.
+    operation_mode = (cfg or {}).get("default_real_mode") or (
+        site_info.get("default_real_mode") if isinstance(site_info, dict) else None
+    )
     raw_backup_reserve_percent = _int_or_none(
         site_info.get("backup_reserve_percent") if isinstance(site_info, dict) else None
     )
