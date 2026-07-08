@@ -3681,6 +3681,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
         if action_name == getattr(self, "_last_executed_action", None):
             return
+        if action_name in ("charge", "discharge", "export"):
+            _LOGGER.debug(
+                "Optimizer: skipping cached forced action %s before fresh LP solve",
+                action_name,
+            )
+            return
 
         # Reentrancy guard (OB-11): the polling loop and the
         # DataUpdateCoordinator refresh cycle can both cross the same
