@@ -207,6 +207,12 @@ class SajH2BatteryController:
         # None when not currently in force_discharge.
         self._cached_charge_enable: int | None = None
         self._cached_discharge_enable: int | None = None
+        # Which _SENSOR_KEYS candidate won for the "load_power" slot
+        # (eg "TotalLoadPower" or the "gridPower" fallback). Set once in
+        # _discover_entities(); used by get_status() to decide whether the
+        # load_power entity can be trusted directly or needs the balance-
+        # formula fallback (see get_status() for why).
+        self._load_power_source: str | None = None
 
     def set_min_soc_pct(self, min_soc_pct: float) -> None:
         """Update the software-enforced discharge floor (called when user changes it)."""
@@ -282,6 +288,8 @@ class SajH2BatteryController:
                 chosen = fast or regular
                 if chosen:
                     self._entity_map[target] = chosen
+                    if target == "load_power":
+                        self._load_power_source = key
                     _LOGGER.debug("SAJ H2: mapped %s → %s", target, chosen)
                     break
             else:
@@ -399,13 +407,36 @@ class SajH2BatteryController:
         solar_total_w = self._read_float("solar_power")
         if solar_total_w is None or pv_total_w > solar_total_w:
             solar_total_w = pv_total_w
+        solar_kw = max(0.0, (solar_total_w or 0.0) / 1000.0)
+
+        if self._load_power_source == "TotalLoadPower":
+            load_kw = max(0.0, (self._read_float("load_power") or 0.0) / 1000.0)
+        elif self._entity_state_available("grid_power") and self._entity_state_available("battery_power"):
+            # TotalLoadPower isn't exposed on this install, so the
+            # "load_power" slot fell back to the raw gridPower sensor —
+            # that's the net grid leg, not house consumption. Reading it
+            # directly bakes battery-charge power into home_load during grid
+            # charging and under-reports load to ~0 during self-consumption
+            # (see the gridPower comment on _SENSOR_KEYS above). Derive load
+            # from the power balance instead, using the SIGNED conventions
+            # computed above (grid: + import / - export; battery:
+            # + discharge / - charge; solar_kw always >= 0):
+            #     load = solar + battery + grid
+            # Battery-charge power is inherently netted out because it's
+            # negative in battery_kw.
+            load_kw = max(0.0, solar_kw + battery_kw + grid_kw)
+        else:
+            # Last resort: neither TotalLoadPower nor the grid/battery legs
+            # needed for the balance formula are available — fall back to
+            # whatever "load_power" resolved to (raw gridPower, or nothing).
+            load_kw = max(0.0, (self._read_float("load_power") or 0.0) / 1000.0)
 
         return {
             "battery_level":              self._read_float("battery_level") or 0.0,
             "battery_power":              battery_kw,
             "grid_power":                 grid_kw,
-            "solar_power":                max(0.0, (solar_total_w or 0.0) / 1000.0),
-            "load_power":                 max(0.0, (self._read_float("load_power") or 0.0) / 1000.0),
+            "solar_power":                solar_kw,
+            "load_power":                 load_kw,
             "pv1_power":                  max(0.0, pv1_w / 1000.0),
             "pv2_power":                  max(0.0, pv2_w / 1000.0),
             "pv3_power":                  max(0.0, pv3_w / 1000.0),

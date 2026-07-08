@@ -1806,7 +1806,27 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         solar_kw = _kw(getattr(snap, "solar_w", None))
         grid_kw = _kw(getattr(snap, "grid_w", None))
         battery_kw = _kw(getattr(snap, "battery_w", None))
-        load_kw = _kw(getattr(snap, "load_w", None))
+        raw_load_kw = _kw(getattr(snap, "load_w", None))
+
+        # The raw gateway load (snap.load_w) includes EV charging power (eg a
+        # Tesla Wall Connector), same as Tesla cloud's live_status.load_power
+        # above. The main cloud path subtracts ev_power_kw before it ever
+        # reaches the load estimator (see load_kw computation earlier in this
+        # method) — mirror that here using the same "observed EV power"
+        # signal PowerwallLocalCoordinator.snapshot_as_api() subtracts via
+        # its _observed_ev_power_w() (powerwall_local/coordinator.py), so a
+        # Tesla cloud outage with a car charging doesn't poison home_load's
+        # recorder history with EV draw. Defensive: EV power may be
+        # unavailable (older/duck-typed coordinator) — treat as 0 and never
+        # let load go negative.
+        observed_ev_power_w = getattr(local_coordinator, "_observed_ev_power_w", None)
+        ev_power_kw = 0.0
+        if callable(observed_ev_power_w):
+            try:
+                ev_power_kw = max(0.0, _kw(observed_ev_power_w()))
+            except Exception:
+                ev_power_kw = 0.0
+        load_kw = max(0.0, raw_load_kw - ev_power_kw)
 
         self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, 0.0, 0.0)
 
@@ -1852,7 +1872,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             "load_power": load_kw,
             "battery_level": soc_pct,
             "grid_status": grid_status,
-            "ev_power": 0.0,
+            "ev_power": ev_power_kw,
             "last_update": dt_util.utcnow(),
             "energy_summary": self._energy_acc.as_dict(),
             "firmware": self._firmware,
