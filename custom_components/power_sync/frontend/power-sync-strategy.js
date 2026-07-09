@@ -5640,12 +5640,18 @@ function _priceGauges(e, hass) {
 
 function _batteryControls(hass) {
   const batteryModeEntity = 'sensor.power_sync_battery_mode';
-  const activeModeName = (mode, label) => `[[[
+  const activeModeName = (mode, label, durationEntity = null, durationFallback = '30') => `[[[
     const modeState = states['${batteryModeEntity}'];
-    if (!modeState || modeState.state !== '${mode}') return '${label}';
+    if (!modeState || modeState.state !== '${mode}') {
+      ${durationEntity ? `const selected = states['${durationEntity}']?.state ?? '${durationFallback}'; return '${label} ' + selected + ' min';` : `return '${label}';`}
+    }
     const remaining = Number(modeState.attributes?.remaining_minutes);
     if (Number.isFinite(remaining)) return '${label} ' + Math.max(0, Math.ceil(remaining)) + ' min';
     return '${label} active';
+  ]]]`;
+  const durationName = (entity, label, fallback = '30') => `[[[
+    const selected = states['${entity}']?.state ?? '${fallback}';
+    return '${label} ' + selected + ' min';
   ]]]`;
   const modeAwareChipStyle = (base, mode, colorName, fallbackRgb) => ({
     ...base,
@@ -5689,10 +5695,21 @@ function _batteryControls(hass) {
   const blueChip = chipStyle('rgba(var(--rgb-blue-color, 33, 150, 243), 0.1)');
   const orangeChip = chipStyle('rgba(var(--rgb-orange-color, 255, 152, 0), 0.1)');
   const greenChip = chipStyle('rgba(var(--rgb-green-color, 76, 175, 80), 0.1)');
+  const compactDurationChip = (base) => ({
+    ...base,
+    name: [
+      ...base.name,
+      { 'font-size': '12px' },
+      { 'line-height': '14px' },
+      { 'white-space': 'normal' },
+    ],
+  });
   const forceChargeChip = modeAwareChipStyle(blueChip, 'force_charge', 'blue', '33, 150, 243');
   const forceDischargeChip = modeAwareChipStyle(orangeChip, 'force_discharge', 'orange', '255, 152, 0');
   const holdSocChip = modeAwareChipStyle(blueChip, 'hold_soc', 'blue', '33, 150, 243');
   const selfConsumptionChip = modeAwareChipStyle(greenChip, 'self_consumption', 'green', '76, 175, 80');
+  const chargeDurationChip = compactDurationChip(blueChip);
+  const sharedDischargeDurationChip = compactDurationChip(orangeChip);
 
   const hasForcePower = !!(hass && hass.states['number.power_sync_force_power_kw']);
 
@@ -5723,7 +5740,7 @@ function _batteryControls(hass) {
       {
         square: false,
         type: 'grid',
-        columns: 4,
+        columns: 2,
         cards: [
           {
             type: 'custom:button-card',
@@ -5731,8 +5748,8 @@ function _batteryControls(hass) {
             show_name: true,
             show_icon: true,
             icon: 'mdi:timer-outline',
-            name: "[[[ return (states['select.power_sync_force_charge_duration'] ? states['select.power_sync_force_charge_duration'].state : '30') + ' min' ]]]",
-            styles: blueChip,
+            name: durationName('select.power_sync_force_charge_duration', 'Charge timer'),
+            styles: chargeDurationChip,
             tap_action: { action: 'more-info' },
           },
           {
@@ -5760,8 +5777,8 @@ function _batteryControls(hass) {
             show_name: true,
             show_icon: true,
             icon: 'mdi:timer-outline',
-            name: "[[[ return (states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '30') + ' min' ]]]",
-            styles: orangeChip,
+            name: durationName('select.power_sync_force_discharge_duration', 'Discharge/Hold/Self'),
+            styles: sharedDischargeDurationChip,
             tap_action: { action: 'more-info' },
           },
           {
@@ -5797,7 +5814,7 @@ function _batteryControls(hass) {
         type: 'custom:button-card',
         entity: batteryModeEntity,
         triggers_update: [batteryModeEntity],
-        name: activeModeName('self_consumption', 'Self Consumption'),
+        name: activeModeName('self_consumption', 'Self Consumption', 'select.power_sync_force_discharge_duration'),
         icon: 'mdi:home-battery',
         styles: {
           ...selfConsumptionChip,
@@ -5846,7 +5863,7 @@ function _batteryControls(hass) {
             type: 'custom:button-card',
             entity: batteryModeEntity,
             triggers_update: [batteryModeEntity],
-            name: activeModeName('hold_soc', 'Hold SoC'),
+            name: activeModeName('hold_soc', 'Hold SoC', 'select.power_sync_force_discharge_duration'),
             icon: 'mdi:battery-lock',
             styles: {
               ...holdSocChip,
@@ -5878,10 +5895,10 @@ function _batteryControls(hass) {
               action: 'call-service',
               service: 'power_sync.hold_battery_soc',
               data: {
-                duration: "[[[ return (states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '60'); ]]]",
+                duration: "[[[ return (states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '30'); ]]]",
               },
               confirmation: {
-                text: "[[[ const dur = states['select.power_sync_force_discharge_duration']?.state ?? '60'; return 'Hold battery at current SoC for ' + dur + ' min?'; ]]]",
+                text: "[[[ const dur = states['select.power_sync_force_discharge_duration']?.state ?? '30'; return 'Hold battery at current SoC for ' + dur + ' min?'; ]]]",
               },
             },
           },

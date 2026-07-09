@@ -277,11 +277,16 @@ def test_dashboard_battery_controls_include_self_consumption_action():
         source.index("function _teslaEnergySiteControls", source.index("function _batteryControls(hass)"))
     ]
 
-    assert "name: activeModeName('self_consumption', 'Self Consumption')" in battery_controls
+    assert (
+        "name: activeModeName('self_consumption', 'Self Consumption', "
+        "'select.power_sync_force_discharge_duration')"
+    ) in battery_controls
     assert "icon: 'mdi:home-battery'" in battery_controls
     assert "service: 'power_sync.set_self_consumption'" in battery_controls
     assert "Set battery to self-consumption mode for ' + dur + ' min?'" in battery_controls
     assert "select.power_sync_force_discharge_duration" in battery_controls
+    assert "durationName('select.power_sync_force_discharge_duration', 'Discharge/Hold/Self')" in battery_controls
+    assert "durationName('select.power_sync_force_charge_duration', 'Charge timer')" in battery_controls
 
 
 def test_dashboard_manual_battery_controls_show_active_mode_countdown():
@@ -309,13 +314,36 @@ def test_dashboard_manual_battery_controls_show_active_mode_countdown():
 
     assert "name: activeModeName('force_charge', 'Charge')" in battery_controls
     assert "name: activeModeName('force_discharge', 'Discharge')" in battery_controls
-    assert "name: activeModeName('hold_soc', 'Hold SoC')" in battery_controls
-    assert "name: activeModeName('self_consumption', 'Self Consumption')" in battery_controls
+    assert (
+        "name: activeModeName('hold_soc', 'Hold SoC', "
+        "'select.power_sync_force_discharge_duration')"
+    ) in battery_controls
+    assert (
+        "name: activeModeName('self_consumption', 'Self Consumption', "
+        "'select.power_sync_force_discharge_duration')"
+    ) in battery_controls
     self_consumption = battery_controls[
-        battery_controls.index("name: activeModeName('self_consumption', 'Self Consumption')"):
+        battery_controls.index("name: activeModeName('self_consumption', 'Self Consumption'"):
         battery_controls.index("service: 'power_sync.set_self_consumption'")
     ]
     assert "states['${batteryModeEntity}']?.state === 'self_consumption'" in self_consumption
+
+
+def test_dashboard_hold_and_self_consumption_share_discharge_duration_label():
+    """Manual hold/self-consumption controls should visibly use the discharge timer."""
+    source = STRATEGY_PATH.read_text()
+    battery_controls = source[
+        source.index("function _batteryControls(hass)"):
+        source.index("function _teslaEnergySiteControls", source.index("function _batteryControls(hass)"))
+    ]
+
+    assert "const durationName = (entity, label, fallback = '30')" in battery_controls
+    assert "columns: 2" in battery_controls
+    assert "Discharge/Hold/Self" in battery_controls
+    assert "Self Consumption', 'select.power_sync_force_discharge_duration'" in battery_controls
+    assert "Hold SoC', 'select.power_sync_force_discharge_duration'" in battery_controls
+    assert "states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '30'" in battery_controls
+    assert "?? '60'" not in battery_controls
 
 
 def test_dashboard_setup_preserves_user_managed_lovelace_layout():
