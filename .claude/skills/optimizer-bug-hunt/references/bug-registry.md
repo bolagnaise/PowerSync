@@ -147,6 +147,7 @@ the grid-charge contribution (assume `max_charge_kw` fill in allowed slots) in t
 projection; add a no-solar regression test.
 
 ### OB-14 — Auto-reserve scalar floor over-applied outside its export run  [MEDIUM, CONFIRMED]
+> **FIXED in c2aaa1b1 (2026-07-08)** — per-slot reserve floor now wins over the cross-run scalar via the matched_per_slot gate in coordinator.py::_force_discharge_reserve_floor (~1160-1169): when the per-slot lookup matches the action slot, the scalar best_meta branch is skipped (guarded by `if not matched_per_slot and self.auto_apply_reserve_enabled`). Regression test tests/test_reserve_floor_scoping.py. (Fix predates range 3303bb7f..HEAD but is unmarked at HEAD; matched_per_slot verified present.)
 `optimization/coordinator.py::_force_discharge_reserve_floor` (~1130-1168): with Auto-Apply
 Reserve on, the scalar `best_meta` floor is `max()`ed onto every same-day action (gate at
 ~1162 only drops it when the max run starts on a different DATE). Verified at the producer
@@ -217,6 +218,7 @@ actively-charging VIN before recording the hold, or scope `_default` holds to
 single-vehicle installs. Regression-test with two VINs per the playbook.
 
 ### OB-20 — EPEX default export price is the retail import price, not wholesale  [MEDIUM, HIGH confidence]
+> **FIXED — production in ac4608d5 (2026-07-08), regression test in 3fcb49a3 (2026-07-08).** EPEXPriceCoordinator._async_update_data (coordinator.py ~3734-3746) now defaults export_ct = 0.0 with a one-time _warned_export_rate_unset warning instead of export_ct = -total_ct (retail); configured-rate and entity overrides unchanged. Test tests/test_epex_export_price.py (AST source-extraction). (ac4608d5 lands ~1 min before range start 3303bb7f — the context assumed a concurrent-range commit; the diff shows it is ac4608d5 'fix(flow-power): fall back to AEMO when KWatch is unavailable'.)
 `coordinator.py::EPEXPriceCoordinator._async_update_data` (~3614-3627): with no configured
 export rate (the default), `export_ct = -total_ct` where `total` is the *final consumer
 price* (wholesale + surcharge + VAT, per the class docstring) — the inline comment claims
@@ -288,6 +290,7 @@ runtime guard exists precisely for pre-validation configs; it misses them. **Fix
 the model gate (host/port/slave equality suffices) and fix get_models_for_brand.
 
 ### OB-27 — Brand switch leaves stale host keys; setup dispatches by host precedence  [MAJOR]
+> **FIXED in 98184399 (2026-07-08)** — runtime dispatch now gated on _active_battery_system(entry, hass): explicit CONF_BATTERY_SYSTEM (options-over-data) is authoritative, host-key detection is legacy-only fallback; all is_<brand> flags in async_setup_entry derive from it and feed the coordinator dispatch chain (__init__.py ~17426+). Brand switch pops every other brand's BATTERY_SYSTEM_CONNECTION_KEYS in config_flow.py::_save_battery_system_selection. Test tests/test_solaredge_runtime.py.
 `config_flow.py` (~6641-6669): changing battery system in the options flow does additive
 merges — no code path pops the old brand's host/station keys. Setup picks the coordinator
 by host-key PRESENCE in a fixed if/elif chain (`__init__.py` ~17346+), not by
