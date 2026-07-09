@@ -20,6 +20,7 @@
 // Native responsive chart card for history, forecast, and TOU schedule data.
 
 const OPTIMIZER_POWER_AXIS_EXPONENT = 0.7;
+const BATTERY_WINDOW_MERGE_GAP_MINUTES = 15;
 
 class PowerSyncChart extends HTMLElement {
   constructor() {
@@ -341,7 +342,7 @@ class PowerSyncChart extends HTMLElement {
 
       svg += `<path d="${pathD}" fill="none" stroke="${series.color}" stroke-width="${series.strokeWidth || 2.25}" stroke-linejoin="round" stroke-linecap="round"/>`;
 
-      const marker = mode === 'tou'
+      const marker = mode === 'tou' || mode === 'forecast'
         ? this._pointAt(series.data, Date.now())
         : series.data[series.data.length - 1];
       if (marker) {
@@ -663,7 +664,7 @@ class PowerSyncChart extends HTMLElement {
   }
 
   _legendItem(series, yMultiplier, config) {
-    const rawValue = config.mode === 'tou'
+    const rawValue = config.mode === 'tou' || config.mode === 'forecast'
       ? this._currentValue(series.data)
       : this._lastValue(series.data);
     const value = rawValue === null ? '' : this._formatValue(rawValue * yMultiplier, config.yUnit, config.yUnitCompact);
@@ -2539,8 +2540,11 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     }
     return `<div class="battery-windows">${windows.slice(0, 8).map(window => {
       const info = this._actionInfo(window.action);
+      const durationLabel = window.spanDurationMinutes > window.durationMinutes
+        ? `${this._formatDuration(window.durationMinutes)} active / ${this._formatDuration(window.spanDurationMinutes)} span`
+        : this._formatDuration(window.durationMinutes);
       const meta = [
-        this._formatDuration(window.durationMinutes),
+        durationLabel,
         window.socLabel,
         window.power_w > 0 ? this._formatPower(window.power_w) : '',
       ].filter(Boolean).join(' - ');
@@ -2603,21 +2607,29 @@ class PowerSyncOptimizationPlan extends HTMLElement {
 
   _priceStatsForAction(action, model) {
     if (!action?.timestamp || !model?.points?.length) return null;
-    const start = Date.parse(action.timestamp);
-    const end = Date.parse(action.end_time || action.timestamp);
-    if (!Number.isFinite(start)) return null;
-    const safeEnd = Number.isFinite(end) && end > start
-      ? end
-      : start + (model.intervalMinutes || 5) * 60000;
-    const useExport = action.action === 'discharge' || action.action === 'export';
+    return this._priceStatsForSegments([action], action.action, model);
+  }
+
+  _priceStatsForSegments(segments, action, model) {
+    if (!Array.isArray(segments) || !segments.length || !model?.points?.length) return null;
+    const useExport = action === 'discharge' || action === 'export';
     const key = useExport ? 'exportPrice' : 'importPrice';
-    const values = model.points
-      .filter(point => {
-        const ts = Date.parse(point.timestamp);
-        return Number.isFinite(ts) && ts >= start && ts < safeEnd;
-      })
-      .map(point => point[key])
-      .filter(value => Number.isFinite(value));
+    const values = [];
+    for (const segment of segments) {
+      const start = Date.parse(segment?.timestamp);
+      const end = Date.parse(segment?.end_time || segment?.timestamp);
+      if (!Number.isFinite(start)) continue;
+      const safeEnd = Number.isFinite(end) && end > start
+        ? end
+        : start + (model.intervalMinutes || 5) * 60000;
+      values.push(...model.points
+        .filter(point => {
+          const ts = Date.parse(point.timestamp);
+          return Number.isFinite(ts) && ts >= start && ts < safeEnd;
+        })
+        .map(point => point[key])
+        .filter(value => Number.isFinite(value)));
+    }
     if (!values.length) return null;
     return {
       kind: useExport ? 'export' : 'import',
@@ -2658,18 +2670,58 @@ class PowerSyncOptimizationPlan extends HTMLElement {
   }
 
   _batteryWindowsFromActions(actions, model) {
-    return (actions || [])
+    const windows = (actions || [])
       .filter(action => this._isBatteryWindowAction(action?.action))
       .map(action => ({
         ...action,
         durationMinutes: this._durationMinutes(action.timestamp, action.end_time, model.intervalMinutes),
+        spanDurationMinutes: this._durationMinutes(action.timestamp, action.end_time, model.intervalMinutes),
         socLabel: this._socRangeForAction(action, model),
         priceStats: this._priceStatsForAction(action, model),
       }));
+    return this._mergeBatteryWindowRanges(windows, model);
   }
 
   _isBatteryWindowAction(action) {
     return action === 'charge' || action === 'discharge' || action === 'export';
+  }
+
+  _mergeBatteryWindowRanges(windows, model) {
+    const merged = [];
+    for (const window of windows || []) {
+      const start = Date.parse(window.timestamp);
+      const duration = this._durationMinutes(window.timestamp, window.end_time, model.intervalMinutes);
+      const segment = { timestamp: window.timestamp, end_time: window.end_time || window.timestamp };
+      const previous = merged[merged.length - 1];
+      const previousEnd = Date.parse(previous?.end_time || '');
+      const gapMinutes = Number.isFinite(start) && Number.isFinite(previousEnd)
+        ? (start - previousEnd) / 60000
+        : Infinity;
+      if (
+        previous
+        && previous.action === window.action
+        && gapMinutes >= 0
+        && gapMinutes <= BATTERY_WINDOW_MERGE_GAP_MINUTES
+      ) {
+        previous.end_time = window.end_time;
+        previous.soc = window.soc;
+        previous.power_w = Math.max(Number(previous.power_w || 0), Number(window.power_w || 0));
+        previous.durationMinutes += duration;
+        previous.spanDurationMinutes = this._durationMinutes(previous.timestamp, previous.end_time, model.intervalMinutes);
+        previous.segments.push(segment);
+        previous.socLabel = this._socRangeForAction(previous, model);
+        previous.priceStats = this._priceStatsForSegments(previous.segments, previous.action, model);
+      } else {
+        merged.push({
+          ...window,
+          durationMinutes: duration,
+          spanDurationMinutes: duration,
+          segments: [segment],
+          priceStats: this._priceStatsForSegments([segment], window.action, model) || window.priceStats,
+        });
+      }
+    }
+    return merged;
   }
 
   _durationMinutes(startValue, endValue, fallbackMinutes = 5) {
@@ -5230,8 +5282,8 @@ class PowerSyncStrategy {
     // --- Center Column: EV Dashboard Panel ---
     center.push(_evPanel());
 
-    // --- Right Column: Price Chart ---
-    if (hasE('current_import_price')) {
+    // --- Right Column: Price History (fallback when no tariff schedule exists) ---
+    if (hasE('current_import_price') && !hasE('tariff_schedule')) {
       right.push(_priceChart(e, hass));
     }
 
@@ -6544,7 +6596,7 @@ function _priceChart(e, hass) {
   const importMeta = _priceMeta(hass, e('current_import_price'));
   return {
     type: 'custom:power-sync-chart',
-    title: 'Electricity Prices - 24 Hours',
+    title: 'Current Price History - Today',
     mode: 'history',
     historyHours: 24,
     historyRange: 'today',

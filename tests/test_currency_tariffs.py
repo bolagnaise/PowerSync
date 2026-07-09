@@ -108,7 +108,20 @@ def test_dashboard_history_chart_projects_series_to_now():
 
     assert "const data = this._projectHistoryToNow(rawData, stateObj, now, start, end)" in source
     assert "projected.push([now, value])" in source
-    assert "const marker = mode === 'tou'" in source
+    assert "const marker = mode === 'tou' || mode === 'forecast'" in source
+
+
+def test_dashboard_forecast_legend_uses_current_point_not_series_end():
+    dashboard = COMPONENT_ROOT / "frontend" / "power-sync-strategy.js"
+    source = dashboard.read_text()
+    legend_item = source[
+        source.index("  _legendItem(series, yMultiplier, config) {"):
+        source.index("  _seriesKey(series, index) {")
+    ]
+
+    assert "config.mode === 'tou' || config.mode === 'forecast'" in legend_item
+    assert "? this._currentValue(series.data)" in legend_item
+    assert ": this._lastValue(series.data)" in legend_item
 
 
 def test_dashboard_history_chart_requests_full_update_history():

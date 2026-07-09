@@ -54,6 +54,34 @@ def test_optimizer_windows_use_combined_visual_card():
     assert "Future Force Charge" not in source
 
 
+def test_dashboard_uses_tariff_schedule_instead_of_duplicate_price_history():
+    """Dynamic tariffs should not show a current-state history chart beside the schedule."""
+    source = STRATEGY_PATH.read_text()
+    price_layout = source[
+        source.index("    // --- Right Column: Price History"):
+        source.index("    // --- Center Column: LP Forecast Summary")
+    ]
+
+    assert "if (hasE('current_import_price') && !hasE('tariff_schedule'))" in price_layout
+    assert "right.push(_priceChart(e, hass));" in price_layout
+    assert "if (hasE('tariff_schedule'))" in price_layout
+    assert "right.push(_touSchedule(e, hass));" in price_layout
+    assert "title: 'Current Price History - Today'" in source
+    assert "title: 'Electricity Prices - 24 Hours'" not in source
+
+
+def test_dashboard_summarizes_short_gap_battery_windows():
+    """Planned battery windows should not list every tiny LP charge island."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "BATTERY_WINDOW_MERGE_GAP_MINUTES = 15" in source
+    assert "return this._mergeBatteryWindowRanges(windows, model);" in source
+    assert "previous.action === window.action" in source
+    assert "gapMinutes <= BATTERY_WINDOW_MERGE_GAP_MINUTES" in source
+    assert "active / ${this._formatDuration(window.spanDurationMinutes)} span" in source
+    assert "_priceStatsForSegments(previous.segments, previous.action, model)" in source
+
+
 def test_optimizer_action_plan_renders_full_scrollable_list():
     """The 24-hour action plan should expose every action instead of hiding overflow."""
     source = STRATEGY_PATH.read_text()
