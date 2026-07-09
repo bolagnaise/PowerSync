@@ -25663,19 +25663,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                         except Exception as notify_err:
                                             _LOGGER.debug(f"Could not send notification: {notify_err}")
 
-                    # Set export rule to battery_ok to allow battery export during discharge
-                    if site_state.get("saved_export_rule") != "battery_ok":
-                        _LOGGER.info("Setting export rule to battery_ok for site %s...", site_id)
-                        async with session.post(
-                            f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
-                            headers=headers,
-                            json={"customer_preferred_export_rule": "battery_ok"},
-                            timeout=aiohttp.ClientTimeout(total=30),
-                        ) as response:
-                            if response.status == 200:
-                                _LOGGER.info("Set export rule to battery_ok for site %s", site_id)
-                            else:
-                                _LOGGER.warning("Could not set export rule for site %s: %s", site_id, response.status)
+                    # Always reapply battery_ok. Tesla/Fleet readback can report
+                    # the intended export rule while the gateway still needs a
+                    # fresh write before it allows battery export.
+                    _LOGGER.info("Setting export rule to battery_ok for site %s...", site_id)
+                    async with session.post(
+                        f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
+                        headers=headers,
+                        json={"customer_preferred_export_rule": "battery_ok"},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            _LOGGER.info("Set export rule to battery_ok for site %s", site_id)
+                            try:
+                                await update_cached_export_rule("battery_ok")
+                            except Exception as cache_err:
+                                _LOGGER.debug("Could not cache force-discharge export rule: %s", cache_err)
+                        else:
+                            _LOGGER.warning("Could not set export rule for site %s: %s", site_id, response.status)
 
                     # Force discharge is tariff-driven on Tesla. Disallow grid
                     # charging before uploading the high-export tariff so the
@@ -28642,6 +28647,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     ) as response:
                         if response.status == 200:
                             _LOGGER.info("Restored export rule to %s for site %s", saved_export_rule, site_id)
+                            try:
+                                await update_cached_export_rule(saved_export_rule)
+                            except Exception as cache_err:
+                                _LOGGER.debug("Could not cache restored export rule: %s", cache_err)
                         else:
                             _LOGGER.warning("Could not restore export rule for site %s: %s", site_id, response.status)
                             _mark_tesla_restore_failed(f"export rule restore failed for site {site_id}")

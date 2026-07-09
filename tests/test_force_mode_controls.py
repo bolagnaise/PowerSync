@@ -1077,6 +1077,44 @@ def test_tesla_force_discharge_disables_grid_charging_before_tariff_upload():
     assert grid_disable_index < tariff_upload_index
 
 
+def test_tesla_force_discharge_always_applies_battery_export_before_tariff_upload():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_force_discharge")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    export_rule_index = function_source.index('"customer_preferred_export_rule": "battery_ok"')
+    grid_disable_index = function_source.index(
+        '"disallow_charge_from_grid_with_solar_installed": True'
+    )
+    tariff_upload_index = function_source.index("send_tariff_to_tesla(")
+
+    assert 'site_state.get("saved_export_rule") != "battery_ok"' not in function_source
+    assert 'await update_cached_export_rule("battery_ok")' in function_source
+    assert export_rule_index < grid_disable_index < tariff_upload_index
+
+
+def test_tesla_restore_updates_cached_export_rule_after_saved_rule_restore():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_restore_normal")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    restore_log_index = function_source.index(
+        "Restored export rule to %s for site %s"
+    )
+    cache_update_index = function_source.index(
+        "await update_cached_export_rule(saved_export_rule)"
+    )
+    restore_failed_index = function_source.index(
+        "export rule restore failed for site {site_id}"
+    )
+
+    assert restore_log_index < cache_update_index < restore_failed_index
+
+
 def test_tesla_force_discharge_tariff_discourages_grid_import():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
