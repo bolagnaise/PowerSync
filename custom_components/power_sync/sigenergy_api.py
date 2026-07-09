@@ -57,6 +57,86 @@ def encode_sigenergy_password(plain_password: str) -> str:
     return base64.b64encode(encrypted).decode("utf-8")
 
 
+def convert_static_tariff_schedule_to_sigenergy(
+    tariff_schedule: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Convert a stored custom/TOU tariff schedule to Sigenergy price slots."""
+    if not isinstance(tariff_schedule, dict):
+        return [], []
+
+    buy_prices = tariff_schedule.get("buy_prices")
+    sell_prices = tariff_schedule.get("sell_prices")
+    if isinstance(buy_prices, dict) and buy_prices:
+        buy_slots = convert_tariff_rates_to_sigenergy(buy_prices)
+        sell_slots = (
+            convert_tariff_rates_to_sigenergy(sell_prices)
+            if isinstance(sell_prices, dict)
+            else []
+        )
+        return buy_slots, sell_slots
+
+    tou_periods = tariff_schedule.get("tou_periods")
+    buy_rates = tariff_schedule.get("buy_rates")
+    sell_rates = tariff_schedule.get("sell_rates") or {}
+    if not isinstance(tou_periods, dict) or not isinstance(buy_rates, dict):
+        return [], []
+
+    from .tariff_time import find_matching_tou_period
+
+    base = (now or datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0)
+    period_buy_rates: dict[str, float] = {}
+    period_sell_rates: dict[str, float] = {}
+
+    for slot in range(48):
+        slot_time = base + timedelta(minutes=slot * 30)
+        period = find_matching_tou_period(
+            tou_periods,
+            slot_time,
+            default="OFF_PEAK",
+            buy_rates=buy_rates,
+            sell_rates=sell_rates,
+        )
+        period_key = f"PERIOD_{slot_time.hour:02d}_{slot_time.minute:02d}"
+        buy = _tariff_rate_for_period(buy_rates, period, default=0.0)
+        sell = _tariff_rate_for_period(sell_rates, period, default=0.0, allow_all=True)
+        period_buy_rates[period_key] = buy
+        period_sell_rates[period_key] = sell
+
+    return (
+        convert_tariff_rates_to_sigenergy(period_buy_rates),
+        convert_tariff_rates_to_sigenergy(period_sell_rates),
+    )
+
+
+def _tariff_rate_for_period(
+    rates: dict[str, Any],
+    period: str,
+    *,
+    default: float,
+    allow_all: bool = False,
+) -> float:
+    """Resolve a named TOU period rate from a custom tariff schedule."""
+    if not isinstance(rates, dict):
+        return default
+
+    candidates = [period]
+    if allow_all:
+        candidates.append("ALL")
+    candidates.extend(("OFF_PEAK", "PARTIAL_PEAK", "SHOULDER"))
+
+    for key in candidates:
+        value = rates.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+
+    numeric = sorted(float(value) for value in rates.values() if isinstance(value, (int, float)))
+    if numeric:
+        return numeric[len(numeric) // 2]
+    return default
+
+
 class SigenergyAPIClient:
     """Async client for Sigenergy Cloud API."""
 

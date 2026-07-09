@@ -19782,6 +19782,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Register services
+    def _static_tou_tariff_schedule_for_sync() -> dict | None:
+        """Return a stored static TOU schedule usable for battery tariff sync."""
+        entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+        tariff_schedule = entry_data.get("tariff_schedule")
+        if isinstance(tariff_schedule, dict) and (
+            tariff_schedule.get("tou_periods") or tariff_schedule.get("buy_prices")
+        ):
+            return tariff_schedule
+
+        automation_store_ref = (
+            entry_data.get("automation_store")
+            or hass.data.get(DOMAIN, {}).get("automation_store")
+        )
+        custom_tariff = None
+        if automation_store_ref:
+            try:
+                custom_tariff = automation_store_ref.get_custom_tariff()
+            except Exception as err:
+                _LOGGER.debug("Could not load custom tariff for TOU sync: %s", err)
+
+        if not custom_tariff:
+            return None
+
+        tariff_schedule = convert_custom_tariff_to_schedule(
+            custom_tariff,
+            currency=currency_for_entry(entry, hass),
+        )
+        if tariff_schedule:
+            entry_data["tariff_schedule"] = tariff_schedule
+            return tariff_schedule
+        return None
+
     async def handle_sync_rest_api_check(check_name="manual") -> None:
         """Run a single TOU sync against the live (settled) price.
 
@@ -19801,6 +19833,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             and not aemo_sensor_coordinator
             and not flow_power_kwatch_coordinator
             and not octopus_coordinator
+            and not _static_tou_tariff_schedule_for_sync()
         ):
             _LOGGER.debug("TOU sync skipped - no price coordinator available (AEMO spike-only mode)")
             return
@@ -20036,6 +20069,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             from .sigenergy_api import (
                 SigenergyAPIClient,
+                convert_static_tariff_schedule_to_sigenergy,
                 convert_amber_prices_to_sigenergy,
                 convert_tariff_rates_to_sigenergy,
                 apply_spike_protection_sigenergy,
@@ -20072,7 +20106,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 DEFAULT_SIGENERGY_CLOUD_REGION,
             )
 
-            if not forecast_data:
+            static_tou_tariff = _static_tou_tariff_schedule_for_sync()
+            if not forecast_data and not static_tou_tariff:
                 _LOGGER.warning("No forecast data available for Sigenergy tariff sync")
                 return
 
@@ -20148,7 +20183,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.debug(f"Sample feedIn interval: type={sample_feedin.get('type')}, "
                              f"perKwh={sample_feedin.get('perKwh')}, "
                              f"advancedPrice={sample_feedin.get('advancedPrice')}")
-            else:
+            elif forecast_data:
                 _LOGGER.warning(
                     "No feedIn (export) prices found in Amber forecast data. "
                     "Export prices will default to 0. Check if your Amber account has feed-in tariff enabled."
@@ -20162,24 +20197,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "TAS1": "Australia/Hobart",
             }
             canonical_timezone = timezone_name or nem_timezones.get(nem_region)
-            canonical_tariff = convert_amber_to_tesla_tariff(
-                forecast_data,
-                tesla_energy_site_id="none",
-                forecast_type=forecast_type,
-                powerwall_timezone=canonical_timezone,
-                current_actual_interval=current_actual_interval,
-                demand_charge_enabled=demand_charge_enabled,
-                demand_charge_rate=demand_charge_rate,
-                demand_charge_start_time=demand_charge_start_time,
-                demand_charge_end_time=demand_charge_end_time,
-                demand_charge_apply_to=demand_charge_apply_to,
-                demand_charge_days=demand_charge_days,
-                demand_artificial_price_enabled=demand_artificial_price_enabled,
-                electricity_provider=provider_for_tz,
-                spike_protection_enabled=False,
-                export_boost_enabled=False,
-                currency=currency_for_entry(entry, hass),
-            )
+            canonical_tariff = None
+            if forecast_data:
+                canonical_tariff = convert_amber_to_tesla_tariff(
+                    forecast_data,
+                    tesla_energy_site_id="none",
+                    forecast_type=forecast_type,
+                    powerwall_timezone=canonical_timezone,
+                    current_actual_interval=current_actual_interval,
+                    demand_charge_enabled=demand_charge_enabled,
+                    demand_charge_rate=demand_charge_rate,
+                    demand_charge_start_time=demand_charge_start_time,
+                    demand_charge_end_time=demand_charge_end_time,
+                    demand_charge_apply_to=demand_charge_apply_to,
+                    demand_charge_days=demand_charge_days,
+                    demand_artificial_price_enabled=demand_artificial_price_enabled,
+                    electricity_provider=provider_for_tz,
+                    spike_protection_enabled=False,
+                    export_boost_enabled=False,
+                    currency=currency_for_entry(entry, hass),
+                )
             if canonical_tariff:
                 canonical_tariff = _apply_provider_tariff_adjustments(
                     canonical_tariff,
@@ -20229,6 +20266,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     len(sell_prices),
                     canonical_timezone or "auto",
                 )
+            elif static_tou_tariff:
+                buy_prices, sell_prices = convert_static_tariff_schedule_to_sigenergy(
+                    static_tou_tariff
+                )
+                payload_source = "static_tou_tariff_schedule"
+                if buy_prices:
+                    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(
+                        entry.entry_id, {}
+                    )
+                    entry_data["tariff_schedule"] = static_tou_tariff
+                    async_dispatcher_send(
+                        hass, f"power_sync_tariff_updated_{entry.entry_id}"
+                    )
+                    _LOGGER.info(
+                        "Sigenergy tariff sync: using stored TOU tariff schedule "
+                        "(%d buy periods, %d sell periods)",
+                        len(buy_prices),
+                        len(sell_prices),
+                    )
 
             if not upload_to_cloud:
                 if buy_prices:
@@ -20629,6 +20685,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             octopus_coordinator is not None and
             electricity_provider_check == "octopus"
         )
+        use_static_tou = (
+            not use_localvolts
+            and not use_octopus
+            and not use_aemo_sensor
+            and not use_kwatch
+            and amber_coordinator is None
+            and _static_tou_tariff_schedule_for_sync() is not None
+        )
 
         def _flow_power_price_source_metadata() -> dict[str, Any]:
             """Return user-visible metadata for the effective Flow Power price source."""
@@ -20674,6 +20738,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info("📊 Using AEMO API for pricing data")
         elif use_kwatch:
             _LOGGER.info("📊 Using Flow Power KWatch API for pricing data")
+        elif use_static_tou:
+            _LOGGER.info("📊 Using stored TOU tariff schedule for pricing data")
         else:
             _LOGGER.info("🟠 Using Amber for pricing data")
 
@@ -20760,6 +20826,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 general_price = current_actual_interval.get('general', {}).get('perKwh') if current_actual_interval.get('general') else None
                 feedin_price = current_actual_interval.get('feedIn', {}).get('perKwh') if current_actual_interval.get('feedIn') else None
                 _LOGGER.info(f"📊 Using Flow Power KWatch price for current interval: general={general_price:.2f}¢/kWh")
+        elif use_static_tou:
+            _LOGGER.info("Using stored TOU tariff schedule for current prices")
         elif websocket_data:
             # WebSocket data received within 60s - use it directly as primary source
             current_actual_interval = websocket_data
@@ -20815,6 +20883,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error("No Flow Power KWatch forecast data available from API")
                 return
             _LOGGER.info(f"Using Flow Power KWatch API forecast: {len(forecast_data) // 2} periods")
+        elif use_static_tou:
+            forecast_data = []
+            _LOGGER.info("Using stored TOU tariff schedule for sync")
         else:
             # Amber coordinator already refreshed above (for current price) —
             # _async_update_data fetches both 5-min and 30-min in one call.

@@ -211,6 +211,104 @@ def test_sigenergy_upload_prices_use_canonical_tariff_rates(
     assert by_start["20:30"] == 35.33
 
 
+def test_static_tou_tariff_schedule_converts_to_sigenergy_slots(
+    sigenergy_api_module,
+):
+    brisbane = ZoneInfo("Australia/Brisbane")
+    tariff_schedule = {
+        "plan_name": "Aurora TOU",
+        "tou_periods": {
+            "PEAK": {
+                "periods": [
+                    {
+                        "fromDayOfWeek": 1,
+                        "toDayOfWeek": 5,
+                        "fromHour": 16,
+                        "fromMinute": 0,
+                        "toHour": 21,
+                        "toMinute": 0,
+                    }
+                ]
+            },
+            "OFF_PEAK": {
+                "periods": [
+                    {
+                        "fromDayOfWeek": 0,
+                        "toDayOfWeek": 6,
+                        "fromHour": 0,
+                        "fromMinute": 0,
+                        "toHour": 24,
+                        "toMinute": 0,
+                    }
+                ]
+            },
+        },
+        "buy_rates": {"PEAK": 0.302, "OFF_PEAK": 0.142},
+        "sell_rates": {"PEAK": 0.093, "OFF_PEAK": 0.093, "ALL": 0.093},
+    }
+
+    buy_prices, sell_prices = sigenergy_api_module.convert_static_tariff_schedule_to_sigenergy(
+        tariff_schedule,
+        now=datetime(2026, 7, 9, 15, 10, tzinfo=brisbane),
+    )
+
+    buy_by_start = {slot["timeRange"].split("-")[0]: slot["price"] for slot in buy_prices}
+    sell_by_start = {slot["timeRange"].split("-")[0]: slot["price"] for slot in sell_prices}
+
+    assert len(buy_prices) == 48
+    assert len(sell_prices) == 48
+    assert buy_by_start["15:30"] == 14.2
+    assert buy_by_start["16:00"] == 30.2
+    assert sell_by_start["16:00"] == 9.3
+
+
+def test_static_period_tariff_schedule_converts_to_sigenergy_slots(
+    sigenergy_api_module,
+):
+    buy_prices, sell_prices = sigenergy_api_module.convert_static_tariff_schedule_to_sigenergy(
+        {
+            "buy_prices": {
+                "PERIOD_00_00": 0.142,
+                "PERIOD_16_00": 0.302,
+            },
+            "sell_prices": {
+                "PERIOD_00_00": 0.08,
+                "PERIOD_16_00": 0.093,
+            },
+        }
+    )
+
+    buy_by_start = {slot["timeRange"].split("-")[0]: slot["price"] for slot in buy_prices}
+    sell_by_start = {slot["timeRange"].split("-")[0]: slot["price"] for slot in sell_prices}
+
+    assert buy_by_start == {"00:00": 14.2, "16:00": 30.2}
+    assert sell_by_start == {"00:00": 8.0, "16:00": 9.3}
+
+
+def test_sigenergy_manual_sync_uses_static_tou_without_price_coordinator():
+    init_source = (COMPONENT_ROOT / "__init__.py").read_text()
+
+    setup_source = init_source[
+        init_source.index("def _static_tou_tariff_schedule_for_sync"):
+        init_source.index("async def handle_sync_tou")
+    ]
+    sync_source = init_source[
+        init_source.index("async def _handle_sync_tou_internal"):
+        init_source.index("# Fetch Powerwall timezone")
+    ]
+    sigenergy_source = init_source[
+        init_source.index("async def _sync_tariff_to_sigenergy"):
+        init_source.index("async def _sync_tariff_to_foxess")
+    ]
+
+    assert "and not _static_tou_tariff_schedule_for_sync()" in setup_source
+    assert "use_static_tou = (" in sync_source
+    assert "amber_coordinator is None" in sync_source
+    assert "forecast_data = []" in sync_source
+    assert "convert_static_tariff_schedule_to_sigenergy" in sigenergy_source
+    assert 'payload_source = "static_tou_tariff_schedule"' in sigenergy_source
+
+
 def test_flow_power_canonical_tariff_ignores_raw_current_wholesale_spike(
     tariff_converter_module,
     monkeypatch,
