@@ -419,6 +419,21 @@ optimizer-disabled Tesla cohort — the managers' target audience — has no res
 keep `_in_*_mode` set on failed restore so the next minute retries (the
 `_restore_pre_idle_backup_reserve` contract), co-designed with OB-34's re-capture guard.
 
+### OB-39 — Residual unconditional `_skip_reload` sites outside `set_settings`  [MEDIUM]
+OB-21's fix (c8f514e1) covers `optimization/coordinator.py::set_settings` (9 sites) and the
+options-flow save handler — the registry entry's stated scope. The identical stuck-flag
+mechanism remains live at four sites in `__init__.py`, each doing
+`entry_data["_skip_reload"] = True` immediately before `async_update_entry` with no no-op
+guard, all reachable from the mobile app / a service call: `__init__.py:8051` (AEMO spike
+enable/disable API view), `:8080` (AEMO region API view), `:9053` (tariff-provider save
+API view), `:29908` (`_user_backup_reserve` service write). A no-op resubmit at any of
+them strands the flag and swallows the next genuine structural reload (the OB-21 failure
+on a different config surface). `select.py:175` is NOT a residual — it early-returns on
+equal value before setting the flag. **Fix**: apply c8f514e1's `persisted_changed` gate
+pattern to the three API views; the `:29908` `_user_backup_reserve` site is reserve-cluster
+territory (PW-5/OB-8) — gate it **within** the reserve source-of-truth co-design run so the
+guard and the reserve-source change land together, not as an isolated patch.
+
 ### Open question — `manual_backup_reserve` writes never reach the LP floor  [LOW confidence]
 `set_settings` (~10645) persists MANUAL only and doesn't touch `_config.backup_reserve`;
 it only takes effect when auto-apply is later toggled off. If the companion app binds its
