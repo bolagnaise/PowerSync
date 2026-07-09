@@ -229,6 +229,7 @@ from the wholesale component (or 0 with a warning), keeping the configured-rate 
 entity overrides as-is.
 
 ### OB-21 — Stuck `_skip_reload` flag swallows the next structural options reload  [MEDIUM, HIGH mechanism-confidence]
+> **FIXED in c8f514e1 (2026-07-10)** — gate each `_skip_reload` set on actual persisted-state change so the flag is never left unconsumed; test `tests/test_battery_export_allowed_slots.py; tests/test_config_flow_weather_options.py`.
 `optimization/coordinator.py::set_settings` (9 flag-set sites) + `config_flow.py` (~9343)
 set `_skip_reload=True` BEFORE `async_update_entry`; HA fires no update listener on a
 no-op write, so an unchanged settings push (the companion app's periodic sync, or
