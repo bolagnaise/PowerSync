@@ -1063,6 +1063,28 @@ def test_optimization_options_schedules_reload_after_flow_response():
     )
 
 
+def test_optimization_options_skip_reload_flag_is_gated_on_persisted_change():
+    """OB-21: resubmitting the options flow with unchanged data/options must
+    not set _skip_reload, or a later genuine structural change's update
+    listener pops the stale flag and its reload is silently swallowed."""
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_optimization")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    persisted_changed_index = method_source.index("persisted_changed = (")
+    skip_reload_index = method_source.index('entry_data["_skip_reload"] = True')
+    update_entry_index = method_source.index(
+        "self.hass.config_entries.async_update_entry"
+    )
+
+    assert persisted_changed_index < skip_reload_index < update_entry_index
+    guard_source = method_source[persisted_changed_index:skip_reload_index]
+    assert "new_data != dict(self.config_entry.data)" in guard_source
+    assert "new_options != dict(self.config_entry.options)" in guard_source
+    assert "and persisted_changed" in guard_source
+
+
 def test_optimization_options_apply_tunables_in_place_without_reload():
     """Pure optimiser tunables apply live (no reload); structural keys reload."""
     source = CONFIG_FLOW_PATH.read_text()

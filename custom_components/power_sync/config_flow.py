@@ -9420,7 +9420,17 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 or _opt_changed(CONF_NEOVOLT_SURPLUS_BALANCER_MODE)
             )
 
-            if isinstance(entry_data, dict):
+            # Only skip the reload listener when this write actually changes
+            # persisted state. HA does not fire the update listener for a
+            # no-op write (e.g. resubmitting the options flow unchanged), so
+            # an unconditional flag here would be left stuck and later
+            # silently swallow the reload for the next genuine structural
+            # change.
+            persisted_changed = (
+                new_data != dict(self.config_entry.data)
+                or new_options != dict(self.config_entry.options)
+            )
+            if isinstance(entry_data, dict) and persisted_changed:
                 entry_data["_skip_reload"] = True
             self.hass.config_entries.async_update_entry(
                 self.config_entry, data=new_data, options=new_options

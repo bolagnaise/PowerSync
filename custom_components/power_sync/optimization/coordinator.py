@@ -10860,10 +10860,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._entry:
                 from ..const import CONF_OPTIMIZATION_ENABLED
                 new_options = dict(self._entry.options)
+                persisted_changed = new_options.get(CONF_OPTIMIZATION_ENABLED) != enabled
                 new_options[CONF_OPTIMIZATION_ENABLED] = enabled
-                # Prevent reload from API-driven options update
+                # Prevent reload from API-driven options update — only when this
+                # write actually changes persisted state, otherwise HA never
+                # fires the update listener to consume the flag and it is left
+                # stuck for the next (unrelated) structural options change.
                 from ..const import DOMAIN as _SKIP_DOM
-                self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
+                if persisted_changed:
+                    self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
                 self.hass.config_entries.async_update_entry(self._entry, options=new_options)
 
         if "auto_apply_reserve_enabled" in settings:
@@ -10898,10 +10903,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if self._entry:
                     from ..const import CONF_OPTIMIZATION_COST_FUNCTION
                     new_data = dict(self._entry.data)
+                    persisted_changed = (
+                        new_data.get(CONF_OPTIMIZATION_COST_FUNCTION)
+                        != settings["cost_function"]
+                    )
                     new_data[CONF_OPTIMIZATION_COST_FUNCTION] = settings["cost_function"]
-                    # Prevent reload from API-driven options update
+                    # Prevent reload from API-driven options update — only when
+                    # this write actually changes persisted state (see the
+                    # "enabled" toggle above for why an unconditional set is a
+                    # bug: HA never fires the listener for a no-op write, so a
+                    # stale flag would swallow the next real structural reload).
                     from ..const import DOMAIN as _SKIP_DOM
-                    self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
+                    if persisted_changed:
+                        self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
                     self.hass.config_entries.async_update_entry(self._entry, data=new_data)
             except ValueError as e:
                 response["success"] = False
@@ -10967,6 +10981,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 new_data = dict(self._entry.data)
                 new_options = dict(self._entry.options)
+                _persisted_before = (dict(new_data), dict(new_options))
                 if "backup_reserve" in settings:
                     reserve_value = settings["backup_reserve"]
                     if reserve_value > 1:
@@ -11026,9 +11041,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     new_data[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = soc_cap
                 if "allow_grid_charge" in settings:
                     new_options[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = bool(settings["allow_grid_charge"])
-                # Prevent reload from API-driven options update
+                # Prevent reload from API-driven options update — only when
+                # this write actually changes persisted state (see the
+                # "enabled" toggle above for why an unconditional set is a bug).
                 from ..const import DOMAIN as _SKIP_DOM
-                self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
+                if (new_data, new_options) != _persisted_before:
+                    self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
                 self.hass.config_entries.async_update_entry(
                     self._entry,
                     data=new_data,
@@ -11053,12 +11071,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 from ..const import CONF_HARDWARE_BACKUP_RESERVE
                 new_data = dict(self._entry.data)
                 new_options = dict(self._entry.options)
+                _persisted_before = (dict(new_data), dict(new_options))
                 new_data[CONF_HARDWARE_BACKUP_RESERVE] = hw_reserve
                 new_options[CONF_HARDWARE_BACKUP_RESERVE] = hw_reserve
                 new_options.pop("_user_backup_reserve", None)
-                # Prevent reload from API-driven options update
+                # Prevent reload from API-driven options update — only when
+                # this write actually changes persisted state (see the
+                # "enabled" toggle above for why an unconditional set is a bug).
                 from ..const import DOMAIN as _SKIP_DOM
-                self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
+                if (new_data, new_options) != _persisted_before:
+                    self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
                 self.hass.config_entries.async_update_entry(
                     self._entry,
                     data=new_data,
@@ -11119,7 +11141,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 new_data[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = entity_id
                 new_options[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = entity_id
                 from ..const import DOMAIN as _SKIP_DOM
-                self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
+                # Only when this write actually changes persisted state (see
+                # the "enabled" toggle above for why an unconditional set is a
+                # bug).
+                if changed:
+                    self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
                 self.hass.config_entries.async_update_entry(
                     self._entry,
                     data=new_data,
@@ -11144,7 +11170,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 new_data[CONF_OPTIMIZATION_LOAD_ENTITY] = entity_id
                 new_options[CONF_OPTIMIZATION_LOAD_ENTITY] = entity_id
                 from ..const import DOMAIN as _SKIP_DOM
-                self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
+                # Only when this write actually changes persisted state (see
+                # the "enabled" toggle above for why an unconditional set is a
+                # bug).
+                if changed:
+                    self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
                 self.hass.config_entries.async_update_entry(
                     self._entry,
                     data=new_data,
@@ -11185,7 +11215,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             new_data[CONF_PROFIT_MAX_TARGET_TIME] = target_time
             new_options[CONF_PROFIT_MAX_TARGET_TIME] = target_time
             from ..const import DOMAIN as _SKIP_DOM
-            self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
+            # Only when this write actually changes persisted state (see the
+            # "enabled" toggle above for why an unconditional set is a bug).
+            if changed:
+                self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
             self.hass.config_entries.async_update_entry(
                 self._entry,
                 data=new_data,
@@ -11222,7 +11255,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 new_data[CONF_PROFIT_MAX_TARGET_SOC] = target_soc
                 new_options[CONF_PROFIT_MAX_TARGET_SOC] = target_soc
                 from ..const import DOMAIN as _SKIP_DOM
-                self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
+                # Only when this write actually changes persisted state (see
+                # the "enabled" toggle above for why an unconditional set is a
+                # bug).
+                if changed:
+                    self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
                 self.hass.config_entries.async_update_entry(
                     self._entry,
                     data=new_data,
@@ -11241,10 +11278,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._entry:
                 from ..const import CONF_OPTIMIZATION_EV_INTEGRATION
                 new_options = dict(self._entry.options)
+                persisted_changed = new_options.get(CONF_OPTIMIZATION_EV_INTEGRATION) != ev_enabled
                 new_options[CONF_OPTIMIZATION_EV_INTEGRATION] = ev_enabled
-                # Prevent reload from API-driven options update
+                # Prevent reload from API-driven options update — only when
+                # this write actually changes persisted state (see the
+                # "enabled" toggle above for why an unconditional set is a bug).
                 from ..const import DOMAIN as _SKIP_DOM
-                self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
+                if persisted_changed:
+                    self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
                 self.hass.config_entries.async_update_entry(self._entry, options=new_options)
                 response["changes"].append(f"ev_integration: {ev_enabled}")
 

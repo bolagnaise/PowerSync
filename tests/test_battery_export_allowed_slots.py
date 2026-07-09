@@ -118,6 +118,8 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_FLOW_POWER_EXPORT_RATE = "flow_power_export_rate"
     const_module.CONF_FP_TWAP_OVERRIDE = "fp_twap_override"
     const_module.CONF_HARDWARE_BACKUP_RESERVE = "hardware_backup_reserve"
+    const_module.CONF_OPTIMIZATION_ENABLED = "optimization_enabled"
+    const_module.CONF_OPTIMIZATION_COST_FUNCTION = "optimization_cost_function"
     const_module.CONF_OPTIMIZATION_BACKUP_RESERVE = "optimization_backup_reserve"
     const_module.CONF_OPTIMIZATION_AUTO_APPLY_RESERVE = "optimization_auto_apply_reserve"
     const_module.CONF_OPTIMIZATION_MANUAL_RESERVE = "optimization_manual_reserve"
@@ -742,6 +744,54 @@ def test_set_settings_persists_hardware_reserve_to_data_and_options(opt_module):
     assert updates[-1]["data"]["hardware_backup_reserve"] == 0.2
     assert updates[-1]["options"]["hardware_backup_reserve"] == 0.2
     assert "_user_backup_reserve" not in updates[-1]["options"]
+
+
+def test_set_settings_enabled_noop_does_not_leave_stale_skip_reload_flag(opt_module):
+    """OB-21: a no-op 'enabled' push (e.g. periodic API sync) must not set
+    _skip_reload, or a later genuine structural reload gets silently swallowed
+    when the update listener pops this stale flag."""
+    coordinator = _coordinator(opt_module, "amber", optimization_enabled=True)
+    coordinator.entry_id = "entry-1"
+    coordinator._enabled = True
+
+    class _ConfigEntries:
+        def async_update_entry(self, entry, **kwargs):
+            if "options" in kwargs:
+                entry.options = kwargs["options"]
+
+    entry_data: dict = {}
+    coordinator.hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": entry_data}},
+        config_entries=_ConfigEntries(),
+    )
+
+    result = asyncio.run(coordinator.set_settings({"enabled": True}))
+
+    assert result["success"] is True
+    assert entry_data.get("_skip_reload") is not True
+
+
+def test_set_settings_cost_function_noop_does_not_leave_stale_skip_reload_flag(opt_module):
+    """OB-21: resending the same cost_function value must not set _skip_reload."""
+    coordinator = _coordinator(opt_module, "amber")
+    coordinator.entry_id = "entry-1"
+    coordinator._entry.data = {"optimization_cost_function": "cost"}
+
+    class _ConfigEntries:
+        def async_update_entry(self, entry, **kwargs):
+            if "data" in kwargs:
+                entry.data = kwargs["data"]
+
+    entry_data: dict = {}
+    coordinator.hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": entry_data}},
+        config_entries=_ConfigEntries(),
+    )
+
+    result = asyncio.run(coordinator.set_settings({"cost_function": "cost"}))
+
+    assert result["success"] is True
+    assert entry_data.get("_skip_reload") is not True
 
 
 def test_set_settings_persists_optimizer_reserve_to_data_and_options(opt_module):
