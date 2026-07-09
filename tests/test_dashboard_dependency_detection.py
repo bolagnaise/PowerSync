@@ -82,6 +82,21 @@ def test_dashboard_summarizes_short_gap_battery_windows():
     assert "_priceStatsForSegments(previous.segments, previous.action, model)" in source
 
 
+def test_optimizer_battery_windows_show_integrated_energy_and_value():
+    """Window energy/value should use active interval data, not peak power times span."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "_energyValueForSegments(segments, action, model)" in source
+    assert "model.detailedSchedule ? 'exportKw' : 'dischargeKw'" in source
+    assert "Math.min(intervalMs, ranges.reduce" in source
+    assert "intervalEnergyKwh = powerKw * overlapMs / 3600000" in source
+    assert "value += intervalEnergyKwh * minorPrice / 100" in source
+    assert "this._energyValueForSegments(previous.segments, previous.action, model)" in source
+    assert "this._renderWindowImpact(window.energyValue, window.action, priceMeta)" in source
+    assert "action === 'charge' ? 'Est. cost' : 'Est. earnings'" in source
+    assert "window.power_w * window.durationMinutes" not in source
+
+
 def test_optimizer_action_plan_renders_full_scrollable_list():
     """The 24-hour action plan should expose every action instead of hiding overflow."""
     source = STRATEGY_PATH.read_text()

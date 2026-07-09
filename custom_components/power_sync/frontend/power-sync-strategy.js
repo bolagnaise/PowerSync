@@ -2023,6 +2023,23 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           font-weight: 650;
           line-height: 1.2;
         }
+        .window-impact {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 3px 7px;
+          margin-top: 4px;
+          color: var(--primary-text-color);
+          font-size: 11px;
+          font-weight: 800;
+          line-height: 1.2;
+        }
+        .window-impact-value {
+          white-space: nowrap;
+        }
+        .window-impact-money {
+          color: var(--secondary-text-color);
+          white-space: nowrap;
+        }
         .actions {
           display: grid;
           gap: 8px;
@@ -2240,6 +2257,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       exportReserveCalculated: reserve.exportCalculated,
       idleHoldActive: idleHold.active,
       idleHoldReservePercent: idleHold.percent,
+      detailedSchedule: detailed,
       powerSeries,
       priceSeries: hasPrices
         ? [
@@ -2554,6 +2572,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           <div class="window-main">
             <div class="window-time">${this._escHtml(this._timeRange(window.timestamp, window.end_time))}</div>
             ${meta ? `<div class="window-meta">${this._escHtml(meta)}</div>` : ''}
+            ${this._renderWindowImpact(window.energyValue, window.action, priceMeta)}
           </div>
           ${this._renderActionPriceStats(window.priceStats, window.action, priceMeta)}
         </div>
@@ -2639,6 +2658,59 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     };
   }
 
+  _renderWindowImpact(stats, action, priceMeta) {
+    if (!stats || !Number.isFinite(stats.energyKwh) || stats.energyKwh <= 0) return '';
+    const valueLabel = action === 'charge' ? 'Est. cost' : 'Est. earnings';
+    const money = Number.isFinite(stats.value)
+      ? `<span class="window-impact-money">${this._escHtml(`${valueLabel} ${this._formatMoney(stats.value, priceMeta.currency)}`)}</span>`
+      : '';
+    return `
+      <div class="window-impact">
+        <span class="window-impact-value">${this._escHtml(this._formatEnergy(stats.energyKwh))}</span>
+        ${money}
+      </div>
+    `;
+  }
+
+  _energyValueForSegments(segments, action, model) {
+    if (!Array.isArray(segments) || !segments.length || !model?.points?.length) return null;
+    const powerKey = action === 'charge'
+      ? 'chargeKw'
+      : (model.detailedSchedule ? 'exportKw' : 'dischargeKw');
+    const priceKey = action === 'charge' ? 'importPrice' : 'exportPrice';
+    const intervalMs = Math.max(1, Number(model.intervalMinutes) || 5) * 60000;
+    const ranges = segments.map(segment => {
+      const start = Date.parse(segment?.timestamp);
+      const parsedEnd = Date.parse(segment?.end_time || segment?.timestamp);
+      const end = Number.isFinite(parsedEnd) && parsedEnd > start ? parsedEnd : start + intervalMs;
+      return { start, end };
+    }).filter(range => Number.isFinite(range.start) && Number.isFinite(range.end));
+    if (!ranges.length) return null;
+
+    let energyKwh = 0;
+    let value = 0;
+    let hasPrice = false;
+    for (const point of model.points) {
+      const pointStart = Date.parse(point.timestamp);
+      if (!Number.isFinite(pointStart)) continue;
+      const pointEnd = pointStart + intervalMs;
+      const overlapMs = Math.min(intervalMs, ranges.reduce((total, range) => (
+        total + Math.max(0, Math.min(pointEnd, range.end) - Math.max(pointStart, range.start))
+      ), 0));
+      if (overlapMs <= 0) continue;
+      const powerKw = Math.max(0, Number(point[powerKey]) || 0);
+      const intervalEnergyKwh = powerKw * overlapMs / 3600000;
+      energyKwh += intervalEnergyKwh;
+      const minorPrice = Number(point[priceKey]);
+      if (Number.isFinite(minorPrice)) {
+        value += intervalEnergyKwh * minorPrice / 100;
+        hasPrice = true;
+      }
+    }
+    if (energyKwh <= 0) return null;
+    return { energyKwh, value: hasPrice ? value : NaN };
+  }
+
   _actionRangesFromApi() {
     const actions = Array.isArray(this._data?.next_actions) ? this._data.next_actions : [];
     return actions
@@ -2678,6 +2750,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         spanDurationMinutes: this._durationMinutes(action.timestamp, action.end_time, model.intervalMinutes),
         socLabel: this._socRangeForAction(action, model),
         priceStats: this._priceStatsForAction(action, model),
+        energyValue: this._energyValueForSegments([action], action.action, model),
       }));
     return this._mergeBatteryWindowRanges(windows, model);
   }
@@ -2711,6 +2784,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         previous.segments.push(segment);
         previous.socLabel = this._socRangeForAction(previous, model);
         previous.priceStats = this._priceStatsForSegments(previous.segments, previous.action, model);
+        previous.energyValue = this._energyValueForSegments(previous.segments, previous.action, model);
       } else {
         merged.push({
           ...window,
@@ -2718,6 +2792,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           spanDurationMinutes: duration,
           segments: [segment],
           priceStats: this._priceStatsForSegments([segment], window.action, model) || window.priceStats,
+          energyValue: this._energyValueForSegments([segment], window.action, model) || window.energyValue,
         });
       }
     }
@@ -2905,6 +2980,13 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const value = Number(watts || 0);
     if (Math.abs(value) >= 1000) return `${(Math.abs(value) / 1000).toFixed(1)} kW`;
     return `${Math.round(Math.abs(value))} W`;
+  }
+
+  _formatEnergy(kwh) {
+    const value = Number(kwh);
+    if (!Number.isFinite(value)) return '';
+    const decimals = Math.abs(value) >= 10 ? 1 : 2;
+    return `${value.toFixed(decimals)} kWh`;
   }
 
   _formatDuration(minutes) {
