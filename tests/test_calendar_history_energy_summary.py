@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import sys
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -38,6 +39,11 @@ def _calendar_namespace() -> dict[str, Any]:
         "_calendar_statistics_end_dt",
         "_calendar_history_bucket_timestamp",
         "_calendar_time_series_from_state_history_rows",
+        "_calendar_time_series_totals_kwh",
+        "_calculate_cost_from_tariff",
+        "_find_season_for_month",
+        "_weighted_avg_rates",
+        "_calendar_result_from_energy_summary",
     }
     body: list[ast.stmt] = []
     for node in tree.body:
@@ -59,7 +65,10 @@ def _calendar_namespace() -> dict[str, Any]:
             )
         ):
             body.append(node)
-        elif isinstance(node, ast.FunctionDef) and node.name in wanted_functions:
+        elif (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in wanted_functions
+        ):
             body.append(node)
 
     module = ast.Module(body=body, type_ignores=[])
@@ -73,6 +82,11 @@ def _calendar_namespace() -> dict[str, Any]:
         "dt_util": SimpleNamespace(
             now=lambda: datetime(2026, 5, 16, 12, 0, tzinfo=timezone.utc),
             as_local=lambda value: value,
+        ),
+        "_LOGGER": SimpleNamespace(
+            info=lambda *args, **kwargs: None,
+            debug=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
         ),
     }
     exec(compile(module, str(INIT_PATH), "exec"), namespace)
@@ -519,3 +533,63 @@ def test_current_calendar_entry_does_not_invent_solar_or_battery_export_splits()
     assert entry["grid_energy_exported"] == 33730
     assert "grid_energy_exported_from_solar" not in entry
     assert "grid_energy_exported_from_battery" not in entry
+
+
+def test_energy_summary_period_costs_ignore_daily_recorder_reset_artifacts():
+    namespace = _calendar_namespace()
+
+    async def fake_statistics(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "timestamp": "2026-07-01T00:00:00+10:00",
+                "grid_import": 100_000,
+                "grid_export": 20_000,
+                "home_consumption": 90_000,
+                "solar_generation": 10_000,
+                "battery_discharge": 5_000,
+                "battery_charge": 6_000,
+            },
+            {
+                "timestamp": "2026-07-02T00:00:00+10:00",
+                "grid_import": 50_000,
+                "grid_export": 5_000,
+                "home_consumption": 45_000,
+                "solar_generation": 8_000,
+                "battery_discharge": 4_000,
+                "battery_charge": 3_000,
+            },
+        ]
+
+    async def reset_skewed_costs(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "import_cost": 1.62,
+            "export_earnings": 0.88,
+            "net_cost": 0.74,
+            "estimated": False,
+        }
+
+    namespace["_calendar_time_series_from_statistics"] = fake_statistics
+    namespace["_calculate_cost_from_statistics"] = reset_skewed_costs
+
+    tariff_schedule = {
+        "buy_rates": {"ALL": 0.40},
+        "sell_rates": {"ALL": 0.10},
+        "seasons": {},
+        "tou_periods": {},
+    }
+
+    result = namespace["_calendar_result_from_energy_summary"](
+        SimpleNamespace(),
+        "month",
+        None,
+        SimpleNamespace(),
+        "entry-1",
+        tariff_schedule,
+        "Sigenergy",
+    )
+    result = asyncio.run(result)
+
+    assert result["cost_summary"]["estimated"] is True
+    assert result["cost_summary"]["import_cost"] == 60.0
+    assert result["cost_summary"]["export_earnings"] == 2.5
+    assert result["cost_summary"]["net_cost"] == 57.5

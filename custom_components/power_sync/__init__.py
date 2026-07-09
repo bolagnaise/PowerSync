@@ -4749,7 +4749,19 @@ async def _calendar_result_from_energy_summary(
         "installation_date": None,
     }
 
-    cost_summary = await _calculate_cost_from_statistics(hass, period, end_date)
+    if period == "day":
+        cost_summary = await _calculate_cost_from_statistics(hass, period, end_date)
+        if not cost_summary and tariff_schedule:
+            cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
+    else:
+        # Non-Tesla energy-summary systems expose daily-reset cost sensors. For
+        # week/month/year those recorder statistics can be reset-skewed, so use
+        # the same period energy rows returned to the mobile app.
+        cost_summary = (
+            _calculate_cost_from_tariff(tariff_schedule, time_series)
+            if tariff_schedule
+            else await _calculate_cost_from_statistics(hass, period, end_date)
+        )
     if not cost_summary and tariff_schedule:
         cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
     if cost_summary:
