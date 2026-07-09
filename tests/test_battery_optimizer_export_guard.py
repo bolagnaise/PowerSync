@@ -581,6 +581,43 @@ def test_grid_export_cap_allows_extra_discharge_for_home_load(
     assert max(action.battery_discharge_w for action in result.schedule.actions) > 7000
 
 
+def test_schedule_api_splits_export_discharge_from_home_load(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=50000,
+        max_charge_w=10600,
+        max_discharge_w=10600,
+        max_grid_export_w=5500,
+        max_battery_export_w=5500,
+        backup_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.05] * 12,
+        export_prices=[1.00] * 12,
+        solar_forecast=[0.0] * 12,
+        load_forecast=[2.0] * 12,
+        current_soc=0.80,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=[True] * 12,
+        block_battery_charge=[True] * 12,
+    )
+
+    api = result.schedule.to_api_response()
+    export_idx = next(
+        idx
+        for idx, action in enumerate(result.schedule.actions)
+        if action.action == "export"
+    )
+
+    assert api["battery_export_w"][export_idx] == pytest.approx(5500, abs=0.1)
+    assert api["battery_consume_w"][export_idx] == pytest.approx(2000, abs=0.1)
+    assert api["discharge_w"][export_idx] == pytest.approx(7500, abs=0.1)
+
+
 def test_zero_grid_export_cap_blocks_battery_export_plan(
     battery_optimizer_module,
 ):

@@ -57,18 +57,23 @@ class OptimizationSchedule:
     @property
     def battery_consume_w(self) -> list[float]:
         """Get battery-to-home consumption power schedule."""
-        return [
-            a.battery_discharge_w
-            if a.action in ("self_consumption", "consume", "off_grid")
-            else 0.0
-            for a in self.actions
-        ]
+        values: list[float] = []
+        for action in self.actions:
+            if action.action in ("self_consumption", "consume", "off_grid"):
+                values.append(action.battery_discharge_w)
+                continue
+            if action.action in ("export", "discharge"):
+                export_w = max(0.0, min(action.power_w, action.battery_discharge_w))
+                values.append(max(0.0, action.battery_discharge_w - export_w))
+                continue
+            values.append(0.0)
+        return values
 
     @property
     def battery_export_w(self) -> list[float]:
         """Get battery-to-grid export power schedule."""
         return [
-            a.power_w
+            max(0.0, min(a.power_w, a.battery_discharge_w))
             if a.action in ("export", "discharge")
             else 0.0
             for a in self.actions
