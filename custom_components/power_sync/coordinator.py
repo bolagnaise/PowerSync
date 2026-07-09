@@ -4994,6 +4994,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             restore_limit_kw = captured_limit_kw
         else:
             restore_limit_kw = max(restore_limit_kw, captured_limit_kw)
+        restore_limit_kw = self._clamp_discharge_restore_limit_kw(restore_limit_kw)
         if restore_limit_kw is None or restore_limit_kw <= 0:
             return True
 
@@ -5041,6 +5042,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 current_limit_label,
             )
             return True
+        restore_limit_kw = self._clamp_discharge_restore_limit_kw(restore_limit_kw)
+        if restore_limit_kw is None or restore_limit_kw <= self._TEMPORARY_DISCHARGE_CAP_MAX_KW:
+            return True
 
         _LOGGER.info(
             "Restoring stale Sungrow discharge cap %s to %.2fkW",
@@ -5057,6 +5061,26 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 restore_limit_kw,
             )
         return bool(limit_ok)
+
+    def _clamp_discharge_restore_limit_kw(self, limit_kw: float | None) -> float | None:
+        """Apply the configured Sungrow optimizer max to restore targets."""
+        if limit_kw is None or limit_kw <= 0:
+            return limit_kw
+
+        configured_limit_kw = self._configured_optimization_discharge_limit_kw()
+        if (
+            configured_limit_kw is not None
+            and configured_limit_kw > 0
+            and limit_kw > configured_limit_kw
+        ):
+            _LOGGER.info(
+                "Sungrow discharge limit restore: clamping target from %.2fkW "
+                "to configured max %.2fkW",
+                limit_kw,
+                configured_limit_kw,
+            )
+            return configured_limit_kw
+        return limit_kw
 
     def _discharge_appears_blocked_after_restore(self) -> bool:
         """Return True when self-consumption telemetry looks discharge-capped.

@@ -29704,9 +29704,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     if local_percent is None:
                         return False
-                    return await transport.write_config(
+                    local_ok = await transport.write_config(
                         din, {"site_info.backup_reserve_percent": local_percent}
                     )
+                    if local_ok:
+                        try:
+                            entry_data[
+                                "powerwall_local_backup_reserve_write_local_pct"
+                            ] = local_percent
+                            entry_data["powerwall_local_backup_reserve_write_user_pct"] = percent
+                            detected = detect_local_backup_reserve_offset(
+                                local_percent,
+                                percent,
+                            )
+                            if detected is not None:
+                                entry_data["powerwall_local_low_soe_reserve_pct"] = detected
+                        except Exception as err:
+                            _LOGGER.debug(
+                                "Could not cache Powerwall local reserve write readback: %s",
+                                err,
+                            )
+                    return local_ok
 
                 async def _cloud() -> bool:
                     site_configs = _get_tesla_site_configs(hass, entry)

@@ -43,6 +43,15 @@ _LOGGER = logging.getLogger(__name__)
 # setup, so wrap every fetch in an explicit ceiling well under the per-request
 # budget's worst case but far below the runaway.
 POWERWALL_LOCAL_SNAPSHOT_TIMEOUT = 15.0
+_BACKUP_RESERVE_WRITE_LOCAL_KEY = "powerwall_local_backup_reserve_write_local_pct"
+_BACKUP_RESERVE_WRITE_USER_KEY = "powerwall_local_backup_reserve_write_user_pct"
+
+
+def _reserve_matches(left: Any, right: Any) -> bool:
+    try:
+        return abs(float(left) - float(right)) <= 0.5
+    except (TypeError, ValueError):
+        return False
 
 
 class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None]):
@@ -188,6 +197,42 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             if isinstance(cloud_site_info, dict)
             else None
         )
+
+        pending_local_write = entry_data.get(_BACKUP_RESERVE_WRITE_LOCAL_KEY)
+        pending_user_reserve = entry_data.get(_BACKUP_RESERVE_WRITE_USER_KEY)
+        pending_offset = detect_local_backup_reserve_offset(
+            pending_local_write,
+            pending_user_reserve,
+        )
+        if (
+            pending_offset is not None
+            and _reserve_matches(local_reserve, pending_local_write)
+        ):
+            previous = entry_data.get("powerwall_local_low_soe_reserve_pct")
+            entry_data["powerwall_local_low_soe_reserve_pct"] = pending_offset
+            normalized = normalize_local_backup_reserve_percent(
+                local_reserve,
+                pending_offset,
+            )
+            if normalized is not None:
+                snap.backup_reserve_percent = normalized
+            if _reserve_matches(cloud_reserve, pending_user_reserve):
+                entry_data.pop(_BACKUP_RESERVE_WRITE_LOCAL_KEY, None)
+                entry_data.pop(_BACKUP_RESERVE_WRITE_USER_KEY, None)
+            if previous != pending_offset:
+                _LOGGER.info(
+                    "Using Powerwall local backup reserve write offset: %.1f%% "
+                    "(local=%s%%, requested=%s%%, Tesla site_info=%s%%)",
+                    pending_offset,
+                    local_reserve,
+                    pending_user_reserve,
+                    cloud_reserve,
+                )
+            return
+        if pending_local_write is not None or pending_user_reserve is not None:
+            entry_data.pop(_BACKUP_RESERVE_WRITE_LOCAL_KEY, None)
+            entry_data.pop(_BACKUP_RESERVE_WRITE_USER_KEY, None)
+
         detected = detect_local_backup_reserve_offset(local_reserve, cloud_reserve)
         if detected is None:
             return
