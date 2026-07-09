@@ -252,14 +252,23 @@ def test_static_tou_tariff_schedule_converts_to_sigenergy_slots(
         now=datetime(2026, 7, 9, 15, 10, tzinfo=brisbane),
     )
 
-    buy_by_start = {slot["timeRange"].split("-")[0]: slot["price"] for slot in buy_prices}
-    sell_by_start = {slot["timeRange"].split("-")[0]: slot["price"] for slot in sell_prices}
+    buy_by_week_start = {
+        (slot["weekRange"], slot["timeRange"].split("-")[0]): slot["price"]
+        for slot in buy_prices
+    }
+    sell_by_week_start = {
+        (slot["weekRange"], slot["timeRange"].split("-")[0]): slot["price"]
+        for slot in sell_prices
+    }
 
-    assert len(buy_prices) == 48
+    assert {slot["weekRange"] for slot in buy_prices} == {"1-5", "6-7"}
+    assert {slot["weekRange"] for slot in sell_prices} == {"1-7"}
+    assert len(buy_prices) == 96
     assert len(sell_prices) == 48
-    assert buy_by_start["15:30"] == 14.2
-    assert buy_by_start["16:00"] == 30.2
-    assert sell_by_start["16:00"] == 9.3
+    assert buy_by_week_start[("1-5", "15:30")] == 14.2
+    assert buy_by_week_start[("1-5", "16:00")] == 30.2
+    assert buy_by_week_start[("6-7", "16:00")] == 14.2
+    assert sell_by_week_start[("1-7", "16:00")] == 9.3
 
 
 def test_static_period_tariff_schedule_converts_to_sigenergy_slots(
@@ -283,6 +292,56 @@ def test_static_period_tariff_schedule_converts_to_sigenergy_slots(
 
     assert buy_by_start == {"00:00": 14.2, "16:00": 30.2}
     assert sell_by_start == {"00:00": 8.0, "16:00": 9.3}
+
+
+def test_sigenergy_upload_groups_day_aware_static_tou_slots(
+    sigenergy_api_module,
+):
+    session = _FakeTariffSession([_FakeTariffResponse(200, payload={"code": 0})])
+    client = sigenergy_api_module.SigenergyAPIClient(
+        access_token="token",
+        token_expires_at=datetime.utcnow() + timedelta(hours=1),
+        session=session,
+    )
+
+    result = asyncio.run(
+        client.set_tariff_rate(
+            station_id="123",
+            buy_prices=[
+                {"weekRange": "1-5", "timeRange": "16:00-16:30", "price": 30.2},
+                {"weekRange": "6-7", "timeRange": "16:00-16:30", "price": 14.2},
+            ],
+            sell_prices=[
+                {"weekRange": "1-7", "timeRange": "16:00-16:30", "price": 9.3},
+            ],
+        )
+    )
+
+    payload = session.post_kwargs[0]["json"]
+    buy_week_prices = payload["buyPrice"]["staticPricing"]["combinedPrices"][0][
+        "weekPrices"
+    ]
+    sell_week_prices = payload["sellPrice"]["staticPricing"]["combinedPrices"][0][
+        "weekPrices"
+    ]
+
+    assert result == {"success": True, "message": "Tariff updated"}
+    assert buy_week_prices == [
+        {
+            "weekRange": "1-5",
+            "timeRange": [{"timeRange": "16:00-16:30", "price": 30.2}],
+        },
+        {
+            "weekRange": "6-7",
+            "timeRange": [{"timeRange": "16:00-16:30", "price": 14.2}],
+        },
+    ]
+    assert sell_week_prices == [
+        {
+            "weekRange": "1-7",
+            "timeRange": [{"timeRange": "16:00-16:30", "price": 9.3}],
+        }
+    ]
 
 
 def test_sigenergy_manual_sync_uses_static_tou_without_price_coordinator():

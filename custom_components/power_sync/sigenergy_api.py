@@ -86,28 +86,84 @@ def convert_static_tariff_schedule_to_sigenergy(
     from .tariff_time import find_matching_tou_period
 
     base = (now or datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0)
-    period_buy_rates: dict[str, float] = {}
-    period_sell_rates: dict[str, float] = {}
+    buy_by_sigenergy_day: dict[int, list[dict]] = {}
+    sell_by_sigenergy_day: dict[int, list[dict]] = {}
 
-    for slot in range(48):
-        slot_time = base + timedelta(minutes=slot * 30)
-        period = find_matching_tou_period(
-            tou_periods,
-            slot_time,
-            default="OFF_PEAK",
-            buy_rates=buy_rates,
-            sell_rates=sell_rates,
+    for sigenergy_day in range(1, 8):
+        tesla_day = 0 if sigenergy_day == 7 else sigenergy_day
+        day_base = _date_for_tesla_day(base, tesla_day)
+        period_buy_rates: dict[str, float] = {}
+        period_sell_rates: dict[str, float] = {}
+
+        for slot in range(48):
+            slot_time = day_base + timedelta(minutes=slot * 30)
+            period = find_matching_tou_period(
+                tou_periods,
+                slot_time,
+                default="OFF_PEAK",
+                buy_rates=buy_rates,
+                sell_rates=sell_rates,
+            )
+            period_key = f"PERIOD_{slot_time.hour:02d}_{slot_time.minute:02d}"
+            buy = _tariff_rate_for_period(buy_rates, period, default=0.0)
+            sell = _tariff_rate_for_period(
+                sell_rates,
+                period,
+                default=0.0,
+                allow_all=True,
+            )
+            period_buy_rates[period_key] = buy
+            period_sell_rates[period_key] = sell
+
+        buy_by_sigenergy_day[sigenergy_day] = convert_tariff_rates_to_sigenergy(
+            period_buy_rates
         )
-        period_key = f"PERIOD_{slot_time.hour:02d}_{slot_time.minute:02d}"
-        buy = _tariff_rate_for_period(buy_rates, period, default=0.0)
-        sell = _tariff_rate_for_period(sell_rates, period, default=0.0, allow_all=True)
-        period_buy_rates[period_key] = buy
-        period_sell_rates[period_key] = sell
+        sell_by_sigenergy_day[sigenergy_day] = convert_tariff_rates_to_sigenergy(
+            period_sell_rates
+        )
 
     return (
-        convert_tariff_rates_to_sigenergy(period_buy_rates),
-        convert_tariff_rates_to_sigenergy(period_sell_rates),
+        _coalesce_daily_sigenergy_slots(buy_by_sigenergy_day),
+        _coalesce_daily_sigenergy_slots(sell_by_sigenergy_day),
     )
+
+
+def _date_for_tesla_day(base: datetime, tesla_day: int) -> datetime:
+    """Return a local date with the requested Tesla day number."""
+    current_tesla_day = (base.weekday() + 1) % 7
+    offset_days = (tesla_day - current_tesla_day) % 7
+    return base + timedelta(days=offset_days)
+
+
+def _coalesce_daily_sigenergy_slots(slots_by_day: dict[int, list[dict]]) -> list[dict]:
+    """Attach Sigenergy week ranges, combining adjacent days with identical slots."""
+    result: list[dict] = []
+    range_start: int | None = None
+    previous_day: int | None = None
+    previous_slots: list[dict] | None = None
+
+    def flush() -> None:
+        nonlocal range_start, previous_day, previous_slots
+        if range_start is None or previous_day is None or previous_slots is None:
+            return
+        week_range = f"{range_start}-{previous_day}"
+        for slot in previous_slots:
+            result.append({**slot, "weekRange": week_range})
+        range_start = None
+        previous_day = None
+        previous_slots = None
+
+    for day in range(1, 8):
+        slots = slots_by_day.get(day, [])
+        if previous_slots is not None and slots == previous_slots:
+            previous_day = day
+            continue
+        flush()
+        range_start = previous_day = day
+        previous_slots = slots
+
+    flush()
+    return result
 
 
 def _tariff_rate_for_period(
@@ -463,6 +519,9 @@ class SigenergyAPIClient:
                 )
             }
 
+        buy_week_prices = _group_sigenergy_prices_by_week_range(buy_prices)
+        sell_week_prices = _group_sigenergy_prices_by_week_range(sell_prices)
+
         # Build the payload in Sigenergy's expected format
         payload = {
             "stationId": station_id,
@@ -479,12 +538,7 @@ class SigenergyAPIClient:
                     "combinedPrices": [
                         {
                             "monthRange": "01-12",
-                            "weekPrices": [
-                                {
-                                    "weekRange": "1-7",
-                                    "timeRange": buy_prices,
-                                }
-                            ],
+                            "weekPrices": buy_week_prices,
                         }
                     ],
                 },
@@ -501,12 +555,7 @@ class SigenergyAPIClient:
                     "combinedPrices": [
                         {
                             "monthRange": "01-12",
-                            "weekPrices": [
-                                {
-                                    "weekRange": "1-7",
-                                    "timeRange": sell_prices,
-                                }
-                            ],
+                            "weekPrices": sell_week_prices,
                         }
                     ],
                 },
@@ -742,6 +791,29 @@ def convert_tariff_rates_to_sigenergy(rates: dict[str, Any]) -> list[dict]:
         })
 
     return result
+
+
+def _group_sigenergy_prices_by_week_range(prices: list[dict]) -> list[dict]:
+    """Group optional day-aware price slots into Sigenergy weekPrices blocks."""
+    grouped: dict[str, list[dict]] = {}
+    for slot in prices:
+        week_range = str(slot.get("weekRange") or "1-7")
+        clean_slot = {
+            key: value
+            for key, value in slot.items()
+            if key in {"timeRange", "price"} and value is not None
+        }
+        if "timeRange" not in clean_slot or "price" not in clean_slot:
+            continue
+        grouped.setdefault(week_range, []).append(clean_slot)
+
+    if not grouped:
+        return [{"weekRange": "1-7", "timeRange": []}]
+
+    return [
+        {"weekRange": week_range, "timeRange": slots}
+        for week_range, slots in grouped.items()
+    ]
 
 
 def _parse_period_key(period_key: str) -> tuple[int, int] | None:

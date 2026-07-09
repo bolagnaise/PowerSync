@@ -5690,6 +5690,31 @@ def test_target_export_force_refreshes_when_optimizer_power_changes(opt_module):
     assert coordinator._optimizer_force_state["power_w"] == 8000
 
 
+def test_spread_export_force_refresh_keeps_existing_lower_target(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "goodwe"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.max_discharge_w = 20000
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(
+            action="export",
+            power_w=20000,
+            timestamp=start + idx * timedelta(minutes=5),
+        )
+        for idx in range(3)
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    coordinator._set_optimizer_force_state("discharge", 60, 8899)
+    coordinator._optimizer_force_state["hardware_expires_at"] = opt_module.dt_util.utcnow()
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_discharge_calls == [(15, 8899, True, None)]
+    assert coordinator._optimizer_force_state["power_w"] == 8899
+
+
 def test_non_target_export_force_ignores_power_change_when_window_is_valid(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)

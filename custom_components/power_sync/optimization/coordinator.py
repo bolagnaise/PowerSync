@@ -5102,6 +5102,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         if force_type == "charge"
                         else self._export_command_power_w(force_window_action)
                     )
+                    if (
+                        force_scope == "optimizer"
+                        and force_type == "discharge"
+                        and self._should_spread_export_schedule()
+                    ):
+                        try:
+                            previous_power_w = float(
+                                _ext_state.get("power_w") or 0.0
+                            )
+                            target_power_w = float(force_power_w)
+                        except (TypeError, ValueError):
+                            previous_power_w = 0.0
+                            target_power_w = float(force_power_w)
+                        if previous_power_w > 0 and target_power_w > previous_power_w:
+                            force_power_w = previous_power_w
                     new_expiry = dt_util.utcnow() + timedelta(minutes=extend_mins)
                     hardware_expiry = self._as_utc_datetime(_ext_state.get("hardware_expires_at"))
                     supports_force_power_refresh = (
