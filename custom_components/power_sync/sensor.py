@@ -135,6 +135,7 @@ from .const import (
     SENSOR_TYPE_PV_DC_POWER,
     SENSOR_TYPE_PV_AC_POWER,
     CONF_EV_CHARGING_ENABLED,
+    CONF_GENERIC_CHARGER_ENABLED,
     CONF_SIGENERGY_CHARGER_ENABLED,
     CONF_BATTERY_SYSTEM,
     BATTERY_SYSTEM_SUNGROW,
@@ -1781,12 +1782,17 @@ async def async_setup_entry(
         CONF_SIGENERGY_CHARGER_ENABLED,
         entry.data.get(CONF_SIGENERGY_CHARGER_ENABLED, False),
     )
+    generic_charger_enabled = entry.options.get(
+        CONF_GENERIC_CHARGER_ENABLED,
+        entry.data.get(CONF_GENERIC_CHARGER_ENABLED, False),
+    )
     has_ev = (
         ev_enabled
         or ocpp_enabled
         or bool(zaptec_entity)
         or zaptec_standalone
         or sigenergy_charger_enabled
+        or generic_charger_enabled
         or _has_tesla_ev_device(hass)
         or (is_solaredge and _has_solaredge_ev_power(hass))
     )
