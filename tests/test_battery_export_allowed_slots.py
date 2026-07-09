@@ -385,6 +385,114 @@ def test_tesla_force_charge_allowed_when_action_slot_is_free(opt_module):
     assert coordinator._tesla_force_charge_should_yield_to_live_solar(action) is False
 
 
+def test_tesla_force_charge_does_not_yield_when_solar_misses_charge_target(
+    opt_module,
+    monkeypatch,
+):
+    coordinator = _coordinator(opt_module, "amber")
+    coordinator.battery_system = "tesla"
+    coordinator._config.battery_capacity_wh = 13500
+    start = datetime(2026, 7, 9, 13, 50, tzinfo=timezone(timedelta(hours=10)))
+    monkeypatch.setattr(
+        opt_module.dt_util,
+        "now",
+        lambda: start + timedelta(minutes=1),
+    )
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=idx * 5),
+            action="charge",
+            power_w=10000,
+            soc=soc,
+            battery_charge_w=10000,
+        )
+        for idx, soc in enumerate(
+            (0.58, 0.61, 0.65, 0.70, 0.75, 0.80, 0.86, 0.93)
+        )
+    ]
+    actions.append(
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=40),
+            action="self_consumption",
+            power_w=0,
+            soc=0.93,
+        )
+    )
+    coordinator._current_schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "solar_power": 5.9,
+            "load_power": 0.4,
+            "battery_power": -3.5,
+            "grid_power": 0.0,
+            "battery_level": 54.0,
+        }
+    )
+
+    assert (
+        coordinator._tesla_force_charge_should_yield_to_live_solar(actions[0])
+        is False
+    )
+
+
+def test_tesla_force_charge_yields_when_solar_can_reach_charge_target(
+    opt_module,
+    monkeypatch,
+):
+    coordinator = _coordinator(opt_module, "amber")
+    coordinator.battery_system = "tesla"
+    coordinator._config.battery_capacity_wh = 13500
+    start = datetime(2026, 7, 9, 13, 50, tzinfo=timezone(timedelta(hours=10)))
+    monkeypatch.setattr(
+        opt_module.dt_util,
+        "now",
+        lambda: start + timedelta(minutes=1),
+    )
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=idx * 5),
+            action="charge",
+            power_w=5000,
+            soc=soc,
+            battery_charge_w=5000,
+        )
+        for idx, soc in enumerate((0.56, 0.58, 0.60, 0.62, 0.64, 0.66))
+    ]
+    actions.append(
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=30),
+            action="self_consumption",
+            power_w=0,
+            soc=0.66,
+        )
+    )
+    coordinator._current_schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "solar_power": 5.9,
+            "load_power": 0.4,
+            "battery_power": -3.5,
+            "grid_power": 0.0,
+            "battery_level": 54.0,
+        }
+    )
+
+    assert (
+        coordinator._tesla_force_charge_should_yield_to_live_solar(actions[0])
+        is True
+    )
+
+
 def test_tesla_force_charge_allowed_without_live_solar(opt_module):
     coordinator = _coordinator(opt_module, "amber")
     coordinator.battery_system = "tesla"

@@ -4798,6 +4798,49 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return False
 
+        target_soc = None
+        charge_deadline = None
+        if action is not None:
+            target_soc = self._tesla_charge_action_target_soc(action)
+            charge_deadline = self._tesla_charge_action_deadline(action)
+
+        if (
+            target_soc is not None
+            and charge_deadline is not None
+            and target_soc > 0
+        ):
+            capacity_wh = float(getattr(self._config, "battery_capacity_wh", 0) or 0)
+            if capacity_wh > 0:
+                now = dt_util.now()
+                if charge_deadline.tzinfo is None:
+                    charge_deadline = dt_util.as_local(charge_deadline)
+                remaining_h = max(
+                    0.0,
+                    (charge_deadline - now).total_seconds() / 3600.0,
+                )
+                live_charge_w = 0.0
+                if battery_w is not None and battery_w < -250.0:
+                    live_charge_w = -battery_w
+                elif load_w is not None:
+                    live_charge_w = max(0.0, solar_w - load_w)
+                projected_soc = min(
+                    1.0,
+                    battery_level / 100.0
+                    + (live_charge_w * remaining_h / capacity_wh),
+                )
+                if projected_soc + 0.01 < target_soc:
+                    _LOGGER.info(
+                        "Optimizer: Allowing Tesla force charge despite %.0fW live "
+                        "solar because current solar charging %.0fW projects %.1f%% "
+                        "SOC by %s, below planned %.1f%%",
+                        solar_w,
+                        live_charge_w,
+                        projected_soc * 100,
+                        charge_deadline.isoformat(),
+                        target_soc * 100,
+                    )
+                    return False
+
         _LOGGER.info(
             "Optimizer: Blocking Tesla force charge while %.0fW live solar "
             "surplus is available; Tesla TOU force charge cannot target partial charge "
@@ -4805,6 +4848,87 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             solar_w,
         )
         return True
+
+    def _tesla_charge_action_target_soc(self, action: Any) -> float | None:
+        """Return the target SOC at the end of the contiguous charge block."""
+        actions = list(
+            getattr(getattr(self, "_current_schedule", None), "actions", []) or []
+        )
+        if not actions:
+            return self._normalise_action_soc(getattr(action, "soc", None))
+
+        action_ts = getattr(action, "timestamp", None)
+        start_idx = None
+        for idx, candidate in enumerate(actions):
+            if candidate is action:
+                start_idx = idx
+                break
+            if (
+                action_ts is not None
+                and getattr(candidate, "timestamp", None) == action_ts
+            ):
+                start_idx = idx
+                break
+        if start_idx is None:
+            return self._normalise_action_soc(getattr(action, "soc", None))
+
+        target = None
+        for candidate in actions[start_idx:]:
+            if getattr(candidate, "action", None) != "charge":
+                break
+            candidate_soc = self._normalise_action_soc(
+                getattr(candidate, "soc", None)
+            )
+            if candidate_soc is not None:
+                target = candidate_soc if target is None else max(target, candidate_soc)
+        return target
+
+    def _tesla_charge_action_deadline(self, action: Any) -> datetime | None:
+        """Return the end timestamp for the contiguous charge block."""
+        actions = list(
+            getattr(getattr(self, "_current_schedule", None), "actions", []) or []
+        )
+        action_ts = getattr(action, "timestamp", None)
+        if not actions:
+            if isinstance(action_ts, datetime):
+                return action_ts + timedelta(minutes=self._config.interval_minutes)
+            return None
+
+        start_idx = None
+        for idx, candidate in enumerate(actions):
+            if candidate is action:
+                start_idx = idx
+                break
+            if (
+                action_ts is not None
+                and getattr(candidate, "timestamp", None) == action_ts
+            ):
+                start_idx = idx
+                break
+        if start_idx is None:
+            if isinstance(action_ts, datetime):
+                return action_ts + timedelta(minutes=self._config.interval_minutes)
+            return None
+
+        end_ts = None
+        for candidate in actions[start_idx:]:
+            if getattr(candidate, "action", None) != "charge":
+                break
+            candidate_ts = getattr(candidate, "timestamp", None)
+            if isinstance(candidate_ts, datetime):
+                end_ts = candidate_ts + timedelta(minutes=self._config.interval_minutes)
+        return end_ts
+
+    @staticmethod
+    def _normalise_action_soc(raw_soc: Any) -> float | None:
+        """Return a schedule SOC as a 0-1 ratio."""
+        try:
+            soc = float(raw_soc)
+        except (TypeError, ValueError):
+            return None
+        if soc > 1.0:
+            soc /= 100.0
+        return max(0.0, min(1.0, soc))
 
     async def _execute_optimizer_action(self, action: Any) -> None:
         """Execute an optimizer action on the battery."""
