@@ -2712,6 +2712,15 @@ class GenericAEMOSpikeManager:
                 current_price,
                 self.threshold,
             )
+            try:
+                await self.hass.services.async_call(
+                    DOMAIN, SERVICE_FORCE_DISCHARGE, {}, blocking=True
+                )
+            except Exception as e:
+                _LOGGER.error(
+                    "%s: Error re-arming force discharge during spike: %s",
+                    self._battery_type, e, exc_info=True,
+                )
 
     async def _enter_spike_mode(self, current_price: float) -> None:
         """Enter spike mode: force discharge via service call and notify user."""
@@ -3192,6 +3201,16 @@ class GenericSavingSessionManager:
             await self._enter_session_mode(active)
         elif not active and self._in_session_mode:
             await self._exit_session_mode()
+        elif active and self._in_session_mode:
+            try:
+                await self.hass.services.async_call(
+                    DOMAIN, SERVICE_FORCE_DISCHARGE, {}, blocking=True
+                )
+            except Exception as e:
+                _LOGGER.error(
+                    "%s: Error re-arming force discharge during session: %s",
+                    self._battery_type, e, exc_info=True,
+                )
 
     async def _enter_session_mode(self, session) -> None:
         """Force discharge battery during saving session."""
@@ -33529,6 +33548,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     CONF_AEMO_REGION,
                     entry.data.get(CONF_AEMO_REGION, "QLD1")
                 )
+                aemo_spike_threshold = entry.options.get(
+                    CONF_AEMO_SPIKE_THRESHOLD,
+                    entry.data.get(CONF_AEMO_SPIKE_THRESHOLD, 3000)
+                )
                 _LOGGER.info(f"🔌 ML VPP enabled - setting up AEMO spike response for region {aemo_region}")
 
                 # Track VPP spike state
@@ -33557,13 +33580,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         region_price = prices.get(aemo_region, {}).get("price", 0)
                         vpp_spike_state["last_price"] = region_price
 
-                        is_spike = region_price >= 3000  # $3/kWh Globird threshold
+                        is_spike = region_price >= aemo_spike_threshold
 
                         # SPIKE DETECTED - Enter spike mode and discharge
                         if is_spike and not vpp_spike_state["in_spike_mode"]:
                             _LOGGER.warning(
-                                "🔌 VPP SPIKE DETECTED: $%.0f/MWh >= $3000/MWh in %s - starting force discharge",
-                                region_price, aemo_region
+                                "🔌 VPP SPIKE DETECTED: $%.0f/MWh >= $%.0f/MWh in %s - starting force discharge",
+                                region_price, aemo_spike_threshold, aemo_region
                             )
                             try:
                                 # Use the force discharge service (30 min for VPP events)
@@ -33599,8 +33622,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         # SPIKE ENDED - Exit spike mode and restore normal
                         elif not is_spike and vpp_spike_state["in_spike_mode"]:
                             _LOGGER.info(
-                                "🔌 VPP: Spike ended - $%.0f/MWh < $3000/MWh - restoring normal operation",
-                                region_price
+                                "🔌 VPP: Spike ended - $%.0f/MWh < $%.0f/MWh - restoring normal operation",
+                                region_price, aemo_spike_threshold
                             )
                             try:
                                 await hass.services.async_call(
@@ -33634,8 +33657,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         # Still in spike mode - log status
                         elif is_spike and vpp_spike_state["in_spike_mode"]:
                             _LOGGER.debug(
-                                "VPP: Still in spike mode - $%.0f/MWh (threshold: $3000/MWh)",
-                                region_price
+                                "VPP: Still in spike mode - $%.0f/MWh (threshold: $%.0f/MWh)",
+                                region_price, aemo_spike_threshold
                             )
                         else:
                             _LOGGER.debug(f"VPP: AEMO price {aemo_region}: ${region_price:.2f}/MWh")
@@ -33661,7 +33684,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     second=45,
                 )
                 hass.data[DOMAIN][entry.entry_id]["vpp_aemo_cancel"] = vpp_aemo_cancel
-                _LOGGER.info(f"🔌 ML VPP AEMO spike response scheduled (region: {aemo_region}, threshold: $3000/MWh)")
+                _LOGGER.info(f"🔌 ML VPP AEMO spike response scheduled (region: {aemo_region}, threshold: ${aemo_spike_threshold:.0f}/MWh)")
 
                 # Run the first network fetch in the background. HA can cancel
                 # long setup awaits during bootstrap; a cancelled AEMO request
