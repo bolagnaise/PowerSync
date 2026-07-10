@@ -361,12 +361,16 @@ battery self-consumes through the rest of the session. Bites the optimizer-disab
 non-Tesla cohort cleanly (enabled cohort gets force-vs-LP contention instead). **Fix**:
 re-arm for the event window — but gated OFF when the optimizer is active (interaction #4).
 
+> **FIXED in 1b9a9cdc (2026-07-10)** — re-arm added, gated off when optimizer is active; test `tests/test_generic_force_event_rearm.py`.
+
 ### OB-33 — Generic AEMO spike force_discharge has the same 30-min truncation  [MEDIUM-HIGH]
 `__init__.py::GenericAEMOSpikeManager` (~2553-2583): identical shape — `elif is_spike and
 self._in_spike_mode:` only logs "Still in spike mode". Spikes routinely outlast 30 min and
 are the highest-value export events of the year; the battery stops at T+30. The Tesla
 variant is immune (window-valid TOU upload, no force). Shared root cause and fix gating
 with OB-32.
+
+> **FIXED in 1b9a9cdc (2026-07-10)** — re-arm added, gated off when optimizer is active; test `tests/test_generic_force_event_rearm.py`.
 
 ### OB-34 — Tesla session/spike managers re-capture their own uploaded tariff as baseline  [MAJOR — Tesla TOU-only cohort]
 `__init__.py::SavingSessionTariffManager._enter_session_mode` (~2776/2801, restore
@@ -379,6 +383,8 @@ draining to grid nightly, until manual reconfiguration. OB-16/OB-17 class (tempo
 captured as baseline). **Fix**: `if self._saved_tariff is None` re-capture guard + extend
 the restorable-tariff filter to reject the managers' own codes + persist the event state.
 
+> **FIXED in 42f21caa (2026-07-10)** — filter rejects AEMO-SPIKE/OCTOPUS-SAVING-SESSION codes plus re-capture guard on both managers; test `tests/test_tesla_spike_session_tariff_baseline.py`.
+
 ### OB-35 — Dead `ml_optimization_enabled` guard: money-event managers double-control with the LP  [MEDIUM-HIGH]
 `__init__.py` ~18054-18063: the comment says "Skip if Smart Optimization is enabled — it
 handles spike detection instead" and the flag is computed — then referenced NOWHERE. All
@@ -390,12 +396,16 @@ Concrete dropped-guard bug extending interaction #4 to ALL manager variants. **F
 apply the computed guard at all four creation sites (managers only when optimizer is off),
 or route events through the LP.
 
+> **FIXED in f3ff4b47 (2026-07-10)** — ml_optimization_enabled guard applied at all four manager-creation sites; test `tests/test_money_event_manager_optimizer_gate.py`.
+
 ### OB-36 — VPP AEMO spike variant: third 30-min truncation instance + hardcoded threshold  [MEDIUM-HIGH]
 `__init__.py::check_aemo_spike_for_vpp` (~32943-33043): a separate inline copy of the
 OB-33 shape — `force_discharge {"duration": 30}` on entry, log-only "still in spike"
 branch, no re-arm; AND `is_spike = region_price >= 3000` hardcoded, ignoring
 `CONF_AEMO_SPIKE_THRESHOLD` that the standalone managers honor (Globird users' configured
 threshold silently inert here). Same fix gating as OB-32/33 (interaction #4).
+
+> **FIXED in 1b9a9cdc (2026-07-10)** — threshold now honors `CONF_AEMO_SPIKE_THRESHOLD`; VPP truncation half left open (gated under LP-active path, deferred pending design decision). Test `tests/test_generic_force_event_rearm.py`.
 
 ### OB-37 — Tesla money-event managers and the demand-charging toggle bypass monitoring mode  [MEDIUM — invariant violation]
 `AEMOSpikeManager` (~2172-2362) and `SavingSessionTariffManager` (~2745-2985) issue tariff
@@ -407,6 +417,8 @@ minute with no monitoring gate (verified). External-controller users with monito
 forced on still get tariff overwrites, mode switches, and grid-charge toggles — violating
 monitoring's "no hardware command" contract on both enter AND exit. **Fix**: gate all
 three surfaces on monitoring mode.
+
+> **FIXED in d2b5add3 (2026-07-10)** — monitoring-mode gate applied to AEMOSpikeManager, SavingSessionTariffManager, and auto_demand_charging_check; test `tests/test_money_event_monitoring_gate.py`.
 
 ### OB-38 — Tesla spike/session exit clears state even when the tariff restore failed  [MEDIUM-HIGH]
 `AEMOSpikeManager._exit_spike_mode` (~2357) / `SavingSessionTariffManager._exit_session_mode`
