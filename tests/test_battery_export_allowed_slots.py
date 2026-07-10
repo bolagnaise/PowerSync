@@ -3229,6 +3229,43 @@ def test_self_consumption_reapplies_sungrow_when_discharge_is_blocked(opt_module
     assert coordinator._last_executed_action == "self_consumption"
 
 
+def test_self_consumption_throttles_inferred_sungrow_restore(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.15)
+    coordinator.battery_system = "sungrow"
+    coordinator.energy_coordinator = _FakeEnergyCoordinator()
+    coordinator.energy_coordinator.discharge_blocked_after_restore = True
+    now = datetime(2026, 7, 10, 5, 20, tzinfo=timezone.utc)
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: now
+    action = SimpleNamespace(action="self_consumption", power_w=435)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.self_consumption_calls == 1
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_explicit_sungrow_forced_mode_bypasses_inferred_restore_cooldown(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator.battery_system = "sungrow"
+    coordinator.energy_coordinator = _FakeEnergyCoordinator()
+    coordinator.energy_coordinator.data = {
+        "ems_mode_name": "forced",
+        "charge_cmd": 0xBB,
+    }
+    now = datetime(2026, 7, 10, 5, 20, tzinfo=timezone.utc)
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: now
+    coordinator._last_sungrow_inferred_restore_at = now
+    action = SimpleNamespace(action="self_consumption", power_w=435)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.self_consumption_calls == 1
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_self_consumption_repairs_sungrow_reserve_when_it_blocks_discharge(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.149)

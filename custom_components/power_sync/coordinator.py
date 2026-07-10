@@ -4353,6 +4353,11 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
     _BLOCKED_DISCHARGE_GRID_LOAD_RATIO = 0.6
     _BLOCKED_DISCHARGE_BATTERY_KW = 0.1
     _BLOCKED_DISCHARGE_RESERVE_MARGIN = 2.0
+    # SH-RS/SH-T firmware can reject the EMS/min-SOC register reads even though
+    # the BMS still enforces its protected 5% discharge floor.  Without a
+    # fallback, normal grid import at that floor looks exactly like a stale
+    # 10 W discharge cap and causes restore_normal to be retried every cycle.
+    _UNREADABLE_RESERVE_FLOOR_PERCENT = 5.0
 
     def __init__(
         self,
@@ -5111,7 +5116,27 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             return False
         if soc <= 0:
             return False
-        if reserve is not None and soc <= reserve + self._BLOCKED_DISCHARGE_RESERVE_MARGIN:
+        configured_reserve = None
+        if reserve is None:
+            try:
+                entry = self.hass.config_entries.async_get_entry(self._entry_id)
+                raw_reserve = entry.options.get(
+                    "hardware_backup_reserve",
+                    entry.data.get("hardware_backup_reserve"),
+                )
+                configured_reserve = float(raw_reserve)
+                if 0 <= configured_reserve <= 1:
+                    configured_reserve *= 100
+            except (AttributeError, TypeError, ValueError):
+                configured_reserve = None
+
+        effective_reserve = reserve
+        if effective_reserve is None:
+            effective_reserve = max(
+                self._UNREADABLE_RESERVE_FLOOR_PERCENT,
+                configured_reserve or 0.0,
+            )
+        if soc <= effective_reserve + self._BLOCKED_DISCHARGE_RESERVE_MARGIN:
             return False
 
         if abs(battery_kw) > self._BLOCKED_DISCHARGE_BATTERY_KW:

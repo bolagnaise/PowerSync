@@ -83,6 +83,7 @@ SELF_USE_ACTIONS = {"consume", "self_consumption"}
 CHARGE_ACTIONS = {"charge"}
 OPTIMIZER_FORCE_CHARGE_MIN_COMMITMENT = timedelta(minutes=20)
 OPTIMIZER_FORCE_DISCHARGE_MIN_COMMITMENT = timedelta(minutes=20)
+SUNGROW_INFERRED_RESTORE_COOLDOWN = timedelta(minutes=5)
 
 
 def _flow_power_network_tariff_rate(
@@ -5652,6 +5653,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     apply_self_consumption = self._last_executed_action != "self_consumption"
                     reapply_backup_reserve = False
                     sungrow_reapply_reserve_pct: int | None = None
+                    sungrow_inferred_restore = False
                     configured_reserve_pct = int(self._config.backup_reserve * 100)
                     reserve_pct: int | None = None
                     if not apply_self_consumption:
@@ -5788,12 +5790,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 )
                                 and self.energy_coordinator._discharge_appears_blocked_after_restore()
                             ):
-                                _LOGGER.info(
-                                    "Optimizer: Sungrow appears discharge-blocked while "
-                                    "LP action is self_consumption — reapplying "
-                                    "restore_normal"
+                                last_inferred_restore = getattr(
+                                    self,
+                                    "_last_sungrow_inferred_restore_at",
+                                    None,
                                 )
-                                apply_self_consumption = True
+                                now = dt_util.utcnow()
+                                if (
+                                    last_inferred_restore is None
+                                    or now - last_inferred_restore
+                                    >= SUNGROW_INFERRED_RESTORE_COOLDOWN
+                                ):
+                                    _LOGGER.info(
+                                        "Optimizer: Sungrow appears discharge-blocked while "
+                                        "LP action is self_consumption — reapplying "
+                                        "restore_normal"
+                                    )
+                                    apply_self_consumption = True
+                                    sungrow_inferred_restore = True
+                                else:
+                                    _LOGGER.debug(
+                                        "Optimizer: Sungrow inferred restore is in cooldown — "
+                                        "skipping redundant restore_normal"
+                                    )
                             else:
                                 battery_kw = _coord_float("battery_power", "battery_power_kw")
                                 grid_kw = _coord_float("grid_power", "grid_power_kw")
@@ -5850,6 +5869,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             if apply_self_consumption:
                                 if await battery.restore_normal() is False:
                                     mode_apply_failed = True
+                        if sungrow_inferred_restore:
+                            self._last_sungrow_inferred_restore_at = dt_util.utcnow()
                         if (
                             sungrow_reapply_reserve_pct is not None
                             and hasattr(battery, "set_backup_reserve")
