@@ -4843,6 +4843,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     return None
         return None
 
+    def _current_export_price_for_action(
+        self,
+        prices: list[float],
+        action: Any | None,
+    ) -> float | None:
+        """Return the export tariff price for an action's scheduled interval."""
+        return self._current_import_price_for_action(prices, action)
+
     def _current_import_price_is_free(self, action: Any | None = None) -> bool:
         prices = getattr(self, "_last_display_import_prices", None) or getattr(
             self, "_last_import_prices", None
@@ -5575,7 +5583,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if effective_action in ("discharge", "export"):
                 _ep = self._last_export_prices
                 if _ep:
-                    _current_export = _ep[0] if _ep else 0
+                    _current_export = self._current_export_price_for_action(
+                        _ep,
+                        action,
+                    )
+                    if _current_export is None:
+                        _current_export = _ep[0] if _ep else 0
                     if _current_export < 0.01:  # < 1c/kWh
                         _LOGGER.info(
                             "Optimizer: Overriding %s → self_consumption — "

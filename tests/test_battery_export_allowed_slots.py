@@ -5733,6 +5733,37 @@ def test_export_duration_clips_at_next_non_export_boundary(opt_module):
     assert coordinator._last_executed_action == "export"
 
 
+def test_export_price_gate_uses_action_timestamp(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "foxess"
+    start = datetime(2026, 5, 3, 17, 30, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(
+            action="export",
+            power_w=4200,
+            timestamp=start,
+        ),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=0,
+            timestamp=start + timedelta(minutes=5),
+        ),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    coordinator._last_price_timestamps = [
+        start - timedelta(minutes=5),
+        start,
+    ]
+    coordinator._last_export_prices = [0.0, 0.15]
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_discharge_calls == [(5, 4200, False, None)]
+    assert battery.self_consumption_calls == 0
+    assert coordinator._last_executed_action == "export"
+
+
 def test_profit_max_export_floor_does_not_block_when_auto_apply_disabled(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.73)
