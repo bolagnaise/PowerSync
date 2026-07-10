@@ -13,6 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     DOMAIN,
+    CONF_BATTERY_CURTAILMENT_ENABLED,
     CONF_FORCE_CHARGE_DURATION,
     CONF_FORCE_DISCHARGE_DURATION,
     CONF_POWERWALL_LOCAL_PAIRED,
@@ -293,10 +294,20 @@ class TeslaGridExportRuleSelect(_TeslaSiteSelectBase):
         # site_info response omits customer_preferred_export_rule (which
         # happens on VPP / non-export-configured sites). Without this
         # fallback, the select used to show as "unknown" for any such site.
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        cached = entry_data.get("cached_export_rule")
-        if cached in self._OPTIONS:
-            return cached
+        # Only trust the cache while curtailment is actively managing the
+        # rule (mirrors PowerwallSettingsView's gating in __init__.py) — a
+        # manual set_grid_export call otherwise pins this cache forever, so
+        # once curtailment is off the entity must fall through to the live
+        # site_info value instead of a permanently stale rule.
+        solar_curtailment_enabled = self._entry.options.get(
+            CONF_BATTERY_CURTAILMENT_ENABLED,
+            self._entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
+        )
+        if solar_curtailment_enabled:
+            entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+            cached = entry_data.get("cached_export_rule")
+            if cached in self._OPTIONS:
+                return cached
 
         coord = self._tesla_coord()
         site_info = getattr(coord, "_site_info_cache", None) if coord else None

@@ -70,6 +70,7 @@ def _load_platform_module(module_name: str):
     const_module.DOMAIN = "power_sync"
     const_module.CONF_TESLA_ENERGY_SITE_ID = "tesla_energy_site_id"
     const_module.CONF_POWERWALL_LOCAL_PAIRED = "powerwall_local_paired"
+    const_module.CONF_BATTERY_CURTAILMENT_ENABLED = "battery_curtailment_enabled"
     const_module.CONF_FORCE_CHARGE_DURATION = "force_charge_duration"
     const_module.CONF_FORCE_DISCHARGE_DURATION = "force_discharge_duration"
     const_module.DEFAULT_DISCHARGE_DURATION = 60
@@ -226,5 +227,81 @@ def test_operation_mode_select_falls_back_for_invalid_local_value():
         )
 
         assert entity.current_option == "self_consumption"
+    finally:
+        restore()
+
+
+def _entry_curtailment(curtailment_enabled):
+    return SimpleNamespace(
+        entry_id="entry-1",
+        data={"powerwall_local_paired": False, "battery_curtailment_enabled": False},
+        options={"battery_curtailment_enabled": curtailment_enabled},
+    )
+
+
+def _hass_export_rule(cached_export_rule=None, cloud_site_info=None):
+    return SimpleNamespace(
+        data={
+            "power_sync": {
+                "entry-1": {
+                    "powerwall_local": {"coordinator": None},
+                    "tesla_coordinator": SimpleNamespace(
+                        _site_info_cache=cloud_site_info or {}
+                    ),
+                    "cached_export_rule": cached_export_rule,
+                }
+            }
+        }
+    )
+
+
+def test_export_rule_select_ignores_stale_cache_when_curtailment_disabled():
+    """PW-7: a manual export-rule write leaves cached_export_rule pinned, but
+    once curtailment is disabled the select must self-heal from live site_info
+    instead of showing the stale cached rule forever."""
+    select, restore = _load_platform_module("select")
+    try:
+        entity = select.TeslaGridExportRuleSelect(
+            _hass_export_rule(
+                cached_export_rule="never",
+                cloud_site_info={
+                    "components": {"customer_preferred_export_rule": "pv_only"}
+                },
+            ),
+            _entry_curtailment(False),
+        )
+
+        assert entity.current_option == "pv_only"
+    finally:
+        restore()
+
+
+def test_export_rule_select_prefers_cache_when_curtailment_enabled():
+    select, restore = _load_platform_module("select")
+    try:
+        entity = select.TeslaGridExportRuleSelect(
+            _hass_export_rule(
+                cached_export_rule="never",
+                cloud_site_info={
+                    "components": {"customer_preferred_export_rule": "pv_only"}
+                },
+            ),
+            _entry_curtailment(True),
+        )
+
+        assert entity.current_option == "never"
+    finally:
+        restore()
+
+
+def test_export_rule_select_defaults_battery_ok_without_cache_or_site_info():
+    select, restore = _load_platform_module("select")
+    try:
+        entity = select.TeslaGridExportRuleSelect(
+            _hass_export_rule(cached_export_rule=None, cloud_site_info=None),
+            _entry_curtailment(False),
+        )
+
+        assert entity.current_option == "battery_ok"
     finally:
         restore()
