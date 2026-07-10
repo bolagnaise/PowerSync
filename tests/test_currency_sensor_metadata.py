@@ -219,6 +219,37 @@ def test_flow_power_import_price_uses_restored_state_before_coordinator_data():
     assert entity.native_value == 0.321
 
 
+def test_tariff_schedule_attributes_convert_high_tesla_rates_to_cents():
+    sensor = _sensor_module()
+    entity = sensor.TariffScheduleSensor(_hass("AUD"), _entry("globird"))
+
+    entity._rebuild_schedule_cache(
+        {
+            "last_sync": "2026-07-10 16:53:49",
+            "utility": "GloBird",
+            "plan_name": "Zero Hero",
+            "current_season": "Summer",
+            "buy_rates": {
+                "ON_PEAK": 10.0,
+                "OFF_PEAK": 0.52,
+            },
+            "sell_rates": {
+                "ON_PEAK": 0.10,
+                "OFF_PEAK": 0.0,
+            },
+            "tou_periods": {
+                "ON_PEAK": [{"fromHour": 15, "toHour": 23}],
+                "OFF_PEAK": [{"fromHour": 0, "toHour": 15}],
+            },
+        }
+    )
+
+    assert entity._schedule_cache["buy_rates"]["ON_PEAK"] == 1000.0
+    assert entity._schedule_cache["sell_rates"]["ON_PEAK"] == 10.0
+    assert entity._schedule_cache["tou_schedule"][0]["buy"] == 1000.0
+    assert entity._schedule_cache["tou_schedule"][0]["sell"] == 10.0
+
+
 def test_flow_power_current_import_price_prefers_tariff_schedule():
     sensor = _sensor_module()
     entity = sensor.FlowPowerPriceSensor(

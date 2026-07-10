@@ -2295,6 +2295,40 @@ def test_build_schedule_converts_priority_export_idle_to_export(
     assert all(action.action != "idle" for action in schedule.actions)
 
 
+def test_build_schedule_converts_priority_export_self_consumption_to_export(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=49000,
+        max_charge_w=10000,
+        max_discharge_w=7500,
+        max_grid_export_w=7500,
+        backup_reserve=0.15,
+        hardware_reserve=0.15,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+
+    schedule = optimizer._build_schedule(
+        1,
+        grid_import=[0.0],
+        grid_export=[0.0],
+        battery_charge=[0.0],
+        battery_discharge=[2.0],
+        solar=[0.0],
+        load=[2.0],
+        soc_0=0.90,
+        import_prices=[0.486],
+        export_prices=[0.45],
+        block_battery_charge=[True],
+        priority_export_slots=[True],
+    )
+
+    assert schedule.actions[0].action == "export"
+    assert schedule.actions[0].power_w == 5500.0
+    assert schedule.actions[0].battery_discharge_w == 7500.0
+
+
 def test_build_schedule_keeps_non_priority_profitable_hold_idle(
     battery_optimizer_module,
 ):

@@ -3716,9 +3716,9 @@ class TariffScheduleSensor(SensorEntity):
         elif buy_rates:
             tou_schedule = []
             for period_name, rate in buy_rates.items():
-                buy_cents = rate * 100 if rate < 1 else rate
+                buy_cents = rate * 100
                 sell_rate = sell_rates.get(period_name, 0)
-                sell_cents = sell_rate * 100 if sell_rate < 1 else sell_rate
+                sell_cents = sell_rate * 100
                 period_times = tou_periods.get(period_name, [])
                 if isinstance(period_times, dict) and "periods" in period_times:
                     periods_list = period_times["periods"]
@@ -3744,8 +3744,8 @@ class TariffScheduleSensor(SensorEntity):
 
             attrs["period_count"] = len(buy_rates)
             attrs["tou_schedule"] = tou_schedule
-            attrs["buy_rates"] = {k: round(v * 100 if v < 1 else v, 2) for k, v in buy_rates.items()}
-            attrs["sell_rates"] = {k: round(v * 100 if v < 1 else v, 2) for k, v in sell_rates.items()}
+            attrs["buy_rates"] = {k: round(v * 100, 2) for k, v in buy_rates.items()}
+            attrs["sell_rates"] = {k: round(v * 100, 2) for k, v in sell_rates.items()}
 
             # 48-slot schedule list for price chart compatibility
             sorted_tou = sorted(

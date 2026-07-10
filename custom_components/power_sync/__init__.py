@@ -31929,7 +31929,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Log the rates for each period
                 buy_rates = tariff_data.get("buy_rates", {})
                 for period_name, rate in buy_rates.items():
-                    rate_cents = rate * 100 if rate < 1 else rate
+                    rate_cents = rate * 100
                     _LOGGER.info(f"  💰 {period_name}: {rate_cents:.1f}c/kWh")
             else:
                 _LOGGER.warning(

@@ -3333,7 +3333,14 @@ class BatteryOptimizer:
 
             reported_charge_w = charge_kw * 1000
             reported_discharge_w = discharge_kw * 1000
-            if priority_export_slot and action == "idle":
+            if priority_export_slot and (
+                action == "idle"
+                or (
+                    action == "self_consumption"
+                    and discharge_kw > threshold_kw
+                    and charge_kw < threshold_kw
+                )
+            ):
                 export_room_kw = (
                     max(0.0, soc - export_floor) * cap * eff / dt
                     if cap > 0 and dt > 0

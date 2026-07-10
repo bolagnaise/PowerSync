@@ -959,6 +959,12 @@ def test_tesla_tariff_fetch_rejects_force_tariffs():
     assert '"last_restorable_tesla_tariff"' in function_source
 
 
+def test_tesla_tariff_startup_summary_always_converts_rates_to_cents():
+    source = INIT_PATH.read_text()
+    assert "rate * 100 if rate < 1 else rate" not in source
+    assert "rate_cents = rate * 100" in source
+
+
 def test_optimizer_force_modes_are_not_reissued_after_restart():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
