@@ -1421,6 +1421,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             next_charge_idx: int | None = None
             next_charge_reason: str | None = None
             for scan_idx in range(run_end, len(actions)):
+                scan_action = actions[scan_idx]
+                scan_discharge_w = float(
+                    getattr(scan_action, "battery_discharge_w", None)
+                    or getattr(scan_action, "power_w", 0.0)
+                    or 0.0
+                )
+                if (
+                    getattr(scan_action, "action", None) in EXPORT_ACTIONS
+                    and scan_discharge_w > 100.0
+                ):
+                    # Another real export run starts here -- it covers its
+                    # own home load, so stop bridging without treating this
+                    # as a charge opportunity for run 1.
+                    break
                 is_charge, reason = _charge_opportunity(scan_idx)
                 if is_charge:
                     next_charge_idx = scan_idx

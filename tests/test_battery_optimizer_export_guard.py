@@ -2838,3 +2838,64 @@ def test_sparse_lp_stats_and_schedule_expansion(
     assert result.lp_stats["variables"] == 7 * 132 + 1
     assert result.lp_stats["constraints"] == captured["A_eq"].shape[0] + captured["A_ub"].shape[0]
     assert len(captured["bounds"]) == result.lp_stats["variables"]
+
+
+def test_priority_export_bridge_nets_import_bonus_hd7(battery_optimizer_module):
+    """HD-7: the priority-export bridge-to-recharge floor must net an
+    import-bonus (ZeroCharge/import-bonus window) off the raw import price
+    when checking for a cheap recharge opportunity, not compare raw import
+    prices alone -- otherwise the bridge over-reserves straight through a
+    window that is actually cheap to recharge in.
+    """
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=13500,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+
+    priority_export_slots = [True, True, False, False, False, False]
+    export_prices = [0.10, 0.10, 0.0, 0.0, 0.0, 0.0]
+    import_prices = [0.0, 0.0, 0.15, 0.15, 0.15, 0.15]
+    solar = [0.0] * 6
+    load = [0.0, 0.0, 2.0, 2.0, 2.0, 2.0]
+    block_battery_charge = [False] * 6
+    grid_charge_allowed = [True] * 6
+
+    # Without an import bonus, the raw import price (0.15) stays above the
+    # cheap-recharge threshold (reference export 0.10) for the whole
+    # horizon, so the bridge floor keeps accumulating home load through
+    # idx 2-5.
+    no_bonus_floors = optimizer._priority_export_reserve_floor_slots(
+        import_prices,
+        export_prices,
+        solar,
+        load,
+        priority_export_slots,
+        block_battery_charge,
+        True,
+        grid_charge_allowed,
+        import_bonus_prices=[0.0] * 6,
+    )
+    assert no_bonus_floors is not None
+    assert no_bonus_floors[0] == pytest.approx(0.6667 / 13.5, abs=0.001)
+
+    # A ZeroCharge/import-bonus window at idx 2 nets the effective import
+    # price down to 0.07 (<= 0.10 cheap-recharge price), so the bridge scan
+    # must stop right there instead of over-reserving straight through it.
+    bonus_floors = optimizer._priority_export_reserve_floor_slots(
+        import_prices,
+        export_prices,
+        solar,
+        load,
+        priority_export_slots,
+        block_battery_charge,
+        True,
+        grid_charge_allowed,
+        import_bonus_prices=[0.0, 0.0, 0.08, 0.0, 0.0, 0.0],
+    )
+    assert bonus_floors is None

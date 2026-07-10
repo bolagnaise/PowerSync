@@ -550,6 +550,7 @@ class BatteryOptimizer:
             block_battery_charge,
             allow_grid_charge,
             grid_charge_allowed,
+            import_bonus_prices,
         )
         export_reserve_floor = self._merge_export_reserve_floor(
             export_reserve_floor,
@@ -764,6 +765,7 @@ class BatteryOptimizer:
         block_battery_charge: list[bool],
         allow_grid_charge: bool,
         grid_charge_allowed: list[bool],
+        import_bonus_prices: list[float] | None = None,
     ) -> list[float] | None:
         """Build per-slot export floors that bridge home load to next recharge."""
         if not any(priority_export_slots):
@@ -772,6 +774,7 @@ class BatteryOptimizer:
             return None
 
         n = len(priority_export_slots)
+        import_bonus_prices = import_bonus_prices or [0.0] * n
         floors = [0.0] * n
         base_floor = max(
             0.0,
@@ -811,12 +814,17 @@ class BatteryOptimizer:
                 load_kw = _forecast_kw(load, scan_idx)
                 if solar_kw - load_kw > threshold_kw:
                     break
+                effective_import_price = import_prices[scan_idx] - (
+                    import_bonus_prices[scan_idx]
+                    if scan_idx < len(import_bonus_prices)
+                    else 0.0
+                )
                 if (
                     allow_grid_charge
                     and scan_idx < len(grid_charge_allowed)
                     and grid_charge_allowed[scan_idx]
                     and not block_battery_charge[scan_idx]
-                    and import_prices[scan_idx] <= cheap_recharge_price
+                    and effective_import_price <= cheap_recharge_price
                     and self._charge_limit_kw(load_kw, solar_kw, True) > threshold_kw
                 ):
                     break

@@ -423,3 +423,53 @@ def test_matched_zero_per_slot_floor_still_wins_over_scalar(opt_module):
     # Matched slot floor is 0.0 -> result is just the configured backup
     # reserve (10%), not the evening scalar (60%).
     assert floor == pytest.approx(0.10)
+
+
+def test_bridge_scan_stops_at_next_export_run_hd6(opt_module):
+    """HD-6: an export window split by one sub-100 W dip slot becomes two
+    runs. Run 1's bridge-to-recharge scan must stop at the start of run 2
+    (another real export run), not fold run 2's own home load into run 1's
+    floor and keep scanning past it to whatever charge opportunity follows.
+    """
+    coordinator = _coordinator(opt_module, backup_reserve=0.0)
+
+    timestamps = _slot_timestamps(6, start_hour=9)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=timestamps[0], action="export", battery_discharge_w=1000.0
+        ),
+        opt_module.ScheduleAction(
+            timestamp=timestamps[1], action="export", battery_discharge_w=1000.0
+        ),
+        # Sub-100W dip: ends run 1.
+        opt_module.ScheduleAction(
+            timestamp=timestamps[2], action="export", battery_discharge_w=50.0
+        ),
+        # Run 2 starts here -- its own home load must NOT be bridged into
+        # run 1's floor.
+        opt_module.ScheduleAction(
+            timestamp=timestamps[3], action="export", battery_discharge_w=1000.0
+        ),
+        opt_module.ScheduleAction(
+            timestamp=timestamps[4], action="export", battery_discharge_w=1000.0
+        ),
+        opt_module.ScheduleAction(
+            timestamp=timestamps[5], action="charge", battery_charge_w=2000.0
+        ),
+    ]
+    schedule = opt_module.OptimizationSchedule(actions=actions)
+
+    solar_forecast = [0.0] * 6
+    load_forecast = [0.0, 0.0, 3.0, 3.0, 3.0, 0.0]
+
+    floors, meta = coordinator._post_processed_export_reserve_floor_slots(
+        schedule, solar_forecast, load_forecast
+    )
+
+    assert meta != {}
+    # Only the dip slot's (idx 2) home load should be bridged -- 3.0 kW for
+    # one 5-minute slot = 0.25 kWh. The buggy version also folds in run 2's
+    # two slots (idx 3, 4) and scans through to the charge action at idx 5,
+    # producing 0.75 kWh and a misleading "scheduled_grid_charge" reason.
+    assert meta["home_load_bridge_kwh"] == pytest.approx(0.25, abs=0.001)
+    assert meta["home_load_bridge_next_charge_reason"] == "no_charge_in_horizon"
