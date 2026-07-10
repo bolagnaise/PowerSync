@@ -506,6 +506,7 @@ CONFIRMED by adversarial verification unless noted:
 - **PW-3** Post-write default-5 normalization: handler invalidates the cloud cache the
   detector needs → overlay shows `percent + stored_offset − 5`; lasts the whole outage if
   Fleet is down (`client.py:679`).
+  > **FIXED in 13d02652 (2026-07-10)** — coordinator fallback reapplies the last-persisted `powerwall_local_low_soe_reserve_pct` offset instead of the client's default-5 basis when the cloud reserve is missing; test `tests/test_powerwall_local_dcq_snapshot.py::test_coordinator_reapplies_persisted_offset_when_cloud_reserve_missing`.
 - **PW-4** Cloud-fallback masking regression: failed local write + cloud success → refresh
   re-stamps the stale snapshot fresh → entity pinned to the old value until gateway sync
   (pre-diff self-corrected ≤30 s).
@@ -513,6 +514,7 @@ CONFIRMED by adversarial verification unless noted:
   > provenance-clean startup/persisted reserve over a fresh-but-possibly-corrupted LIVE
   > read), but the overlay-layer corruption in `powerwall_local/coordinator.py` is untouched
   > and PW-4 stays open — mirroring reserve-cluster-design.md §4's residual carry.
+  > **FIXED in 662843d9 (2026-07-10)** — Part A routes force-save last-resort branches through `resolve_restore_target()`; Part B adds a one-shot cross-module marker so a cloud-fallback write does not re-stamp `_last_success_ts` fresh on the stale snapshot; tests `tests/test_schedule_max_backup_reserve.py`, `tests/test_dispatch.py`, `tests/test_powerwall_local_dcq_snapshot.py`.
 - **PW-5** Silent reader divergence: `optimization/battery_controller.py:207
   get_backup_reserve` prefers the cloud cache (opposite of `get_tesla_operation_mode`),
   so the LP plans against the stale reserve while the UI shows the local one; the
