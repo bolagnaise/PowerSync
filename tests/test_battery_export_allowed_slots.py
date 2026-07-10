@@ -3099,6 +3099,24 @@ def test_self_consumption_adopts_manual_tesla_reserve_above_cached_target(opt_mo
     assert coordinator._last_executed_action == "self_consumption"
 
 
+def test_self_consumption_does_not_adopt_pending_tesla_idle_hold(opt_module):
+    battery = _FakeBattery(hardware_mode="self_consumption", backup_reserve=55)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.55)
+    coordinator._startup_backup_reserve = 5
+    coordinator._config.backup_reserve = 0.10
+    coordinator._pre_idle_backup_reserve = 5
+    coordinator._idle_hold_reserve = 55
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.backup_reserve_calls == [5]
+    assert coordinator._startup_backup_reserve == 5
+
+
 def test_self_consumption_reapplies_stale_tesla_full_reserve(opt_module):
     battery = _FakeBattery(hardware_mode="autonomous", backup_reserve=100)
     coordinator = _execution_coordinator(opt_module, battery, soc=1.0)
@@ -3343,6 +3361,76 @@ def test_tesla_idle_holds_current_soc_when_below_optimizer_floor(opt_module):
     assert battery.backup_reserve_calls == [32]
     assert coordinator._pre_idle_backup_reserve == 0
     assert coordinator._last_executed_action == "idle"
+
+
+def test_tesla_idle_uses_configured_restore_fallback_when_read_unavailable(opt_module):
+    battery = _FakeBattery(backup_reserve=None)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.55)
+    coordinator._startup_backup_reserve = None
+    coordinator._config.backup_reserve = 0.20
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+
+    assert battery.backup_reserve_calls == [55]
+    assert coordinator._pre_idle_backup_reserve == 20
+    assert coordinator._idle_hold_reserve == 55
+    assert coordinator._last_executed_action == "idle"
+
+
+def test_tesla_idle_failed_reserve_write_keeps_previous_marker(opt_module):
+    class FailingIdleBattery(_FakeBattery):
+        async def set_backup_reserve(self, percent):
+            self.backup_reserve_calls.append(percent)
+            return False
+
+    battery = FailingIdleBattery(backup_reserve=15)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.55)
+    coordinator._startup_backup_reserve = 15
+    coordinator._last_executed_action = "self_consumption"
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+
+    assert battery.backup_reserve_calls == [55]
+    assert coordinator._pre_idle_backup_reserve == 15
+    assert coordinator._idle_hold_reserve is None
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_tesla_idle_restore_false_keeps_idle_marker_and_retries(opt_module):
+    class RetryRestoreBattery(_FakeBattery):
+        async def set_backup_reserve(self, percent):
+            self.backup_reserve_calls.append(percent)
+            return len(self.backup_reserve_calls) > 1
+
+    battery = RetryRestoreBattery(backup_reserve=55)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.55)
+    coordinator._last_executed_action = "idle"
+    coordinator._startup_backup_reserve = 15
+    coordinator._pre_idle_backup_reserve = 15
+    coordinator._idle_hold_reserve = 55
+    action = SimpleNamespace(action="self_consumption", power_w=0)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.backup_reserve_calls == [15]
+    assert coordinator._pre_idle_backup_reserve == 15
+    assert coordinator._idle_hold_reserve == 55
+    assert coordinator._last_executed_action == "idle"
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.backup_reserve_calls == [15, 15, 15]
+    assert coordinator._pre_idle_backup_reserve is None
+    assert coordinator._idle_hold_reserve is None
+    assert coordinator._last_executed_action == "self_consumption"
 
 
 def test_charge_executes_immediately_above_reserve(opt_module):

@@ -483,7 +483,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return False
         try:
-            await battery.set_backup_reserve(self._pre_idle_backup_reserve)
+            result = await battery.set_backup_reserve(self._pre_idle_backup_reserve)
+            if result is False:
+                _LOGGER.warning(
+                    "Failed to restore backup reserve to %d%%: command returned False "
+                    "(will retry next cycle)",
+                    self._pre_idle_backup_reserve,
+                )
+                return False
             _LOGGER.info(
                 "Optimizer: Restored backup reserve to %d%%%s",
                 self._pre_idle_backup_reserve,
@@ -653,6 +660,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "Optimizer: Saved pre-IDLE backup reserve (fallback): %d%%",
                         saved,
                     )
+                else:
+                    configured_reserve, reserve_source = (
+                        self._configured_startup_backup_reserve()
+                    )
+                    if configured_reserve is None:
+                        configured_reserve = configured_idle_floor
+                        reserve_source = "optimizer floor"
+                    self._pre_idle_backup_reserve = configured_reserve
+                    _LOGGER.info(
+                        "Optimizer: Pre-IDLE reserve read unavailable; using %s: %d%%",
+                        reserve_source,
+                        configured_reserve,
+                    )
 
         non_tesla_hold_pct = max(soc_pct, configured_idle_floor)
 
@@ -677,17 +697,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if hasattr(battery, "set_backup_reserve"):
             if hasattr(battery, "set_self_consumption_mode"):
                 reserve = min(max(soc_pct, 0), 80)
-                await battery.set_self_consumption_mode()
+                if await battery.set_self_consumption_mode() is False:
+                    return False
             elif hasattr(battery, "restore_normal"):
                 reserve = non_tesla_hold_pct
-                await battery.restore_normal()
+                if await battery.restore_normal() is False:
+                    return False
             else:
                 reserve = non_tesla_hold_pct
             self._idle_reserve_adjustment = True
             try:
-                await battery.set_backup_reserve(reserve)
+                reserve_result = await battery.set_backup_reserve(reserve)
             finally:
                 self._idle_reserve_adjustment = False
+            if reserve_result is False:
+                _LOGGER.warning(
+                    "Optimizer: IDLE backup reserve command returned False; "
+                    "keeping the previous action marker so the next cycle retries"
+                )
+                return False
             _LOGGER.info(
                 "Optimizer: IDLE — holding SOC at %d%% via self_consumption "
                 "(backup reserve=%d%%)",
@@ -5442,6 +5470,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "backup reserve restore is pending",
                         effective_action,
                     )
+                    return
 
             # The optimizer backup reserve is a hard software floor for all
             # battery systems.  Once SOC reaches it, stop any forced/max
@@ -5586,7 +5615,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     getattr(action, "action", "scheduled_ev_preserve"),
                 )
             elif effective_action == "idle":
-                await self._set_idle_hold_mode(battery)
+                if await self._set_idle_hold_mode(battery) is False:
+                    _LOGGER.warning(
+                        "Optimizer: IDLE command failed — keeping previous action "
+                        "marker so the next cycle retries"
+                    )
+                    return
             elif effective_action == "off_grid":
                 # Off-grid curtailment: physically disconnect from grid.
                 # Delegates to CurtailmentFallback which enforces SOC floor,
@@ -5702,7 +5736,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     )
                                     reapply_backup_reserve = True
                                 elif (
-                                    current_reserve > reserve_pct
+                                    self._pre_idle_backup_reserve is None
+                                    and self._idle_hold_reserve is None
+                                    and current_reserve > reserve_pct
                                     and current_reserve <= soc_pct
                                 ):
                                     previous_reserve_pct = reserve_pct
