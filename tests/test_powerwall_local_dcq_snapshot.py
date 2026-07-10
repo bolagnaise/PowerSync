@@ -286,6 +286,43 @@ def test_coordinator_preserves_local_write_offset_when_cloud_site_info_is_stale(
     assert snap.backup_reserve_percent == 19
 
 
+def test_coordinator_reapplies_persisted_offset_when_cloud_reserve_missing():
+    entry_data = {
+        "powerwall_local_low_soe_reserve_pct": 10,
+        "tesla_coordinator": SimpleNamespace(_site_info_cache=None),
+    }
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord.hass = SimpleNamespace(data={"power_sync": {"entry-1": entry_data}})
+    coord._entry_id = "entry-1"
+    # backup_reserve_percent as produced by the client's default-5 basis
+    # normalization (24 - DEFAULT_LOW_SOE_RESERVE_PCT=5 = 19), before the
+    # coordinator has a chance to correct it against the persisted offset.
+    snap = client_mod.PowerwallSnapshot(
+        soc=50.0,
+        solar_w=0.0,
+        battery_w=0.0,
+        grid_w=0.0,
+        load_w=0.0,
+        grid_status="SystemGridConnected",
+        operation_mode="self_consumption",
+        backup_reserve_percent=19,
+        raw={
+            "config": {
+                "site_info": {
+                    "backup_reserve_percent": 24,
+                }
+            }
+        },
+    )
+
+    coord._update_backup_reserve_offset(snap)
+
+    assert entry_data["powerwall_local_low_soe_reserve_pct"] == 10
+    assert snap.backup_reserve_percent == 14
+
+
 def _coordinator_with_snapshot(ev_power_kw: float = 0.0):
     coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
         coordinator_mod.PowerwallLocalCoordinator

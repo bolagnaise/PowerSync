@@ -235,6 +235,14 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
 
         detected = detect_local_backup_reserve_offset(local_reserve, cloud_reserve)
         if detected is None:
+            persisted = entry_data.get("powerwall_local_low_soe_reserve_pct")
+            if persisted is not None:
+                normalized = normalize_local_backup_reserve_percent(
+                    local_reserve,
+                    persisted,
+                )
+                if normalized is not None:
+                    snap.backup_reserve_percent = normalized
             return
 
         previous = entry_data.get("powerwall_local_low_soe_reserve_pct")
