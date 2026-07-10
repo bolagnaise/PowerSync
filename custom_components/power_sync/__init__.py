@@ -32585,6 +32585,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if aemo_spike_manager:
         async def auto_aemo_spike_check(now):
             """Automatically check AEMO prices for spikes."""
+            if _is_monitoring_mode():
+                _LOGGER.info(
+                    "[MONITORING] Would check AEMO spike — blocked by monitoring mode"
+                )
+                return
             await aemo_spike_manager.check_and_handle_spike()
 
         # Check every minute at :35 seconds
@@ -32603,8 +32608,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
         # Perform initial AEMO spike check
-        _LOGGER.info("Performing initial AEMO spike check")
-        await aemo_spike_manager.check_and_handle_spike()
+        if _is_monitoring_mode():
+            _LOGGER.info(
+                "[MONITORING] Would perform initial AEMO spike check — blocked by monitoring mode"
+            )
+        else:
+            _LOGGER.info("Performing initial AEMO spike check")
+            await aemo_spike_manager.check_and_handle_spike()
 
     # Set up automatic generic AEMO spike check every minute if enabled (for non-Tesla systems)
     if generic_aemo_spike_manager:
@@ -32636,6 +32646,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if saving_session_tariff_manager:
         async def auto_saving_session_check(now):
             """Check for active saving sessions (Tesla TOU mode)."""
+            if _is_monitoring_mode():
+                _LOGGER.info(
+                    "[MONITORING] Would check saving session — blocked by monitoring mode"
+                )
+                return
             await saving_session_tariff_manager.check_and_handle_sessions()
 
         saving_session_cancel_timer = async_track_utc_time_change(
@@ -32672,6 +32687,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ts_coordinator = entry_data.get("tesla_coordinator")
 
                 if not dc_coordinator or not ts_coordinator:
+                    return
+
+                if _is_monitoring_mode():
+                    _LOGGER.info(
+                        "[MONITORING] Would toggle grid charging for demand period — blocked by monitoring mode"
+                    )
                     return
 
                 # Skip grid charging control if user allows grid charging during demand windows
