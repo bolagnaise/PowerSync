@@ -15,8 +15,11 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
-          # Issue tracking is Discord-only by policy; GitHub Issues stay disabled.
-          ignore: issues
+          # issues: issue tracking is Discord-only by policy; GitHub Issues stay disabled.
+          # license: the repo IS licensed (PolyForm Noncommercial 1.0.0, see LICENSE),
+          # but GitHub's license detector does not recognize PolyForm, so the HACS
+          # check reads SPDX NOASSERTION and can never pass.
+          ignore: issues license
 
   validate-hassfest:
     runs-on: ubuntu-latest
