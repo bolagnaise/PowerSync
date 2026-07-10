@@ -2243,6 +2243,12 @@ class AEMOSpikeManager:
         self._last_price: float | None = None
         self._last_check: datetime | None = None
 
+        # OB-41: dedicated store so spike-mode state (and the baseline it
+        # owes a restore from) survives a reload — this class is a top-level
+        # object constructed in async_setup_entry, not a closure that can
+        # reach the force_mode_state Store, so it needs its own key.
+        self._store = Store(hass, 1, f"{DOMAIN}.aemo_spike_event.{entry.entry_id}")
+
         # Create AEMO client (uses NEMWEB dispatch ZIP with JSON fallback)
         from .aemo_api import AEMOAPIClient
         session = async_get_clientsession(hass)
@@ -2288,6 +2294,50 @@ class AEMOSpikeManager:
     def spike_start_time(self) -> datetime | None:
         """Return when the current spike started."""
         return self._spike_start_time
+
+    async def _persist_event_state(self) -> None:
+        """OB-41: persist spike-mode state so a reload mid-event doesn't
+        forget it owes a restore. ``getattr`` guards a missing ``_store``
+        for lightweight test fixtures built via ``object.__new__``, which
+        bypass ``__init__``."""
+        store = getattr(self, "_store", None)
+        if store is None:
+            return
+        if self._in_spike_mode:
+            await store.async_save({
+                "in_event": True,
+                "saved_tariff": self._saved_tariff,
+                "saved_operation_mode": self._saved_operation_mode,
+            })
+        else:
+            await store.async_save(None)
+
+    async def restore_or_exit(self) -> None:
+        """OB-41: called once from async_setup_entry after construction. If
+        a persisted spike event is still active, take the conservative
+        choice — restore the saved tariff/mode and exit spike mode
+        immediately rather than resuming the event blind (the Powerwall may
+        have been stranded on the inflated spike tariff for an unknown
+        duration). A failed restore leaves ``_in_spike_mode`` set so the
+        existing OB-38 retry-next-cycle contract picks it up."""
+        store = getattr(self, "_store", None)
+        if store is None:
+            return
+        try:
+            stored = await store.async_load()
+        except Exception as e:
+            _LOGGER.debug("No persisted AEMO spike event state to restore: %s", e)
+            return
+        if not stored or not stored.get("in_event"):
+            return
+        _LOGGER.warning(
+            "Persisted AEMO spike event found on startup - exiting spike mode "
+            "conservatively instead of resuming (tariff may be stale)"
+        )
+        self._saved_tariff = stored.get("saved_tariff")
+        self._saved_operation_mode = stored.get("saved_operation_mode")
+        self._in_spike_mode = True
+        await self._exit_spike_mode(0.0)
 
     async def check_and_handle_spike(self) -> None:
         """Check AEMO prices and handle spike mode transitions."""
@@ -2440,6 +2490,7 @@ class AEMOSpikeManager:
             if success:
                 self._in_spike_mode = True
                 self._spike_start_time = dt_util.utcnow()
+                await self._persist_event_state()
                 _LOGGER.warning(
                     "SPIKE MODE ACTIVE: Tariff uploaded to maximize export at $%.2f/MWh",
                     current_price,
@@ -2527,11 +2578,23 @@ class AEMOSpikeManager:
                 # Clear spike state
                 self._in_spike_mode = False
                 self._spike_start_time = None
+                # OB-41: also clear the saved baseline. Otherwise a genuine
+                # tariff change the user makes between two events would be
+                # clobbered by the capture-once guard (OB-34/42f21caa) on
+                # the next spike, restoring this now-stale value instead.
+                self._saved_tariff = None
+                self._saved_operation_mode = None
                 _LOGGER.info("SPIKE MODE ENDED: Normal operation restored")
             else:
                 _LOGGER.warning(
                     "Tariff restore failed — will retry exit next cycle"
                 )
+
+            # OB-41: persist either way — a successful exit persists the
+            # cleared state so a reload afterwards finds no owed restore; a
+            # failed exit re-persists the still-active state (unchanged)
+            # so a reload mid-retry doesn't forget it owes one.
+            await self._persist_event_state()
 
         except Exception as e:
             _LOGGER.error("Error exiting spike mode: %s", e, exc_info=True)
@@ -2888,6 +2951,10 @@ class SavingSessionTariffManager:
         self._saved_operation_mode: str | None = None
         self._active_session_code: str | None = None
 
+        # OB-41: dedicated store so session-mode state (and the baseline it
+        # owes a restore from) survives a reload — mirrors AEMOSpikeManager.
+        self._store = Store(hass, 1, f"{DOMAIN}.saving_session_event.{entry.entry_id}")
+
         _LOGGER.info("Saving Session Tariff Manager initialized for Tesla site %s", site_id)
 
     def _get_current_token(self) -> tuple[str | None, str]:
@@ -2909,6 +2976,52 @@ class SavingSessionTariffManager:
     def in_session_mode(self) -> bool:
         """Return whether currently in session mode."""
         return self._in_session_mode
+
+    async def _persist_event_state(self) -> None:
+        """OB-41: persist session-mode state so a reload mid-event doesn't
+        forget it owes a restore. ``getattr`` guards a missing ``_store``
+        for lightweight test fixtures built via ``object.__new__``, which
+        bypass ``__init__``."""
+        store = getattr(self, "_store", None)
+        if store is None:
+            return
+        if self._in_session_mode:
+            await store.async_save({
+                "in_event": True,
+                "saved_tariff": self._saved_tariff,
+                "saved_operation_mode": self._saved_operation_mode,
+                "active_session_code": self._active_session_code,
+            })
+        else:
+            await store.async_save(None)
+
+    async def restore_or_exit(self) -> None:
+        """OB-41: called once from async_setup_entry after construction. If
+        a persisted session event is still active, take the conservative
+        choice — restore the saved tariff/mode and exit session mode
+        immediately rather than resuming the event blind (the Powerwall may
+        have been stranded on the inflated session tariff for an unknown
+        duration). A failed restore leaves ``_in_session_mode`` set so the
+        existing OB-38 retry-next-cycle contract picks it up."""
+        store = getattr(self, "_store", None)
+        if store is None:
+            return
+        try:
+            stored = await store.async_load()
+        except Exception as e:
+            _LOGGER.debug("No persisted saving session event state to restore: %s", e)
+            return
+        if not stored or not stored.get("in_event"):
+            return
+        _LOGGER.warning(
+            "Persisted saving session event found on startup - exiting session "
+            "mode conservatively instead of resuming (tariff may be stale)"
+        )
+        self._saved_tariff = stored.get("saved_tariff")
+        self._saved_operation_mode = stored.get("saved_operation_mode")
+        self._active_session_code = stored.get("active_session_code")
+        self._in_session_mode = True
+        await self._exit_session_mode()
 
     async def check_and_handle_sessions(self) -> None:
         """Check if a saving session is active and manage tariff."""
@@ -3033,6 +3146,7 @@ class SavingSessionTariffManager:
                 self._in_session_mode = True
                 self._session_start_time = dt_util.utcnow()
                 self._active_session_code = session.code
+                await self._persist_event_state()
                 _LOGGER.warning(
                     "SESSION MODE ACTIVE: Tariff uploaded for %d octopoints/kWh export",
                     session.octopoints_per_kwh,
@@ -3169,13 +3283,26 @@ class SavingSessionTariffManager:
                 _LOGGER.warning(
                     "Tariff restore failed — will retry exit next cycle"
                 )
+                # OB-41: persist the still-active state (unchanged) so a
+                # reload mid-retry doesn't forget it owes a restore.
+                await self._persist_event_state()
                 return
 
             # Clear session state
             self._in_session_mode = False
             self._session_start_time = None
             self._active_session_code = None
+            # OB-41: also clear the saved baseline. Otherwise a genuine
+            # tariff change the user makes between two events would be
+            # clobbered by the capture-once guard (OB-34/42f21caa) on the
+            # next session, restoring this now-stale value instead.
+            self._saved_tariff = None
+            self._saved_operation_mode = None
             _LOGGER.info("SESSION MODE ENDED: Normal operation restored")
+
+            # OB-41: persist the cleared state so a reload afterwards finds
+            # no owed restore.
+            await self._persist_event_state()
 
             # Send push notification
             try:
@@ -18302,6 +18429,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 aemo_region,
                 aemo_threshold,
             )
+            # OB-41: a persisted spike event from before a reload/restart
+            # must not be silently forgotten — restore-or-exit conservatively.
+            await aemo_spike_manager.restore_or_exit()
         else:
             _LOGGER.warning("AEMO spike detection enabled but no region configured")
 
@@ -18437,6 +18567,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     octopoints_per_penny=ss_octopoints_per_penny,
                 )
                 _LOGGER.info("Saving Session Tariff Manager initialized for Tesla")
+                # OB-41: a persisted session event from before a reload/
+                # restart must not be silently forgotten — restore-or-exit
+                # conservatively.
+                await saving_session_tariff_manager.restore_or_exit()
 
             # Non-Tesla generic manager
             elif not ml_optimization_enabled and (is_sigenergy or is_sungrow or is_foxess or is_goodwe or is_esy_sunhome or is_solax or is_saj_h2 or is_fronius_reserva or is_neovolt or is_solaredge or is_anker_solix):

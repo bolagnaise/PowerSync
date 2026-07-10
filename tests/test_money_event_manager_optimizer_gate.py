@@ -156,6 +156,12 @@ def _make_recorder_class():
             self.kwargs = kwargs
             type(self).created.append(self)
 
+        async def restore_or_exit(self):
+            """OB-41: async_setup_entry calls this right after construction
+            to restore-or-exit a persisted event found on a reload; this
+            stand-in has no real store, so it's a no-op."""
+            pass
+
     return _Recorder
 
 
