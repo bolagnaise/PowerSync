@@ -132,6 +132,7 @@ def _install_power_sync_stubs() -> None:
 
     const_module = types.ModuleType("power_sync.const")
     const_module.DOMAIN = "power_sync"
+    const_module.TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
     const_module.CONF_ELECTRICITY_PROVIDER = "electricity_provider"
     const_module.CONF_MONITORING_MODE = "monitoring_mode"
     const_module.CONF_FLOW_POWER_STATE = "flow_power_state"

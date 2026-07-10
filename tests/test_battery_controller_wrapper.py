@@ -36,6 +36,7 @@ def _load_controller_module():
     opt_module.__path__ = [str(COMPONENT_ROOT / "optimization")]
     const_module = types.ModuleType("power_sync.const")
     const_module.DOMAIN = "power_sync"
+    const_module.TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
 
     sys.modules["homeassistant"] = ha_root
     sys.modules["homeassistant.core"] = ha_core

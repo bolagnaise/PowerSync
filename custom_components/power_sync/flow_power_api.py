@@ -409,6 +409,8 @@ class FlowPowerAPIClient:
                 {
                     "nemTime": period_time.isoformat(),
                     "perKwh": price_mwh / 10.0,
+                    # $/kWh here — NOT the same unit as the "wholesaleKWHPrice"
+                    # key produced by kwatch_prices_to_amber_format() below (c/kWh).
                     "wholesaleKWHPrice": price_mwh / 1000.0,
                     "price_mwh": price_mwh,
                     "duration": duration,
@@ -490,6 +492,8 @@ def kwatch_prices_to_amber_format(
             starts_at = dt_util.utcnow()
         duration = int(price.get("duration") or default_duration)
         ends_at = starts_at + timedelta(minutes=duration)
+        # c/kWh here — NOT the same unit as the "wholesaleKWHPrice" key
+        # produced by _normalize_price_records() above ($/kWh).
         price_cents = float(price["perKwh"])
         entries.append(
             {

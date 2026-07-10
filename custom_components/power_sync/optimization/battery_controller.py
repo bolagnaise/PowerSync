@@ -16,9 +16,10 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
+from ..const import TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS
+
 _LOGGER = logging.getLogger(__name__)
 
-TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
 TESLA_SITE_INFO_MAX_AGE_SECONDS = 900
 _BACKUP_RESERVE_WRITE_USER_KEY = "powerwall_local_backup_reserve_write_user_pct"
 

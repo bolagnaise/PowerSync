@@ -639,7 +639,7 @@ class SajH2BatteryController:
             # (force_discharge called twice without restore in between).
             if self._cached_charge_enable is None:
                 cached = self._read_int_sensor("charge_time_enable_bitmask")
-                self._cached_charge_enable = cached if cached is not None else 0
+                self._cached_charge_enable = (cached if cached is not None else 0) & ~_POWERSYNC_CHARGE_BIT
                 if "charge_time_enable" in self._entity_map:
                     await self._set_number("charge_time_enable", 0)
 

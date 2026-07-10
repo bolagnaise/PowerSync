@@ -48,6 +48,7 @@ from .const import (
     SENSOR_FAMILY_EV_CHARGING,
     TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS,
     TESLA_CAPABILITY_WAIT_SECONDS,
+    TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -67,7 +68,6 @@ FORCE_POWER_COORDINATOR_KEYS = (
     "neovolt_coordinator",
     "anker_solix_coordinator",
 )
-TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
 
 
 def _fresh_powerwall_local_snapshot(hass: HomeAssistant, entry: ConfigEntry) -> Any | None:

@@ -114,6 +114,7 @@ def _install_power_sync_stubs() -> None:
 
     const_module = types.ModuleType("power_sync.const")
     const_module.DOMAIN = "power_sync"
+    const_module.TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
     const_module.CONF_ELECTRICITY_PROVIDER = "electricity_provider"
     const_module.CONF_MONITORING_MODE = "monitoring_mode"
     const_module.CONF_FLOW_POWER_STATE = "flow_power_state"
@@ -329,3 +330,32 @@ def test_time_window_slots_matches_lp_slot_zero_origin(opt_module, monkeypatch):
         minutes_of_day = slot_ts.hour * 60 + slot_ts.minute
         expected_in_window = 0 <= minutes_of_day < (23 * 60 + 59)
         assert result[t] == expected_in_window
+
+
+def test_current_import_price_for_action_uses_price_timestamps_fallback_for_dynamic_provider(
+    opt_module, monkeypatch
+):
+    """HD-20 regression: _last_price_timestamps is only ever stamped on the
+    static TOU-forecast path, so dynamic-price providers (Amber, ZeroHero,
+    etc.) leave it None. _current_import_price_for_action must fall back to
+    the existing _price_timestamps() synthetic interval grid — the same one
+    _zerohero_window_slots/_zerocharge_window_slots already rely on — instead
+    of unconditionally returning None whenever the attribute is unset.
+    """
+    aligned_now = datetime(2026, 5, 3, 17, 30, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda *a, **k: aligned_now)
+
+    coordinator = _coordinator(opt_module, "amber")
+    coordinator._config.interval_minutes = 5
+    coordinator._last_price_timestamps = None  # dynamic provider: never stamped
+
+    prices = [10.0, 20.0, 30.0]
+    action = opt_module.ScheduleAction(
+        timestamp=datetime(2026, 5, 3, 17, 36, 0, tzinfo=timezone.utc),
+        action="charge",
+        power_w=1000.0,
+    )
+
+    result = coordinator._current_import_price_for_action(prices, action)
+
+    assert result == 20.0

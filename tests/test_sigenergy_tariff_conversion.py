@@ -537,6 +537,74 @@ def test_sigenergy_visible_upload_uses_distinct_30_min_buy_and_sell_slots(
     assert sell_by_start["20:30"] != buy_by_start["20:30"]
 
 
+def test_convert_amber_to_tesla_tariff_demand_artificial_price_uses_ha_local_weekday(
+    tariff_converter_module, monkeypatch
+):
+    """HD-23 regression: when no timezone can be auto-detected from price data
+    (detected_tz is None), the demand-artificial-price "Weekdays Only" check
+    must use HA's configured clock (dt_util.now()), not the OS-local clock
+    (datetime.now())."""
+    # OS-local "now" lands on a Saturday - if the buggy code path is used,
+    # "Weekdays Only" is (wrongly) treated as invalid and no artificial
+    # price increase is applied.
+    os_local_now = datetime(2026, 7, 11, 15, 0)
+    # HA-local "now" (dt_util.now()) lands on a Wednesday - the correct
+    # weekday to use for the "Weekdays Only" check.
+    ha_local_now = datetime(2026, 7, 8, 15, 0)
+
+    real_datetime = tariff_converter_module.datetime
+
+    class _FakeDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is not None:
+                return os_local_now.replace(tzinfo=tz)
+            return os_local_now
+
+    monkeypatch.setattr(tariff_converter_module, "datetime", _FakeDatetime)
+    monkeypatch.setattr(
+        tariff_converter_module.dt_util, "now", lambda: ha_local_now, raising=False
+    )
+
+    # Build a full day of naive (no tzinfo) forecast points so timezone
+    # auto-detection fails and detected_tz stays None - the only condition
+    # under which the OS-local vs HA-local distinction matters.
+    day = real_datetime(2026, 7, 11)
+    forecast: list[dict] = []
+    for slot in range(48):
+        slot_end = day + timedelta(minutes=(slot + 1) * 30)
+        for channel, price in (("general", 20.0), ("feedIn", -5.0)):
+            forecast.append(
+                {
+                    "nemTime": slot_end.isoformat(),
+                    "duration": 30,
+                    "type": "ForecastInterval",
+                    "channelType": channel,
+                    "advancedPrice": {"predicted": price},
+                    "perKwh": price,
+                }
+            )
+
+    tariff = tariff_converter_module.convert_amber_to_tesla_tariff(
+        forecast,
+        tesla_energy_site_id="none",
+        forecast_type="predicted",
+        demand_charge_enabled=True,
+        demand_charge_rate=1.0,
+        demand_charge_start_time="14:00",
+        demand_charge_end_time="20:00",
+        demand_charge_days="Weekdays Only",
+        demand_artificial_price_enabled=True,
+    )
+
+    assert tariff is not None
+    buy_price = tariff["energy_charges"]["Summer"]["rates"]["PERIOD_15_00"]
+    # $0.20/kWh base price + the $2/kWh artificial increase should land here
+    # only if the weekday check used HA-local time (Wednesday), not OS-local
+    # time (Saturday).
+    assert buy_price == pytest.approx(2.2)
+
+
 def test_chip_mode_threshold_uses_unboosted_tesla_tariff_price(tariff_converter_module):
     tariff = {
         "sell_tariff": {

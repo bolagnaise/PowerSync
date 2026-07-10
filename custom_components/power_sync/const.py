@@ -1182,6 +1182,10 @@ UPDATE_INTERVAL_PRICES = timedelta(minutes=5)  # Amber updates every 5 minutes
 UPDATE_INTERVAL_ENERGY = timedelta(seconds=15)  # Tesla energy data every 15 seconds
 TESLA_SITE_INFO_CACHE_TTL_SECONDS = 6 * 60 * 60
 TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS = 60
+# How recently the local Powerwall coordinator must have ticked for its data
+# to be trusted by number.py/select.py/sensor.py's local-prefer overrides and
+# optimization/battery_controller.py's local snapshot lookup.
+TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
 
 # Amber API
 AMBER_API_BASE_URL = "https://api.amber.com.au/v1"

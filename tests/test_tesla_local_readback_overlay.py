@@ -77,6 +77,7 @@ def _load_platform_module(module_name: str):
     const_module.DISCHARGE_DURATIONS = [15, 30, 60]
     const_module.TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS = 30
     const_module.TESLA_CAPABILITY_WAIT_SECONDS = 30
+    const_module.TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
     const_module.SENSOR_FAMILY_BATTERY = "battery"
     const_module.SENSOR_FAMILY_GRID_HOME = "grid_home"
     const_module.SENSOR_FAMILY_EV_CHARGING = "ev_charging"

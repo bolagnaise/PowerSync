@@ -4835,7 +4835,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         action_time = self._as_utc_datetime(getattr(action, "timestamp", None))
         if action_time is None:
             return None
-        timestamps = getattr(self, "_last_price_timestamps", None)
+        if not prices:
+            return None
+        timestamps = self._price_timestamps(len(prices))
         if not timestamps:
             return None
 

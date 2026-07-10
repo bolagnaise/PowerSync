@@ -499,6 +499,31 @@ def test_restore_normal_after_force_charge_clears_charge_slot_and_restores_disch
     assert controller._cached_discharge_enable is None
 
 
+def test_restore_normal_after_cross_type_force_does_not_reapply_stale_charge_bit():
+    # force_charge sets slot-7's shared bit on charge_time_enable, then
+    # force_discharge is called without an intervening restore — its
+    # capture of charge_time_enable_bitmask must not cache PowerSync's own
+    # bit, or restore_normal will write it straight back onto the user's
+    # charge slots.
+    hass = _FakeHass(_tou_states(charge_bitmask="2", discharge_bitmask="0"))
+    controller = _tou_controller(hass)
+
+    assert asyncio.run(controller.force_charge(duration_minutes=30, power_w=2500))
+    # Simulate the inverter's bitmask sensor confirming the bit force_charge
+    # just wrote (real hardware would report this on the next poll).
+    hass.states.set("sensor.saj_charge_time_enable_bitmask", "66")
+
+    assert asyncio.run(controller.force_discharge(duration_minutes=30, power_w=2500))
+    assert asyncio.run(controller.restore_normal())
+
+    charge_writes = [
+        call[2]["value"]
+        for call in hass.services.calls
+        if call[2].get("entity_id") == "number.saj_charge_time_enable_input"
+    ]
+    assert charge_writes[-1] == 2
+
+
 def test_force_charge_attempts_restore_normal_on_mid_sequence_exception():
     hass = _FakeHass(
         _tou_states(),

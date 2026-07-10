@@ -209,6 +209,7 @@ from .const import (
     SENSOR_FAMILY_EV_CHARGING,
     SENSOR_FAMILY_OCTOPUS,
     TESLA_INTEGRATIONS,
+    TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
 )
 from .coordinator import (
     AmberPriceCoordinator,
@@ -2550,7 +2551,7 @@ _LOCAL_OVERRIDABLE = {
 # trusted by the local-prefer override. The local coord polls every 2s, so
 # 30s is ~15 missed ticks — comfortably past transient blips, well before
 # the data turns into a "stuck at 41%" disaster.
-_LOCAL_STALE_SECONDS = 30
+_LOCAL_STALE_SECONDS = TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS
 _ENERGY_COORDINATOR_STALE_FACTOR = 4
 _ENERGY_COORDINATOR_MIN_STALE_SECONDS = 60
 

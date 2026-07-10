@@ -23,10 +23,10 @@ from .const import (
     SENSOR_FAMILY_BATTERY,
     SENSOR_FAMILY_GRID_HOME,
     TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS,
+    TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
-TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
 
 
 def _fresh_powerwall_local_snapshot(hass: HomeAssistant, entry: ConfigEntry) -> Any | None:

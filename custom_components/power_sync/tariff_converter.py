@@ -817,7 +817,7 @@ def convert_amber_to_tesla_tariff(
         periods_modified = 0
 
         # Check if today is a valid day for demand charges (use detected tz, not system tz)
-        weekday = (datetime.now(detected_tz) if detected_tz else datetime.now()).weekday()
+        weekday = (datetime.now(detected_tz) if detected_tz else dt_util.now()).weekday()
 
         day_is_valid = True
         if demand_charge_days == "Weekdays Only" and weekday >= 5:  # Saturday or Sunday
