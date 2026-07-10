@@ -1888,16 +1888,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Resolve a trustworthy backup-reserve value to restore after a
         temporary window (e.g. ``schedule_max_backup``) ends.
 
-        Prefers a freshly-read, trust-tagged reserve (LIVE/CLOUD_FRESH via
-        ``read_backup_reserve()``); an untrusted (CLOUD_STALE/ENTITY)
-        reading is never used, since a stale Tesla cloud value clobbering
-        the user's real reserve is exactly the PW-6 hazard this closes. A
-        legacy battery with no ``read_backup_reserve`` accessor is not
-        trusted via a raw ``get_backup_reserve()`` read either -- it falls
-        through the same untrusted-fallback chain. Falls back to the
-        persisted user reserve option, then the optimizer's startup
-        reserve, returning ``None`` only if nothing usable exists.
+        Ordering is load-bearing (S3/PW-4): the optimizer's
+        ``_startup_backup_reserve`` and the persisted ``_user_backup_reserve``
+        are provenance-clean and preferred over even a trusted live read,
+        because a LIVE tag certifies freshness, not overlay integrity -- a
+        PW-3/PW-4 offset-corrupted local snapshot is still "fresh", and
+        this value feeds a ``source="user"`` restore that would clobber
+        the persisted user reserve with it. A trusted (LIVE/CLOUD_FRESH)
+        reading is the final fallback; an untrusted (CLOUD_STALE/ENTITY)
+        reading is never used, and a legacy battery with no
+        ``read_backup_reserve`` accessor is not trusted via a raw
+        ``get_backup_reserve()`` read either. Returns ``None`` only if
+        nothing usable exists.
         """
+        startup = self._reserve_percent(getattr(self, "_startup_backup_reserve", None))
+        if startup is not None:
+            return startup
+
+        persisted = (
+            self._reserve_percent(self._entry.options.get("_user_backup_reserve"))
+            if self._entry
+            else None
+        )
+        if persisted is not None:
+            return persisted
+
         battery = self._executor.battery_controller if self._executor else None
         if battery is not None and hasattr(battery, "read_backup_reserve"):
             try:
@@ -1910,15 +1925,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if reading.trust in TRUSTED_FOR_PERSIST:
                     return self._reserve_percent(reading.percent)
 
-        persisted = (
-            self._reserve_percent(self._entry.options.get("_user_backup_reserve"))
-            if self._entry
-            else None
-        )
-        if persisted is not None:
-            return persisted
-
-        return getattr(self, "_startup_backup_reserve", None)
+        return None
 
     def _provider_key(self) -> str:
         """Return the configured electricity provider key."""

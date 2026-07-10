@@ -12,13 +12,17 @@ garbage cloud value clobbers the user's real reserve when the window ends.
 Fix (this change):
 1. ``OptimizationCoordinator.resolve_restore_target()`` (new method in
    ``optimization/coordinator.py``) returns a trustworthy reserve value:
-   a freshly-read, trust-tagged reading (LIVE/CLOUD_FRESH via
-   ``read_backup_reserve()``), else the persisted ``_user_backup_reserve``
-   option, else ``_startup_backup_reserve``, else ``None``. An untrusted
-   reading (CLOUD_STALE/ENTITY) is never returned directly, and a legacy
-   battery with no ``read_backup_reserve`` accessor is *not* trusted via a
-   raw ``get_backup_reserve()`` read either -- it falls through the same
-   chain.
+   the optimizer's ``_startup_backup_reserve`` (provenance-clean after
+   RSV-2), else the persisted ``_user_backup_reserve`` option, else a
+   freshly-read, trust-tagged reading (LIVE/CLOUD_FRESH via
+   ``read_backup_reserve()``), else ``None``. The clean sources are
+   deliberately preferred over even a trusted live read (design §2 PW-6 /
+   S3): a LIVE tag certifies freshness, not overlay integrity, and a
+   PW-3/PW-4 offset-corrupted local snapshot must not become the
+   ``source="user"`` restore value that clobbers the persisted user
+   reserve. An untrusted reading (CLOUD_STALE/ENTITY) is never returned
+   directly, and a legacy battery with no ``read_backup_reserve`` accessor
+   is *not* trusted via a raw ``get_backup_reserve()`` read either.
 2. ``handle_schedule_max_backup`` now snapshots via
    ``opt_coord.resolve_restore_target()`` when the optimization coordinator
    is available, keeping the original ``_site_info_cache`` read only as a
@@ -95,20 +99,45 @@ def _make_coordinator(opt_module, *, persisted_reserve=None, startup_reserve=Non
     return coordinator
 
 
-def test_resolve_restore_target_trusted_live_reading_wins(opt_module):
+def test_resolve_restore_target_startup_reserve_beats_trusted_live(opt_module):
+    """S3/PW-4 ordering guard (design §2 PW-6): a LIVE tag certifies
+    freshness, not overlay integrity -- a fresh-but-offset-corrupted local
+    snapshot must not become the max-backup restore target while a
+    provenance-clean _startup_backup_reserve exists."""
+    bc = _bc_module()
+    battery = _FakeBatteryWithTrust(8, bc.ReserveTrust.LIVE)
+    coordinator = _make_coordinator(opt_module, persisted_reserve=40, startup_reserve=20, battery=battery)
+
+    result = asyncio.run(coordinator.resolve_restore_target())
+
+    assert result == 20
+    assert result != 8
+
+
+def test_resolve_restore_target_persisted_beats_trusted_live(opt_module):
     bc = _bc_module()
     battery = _FakeBatteryWithTrust(15, bc.ReserveTrust.LIVE)
-    coordinator = _make_coordinator(opt_module, persisted_reserve=40, startup_reserve=99, battery=battery)
+    coordinator = _make_coordinator(opt_module, persisted_reserve=40, startup_reserve=None, battery=battery)
+
+    result = asyncio.run(coordinator.resolve_restore_target())
+
+    assert result == 40
+
+
+def test_resolve_restore_target_trusted_live_is_final_fallback(opt_module):
+    bc = _bc_module()
+    battery = _FakeBatteryWithTrust(15, bc.ReserveTrust.LIVE)
+    coordinator = _make_coordinator(opt_module, persisted_reserve=None, startup_reserve=None, battery=battery)
 
     result = asyncio.run(coordinator.resolve_restore_target())
 
     assert result == 15
 
 
-def test_resolve_restore_target_cloud_fresh_reading_wins(opt_module):
+def test_resolve_restore_target_cloud_fresh_reading_used_when_no_clean_source(opt_module):
     bc = _bc_module()
     battery = _FakeBatteryWithTrust(22, bc.ReserveTrust.CLOUD_FRESH)
-    coordinator = _make_coordinator(opt_module, persisted_reserve=40, battery=battery)
+    coordinator = _make_coordinator(opt_module, persisted_reserve=None, battery=battery)
 
     result = asyncio.run(coordinator.resolve_restore_target())
 
@@ -121,7 +150,7 @@ def test_resolve_restore_target_cloud_stale_falls_back_to_persisted_not_stale_ca
     reserve instead of clobbering it with the stale value."""
     bc = _bc_module()
     battery = _FakeBatteryWithTrust(5, bc.ReserveTrust.CLOUD_STALE)
-    coordinator = _make_coordinator(opt_module, persisted_reserve=40, startup_reserve=99, battery=battery)
+    coordinator = _make_coordinator(opt_module, persisted_reserve=40, startup_reserve=None, battery=battery)
 
     result = asyncio.run(coordinator.resolve_restore_target())
 
