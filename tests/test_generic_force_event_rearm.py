@@ -93,7 +93,7 @@ class _FakeAemoClient:
         self.is_spike = is_spike
         self.price = price
 
-    async def check_price_spike(self, region, threshold):
+    async def check_price_spike(self, region, threshold, *, was_active=False):
         return self.is_spike, self.price, {}
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import importlib.util
 from pathlib import Path
 import textwrap
 from types import SimpleNamespace
@@ -13,6 +14,18 @@ ROOT = Path(__file__).resolve().parent.parent
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
 ACTIONS_PATH = ROOT / "custom_components" / "power_sync" / "automations" / "actions.py"
 SUNGROW_INVERTER_PATH = ROOT / "custom_components" / "power_sync" / "inverters" / "sungrow.py"
+TARIFF_UTILS_PATH = ROOT / "custom_components" / "power_sync" / "tariff_utils.py"
+
+
+def _load_with_hysteresis():
+    """Load the real HD-15/HD-24 hysteresis helper from tariff_utils.py."""
+    spec = importlib.util.spec_from_file_location(
+        "power_sync_tariff_utils_for_curtailment_test", TARIFF_UTILS_PATH
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module.with_hysteresis
 
 
 def _function_source(name: str) -> str:
@@ -349,8 +362,11 @@ def test_ac_coupled_curtails_zero_export_when_exporting_and_battery_not_absorbin
             debug=lambda *args, **kwargs: None,
             info=lambda *args, **kwargs: None,
         ),
-        "entry": SimpleNamespace(options={}, data={}),
+        "entry": SimpleNamespace(options={}, data={}, entry_id="test_entry"),
         "get_live_status": get_live_status,
+        "hass": SimpleNamespace(data={}),
+        "DOMAIN": "power_sync",
+        "with_hysteresis": _load_with_hysteresis(),
     }
     exec(textwrap.dedent(_function_source("should_curtail_ac_coupled")), namespace)
 

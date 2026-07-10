@@ -815,6 +815,7 @@ from .currency import (
     normalize_currency,
 )
 from .inverters import get_inverter_controller
+from .tariff_utils import with_hysteresis
 from .optimization.coordinator import OptimizationCoordinator
 from .coordinator import (
     AmberPriceCoordinator,
@@ -2346,7 +2347,7 @@ class AEMOSpikeManager:
 
         # Check for spike
         is_spike, current_price, price_data = await self._aemo_client.check_price_spike(
-            self.region, self.threshold
+            self.region, self.threshold, was_active=self._in_spike_mode
         )
 
         if current_price is not None:
@@ -2777,7 +2778,7 @@ class GenericAEMOSpikeManager:
 
         # Check for spike
         is_spike, current_price, price_data = await self._aemo_client.check_price_spike(
-            self.region, self.threshold
+            self.region, self.threshold, was_active=self._in_spike_mode
         )
 
         if current_price is not None:
@@ -19609,6 +19610,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_INVERTER_RESTORE_SOC, DEFAULT_INVERTER_RESTORE_SOC)
         )
 
+        # HD-15: hysteresis on the uneconomic-export boundary (1c/kWh) so a price
+        # hovering at the threshold doesn't flap curtail/restore every tick.
+        entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+        export_uneconomic = False
+        if export_earnings is not None:
+            export_uneconomic = with_hysteresis(
+                export_earnings,
+                entry_data.get("ac_curtail_export_uneconomic", False),
+                enter_threshold=1.0,
+                exit_threshold=1.2,
+            )
+        entry_data["ac_curtail_export_uneconomic"] = export_uneconomic
+
         # PRIORITY CHECK 1: If import price is negative, ALWAYS curtail AC solar
         # Getting paid to import from grid is better than free solar - maximize grid import
         # This takes precedence over battery charging (charge from grid instead)
@@ -19622,7 +19636,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # PRIORITY CHECK 2: If exporting at uneconomic price - but allow if battery absorbing
         # When battery is charging AND has room (SOC < 90%), small exports are OK
         # The value of charging the battery (for later peak discharge) exceeds small export losses
-        if is_exporting and export_earnings is not None and export_earnings < 1:
+        if is_exporting and export_uneconomic:
             # Check if battery is absorbing the solar and has room
             battery_has_room = battery_soc is not None and battery_soc < 90
             if battery_is_charging and battery_has_room:
@@ -19665,7 +19679,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Check 4: If actually exporting (grid_power < 0) AND export earnings are below 1c/kWh
         # Only curtail when export is actually happening, not just when export price is uneconomic
         if grid_power is not None and grid_power < 0:  # Negative = exporting
-            if export_earnings is not None and export_earnings < 1:
+            if export_uneconomic:
                 _LOGGER.info(f"🔌 AC-COUPLED: Exporting {abs(grid_power):.0f}W at uneconomic price ({export_earnings:.2f}c/kWh) - should curtail")
                 return True
             else:
@@ -19675,7 +19689,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Check 3: Battery full (100%) AND export is unprofitable (< 1c/kWh)
         if battery_soc is not None and battery_soc >= 100:
-            if export_earnings is not None and export_earnings < 1:
+            if export_uneconomic:
                 _LOGGER.info(f"🔌 AC-COUPLED: Battery full ({battery_soc:.0f}%) AND export unprofitable ({export_earnings:.2f}c/kWh) - should curtail")
                 return True
             else:
@@ -19685,7 +19699,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Check 4: Solar producing but battery NOT absorbing AND exporting at uneconomic price
         # (battery_is_charging already computed above)
         if solar_power > 100 and not battery_is_charging and is_exporting:
-            if export_earnings is not None and export_earnings < 1:
+            if export_uneconomic:
                 _LOGGER.info(
                     f"🔌 AC-COUPLED: Solar producing {solar_power:.0f}W but battery NOT charging "
                     f"(battery_power={battery_power:.0f}W), exporting {abs(grid_power):.0f}W at uneconomic price "

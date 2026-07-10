@@ -16,6 +16,38 @@ from datetime import datetime, timedelta
 _LOGGER = logging.getLogger(__name__)
 
 
+def with_hysteresis(
+    current: float,
+    was_active: bool,
+    *,
+    enter_threshold: float,
+    exit_threshold: float,
+) -> bool:
+    """Evaluate a boundary condition with hysteresis (HD-15 / HD-24).
+
+    A single stateless `current >= threshold` (or `<`) comparison flaps
+    active/inactive on every poll when ``current`` hovers right at the
+    boundary. This adds a dead zone: once active, the condition only
+    releases past ``exit_threshold`` rather than back at ``enter_threshold``.
+
+    Whether "active" means "above" or "below" the nominal threshold is
+    inferred from which of the two thresholds is larger:
+
+    - ``enter_threshold >= exit_threshold``: active while high (e.g. a
+      price spike). Enters at ``current >= enter_threshold``; once active,
+      stays active until ``current`` drops below ``exit_threshold``.
+    - ``enter_threshold < exit_threshold``: active while low (e.g. an
+      uneconomic export price). Enters at ``current < enter_threshold``;
+      once active, stays active until ``current`` rises to ``exit_threshold``
+      or above.
+    """
+    active_when_high = enter_threshold >= exit_threshold
+    boundary = exit_threshold if was_active else enter_threshold
+    if active_when_high:
+        return current >= boundary
+    return current < boundary
+
+
 @contextmanager
 def _suppress_stdout():
     """Silence print() statements in the aemo_to_tariff library."""

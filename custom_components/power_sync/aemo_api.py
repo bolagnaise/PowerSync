@@ -20,6 +20,9 @@ from zoneinfo import ZoneInfo
 
 _LOGGER = logging.getLogger(__name__)
 
+# HD-24: dead-zone width for the spike-threshold hysteresis, in $/MWh.
+_SPIKE_HYSTERESIS_DEADBAND = 20.0
+
 # NEM time is always AEST (no daylight saving)
 NEM_TIMEZONE = ZoneInfo("Australia/Brisbane")
 
@@ -323,13 +326,16 @@ class AEMOAPIClient:
         return None
 
     async def check_price_spike(
-        self, region: str, threshold_dollars_per_mwh: float
+        self, region: str, threshold_dollars_per_mwh: float, *, was_active: bool = False
     ) -> tuple[bool, float | None, dict[str, Any] | None]:
         """Check if current price exceeds threshold (price spike detection).
 
         Args:
             region: Region code (NSW1, QLD1, VIC1, SA1, TAS1)
             threshold_dollars_per_mwh: Spike threshold in $/MWh (e.g., 300)
+            was_active: Whether the caller currently considers a spike in
+                progress. HD-24: applies hysteresis so a price hovering at
+                the threshold doesn't flap enter/exit every poll.
 
         Returns:
             tuple: (is_spike: bool, current_price: float, price_data: dict)
@@ -338,8 +344,15 @@ class AEMOAPIClient:
         if not price_data:
             return False, None, None
 
+        from .tariff_utils import with_hysteresis
+
         current_price = price_data["price"]
-        is_spike = current_price >= threshold_dollars_per_mwh
+        is_spike = with_hysteresis(
+            current_price,
+            was_active,
+            enter_threshold=threshold_dollars_per_mwh,
+            exit_threshold=threshold_dollars_per_mwh - _SPIKE_HYSTERESIS_DEADBAND,
+        )
 
         if is_spike:
             _LOGGER.warning(
