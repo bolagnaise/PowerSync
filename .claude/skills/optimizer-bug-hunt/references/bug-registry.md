@@ -610,6 +610,7 @@ CONFIRMED by adversarial verification unless noted:
   `entry_data.get("hold_soc_state", {})` but only the two force states are registered
   into `hass.data` in `async_setup_entry` — the hold dict is a closure-local. Fix
   alongside OB-5 (register it, or publish via dispatcher state).
+  > FIXED (2026-07-10, no dedicated sha — landed with the OB-5 hold_soc persistence work, 0ae52626) — hold_soc_state is registered into hass.data[DOMAIN][entry.entry_id]["hold_soc_state"] in async_setup_entry (__init__.py ~L23991-23994, carries an explicit `# HD-13:` comment) and read by the Battery Mode sensor (sensor.py ~L5753); it can now show Hold SoC.
 - **HD-14** Sigenergy `curtail()` captures `_original_pv_limit` only when None; after a
   reload-mid-curtailment the fresh controller re-captures 0, and `restore()` treats 0 as
   falsy → restores to safety-cap/unlimited, losing an inverter-side-only DNSP export cap.
