@@ -33,6 +33,7 @@ later call a no-op — no retry. Sungrow/FoxESS self-heal via their `restore_nor
 set_self_consumption through `restore_normal`.
 
 ### OB-3 — `disable()` strands Tesla's EV-preserve elevated reserve  [MAJOR — Tesla]
+> **FIXED in 431571f9 (2026-07-10)** — disable() restores pre-idle reserve ungated from `== "idle"`, adoption path skips when pending; test `tests/test_disable_ev_preserve_reserve.py`.
 Tesla lacks `set_no_discharge_mode`, so EV preserve uses
 `_set_idle_hold_mode(preserve_charge=True)` → reserve raised to ~SOC (≤80). In `disable()`
 the idle-cleanup is gated on `_last_executed_action == "idle"` (it is `"no_discharge"`),
@@ -91,6 +92,7 @@ restores. Also a leak (one timer set per reload). **Fix**: cancel
 states in `async_unload_entry`.
 
 ### OB-8 — Monitoring-enable cleanup misses the pre-idle elevated reserve  [MEDIUM, narrow]
+> **FIXED in 431571f9 (2026-07-10)** — monitoring-enable cleanup now includes `_restore_pre_idle_backup_reserve` with a bypass flag; test `tests/test_disable_ev_preserve_reserve.py`.
 Enabling monitoring fires a `force_restore` cleanup that releases force modes and native
 control (this REFUTES the broad "monitoring strands everything" claim), but nothing
 restores an IDLE/EV-elevated backup reserve, and afterwards the restore-side monitoring
@@ -239,6 +241,7 @@ returns — the required reload silently never happens. **Fix**: only set the fl
 new options differ (or clear it with a call_soon fallback / timestamp TTL).
 
 ### OB-22 — Live hardware-reserve change never reaches Sigenergy's restore target  [MEDIUM, Sigenergy-only]
+> **FIXED in a7d94d59 (2026-07-10)** — set_settings/_deferred_enable_restore now sync `controller._restore_backup_reserve_pct` on the persistent Sigenergy coordinator controller; test `tests/test_reserve_source_of_truth.py`.
 `set_settings` hardware block (~10808) updates `_startup_backup_reserve` and the LP but
 NOT `controller._restore_backup_reserve_pct`, which is assigned once at setup
 (`__init__.py` ~32856) and written back to hardware by `sigenergy.py::restore_normal`
@@ -454,6 +457,7 @@ hold_soc persistence pattern (0ae52626) and restore-or-exit on setup; clear
 capture-once + retry contract (42f21caa, c3101f2c).
 
 ### OB-39 — Residual unconditional `_skip_reload` sites outside `set_settings`  [MEDIUM]
+> **FIXED in bea6d395 + 0e330026 (2026-07-10)** — c8f514e1's persisted_changed no-op gate applied to the `:29908` reserve site (bea6d395) and the three API views at `:8051`/`:8080`/`:9053` (0e330026); tests `tests/test_reserve_source_of_truth.py`, `tests/test_force_mode_controls.py`.
 OB-21's fix (c8f514e1) covers `optimization/coordinator.py::set_settings` (9 sites) and the
 options-flow save handler — the registry entry's stated scope. The identical stuck-flag
 mechanism remains live at four sites in `__init__.py`, each doing
@@ -509,9 +513,11 @@ CONFIRMED by adversarial verification unless noted:
   get_backup_reserve` prefers the cloud cache (opposite of `get_tesla_operation_mode`),
   so the LP plans against the stale reserve while the UI shows the local one; the
   startup-resolve path can persist the stale value over the user's reserve.
+  > **FIXED in 9622cdaa (accessor) + 45a17127 (completion) (2026-07-10)** — added trust-tagged `read_backup_reserve` accessor (CLOUD_FRESH/CLOUD_STALE/ENTITY/LIVE/NONE) and gated all 4 coordinator adoption/persist sites on trust so untrusted CLOUD_STALE/ENTITY reads are never adopted or persisted; tests `tests/test_battery_controller_wrapper.py`, `tests/test_reserve_source_of_truth.py`.
 - **PW-6** `schedule_max_backup` (~`__init__.py:30086`) snapshots the reserve-to-restore
   from the stale cloud cache and its user-sourced restore clobbers the persisted user
   reserve. Force save paths have the same shape behind startup-reserve fallbacks.
+  > **FIXED in aca18d6e (2026-07-10)** — added `resolve_restore_target()` on the coordinator and routed `handle_schedule_max_backup`'s snapshot through it instead of reading the raw (possibly stale-cloud) `backup_reserve_percent` directly; test `tests/test_schedule_max_backup_reserve.py`.
 - **PW-7** `cached_export_rule` permanent pinning for curtailment-disabled users (new
   manual write + no-TTL cache preferred by the select, persisted across restarts).
 - **PW-8** VPP restore-branch caches `battery_ok` while re-posting the manual `never`
