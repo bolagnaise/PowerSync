@@ -517,7 +517,7 @@ CONFIRMED by adversarial verification unless noted:
 - **PW-6** `schedule_max_backup` (~`__init__.py:30086`) snapshots the reserve-to-restore
   from the stale cloud cache and its user-sourced restore clobbers the persisted user
   reserve. Force save paths have the same shape behind startup-reserve fallbacks.
-  > **FIXED in aca18d6e (2026-07-10)** — added `resolve_restore_target()` on the coordinator and routed `handle_schedule_max_backup`'s snapshot through it instead of reading the raw (possibly stale-cloud) `backup_reserve_percent` directly; test `tests/test_schedule_max_backup_reserve.py`.
+  > **FIXED in aca18d6e + 3fc40fa6 (2026-07-10)** — added `resolve_restore_target()` on the coordinator and routed `handle_schedule_max_backup`'s snapshot through it instead of reading the raw (possibly stale-cloud) `backup_reserve_percent` directly; 3fc40fa6 reordered the resolver to prefer the provenance-clean startup/persisted reserve over even a trusted live read (design §2 PW-6 / S3 — a PW-3/PW-4-corrupted local snapshot is LIVE-tagged but must not feed the `source="user"` restore); test `tests/test_schedule_max_backup_reserve.py`.
 - **PW-7** `cached_export_rule` permanent pinning for curtailment-disabled users (new
   manual write + no-TTL cache preferred by the select, persisted across restarts).
 - **PW-8** VPP restore-branch caches `battery_ok` while re-posting the manual `never`
