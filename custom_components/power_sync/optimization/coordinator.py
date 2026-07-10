@@ -3528,46 +3528,43 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             used_recommendation_floor = recommendation_floor is not None
 
             self._last_optimizer_result = result
-            self._current_schedule = result.schedule
+            schedule = result.schedule
             if self._should_spread_import_schedule():
-                self._current_schedule = self._spread_import_schedule(
-                    self._current_schedule,
+                schedule = self._spread_import_schedule(
+                    schedule,
                     import_prices,
                     spread_import_blocked,
                     soc,
                     solar_forecast=solar_forecast,
                     load_forecast=load_forecast,
                 )
-                result.schedule = self._current_schedule
             if self._should_spread_export_schedule():
-                self._current_schedule = self._spread_export_schedule(
-                    self._current_schedule,
+                schedule = self._spread_export_schedule(
+                    schedule,
                     battery_export_allowed,
                 )
-                result.schedule = self._current_schedule
-            self._current_schedule = self._bridge_short_export_gaps(
-                self._current_schedule,
+            schedule = self._bridge_short_export_gaps(
+                schedule,
                 export_prices,
             )
-            result.schedule = self._current_schedule
             if self._should_disable_idle_schedule():
-                self._current_schedule = self._disable_idle_schedule(
-                    self._current_schedule,
+                schedule = self._disable_idle_schedule(
+                    schedule,
                     solar_forecast=solar_forecast,
                     load_forecast=load_forecast,
                     initial_soc=soc,
                 )
-                result.schedule = self._current_schedule
             self._last_update_time = dt_util.now()
 
             # Apply off-grid curtailment overlay if enabled — converts
             # eligible SELF_CONSUMPTION/IDLE slots to OFF_GRID during
             # negative export price periods.
             if self._should_apply_offgrid_overlay():
-                self._current_schedule = self._apply_offgrid_overlay(
-                    self._current_schedule, export_prices,
+                schedule = self._apply_offgrid_overlay(
+                    schedule, export_prices,
                 )
-                result.schedule = self._current_schedule
+            self._current_schedule = schedule
+            result.schedule = schedule
 
             reserve_recommendation = dict(
                 getattr(result, "reserve_recommendation", {}) or {}
@@ -3607,43 +3604,40 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     export_reserve_floor=export_reserve_floor
                 )
                 self._last_optimizer_result = result
-                self._current_schedule = result.schedule
+                schedule = result.schedule
                 if self._should_spread_import_schedule():
-                    self._current_schedule = self._spread_import_schedule(
-                        self._current_schedule,
+                    schedule = self._spread_import_schedule(
+                        schedule,
                         import_prices,
                         spread_import_blocked,
                         soc,
                         solar_forecast=solar_forecast,
                         load_forecast=load_forecast,
                     )
-                    result.schedule = self._current_schedule
                 if self._should_spread_export_schedule():
-                    self._current_schedule = self._spread_export_schedule(
-                        self._current_schedule,
+                    schedule = self._spread_export_schedule(
+                        schedule,
                         battery_export_allowed,
                         export_reserve_floor=export_reserve_floor,
                     )
-                    result.schedule = self._current_schedule
-                self._current_schedule = self._bridge_short_export_gaps(
-                    self._current_schedule,
+                schedule = self._bridge_short_export_gaps(
+                    schedule,
                     export_prices,
                     export_reserve_floor=export_reserve_floor,
                 )
-                result.schedule = self._current_schedule
                 if self._should_disable_idle_schedule():
-                    self._current_schedule = self._disable_idle_schedule(
-                        self._current_schedule,
+                    schedule = self._disable_idle_schedule(
+                        schedule,
                         solar_forecast=solar_forecast,
                         load_forecast=load_forecast,
                         initial_soc=soc,
                     )
-                    result.schedule = self._current_schedule
                 if self._should_apply_offgrid_overlay():
-                    self._current_schedule = self._apply_offgrid_overlay(
-                        self._current_schedule, export_prices,
+                    schedule = self._apply_offgrid_overlay(
+                        schedule, export_prices,
                     )
-                    result.schedule = self._current_schedule
+                self._current_schedule = schedule
+                result.schedule = schedule
                 if reserve_recommendation and result.reserve_recommendation:
                     for recommendation_key in (
                         "configured_optimizer_reserve_percent",
@@ -6425,6 +6419,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         battery_discharge_w=0.0,
                     )
                 soc_cursor = _advance_soc(soc_cursor, new_actions[pos])
+                new_actions[pos].soc = round(soc_cursor, 4)
 
         return OptimizationSchedule(
             actions=new_actions,
@@ -6696,8 +6691,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         start_min = sh * 60 + sm
         end_min = eh * 60 + em
-        interval = self._config.interval_minutes
-        now = dt_util.now()
+        interval = max(1, int(self._config.interval_minutes or 5))
+        raw_now = dt_util.now()
+        now = raw_now.replace(
+            minute=(raw_now.minute // interval) * interval,
+            second=0, microsecond=0,
+        )
         result = [False] * n
 
         for t in range(n):
