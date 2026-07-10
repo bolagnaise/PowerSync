@@ -1152,6 +1152,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         new_data = dict(self._entry.data)
         new_options = dict(self._entry.options)
+        _persisted_before = (dict(new_data), dict(new_options))
         if auto_apply is not None:
             new_data[CONF_OPTIMIZATION_AUTO_APPLY_RESERVE] = bool(auto_apply)
             new_options[CONF_OPTIMIZATION_AUTO_APPLY_RESERVE] = bool(auto_apply)
@@ -1164,9 +1165,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = reserve
             new_options[CONF_OPTIMIZATION_BACKUP_RESERVE] = reserve
 
-        self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry_id, {})[
-            "_skip_reload"
-        ] = True
+        if (new_data, new_options) != _persisted_before:
+            self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry_id, {})[
+                "_skip_reload"
+            ] = True
         self.hass.config_entries.async_update_entry(
             self._entry,
             data=new_data,

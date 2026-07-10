@@ -30033,7 +30033,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if opt_coord:
                     opt_coord._startup_backup_reserve = percent
                 new_opts = {**entry.options, "_user_backup_reserve": percent}
-                entry_data["_skip_reload"] = True
+                if new_opts != dict(entry.options):
+                    entry_data["_skip_reload"] = True
                 hass.config_entries.async_update_entry(entry, options=new_opts)
                 _LOGGER.info("Persisted user backup reserve: %d%%", percent)
             else:

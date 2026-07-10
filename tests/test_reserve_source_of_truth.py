@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -649,3 +650,148 @@ def test_sigenergy_settings_view_post_syncs_restore_target_on_backup_reserve_cha
     block = source[set_call_idx:results_idx]
     assert "controller._restore_backup_reserve_pct = val" in block
     assert "if success" in block
+
+
+# ---------------------------------------------------------------------------
+# RSV-6 (OB-39 reserve-cluster sites): unconditional `_skip_reload` at
+# `optimization/coordinator.py::_persist_optimizer_reserve_settings` and
+# `__init__.py::handle_set_backup_reserve`'s persistence block. Both set
+# `_skip_reload = True` before `async_update_entry` with no comparison of
+# old vs. new persisted state, so a no-op resubmit of the same reserve
+# value strands the flag and swallows the NEXT genuine structural reload
+# (the OB-21 failure mode, on the reserve-settings axis).
+# ---------------------------------------------------------------------------
+
+
+def _persist_reserve_coordinator(opt_module, *, persisted_data=None, persisted_options=None):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator.entry_id = "entry-1"
+    coordinator._entry = SimpleNamespace(
+        data=dict(persisted_data or {}), options=dict(persisted_options or {})
+    )
+    coordinator._config = opt_module.OptimizationConfig(
+        interval_minutes=5,
+        horizon_hours=24,
+        backup_reserve=0.20,
+    )
+
+    class _ConfigEntries:
+        def async_update_entry(self, entry, **kwargs):
+            if "data" in kwargs:
+                entry.data = kwargs["data"]
+            if "options" in kwargs:
+                entry.options = kwargs["options"]
+
+    coordinator.hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": {}}},
+        config_entries=_ConfigEntries(),
+    )
+    return coordinator
+
+
+def test_persist_optimizer_reserve_settings_noop_does_not_set_skip_reload(opt_module):
+    """A resubmit of the same auto_apply/manual_reserve values must not
+    strand `_skip_reload` (OB-39 site 2)."""
+
+    const = sys.modules["power_sync.const"]
+    persisted = {
+        const.CONF_OPTIMIZATION_AUTO_APPLY_RESERVE: True,
+        const.CONF_OPTIMIZATION_MANUAL_RESERVE: 0.3,
+    }
+    coordinator = _persist_reserve_coordinator(
+        opt_module, persisted_data=persisted, persisted_options=dict(persisted)
+    )
+
+    coordinator._persist_optimizer_reserve_settings(auto_apply=True, manual_reserve=0.3)
+
+    assert "_skip_reload" not in coordinator.hass.data["power_sync"]["entry-1"]
+
+
+def test_persist_optimizer_reserve_settings_changed_sets_skip_reload(opt_module):
+    """A genuine value change must still set `_skip_reload` (guard against
+    an inverted no-op condition)."""
+
+    const = sys.modules["power_sync.const"]
+    persisted = {
+        const.CONF_OPTIMIZATION_AUTO_APPLY_RESERVE: False,
+        const.CONF_OPTIMIZATION_MANUAL_RESERVE: 0.3,
+    }
+    coordinator = _persist_reserve_coordinator(
+        opt_module, persisted_data=persisted, persisted_options=dict(persisted)
+    )
+
+    coordinator._persist_optimizer_reserve_settings(auto_apply=True, manual_reserve=0.3)
+
+    assert coordinator.hass.data["power_sync"]["entry-1"]["_skip_reload"] is True
+
+
+def _handle_set_backup_reserve_persist_source() -> str:
+    init_path = (
+        Path(__file__).resolve().parent.parent
+        / "custom_components"
+        / "power_sync"
+        / "__init__.py"
+    )
+    source = init_path.read_text()
+    start = source.index("# Persist the user's chosen backup reserve")
+    end = source.index("async def handle_set_operation_mode", start)
+    return source[start:end]
+
+
+def _run_persist_backup_reserve(*, hass, entry, percent, call):
+    block = textwrap.indent(_handle_set_backup_reserve_persist_source(), "    ")
+    func_src = f"async def _persist(hass, entry, percent, call, DOMAIN):\n{block}"
+    namespace = {
+        "_LOGGER": SimpleNamespace(
+            info=lambda *a, **k: None,
+            debug=lambda *a, **k: None,
+            error=lambda *a, **k: None,
+        )
+    }
+    exec(compile(func_src, "<handle_set_backup_reserve_persist>", "exec"), namespace)
+    return asyncio.run(namespace["_persist"](hass, entry, percent, call, "power_sync"))
+
+
+def _backup_reserve_hass(*, entry_id="entry-1"):
+    class _ConfigEntries:
+        def __init__(self):
+            self.calls = []
+
+        def async_update_entry(self, entry, **kwargs):
+            self.calls.append(kwargs)
+            if "options" in kwargs:
+                entry.options = kwargs["options"]
+
+    config_entries = _ConfigEntries()
+    hass = SimpleNamespace(
+        data={"power_sync": {entry_id: {}}},
+        config_entries=config_entries,
+    )
+    return hass, config_entries
+
+
+def test_handle_set_backup_reserve_noop_does_not_set_skip_reload():
+    """A resubmit of the currently-persisted percent must not strand
+    `_skip_reload` (OB-39 site 1)."""
+
+    hass, config_entries = _backup_reserve_hass()
+    entry = SimpleNamespace(entry_id="entry-1", options={"_user_backup_reserve": 20})
+    call = SimpleNamespace(data={})
+
+    _run_persist_backup_reserve(hass=hass, entry=entry, percent=20, call=call)
+
+    assert "_skip_reload" not in hass.data["power_sync"]["entry-1"]
+
+
+def test_handle_set_backup_reserve_changed_sets_skip_reload():
+    """A genuine percent change must still set `_skip_reload` (guard
+    against an inverted no-op condition)."""
+
+    hass, config_entries = _backup_reserve_hass()
+    entry = SimpleNamespace(entry_id="entry-1", options={"_user_backup_reserve": 20})
+    call = SimpleNamespace(data={})
+
+    _run_persist_backup_reserve(hass=hass, entry=entry, percent=30, call=call)
+
+    assert hass.data["power_sync"]["entry-1"]["_skip_reload"] is True
+    assert entry.options["_user_backup_reserve"] == 30
