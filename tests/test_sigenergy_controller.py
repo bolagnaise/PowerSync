@@ -495,3 +495,97 @@ def test_restore_normal_native_control_disables_remote_ems(sigenergy_module):
         ("write", controller.REG_REMOTE_EMS_ENABLE, [0]),
         ("set_backup_reserve", 25, None),
     ]
+
+
+def test_curtail_does_not_capture_curtailed_zero_as_original(sigenergy_module):
+    """HD-14 regression: a fresh controller (e.g. after a config reload) that
+    calls curtail() while the export limit register already reads 0 (already
+    curtailed) must not treat that 0 as the 'original' limit to restore to —
+    doing so silently discards an inverter-side-only DNSP export cap."""
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    assert controller._original_pv_limit is None
+
+    async def connect():
+        return True
+
+    async def get_current_export_limit():
+        # Simulates a fresh controller instance reading the register while
+        # it is already curtailed to zero (e.g. after a reload mid-curtailment).
+        return 0
+
+    async def write(address, values, slave_id=None):
+        return True
+
+    controller.connect = connect
+    controller._get_current_export_limit = get_current_export_limit
+    controller._write_holding_registers = write
+
+    assert asyncio.run(controller.curtail())
+
+    assert controller._original_pv_limit is None
+
+
+def test_restore_treats_stored_zero_as_valid_original_limit(sigenergy_module):
+    """HD-14 regression: restore() must not use a falsy check on
+    _original_pv_limit — a stored value of 0 is a legitimate captured limit
+    distinct from 'no original captured' (None) and must not fall through to
+    the safety-cap/unlimited fallback."""
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    controller._original_pv_limit = 0
+    writes: list[tuple[int, list[int]]] = []
+
+    async def connect():
+        return True
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, list(values)))
+        return True
+
+    async def get_status():
+        return types.SimpleNamespace(is_curtailed=False)
+
+    async def fail_safety_cap():
+        raise AssertionError(
+            "safety cap fallback should not be used when an original limit is stored"
+        )
+
+    controller.connect = connect
+    controller._write_holding_registers = write
+    controller.get_status = get_status
+    controller._get_effective_export_safety_cap_kw = fail_safety_cap
+
+    assert asyncio.run(controller.restore())
+
+    assert writes == [
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(0)),
+    ]
+
+
+def test_restore_uses_stored_original_limit_not_safety_cap(sigenergy_module):
+    """Regression guard: a legitimately captured original limit (e.g. a
+    5 kW DNSP cap) must still be restored verbatim, not overridden by the
+    safety-cap/unlimited fallback."""
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    controller._original_pv_limit = 5000
+    writes: list[tuple[int, list[int]]] = []
+
+    async def connect():
+        return True
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, list(values)))
+        return True
+
+    async def get_status():
+        return types.SimpleNamespace(is_curtailed=False)
+
+    controller.connect = connect
+    controller._write_holding_registers = write
+    controller.get_status = get_status
+
+    assert asyncio.run(controller.restore())
+
+    assert writes == [
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(5000)),
+    ]
+    assert controller._original_pv_limit is None

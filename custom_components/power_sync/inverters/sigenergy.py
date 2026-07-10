@@ -490,10 +490,15 @@ class SigenergyController(InverterController):
                 _LOGGER.error("Cannot curtail: failed to connect to Sigenergy")
                 return False
 
-            # Store original export limit if not already stored
+            # Store original export limit if not already stored. A read of
+            # EXPORT_LIMIT_ZERO here means the inverter is already curtailed
+            # (e.g. a fresh controller instance after a config reload
+            # mid-curtailment) — that is not a real "original" value, so
+            # don't capture it or the true DNSP cap would be lost on restore.
             if self._original_pv_limit is None:
-                self._original_pv_limit = await self._get_current_export_limit()
-                if self._original_pv_limit is not None:
+                current_limit = await self._get_current_export_limit()
+                if current_limit is not None and current_limit > self.EXPORT_LIMIT_ZERO:
+                    self._original_pv_limit = current_limit
                     limit_str = f"{self._original_pv_limit / self.GAIN_POWER} kW" if self._original_pv_limit < self.EXPORT_LIMIT_UNLIMITED else "unlimited"
                     _LOGGER.info(f"Stored original export limit: {limit_str}")
 
@@ -529,8 +534,10 @@ class SigenergyController(InverterController):
                 _LOGGER.error("Cannot restore: failed to connect to Sigenergy")
                 return False
 
-            # Use stored original limit, or fall back to safety cap, or unlimited
-            if self._original_pv_limit and self._original_pv_limit < self.EXPORT_LIMIT_UNLIMITED:
+            # Use stored original limit, or fall back to safety cap, or unlimited.
+            # Note: `is not None` (not truthy) — a stored 0 is a legitimate
+            # captured limit, distinct from "no original captured" (None).
+            if self._original_pv_limit is not None and self._original_pv_limit < self.EXPORT_LIMIT_UNLIMITED:
                 restore_value = self._original_pv_limit
             else:
                 safety_cap = await self._get_effective_export_safety_cap_kw()
