@@ -527,15 +527,21 @@ CONFIRMED by adversarial verification unless noted:
 - **PW-7** `cached_export_rule` permanent pinning for curtailment-disabled users (new
   manual write + no-TTL cache preferred by the select, persisted across restarts).
 - **PW-8** VPP restore-branch caches `battery_ok` while re-posting the manual `never`
-  (`__init__.py:22988`, pre-existing, newly reachable; plus wrong log + spurious
+  (`__init__.py:~23261-23323`, pre-existing, newly reachable; plus wrong log + spurious
   verification warning).
 - **PW-9** Unguarded store I/O in `update_cached_export_rule` now runs before the
   manual-override flags — storage exception skips the override, curtailment reverts the
-  user's rule.
+  user's rule (`~30454` write / `~30460` override flags).
 - **PW-10/11** (PLAUSIBLE) The inserted awaits open two race windows: curtailment cycle
   reading `manual_export_override=False` mid-write, and the force re-toggle guard
   reverting a user's mode change before `last_force_toggle_time` pops. Set flags before
   awaits / fire-and-forget the refresh.
+- **Re-verified 2026-07-10 against f0124ba1 (fix(tesla): reapply export rule for force
+  discharge)**: that commit rewrites only the force-discharge set/restore branches
+  (`__init__.py` ~25663/~28647) and adds guarded `update_cached_export_rule` writes there —
+  it does NOT touch the manual `set_grid_export` cache write (~30454), the select cache
+  preference, the curtailment restore branch (~23261-23323), or the ordering/race windows;
+  PW-7/8/9/10/11 remain open, PW-10/11 remain PLAUSIBLE.
 - Efficiency/reuse: awaited refresh adds ≤15 s to blocking Hold-SoC/Max-Backup chains
   (fire-and-forget it); double store write per export-rule change; helper + 30 s constant
   duplicated across number/select/sensor; wall-clock freshness gate (fix at the
