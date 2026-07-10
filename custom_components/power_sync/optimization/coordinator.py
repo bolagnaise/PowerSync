@@ -3927,7 +3927,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if now < self._current_schedule.actions[i + 1].timestamp:
                         return action
                 else:
-                    return action
+                    interval = max(
+                        1, int(getattr(self._config, "interval_minutes", 5) or 5)
+                    )
+                    schedule_end = action.timestamp + timedelta(minutes=interval)
+                    if now < schedule_end:
+                        return action
+                    return None
 
         return self._current_schedule.actions[0] if self._current_schedule.actions else None
 
@@ -10623,6 +10629,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Get data for HTTP API and mobile app."""
         optimizer_available = self._optimizer is not None
 
+        schedule_age_s = (
+            (dt_util.now() - self._last_update_time).total_seconds()
+            if self._last_update_time
+            else None
+        )
+        stale_after_s = 3 * max(1, int(getattr(self._config, "interval_minutes", 5) or 5)) * 60
+        is_stale = (
+            optimizer_available
+            and schedule_age_s is not None
+            and schedule_age_s > stale_after_s
+        )
+
         # Determine status message
         if optimizer_available:
             if self._current_schedule and self._current_schedule.actions:
@@ -10807,7 +10825,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else None
             ),
             "status": "active" if self._enabled and optimizer_available else "disabled",
-            "optimization_status": "active" if optimizer_available else "not_available",
+            "optimization_status": (
+                "stale"
+                if is_stale
+                else ("active" if optimizer_available else "not_available")
+            ),
+            "schedule_age_s": schedule_age_s,
             "current_action": current_action,
             "current_power_w": current_power_w,
             "planned_current_action": planned_current_action,

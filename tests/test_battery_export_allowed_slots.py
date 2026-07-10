@@ -2439,6 +2439,84 @@ def test_api_current_action_reflects_no_idle_runtime_override(opt_module):
     assert data["next_actions"][0]["planned_action"] == "idle"
 
 
+def test_get_current_action_returns_none_past_schedule_end(opt_module):
+    """HD-4: a schedule whose slots have all elapsed must not pin the final action forever."""
+    coordinator = _coordinator(opt_module, "octopus")
+    now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    actions = [
+        _api_action(now - timedelta(hours=4), "charge", 5000, 0.5),
+        _api_action(now - timedelta(hours=3, minutes=55), "charge", 5000, 0.5),
+        _api_action(now - timedelta(hours=3, minutes=50), "self_consumption", 0, 0.5),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+
+    assert coordinator._get_current_action() is None
+
+
+def test_api_reports_stale_status_when_schedule_and_update_time_expired(opt_module):
+    """HD-4: a swallowed solve failure must surface as a stale status, not silent 'active'."""
+    coordinator = _coordinator(opt_module, "octopus")
+    now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    stale_update_time = now - timedelta(hours=4)
+    actions = [
+        _api_action(now - timedelta(hours=4), "charge", 5000, 0.5),
+        _api_action(now - timedelta(hours=3, minutes=55), "charge", 5000, 0.5),
+        _api_action(now - timedelta(hours=3, minutes=50), "self_consumption", 0, 0.5),
+    ]
+    coordinator._current_schedule = SimpleNamespace(
+        actions=actions,
+        to_api_response=lambda: {
+            "timestamps": [action.timestamp.isoformat() for action in actions],
+            "soc": [action.soc for action in actions],
+            "actions": [action.action for action in actions],
+        },
+    )
+    coordinator._optimizer = object()
+    coordinator._enabled = True
+    coordinator._cost_function = opt_module.CostFunction("cost")
+    coordinator._last_update_time = stale_update_time
+    coordinator._last_optimizer_result = None
+    coordinator._last_executed_planned_action = None
+    coordinator._last_executed_action = None
+    coordinator._startup_backup_reserve = 20
+    coordinator._battery_specs_source = "config"
+    coordinator._planned_ev_load_entity_id = None
+    coordinator._ev_integration_enabled = False
+    coordinator._ev_configs = []
+    coordinator._ev_coordinator = None
+    coordinator._last_planned_ev_load_forecast_w = []
+    coordinator._last_import_prices = None
+    coordinator._last_export_prices = None
+    coordinator._last_display_import_prices = None
+    coordinator._last_display_export_prices = None
+    coordinator._actual_cost_today = 0.0
+    coordinator._actual_baseline_today = 0.0
+    coordinator._actual_import_cost_today = 0.0
+    coordinator._actual_export_earnings_today = 0.0
+    coordinator._actual_import_kwh_today = 0.0
+    coordinator._actual_export_kwh_today = 0.0
+    coordinator._actual_charge_kwh_today = 0.0
+    coordinator._actual_discharge_kwh_today = 0.0
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator.entry_id = "entry-1"
+    coordinator._get_actual_battery_power_w = lambda: 0
+    coordinator._get_daily_cost = lambda: 0.0
+    coordinator._get_daily_savings = lambda: 0.0
+    coordinator._get_predicted_cost_to_midnight = lambda: (0.0, 0.0)
+    coordinator._get_warnings = lambda: []
+    coordinator._summarise_load_forecast = lambda: None
+    coordinator._zerohero_cost_breakdown = lambda: {}
+    coordinator._should_spread_export_schedule = lambda: False
+    coordinator._should_spread_import_schedule = lambda: False
+    coordinator._get_demand_window_config = lambda: None
+    coordinator._is_in_demand_window_at = lambda timestamp: False
+
+    data = coordinator.get_api_data()
+
+    assert data["schedule_age_s"] == pytest.approx(4 * 3600, abs=5)
+    assert data["optimization_status"] == "stale"
+
+
 def test_api_current_action_uses_optimizer_force_command_power(opt_module):
     coordinator = _coordinator(opt_module, "octopus")
     now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
