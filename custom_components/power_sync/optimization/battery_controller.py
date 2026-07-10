@@ -9,10 +9,50 @@ Provides unified interface for controlling different battery systems:
 from __future__ import annotations
 
 import logging
+import time
+from typing import Any
 
 from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
+
+TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
+_BACKUP_RESERVE_WRITE_USER_KEY = "powerwall_local_backup_reserve_write_user_pct"
+
+
+def _coerce_reserve_percent(value: Any) -> int | None:
+    try:
+        reserve = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(100, reserve))
+
+
+def _pending_powerwall_local_reserve_write(
+    entry_data: dict[str, Any],
+) -> int | None:
+    """Return the user-facing target for an in-flight local reserve write."""
+    if not isinstance(entry_data, dict):
+        return None
+    return _coerce_reserve_percent(entry_data.get(_BACKUP_RESERVE_WRITE_USER_KEY))
+
+
+def _fresh_powerwall_local_snapshot(
+    entry_data: dict[str, Any],
+) -> Any | None:
+    """Return fresh local Powerwall data when available, otherwise None."""
+    coordinator = (
+        (entry_data.get("powerwall_local") or {}).get("coordinator")
+        if isinstance(entry_data, dict)
+        else None
+    )
+    data = getattr(coordinator, "data", None)
+    last_success_ts = getattr(coordinator, "last_success_ts", None)
+    if data is None or last_success_ts is None:
+        return None
+    if time.time() - last_success_ts > TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS:
+        return None
+    return data
 
 
 class BatteryControllerWrapper:
@@ -201,8 +241,27 @@ class BatteryControllerWrapper:
             for entry_id, entry_data in self.hass.data.get(DOMAIN, {}).items():
                 if not isinstance(entry_data, dict):
                     continue
-                # Tesla: prefer cached site_info because the HA number entity
-                # can fall back to a stale persisted user reserve during setup.
+                if self.battery_system == "tesla":
+                    pending_reserve = _pending_powerwall_local_reserve_write(
+                        entry_data
+                    )
+                    if pending_reserve is not None:
+                        return pending_reserve
+
+                    local_snap = _fresh_powerwall_local_snapshot(entry_data)
+                    local_reserve = getattr(
+                        local_snap,
+                        "backup_reserve_percent",
+                        None,
+                    )
+                    if local_reserve is not None:
+                        coerced = _coerce_reserve_percent(local_reserve)
+                        if coerced is not None:
+                            return coerced
+
+                # Tesla: prefer cached site_info over the HA number entity
+                # because the entity can fall back to a stale persisted user
+                # reserve during setup. Fresh local readback above wins.
                 tesla_coord = entry_data.get("tesla_coordinator") or entry_data.get("coordinator")
                 if tesla_coord and hasattr(tesla_coord, "_site_info_cache") and tesla_coord._site_info_cache:
                     reserve = tesla_coord._site_info_cache.get("backup_reserve_percent")

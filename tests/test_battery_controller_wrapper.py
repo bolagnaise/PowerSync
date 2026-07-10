@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
+import time
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -125,6 +126,100 @@ def test_tesla_backup_reserve_uses_cloud_site_info_cache_as_user_facing():
         controller = module.BatteryControllerWrapper(hass, "tesla")
 
         assert asyncio.run(controller.get_backup_reserve()) == 5
+    finally:
+        restore()
+
+
+def test_tesla_backup_reserve_prefers_fresh_local_readback_over_cloud_cache():
+    module, restore = _load_controller_module()
+    try:
+        hass = SimpleNamespace(
+            states=_States({}),
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "powerwall_local": {
+                            "coordinator": SimpleNamespace(
+                                data=SimpleNamespace(backup_reserve_percent=10),
+                                last_success_ts=time.time(),
+                            )
+                        },
+                        "tesla_coordinator": SimpleNamespace(
+                            _site_info_cache={
+                                "default_real_mode": "self_consumption",
+                                "backup_reserve_percent": 18,
+                            }
+                        ),
+                    }
+                }
+            },
+        )
+        controller = module.BatteryControllerWrapper(hass, "tesla")
+
+        assert asyncio.run(controller.get_backup_reserve()) == 10
+    finally:
+        restore()
+
+
+def test_tesla_backup_reserve_prefers_pending_local_write_over_readbacks():
+    module, restore = _load_controller_module()
+    try:
+        hass = SimpleNamespace(
+            states=_States({}),
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "powerwall_local_backup_reserve_write_user_pct": 10,
+                        "powerwall_local": {
+                            "coordinator": SimpleNamespace(
+                                data=SimpleNamespace(backup_reserve_percent=18),
+                                last_success_ts=time.time(),
+                            )
+                        },
+                        "tesla_coordinator": SimpleNamespace(
+                            _site_info_cache={
+                                "default_real_mode": "self_consumption",
+                                "backup_reserve_percent": 18,
+                            }
+                        ),
+                    }
+                }
+            },
+        )
+        controller = module.BatteryControllerWrapper(hass, "tesla")
+
+        assert asyncio.run(controller.get_backup_reserve()) == 10
+    finally:
+        restore()
+
+
+def test_tesla_backup_reserve_ignores_stale_local_readback():
+    module, restore = _load_controller_module()
+    try:
+        hass = SimpleNamespace(
+            states=_States({}),
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "powerwall_local": {
+                            "coordinator": SimpleNamespace(
+                                data=SimpleNamespace(backup_reserve_percent=10),
+                                last_success_ts=time.time() - 120,
+                            )
+                        },
+                        "tesla_coordinator": SimpleNamespace(
+                            _site_info_cache={
+                                "default_real_mode": "self_consumption",
+                                "backup_reserve_percent": 18,
+                            }
+                        ),
+                    }
+                }
+            },
+        )
+        controller = module.BatteryControllerWrapper(hass, "tesla")
+
+        assert asyncio.run(controller.get_backup_reserve()) == 18
     finally:
         restore()
 
