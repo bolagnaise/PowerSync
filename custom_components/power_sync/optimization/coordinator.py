@@ -84,6 +84,7 @@ CHARGE_ACTIONS = {"charge"}
 OPTIMIZER_FORCE_CHARGE_MIN_COMMITMENT = timedelta(minutes=20)
 OPTIMIZER_FORCE_DISCHARGE_MIN_COMMITMENT = timedelta(minutes=20)
 SUNGROW_INFERRED_RESTORE_COOLDOWN = timedelta(minutes=5)
+BELOW_RESERVE_RECOVERY_HOLD_MARGIN_SOC = 0.02
 
 
 def _flow_power_network_tariff_rate(
@@ -3935,6 +3936,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if charge_by_time_target_slot is not None
             else 0.0
         )
+        future_grid_charge_planned = [False] * len(actions)
+        has_future_grid_charge = False
+        for index in range(len(actions) - 1, -1, -1):
+            future_grid_charge_planned[index] = has_future_grid_charge
+            future_action = actions[index]
+            if (
+                getattr(future_action, "action", None) == "charge"
+                and float(getattr(future_action, "battery_charge_w", 0.0) or 0.0) > 0
+            ):
+                has_future_grid_charge = True
 
         def _forecast_w(values: list[float] | None, index: int) -> float:
             if not values or index >= len(values):
@@ -3989,7 +4000,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 and soc_cursor < charge_by_time_target_soc - 0.0001
                 and (action_name == "idle" or should_simulate_self_use)
             )
-            if should_preserve_charge_by_time_hold:
+            should_preserve_below_reserve_recovery_hold = (
+                action_name == "idle"
+                and soc_cursor is not None
+                and soc_cursor <= optimizer_reserve
+                and soc_cursor
+                <= self_consumption_floor
+                + BELOW_RESERVE_RECOVERY_HOLD_MARGIN_SOC
+                and future_grid_charge_planned[index]
+            )
+            if (
+                should_preserve_charge_by_time_hold
+                or should_preserve_below_reserve_recovery_hold
+            ):
                 new_actions.append(
                     ScheduleAction(
                         timestamp=action.timestamp,

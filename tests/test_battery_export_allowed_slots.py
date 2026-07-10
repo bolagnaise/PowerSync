@@ -4218,6 +4218,66 @@ def test_flow_power_no_idle_schedule_simulates_home_load(opt_module):
     assert converted.actions[1].soc < converted.actions[0].soc
 
 
+def test_no_idle_preserves_below_reserve_hold_before_planned_recovery_charge(
+    opt_module,
+):
+    coordinator = _coordinator(opt_module, "flow_power")
+    coordinator._config.disable_idle_enabled = True
+    coordinator._config.battery_capacity_wh = 42000
+    coordinator._config.max_discharge_w = 10000
+    coordinator._config.backup_reserve = 0.35
+    coordinator._startup_backup_reserve = 10
+
+    start = datetime(2026, 7, 10, 3, 30, tzinfo=timezone.utc)
+    schedule = opt_module.OptimizationSchedule(
+        actions=[
+            opt_module.ScheduleAction(
+                timestamp=start,
+                action="idle",
+                power_w=0,
+                soc=0.11,
+                battery_charge_w=0,
+                battery_discharge_w=0,
+            ),
+            opt_module.ScheduleAction(
+                timestamp=start + timedelta(minutes=5),
+                action="idle",
+                power_w=0,
+                soc=0.11,
+                battery_charge_w=0,
+                battery_discharge_w=0,
+            ),
+            opt_module.ScheduleAction(
+                timestamp=start + timedelta(minutes=10),
+                action="charge",
+                power_w=10000,
+                soc=0.13,
+                battery_charge_w=10000,
+                battery_discharge_w=0,
+            ),
+        ],
+        predicted_cost=1.23,
+        predicted_savings=0.45,
+        last_updated=start,
+    )
+
+    converted = coordinator._disable_idle_schedule(
+        schedule,
+        solar_forecast=[0.0, 0.0, 0.0],
+        load_forecast=[5.0, 5.0, 5.0],
+        initial_soc=0.11,
+    )
+
+    assert [action.action for action in converted.actions] == [
+        "idle",
+        "idle",
+        "charge",
+    ]
+    assert [action.soc for action in converted.actions] == [0.11, 0.11, 0.13]
+    assert converted.actions[0].battery_discharge_w == 0
+    assert converted.actions[1].battery_discharge_w == 0
+
+
 def test_no_idle_preserves_charge_by_time_prefill_hold(opt_module):
     coordinator = _coordinator(
         opt_module,
