@@ -548,8 +548,9 @@ CONFIRMED by adversarial verification unless noted:
   discharge)**: that commit rewrites only the force-discharge set/restore branches
   (`__init__.py` ~25663/~28647) and adds guarded `update_cached_export_rule` writes there —
   it does NOT touch the manual `set_grid_export` cache write (~30454), the select cache
-  preference, the curtailment restore branch (~23261-23323), or the ordering/race windows;
-  PW-7/8/9/10/11 remain open, PW-10/11 remain PLAUSIBLE.
+  preference, the curtailment restore branch (~23261-23323), or the ordering/race windows.
+  (All five since FIXED — see the annotations above; PW-10/11 were closed via
+  ordering-invariant hardening rather than a demonstrated race, per coordinator sign-off.)
 - Efficiency/reuse: awaited refresh adds ≤15 s to blocking Hold-SoC/Max-Backup chains
   (fire-and-forget it); double store write per export-rule change; helper + 30 s constant
   duplicated across number/select/sensor; wall-clock freshness gate (fix at the
