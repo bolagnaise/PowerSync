@@ -300,6 +300,10 @@ def _nem_region_from_iana_tz(tz_name: str | None) -> str | None:
 
 _FORCE_TARIFF_TEXT_MARKERS = ("force charge", "force discharge")
 _FORCE_TARIFF_CODE_PREFIXES = ("charge_", "discharge_")
+# Codes the AEMO spike / saving session managers upload themselves — never
+# adopt these as a restore baseline (they are the temporary money-event
+# tariff, not the user's real tariff). See _select_restorable_tesla_tariff.
+_MANAGER_OWN_TARIFF_CODES = ("aemo-spike", "octopus-saving-session")
 
 
 def _iter_tariff_strings(value: Any):
@@ -321,6 +325,8 @@ def _is_powersync_force_tariff(tariff: Any) -> bool:
 
     code = str(tariff.get("code", "")).strip().lower()
     if code.startswith(_FORCE_TARIFF_CODE_PREFIXES):
+        return True
+    if code in _MANAGER_OWN_TARIFF_CODES:
         return True
 
     utility = str(tariff.get("utility", "")).strip().lower()
@@ -2338,31 +2344,40 @@ class AEMOSpikeManager:
             }
             api_base = get_tesla_api_base_url(current_provider, self.entry.data.get(CONF_FLEET_API_BASE_URL))
 
-            # Step 1: Save current tariff
-            _LOGGER.info("Saving current tariff before spike mode...")
-            async with session.get(
-                f"{api_base}/api/1/energy_sites/{self.site_id}/tariff_rate",
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    resp = data.get("response", {})
-                    # Try tariff_content_v2 first, then fall back to tariff_content
-                    tariff_candidate = resp.get("tariff_content_v2") or resp.get("tariff_content")
-                    self._saved_tariff = _select_restorable_tesla_tariff(tariff_candidate)
-                    if self._saved_tariff:
-                        _LOGGER.info("Saved current tariff for restoration after spike (name: %s)",
-                                    self._saved_tariff.get("name", "unknown"))
-                    elif tariff_candidate:
-                        _LOGGER.warning(
-                            "Ignoring PowerSync force tariff from tariff_rate as spike restore baseline (name: %s)",
-                            _tariff_display_name(tariff_candidate),
-                        )
+            # Step 1: Save current tariff. Skip re-capture if we already have a
+            # baseline — a reload mid-spike can re-enter this method while the
+            # manager's OWN prior spike tariff is still live at Tesla, and
+            # re-fetching would clobber (or null out) a still-valid baseline.
+            if self._saved_tariff is None:
+                _LOGGER.info("Saving current tariff before spike mode...")
+                async with session.get(
+                    f"{api_base}/api/1/energy_sites/{self.site_id}/tariff_rate",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        resp = data.get("response", {})
+                        # Try tariff_content_v2 first, then fall back to tariff_content
+                        tariff_candidate = resp.get("tariff_content_v2") or resp.get("tariff_content")
+                        self._saved_tariff = _select_restorable_tesla_tariff(tariff_candidate)
+                        if self._saved_tariff:
+                            _LOGGER.info("Saved current tariff for restoration after spike (name: %s)",
+                                        self._saved_tariff.get("name", "unknown"))
+                        elif tariff_candidate:
+                            _LOGGER.warning(
+                                "Ignoring PowerSync force tariff from tariff_rate as spike restore baseline (name: %s)",
+                                _tariff_display_name(tariff_candidate),
+                            )
+                        else:
+                            _LOGGER.warning("Could not extract tariff from tariff_rate response - will try site_info")
                     else:
-                        _LOGGER.warning("Could not extract tariff from tariff_rate response - will try site_info")
-                else:
-                    _LOGGER.warning("tariff_rate endpoint returned %s - will try site_info fallback", response.status)
+                        _LOGGER.warning("tariff_rate endpoint returned %s - will try site_info fallback", response.status)
+            else:
+                _LOGGER.info(
+                    "Already have a saved tariff baseline (name: %s) - skipping re-capture",
+                    self._saved_tariff.get("name", "unknown"),
+                )
 
             # Step 2: Get and save current operation mode (and tariff fallback)
             async with session.get(
@@ -2918,27 +2933,36 @@ class SavingSessionTariffManager:
             }
             api_base = get_tesla_api_base_url(current_provider, self.entry.data.get(CONF_FLEET_API_BASE_URL))
 
-            # Step 1: Save current tariff
-            _LOGGER.info("Saving current tariff before session mode...")
-            async with session_http.get(
-                f"{api_base}/api/1/energy_sites/{self.site_id}/tariff_rate",
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    resp = data.get("response", {})
-                    tariff_candidate = resp.get("tariff_content_v2") or resp.get("tariff_content")
-                    self._saved_tariff = _select_restorable_tesla_tariff(tariff_candidate)
-                    if self._saved_tariff:
-                        _LOGGER.info("Saved current tariff (name: %s)", self._saved_tariff.get("name", "unknown"))
-                    elif tariff_candidate:
-                        _LOGGER.warning(
-                            "Ignoring PowerSync force tariff from tariff_rate as session restore baseline (name: %s)",
-                            _tariff_display_name(tariff_candidate),
-                        )
-                    else:
-                        _LOGGER.warning("Could not extract tariff from tariff_rate response")
+            # Step 1: Save current tariff. Skip re-capture if we already have a
+            # baseline — a reload mid-session can re-enter this method while
+            # the manager's OWN prior session tariff is still live at Tesla,
+            # and re-fetching would clobber (or null out) a still-valid baseline.
+            if self._saved_tariff is None:
+                _LOGGER.info("Saving current tariff before session mode...")
+                async with session_http.get(
+                    f"{api_base}/api/1/energy_sites/{self.site_id}/tariff_rate",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        resp = data.get("response", {})
+                        tariff_candidate = resp.get("tariff_content_v2") or resp.get("tariff_content")
+                        self._saved_tariff = _select_restorable_tesla_tariff(tariff_candidate)
+                        if self._saved_tariff:
+                            _LOGGER.info("Saved current tariff (name: %s)", self._saved_tariff.get("name", "unknown"))
+                        elif tariff_candidate:
+                            _LOGGER.warning(
+                                "Ignoring PowerSync force tariff from tariff_rate as session restore baseline (name: %s)",
+                                _tariff_display_name(tariff_candidate),
+                            )
+                        else:
+                            _LOGGER.warning("Could not extract tariff from tariff_rate response")
+            else:
+                _LOGGER.info(
+                    "Already have a saved tariff baseline (name: %s) - skipping re-capture",
+                    self._saved_tariff.get("name", "unknown"),
+                )
 
             # Step 2: Get and save current operation mode
             async with session_http.get(
