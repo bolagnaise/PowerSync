@@ -7606,6 +7606,8 @@ class SigenergySettingsView(HomeAssistantView):
                             status=400
                         )
                     success = await controller.set_backup_reserve(val)
+                    if success:
+                        controller._restore_backup_reserve_pct = val
                 except (ValueError, TypeError):
                     return web.json_response(
                         {"success": False, "error": "Invalid backup_reserve value"},
@@ -29750,6 +29752,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 if success:
                     _LOGGER.info(f"✅ SigEnergy backup reserve set to {percent}%")
+                    # Keep the persistent controller's restore target in sync
+                    # so the next force/restore cycle doesn't clobber the
+                    # value just applied (OB-22) — this branch's `controller`
+                    # is a scratch instance discarded above.
+                    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                    persistent_sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
+                    persistent_ctrl = getattr(persistent_sigenergy_coordinator, "_controller", None)
+                    if persistent_ctrl is not None and hasattr(persistent_ctrl, "_restore_backup_reserve_pct"):
+                        persistent_ctrl._restore_backup_reserve_pct = percent
                 else:
                     _LOGGER.error(f"Failed to set SigEnergy backup reserve")
 
@@ -34617,6 +34628,7 @@ class OptimizationSettingsView(HomeAssistantView):
                 opt_coord = self._hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {}).get("optimization_coordinator")
                 if opt_coord:
                     opt_coord._startup_backup_reserve = int(hw_reserve * 100)
+                    opt_coord._sync_brand_restore_targets(int(hw_reserve * 100))
                     _LOGGER.info("Updated startup backup reserve to %d%%", int(hw_reserve * 100))
 
             if "max_grid_export_w" in settings:

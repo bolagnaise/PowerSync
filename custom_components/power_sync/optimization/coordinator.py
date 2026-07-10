@@ -2917,6 +2917,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             (self._initial_optimization_not_before - dt_util.utcnow()).total_seconds(),
         )
 
+    def _sync_brand_restore_targets(self, reserve_pct: int) -> None:
+        """Push a live backup-reserve change to the brand's hardware restore
+        target (OB-22, Sigenergy-only).
+
+        Sigenergy's ``restore_normal()`` writes hardware from a separate
+        ``SigenergyController`` instance's ``_restore_backup_reserve_pct``,
+        which is only ever set at initial ``async_setup_entry`` and is not
+        the same object as ``self._executor.battery_controller`` (a thin
+        ``BatteryControllerWrapper``). Without this, a live reserve change
+        made without a reload survives only until the next force/restore
+        cycle, when hardware is written back to the stale value. No-op for
+        every other brand.
+        """
+        if getattr(self, "battery_system", None) != "sigenergy":
+            return
+        from ..const import DOMAIN as _SYNC_DOMAIN
+        entry_data = self.hass.data.get(_SYNC_DOMAIN, {}).get(self.entry_id, {})
+        sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
+        ctrl = getattr(sigenergy_coordinator, "_controller", None)
+        if ctrl is not None and hasattr(ctrl, "_restore_backup_reserve_pct"):
+            ctrl._restore_backup_reserve_pct = int(reserve_pct)
+
     async def _deferred_enable_restore(self) -> None:
         """Restore backup reserve and work mode in the background.
 
@@ -2944,6 +2966,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             if startup_reserve is not None:
                 self._startup_backup_reserve = startup_reserve
+                self._sync_brand_restore_targets(startup_reserve)
                 if self._optimizer:
                     self._optimizer.update_hardware_reserve(startup_reserve / 100)
                 _LOGGER.info(
@@ -2961,6 +2984,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         ):
                             startup_reserve = reading.percent
                             self._startup_backup_reserve = startup_reserve
+                            self._sync_brand_restore_targets(startup_reserve)
                             _LOGGER.info(
                                 "Optimizer startup: captured live backup reserve: %d%%",
                                 startup_reserve,
@@ -2971,6 +2995,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         startup_reserve = await battery.get_backup_reserve()
                         if startup_reserve is not None:
                             self._startup_backup_reserve = startup_reserve
+                            self._sync_brand_restore_targets(startup_reserve)
                             _LOGGER.info(
                                 "Optimizer startup: captured live backup reserve: %d%%",
                                 startup_reserve,
@@ -11239,6 +11264,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 hw_reserve = hw_reserve / 100.0
             hw_int = int(hw_reserve * 100)
             self._startup_backup_reserve = hw_int
+            self._sync_brand_restore_targets(hw_int)
             if self._optimizer:
                 self._optimizer.update_hardware_reserve(hw_reserve)
             # Persist to config entry

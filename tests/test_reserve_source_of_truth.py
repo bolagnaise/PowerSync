@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -481,3 +482,170 @@ def test_idle_hold_legacy_battery_unchanged(opt_module):
     asyncio.run(coordinator._set_idle_hold_mode(battery))
 
     assert coordinator._pre_idle_backup_reserve == 55
+
+
+# ---------------------------------------------------------------------------
+# Site 5: _sync_brand_restore_targets (OB-22)
+#
+# Sigenergy's restore_normal() writes hardware from a separate
+# SigenergyController instance's `_restore_backup_reserve_pct`
+# (custom_components/power_sync/inverters/sigenergy.py), which lives on
+# `entry_data["sigenergy_coordinator"]._controller` — NOT on
+# `self._executor.battery_controller` (a BatteryControllerWrapper with no
+# such attribute). Before this fix, a live reserve change (20 -> 10) made
+# without a reload never reached that controller: every subsequent
+# force/restore cycle wrote hardware back to the stale value.
+# ---------------------------------------------------------------------------
+
+
+def _sigenergy_coordinator_with_target(opt_module, *, initial_pct: int):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator.battery_system = "sigenergy"
+    coordinator.entry_id = "entry-1"
+    sigenergy_controller = SimpleNamespace(_restore_backup_reserve_pct=initial_pct)
+    sigenergy_coordinator = SimpleNamespace(_controller=sigenergy_controller)
+    coordinator.hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": {"sigenergy_coordinator": sigenergy_coordinator}}}
+    )
+    return coordinator, sigenergy_controller
+
+
+def test_sync_brand_restore_targets_sigenergy_updates_persistent_controller(opt_module):
+    coordinator, ctrl = _sigenergy_coordinator_with_target(opt_module, initial_pct=20)
+
+    coordinator._sync_brand_restore_targets(10)
+
+    assert ctrl._restore_backup_reserve_pct == 10
+    assert isinstance(ctrl._restore_backup_reserve_pct, int)
+
+
+def test_sync_brand_restore_targets_non_sigenergy_is_noop(opt_module):
+    coordinator, ctrl = _sigenergy_coordinator_with_target(opt_module, initial_pct=20)
+    coordinator.battery_system = "tesla"
+
+    coordinator._sync_brand_restore_targets(10)
+
+    assert ctrl._restore_backup_reserve_pct == 20
+
+
+def test_sync_brand_restore_targets_no_sigenergy_coordinator_is_safe_noop(opt_module):
+    """No sigenergy_coordinator in hass.data (not yet set up) must not raise."""
+
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator.battery_system = "sigenergy"
+    coordinator.entry_id = "entry-1"
+    coordinator.hass = SimpleNamespace(data={"power_sync": {"entry-1": {}}})
+
+    coordinator._sync_brand_restore_targets(10)  # must not raise
+
+
+def test_set_settings_hardware_reserve_syncs_sigenergy_restore_target(opt_module):
+    """set_settings's hardware_backup_reserve block must push the new value
+    to the persistent Sigenergy controller, not just `_startup_backup_reserve`."""
+
+    from test_battery_export_allowed_slots import _coordinator
+
+    coordinator = _coordinator(
+        opt_module,
+        "amber",
+        hardware_backup_reserve=0.20,
+    )
+    coordinator.entry_id = "entry-1"
+    coordinator.battery_system = "sigenergy"
+    coordinator._startup_backup_reserve = 20
+    coordinator._optimizer = SimpleNamespace(update_hardware_reserve=lambda reserve: None)
+
+    sigenergy_controller = SimpleNamespace(_restore_backup_reserve_pct=20)
+    sigenergy_coordinator = SimpleNamespace(_controller=sigenergy_controller)
+
+    class _ConfigEntries:
+        def async_update_entry(self, entry, **kwargs):
+            if "data" in kwargs:
+                entry.data = kwargs["data"]
+            if "options" in kwargs:
+                entry.options = kwargs["options"]
+
+    coordinator.hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": {"sigenergy_coordinator": sigenergy_coordinator}}},
+        config_entries=_ConfigEntries(),
+    )
+
+    result = asyncio.run(coordinator.set_settings({"hardware_backup_reserve": 10}))
+
+    assert result["success"] is True
+    assert coordinator._startup_backup_reserve == 10
+    assert sigenergy_controller._restore_backup_reserve_pct == 10
+
+
+def test_deferred_enable_restore_syncs_sigenergy_restore_target(opt_module):
+    """_deferred_enable_restore's no-config trusted-reading fallback must
+    also push the resolved reserve to the persistent Sigenergy controller."""
+
+    bc = _bc_module()
+    battery = _FakeBatteryWithTrust(45, bc.ReserveTrust.LIVE)
+    coordinator = _deferred_restore_coordinator(opt_module, battery)
+    coordinator.battery_system = "sigenergy"
+
+    sigenergy_controller = SimpleNamespace(_restore_backup_reserve_pct=20)
+    sigenergy_coordinator = SimpleNamespace(_controller=sigenergy_controller)
+    coordinator.hass.data = {
+        "power_sync": {"entry-1": {"sigenergy_coordinator": sigenergy_coordinator}}
+    }
+
+    asyncio.run(coordinator._deferred_enable_restore())
+
+    assert coordinator._startup_backup_reserve == 45
+    assert sigenergy_controller._restore_backup_reserve_pct == 45
+
+
+# ---------------------------------------------------------------------------
+# Site 5b: SigenergySettingsView.post (OB-22 fifth surface)
+#
+# /api/power_sync/sigenergy_settings writes `backup_reserve` straight to the
+# PERSISTENT sigenergy_coordinator._controller via
+# `controller.set_backup_reserve(val)`, but (before this fix) never updated
+# that same controller's `_restore_backup_reserve_pct`. Because
+# restore_normal() runs on that identical instance and writes hardware from
+# `_restore_backup_reserve_pct`, a reserve change made through this endpoint
+# with no reload was clobbered back to the stale value on the next
+# force/restore cycle -- unlike the scratch-controller case in
+# handle_set_backup_reserve, `controller` here already IS the persistent
+# instance, so the fix is a direct assignment with no extra resolution.
+# ---------------------------------------------------------------------------
+
+
+def _sigenergy_settings_view_post_source():
+    import ast
+
+    init_path = (
+        Path(__file__).resolve().parent.parent
+        / "custom_components"
+        / "power_sync"
+        / "__init__.py"
+    )
+    source = init_path.read_text()
+    module = ast.parse(source)
+    for node in module.body:
+        if isinstance(node, ast.ClassDef) and node.name == "SigenergySettingsView":
+            for child in node.body:
+                if isinstance(child, ast.AsyncFunctionDef) and child.name == "post":
+                    segment = ast.get_source_segment(source, child)
+                    assert segment is not None
+                    return segment
+    raise AssertionError("SigenergySettingsView.post not found")
+
+
+def test_sigenergy_settings_view_post_syncs_restore_target_on_backup_reserve_change():
+    """The `backup_reserve` branch of the HTTP handler must keep the
+    persistent controller's `_restore_backup_reserve_pct` in sync with the
+    value just written to hardware, gated on `success` (not unconditional)."""
+
+    source = _sigenergy_settings_view_post_source()
+
+    body_idx = source.index('"backup_reserve" in body')
+    set_call_idx = source.index("controller.set_backup_reserve(val)", body_idx)
+    results_idx = source.index('results["backup_reserve"] = success', set_call_idx)
+
+    block = source[set_call_idx:results_idx]
+    assert "controller._restore_backup_reserve_pct = val" in block
+    assert "if success" in block
