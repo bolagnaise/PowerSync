@@ -8,6 +8,8 @@ Provides unified interface for controlling different battery systems:
 """
 from __future__ import annotations
 
+import collections
+import enum
 import logging
 import time
 from typing import Any
@@ -17,7 +19,23 @@ from homeassistant.core import HomeAssistant
 _LOGGER = logging.getLogger(__name__)
 
 TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
+TESLA_SITE_INFO_MAX_AGE_SECONDS = 900
 _BACKUP_RESERVE_WRITE_USER_KEY = "powerwall_local_backup_reserve_write_user_pct"
+
+
+class ReserveTrust(enum.Enum):
+    """Provenance tag for a backup-reserve reading."""
+
+    LIVE = "live"
+    CLOUD_FRESH = "cloud_fresh"
+    CLOUD_STALE = "cloud_stale"
+    ENTITY = "entity"
+    NONE = "none"
+
+
+ReserveReading = collections.namedtuple("ReserveReading", "percent trust source")
+
+TRUSTED_FOR_PERSIST = frozenset({ReserveTrust.LIVE, ReserveTrust.CLOUD_FRESH})
 
 
 def _coerce_reserve_percent(value: Any) -> int | None:
@@ -228,13 +246,13 @@ class BatteryControllerWrapper:
             _LOGGER.error(f"Set autonomous mode failed: {e}", exc_info=True)
             return False
 
-    async def get_backup_reserve(self) -> int | None:
+    async def read_backup_reserve(self) -> ReserveReading:
         """
-        Read current battery backup reserve percentage.
+        Read current battery backup reserve percentage, tagged with provenance.
 
         Reads from the energy coordinator's underlying controller (Modbus/API),
         current Tesla HA entities, or the Tesla coordinator's cached site_info.
-        Returns None if not available.
+        Returns ReserveReading(None, ReserveTrust.NONE, ...) if not available.
         """
         try:
             from ..const import DOMAIN
@@ -246,7 +264,7 @@ class BatteryControllerWrapper:
                         entry_data
                     )
                     if pending_reserve is not None:
-                        return pending_reserve
+                        return ReserveReading(pending_reserve, ReserveTrust.LIVE, "pending_local_write")
 
                     local_snap = _fresh_powerwall_local_snapshot(entry_data)
                     local_reserve = getattr(
@@ -257,7 +275,7 @@ class BatteryControllerWrapper:
                     if local_reserve is not None:
                         coerced = _coerce_reserve_percent(local_reserve)
                         if coerced is not None:
-                            return coerced
+                            return ReserveReading(coerced, ReserveTrust.LIVE, "local_snapshot")
 
                 # Tesla: prefer cached site_info over the HA number entity
                 # because the entity can fall back to a stale persisted user
@@ -266,7 +284,14 @@ class BatteryControllerWrapper:
                 if tesla_coord and hasattr(tesla_coord, "_site_info_cache") and tesla_coord._site_info_cache:
                     reserve = tesla_coord._site_info_cache.get("backup_reserve_percent")
                     if reserve is not None:
-                        return int(reserve)
+                        last_fetch = getattr(tesla_coord, "_site_info_last_fetch", 0) or 0
+                        age = time.monotonic() - last_fetch
+                        trust = (
+                            ReserveTrust.CLOUD_FRESH
+                            if age <= TESLA_SITE_INFO_MAX_AGE_SECONDS
+                            else ReserveTrust.CLOUD_STALE
+                        )
+                        return ReserveReading(int(reserve), trust, "site_info_cache")
                 # Prefer the coordinator's latest data when available. This
                 # also covers wrappers like DualSungrowCoordinator and entity-
                 # based bridges whose underlying controller may not expose a
@@ -289,21 +314,31 @@ class BatteryControllerWrapper:
                     for data_key in ("backup_reserve", "min_soc"):
                         reserve = data.get(data_key)
                         if reserve is not None:
-                            return int(float(reserve))
+                            return ReserveReading(int(float(reserve)), ReserveTrust.LIVE, coord_key)
 
                 # Modbus-based batteries: read from controller
                 for coord_key in ("sigenergy_coordinator", "sungrow_coordinator", "foxess_coordinator", "goodwe_coordinator", "esy_sunhome_coordinator", "solax_coordinator", "saj_h2_coordinator", "fronius_reserva_coordinator", "neovolt_coordinator", "solaredge_coordinator", "anker_solix_coordinator"):
                     coord = entry_data.get(coord_key)
                     if coord and hasattr(coord, "_controller") and hasattr(coord._controller, "get_backup_reserve"):
-                        return await coord._controller.get_backup_reserve()
+                        reserve = await coord._controller.get_backup_reserve()
+                        return ReserveReading(reserve, ReserveTrust.LIVE, coord_key)
             if self.battery_system == "tesla" and hasattr(self.hass, "states"):
                 state = self.hass.states.get("number.power_sync_tesla_backup_reserve")
                 if state and state.state not in (None, "unknown", "unavailable"):
-                    return int(float(state.state))
-            return None
+                    return ReserveReading(int(float(state.state)), ReserveTrust.ENTITY, "ha_entity")
+            return ReserveReading(None, ReserveTrust.NONE, "unavailable")
         except Exception as e:
             _LOGGER.debug(f"get_backup_reserve failed: {e}")
-            return None
+            return ReserveReading(None, ReserveTrust.NONE, "error")
+
+    async def get_backup_reserve(self) -> int | None:
+        """
+        Read current battery backup reserve percentage.
+
+        Thin wrapper over read_backup_reserve() for callers that only need
+        the value, not its provenance.
+        """
+        return (await self.read_backup_reserve()).percent
 
     async def get_tesla_operation_mode(self) -> str | None:
         """

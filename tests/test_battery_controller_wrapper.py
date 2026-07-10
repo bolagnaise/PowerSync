@@ -266,3 +266,201 @@ def test_backup_reserve_reads_coordinator_data_before_controller():
         assert asyncio.run(controller.get_backup_reserve()) == 15
     finally:
         restore()
+
+
+def test_read_backup_reserve_pending_local_write_is_live():
+    module, restore = _load_controller_module()
+    try:
+        hass = SimpleNamespace(
+            states=_States({}),
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "powerwall_local_backup_reserve_write_user_pct": 10,
+                        "powerwall_local": {
+                            "coordinator": SimpleNamespace(
+                                data=SimpleNamespace(backup_reserve_percent=18),
+                                last_success_ts=time.time(),
+                            )
+                        },
+                        "tesla_coordinator": SimpleNamespace(
+                            _site_info_cache={"backup_reserve_percent": 18},
+                            _site_info_last_fetch=time.monotonic(),
+                        ),
+                    }
+                }
+            },
+        )
+        controller = module.BatteryControllerWrapper(hass, "tesla")
+
+        reading = asyncio.run(controller.read_backup_reserve())
+
+        assert reading.percent == 10
+        assert reading.trust == module.ReserveTrust.LIVE
+        assert asyncio.run(controller.get_backup_reserve()) == reading.percent
+    finally:
+        restore()
+
+
+def test_read_backup_reserve_fresh_local_snapshot_is_live():
+    module, restore = _load_controller_module()
+    try:
+        hass = SimpleNamespace(
+            states=_States({}),
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "powerwall_local": {
+                            "coordinator": SimpleNamespace(
+                                data=SimpleNamespace(backup_reserve_percent=10),
+                                last_success_ts=time.time(),
+                            )
+                        },
+                        "tesla_coordinator": SimpleNamespace(
+                            _site_info_cache={"backup_reserve_percent": 18},
+                            _site_info_last_fetch=time.monotonic(),
+                        ),
+                    }
+                }
+            },
+        )
+        controller = module.BatteryControllerWrapper(hass, "tesla")
+
+        reading = asyncio.run(controller.read_backup_reserve())
+
+        assert reading.percent == 10
+        assert reading.trust == module.ReserveTrust.LIVE
+        assert asyncio.run(controller.get_backup_reserve()) == reading.percent
+    finally:
+        restore()
+
+
+def test_read_backup_reserve_cloud_cache_fresh_fetch_is_cloud_fresh():
+    module, restore = _load_controller_module()
+    try:
+        hass = SimpleNamespace(
+            states=_States({}),
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "tesla_coordinator": SimpleNamespace(
+                            _site_info_cache={"backup_reserve_percent": 20},
+                            _site_info_last_fetch=time.monotonic(),
+                        ),
+                    }
+                }
+            },
+        )
+        controller = module.BatteryControllerWrapper(hass, "tesla")
+
+        reading = asyncio.run(controller.read_backup_reserve())
+
+        assert reading.percent == 20
+        assert reading.trust == module.ReserveTrust.CLOUD_FRESH
+        assert asyncio.run(controller.get_backup_reserve()) == reading.percent
+    finally:
+        restore()
+
+
+def test_read_backup_reserve_cloud_cache_old_fetch_is_cloud_stale():
+    module, restore = _load_controller_module()
+    try:
+        hass = SimpleNamespace(
+            states=_States({}),
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "tesla_coordinator": SimpleNamespace(
+                            _site_info_cache={"backup_reserve_percent": 20},
+                            _site_info_last_fetch=time.monotonic()
+                            - module.TESLA_SITE_INFO_MAX_AGE_SECONDS
+                            - 1,
+                        ),
+                    }
+                }
+            },
+        )
+        controller = module.BatteryControllerWrapper(hass, "tesla")
+
+        reading = asyncio.run(controller.read_backup_reserve())
+
+        assert reading.percent == 20
+        assert reading.trust == module.ReserveTrust.CLOUD_STALE
+        assert asyncio.run(controller.get_backup_reserve()) == reading.percent
+    finally:
+        restore()
+
+
+def test_read_backup_reserve_missing_last_fetch_treated_as_cloud_stale():
+    module, restore = _load_controller_module()
+    try:
+        hass = SimpleNamespace(
+            states=_States({}),
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "entry": SimpleNamespace(data={"powerwall_local_paired": True}),
+                        "tesla_coordinator": SimpleNamespace(
+                            _site_info_cache={
+                                "default_real_mode": "self_consumption",
+                                "backup_reserve_percent": 5,
+                            }
+                        ),
+                    }
+                }
+            },
+        )
+        controller = module.BatteryControllerWrapper(hass, "tesla")
+
+        reading = asyncio.run(controller.read_backup_reserve())
+
+        assert reading.percent == 5
+        assert reading.trust == module.ReserveTrust.CLOUD_STALE
+        assert asyncio.run(controller.get_backup_reserve()) == reading.percent
+    finally:
+        restore()
+
+
+def test_read_backup_reserve_no_cloud_cache_falls_back_to_entity():
+    module, restore = _load_controller_module()
+    try:
+        hass = SimpleNamespace(
+            states=_States({"number.power_sync_tesla_backup_reserve": "0.0"}),
+            data={"power_sync": {"entry-1": {}}},
+        )
+        controller = module.BatteryControllerWrapper(hass, "tesla")
+
+        reading = asyncio.run(controller.read_backup_reserve())
+
+        assert reading.percent == 0
+        assert reading.trust == module.ReserveTrust.ENTITY
+        assert asyncio.run(controller.get_backup_reserve()) == reading.percent
+    finally:
+        restore()
+
+
+def test_read_backup_reserve_non_tesla_coordinator_data_is_live():
+    module, restore = _load_controller_module()
+    try:
+        hass = SimpleNamespace(
+            states=_States({}),
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "sungrow_coordinator": SimpleNamespace(
+                            data={"backup_reserve": 15},
+                            _controller=SimpleNamespace(),
+                        )
+                    }
+                }
+            },
+        )
+        controller = module.BatteryControllerWrapper(hass, "sungrow")
+
+        reading = asyncio.run(controller.read_backup_reserve())
+
+        assert reading.percent == 15
+        assert reading.trust == module.ReserveTrust.LIVE
+        assert asyncio.run(controller.get_backup_reserve()) == reading.percent
+    finally:
+        restore()
