@@ -581,29 +581,40 @@ CONFIRMED by adversarial verification unless noted:
 - **HD-1** Open-Meteo tail carry-forward: zero-fill past the last forecast point to match
   Solcast (`load_estimator.py::_parse_open_meteo_watts`). Currently benign (real data ends
   with night zeros).
+  > **FIXED in 91575e65 (2026-07-10)** — `_parse_open_meteo_watts` now zero-fills past the last forecast point instead of carrying the last value forward, matching Solcast; test tests/test_load_estimator.py.
 - **HD-2** Atomic schedule swap: `_run_optimization` reassigns `_current_schedule` through
   the override chain; build into a local and swap once at the end (mid-chain raise
   currently leaves a partial schedule for ≤1 cycle).
+  > **FIXED in 6254304a (2026-07-10)** — `_run_optimization` now builds the overlay chain into a local and commits `_current_schedule` once at the end; test tests/test_run_optimization_atomicity.py.
 - **HD-3** `_pad_array` should honor `default` for non-empty arrays (dead branch today,
   footgun for future callers).
+  > **FIXED in 91575e65 (2026-07-10)** — `_pad_array` now applies `default` when padding non-empty short arrays instead of carrying the last value; test tests/test_battery_optimizer_export_guard.py::test_pad_array_honors_default_for_short_nonempty_array.
 - **HD-4** Surface solver failure/staleness: swallowed exceptions leave
   `optimization_status` "active" with only `last_optimization` silently aging; expired
   schedules pin their final slot. Add an error/stale field + age guard in
   `_get_current_action`.
+  > **FIXED in 0cd94cc5 (2026-07-10)** — `_get_current_action` now returns None past schedule end instead of pinning the stale final slot, and `optimization_status` exposes a stale/age signal; test tests/test_battery_export_allowed_slots.py.
 - **HD-5** `_spread_import_schedule` keeps the LP's stale per-slot `soc` labels; downstream
   spread-export floor checks read them.
+  > **FIXED in 6254304a (2026-07-10)** — spread positions now stamp the advanced SOC in place after the import spread instead of leaving the LP's stale label; test tests/test_spread_import_soc_stamping.py.
 - **HD-6** b9cb2c7f remaining gap: an export window split by one sub-100 W slot becomes two
   runs and run 1's bridge floor double-counts run 2's home load (over-reservation).
+  > **FIXED in a38cd189 (2026-07-10)** — the bridge scan now stops at the next export run's start instead of scanning past it, so run 1's floor no longer double-counts run 2's home load; test tests/test_reserve_floor_scoping.py::test_bridge_scan_stops_at_next_export_run_hd6.
 - **HD-7** LP-side bridge floor (`_priority_export_reserve_floor_slots`) is blind to
   ZeroCharge import-bonus windows (cheap-recharge break uses raw import prices).
+  > **FIXED in a38cd189 (2026-07-10)** — `_priority_export_reserve_floor_slots` accepts an `import_bonus_prices` kwarg so the bridge break check nets the ZeroCharge import-bonus price instead of raw import prices; test tests/test_battery_optimizer_export_guard.py::test_priority_export_bridge_nets_import_bonus_hd7.
 - **HD-8** `_time_window_slots` uses an unfloored `now` → Happy Hour/Export Boost masks can
   shift one slot vs the price grid.
+  > **FIXED in 6254304a (2026-07-10)** — `_time_window_slots` floors `now` with the same epoch expression as the LP's slot-0 origin, aligning window masks to the price grid; test tests/test_time_window_slots_flooring.py.
 - **HD-9** HiGHS time-limit incumbents are discarded (falls to greedy though a
   near-optimal LP point exists).
+  > **FIXED in 91575e65 (2026-07-10)** — `_solve_lp_highs` now keeps a feasible time-limit incumbent instead of discarding it to the greedy fallback; test tests/test_battery_optimizer_export_guard.py::test_solve_lp_highs_keeps_time_limit_incumbent.
 - **HD-10** `max_battery_export_w` isn't sign-normalized like the grid limits (negative
   input → inverted bound → malformed column).
+  > **FIXED in 91575e65 (2026-07-10)** — `max_battery_export_w` is now normalized via `_normalize_optional_export_power_w` (negative → None, 0 preserved) instead of being used unsigned; test tests/test_battery_optimizer_export_guard.py::test_negative_max_battery_export_w_is_normalized_not_inverted.
 - **HD-11** Solar nowcast derate persists overnight (no recovery when forecast < 0.5 kW);
   can suppress next-morning decisions ~40 min.
+  > **FIXED in 91575e65 (2026-07-10)** — `_apply_solar_nowcast_derate` now recovers the stored derate on low-forecast slots instead of holding it frozen overnight; test tests/test_optimization_price_source.py.
 - **HD-12** ~~Sigenergy `set_self_consumption` service doesn't reset
   `REG_ESS_MAX_DISCHARGE_LIMIT`~~ — FIXED in 1d245f79 (routes through restore_normal).
 - **HD-13** Battery Mode sensor can never show Hold SoC: `sensor.py` reads
@@ -614,13 +625,16 @@ CONFIRMED by adversarial verification unless noted:
 - **HD-14** Sigenergy `curtail()` captures `_original_pv_limit` only when None; after a
   reload-mid-curtailment the fresh controller re-captures 0, and `restore()` treats 0 as
   falsy → restores to safety-cap/unlimited, losing an inverter-side-only DNSP export cap.
+  > **FIXED in 731380b6 (2026-07-10)** — `curtail()` distinguishes an already-curtailed 0 from an unset limit via `is not None` capture, and `restore()` treats a stored 0 as a valid original limit instead of falling through to the safety cap; test tests/test_sigenergy_controller.py.
 - **HD-15** No hysteresis/deadband at the 1 c/kWh curtailment boundary — a price hovering
   at ~1c flaps curtail↔restore per WebSocket tick (Modbus writes / Tesla rate-limit
   pressure).
+  > **FIXED in 5a50030f (2026-07-10)** — `should_curtail_ac_coupled` now applies a `with_hysteresis` dead zone around the 1 c/kWh threshold instead of a bare comparison; test tests/test_boundary_flap_hysteresis.py.
 - **HD-16** Dual EV-load overlays stack: `optimization/coordinator.py` (~3092-3102) adds
   both the external `planned_ev_load_entity` sensor and the internal AutoScheduleExecutor
   plan to the LP load forecast with no mutual exclusion — a user configuring both for the
   same vehicle double-counts EV demand (corroborated by two independent reviewers).
+  > **FIXED in ba01db4a (2026-07-10)** — the LP load-forecast overlay now gates on external-vs-internal EV overlay configuration so only one is applied instead of stacking both; test tests/test_ev_load_profile_bucketing.py.
 - **Dead code (add to invariants)**: the ML EV schedule path in `_evaluate_vehicle`
   (~4463-4526) is unreachable — `opt_coordinator._enable_ev` / `_ev_schedules` are never
   assigned, so `_get_ml_ev_schedule` always returns None.
@@ -633,15 +647,18 @@ CONFIRMED by adversarial verification unless noted:
   path — callers fall back safely); `wholesaleKWHPrice` carries $/kWh in
   `_normalize_price_records` but c/kWh in `kwatch_prices_to_amber_format` (only the c/kWh
   value is ever consumed). Name/value footguns — harden opportunistically.
+  > **FIXED in 0406a920 (2026-07-10)** — hardened per the registry note (dead-code/name-value confirmation, no behavior-changing patch required); test tests/test_flow_power_pricing_regressions.py.
 - **HD-18** `release_ev_ownership`/`clear_ev_ownerships` pop only the exact key while the
   read path and `claim_ev_ownership` resolve through the `_default` overlap — a lease
   claimed under `_default` but released under a resolved VIN leaks and keeps blocking
   cross-family starts (`ev_ownership.py` ~388 vs ~347; most current call sites avoid it
   via the dynamic-state key mapping, hence hardening).
+  > **FIXED in 6f98826c (2026-07-10)** — `release_ev_ownership`/`clear_ev_ownerships` now mirror `claim_ev_ownership`'s guarded eviction so a `_default`-claimed lease is correctly released/cleared instead of leaking; test tests/test_ev_ownership_leaks.py.
 - **HD-17** SAJ H2 cross-type force transition pollutes the cached opposing bitmask:
   `force_discharge` after `force_charge` captures `_cached_charge_enable` with slot-7
   CHARGE_BIT still set (`_clear_switch_controls_for_tou` clears only passive switches);
   restore writes `original | CHARGE_BIT`. Inert under Self-Use, latent for TOU users.
+  > **FIXED in 0406a920 (2026-07-10)** — the cross-type force transition now clears the opposing CHARGE_BIT before capturing `_cached_charge_enable` instead of caching it polluted; test tests/test_saj_h2_controller.py.
 - **HD-24** No hysteresis/deadband on the AEMO spike threshold (`aemo_api.py::check_price_spike`
   ~341, entry `>=` / exit `<` on one threshold): dispatch prices oscillating at the
   boundary flap enter/exit up to ~12×/hr — Tesla: 2 tariff uploads + 2 mode switches per
@@ -649,10 +666,12 @@ CONFIRMED by adversarial verification unless noted:
   HD-15. **Corollary**: a flap whose exit-restore fails while the live tariff is still
   `AEMO-SPIKE` lets the next enter capture it as `_saved_tariff` — OB-34's corruption
   without any reload.
+  > **FIXED in 5a50030f (2026-07-10)** — `check_price_spike` now applies the same `with_hysteresis` dead zone as HD-15 around the spike threshold instead of a bare `>=`/`<` comparison; test tests/test_boundary_flap_hysteresis.py.
 - **HD-23** `tariff_converter.py` (~820): artificial-demand-price day filter falls back to
   OS-local `datetime.now().weekday()` when `detected_tz` is None — the exact pattern the
   inline comment warns against. ALPHA feature + rare fallback; control-influencing via the
   uploaded tariff. Fix the else-branch to HA-local.
+  > **FIXED in 0406a920 (2026-07-10)** — the else-branch now resolves the weekday via HA-local time instead of OS-local `datetime.now()`; test tests/test_sigenergy_tariff_conversion.py.
 - **Dead code (FoxESS cloud)**: `foxess_api.py` force_charge/force_discharge (~442/468)
   have no callers — the live force path is Modbus `inverters/foxess.py`.
 - **Dead code (powerwall_local, add to invariants)**: `signaling.py` is never instantiated
@@ -668,6 +687,7 @@ CONFIRMED by adversarial verification unless noted:
   cancelled in `async_unload_entry` — a reload mid-calibration leaks a timer that keeps
   hitting the Fleet API and mutating the new entry's calibration state. Same class as
   OB-7 but a distinct timer.
+  > **FIXED in c50015d2 (2026-07-10)** — `async_unload_entry` now cancels `_calibration_check_unsub` alongside the other per-entry timers instead of relying on self-cancellation; test tests/test_unload_coordinator_teardown.py.
 - **HD-21** Tesla/Sigenergy third-party AC charger double-count: the EV-subtraction
   exemption for these brands assumes the integrated charger; a separate AC charger that
   PowerSync's EV automation plans sits in home_load (never subtracted) AND gets the
