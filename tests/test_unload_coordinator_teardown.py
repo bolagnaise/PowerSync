@@ -186,3 +186,23 @@ def test_powerwall_local_coordinator_has_keepalive_unsub_attribute():
         "PowerwallLocalCoordinator no longer stores its keep-alive listener "
         "unsubscribe callback as self._keepalive_unsub"
     )
+
+
+def test_unload_entry_cancels_calibration_check_timer():
+    """HD-22: the Tesla calibration-recovery 30-minute interval timer
+    (entry_data["_calibration_check_unsub"]) self-cancels only from inside
+    its own callback (on successful return-to-autonomous, or on success
+    during the exponential-backoff retry path). Neither path fires on a
+    plain integration reload/unload, so a reload that happens mid-
+    calibration leaks a 30-minute timer that keeps polling/writing the Tesla
+    Fleet API operation mode against the old (or a freshly re-created)
+    entry_data. async_unload_entry must cancel and null this timer alongside
+    the other timer-cancel stanzas already present there.
+    """
+    unload_source = _unload_entry_source()
+
+    assert '"_calibration_check_unsub"' in unload_source, (
+        "async_unload_entry never references _calibration_check_unsub, so "
+        "the Tesla calibration-recovery 30-minute interval timer is never "
+        "cancelled on unload"
+    )

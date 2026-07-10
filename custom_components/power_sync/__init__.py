@@ -35002,6 +35002,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         demand_charging_cancel()
         _LOGGER.debug("Cancelled demand period grid charging timer")
 
+    # Cancel the Tesla calibration-recovery check timer if it exists
+    if calibration_check_unsub := entry_data.get("_calibration_check_unsub"):
+        calibration_check_unsub()
+        entry_data["_calibration_check_unsub"] = None
+        _LOGGER.debug("Cancelled Tesla calibration-recovery check timer")
+
     # Re-enable grid charging if it was disabled for demand period
     # (e.g. user disabled demand charges or enabled demand_allow_grid_charging mid-window)
     if entry_data.get("grid_charging_disabled_for_demand", False):
