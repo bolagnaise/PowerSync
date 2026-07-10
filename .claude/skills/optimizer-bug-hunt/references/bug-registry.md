@@ -483,6 +483,17 @@ reserve slider to `manual_backup_reserve` while auto-apply is OFF, the slider is
 **Confirm the app's payload key per auto-apply state before treating as a bug** — if the
 app sends `backup_reserve` when auto-apply is off, this is intended baseline semantics.
 
+> **RESOLVED NOT-A-BUG (2026-07-10, verified from PowerSyncMobile source + set_settings).**
+> The app's Optimizer Reserve slider is unconditionally bound to `backup_reserve`
+> (`ElectricityProviderScreen.tsx:1909-1920`); no UI control anywhere writes
+> `manual_backup_reserve` (repo-wide grep: zero call sites); the auto-apply toggle is an
+> independent control that never redirects the key. Other write paths: hardware slider →
+> `hardware_backup_reserve`; ControlsScreen/automations → `set_backup_reserve` service.
+> The app DOES echo the last-fetched `manual_backup_reserve` on every full-object save,
+> but `set_settings` processes it (~11121) BEFORE `backup_reserve` (~11221), and the
+> `backup_reserve` branch overwrites all three manual fields with the new slider value —
+> last-write-wins makes the stale echo harmless by construction.
+
 ### Open question — Flow Power KWatch naive timestamps parsed as UTC  [UNDECIDED, would be MAJOR]
 `flow_power_api.py::_parse_time` (~213) stamps tz-naive strings as UTC and the regression
 tests assert that behavior, but the parsed fields (SETTLEMENT_DATE, periodDateTime) are
@@ -577,6 +588,26 @@ CONFIRMED by adversarial verification unless noted:
    side alone flips which consumer breaks; change both stamps/reads atomically.
 
 ## Hardening items (real code facts, bounded impact — fix opportunistically)
+
+- **HD-25** (filed 2026-07-10, HD-15 follow-up) Brand-specific curtailment handlers still
+  flap on the raw `export_earnings < 1` boundary: ~10 comparisons in
+  `handle_sigenergy/solaredge/goodwe_curtailment`, `_foxess/_alphaess_force_dispatch_active`,
+  `handle_ac_inverter_curtailment_only`, `handle_solar_curtailment_check`,
+  `handle_solar_curtailment_with_websocket_data` — the same flap class 5a50030f fixed in
+  `should_curtail_ac_coupled` (its `with_hysteresis` helper is the ready-made fix); each
+  brand path needs its own enter/exit state threading. Bounded: flap only at ~1 c/kWh.
+- **HD-26** (filed 2026-07-10, deliberate deferral from 0406a920) Wall-clock freshness
+  gate: `powerwall_local/coordinator.py` stamps `_last_success_ts = time.time()` and all
+  freshness consumers compare wall-clock, so an NTP jump skews the ≤30 s window. A naive
+  monotonic swap was correctly REFUSED — `last_success_ts` is API-exposed via `views.py`
+  (~:314/:327) as a wall-clock value. **Fix**: add a SEPARATE monotonic field for the
+  freshness comparisons, keep the wall-clock field for the API; preserve PW-4's one-shot
+  `_CLOUD_FALLBACK_PENDING_KEY` skip (662843d9) around the stamp.
+- **HD-27** (filed 2026-07-10, HD-14 limitation) A genuine 0 W DNSP export limit is
+  indistinguishable from an already-curtailed 0 in Sigenergy's `_original_pv_limit`
+  capture (731380b6 refuses zero captures, which protects the common case but means a
+  true-zero config won't survive a curtail cycle). Needs a captured-flag design (persist
+  "curtailed by PowerSync" state instead of inferring from the limit value).
 
 - **HD-1** Open-Meteo tail carry-forward: zero-fill past the last forecast point to match
   Solcast (`load_estimator.py::_parse_open_meteo_watts`). Currently benign (real data ends
