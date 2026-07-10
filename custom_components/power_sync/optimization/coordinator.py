@@ -468,7 +468,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         )
 
-    async def _restore_pre_idle_backup_reserve(self, battery, context: str = "") -> bool:
+    async def _restore_pre_idle_backup_reserve(
+        self, battery, context: str = "", bypass_monitoring: bool = False
+    ) -> bool:
         """Restore pre-IDLE backup reserve with retry. Only clears on success."""
         if self._pre_idle_backup_reserve is None:
             self._idle_hold_reserve = None
@@ -477,7 +479,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._pre_idle_backup_reserve = None
             self._idle_hold_reserve = None
             return True
-        if self._monitoring_mode_active():
+        if not bypass_monitoring and self._monitoring_mode_active():
             _LOGGER.info(
                 "[MONITORING] Optimizer would restore pre-IDLE backup reserve to %d%%%s — blocked by monitoring mode",
                 self._pre_idle_backup_reserve,
@@ -3066,16 +3068,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         monitoring_mode = self._monitoring_mode_active()
 
-        # Safety: if IDLE was the last action, restore backup_reserve and
-        # work mode before shutting down. Otherwise the battery stays locked
-        # at the IDLE-elevated backup_reserve (and Backup mode for FoxESS).
-        if not monitoring_mode and self._last_executed_action == "idle":
+        # Safety: restore any pending pre-IDLE backup_reserve before shutting
+        # down. Gated on the pending reserve itself, not on
+        # _last_executed_action == "idle" — Tesla's scheduled EV-preserve
+        # path (no set_no_discharge_mode primitive) also elevates the
+        # reserve via _set_idle_hold_mode(preserve_charge=True) but records
+        # _last_executed_action = "no_discharge", not "idle". Runs BEFORE
+        # the EV no-discharge release below, which only restores work mode
+        # and must not be assumed to have already handled the reserve.
+        if not monitoring_mode and self._pre_idle_backup_reserve is not None:
             if self.battery_controller:
                 await self._restore_pre_idle_backup_reserve(
                     self.battery_controller,
                     "optimizer disable",
                 )
-            # FoxESS/Sungrow: restore from IDLE hold mode to normal operation
+        elif monitoring_mode and self._pre_idle_backup_reserve is not None:
+            _LOGGER.info(
+                "Optimizer shutdown: monitoring mode active — skipping "
+                "pre-IDLE backup reserve restore"
+            )
+
+        # FoxESS/Sungrow: restore from IDLE hold mode to normal operation.
+        # Stays gated on _last_executed_action == "idle" only — the EV
+        # no-discharge path restores its own work mode via
+        # _release_scheduled_ev_no_discharge_mode below, and widening this
+        # gate would double-fire restore_work_mode_from_idle.
+        if not monitoring_mode and self._last_executed_action == "idle":
             if (
                 self.energy_coordinator
                 and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
@@ -3089,7 +3107,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.info(
                 "Optimizer shutdown: monitoring mode active — skipping IDLE cleanup writes"
             )
-            self._idle_hold_reserve = None
         if self._scheduled_ev_no_discharge_active:
             if monitoring_mode:
                 _LOGGER.info(

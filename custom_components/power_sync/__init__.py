@@ -9206,6 +9206,24 @@ class ProviderConfigView(HomeAssistantView):
                             restore_data,
                             blocking=True,
                         )
+                        # restore_normal releases force modes/native control,
+                        # but never restores an IDLE/EV-elevated backup
+                        # reserve — the restore-side monitoring gate would
+                        # then block the optimizer's own retries, stranding
+                        # it (OB-8). This is the one sanctioned bypass caller
+                        # (see coordinator._restore_pre_idle_backup_reserve).
+                        opt_coord = entry_data.get("optimization_coordinator")
+                        if (
+                            opt_coord
+                            and getattr(opt_coord, "_pre_idle_backup_reserve", None)
+                            is not None
+                            and getattr(opt_coord, "battery_controller", None)
+                        ):
+                            await opt_coord._restore_pre_idle_backup_reserve(
+                                opt_coord.battery_controller,
+                                "monitoring enabled",
+                                bypass_monitoring=True,
+                            )
                     except Exception as err:
                         _LOGGER.warning(
                             "Monitoring mode enabled but restore normal failed: %s",

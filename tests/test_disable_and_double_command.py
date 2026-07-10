@@ -92,6 +92,9 @@ def _disable_coordinator(opt_module):
     # Not "idle" — skips the pre-idle backup-reserve restore branch, which
     # would otherwise need a real battery_controller/energy_coordinator stub.
     coordinator._last_executed_action = "self_consumption"
+    # No reserve pending (RSV-4/OB-3) — skips the reserve-restore branch,
+    # which would otherwise need a real battery_controller stub.
+    coordinator._pre_idle_backup_reserve = None
     coordinator._scheduled_ev_no_discharge_active = False
     coordinator._polling_task = None
     coordinator._initial_opt_task = None
