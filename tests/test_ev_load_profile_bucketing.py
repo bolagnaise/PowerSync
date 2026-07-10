@@ -13,9 +13,11 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
+import textwrap
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -219,3 +221,105 @@ def test_load_profile_weekend_flag_uses_local_weekday():
         ev_planner.LoadProfileEstimator.DEFAULT_WEEKEND_PROFILE[23]
     )
     assert weekend_profile[23] != pytest.approx(2.5)
+
+
+# --- HD-16: dual EV-load overlays must not stack ---------------------------
+#
+# `OptimizationCoordinator._run_optimization` overlays EV charging demand
+# onto the LP load forecast from two independent sources: the external
+# `planned_ev_load_entity` sensor (`_get_planned_ev_load_forecast`) and the
+# internal AutoScheduleExecutor plan (`_get_ev_planned_load`). Pre-fix, both
+# overlays are added unconditionally with no mutual exclusion, so a user who
+# configures both for the same vehicle double-counts EV demand in the LP
+# load forecast. The overlay block is extracted straight from
+# coordinator.py's source (AST/text-slice, per the AGENTS.md source-extraction
+# pattern) and exec'd against a fake coordinator, so the test runs the real
+# production logic rather than a re-implementation.
+
+COORDINATOR_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "custom_components"
+    / "power_sync"
+    / "optimization"
+    / "coordinator.py"
+)
+
+
+def _ev_overlay_block_source() -> str:
+    source = COORDINATOR_PATH.read_text()
+    marker = "# Overlay EV charging plan onto load forecast"
+    marker_idx = source.index(marker)
+    line_start = source.rindex("\n", 0, marker_idx) + 1
+    end_marker = "import_prices = prices[0] if prices else []"
+    end_idx = source.index(end_marker, marker_idx)
+    return textwrap.dedent(source[line_start:end_idx])
+
+
+class _FakeOverlayCoordinator:
+    """Stands in for `self` inside the extracted overlay block."""
+
+    def __init__(
+        self,
+        *,
+        external_forecast: list[float] | None,
+        internal_forecast: list[float] | None,
+        ev_integration_enabled: bool,
+    ) -> None:
+        self._external_forecast = external_forecast
+        self._internal_forecast = internal_forecast
+        self._ev_integration_enabled = ev_integration_enabled
+        self._last_planned_ev_load_forecast_w = None
+        self._warned_dual_ev_overlay = False
+
+    def _get_planned_ev_load_forecast(self, n_intervals: int) -> list[float] | None:
+        return self._external_forecast
+
+    def _get_ev_planned_load(self, n_intervals: int) -> list[float] | None:
+        return self._internal_forecast
+
+
+def _run_overlay(coordinator: _FakeOverlayCoordinator, load: list[float]) -> list[float]:
+    namespace = {
+        "self": coordinator,
+        "load": list(load),
+        "_LOGGER": SimpleNamespace(warning=lambda *a, **k: None),
+    }
+    exec(compile(_ev_overlay_block_source(), "<ev_overlay_block>", "exec"), namespace)
+    return namespace["load"]
+
+
+def test_ev_overlay_external_entity_only_applies_external_forecast():
+    coordinator = _FakeOverlayCoordinator(
+        external_forecast=[1000.0, 1000.0, 1000.0, 1000.0],
+        internal_forecast=None,
+        ev_integration_enabled=False,
+    )
+    result = _run_overlay(coordinator, [2000.0, 2000.0, 2000.0, 2000.0])
+    assert result == [3000.0, 3000.0, 3000.0, 3000.0]
+
+
+def test_ev_overlay_internal_plan_only_applies_internal_forecast():
+    coordinator = _FakeOverlayCoordinator(
+        external_forecast=None,
+        internal_forecast=[500.0, 500.0, 500.0, 500.0],
+        ev_integration_enabled=True,
+    )
+    result = _run_overlay(coordinator, [2000.0, 2000.0, 2000.0, 2000.0])
+    assert result == [2500.0, 2500.0, 2500.0, 2500.0]
+
+
+def test_ev_overlay_both_configured_does_not_double_count_ev_demand():
+    """HD-16 regression: external planned_ev_load_entity AND an internal
+    AutoScheduleExecutor plan configured for the same vehicle must not both
+    land in the load forecast. External wins (it is the user's explicit,
+    most current configuration) - the internal overlay must be skipped."""
+    coordinator = _FakeOverlayCoordinator(
+        external_forecast=[1000.0, 1000.0, 1000.0, 1000.0],
+        internal_forecast=[500.0, 500.0, 500.0, 500.0],
+        ev_integration_enabled=True,
+    )
+    result = _run_overlay(coordinator, [2000.0, 2000.0, 2000.0, 2000.0])
+
+    # Only the external overlay should be applied (2000 + 1000 = 3000).
+    # Pre-fix this stacks both overlays: 2000 + 1000 + 500 = 3500.
+    assert result == [3000.0, 3000.0, 3000.0, 3000.0]

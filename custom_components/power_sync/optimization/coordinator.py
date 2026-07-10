@@ -313,6 +313,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._ev_integration_enabled = False
         self._configured_load_entity_id: str | None = None
         self._planned_ev_load_entity_id: str | None = None
+        self._warned_dual_ev_overlay = False
         if self._entry:
             from ..const import (
                 CONF_OPTIMIZATION_EV_INTEGRATION,
@@ -3289,18 +3290,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Overlay EV charging plan onto load forecast
             ev_peak_kw = 0.0
             self._last_planned_ev_load_forecast_w = None
+            external_ev_overlay_applied = False
             if load:
                 planned_ev_load_w = self._get_planned_ev_load_forecast(len(load))
                 if planned_ev_load_w:
                     load = [l + ev for l, ev in zip(load, planned_ev_load_w)]
                     self._last_planned_ev_load_forecast_w = planned_ev_load_w
                     ev_peak_kw = max(ev_peak_kw, max(planned_ev_load_w) / 1000)
+                    external_ev_overlay_applied = True
 
-            if load and self._ev_integration_enabled:
+            if load and self._ev_integration_enabled and not external_ev_overlay_applied:
                 ev_load_w = self._get_ev_planned_load(len(load))
                 if ev_load_w:
                     load = [l + ev for l, ev in zip(load, ev_load_w)]
                     ev_peak_kw = max(ev_peak_kw, max(ev_load_w) / 1000)
+            elif load and external_ev_overlay_applied and self._ev_integration_enabled:
+                if self._get_ev_planned_load(len(load)) and not self._warned_dual_ev_overlay:
+                    _LOGGER.warning(
+                        "Optimizer: both planned_ev_load_entity and the internal EV "
+                        "charging plan are configured for this system. Using the "
+                        "external planned_ev_load_entity for load forecasting and "
+                        "ignoring the internal AutoScheduleExecutor plan to avoid "
+                        "double-counting EV demand."
+                    )
+                    self._warned_dual_ev_overlay = True
 
             import_prices = prices[0] if prices else []
             export_prices = prices[1] if prices else []
