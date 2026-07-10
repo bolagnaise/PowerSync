@@ -431,6 +431,28 @@ optimizer-disabled Tesla cohort — the managers' target audience — has no res
 keep `_in_*_mode` set on failed restore so the next minute retries (the
 `_restore_pre_idle_backup_reserve` contract), co-designed with OB-34's re-capture guard.
 
+### OB-40 — Tesla managers capture `_saved_operation_mode` unconditionally  [MEDIUM — Tesla]
+OB-34's fix (42f21caa) guards `_saved_tariff` capture with `is None`, but Step 2's
+`_saved_operation_mode = site_info.get("default_real_mode")` (`AEMOSpikeManager` ~2391,
+`SavingSessionTariffManager` mirror ~2976) is still captured unconditionally on every
+enter. A reload mid-event re-enters with the manager's own event mode live, so the exit
+restores "autonomous" (or whatever the event set) instead of the user's real operation
+mode — the OB-34 corruption shape, on the operation-mode axis. **Fix**: mirror the
+`is None` capture guard from 42f21caa on `_saved_operation_mode` in both managers.
+
+### OB-41 — Tesla money-event state does not survive a reload  [MEDIUM-HIGH — Tesla, optimizer-disabled cohort]
+Neither `AEMOSpikeManager` nor `SavingSessionTariffManager` persists
+`_saved_tariff`/`_saved_operation_mode`/`_in_*_mode`; a reload mid-event forgets that a
+restore is owed, leaving the Powerwall on the manager's inflated event tariff (buy ≥
+£5/kWh). Optimizer-enabled installs self-heal via the next TOU sync; the
+optimizer-disabled cohort — the managers' target audience post-f3ff4b47 — has no rescue
+(the OB-5 persistence pattern, on the tariff axis). Related corner: exit never resets
+`_saved_tariff = None`, so a user who changes their real tariff between two events in the
+same process restores the stale genuine tariff. **Fix**: persist event state with the
+hold_soc persistence pattern (0ae52626) and restore-or-exit on setup; clear
+`_saved_tariff` after a confirmed successful restore. Co-design with OB-34/OB-38's
+capture-once + retry contract (42f21caa, c3101f2c).
+
 ### OB-39 — Residual unconditional `_skip_reload` sites outside `set_settings`  [MEDIUM]
 OB-21's fix (c8f514e1) covers `optimization/coordinator.py::set_settings` (9 sites) and the
 options-flow save handler — the registry entry's stated scope. The identical stuck-flag
