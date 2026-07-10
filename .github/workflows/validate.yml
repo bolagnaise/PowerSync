@@ -15,6 +15,8 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
+          # Issue tracking is Discord-only by policy; GitHub Issues stay disabled.
+          ignore: issues
 
   validate-hassfest:
     runs-on: ubuntu-latest
