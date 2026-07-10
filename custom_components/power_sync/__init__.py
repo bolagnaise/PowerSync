@@ -30729,8 +30729,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coord = _get_tesla_coordinator_for_service("schedule_max_backup")
         if coord is None:
             return
-        site_info = getattr(coord, "_site_info_cache", None) or {}
-        saved_reserve = site_info.get("backup_reserve_percent")
+        opt_coord = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("optimization_coordinator")
+        if opt_coord is not None and hasattr(opt_coord, "resolve_restore_target"):
+            saved_reserve = await opt_coord.resolve_restore_target()
+        else:
+            site_info = getattr(coord, "_site_info_cache", None) or {}
+            saved_reserve = site_info.get("backup_reserve_percent")
 
         entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
         prior_cancel = entry_data.get("max_backup_cancel")

@@ -1880,6 +1880,42 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return live_reserve, "live Tesla backup reserve"
 
+    async def resolve_restore_target(self) -> int | None:
+        """Resolve a trustworthy backup-reserve value to restore after a
+        temporary window (e.g. ``schedule_max_backup``) ends.
+
+        Prefers a freshly-read, trust-tagged reserve (LIVE/CLOUD_FRESH via
+        ``read_backup_reserve()``); an untrusted (CLOUD_STALE/ENTITY)
+        reading is never used, since a stale Tesla cloud value clobbering
+        the user's real reserve is exactly the PW-6 hazard this closes. A
+        legacy battery with no ``read_backup_reserve`` accessor is not
+        trusted via a raw ``get_backup_reserve()`` read either -- it falls
+        through the same untrusted-fallback chain. Falls back to the
+        persisted user reserve option, then the optimizer's startup
+        reserve, returning ``None`` only if nothing usable exists.
+        """
+        battery = self._executor.battery_controller if self._executor else None
+        if battery is not None and hasattr(battery, "read_backup_reserve"):
+            try:
+                reading = await battery.read_backup_reserve()
+            except Exception as exc:
+                _LOGGER.debug(
+                    "resolve_restore_target: read_backup_reserve failed: %s", exc
+                )
+            else:
+                if reading.trust in TRUSTED_FOR_PERSIST:
+                    return self._reserve_percent(reading.percent)
+
+        persisted = (
+            self._reserve_percent(self._entry.options.get("_user_backup_reserve"))
+            if self._entry
+            else None
+        )
+        if persisted is not None:
+            return persisted
+
+        return getattr(self, "_startup_backup_reserve", None)
+
     def _provider_key(self) -> str:
         """Return the configured electricity provider key."""
         if not self._entry:
