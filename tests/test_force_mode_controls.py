@@ -1281,8 +1281,19 @@ def test_tesla_setting_writes_refresh_local_readback_and_invalidate_fleet_cache(
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
 
+    # set_backup_reserve is untouched by PW-9/10/11 and still awaits the
+    # refresh directly. set_operation_mode and set_grid_export fire-and-forget
+    # it (PW-10/PW-11 fix) so it can never block manual-override / force-toggle
+    # flag updates behind up to ~15s of Powerwall local readback I/O.
+    function_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_set_backup_reserve"),
+    )
+    assert function_source is not None
+    assert "_tesla_coord_for_cache.invalidate_site_info_cache()" in function_source
+    assert 'await refresh_powerwall_local_after_settings_write("set_backup_reserve")' in function_source
+
     for function_name, refresh_label in (
-        ("handle_set_backup_reserve", "set_backup_reserve"),
         ("handle_set_operation_mode", "set_operation_mode"),
         ("handle_set_grid_export", "set_grid_export"),
     ):
@@ -1294,12 +1305,16 @@ def test_tesla_setting_writes_refresh_local_readback_and_invalidate_fleet_cache(
         assert function_source is not None
         assert "_tesla_coord_for_cache.invalidate_site_info_cache()" in function_source
         assert (
-            f'await refresh_powerwall_local_after_settings_write("{refresh_label}")'
+            f'hass.async_create_task(refresh_powerwall_local_after_settings_write("{refresh_label}"))'
             in function_source
         )
 
 
-def test_tesla_grid_export_write_updates_cached_rule_immediately():
+def test_tesla_grid_export_write_sets_manual_override_before_cache_persist():
+    """PW-9/PW-10: the in-memory manual_export_override flags must be set
+    before update_cached_export_rule is awaited, so a store exception or a
+    concurrently-scheduled curtailment-cycle read can never see them unset
+    after the Tesla write already succeeded."""
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
     function = _find_function(tree, "handle_set_grid_export")
@@ -1307,8 +1322,8 @@ def test_tesla_grid_export_write_updates_cached_rule_immediately():
 
     assert function_source is not None
     assert "await update_cached_export_rule(rule)" in function_source
-    assert function_source.index("await update_cached_export_rule(rule)") < (
-        function_source.index("manual_export_override")
+    assert function_source.index("manual_export_override") < (
+        function_source.index("await update_cached_export_rule(rule)")
     )
 
 

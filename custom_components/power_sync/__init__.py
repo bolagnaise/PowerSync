@@ -19049,12 +19049,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def update_cached_export_rule(new_rule: str) -> None:
         """Update the cached export rule in memory and persist to storage."""
         hass.data[DOMAIN][entry.entry_id]["cached_export_rule"] = new_rule
-        store = hass.data[DOMAIN][entry.entry_id]["store"]
-        # Preserve other stored data (like battery_health)
-        stored_data = await store.async_load() or {}
-        stored_data["cached_export_rule"] = new_rule
-        await store.async_save(stored_data)
-        _LOGGER.debug(f"Persisted cached_export_rule='{new_rule}' to storage")
+        try:
+            store = hass.data[DOMAIN][entry.entry_id]["store"]
+            # Preserve other stored data (like battery_health)
+            stored_data = await store.async_load() or {}
+            stored_data["cached_export_rule"] = new_rule
+            await store.async_save(stored_data)
+            _LOGGER.debug(f"Persisted cached_export_rule='{new_rule}' to storage")
+        except Exception as err:
+            _LOGGER.warning(f"Could not persist cached_export_rule='{new_rule}' to storage: {err}")
         # Signal sensor to update
         async_dispatcher_send(hass, f"power_sync_curtailment_updated_{entry.entry_id}")
 
@@ -30328,11 +30331,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 if _tesla_coord_for_cache is not None:
                     _tesla_coord_for_cache.invalidate_site_info_cache()
-                await refresh_powerwall_local_after_settings_write("set_operation_mode")
                 if mode == "self_consumption":
                     if entry.entry_id in hass.data[DOMAIN]:
                         hass.data[DOMAIN][entry.entry_id].pop("last_force_toggle_time", None)
                         _LOGGER.debug("Cleared last_force_toggle_time (user set self_consumption)")
+                hass.async_create_task(refresh_powerwall_local_after_settings_write("set_operation_mode"))
             else:
                 raise HomeAssistantError(f"Could not verify Tesla operation mode changed to {mode}")
         except Exception as e:
@@ -30451,8 +30454,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
                 if _tesla_coord_for_cache is not None:
                     _tesla_coord_for_cache.invalidate_site_info_cache()
-                await update_cached_export_rule(rule)
-                await refresh_powerwall_local_after_settings_write("set_grid_export")
                 solar_curtailment_enabled = entry.options.get(
                     CONF_BATTERY_CURTAILMENT_ENABLED,
                     entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
@@ -30462,6 +30463,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     entry_data["manual_export_override"] = True
                     entry_data["manual_export_rule"] = rule
                     _LOGGER.info("Manual export override enabled: %s", rule)
+                await update_cached_export_rule(rule)
+                hass.async_create_task(refresh_powerwall_local_after_settings_write("set_grid_export"))
+                if solar_curtailment_enabled:
                     # Persist so the override survives HA restarts / config reloads
                     try:
                         _store = entry_data.get("store")
