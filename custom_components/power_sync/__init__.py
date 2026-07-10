@@ -23313,19 +23313,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 if verified_rule is None:
                                     # API doesn't return this field - can't verify but not a failure
                                     _LOGGER.info(f"ℹ️ Cannot verify restore (API returns None for export_rule) - operation reported success")
-                                elif verified_rule != "battery_ok":
-                                    _LOGGER.warning(f"⚠️ RESTORE VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'battery_ok')")
+                                elif verified_rule != restore_rule:
+                                    _LOGGER.warning(f"⚠️ RESTORE VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected '{restore_rule}')")
                                     _LOGGER.warning(f"Full verification response: {verify_info}")
                                 else:
                                     _LOGGER.info(f"✓ Restore verified via read-back: export_rule='{verified_rule}'")
 
-                        _LOGGER.info(f"✅ CURTAILMENT REMOVED: Export restored 'never' → 'battery_ok'")
-                        await update_cached_export_rule("battery_ok")
+                        _LOGGER.info(f"✅ CURTAILMENT REMOVED: Export restored 'never' → '{restore_rule}'")
+                        await update_cached_export_rule(restore_rule)
 
                         # Also restore AC-coupled inverter if configured
                         await apply_inverter_curtailment(curtail=False)
 
-                        _LOGGER.info(f"📊 Action summary: Restored to normal (earnings: {export_earnings:.2f}c/kWh, export: 'battery_ok')")
+                        _LOGGER.info(f"📊 Action summary: Restored to normal (earnings: {export_earnings:.2f}c/kWh, export: '{restore_rule}')")
 
                     except Exception as err:
                         _LOGGER.error(f"Error restoring from curtailment: {err}")
@@ -23686,19 +23686,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 if verified_rule is None:
                                     # API doesn't return this field - can't verify but not a failure
                                     _LOGGER.info(f"ℹ️ Cannot verify restore (API returns None for export_rule) - operation reported success")
-                                elif verified_rule != "battery_ok":
-                                    _LOGGER.warning(f"⚠️ RESTORE VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'battery_ok')")
+                                elif verified_rule != restore_rule:
+                                    _LOGGER.warning(f"⚠️ RESTORE VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected '{restore_rule}')")
                                     _LOGGER.warning(f"Full verification response: {verify_info}")
                                 else:
                                     _LOGGER.info(f"✓ Restore verified via read-back: export_rule='{verified_rule}'")
 
-                        _LOGGER.info(f"✅ CURTAILMENT REMOVED: Export restored 'never' → 'battery_ok'")
-                        await update_cached_export_rule("battery_ok")
+                        _LOGGER.info(f"✅ CURTAILMENT REMOVED: Export restored 'never' → '{restore_rule}'")
+                        await update_cached_export_rule(restore_rule)
 
                         # Also restore AC-coupled inverter if configured
                         await apply_inverter_curtailment(curtail=False)
 
-                        _LOGGER.info(f"📊 Action summary: Restored to normal (earnings: {export_earnings:.2f}c/kWh, export: 'battery_ok')")
+                        _LOGGER.info(f"📊 Action summary: Restored to normal (earnings: {export_earnings:.2f}c/kWh, export: '{restore_rule}')")
 
                     except Exception as err:
                         _LOGGER.error(f"Error restoring from curtailment: {err}")
