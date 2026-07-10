@@ -131,10 +131,10 @@ class _FakeSession:
         return _FakeCtx(_FakeResponse(self.post_status, {}))
 
 
-def _build_namespace(session, upload_calls):
+def _build_namespace(session, upload_calls, send_result=True):
     async def _fake_send_tariff_to_tesla(hass, site_id, tariff, token, provider, fleet_base_url=None):
         upload_calls.append(tariff)
-        return True
+        return send_result
 
     def _fake_get_tesla_api_base_url(provider, fleet_base_url):
         return "https://api.example.com"
@@ -145,6 +145,15 @@ def _build_namespace(session, upload_calls):
 
     aiohttp_stub = SimpleNamespace(ClientTimeout=_FakeClientTimeout)
 
+    class _FakeAsyncio:
+        """Stands in for the real ``asyncio`` module inside exec'd class
+        source so ``_exit_spike_mode``/``_exit_session_mode`` don't block
+        the test suite on the real 5-second ``asyncio.sleep(5)`` call."""
+
+        @staticmethod
+        async def sleep(_seconds):
+            return None
+
     namespace = {
         "HomeAssistant": object,
         "ConfigEntry": object,
@@ -152,6 +161,7 @@ def _build_namespace(session, upload_calls):
         "dt_util": _FakeDtUtil(),
         "_LOGGER": _FakeLogger(),
         "aiohttp": aiohttp_stub,
+        "asyncio": _FakeAsyncio(),
         "async_get_clientsession": lambda hass: session,
         "get_tesla_api_base_url": _fake_get_tesla_api_base_url,
         "send_tariff_to_tesla": _fake_send_tariff_to_tesla,
@@ -336,3 +346,103 @@ def test_saving_session_manager_preserves_genuine_baseline_on_reentry():
         "genuine baseline must survive re-entry into session mode even when the "
         f"manager's own prior upload is still live at Tesla; got {manager._saved_tariff!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# OB-38: exit-path must not forget it owes a restore when send_tariff_to_tesla
+# fails. A failed upload must leave _in_*_mode (and dependent start-time /
+# session-code state) untouched so the next detection cycle retries the exit;
+# a successful upload must still clear state as before.
+# ---------------------------------------------------------------------------
+
+def _exit_session(session_status_ok=True, *, send_result):
+    """Build a fake aiohttp session whose POSTs (operation-mode switches)
+    succeed, independent of the tariff-upload result under test."""
+    return _FakeSession(
+        tariff_rate_response=_FakeResponse(200, {"response": {}}),
+        site_info_response=_FakeResponse(200, {"response": {}}),
+        post_status=200 if session_status_ok else 500,
+    )
+
+
+def test_aemo_spike_manager_retries_exit_after_failed_restore():
+    session = _exit_session(send_result=False)
+    upload_calls: list = []
+    namespace = _build_namespace(session, upload_calls, send_result=False)
+    manager = _make_aemo_manager(namespace, saved_tariff=dict(GENUINE_TARIFF))
+    manager._in_spike_mode = True
+    manager._spike_start_time = "2026-07-10T12:00:00Z"
+
+    asyncio.run(manager._exit_spike_mode(50.0))
+
+    assert manager._in_spike_mode is True, (
+        "a failed tariff restore must leave _in_spike_mode set so the next "
+        "cycle retries the exit instead of silently abandoning the restore"
+    )
+    assert manager._spike_start_time == "2026-07-10T12:00:00Z"
+
+
+def test_aemo_spike_manager_clears_state_after_successful_restore():
+    session = _exit_session(send_result=True)
+    upload_calls: list = []
+    namespace = _build_namespace(session, upload_calls, send_result=True)
+    manager = _make_aemo_manager(namespace, saved_tariff=dict(GENUINE_TARIFF))
+    manager._in_spike_mode = True
+    manager._spike_start_time = "2026-07-10T12:00:00Z"
+
+    asyncio.run(manager._exit_spike_mode(50.0))
+
+    assert manager._in_spike_mode is False
+    assert manager._spike_start_time is None
+
+
+def test_saving_session_manager_retries_exit_after_failed_restore():
+    session = _exit_session(send_result=False)
+    upload_calls: list = []
+    namespace = _build_namespace(session, upload_calls, send_result=False)
+    manager = _make_session_manager(namespace, saved_tariff=dict(GENUINE_TARIFF))
+    manager._in_session_mode = True
+    manager._session_start_time = "2026-07-10T17:00:00Z"
+    manager._active_session_code = "octopus-session-1"
+
+    asyncio.run(manager._exit_session_mode())
+
+    assert manager._in_session_mode is True, (
+        "a failed tariff restore must leave _in_session_mode set so the next "
+        "cycle retries the exit instead of silently abandoning the restore"
+    )
+    assert manager._session_start_time == "2026-07-10T17:00:00Z"
+    assert manager._active_session_code == "octopus-session-1"
+
+
+def test_saving_session_manager_clears_state_after_successful_restore():
+    session = _exit_session(send_result=True)
+    upload_calls: list = []
+    namespace = _build_namespace(session, upload_calls, send_result=True)
+    manager = _make_session_manager(namespace, saved_tariff=dict(GENUINE_TARIFF))
+    manager._in_session_mode = True
+    manager._session_start_time = "2026-07-10T17:00:00Z"
+    manager._active_session_code = "octopus-session-1"
+
+    asyncio.run(manager._exit_session_mode())
+
+    assert manager._in_session_mode is False
+    assert manager._session_start_time is None
+    assert manager._active_session_code is None
+
+
+def test_aemo_spike_manager_clears_state_when_no_saved_tariff_to_restore():
+    """Not a send_tariff_to_tesla failure — there was never anything to
+    restore, so exit must still complete and clear state."""
+    session = _exit_session(send_result=True)
+    upload_calls: list = []
+    namespace = _build_namespace(session, upload_calls, send_result=True)
+    manager = _make_aemo_manager(namespace, saved_tariff=None)
+    manager._in_spike_mode = True
+    manager._spike_start_time = "2026-07-10T12:00:00Z"
+
+    asyncio.run(manager._exit_spike_mode(50.0))
+
+    assert manager._in_spike_mode is False
+    assert manager._spike_start_time is None
+    assert upload_calls == []

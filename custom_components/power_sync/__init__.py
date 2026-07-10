@@ -2477,6 +2477,7 @@ class AEMOSpikeManager:
                     _LOGGER.info("Switched to self_consumption mode")
 
             # Step 2: Restore saved tariff
+            restore_ok = True
             restore_tariff = _select_restorable_tesla_tariff(self._saved_tariff)
             if restore_tariff:
                 _LOGGER.info("Restoring saved tariff...")
@@ -2488,6 +2489,7 @@ class AEMOSpikeManager:
                     current_provider,
                     fleet_base_url=self.entry.data.get(CONF_FLEET_API_BASE_URL),
                 )
+                restore_ok = success
                 if success:
                     _LOGGER.info("Restored saved tariff successfully")
                 else:
@@ -2515,10 +2517,15 @@ class AEMOSpikeManager:
                 if response.status == 200:
                     _LOGGER.info("Restored operation mode to %s", restore_mode)
 
-            # Clear spike state
-            self._in_spike_mode = False
-            self._spike_start_time = None
-            _LOGGER.info("SPIKE MODE ENDED: Normal operation restored")
+            if restore_ok:
+                # Clear spike state
+                self._in_spike_mode = False
+                self._spike_start_time = None
+                _LOGGER.info("SPIKE MODE ENDED: Normal operation restored")
+            else:
+                _LOGGER.warning(
+                    "Tariff restore failed — will retry exit next cycle"
+                )
 
         except Exception as e:
             _LOGGER.error("Error exiting spike mode: %s", e, exc_info=True)
@@ -3108,6 +3115,7 @@ class SavingSessionTariffManager:
                     _LOGGER.info("Switched to self_consumption mode")
 
             # Step 2: Restore saved tariff
+            restore_ok = True
             restore_tariff = _select_restorable_tesla_tariff(self._saved_tariff)
             if restore_tariff:
                 _LOGGER.info("Restoring saved tariff...")
@@ -3119,6 +3127,7 @@ class SavingSessionTariffManager:
                     current_provider,
                     fleet_base_url=self.entry.data.get(CONF_FLEET_API_BASE_URL),
                 )
+                restore_ok = success
                 if success:
                     _LOGGER.info("Restored saved tariff successfully")
                 else:
@@ -3143,6 +3152,12 @@ class SavingSessionTariffManager:
             ) as response:
                 if response.status == 200:
                     _LOGGER.info("Restored operation mode to %s", restore_mode)
+
+            if not restore_ok:
+                _LOGGER.warning(
+                    "Tariff restore failed — will retry exit next cycle"
+                )
+                return
 
             # Clear session state
             self._in_session_mode = False
