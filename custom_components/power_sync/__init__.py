@@ -8187,7 +8187,8 @@ class AEMOSpikeView(HomeAssistantView):
                 new_options = {**entry.options, CONF_AEMO_SPIKE_ENABLED: new_enabled}
                 domain_data = self._hass.data.get(DOMAIN, {})
                 entry_data = domain_data.get(entry.entry_id, {})
-                entry_data["_skip_reload"] = True
+                if new_options != dict(entry.options):
+                    entry_data["_skip_reload"] = True
                 self._hass.config_entries.async_update_entry(entry, options=new_options)
 
                 _LOGGER.info(
@@ -8216,7 +8217,8 @@ class AEMOSpikeView(HomeAssistantView):
                 new_options = {**entry.options, CONF_AEMO_REGION: new_region}
                 domain_data = self._hass.data.get(DOMAIN, {})
                 entry_data = domain_data.get(entry.entry_id, {})
-                entry_data["_skip_reload"] = True
+                if new_options != dict(entry.options):
+                    entry_data["_skip_reload"] = True
                 self._hass.config_entries.async_update_entry(entry, options=new_options)
 
                 _LOGGER.info("AEMO region updated to %s", new_region)
@@ -9189,7 +9191,8 @@ class ProviderConfigView(HomeAssistantView):
             # API-driven saves don't need a full integration restart.
             domain_data = self._hass.data.get(DOMAIN, {})
             entry_data = domain_data.get(entry.entry_id, {})
-            entry_data["_skip_reload"] = True
+            if new_options != dict(entry.options):
+                entry_data["_skip_reload"] = True
             self._hass.config_entries.async_update_entry(entry, options=new_options)
             if "monitoring_mode" in data:
                 async_dispatcher_send(

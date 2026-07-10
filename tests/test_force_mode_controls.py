@@ -1727,3 +1727,92 @@ def test_optimizer_retries_sungrow_restore_when_self_consumption_drift_detected(
     assert "charge_cmd_int in (0xAA, 0xBB)" in function_source
     assert "Sungrow still reports forced mode" in function_source
     assert "apply_self_consumption = True" in function_source
+
+
+# ---------------------------------------------------------------------------
+# OB-39 (remaining API-view sites): `AEMOSpikeView.post` (enabled + region
+# branches) and `ProviderConfigView.post` (tariff-provider save) each set
+# `_skip_reload = True` before `async_update_entry` with no comparison of
+# old vs. new persisted state, so a no-op resubmit from the mobile app
+# strands the flag and swallows the NEXT genuine structural reload (the
+# same failure mode as OB-21/RSV-6, on the API-view axis). The fix nests
+# the `_skip_reload` write one level deeper than the paired
+# `async_update_entry` call, behind an `if <new> != <current>:` guard —
+# assert that nesting relationship structurally so this doesn't regress.
+# ---------------------------------------------------------------------------
+
+
+def _build_parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    return parents
+
+
+def _if_nesting_depth(node: ast.AST, parents: dict[ast.AST, ast.AST], root: ast.AST) -> int:
+    """Count `ast.If` ancestors between `node` and `root`. Using raw AST node
+    depth would overcount an `async_update_entry(...)` call by one level (it
+    sits inside its own `ast.Expr` statement wrapper) relative to a bare
+    `entry_data["_skip_reload"] = True` assignment, which is itself already a
+    statement — so compare `if`-nesting specifically instead."""
+    depth = 0
+    current = node
+    while current is not root:
+        parent = parents.get(current)
+        if parent is None:
+            break
+        if isinstance(parent, ast.If):
+            depth += 1
+        current = parent
+    return depth
+
+
+def _skip_reload_vs_update_entry_depth_deltas(
+    method: ast.AST, parents: dict[ast.AST, ast.AST]
+) -> list[int]:
+    """For each `_skip_reload` write, find the next `async_update_entry` call
+    after it (by source line) and return how much *more* deeply nested the
+    write is than that call. A positive delta means the write sits behind an
+    extra `if` guard the call is not subject to (the no-op gate); zero means
+    the write is an unconditional sibling of the call (the OB-39 bug)."""
+    assigns = sorted(
+        (n for n in ast.walk(method) if _writes_skip_reload(n)), key=lambda n: n.lineno
+    )
+    calls = sorted(
+        (n for n in ast.walk(method) if _is_async_update_entry_call(n)), key=lambda n: n.lineno
+    )
+    deltas = []
+    for assign in assigns:
+        paired = next((c for c in calls if c.lineno > assign.lineno), None)
+        assert paired is not None, f"no async_update_entry call follows skip_reload write at line {assign.lineno}"
+        deltas.append(_if_nesting_depth(assign, parents, method) - _if_nesting_depth(paired, parents, method))
+    return deltas
+
+
+def test_aemo_spike_view_post_skip_reload_gated_on_persisted_change():
+    tree = ast.parse(INIT_PATH.read_text())
+    method = _find_class_method(tree, "AEMOSpikeView", "post")
+    parents = _build_parents(tree)
+
+    deltas = _skip_reload_vs_update_entry_depth_deltas(method, parents)
+
+    assert len(deltas) == 2, "expected one _skip_reload write per branch (enabled, region)"
+    assert all(delta > 0 for delta in deltas), (
+        "AEMOSpikeView.post sets _skip_reload unconditionally — a no-op "
+        "resubmit strands the flag and swallows the next genuine reload (OB-39)"
+    )
+
+
+def test_provider_config_view_post_skip_reload_gated_on_persisted_change():
+    tree = ast.parse(INIT_PATH.read_text())
+    method = _find_class_method(tree, "ProviderConfigView", "post")
+    parents = _build_parents(tree)
+
+    deltas = _skip_reload_vs_update_entry_depth_deltas(method, parents)
+
+    assert len(deltas) == 1, "expected exactly one _skip_reload write in the tariff-provider save path"
+    assert deltas[0] > 0, (
+        "ProviderConfigView.post sets _skip_reload unconditionally — a no-op "
+        "resubmit strands the flag and swallows the next genuine reload (OB-39)"
+    )
