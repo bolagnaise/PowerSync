@@ -103,10 +103,13 @@ def _solve_lp_highs(c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit):
 
     minimize  c·x   s.t.   A_ub·x <= b_ub,  A_eq·x == b_eq,  bounds[j] on x[j].
 
-    Mirrors ``scipy.optimize.linprog(method="highs")``: only an optimal solve
-    sets ``success=True``; infeasible/time-limit/unbounded report success=False
-    with a message string (``"infeasible"`` substring preserved so the caller's
-    self-consumption fallback still triggers).
+    Mirrors ``scipy.optimize.linprog(method="highs")``: an optimal solve sets
+    ``success=True``, and so does a time/iteration-limited solve that still
+    holds a feasible incumbent (that incumbent is returned instead of being
+    discarded); infeasible/unbounded — and limited solves with no feasible
+    incumbent — report success=False with a message string (``"infeasible"``
+    substring preserved so the caller's self-consumption fallback still
+    triggers).
     """
     inf = highspy.kHighsInf
     h = highspy.Highs()
@@ -136,7 +139,23 @@ def _solve_lp_highs(c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit):
     model_status = h.getModelStatus()
     message = h.modelStatusToString(model_status)
     optimal = model_status == highspy.HighsModelStatus.kOptimal
-    if optimal:
+
+    # A time/iteration-limited solve can still hold a usable feasible
+    # incumbent — use it instead of discarding it and forcing the caller's
+    # greedy fallback.
+    usable_incumbent = False
+    if not optimal and model_status in (
+        highspy.HighsModelStatus.kTimeLimit,
+        highspy.HighsModelStatus.kIterationLimit,
+    ):
+        info = h.getInfo()
+        usable_incumbent = (
+            getattr(info, "primal_solution_status", None)
+            == highspy.kSolutionStatusFeasible
+        )
+
+    success = optimal or usable_incumbent
+    if success:
         x = list(h.getSolution().col_value)
         fun = float(h.getObjectiveValue())
     else:
@@ -144,7 +163,7 @@ def _solve_lp_highs(c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit):
         fun = None
     return _HighsResult(
         x=x,
-        success=optimal,
+        success=success,
         message=message,
         status=int(model_status),
         fun=fun,
@@ -253,7 +272,9 @@ class BatteryOptimizer:
         self.max_discharge_w = max_discharge_w
         self.max_grid_import_w = self._normalize_optional_power_w(max_grid_import_w)
         self.max_grid_export_w = self._normalize_optional_export_power_w(max_grid_export_w)
-        self.max_battery_export_w = max_battery_export_w
+        self.max_battery_export_w = self._normalize_optional_export_power_w(
+            max_battery_export_w
+        )
         self.efficiency = efficiency
         self.backup_reserve = backup_reserve
         self.hardware_reserve = max(0.0, min(1.0, float(hardware_reserve or 0.0)))
@@ -308,8 +329,8 @@ class BatteryOptimizer:
             else None
         )
         self.max_battery_export_kw = (
-            max_battery_export_w / 1000.0
-            if max_battery_export_w is not None
+            self.max_battery_export_w / 1000.0
+            if self.max_battery_export_w is not None
             else None
         )
         self.dt_hours = interval_minutes / 60.0  # time step in hours
@@ -347,10 +368,12 @@ class BatteryOptimizer:
         if max_grid_export_w is not _UNSET:
             self.max_grid_export_w = self._normalize_optional_export_power_w(max_grid_export_w)
         if max_battery_export_w is not _UNSET:
-            self.max_battery_export_w = max_battery_export_w
+            self.max_battery_export_w = self._normalize_optional_export_power_w(
+                max_battery_export_w
+            )
             self.max_battery_export_kw = (
-                max_battery_export_w / 1000.0
-                if max_battery_export_w is not None
+                self.max_battery_export_w / 1000.0
+                if self.max_battery_export_w is not None
                 else None
             )
         if efficiency is not None:
@@ -659,9 +682,8 @@ class BatteryOptimizer:
             return [default] * target_len
         if len(arr) >= target_len:
             return arr[:target_len]
-        # Pad with last known value
-        pad_value = arr[-1] if arr else default
-        return arr + [pad_value] * (target_len - len(arr))
+        # Pad with the caller-supplied default
+        return arr + [default] * (target_len - len(arr))
 
     def _normalize_battery_export_flags(
         self,

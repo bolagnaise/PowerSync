@@ -438,6 +438,34 @@ def test_open_meteo_hass_data_watts_are_expanded_to_optimizer_slots(monkeypatch)
     ]
 
 
+def test_open_meteo_zero_fills_after_last_forecast_point(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 5, 9, 10, 0, tzinfo=timezone.utc)
+    watts = {
+        start.isoformat(): 1000,
+        (start + timedelta(minutes=5)).isoformat(): 2000,
+    }
+    hass = SimpleNamespace(
+        data={
+            "open_meteo_solar_forecast": {
+                "entry-1": SimpleNamespace(data=SimpleNamespace(watts=watts)),
+            }
+        },
+        states=_FakeStates(),
+    )
+    forecaster = module.SolcastForecaster(hass, interval_minutes=5)
+
+    forecast = _run(forecaster.get_forecast(horizon_hours=1, start_time=start))
+
+    # Past the last forecast point (start+5min), Open-Meteo should zero-fill
+    # like Solcast does rather than carrying the last point's value forward
+    # for the rest of the horizon.
+    assert forecast[0] == 1000.0
+    assert forecast[1] == 2000.0
+    assert forecast[2] == 0.0
+    assert forecast[-1] == 0.0
+
+
 def test_open_meteo_multiple_entries_are_summed(monkeypatch):
     module = _load_estimator_module(monkeypatch)
     start = datetime(2026, 5, 9, 10, 0, tzinfo=timezone.utc)
@@ -454,7 +482,10 @@ def test_open_meteo_multiple_entries_are_summed(monkeypatch):
 
     forecast = _run(forecaster.get_forecast(horizon_hours=1, start_time=start))
 
-    assert forecast == [1500.0] * 12
+    # Entries are summed at the shared timestamp (1000 + 500); past that
+    # single forecast point Open-Meteo zero-fills rather than carrying the
+    # summed value forward for the rest of the horizon.
+    assert forecast == [1500.0] + [0.0] * 11
 
 
 def test_solar_forecast_default_prefers_solcast_when_both_providers_have_data(monkeypatch):
@@ -517,7 +548,9 @@ def test_solar_forecast_open_meteo_preference_wins_when_both_providers_have_data
 
     forecast = _run(forecaster.get_forecast(horizon_hours=1, start_time=start))
 
-    assert forecast == [1000.0, 1000.0]
+    # Past the single forecast point, Open-Meteo zero-fills rather than
+    # carrying the value forward for the rest of the horizon.
+    assert forecast == [1000.0, 0.0]
     assert forecaster.last_forecast_source == "open_meteo"
 
 
@@ -635,7 +668,7 @@ def test_open_meteo_sensor_watts_attributes_are_used_without_hass_data(monkeypat
 
     forecast = _run(forecaster.get_forecast(horizon_hours=1, start_time=start))
 
-    assert forecast[:6] == [800.0, 800.0, 800.0, 1200.0, 1200.0, 1200.0]
+    assert forecast[:6] == [800.0, 800.0, 800.0, 1200.0, 0.0, 0.0]
 
 
 def test_open_meteo_renamed_sensor_watts_attributes_are_used(monkeypatch):
@@ -659,7 +692,7 @@ def test_open_meteo_renamed_sensor_watts_attributes_are_used(monkeypatch):
 
     forecast = _run(forecaster.get_forecast(horizon_hours=1, start_time=start))
 
-    assert forecast[:6] == [700.0, 700.0, 700.0, 900.0, 900.0, 900.0]
+    assert forecast[:6] == [700.0, 700.0, 700.0, 900.0, 0.0, 0.0]
 
 
 class _FakeStates:

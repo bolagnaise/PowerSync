@@ -7793,7 +7793,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return solar_forecast
         forecast_now_kw = sum(window) / len(window)
         if forecast_now_kw < 0.5:
-            # Dawn/dusk and very low production are too noisy to learn from.
+            # Dawn/dusk and very low production are too noisy to learn from,
+            # but a derate learned before sunset must still recover overnight
+            # instead of freezing and suppressing next-morning forecasts.
+            self._solar_nowcast_derate = min(1.0, self._solar_nowcast_derate + 0.08)
             return solar_forecast
 
         ratio = actual_kw / forecast_now_kw if forecast_now_kw > 0 else 1.0

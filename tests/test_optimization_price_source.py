@@ -1948,3 +1948,28 @@ def test_flow_power_kwatch_price_source_is_provider_gated():
     assert "FlowPowerKWatchPriceCoordinator" in source
     assert '"flow_power_kwatch_coordinator": flow_power_kwatch_coordinator' in source
     assert "or flow_power_kwatch_coordinator" in source
+
+
+def test_solar_nowcast_derate_recovers_through_overnight_zero_forecast(opt_module):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
+    coordinator._solar_nowcast_derate = 0.35
+    coordinator._last_solar_nowcast_ratio = None
+    coordinator._last_logged_solar_nowcast_derate = None
+    coordinator._get_energy_data = lambda: {"solar_power": 0}
+
+    # Overnight: forecast is all zeros, so forecast_now_kw stays under the
+    # 0.5 kW noise floor for every cycle.
+    solar_forecast = [0.0] * 12
+
+    coordinator._apply_solar_nowcast_derate(solar_forecast, soc=0.5)
+    # A derate learned before sunset must not freeze through the zero-
+    # forecast night — it should recover toward 1.0 each cycle, matching the
+    # existing `ratio >= 0.9` recovery step, rather than only resuming once
+    # the morning forecast crosses 0.5 kW again.
+    assert coordinator._solar_nowcast_derate > 0.35
+
+    for _ in range(20):
+        coordinator._apply_solar_nowcast_derate(solar_forecast, soc=0.5)
+
+    assert coordinator._solar_nowcast_derate == pytest.approx(1.0)

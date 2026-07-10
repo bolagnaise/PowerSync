@@ -1488,6 +1488,7 @@ class SolcastForecaster:
             return None
 
         sorted_points = sorted(points, key=lambda item: item[0])
+        last_point_time = sorted_points[-1][0]
         result: list[float] = []
         point_index = 0
         current_power = 0.0
@@ -1500,6 +1501,11 @@ class SolcastForecaster:
             ):
                 current_power = sorted_points[point_index][1]
                 point_index += 1
+            if point_index >= len(sorted_points) and current_time > last_point_time:
+                # Past the last forecast point: zero-fill instead of carrying
+                # the final value forward, matching Solcast's period-window
+                # behavior (a period-less point has no "current" reading).
+                current_power = 0.0
             result.append(current_power)
             current_time += timedelta(minutes=self.interval_minutes)
 

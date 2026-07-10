@@ -675,6 +675,110 @@ def test_target_export_cap_is_separate_from_total_discharge(battery_optimizer_mo
     assert max(action.battery_discharge_w for action in result.schedule.actions) > 2500
 
 
+def test_negative_max_battery_export_w_is_normalized_not_inverted(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=13500,
+        max_charge_w=7000,
+        max_discharge_w=7000,
+        max_battery_export_w=-500,
+        backup_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+
+    # A negative config value must not survive raw — it should normalize away
+    # (no additional battery-export cap) rather than flow into
+    # `solar_surplus_kw + max_battery_export_kw` and invert the LP bound.
+    assert optimizer.max_battery_export_w is None
+    assert optimizer.max_battery_export_kw is None
+
+    optimizer.update_config(max_battery_export_w=-500)
+
+    assert optimizer.max_battery_export_w is None
+    assert optimizer.max_battery_export_kw is None
+
+
+def test_pad_array_honors_default_for_short_nonempty_array(battery_optimizer_module):
+    optimizer = _optimizer(battery_optimizer_module)
+
+    padded = optimizer._pad_array([1.0, 2.0], 5, 9.0)
+
+    assert padded == [1.0, 2.0, 9.0, 9.0, 9.0]
+
+
+def test_solve_lp_highs_keeps_time_limit_incumbent(
+    battery_optimizer_module, monkeypatch
+):
+    module = battery_optimizer_module
+    if not module.HIGHS_AVAILABLE:
+        pytest.skip("highspy unavailable")
+
+    real_highspy = module.highspy
+
+    class _FakeHighs:
+        def __init__(self):
+            self._n_cols = 0
+
+        def setOptionValue(self, *args, **kwargs):
+            pass
+
+        def addCol(self, obj, lo, hi, *args, **kwargs):
+            self._n_cols += 1
+
+        def addRow(self, *args, **kwargs):
+            pass
+
+        def run(self):
+            pass
+
+        def getModelStatus(self):
+            return real_highspy.HighsModelStatus.kTimeLimit
+
+        def modelStatusToString(self, status):
+            return "Time limit reached."
+
+        def getInfo(self):
+            info = types.SimpleNamespace()
+            info.primal_solution_status = real_highspy.kSolutionStatusFeasible
+            return info
+
+        def getSolution(self):
+            sol = types.SimpleNamespace()
+            sol.col_value = [1.5] * self._n_cols
+            return sol
+
+        def getObjectiveValue(self):
+            return 3.0
+
+    fake_highspy = types.SimpleNamespace(
+        kHighsInf=real_highspy.kHighsInf,
+        Highs=_FakeHighs,
+        HighsModelStatus=real_highspy.HighsModelStatus,
+        kSolutionStatusFeasible=real_highspy.kSolutionStatusFeasible,
+    )
+    monkeypatch.setattr(module, "highspy", fake_highspy)
+
+    A_eq = module._LpMatrix((0, 1))
+    A_ub = module._LpMatrix((0, 1))
+    result = module._solve_lp_highs(
+        c=[1.0],
+        A_ub=A_ub,
+        b_ub=[],
+        A_eq=A_eq,
+        b_eq=[],
+        bounds=[(0, 5)],
+        time_limit=1.0,
+    )
+
+    # A time-limited solve with a feasible incumbent should be used instead
+    # of being discarded and falling all the way to the greedy fallback.
+    assert result.success is True
+    assert result.x == [1.5]
+    assert result.fun == 3.0
+
+
 def test_solar_surplus_export_still_works_when_battery_export_blocked(
     battery_optimizer_module,
 ):
