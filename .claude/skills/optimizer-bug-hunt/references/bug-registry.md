@@ -509,6 +509,10 @@ CONFIRMED by adversarial verification unless noted:
 - **PW-4** Cloud-fallback masking regression: failed local write + cloud success → refresh
   re-stamps the stale snapshot fresh → entity pinned to the old value until gateway sync
   (pre-diff self-corrected ≤30 s).
+  > Note: 8a84065c narrowed PW-4's downstream exposure via `resolve_restore_target` (prefers
+  > provenance-clean startup/persisted reserve over a fresh-but-possibly-corrupted LIVE
+  > read), but the overlay-layer corruption in `powerwall_local/coordinator.py` is untouched
+  > and PW-4 stays open — mirroring reserve-cluster-design.md §4's residual carry.
 - **PW-5** Silent reader divergence: `optimization/battery_controller.py:207
   get_backup_reserve` prefers the cloud cache (opposite of `get_tesla_operation_mode`),
   so the LP plans against the stale reserve while the UI shows the local one; the
