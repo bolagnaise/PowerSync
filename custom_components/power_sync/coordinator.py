@@ -3472,7 +3472,9 @@ class FlowPowerKWatchPriceCoordinator(DataUpdateCoordinator):
         self._aemo_fallback = AEMOPriceCoordinator(hass, region, session)
         self._using_fallback = False
         self._fallback_reason: str | None = None
+        self._kwatch_last_attempt: datetime | None = None
         self._kwatch_last_success: datetime | None = None
+        self._kwatch_consecutive_failures = 0
 
         super().__init__(
             hass,
@@ -3581,6 +3583,10 @@ class FlowPowerKWatchPriceCoordinator(DataUpdateCoordinator):
                 "fallback_source": "aemo_api",
                 "using_fallback": True,
                 "fallback_reason": reason,
+                "kwatch_consecutive_failures": self._kwatch_consecutive_failures,
+                "kwatch_last_attempt": self._format_update_time(
+                    self._kwatch_last_attempt
+                ),
                 "kwatch_last_success": self._format_update_time(
                     self._kwatch_last_success
                 ),
@@ -3591,9 +3597,11 @@ class FlowPowerKWatchPriceCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch KWatch prices, falling back to AEMO during transient outages."""
+        self._kwatch_last_attempt = dt_util.utcnow()
         try:
             data = await self._fetch_kwatch_data()
         except Exception as err:
+            self._kwatch_consecutive_failures += 1
             reason = self._fallback_reason_from_error(err)
             if reason is None:
                 raise
@@ -3606,6 +3614,7 @@ class FlowPowerKWatchPriceCoordinator(DataUpdateCoordinator):
                 ) from fallback_err
 
         self._kwatch_last_success = data.get("last_update")
+        self._kwatch_consecutive_failures = 0
         if self._using_fallback:
             _LOGGER.info(
                 "Flow Power KWatch recovered for %s; returning to primary pricing",
@@ -3613,6 +3622,17 @@ class FlowPowerKWatchPriceCoordinator(DataUpdateCoordinator):
             )
         self._using_fallback = False
         self._fallback_reason = None
+        data.update(
+            {
+                "kwatch_consecutive_failures": 0,
+                "kwatch_last_attempt": self._format_update_time(
+                    self._kwatch_last_attempt
+                ),
+                "kwatch_last_success": self._format_update_time(
+                    self._kwatch_last_success
+                ),
+            }
+        )
         return data
 
 
@@ -4353,11 +4373,6 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
     _BLOCKED_DISCHARGE_GRID_LOAD_RATIO = 0.6
     _BLOCKED_DISCHARGE_BATTERY_KW = 0.1
     _BLOCKED_DISCHARGE_RESERVE_MARGIN = 2.0
-    # SH-RS/SH-T firmware can reject the EMS/min-SOC register reads even though
-    # the BMS still enforces its protected 5% discharge floor.  Without a
-    # fallback, normal grid import at that floor looks exactly like a stale
-    # 10 W discharge cap and causes restore_normal to be retried every cycle.
-    _UNREADABLE_RESERVE_FLOOR_PERCENT = 5.0
 
     def __init__(
         self,
@@ -4631,6 +4646,12 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 "backup_reserve": data.get("backup_reserve"),
                 "charge_rate_limit_kw": data.get("charge_rate_limit_kw"),
                 "discharge_rate_limit_kw": data.get("discharge_rate_limit_kw"),
+                "bms_max_discharge_current_a": data.get(
+                    "bms_max_discharge_current_a"
+                ),
+                "discharge_rate_limit_source": data.get(
+                    "discharge_rate_limit_source"
+                ),
                 "export_limit_w": data.get("export_limit_w"),
                 "export_limit_enabled": data.get("export_limit_enabled"),
                 "meter_power": meter_power_w,
@@ -5111,6 +5132,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         load_kw = read_float("load_power", "home_load")
         soc = read_float("battery_level", "battery_soc")
         reserve = read_float("backup_reserve", "min_soc")
+        bms_max_discharge_current_a = read_float("bms_max_discharge_current_a")
 
         if battery_kw is None or grid_kw is None or soc is None:
             return False
@@ -5130,13 +5152,21 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             except (AttributeError, TypeError, ValueError):
                 configured_reserve = None
 
-        effective_reserve = reserve
-        if effective_reserve is None:
-            effective_reserve = max(
-                self._UNREADABLE_RESERVE_FLOOR_PERCENT,
-                configured_reserve or 0.0,
-            )
-        if soc <= effective_reserve + self._BLOCKED_DISCHARGE_RESERVE_MARGIN:
+        effective_reserve = reserve if reserve is not None else configured_reserve
+        if (
+            effective_reserve is not None
+            and soc <= effective_reserve + self._BLOCKED_DISCHARGE_RESERVE_MARGIN
+        ):
+            return False
+
+        # A zero BMS discharge-current allowance is positive evidence that the
+        # inverter is protecting the battery.  Do not infer the same thing from
+        # SOC alone: some Sungrow installations normally expose and discharge
+        # through a displayed 5% SOC before reaching their configured 0% floor.
+        if (
+            bms_max_discharge_current_a is not None
+            and bms_max_discharge_current_a <= 0
+        ):
             return False
 
         if abs(battery_kw) > self._BLOCKED_DISCHARGE_BATTERY_KW:

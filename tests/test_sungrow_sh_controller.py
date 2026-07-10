@@ -405,6 +405,8 @@ def test_battery_data_prefers_mkaiser_telemetry_registers_without_write_probe():
     assert data["meter_power"] == 1500
     assert data["charge_rate_limit_kw"] == 12.0
     assert data["discharge_rate_limit_kw"] == 15.0
+    assert data["discharge_rate_limit_source"] == "configured_power"
+    assert "bms_max_discharge_current_a" not in data
     assert data["export_limit_enabled"] is True
     assert data["backup_reserve"] == 30
     assert (controller.REG_MAX_CHARGE_POWER, 1) in holding_reads
@@ -412,6 +414,41 @@ def test_battery_data_prefers_mkaiser_telemetry_registers_without_write_probe():
     assert (controller.REG_BMS_MAX_CHARGE_CURRENT, 1) not in input_reads
     assert (13065, 1) not in holding_reads
     assert (13066, 1) not in holding_reads
+
+
+def test_battery_data_marks_zero_bms_discharge_capability():
+    async def run_read():
+        controller = SungrowSHController("192.0.2.10")
+
+        async def connect() -> bool:
+            return True
+
+        async def read_input_register(address: int, count: int = 1):
+            values = {
+                controller.REG_BATTERY_VOLTAGE: [5751, 0, 0, 49, 980, 208, 298],
+                controller.REG_BATTERY_POWER_S32: [0, 0],
+                controller.REG_BATTERY_CURRENT_PRECISE: [0],
+                controller.REG_INVERTER_TEMP: [312],
+                controller.REG_METER_ACTIVE_POWER: [8540, 0],
+                controller.REG_BMS_MAX_CHARGE_CURRENT: [40],
+                controller.REG_BMS_MAX_DISCHARGE_CURRENT: [0],
+            }
+            return values.get(address)
+
+        async def read_register(address: int, count: int = 1):
+            return None
+
+        controller.connect = connect
+        controller._read_input_register = read_input_register
+        controller._read_register = read_register
+        return await controller.get_battery_data()
+
+    data = asyncio.run(run_read())
+
+    assert data["battery_soc"] == 4.9
+    assert data["bms_max_discharge_current_a"] == 0
+    assert data["discharge_rate_limit_kw"] == 0.0
+    assert data["discharge_rate_limit_source"] == "bms_current"
 
 
 def test_sungrow_rate_limits_use_mkaiser_power_registers():
@@ -1026,7 +1063,7 @@ def test_sungrow_restore_repairs_blocked_discharge_when_cap_unreadable():
     assert fake_controller.discharge_rate_limits == [10.6]
 
 
-def test_sungrow_restore_does_not_repair_at_unreadable_bms_floor():
+def test_sungrow_restore_repairs_low_soc_when_floor_and_bms_limit_are_unreadable():
     SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
 
     async def run_restore_cycle():
@@ -1040,6 +1077,40 @@ def test_sungrow_restore_does_not_repair_at_unreadable_bms_floor():
             "grid_power": 8.54,
             "load_power": 8.48,
             "battery_level": 4.9,
+            "charge_rate_limit_kw": 10.6,
+            "battery_max_charge_power": 10.6,
+        }
+
+        restore_result = await coordinator.restore_normal()
+        return restore_result, fake_controller
+
+    try:
+        restore_result, fake_controller = asyncio.run(run_restore_cycle())
+    finally:
+        restore()
+
+    assert restore_result
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.discharge_rate_limits == [10.6]
+
+
+def test_sungrow_restore_does_not_repair_when_bms_blocks_discharge():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restore_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 10.6,
+        }
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller)
+        coordinator.data = {
+            "battery_power": 0.0,
+            "grid_power": 8.54,
+            "load_power": 8.48,
+            "battery_level": 4.9,
+            "bms_max_discharge_current_a": 0.0,
+            "discharge_rate_limit_kw": 0.0,
+            "discharge_rate_limit_source": "bms_current",
             "charge_rate_limit_kw": 10.6,
             "battery_max_charge_power": 10.6,
         }

@@ -614,6 +614,9 @@ def test_flow_power_kwatch_success_does_not_call_aemo_fallback():
 
         assert data["source"] == "flow_power_kwatch"
         assert data["using_fallback"] is False
+        assert data["kwatch_consecutive_failures"] == 0
+        assert data["kwatch_last_attempt"] is not None
+        assert data["kwatch_last_success"] is not None
         assert session.aemo_fallback.refresh_count == 0
     finally:
         restore()
@@ -635,6 +638,9 @@ def test_flow_power_kwatch_transient_failure_uses_aemo_fallback():
         assert data["fallback_source"] == "aemo_api"
         assert data["using_fallback"] is True
         assert data["fallback_reason"] == "api_status_500"
+        assert data["kwatch_consecutive_failures"] == 1
+        assert data["kwatch_last_attempt"] is not None
+        assert data["kwatch_last_success"] is None
         assert data["current"][0]["perKwh"] == 7.5
         assert session.aemo_fallback.refresh_count == 1
     finally:
@@ -656,6 +662,7 @@ def test_flow_power_kwatch_invalid_api_key_does_not_use_aemo_fallback():
             assert str(err) == "invalid_api_key"
         else:
             raise AssertionError("invalid_api_key should not be hidden by fallback")
+        assert coordinator._kwatch_consecutive_failures == 1
         assert session.aemo_fallback.refresh_count == 0
     finally:
         restore()
@@ -699,12 +706,16 @@ def test_flow_power_kwatch_recovery_switches_back_to_primary_source():
         coordinator = cls(SimpleNamespace(), "QLD1", "secret-key", session)
 
         fallback = asyncio.run(coordinator._async_update_data())
+        second_fallback = asyncio.run(coordinator._async_update_data())
         coordinator._client = _FakeKWatchClient()
         recovered = asyncio.run(coordinator._async_update_data())
 
         assert fallback["source"] == "flow_power_kwatch_fallback_aemo"
+        assert second_fallback["kwatch_consecutive_failures"] == 2
         assert recovered["source"] == "flow_power_kwatch"
         assert recovered["using_fallback"] is False
+        assert recovered["kwatch_consecutive_failures"] == 0
+        assert recovered["kwatch_last_success"] is not None
         assert coordinator._using_fallback is False
     finally:
         restore()
@@ -757,7 +768,11 @@ def test_flow_power_sensor_exposes_effective_price_source_metadata():
 
     assert "'price_source'" in helper
     assert "'using_price_fallback'" in helper
+    assert "'price_update_success'" in helper
     assert "'fallback_reason'" in helper
+    assert "'kwatch_consecutive_failures'" in helper
+    assert "'kwatch_last_attempt'" in helper
+    assert "'kwatch_last_success'" in helper
     assert "_coordinator_source_attributes" in attrs
     assert "tariff_data.get('price_source'" in attrs
 

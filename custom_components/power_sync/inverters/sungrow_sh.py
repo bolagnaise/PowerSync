@@ -1319,11 +1319,14 @@ class SungrowSHController(InverterController):
             max_discharge_power = await self._read_register(self.REG_MAX_DISCHARGE_POWER, 1)
             if max_discharge_power and self._valid_u16(max_discharge_power[0]):
                 data["discharge_rate_limit_kw"] = round(max_discharge_power[0] * 10 / 1000, 2)
+                data["discharge_rate_limit_source"] = "configured_power"
             else:
                 max_discharge_current = await self._read_input_register(self.REG_BMS_MAX_DISCHARGE_CURRENT, 1)
                 if max_discharge_current and self._valid_u16(max_discharge_current[0]):
                     amps = max_discharge_current[0]
+                    data["bms_max_discharge_current_a"] = amps
                     data["discharge_rate_limit_kw"] = round(amps * self._battery_voltage / 1000, 2)
+                    data["discharge_rate_limit_source"] = "bms_current"
 
             data["rate_limit_writable"] = self._rate_limit_writable or False
 

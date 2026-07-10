@@ -4547,16 +4547,31 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
         source = data.get("source")
         if source:
             attrs["price_source"] = source
+        attrs["price_update_success"] = bool(
+            getattr(self.coordinator, "last_update_success", True)
+        )
         attrs["using_price_fallback"] = bool(data.get("using_fallback"))
         for key in (
             "fallback_reason",
             "fallback_source",
             "primary_source",
+            "kwatch_consecutive_failures",
+            "kwatch_last_attempt",
             "kwatch_last_success",
         ):
             value = data.get(key)
             if value not in (None, ""):
                 attrs[key] = value
+
+        # Read live coordinator fields after the last-good data snapshot. If a
+        # refresh fails completely, DataUpdateCoordinator intentionally keeps
+        # serving that snapshot, but these values still reveal the new attempt.
+        last_attempt = getattr(self.coordinator, "_kwatch_last_attempt", None)
+        if last_attempt is not None:
+            attrs["kwatch_last_attempt"] = last_attempt.isoformat()
+        failures = getattr(self.coordinator, "_kwatch_consecutive_failures", None)
+        if failures is not None:
+            attrs["kwatch_consecutive_failures"] = failures
         return attrs
 
     @property
@@ -4743,6 +4758,8 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
                 "fallback_reason",
                 "fallback_source",
                 "primary_source",
+                "kwatch_consecutive_failures",
+                "kwatch_last_attempt",
                 "kwatch_last_success",
             ):
                 value = tariff_data.get(key)
