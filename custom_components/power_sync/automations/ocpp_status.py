@@ -31,8 +31,8 @@ OCPP_STATUS_SUFFIXES = (
 OCPP_POWER_SUFFIXES = (
     "_current_power",
     "_power_active_import",
-    "_power_offered",
 )
+OCPP_CAPABILITY_SUFFIXES = ("_power_offered",)
 OCPP_ENERGY_SUFFIXES = (
     "_energy_meter",
     "_energy_active_import_register",
@@ -49,6 +49,7 @@ OCPP_CURRENT_LIMIT_SUFFIXES = (
 OCPP_ENTITY_SUFFIXES = (
     *OCPP_STATUS_SUFFIXES,
     *OCPP_POWER_SUFFIXES,
+    *OCPP_CAPABILITY_SUFFIXES,
     *OCPP_ENERGY_SUFFIXES,
     *OCPP_CURRENT_LIMIT_SUFFIXES,
 )
@@ -89,7 +90,11 @@ def is_hacs_ocpp_status_entity(entity_id: str) -> bool:
 
 
 def is_hacs_ocpp_power_entity(entity_id: str) -> bool:
-    """Return True for HACS OCPP power measurand entities."""
+    """Return True for HACS OCPP delivered-power measurand entities.
+
+    Power offered is the EVSE's advertised capacity, not power delivered to a
+    vehicle, so it must not drive connected or charging state.
+    """
     if "." not in entity_id:
         return False
     object_id = entity_id.lower().split(".", 1)[1]

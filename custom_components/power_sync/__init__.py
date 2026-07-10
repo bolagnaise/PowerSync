@@ -14612,7 +14612,6 @@ class OCPPChargersView(HomeAssistantView):
             power_suffixes = (
                 "_current_power",
                 "_power_active_import",
-                "_power_offered",
             )
             energy_suffixes = (
                 "_energy_meter",

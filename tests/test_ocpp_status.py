@@ -53,7 +53,13 @@ def test_classifies_hacs_ocpp_entity_types():
     assert is_hacs_ocpp_status_entity("sensor.evse_1_status_connector") is True
     assert is_hacs_ocpp_status_entity("switch.evse_1_charge_control") is False
     assert is_hacs_ocpp_power_entity("sensor.evse_1_power_active_import") is True
+    assert is_hacs_ocpp_power_entity("sensor.evse_1_current_power") is True
+    assert is_hacs_ocpp_power_entity("sensor.evse_1_power_offered") is False
     assert is_hacs_ocpp_energy_entity("sensor.evse_1_energy_session") is True
+
+
+def test_power_offered_remains_discoverable_without_becoming_delivered_power():
+    assert extract_hacs_ocpp_prefix("sensor.evse_1_power_offered") == "evse_1"
 
 
 def test_status_normalization_accepts_hacs_variants():
