@@ -213,6 +213,77 @@ def test_coordinator_skips_poll_when_local_access_disabled():
     assert asyncio.run(coord._async_update_data()) is None
 
 
+class _FakeLocalClient:
+    """A local client that always returns a fresh (but still stale-basis,
+    per PW-4) snapshot -- exercises _async_update_data's freshness stamp."""
+
+    local_access_enabled = True
+
+    async def get_snapshot(self):
+        return client_mod.PowerwallSnapshot(
+            soc=50.0,
+            solar_w=0.0,
+            battery_w=0.0,
+            grid_w=0.0,
+            load_w=0.0,
+            grid_status="SystemGridConnected",
+            operation_mode="self_consumption",
+            backup_reserve_percent=10,
+            raw={},
+        )
+
+
+def _make_poll_coordinator(entry_data: dict) -> "coordinator_mod.PowerwallLocalCoordinator":
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord.hass = SimpleNamespace(data={"power_sync": {"entry-1": entry_data}})
+    coord._entry_id = "entry-1"
+    coord._client = _FakeLocalClient()
+    coord._consecutive_failures = 0
+    coord._last_success_ts = 100.0
+    return coord
+
+
+def test_coordinator_skips_freshness_restamp_after_cloud_fallback_write():
+    """PW-4 residual closure, part B: a poll that immediately follows a
+    failed-local/succeeded-cloud write must not re-stamp _last_success_ts,
+    because it is re-fetching the gateway's still-stale (unwritten) local
+    snapshot -- stamping it fresh would make battery_controller's 30s
+    LIVE-trust window treat the stale reserve as trustworthy."""
+    entry_data = {"powerwall_local_cloud_fallback_pending": True}
+    coord = _make_poll_coordinator(entry_data)
+
+    asyncio.run(coord._async_update_data())
+
+    assert coord._last_success_ts == 100.0
+    assert "powerwall_local_cloud_fallback_pending" not in entry_data
+
+
+def test_coordinator_restamps_freshness_on_next_poll_after_marker_consumed():
+    """The very next periodic poll (no marker set) must restamp normally --
+    the self-correction the registry note describes."""
+    entry_data = {"powerwall_local_cloud_fallback_pending": True}
+    coord = _make_poll_coordinator(entry_data)
+
+    asyncio.run(coord._async_update_data())
+    assert coord._last_success_ts == 100.0
+
+    asyncio.run(coord._async_update_data())
+    assert coord._last_success_ts != 100.0
+    assert coord._last_success_ts is not None
+
+
+def test_coordinator_restamps_freshness_when_no_fallback_pending():
+    entry_data: dict = {}
+    coord = _make_poll_coordinator(entry_data)
+
+    asyncio.run(coord._async_update_data())
+
+    assert coord._last_success_ts != 100.0
+    assert coord._last_success_ts is not None
+
+
 def test_coordinator_detects_hidden_reserve_offset_from_cloud_site_info():
     entry_data = {
         "tesla_coordinator": SimpleNamespace(

@@ -28,13 +28,18 @@ Fix (this change):
    is available, keeping the original ``_site_info_cache`` read only as a
    fallback for the (rare) case the optimizer isn't set up.
 
-Explicitly OUT of scope / left unchanged (per the RSV-3 design, coordinator
-notes S3): the two force-save "last-resort" branches (~L25693-25710 and
-~L27327-27343) already prioritize ``_startup_backup_reserve`` /
-``_pre_idle_backup_reserve`` over a live (but provenance-untagged) API read
--- that shape is intentionally NOT touched here. This is a documented
-residual exposure (PW-4/S3), not a regression introduced by this fix; a
-later RSV step gates it at persist time.
+Follow-up (PW-4 residual closure, part A): the two force-save "last-resort"
+branches (``handle_force_discharge`` ~L25707, ``handle_force_charge``
+~L27341) were left routing their last-resort fallback through the raw,
+provenance-untagged ``api_reserve`` site_info read when neither
+``_startup_backup_reserve`` nor ``_pre_idle_backup_reserve`` was set. Per
+reserve-cluster-design.md Section 2 (PW-6) / the RSV-3 follow-up, both
+last-resort branches now call ``opt_coord.resolve_restore_target()`` before
+falling back to the raw ``api_reserve`` read (which remains the final
+pre-``0`` fallback when the resolver itself returns ``None``, e.g. no
+optimization coordinator or a legacy battery). The top two branches
+(``_startup_backup_reserve`` / ``_pre_idle_backup_reserve``) are unchanged --
+they were already correct-by-construction after RSV-2.
 """
 
 from __future__ import annotations
@@ -379,37 +384,141 @@ def test_handle_schedule_max_backup_falls_back_to_site_info_when_optimizer_unava
 
 
 # ---------------------------------------------------------------------------
-# (4) Force-save last-resort branches: documented S3 residual (unchanged)
+# (4) Force-save last-resort branches: PW-4 residual closure, part A
 # ---------------------------------------------------------------------------
 
 
-def test_force_save_last_resort_branches_still_use_untagged_api_reserve_s3_residual():
-    """PW-4/S3 residual (documented, NOT closed by this fix): the two
-    force-save last-resort fallback branches still fold a live (but
-    provenance-untagged) site_info API read into saved_backup_reserve when
-    neither _startup_backup_reserve nor _pre_idle_backup_reserve is set.
-
-    Per the RSV-3 design (coordinator notes S3 / registry PW-4), this
-    interim behavior is intentionally left unchanged by this change --
-    closing it is deferred to a later RSV step that gates persist-time
-    writes, not just the schedule_max_backup snapshot fixed here. This test
-    exists to document the residual exposure and catch it if the branch
-    shape is ever silently touched without updating this note.
-    """
+def _force_save_chain_source(func_name: str) -> str:
+    """Extract the ``if startup_reserve is not None: ...`` chain nested
+    inside ``func_name``, source-exact (original indentation preserved so
+    ``textwrap.dedent`` can normalize it uniformly)."""
     source = INIT_PATH.read_text()
+    module = ast.parse(source)
+    lines = source.splitlines(keepends=True)
 
-    occurrences = _find_all(
-        source, "elif api_reserve is not None and api_reserve < 100:"
+    func_node = None
+    for node in ast.walk(module):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == func_name:
+            func_node = node
+            break
+    assert func_node is not None, f"{func_name} not found"
+
+    target = None
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "startup_reserve is not None":
+            target = node
+            break
+    assert target is not None, f"force-save if-chain not found in {func_name}"
+
+    segment = "".join(lines[target.lineno - 1 : target.end_lineno])
+    return textwrap.dedent(segment)
+
+
+def _run_force_save_chain(func_name: str, *, startup_reserve, pre_idle, api_reserve, opt_coord):
+    chain_source = _force_save_chain_source(func_name)
+    wrapper = (
+        "async def _run(startup_reserve, pre_idle, api_reserve, opt_coord):\n"
+        "    site_state = {}\n"
+        + textwrap.indent(chain_source, "    ")
+        + "    return site_state.get(\"saved_backup_reserve\")\n"
     )
-    assert len(occurrences) == 2, (
-        "expected exactly the two known force-save last-resort branches "
-        f"(found {len(occurrences)}); if this count changed, re-check "
-        "whether they were folded into resolve_restore_target (would mean "
-        "S3 is closed -- update this test and the docstring above)"
+    namespace: dict = {}
+    exec(wrapper, namespace)
+    return asyncio.run(
+        namespace["_run"](startup_reserve, pre_idle, api_reserve, opt_coord)
     )
-    for idx in occurrences:
-        window = source[idx : idx + 400]
-        assert 'site_state["saved_backup_reserve"] = api_reserve' in window
-        # Still gated only by startup_reserve/pre_idle priority above it --
-        # not by any read-trust tag (that gate is the still-open part).
-        assert "startup_reserve is not None" in source[max(0, idx - 400) : idx]
+
+
+def test_force_save_last_resort_branches_route_through_resolve_restore_target_structural():
+    """PW-4 residual closure, part A (design §2 PW-6): both force-save
+    last-resort branches must call resolve_restore_target() before falling
+    back to the raw, provenance-untagged api_reserve site_info read."""
+    for func_name in ("handle_force_discharge", "handle_force_charge"):
+        chain = _force_save_chain_source(func_name)
+        assert "await opt_coord.resolve_restore_target()" in chain
+        resolver_idx = chain.index("await opt_coord.resolve_restore_target()")
+        api_fallback_idx = chain.index(
+            'site_state["saved_backup_reserve"] = api_reserve'
+        )
+        assert resolver_idx < api_fallback_idx, (
+            f"{func_name}: resolve_restore_target() must be tried before the "
+            "raw api_reserve fallback"
+        )
+        # Top two branches (startup/pre_idle) stay first and untouched.
+        assert chain.index("startup_reserve is not None") < resolver_idx
+        assert chain.index("pre_idle is not None") < resolver_idx
+
+
+class _FakeResolvingOptCoord:
+    def __init__(self, resolved):
+        self._resolved = resolved
+        self.calls = 0
+
+    async def resolve_restore_target(self):
+        self.calls += 1
+        return self._resolved
+
+
+def test_force_save_last_resort_prefers_startup_reserve_over_resolver():
+    opt_coord = _FakeResolvingOptCoord(resolved=99)
+    for func_name in ("handle_force_discharge", "handle_force_charge"):
+        result = _run_force_save_chain(
+            func_name, startup_reserve=20, pre_idle=None, api_reserve=5, opt_coord=opt_coord
+        )
+        assert result == 20
+        assert opt_coord.calls == 0
+
+
+def test_force_save_last_resort_prefers_pre_idle_over_resolver():
+    opt_coord = _FakeResolvingOptCoord(resolved=99)
+    for func_name in ("handle_force_discharge", "handle_force_charge"):
+        result = _run_force_save_chain(
+            func_name, startup_reserve=None, pre_idle=30, api_reserve=5, opt_coord=opt_coord
+        )
+        assert result == 30
+        assert opt_coord.calls == 0
+
+
+def test_force_save_last_resort_uses_resolver_not_raw_api_reserve():
+    """Core PW-4 regression: when neither startup nor pre_idle is set, the
+    resolver's trustworthy value must win over the raw, untrusted
+    api_reserve read -- not the other way around."""
+    for func_name in ("handle_force_discharge", "handle_force_charge"):
+        opt_coord = _FakeResolvingOptCoord(resolved=42)
+        result = _run_force_save_chain(
+            func_name, startup_reserve=None, pre_idle=None, api_reserve=7, opt_coord=opt_coord
+        )
+        assert result == 42
+        assert result != 7
+        assert opt_coord.calls == 1
+
+
+def test_force_save_last_resort_falls_back_to_api_reserve_when_resolver_returns_none():
+    opt_coord = _FakeResolvingOptCoord(resolved=None)
+    for func_name in ("handle_force_discharge", "handle_force_charge"):
+        result = _run_force_save_chain(
+            func_name, startup_reserve=None, pre_idle=None, api_reserve=17, opt_coord=opt_coord
+        )
+        assert result == 17
+
+
+def test_force_save_last_resort_falls_back_to_api_reserve_when_no_opt_coord():
+    for func_name in ("handle_force_discharge", "handle_force_charge"):
+        result = _run_force_save_chain(
+            func_name, startup_reserve=None, pre_idle=None, api_reserve=17, opt_coord=None
+        )
+        assert result == 17
+
+
+def test_force_save_last_resort_defaults_to_zero_when_nothing_usable():
+    opt_coord = _FakeResolvingOptCoord(resolved=None)
+    for func_name in ("handle_force_discharge", "handle_force_charge"):
+        result = _run_force_save_chain(
+            func_name, startup_reserve=None, pre_idle=None, api_reserve=100, opt_coord=opt_coord
+        )
+        assert result == 0
+
+        result = _run_force_save_chain(
+            func_name, startup_reserve=None, pre_idle=None, api_reserve=None, opt_coord=None
+        )
+        assert result == 0

@@ -45,6 +45,7 @@ _LOGGER = logging.getLogger(__name__)
 POWERWALL_LOCAL_SNAPSHOT_TIMEOUT = 15.0
 _BACKUP_RESERVE_WRITE_LOCAL_KEY = "powerwall_local_backup_reserve_write_local_pct"
 _BACKUP_RESERVE_WRITE_USER_KEY = "powerwall_local_backup_reserve_write_user_pct"
+_CLOUD_FALLBACK_PENDING_KEY = "powerwall_local_cloud_fallback_pending"
 
 
 def _reserve_matches(left: Any, right: Any) -> bool:
@@ -176,7 +177,12 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
 
         import time as _time
 
-        self._last_success_ts = _time.time()
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
+        cloud_fallback_pending = isinstance(entry_data, dict) and entry_data.pop(
+            _CLOUD_FALLBACK_PENDING_KEY, False
+        )
+        if not cloud_fallback_pending:
+            self._last_success_ts = _time.time()
         self._consecutive_failures = 0
         self._update_backup_reserve_offset(snap)
         return snap

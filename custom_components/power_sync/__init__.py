@@ -25726,10 +25726,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 site_state["saved_backup_reserve"] = startup_reserve
                             elif pre_idle is not None:
                                 site_state["saved_backup_reserve"] = pre_idle
-                            elif api_reserve is not None and api_reserve < 100:
-                                site_state["saved_backup_reserve"] = api_reserve
                             else:
-                                site_state["saved_backup_reserve"] = 0
+                                resolved_reserve = None
+                                if opt_coord is not None and hasattr(opt_coord, "resolve_restore_target"):
+                                    resolved_reserve = await opt_coord.resolve_restore_target()
+                                if resolved_reserve is not None:
+                                    site_state["saved_backup_reserve"] = resolved_reserve
+                                elif api_reserve is not None and api_reserve < 100:
+                                    site_state["saved_backup_reserve"] = api_reserve
+                                else:
+                                    site_state["saved_backup_reserve"] = 0
                             _LOGGER.info("Site %s: saved operation mode: %s, backup reserve: %s%% (api=%s%%, pre_idle=%s%%, startup=%s%%)",
                                          site_id, site_state["saved_operation_mode"],
                                          site_state["saved_backup_reserve"], api_reserve, pre_idle, startup_reserve)
@@ -27359,10 +27365,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 site_state["saved_backup_reserve"] = startup_reserve
                             elif pre_idle is not None:
                                 site_state["saved_backup_reserve"] = pre_idle
-                            elif api_reserve is not None and api_reserve < 100:
-                                site_state["saved_backup_reserve"] = api_reserve
                             else:
-                                site_state["saved_backup_reserve"] = 0
+                                resolved_reserve = None
+                                if opt_coord is not None and hasattr(opt_coord, "resolve_restore_target"):
+                                    resolved_reserve = await opt_coord.resolve_restore_target()
+                                if resolved_reserve is not None:
+                                    site_state["saved_backup_reserve"] = resolved_reserve
+                                elif api_reserve is not None and api_reserve < 100:
+                                    site_state["saved_backup_reserve"] = api_reserve
+                                else:
+                                    site_state["saved_backup_reserve"] = 0
                             _LOGGER.info("Site %s: saved operation mode: %s, backup reserve: %s%% (api=%s%%, pre_idle=%s%%, startup=%s%%)",
                                          site_id, site_state["saved_operation_mode"],
                                          site_state["saved_backup_reserve"], api_reserve, pre_idle, startup_reserve)

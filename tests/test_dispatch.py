@@ -221,6 +221,45 @@ def test_paired_signature_error_falls_back():
     asyncio.run(_test_paired_signature_error_falls_back())
 
 
+async def _test_paired_local_failure_then_cloud_success_marks_fallback_pending():
+    """PW-4 residual closure, part B: when local was attempted and failed
+    but the cloud fallback succeeded, dispatch must flag the entry so the
+    next local poll doesn't re-stamp the (still-stale) snapshot as fresh."""
+    local = AsyncMock(side_effect=PowerwallUnreachableError("unreachable"))
+    cloud = AsyncMock(return_value="cloud-ok")
+    hass = _hass_with_transport(TEDAPIv1rTransport())
+    result = await dispatch_powerwall_write(
+        hass, _paired(), local_call=local, cloud_call=cloud, label="t",
+        retry_local_once=False,
+    )
+    assert result == "cloud-ok"
+    entry_data = hass.data["power_sync"]["abc"]
+    assert entry_data.get("powerwall_local_cloud_fallback_pending") is True
+
+
+def test_paired_local_failure_then_cloud_success_marks_fallback_pending():
+    asyncio.run(_test_paired_local_failure_then_cloud_success_marks_fallback_pending())
+
+
+async def _test_unpaired_cloud_only_does_not_mark_fallback_pending():
+    """Local was never attempted (unpaired) -- no marker, since the next
+    local poll isn't re-fetching anything stale on this entry's behalf."""
+    local = AsyncMock()
+    cloud = AsyncMock(return_value="cloud-ok")
+    hass = MagicMock()
+    hass.data = {"power_sync": {"abc": {}}}
+    result = await dispatch_powerwall_write(
+        hass, _unpaired(), local_call=local, cloud_call=cloud, label="t"
+    )
+    assert result == "cloud-ok"
+    entry_data = hass.data["power_sync"]["abc"]
+    assert "powerwall_local_cloud_fallback_pending" not in entry_data
+
+
+def test_unpaired_cloud_only_does_not_mark_fallback_pending():
+    asyncio.run(_test_unpaired_cloud_only_does_not_mark_fallback_pending())
+
+
 async def _test_paired_no_transport_short_circuits_to_cloud():
     hass = MagicMock()
     hass.data = {"power_sync": {"abc": {"powerwall_local": {"client": None}}}}
