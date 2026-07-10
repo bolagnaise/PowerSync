@@ -50,6 +50,7 @@ def _install_import_stubs() -> None:
     ha_core.ServiceCall = type("ServiceCall", (), {})
     ha_core.SupportsResponse = SimpleNamespace(ONLY="only", OPTIONAL="optional", NONE="none")
     ha_exceptions.ConfigEntryNotReady = type("ConfigEntryNotReady", (Exception,), {})
+    ha_exceptions.HomeAssistantError = type("HomeAssistantError", (Exception,), {})
     ha_http.HomeAssistantView = type("HomeAssistantView", (), {})
     ha_aiohttp_client.async_get_clientsession = lambda hass: None
     ha_device_registry.async_get = lambda hass: hass.device_registry
@@ -137,6 +138,7 @@ def _install_import_stubs() -> None:
         "FroniusReservaEnergyCoordinator",
         "NeovoltEnergyCoordinator",
         "SolarEdgeEnergyCoordinator",
+        "AnkerSolixEnergyCoordinator",
         "DemandChargeCoordinator",
         "AEMOSensorCoordinator",
         "OctopusPriceCoordinator",
@@ -360,6 +362,87 @@ def test_aggregate_ev_status_uses_configured_generic_charger_soc():
     status = power_sync._get_ev_vehicle_status(hass, entry)
 
     assert status == {"ev_power_kw": 0.0, "ev_soc": 64}
+
+
+def test_aggregate_ev_status_uses_configured_generic_charger_power():
+    power_sync = _power_sync_module()
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "generic_charger_power_entity": "sensor.generic_ev_power",
+            "generic_charger_soc_entity": "sensor.generic_ev_soc",
+        },
+    )
+    hass = _Hass([
+        _State("sensor.generic_ev_power", "3500", {"unit_of_measurement": "W"}),
+        _State("sensor.generic_ev_soc", "64"),
+    ])
+
+    status = power_sync._get_ev_vehicle_status(hass, entry)
+
+    assert status == {"ev_power_kw": 3.5, "ev_soc": 64}
+
+
+def test_generic_charger_vehicle_reports_connected_idle_status():
+    power_sync = _power_sync_module()
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "generic_charger_status_entity": "sensor.generic_ev_status",
+            "generic_charger_power_entity": "sensor.generic_ev_power",
+            "generic_charger_soc_entity": "sensor.generic_ev_soc",
+        },
+    )
+    hass = _Hass([
+        _State("sensor.generic_ev_status", "connected"),
+        _State("sensor.generic_ev_power", "0", {"unit_of_measurement": "W"}),
+        _State("sensor.generic_ev_soc", "64"),
+    ])
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+
+    assert vehicles == [{
+        "vehicle_id": "generic_ev",
+        "vehicle_name": "EV",
+        "ev_power_kw": 0.0,
+        "ev_soc": 64,
+        "is_connected": True,
+        "is_charging": False,
+    }]
+
+
+def test_generic_charger_vehicle_reports_measured_charging_power():
+    power_sync = _power_sync_module()
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "generic_charger_status_entity": "sensor.generic_ev_status",
+            "generic_charger_power_entity": "sensor.generic_ev_power",
+            "generic_charger_soc_entity": "sensor.generic_ev_soc",
+        },
+    )
+    hass = _Hass([
+        _State("sensor.generic_ev_status", "connected"),
+        _State("sensor.generic_ev_power", "3.4", {"unit_of_measurement": "kW"}),
+        _State("sensor.generic_ev_soc", "64"),
+    ])
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+
+    assert vehicles == [{
+        "vehicle_id": "generic_ev",
+        "vehicle_name": "EV",
+        "ev_power_kw": 3.4,
+        "ev_soc": 64,
+        "is_connected": True,
+        "is_charging": True,
+    }]
 
 
 def test_aggregate_ev_status_uses_generic_charger_fallback_soc():

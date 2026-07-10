@@ -1096,6 +1096,69 @@ def _apply_wall_connector_observation(
     return False
 
 
+def _generic_charger_observation_from_config(
+    hass,
+    config: dict,
+    *,
+    vehicle_name: str = "EV",
+) -> dict | None:
+    """Build normalized generic charger telemetry from configured HA entities."""
+    from .automations.generic_charger_soc import resolve_generic_charger_soc
+    from .automations.loadpoint_status import build_generic_charger_observation
+    from .const import (
+        CONF_GENERIC_CHARGER_AMPS_ENTITY,
+        CONF_GENERIC_CHARGER_ENABLED,
+        CONF_GENERIC_CHARGER_POWER_ENTITY,
+        CONF_GENERIC_CHARGER_SOC_ENTITY,
+        CONF_GENERIC_CHARGER_SOC_ENTITY_2,
+        CONF_GENERIC_CHARGER_STATUS_ENTITY,
+        CONF_GENERIC_CHARGER_SWITCH_ENTITY,
+    )
+
+    if not config.get(CONF_GENERIC_CHARGER_ENABLED):
+        return None
+
+    switch_entity = config.get(CONF_GENERIC_CHARGER_SWITCH_ENTITY)
+    amps_entity = config.get(CONF_GENERIC_CHARGER_AMPS_ENTITY)
+    status_entity = config.get(CONF_GENERIC_CHARGER_STATUS_ENTITY)
+    power_entity = config.get(CONF_GENERIC_CHARGER_POWER_ENTITY)
+    soc_entity = config.get(CONF_GENERIC_CHARGER_SOC_ENTITY)
+    soc_entity_2 = config.get(CONF_GENERIC_CHARGER_SOC_ENTITY_2)
+
+    if not any((switch_entity, amps_entity, status_entity, power_entity, soc_entity, soc_entity_2)):
+        return None
+
+    switch_state = hass.states.get(switch_entity) if switch_entity else None
+    amps_state = hass.states.get(amps_entity) if amps_entity else None
+    status_state = hass.states.get(status_entity) if status_entity else None
+    power_state = hass.states.get(power_entity) if power_entity else None
+    resolved_soc = resolve_generic_charger_soc(hass, config)
+
+    return build_generic_charger_observation(
+        vehicle_name=vehicle_name,
+        switch_state=switch_state.state if switch_state else None,
+        amps_value=amps_state.state if amps_state else None,
+        status_state=status_state.state if status_state else None,
+        power_value=_kw_from_power_state(power_state) if power_state else None,
+        soc_value=resolved_soc,
+    )
+
+
+def _generic_charger_charging_state(observation: dict) -> str:
+    """Map generic charger telemetry to a user-facing connection state."""
+    status = str(observation.get("blocking_reason") or "").strip()
+    normalized = re.sub(r"[^a-z0-9]+", "", status.lower())
+    if observation.get("is_charging"):
+        return "Charging"
+    if normalized in {"suspendedevse", "suspendedev", "paused", "stopped"}:
+        return "Stopped"
+    if normalized == "finishing":
+        return "Complete"
+    if observation.get("is_connected"):
+        return "Connected"
+    return "Disconnected"
+
+
 def _get_ev_vehicle_status(hass, entry) -> dict:
     """Get EV charging status from configured EV sensors.
 
@@ -1111,13 +1174,14 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
 
     config = {**entry.data, **entry.options}
     generic_ev_soc = None
-    from .const import CONF_GENERIC_CHARGER_ENABLED
-    from .automations.generic_charger_soc import resolve_generic_charger_soc
 
-    if config.get(CONF_GENERIC_CHARGER_ENABLED):
-        resolved_soc = resolve_generic_charger_soc(hass, config)
-        if resolved_soc is not None:
-            generic_ev_soc = int(resolved_soc)
+    generic_observation = _generic_charger_observation_from_config(hass, config)
+    if generic_observation:
+        generic_ev_soc = generic_observation.get("ev_soc")
+        ev_power_kw = max(
+            ev_power_kw,
+            float(generic_observation.get("ev_power_kw") or 0.0),
+        )
 
     # Check Tesla BLE sensors (all configured prefixes)
     for prefix in _resolve_ble_prefixes(hass, config):
@@ -1251,7 +1315,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
                     pass
 
     if generic_ev_soc is not None:
-        ev_soc = generic_ev_soc
+        ev_soc = int(generic_ev_soc)
 
     return {"ev_power_kw": ev_power_kw, "ev_soc": ev_soc}
 
@@ -1372,6 +1436,21 @@ def _get_ev_vehicles_status(hass, entry) -> list:
     # vehicle is away/asleep, so derive connection from charge_flap, charging
     # state, or measured charge power instead of switch existence.
     config = {**entry.data, **entry.options}
+    generic_observation = _generic_charger_observation_from_config(hass, config)
+    if generic_observation:
+        generic_power_kw = float(generic_observation.get("ev_power_kw") or 0.0)
+        vehicles.append({
+            "vehicle_id": "generic_ev",
+            "vehicle_name": generic_observation.get("vehicle_name") or "EV",
+            "ev_power_kw": generic_power_kw,
+            "ev_soc": generic_observation.get("ev_soc"),
+            "is_connected": bool(generic_observation.get("is_connected")),
+            "is_charging": (
+                bool(generic_observation.get("is_charging"))
+                or generic_power_kw > 0.05
+            ),
+        })
+
     for prefix in _resolve_ble_prefixes(hass, config):
         ble_vehicle_id = f"ble_{prefix}"
         if any(_vehicle_matches_identifier(vehicle, ble_vehicle_id) for vehicle in vehicles):
@@ -11787,43 +11866,17 @@ class EVVehiclesView(HomeAssistantView):
                                 v["charging_state"] = "Stopped"
                     break  # Only one PowerSync entry with Zaptec
 
-            # Discover generic charger vehicle (SoC from external sensor e.g. MQTT/BYD)
-            from .const import (
-                CONF_GENERIC_CHARGER_ENABLED,
-                CONF_GENERIC_CHARGER_STATUS_ENTITY,
-            )
-            from .automations.generic_charger_soc import (
-                generic_charger_soc_entities,
-                resolve_generic_charger_soc,
-            )
+            # Discover generic charger vehicle (SoC/status/power from configured HA entities).
             entries = self._hass.config_entries.async_entries(DOMAIN)
             for entry in entries:
                 opts = {**entry.data, **entry.options}
-                if not opts.get(CONF_GENERIC_CHARGER_ENABLED):
+                observation = _generic_charger_observation_from_config(self._hass, opts)
+                if not observation:
                     continue
-                soc_entities = generic_charger_soc_entities(opts)
-                status_entity = opts.get(CONF_GENERIC_CHARGER_STATUS_ENTITY, "")
-                if not soc_entities and not status_entity:
-                    continue  # No sensors configured — nothing to show
 
-                resolved_soc = resolve_generic_charger_soc(self._hass, opts)
-                battery_level = int(resolved_soc) if resolved_soc is not None else None
-
-                is_plugged_in = False
-                charging_state = "Disconnected"
-                if status_entity:
-                    cs_state = self._hass.states.get(status_entity)
-                    if cs_state:
-                        status_lower = cs_state.state.lower()
-                        if status_lower in ("charging", "preparing", "suspended_evse", "suspended_ev", "finishing"):
-                            is_plugged_in = True
-                            charging_state = cs_state.state.capitalize()
-                            if status_lower == "suspended_evse":
-                                charging_state = "Stopped"
-                            elif status_lower == "suspended_ev":
-                                charging_state = "Stopped"
-                            elif status_lower == "finishing":
-                                charging_state = "Complete"
+                power_kw = float(observation.get("ev_power_kw") or 0.0)
+                battery_level = observation.get("ev_soc")
+                charging_state = _generic_charger_charging_state(observation)
 
                 vehicles.append({
                     "id": "generic_ev",
@@ -11834,16 +11887,24 @@ class EVVehiclesView(HomeAssistantView):
                     "battery_level": battery_level,
                     "charging_state": charging_state,
                     "charge_limit_soc": None,
-                    "is_plugged_in": is_plugged_in,
-                    "charger_power": None,
+                    "is_plugged_in": bool(observation.get("is_connected")),
+                    "charger_power": power_kw,
+                    "ev_power_kw": power_kw,
+                    "ev_soc": battery_level,
+                    "is_connected": bool(observation.get("is_connected")),
+                    "is_charging": bool(observation.get("is_charging")),
                     "is_online": True,
                     "data_updated_at": dt_util.now().isoformat(),
                     "source": "generic_charger",
                     "brand": "generic",
                 })
                 _LOGGER.debug(
-                    "EV Generic: soc=%s, plugged=%s, state=%s",
-                    battery_level, is_plugged_in, charging_state,
+                    "EV Generic: soc=%s, power=%.2fkW, connected=%s, charging=%s, state=%s",
+                    battery_level,
+                    power_kw,
+                    bool(observation.get("is_connected")),
+                    bool(observation.get("is_charging")),
+                    charging_state,
                 )
                 break  # Only one generic charger entry
 
@@ -15399,10 +15460,8 @@ class EVLoadpointStatusView(HomeAssistantView):
         try:
             from .automations.actions import _dynamic_ev_state, _calculate_solar_surplus
             from .automations.loadpoint_status import (
-                build_generic_charger_observation,
                 build_loadpoint_status,
             )
-            from .automations.generic_charger_soc import resolve_generic_charger_soc
             from .automations.ev_ownership import get_ev_last_commands, get_ev_ownerships
             from .automations.ev_charging_planner import (
                 get_ev_charging_coordinator,
@@ -15411,11 +15470,7 @@ class EVLoadpointStatusView(HomeAssistantView):
             )
             from .solar_surplus_config import get_stored_solar_surplus_config
             from .const import (
-                CONF_GENERIC_CHARGER_AMPS_ENTITY,
                 CONF_GENERIC_CHARGER_ENABLED,
-                CONF_GENERIC_CHARGER_POWER_ENTITY,
-                CONF_GENERIC_CHARGER_STATUS_ENTITY,
-                CONF_GENERIC_CHARGER_SWITCH_ENTITY,
             )
 
             entry_id = self._config_entry.entry_id
@@ -15473,17 +15528,6 @@ class EVLoadpointStatusView(HomeAssistantView):
 
             opts = {**self._config_entry.data, **self._config_entry.options}
             if opts.get(CONF_GENERIC_CHARGER_ENABLED):
-                switch_entity = opts.get(CONF_GENERIC_CHARGER_SWITCH_ENTITY)
-                amps_entity = opts.get(CONF_GENERIC_CHARGER_AMPS_ENTITY)
-                status_entity = opts.get(CONF_GENERIC_CHARGER_STATUS_ENTITY)
-                power_entity = opts.get(CONF_GENERIC_CHARGER_POWER_ENTITY)
-
-                switch_state = self._hass.states.get(switch_entity) if switch_entity else None
-                amps_state = self._hass.states.get(amps_entity) if amps_entity else None
-                status_state = self._hass.states.get(status_entity) if status_entity else None
-                power_state = self._hass.states.get(power_entity) if power_entity else None
-                resolved_soc = resolve_generic_charger_soc(self._hass, opts)
-
                 vehicle_name = "EV"
                 automation_store = entry_data.get("automation_store")
                 if automation_store:
@@ -15493,16 +15537,13 @@ class EVLoadpointStatusView(HomeAssistantView):
                             vehicle_name = config.get("display_name") or vehicle_name
                             break
 
-                observed_vehicles.append(
-                    build_generic_charger_observation(
-                        vehicle_name=vehicle_name,
-                        switch_state=switch_state.state if switch_state else None,
-                        amps_value=amps_state.state if amps_state else None,
-                        status_state=status_state.state if status_state else None,
-                        power_value=_kw_from_power_state(power_state) if power_state else None,
-                        soc_value=resolved_soc,
-                    )
+                generic_observation = _generic_charger_observation_from_config(
+                    self._hass,
+                    opts,
+                    vehicle_name=vehicle_name,
                 )
+                if generic_observation:
+                    observed_vehicles.append(generic_observation)
 
             configured_sigenergy_state = _configured_sigenergy_charger_state(self._config_entry)
             if configured_sigenergy_state:
