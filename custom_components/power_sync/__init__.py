@@ -2388,8 +2388,14 @@ class AEMOSpikeManager:
                 if response.status == 200:
                     data = await response.json()
                     site_info = data.get("response", {})
-                    self._saved_operation_mode = site_info.get("default_real_mode")
-                    _LOGGER.info("Saved operation mode: %s", self._saved_operation_mode)
+                    if self._saved_operation_mode is None:
+                        self._saved_operation_mode = site_info.get("default_real_mode")
+                        _LOGGER.info("Saved operation mode: %s", self._saved_operation_mode)
+                    else:
+                        _LOGGER.info(
+                            "Already have a saved operation mode (%s) - skipping re-capture",
+                            self._saved_operation_mode,
+                        )
 
                     # Fallback: if tariff wasn't saved from tariff_rate, try to get it from site_info
                     if not self._saved_tariff:
@@ -2980,8 +2986,14 @@ class SavingSessionTariffManager:
                 if response.status == 200:
                     data = await response.json()
                     site_info = data.get("response", {})
-                    self._saved_operation_mode = site_info.get("default_real_mode")
-                    _LOGGER.info("Saved operation mode: %s", self._saved_operation_mode)
+                    if self._saved_operation_mode is None:
+                        self._saved_operation_mode = site_info.get("default_real_mode")
+                        _LOGGER.info("Saved operation mode: %s", self._saved_operation_mode)
+                    else:
+                        _LOGGER.info(
+                            "Already have a saved operation mode (%s) - skipping re-capture",
+                            self._saved_operation_mode,
+                        )
 
                     if not self._saved_tariff:
                         site_tariff = site_info.get("tariff_content_v2") or site_info.get("tariff_content")

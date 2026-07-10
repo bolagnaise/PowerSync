@@ -349,6 +349,124 @@ def test_saving_session_manager_preserves_genuine_baseline_on_reentry():
 
 
 # ---------------------------------------------------------------------------
+# OB-40: _saved_operation_mode must not be re-captured on reentry either —
+# mirrors the OB-34 tariff-baseline guard onto the operation-mode axis. A
+# reload mid-event re-enters enter_*_mode while site_info now reflects the
+# manager's OWN event mode ("autonomous"), which must not clobber the user's
+# real pre-event mode.
+# ---------------------------------------------------------------------------
+
+def test_aemo_spike_manager_preserves_operation_mode_on_reentry():
+    session = _FakeSession(
+        tariff_rate_response=_FakeResponse(
+            200, {"response": {"tariff_content_v2": LIVE_AEMO_SPIKE_TARIFF}}
+        ),
+        site_info_response=_FakeResponse(
+            200,
+            {
+                "response": {
+                    "default_real_mode": "autonomous",
+                    "tariff_content_v2": LIVE_AEMO_SPIKE_TARIFF,
+                }
+            },
+        ),
+    )
+    upload_calls: list = []
+    namespace = _build_namespace(session, upload_calls)
+    manager = _make_aemo_manager(namespace, saved_tariff=dict(GENUINE_TARIFF))
+    manager._saved_operation_mode = "self_consumption"
+
+    asyncio.run(manager._enter_spike_mode(5000.0))
+
+    assert manager._saved_operation_mode == "self_consumption", (
+        "genuine operation mode must survive re-entry into spike mode even "
+        "when the manager's own event mode (autonomous) is live at Tesla; "
+        f"got {manager._saved_operation_mode!r}"
+    )
+
+
+def test_aemo_spike_manager_captures_operation_mode_on_first_entry():
+    """Sanity: the fix must not block a legitimate first-time capture."""
+    session = _FakeSession(
+        tariff_rate_response=_FakeResponse(
+            200, {"response": {"tariff_content_v2": GENUINE_TARIFF}}
+        ),
+        site_info_response=_FakeResponse(
+            200, {"response": {"default_real_mode": "self_consumption"}}
+        ),
+    )
+    upload_calls: list = []
+    namespace = _build_namespace(session, upload_calls)
+    manager = _make_aemo_manager(namespace, saved_tariff=None)
+
+    asyncio.run(manager._enter_spike_mode(400.0))
+
+    assert manager._saved_operation_mode == "self_consumption"
+
+
+def test_saving_session_manager_preserves_operation_mode_on_reentry():
+    session = _FakeSession(
+        tariff_rate_response=_FakeResponse(
+            200, {"response": {"tariff_content_v2": LIVE_SAVING_SESSION_TARIFF}}
+        ),
+        site_info_response=_FakeResponse(
+            200,
+            {
+                "response": {
+                    "default_real_mode": "autonomous",
+                    "tariff_content_v2": LIVE_SAVING_SESSION_TARIFF,
+                }
+            },
+        ),
+    )
+    upload_calls: list = []
+    namespace = _build_namespace(session, upload_calls)
+    manager = _make_session_manager(namespace, saved_tariff=dict(GENUINE_TARIFF))
+    manager._saved_operation_mode = "self_consumption"
+
+    active_session = SimpleNamespace(
+        code="octopus-session-1",
+        start="2026-07-10T17:00:00Z",
+        end="2026-07-10T18:00:00Z",
+        octopoints_per_kwh=10,
+    )
+
+    asyncio.run(manager._enter_session_mode(active_session))
+
+    assert manager._saved_operation_mode == "self_consumption", (
+        "genuine operation mode must survive re-entry into session mode even "
+        "when the manager's own event mode (autonomous) is live at Tesla; "
+        f"got {manager._saved_operation_mode!r}"
+    )
+
+
+def test_saving_session_manager_captures_operation_mode_on_first_entry():
+    """Sanity: the fix must not block a legitimate first-time capture."""
+    session = _FakeSession(
+        tariff_rate_response=_FakeResponse(
+            200, {"response": {"tariff_content_v2": GENUINE_TARIFF}}
+        ),
+        site_info_response=_FakeResponse(
+            200, {"response": {"default_real_mode": "self_consumption"}}
+        ),
+    )
+    upload_calls: list = []
+    namespace = _build_namespace(session, upload_calls)
+    manager = _make_session_manager(namespace, saved_tariff=None)
+
+    active_session = SimpleNamespace(
+        code="octopus-session-1",
+        start="2026-07-10T17:00:00Z",
+        end="2026-07-10T18:00:00Z",
+        octopoints_per_kwh=10,
+    )
+
+    asyncio.run(manager._enter_session_mode(active_session))
+
+    assert manager._saved_operation_mode == "self_consumption"
+
+
+# ---------------------------------------------------------------------------
 # OB-38: exit-path must not forget it owes a restore when send_tariff_to_tesla
 # fails. A failed upload must leave _in_*_mode (and dependent start-time /
 # session-code state) untouched so the next detection cycle retries the exit;
