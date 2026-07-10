@@ -18,6 +18,19 @@ scheduled/price start for 15 minutes too. Fixed by resolving the actually-
 charging VIN before recording the hold, and skipping the hold entirely (never
 falling back to "_default") when it can't be resolved and more than one
 vehicle is configured.
+
+HD-18: ``release_ev_ownership``/``clear_ev_ownerships`` used to pop only the
+exact resolved key from the leases dict, while ``get_ev_ownership`` (and
+``claim_ev_ownership``) resolve/evict through the "_default" overlap. A lease
+claimed under "_default" (e.g. a no-VIN start) but later released/cleared
+under a resolved VIN left the "_default" entry in place, so
+``get_ev_ownership`` kept finding it via the default-candidate fallback and
+reported the loadpoint owned forever — blocking a second vehicle's
+cross-family start. Fixed by mirroring ``claim_ev_ownership``'s guarded
+"_default" eviction (pop the exact key, then also pop "_default" only when
+the exact key wasn't itself "_default") in both ``release_ev_ownership`` and
+``clear_ev_ownerships``, so a falsy/"_default" id never resolves onto an
+unrelated sibling VIN lease.
 """
 
 from __future__ import annotations
@@ -528,3 +541,80 @@ def test_explicit_vin_stop_is_unaffected_by_resolver(monkeypatch):
     assert result is True
     assert ev_ownership.manual_stop_hold_reason(hass, entry, VIN_A) is not None
     assert ev_ownership.manual_stop_hold_reason(hass, entry, VIN_B) is None
+
+
+# ---------------------------------------------------------------------------
+# HD-18: release/clear must evict a "_default"-held lease when it is
+# released/cleared under a resolved VIN, mirroring claim_ev_ownership's
+# "_default" eviction, so it stops leaking and blocking cross-family starts.
+# ---------------------------------------------------------------------------
+
+
+def test_release_under_resolved_vin_evicts_leaked_default_lease():
+    """A lease claimed under "_default" (no VIN known at claim time) must be
+    evicted when it is later released under a resolved VIN — otherwise the
+    stale "_default" lease keeps being found via the default-candidate
+    overlap and blocks a second vehicle (VIN_B) from starting."""
+    hass = _Hass()
+    entry = _Entry()
+
+    ev_ownership.claim_ev_ownership(hass, entry, None, owner_mode="scheduled", command="start")
+    lease_id, lease = ev_ownership.get_ev_ownership(hass, entry, ev_ownership.DEFAULT_VEHICLE_ID)
+    assert lease_id == ev_ownership.DEFAULT_VEHICLE_ID
+    assert lease is not None
+
+    # Released under a resolved VIN that was never the exact lease key.
+    previous = ev_ownership.release_ev_ownership(hass, entry, VIN_A)
+    assert previous is not None
+
+    # The "_default" lease must be gone, not merely unreachable under VIN_A.
+    assert ev_ownership.DEFAULT_VEHICLE_ID not in ev_ownership.get_ev_ownerships(hass, entry)
+    # VIN_B must no longer see the loadpoint as owned via the default overlap.
+    _lease_id, lease = ev_ownership.get_ev_ownership(hass, entry, VIN_B)
+    assert lease is None
+
+
+def test_clear_under_resolved_vin_evicts_leaked_default_lease():
+    """Same leak class as above, but via clear_ev_ownerships' explicit-list
+    branch: clearing a resolved VIN must also evict the "_default" lease it
+    resolves to."""
+    hass = _Hass()
+    entry = _Entry()
+
+    ev_ownership.claim_ev_ownership(hass, entry, None, owner_mode="scheduled", command="start")
+
+    ev_ownership.clear_ev_ownerships(hass, entry, vehicle_ids=[VIN_A])
+
+    assert ev_ownership.DEFAULT_VEHICLE_ID not in ev_ownership.get_ev_ownerships(hass, entry)
+    _lease_id, lease = ev_ownership.get_ev_ownership(hass, entry, VIN_B)
+    assert lease is None
+
+
+def test_release_under_default_does_not_evict_unrelated_vin_lease():
+    """Releasing/clearing under a falsy/"_default" id must never resolve onto
+    an unrelated sibling VIN lease. Pre-fix, ``_default`` eviction resolved
+    via the unguarded ``_candidate_vehicle_ids`` overlap, which for a falsy
+    id returns every other lease key as a candidate — so releasing "_default"
+    when no "_default" lease exists popped VIN_A's real lease instead."""
+    hass = _Hass()
+    entry = _Entry()
+
+    ev_ownership.claim_ev_ownership(hass, entry, VIN_A, owner_mode="scheduled", command="start")
+
+    ev_ownership.release_ev_ownership(hass, entry, None)
+
+    _lease_id, lease = ev_ownership.get_ev_ownership(hass, entry, VIN_A)
+    assert lease is not None
+
+
+def test_clear_under_default_does_not_evict_unrelated_vin_lease():
+    """Same guard as above, via ``clear_ev_ownerships``' explicit-list branch."""
+    hass = _Hass()
+    entry = _Entry()
+
+    ev_ownership.claim_ev_ownership(hass, entry, VIN_A, owner_mode="scheduled", command="start")
+
+    ev_ownership.clear_ev_ownerships(hass, entry, vehicle_ids=[None])
+
+    _lease_id, lease = ev_ownership.get_ev_ownership(hass, entry, VIN_A)
+    assert lease is not None

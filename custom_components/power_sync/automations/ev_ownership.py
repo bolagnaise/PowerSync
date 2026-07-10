@@ -387,6 +387,9 @@ def release_ev_ownership(
     vid = normalize_vehicle_id(vehicle_id)
     leases = get_ev_ownerships(hass, config_entry)
     previous = leases.pop(vid, None)
+    if vid != DEFAULT_VEHICLE_ID:
+        default_previous = leases.pop(DEFAULT_VEHICLE_ID, None)
+        previous = previous if previous is not None else default_previous
     now = _now_iso()
     last_command = {
         "command": command,
@@ -412,7 +415,10 @@ def clear_ev_ownerships(
         _schedule_runtime_save(hass, config_entry)
         return
     for vehicle_id in vehicle_ids:
-        leases.pop(normalize_vehicle_id(vehicle_id), None)
+        vid = normalize_vehicle_id(vehicle_id)
+        leases.pop(vid, None)
+        if vid != DEFAULT_VEHICLE_ID:
+            leases.pop(DEFAULT_VEHICLE_ID, None)
     _schedule_runtime_save(hass, config_entry)
 
 
