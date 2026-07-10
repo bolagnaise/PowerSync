@@ -443,6 +443,8 @@ restores "autonomous" (or whatever the event set) instead of the user's real ope
 mode — the OB-34 corruption shape, on the operation-mode axis. **Fix**: mirror the
 `is None` capture guard from 42f21caa on `_saved_operation_mode` in both managers.
 
+> **FIXED in f5e6058e (2026-07-10)** — `_saved_operation_mode` capture in both `AEMOSpikeManager` and `SavingSessionTariffManager` is now gated with the same `is None` guard as `_saved_tariff`; test `tests/test_tesla_spike_session_tariff_baseline.py`.
+
 ### OB-41 — Tesla money-event state does not survive a reload  [MEDIUM-HIGH — Tesla, optimizer-disabled cohort]
 Neither `AEMOSpikeManager` nor `SavingSessionTariffManager` persists
 `_saved_tariff`/`_saved_operation_mode`/`_in_*_mode`; a reload mid-event forgets that a
@@ -455,6 +457,8 @@ same process restores the stale genuine tariff. **Fix**: persist event state wit
 hold_soc persistence pattern (0ae52626) and restore-or-exit on setup; clear
 `_saved_tariff` after a confirmed successful restore. Co-design with OB-34/OB-38's
 capture-once + retry contract (42f21caa, c3101f2c).
+
+> **FIXED in c76572d0 (2026-07-10)** — both managers persist `_saved_tariff`/`_saved_operation_mode`/`_in_*_mode` to a dedicated Store on enter/exit and expose `restore_or_exit()`, wired into `async_setup_entry` to restore-or-exit on reload; test `tests/test_tesla_spike_session_tariff_baseline.py`.
 
 ### OB-39 — Residual unconditional `_skip_reload` sites outside `set_settings`  [MEDIUM]
 > **FIXED in a9bcd2c8 + b9d92505 (2026-07-10)** — c8f514e1's persisted_changed no-op gate applied to the `:29908` reserve site (a9bcd2c8) and the three API views at `:8051`/`:8080`/`:9053` (b9d92505); tests `tests/test_reserve_source_of_truth.py`, `tests/test_force_mode_controls.py`.
@@ -526,16 +530,20 @@ CONFIRMED by adversarial verification unless noted:
   > **FIXED in 563d4516 + 8a84065c (2026-07-10)** — added `resolve_restore_target()` on the coordinator and routed `handle_schedule_max_backup`'s snapshot through it instead of reading the raw (possibly stale-cloud) `backup_reserve_percent` directly; 8a84065c reordered the resolver to prefer the provenance-clean startup/persisted reserve over even a trusted live read (design §2 PW-6 / S3 — a PW-3/PW-4-corrupted local snapshot is LIVE-tagged but must not feed the `source="user"` restore); test `tests/test_schedule_max_backup_reserve.py`.
 - **PW-7** `cached_export_rule` permanent pinning for curtailment-disabled users (new
   manual write + no-TTL cache preferred by the select, persisted across restarts).
+  > **FIXED in 8fdfbb72 (2026-07-10)** — `select.py` gates cache preference on `solar_curtailment_enabled`, falling through to the live `site_info` export rule when curtailment is disabled; test `tests/test_tesla_local_readback_overlay.py`.
 - **PW-8** VPP restore-branch caches `battery_ok` while re-posting the manual `never`
   (`__init__.py:~23261-23323`, pre-existing, newly reachable; plus wrong log + spurious
   verification warning).
+  > **FIXED in 2c52b927 (2026-07-10)** — both curtailment-restore branches (REST + WebSocket) now log/cache the upstream-computed `restore_rule` instead of hardcoded `battery_ok`; test `tests/test_curtailment_restore_manual_override.py`.
 - **PW-9** Unguarded store I/O in `update_cached_export_rule` now runs before the
   manual-override flags — storage exception skips the override, curtailment reverts the
   user's rule (`~30454` write / `~30460` override flags).
+  > **FIXED in edb04a5f (2026-07-10)** — manual-override flags are set before the awaited `update_cached_export_rule`, and that helper's store I/O is wrapped in try/except so a storage exception can no longer skip the override; test `tests/test_manual_override_race.py`.
 - **PW-10/11** (PLAUSIBLE) The inserted awaits open two race windows: curtailment cycle
   reading `manual_export_override=False` mid-write, and the force re-toggle guard
   reverting a user's mode change before `last_force_toggle_time` pops. Set flags before
   awaits / fire-and-forget the refresh.
+  > **FIXED in edb04a5f (2026-07-10)** — `manual_export_override` is set with no await in between before the write, and `last_force_toggle_time` is popped synchronously before the now fire-and-forget refresh (`hass.async_create_task`); test `tests/test_manual_override_race.py`.
 - **Re-verified 2026-07-10 against f0124ba1 (fix(tesla): reapply export rule for force
   discharge)**: that commit rewrites only the force-discharge set/restore branches
   (`__init__.py` ~25663/~28647) and adds guarded `update_cached_export_rule` writes there —
