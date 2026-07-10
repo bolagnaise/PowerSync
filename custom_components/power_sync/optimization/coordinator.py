@@ -20,6 +20,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 from homeassistant.exceptions import ConfigEntryNotReady
 
+from .battery_controller import TRUSTED_FOR_PERSIST
 from .battery_optimizer import BatteryOptimizer, OptimizerResult
 from .schedule_reader import OptimizationSchedule, ScheduleAction
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
@@ -641,7 +642,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             else:
                 saved = None
-                if hasattr(battery, "get_backup_reserve"):
+                if hasattr(battery, "read_backup_reserve"):
+                    try:
+                        reading = await battery.read_backup_reserve()
+                        if reading.trust in TRUSTED_FOR_PERSIST:
+                            saved = reading.percent
+                    except Exception:
+                        pass
+                elif hasattr(battery, "get_backup_reserve"):
                     try:
                         saved = await battery.get_backup_reserve()
                     except Exception:
@@ -1816,12 +1824,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             startup_reserve is None
             or reserve_source != "persisted user backup reserve"
             or self.battery_system != "tesla"
-            or not hasattr(battery, "get_backup_reserve")
+            or not (
+                hasattr(battery, "read_backup_reserve")
+                or hasattr(battery, "get_backup_reserve")
+            )
         ):
             return startup_reserve, reserve_source
 
         try:
-            live_reserve = self._reserve_percent(await battery.get_backup_reserve())
+            if hasattr(battery, "read_backup_reserve"):
+                reading = await battery.read_backup_reserve()
+                if reading.trust not in TRUSTED_FOR_PERSIST:
+                    return startup_reserve, reserve_source
+                live_reserve = self._reserve_percent(reading.percent)
+            else:
+                live_reserve = self._reserve_percent(await battery.get_backup_reserve())
         except Exception as exc:
             _LOGGER.debug("Could not verify live Tesla backup reserve: %s", exc)
             return startup_reserve, reserve_source
@@ -1847,16 +1864,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             try:
                 from ..const import DOMAIN as _DOMAIN
 
-                entry_data = self.hass.data.get(_DOMAIN, {}).get(self.entry_id, {})
-                entry_data["_skip_reload"] = True
                 new_options = {
                     **self._entry.options,
                     "_user_backup_reserve": live_reserve,
                 }
-                self.hass.config_entries.async_update_entry(
-                    self._entry,
-                    options=new_options,
-                )
+                if new_options != dict(self._entry.options):
+                    entry_data = self.hass.data.get(_DOMAIN, {}).get(self.entry_id, {})
+                    entry_data["_skip_reload"] = True
+                    self.hass.config_entries.async_update_entry(
+                        self._entry,
+                        options=new_options,
+                    )
             except Exception as exc:
                 _LOGGER.debug("Could not update persisted backup reserve: %s", exc)
 
@@ -2897,7 +2915,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             else:
                 try:
-                    if hasattr(battery, "get_backup_reserve"):
+                    if hasattr(battery, "read_backup_reserve"):
+                        reading = await battery.read_backup_reserve()
+                        if (
+                            reading.percent is not None
+                            and reading.trust in TRUSTED_FOR_PERSIST
+                        ):
+                            startup_reserve = reading.percent
+                            self._startup_backup_reserve = startup_reserve
+                            _LOGGER.info(
+                                "Optimizer startup: captured live backup reserve: %d%%",
+                                startup_reserve,
+                            )
+                            if self._optimizer:
+                                self._optimizer.update_hardware_reserve(startup_reserve / 100)
+                    elif hasattr(battery, "get_backup_reserve"):
                         startup_reserve = await battery.get_backup_reserve()
                         if startup_reserve is not None:
                             self._startup_backup_reserve = startup_reserve
@@ -5744,7 +5776,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 reserve_pct = min(reserve_pct, soc_pct)
                                 if 81 <= reserve_pct <= 99:
                                     reserve_pct = 80
-                            current_reserve = await battery.get_backup_reserve()
+                            current_reserve_trust = None
+                            if hasattr(battery, "read_backup_reserve"):
+                                current_reserve_reading = await battery.read_backup_reserve()
+                                current_reserve = current_reserve_reading.percent
+                                current_reserve_trust = current_reserve_reading.trust
+                            else:
+                                current_reserve = await battery.get_backup_reserve()
                             if (
                                 current_reserve is not None
                                 and reserve_pct is not None
@@ -5763,6 +5801,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     and self._idle_hold_reserve is None
                                     and current_reserve > reserve_pct
                                     and current_reserve <= soc_pct
+                                    and (
+                                        current_reserve_trust is None
+                                        or current_reserve_trust in TRUSTED_FOR_PERSIST
+                                    )
                                 ):
                                     previous_reserve_pct = reserve_pct
                                     self._startup_backup_reserve = current_reserve
