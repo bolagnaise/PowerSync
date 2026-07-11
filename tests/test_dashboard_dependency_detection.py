@@ -70,6 +70,21 @@ def test_dashboard_uses_tariff_schedule_instead_of_duplicate_price_history():
     assert "title: 'Electricity Prices - 24 Hours'" not in source
 
 
+def test_import_price_gauge_shows_effective_price_source():
+    """The live import gauge should identify KWatch and fallback sources."""
+    source = STRATEGY_PATH.read_text()
+    gauge_source = source[
+        source.index("function _svgArcGaugeCard"):
+        source.index("function _batteryControls")
+    ]
+
+    assert "attrs.price_source" in gauge_source
+    assert "flow_power_kwatch: 'KWatch'" in gauge_source
+    assert "flow_power_kwatch_fallback_aemo: 'AEMO fallback'" in gauge_source
+    assert "attrs.using_price_fallback" in gauge_source
+    assert gauge_source.count("showPriceSource: true") == 1
+
+
 def test_dashboard_summarizes_short_gap_battery_windows():
     """Planned battery windows should not list every tiny LP charge island."""
     source = STRATEGY_PATH.read_text()

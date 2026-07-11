@@ -266,6 +266,7 @@ def test_flow_power_current_import_price_prefers_tariff_schedule():
                         "currency": "AUD",
                         "buy_prices": {"PEAK": 0.25},
                         "sell_prices": {"PEAK": 0.08},
+                        "price_source": "flow_power_kwatch",
                         "utility": "Flow Power",
                         "plan_name": "PowerSync Flow Power",
                     }
@@ -279,6 +280,7 @@ def test_flow_power_current_import_price_prefers_tariff_schedule():
     assert attrs["source"] == "tariff_schedule"
     assert attrs["current_period"] == "PEAK"
     assert attrs["final_rate_cents"] == 25.0
+    assert attrs["price_source"] == "flow_power_kwatch"
     assert attrs["price_spike"] is None
 
 

@@ -5622,7 +5622,17 @@ function _evPanel() {
   };
 }
 
-function _svgArcGaugeCard({ entityId, label, unit, min, max, thresholds, multiplier = 1, decimals = 1 }) {
+function _svgArcGaugeCard({
+  entityId,
+  label,
+  unit,
+  min,
+  max,
+  thresholds,
+  multiplier = 1,
+  decimals = 1,
+  showPriceSource = false,
+}) {
   // thresholds: { green, yellow, red } in display units (after multiplier).
   // Color picked is the one whose threshold is the highest <= displayed value.
   return {
@@ -5651,6 +5661,37 @@ function _svgArcGaugeCard({ entityId, label, unit, min, max, thresholds, multipl
         const fill = pct * circ;
         const decimals = ${decimals};
         const display = Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(decimals);
+        let sourceLabel = '';
+        if (${showPriceSource ? 'true' : 'false'}) {
+          const attrs = entity?.attributes || {};
+          const sourceKey = String(attrs.price_source || '')
+            .toLowerCase()
+            .replace(/[^a-z0-9_]+/g, '_')
+            .replace(/^_+|_+$/g, '');
+          const sourceLabels = {
+            kwatch: 'KWatch',
+            flow_power_kwatch: 'KWatch',
+            flow_power_kwatch_fallback_aemo: 'AEMO fallback',
+            aemo: 'AEMO',
+            aemo_api: 'AEMO',
+            aemo_sensor: 'AEMO',
+            amber: 'Amber',
+            amber_api: 'Amber',
+            amber_stored: 'Amber',
+            tariff_schedule: 'Tariff schedule',
+          };
+          sourceLabel = sourceLabels[sourceKey] || sourceKey
+            .split('_')
+            .filter(Boolean)
+            .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+            .join(' ');
+          if (attrs.using_price_fallback && sourceLabel && !sourceLabel.toLowerCase().includes('fallback')) {
+            sourceLabel += ' fallback';
+          }
+        }
+        const sourceHtml = sourceLabel
+          ? '<div style="font-size:0.68em;color:var(--secondary-text-color);margin-top:-7px;">' + sourceLabel + '</div>'
+          : '';
         return \`
           <div style="display:flex;flex-direction:column;align-items:center;">
             <div style="font-size:0.85em;color:var(--secondary-text-color);margin-bottom:2px;">${label}</div>
@@ -5660,6 +5701,7 @@ function _svgArcGaugeCard({ entityId, label, unit, min, max, thresholds, multipl
               <text x="60" y="54" text-anchor="middle" font-size="20" font-weight="600" fill="var(--primary-text-color)">\${display}</text>
               <text x="60" y="68" text-anchor="middle" font-size="9" fill="var(--secondary-text-color)">${unit}</text>
             </svg>
+            \${sourceHtml}
           </div>
         \`;
       ]]]`,
@@ -5697,6 +5739,7 @@ function _priceGauges(e, hass) {
         max: 60,
         thresholds: { green: 0, yellow: 25, red: 40 },
         multiplier: 100,
+        showPriceSource: true,
       }),
       _svgArcGaugeCard({
         entityId: e('current_export_price'),
