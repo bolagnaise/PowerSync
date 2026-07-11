@@ -202,7 +202,7 @@ def test_preserve_charge_backup_reserve_write_does_not_replace_user_reserve():
 
     assert function_source is not None
     assert '"automation_preserve_charge"' in function_source
-    assert 'reserve_source in ("optimizer", "automation_preserve_charge", "hold_soc")' in function_source
+    assert '"hold_soc_restore"' in function_source
 
 
 def test_tesla_hold_soc_backup_reserve_write_does_not_replace_user_reserve():
@@ -214,6 +214,8 @@ def test_tesla_hold_soc_backup_reserve_write_does_not_replace_user_reserve():
     assert function_source is not None
     assert 'DOMAIN, SERVICE_SET_BACKUP_RESERVE' in function_source
     assert '{"percent": target_reserve, "source": "hold_soc"}' in function_source
+    assert "_disabled_optimizer_backup_reserve_target(entry)" in function_source
+    assert 'hold_soc_state["saved_backup_reserve"] = saved_backup_reserve' in function_source
 
 
 def test_restore_normal_restores_user_reserve_after_tesla_hold_soc():
@@ -224,8 +226,50 @@ def test_restore_normal_restores_user_reserve_after_tesla_hold_soc():
 
     assert function_source is not None
     assert "restore_was_hold_soc = bool(hold_soc_state.get(\"active\"))" in function_source
-    assert 'entry.options.get("_user_backup_reserve")' in function_source
+    assert "def _saved_hold_soc_backup_reserve()" in function_source
+    assert 'hold_soc_state.get("saved_backup_reserve")' in function_source
     assert "Restore normal: restoring Hold SoC backup reserve to user reserve" in function_source
+
+
+def test_restore_normal_hold_soc_counts_as_restorable_state():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_restore_normal")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    has_saved_index = function_source.index("has_saved_state = (")
+    guard_index = function_source.index(
+        "if not force_restore and not has_active_force and not has_saved_state:"
+    )
+    hold_state_index = function_source.index(
+        "(restore_was_hold_soc and _saved_hold_soc_backup_reserve() is not None)",
+        has_saved_index,
+    )
+
+    assert has_saved_index < hold_state_index < guard_index
+
+
+def test_restore_normal_hold_soc_uses_local_first_reserve_service():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_restore_normal")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    hold_only_index = function_source.index("hold_only_restore = (")
+    site_configs_index = function_source.index("site_configs = _get_tesla_site_configs")
+    service_call_index = function_source.index(
+        "SERVICE_SET_BACKUP_RESERVE",
+        hold_only_index,
+    )
+    persist_index = function_source.index(
+        "await persist_force_mode_state()",
+        service_call_index,
+    )
+
+    assert hold_only_index < service_call_index < persist_index < site_configs_index
+    assert '"source": "hold_soc_restore"' in function_source[hold_only_index:site_configs_index]
 
 
 def test_monitoring_mode_optimizer_shutdown_releases_active_control():
@@ -1256,7 +1300,10 @@ def test_optimizer_backup_reserve_writes_do_not_persist_as_user_reserve():
 
     assert function_source is not None
     assert 'reserve_source = call.data.get("source")' in function_source
-    assert 'reserve_source in ("optimizer", "automation_preserve_charge", "hold_soc")' in function_source
+    assert '"optimizer"' in function_source
+    assert '"automation_preserve_charge"' in function_source
+    assert '"hold_soc"' in function_source
+    assert '"hold_soc_restore"' in function_source
     assert "if not optimizer_write:" in function_source
     persistence_branch = function_source.split("if not optimizer_write:", 1)[1]
     assert '"_user_backup_reserve": percent' in persistence_branch

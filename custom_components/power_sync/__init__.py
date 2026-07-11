@@ -28074,6 +28074,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return True
 
+        def _saved_hold_soc_backup_reserve() -> int | None:
+            saved = hold_soc_state.get("saved_backup_reserve")
+            if saved is None:
+                saved, _source = _disabled_optimizer_backup_reserve_target(entry)
+            try:
+                saved = int(saved)
+            except (TypeError, ValueError):
+                return None
+            if 0 <= saved <= 100:
+                return saved
+            return None
+
         # Check if this is a Sigenergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
         if is_sigenergy:
@@ -28649,6 +28661,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             force_discharge_state.get("saved_operation_mode") or force_charge_state.get("saved_operation_mode") or
             force_discharge_state.get("saved_backup_reserve") is not None or
             force_charge_state.get("saved_backup_reserve") is not None or
+            (restore_was_hold_soc and _saved_hold_soc_backup_reserve() is not None) or
             saved_grid_charging_enabled is not None
         )
         if not force_restore and not has_active_force and not has_saved_state:
@@ -28656,6 +28669,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
 
         try:
+            hold_only_restore = (
+                restore_was_hold_soc
+                and not has_active_force
+                and not restorable_saved_tariff
+                and not force_discharge_state.get("saved_operation_mode")
+                and not force_charge_state.get("saved_operation_mode")
+                and saved_grid_charging_enabled is None
+            )
+            if hold_only_restore:
+                saved_backup_reserve = _saved_hold_soc_backup_reserve()
+                if saved_backup_reserve is None:
+                    _LOGGER.warning(
+                        "Restore normal: Hold SoC had no saved backup reserve; "
+                        "will not change current Tesla reserve"
+                    )
+                else:
+                    _LOGGER.info(
+                        "Restore normal: restoring Hold SoC backup reserve to %d%% via local-first reserve service",
+                        saved_backup_reserve,
+                    )
+                    await hass.services.async_call(
+                        DOMAIN,
+                        SERVICE_SET_BACKUP_RESERVE,
+                        {
+                            "percent": saved_backup_reserve,
+                            "source": "hold_soc_restore",
+                        },
+                        blocking=True,
+                    )
+                await persist_force_mode_state()
+                return
+
             # Get Tesla gateway config
             site_configs = _get_tesla_site_configs(hass, entry)
             if not site_configs:
@@ -28857,17 +28902,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if saved_backup_reserve is None:
                     saved_backup_reserve = force_charge_state.get("saved_backup_reserve")
                 if saved_backup_reserve is None and restore_was_hold_soc:
-                    user_backup_reserve = entry.options.get("_user_backup_reserve")
-                    if user_backup_reserve is not None:
-                        try:
-                            user_backup_reserve = int(user_backup_reserve)
-                        except (TypeError, ValueError):
-                            user_backup_reserve = None
-                    if (
-                        user_backup_reserve is not None
-                        and 0 <= user_backup_reserve <= 100
-                    ):
-                        saved_backup_reserve = user_backup_reserve
+                    saved_backup_reserve = _saved_hold_soc_backup_reserve()
+                    if saved_backup_reserve is not None:
                         _LOGGER.info(
                             "Restore normal: restoring Hold SoC backup reserve to user reserve %d%%",
                             saved_backup_reserve,
@@ -29218,9 +29254,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 return
             target_reserve = max(0, min(int(round(current_soc)), 80))
+            saved_backup_reserve, reserve_source = _disabled_optimizer_backup_reserve_target(entry)
+            hold_soc_state["saved_backup_reserve"] = saved_backup_reserve
             _LOGGER.info(
-                "Hold SoC (Tesla): setting backup_reserve=%d%% (current SoC=%.1f%%) + self_consumption mode",
-                target_reserve, current_soc,
+                "Hold SoC (Tesla): setting backup_reserve=%d%% (current SoC=%.1f%%) + self_consumption mode; saved reserve=%s%% from %s",
+                target_reserve, current_soc, saved_backup_reserve, reserve_source,
             )
             try:
                 await hass.services.async_call(
@@ -30204,7 +30242,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 and getattr(opt_coord, "_idle_reserve_adjustment", False)
             )
             optimizer_write = (
-                reserve_source in ("optimizer", "automation_preserve_charge", "hold_soc")
+                reserve_source in (
+                    "optimizer",
+                    "automation_preserve_charge",
+                    "hold_soc",
+                    "hold_soc_restore",
+                )
                 or optimizer_is_idle
             )
             if not optimizer_write:
