@@ -488,6 +488,61 @@ def test_flow_power_pea_uses_current_wholesale_without_raw_tariff_injection(
     assert adjusted_rates["PERIOD_18_30"] != 0.8801
 
 
+def test_flow_power_pea_current_interval_fills_leading_forecast_gap(
+    tariff_converter_module,
+):
+    brisbane = ZoneInfo("Australia/Brisbane")
+    forecast = [
+        {
+            "nemTime": datetime(2026, 7, 11, 9, 0, tzinfo=brisbane).isoformat(),
+            "duration": 30,
+            "type": "ForecastInterval",
+            "channelType": "general",
+            "perKwh": 2.1,
+        }
+    ]
+    current_actual = {
+        "general": {
+            "nemTime": datetime(2026, 7, 11, 8, 5, tzinfo=brisbane).isoformat(),
+            "duration": 5,
+            "type": "CurrentInterval",
+            "channelType": "general",
+            "perKwh": 5.65,
+        },
+    }
+
+    wholesale_lookup = tariff_converter_module.get_wholesale_lookup(
+        forecast,
+        current_actual_interval=current_actual,
+    )
+
+    assert wholesale_lookup["PERIOD_08_00"] == 0.0565
+    assert wholesale_lookup["PERIOD_08_30"] == 0.021
+
+    tariff = {
+        "energy_charges": {
+            "Summer": {
+                "rates": {
+                    "PERIOD_08_00": 0.9999,
+                    "PERIOD_08_30": 0.9999,
+                },
+            },
+        },
+    }
+    adjusted = tariff_converter_module.apply_flow_power_pea(
+        tariff,
+        wholesale_lookup,
+        base_rate=34.0,
+        twap=8.0,
+        bpea=1.7,
+    )
+
+    adjusted_rates = adjusted["energy_charges"]["Summer"]["rates"]
+    assert adjusted_rates["PERIOD_08_00"] == 0.2995
+    assert adjusted_rates["PERIOD_08_00"] != 0.323
+    assert adjusted_rates["PERIOD_08_30"] == 0.264
+
+
 def test_sigenergy_visible_upload_uses_distinct_30_min_buy_and_sell_slots(
     sigenergy_api_module,
     tariff_converter_module,

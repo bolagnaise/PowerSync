@@ -1217,15 +1217,15 @@ def test_sigenergy_flow_power_sync_stores_canonical_tariff_schedule():
     assert "current_actual_interval=current_actual_interval" in sync_source
 
 
-def test_flow_power_display_schedule_pea_ignores_raw_current_interval():
+def test_flow_power_display_schedule_pea_uses_current_interval():
     source = (COMPONENT_ROOT / "__init__.py").read_text()
     helper_source = source[
         source.index("def _apply_provider_tariff_adjustments"):
         source.index("async def _sync_tariff_to_sigenergy")
     ]
 
-    assert "raw 5-minute KWatch dispatch" in helper_source
-    assert "current_actual_interval=None" in helper_source
+    assert "sensor/dashboard-only" in helper_source
+    assert "current_actual_interval=current_actual_interval" in helper_source
 
 
 def test_flow_power_main_schedule_pea_ignores_raw_current_interval():

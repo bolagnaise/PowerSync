@@ -20293,12 +20293,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             base_rate = entry.options.get(CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE)
             custom_pea = entry.options.get(CONF_PEA_CUSTOM_VALUE)
-            # Flow Power's displayed billing price is a canonical 30-minute
-            # tariff value. Do not inject the raw 5-minute KWatch dispatch
-            # interval here, or the current price sensor jitters near boundaries.
+            # Non-Tesla display schedules are sensor/dashboard-only. Use the
+            # live KWatch interval for the active period's PEA input so the
+            # current import price does not fall back to the default wholesale
+            # value when the 30-minute forecast starts later in the horizon.
             wholesale_prices = get_wholesale_lookup(
                 forecast_data,
-                current_actual_interval=None,
+                current_actual_interval=current_actual_interval,
             )
             domain_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             pricing = resolve_flow_power_pricing_context(
