@@ -7569,10 +7569,11 @@ class PriceLevelChargingExecutor:
             vehicle_state = self._get_or_create_vehicle_state(vin)
 
             if (
-                should_charge
-                and mode == "price_level_recovery"
-                and vin.startswith("ble_")
-                and "EV SOC unknown" in reason
+                vin.startswith("ble_")
+                and (
+                    "EV SOC unknown" in reason
+                    or reason.startswith("Opportunity: EV unknown")
+                )
                 and any(not v["vin"].startswith("ble_") for v in vehicles)
             ):
                 reason = (

@@ -3106,6 +3106,160 @@ def test_mixed_tesla_ble_unknown_soc_does_not_recovery_start_duplicate(
     fake_actions._action_start_ev_charging_dynamic.assert_not_awaited()
 
 
+def test_mixed_tesla_ble_unknown_soc_uses_duplicate_guard_above_recovery_price(
+    monkeypatch,
+    fake_actions,
+):
+    ble_vin = "ble_garage_garage_ble_gateway"
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def discovered_vehicles(*args, **kwargs):
+        return [
+            {"vin": VIN, "name": "TSL43", "source": "fleet_api"},
+            {
+                "vin": ble_vin,
+                "name": "Tesla BLE (garage_garage_ble_gateway)",
+                "source": "tesla_ble",
+            },
+        ]
+
+    async def at_home(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (VIN, ble_vin)
+        return "home"
+
+    async def plugged_in(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (VIN, ble_vin)
+        return True
+
+    async def mixed_soc(self, vehicle_vin=None):
+        if vehicle_vin == VIN:
+            return 49
+        if vehicle_vin == ble_vin:
+            return None
+        raise AssertionError(f"Unexpected vehicle_vin {vehicle_vin!r}")
+
+    async def no_home_battery_limit(self):
+        return None
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", discovered_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "_get_ev_soc",
+        mixed_soc,
+    )
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "_get_home_battery_soc",
+        no_home_battery_limit,
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(
+        _FakeHass(
+            price_settings={
+                "recovery_soc": 30,
+                "recovery_price_cents": 30,
+                "opportunity_price_cents": 5,
+                "home_battery_minimum": 0,
+            }
+        ),
+        _FakeConfigEntry(),
+    )
+
+    results = asyncio.run(executor.evaluate_all_vehicles(34.3))
+
+    assert results[VIN] == (False, "EV 49% >= 30%, price 34.3c > 5c", "")
+    assert results[ble_vin] == (
+        False,
+        "Tesla BLE SOC unavailable while another Tesla vehicle is already "
+        "discovered; waiting for a vehicle-specific SOC source",
+        "",
+    )
+    fake_actions._action_start_ev_charging_dynamic.assert_not_awaited()
+
+
+def test_mixed_tesla_ble_unknown_soc_does_not_opportunity_start_duplicate(
+    monkeypatch,
+    fake_actions,
+):
+    ble_vin = "ble_garage_garage_ble_gateway"
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def discovered_vehicles(*args, **kwargs):
+        return [
+            {"vin": VIN, "name": "TSL43", "source": "fleet_api"},
+            {
+                "vin": ble_vin,
+                "name": "Tesla BLE (garage_garage_ble_gateway)",
+                "source": "tesla_ble",
+            },
+        ]
+
+    async def at_home(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (VIN, ble_vin)
+        return "home"
+
+    async def plugged_in(_hass, _entry, vehicle_vin=None):
+        assert vehicle_vin in (VIN, ble_vin)
+        return True
+
+    async def mixed_soc(self, vehicle_vin=None):
+        if vehicle_vin == VIN:
+            return 59
+        if vehicle_vin == ble_vin:
+            return None
+        raise AssertionError(f"Unexpected vehicle_vin {vehicle_vin!r}")
+
+    async def no_home_battery_limit(self):
+        return None
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", discovered_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "_get_ev_soc",
+        mixed_soc,
+    )
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "_get_home_battery_soc",
+        no_home_battery_limit,
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(
+        _FakeHass(
+            price_settings={
+                "recovery_soc": 30,
+                "recovery_price_cents": 30,
+                "opportunity_price_cents": 5,
+                "home_battery_minimum": 0,
+            }
+        ),
+        _FakeConfigEntry(),
+    )
+
+    results = asyncio.run(executor.evaluate_all_vehicles(4.0))
+
+    assert results[VIN] == (
+        True,
+        "Opportunity: EV 59%, price 4.0c <= 5c",
+        "price_level_opportunity",
+    )
+    assert results[ble_vin] == (
+        False,
+        "Tesla BLE SOC unavailable while another Tesla vehicle is already "
+        "discovered; waiting for a vehicle-specific SOC source",
+        "",
+    )
+    assert fake_actions._action_start_ev_charging_dynamic.await_count == 1
+    _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
+    assert params["vehicle_vin"] == VIN
+
+
 def test_full_vehicle_soc_blocks_price_level_opportunity(monkeypatch):
     async def at_home(*args, **kwargs):
         return "home"
