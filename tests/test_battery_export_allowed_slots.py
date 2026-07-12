@@ -2712,7 +2712,7 @@ def test_solar_forecast_warning_waits_for_forecast_attempt(opt_module):
     assert coordinator._get_warnings() == []
 
 
-def test_coordinator_refresh_skips_cached_charge_at_action_boundary(opt_module):
+def test_coordinator_refresh_executes_cached_charge_at_action_boundary(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.25)
     coordinator._enabled = True
@@ -2746,8 +2746,8 @@ def test_coordinator_refresh_skips_cached_charge_at_action_boundary(opt_module):
         opt_module.dt_util.now = original_now
 
     assert result == {"ok": True}
-    assert battery.force_charge_calls == []
-    assert coordinator._last_executed_action == "self_consumption"
+    assert battery.force_charge_calls == [(5, 5000, False)]
+    assert coordinator._last_executed_action == "charge"
 
 
 def _enable_scheduled_ev_preserve(coordinator):

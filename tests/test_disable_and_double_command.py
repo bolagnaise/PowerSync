@@ -289,14 +289,13 @@ def test_concurrent_cached_self_consumption_calls_issue_command_once(opt_module)
 
 
 @pytest.mark.parametrize("action_name", ["charge", "discharge", "export"])
-def test_cached_forced_action_waits_for_fresh_lp_solve(opt_module, action_name):
-    """Cached high-impact force actions must not run before fresh SOC/prices.
+def test_concurrent_cached_forced_action_calls_issue_command_once(opt_module, action_name):
+    """Cached force actions should start at the boundary without duplicates.
 
-    The boundary cache path exists to avoid schedule drift, but force
-    charge/discharge/export can become stale when live SOC, prices, or a
-    user/manual restore changed since the last solve. Those actions should be
-    executed by the immediate fresh LP run that follows the cached-action check,
-    while non-forced restore/self-consumption actions can still run immediately.
+    The polling loop applies the already-computed slot before running the fresh
+    LP solve so slow forecast/history work cannot delay a planned charge/export
+    transition. The execution lock still has to protect force actions from the
+    same OB-11 double-command race as self-consumption restores.
     """
 
     async def _run():
@@ -306,16 +305,31 @@ def test_cached_forced_action_waits_for_fresh_lp_solve(opt_module, action_name):
             last_executed="self_consumption",
         )
         execute_calls = []
+        release_event = asyncio.Event()
+        started_event = asyncio.Event()
 
         async def fake_execute_optimizer_action(action):
             execute_calls.append(action.action)
+            started_event.set()
+            await release_event.wait()
             coordinator._last_executed_action = action.action
 
         coordinator._execute_optimizer_action = fake_execute_optimizer_action
 
-        await coordinator._execute_cached_current_action_if_changed()
+        task_a = asyncio.create_task(
+            coordinator._execute_cached_current_action_if_changed()
+        )
+        await started_event.wait()
 
-        assert execute_calls == []
-        assert coordinator._last_executed_action == "self_consumption"
+        task_b = asyncio.create_task(
+            coordinator._execute_cached_current_action_if_changed()
+        )
+        await asyncio.sleep(0)
+
+        release_event.set()
+        await asyncio.gather(task_a, task_b)
+
+        assert execute_calls == [action_name]
+        assert coordinator._last_executed_action == action_name
 
     asyncio.run(_run())
