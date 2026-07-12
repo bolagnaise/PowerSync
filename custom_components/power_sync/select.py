@@ -40,10 +40,10 @@ def _fresh_powerwall_local_snapshot(hass: HomeAssistant, entry: ConfigEntry) -> 
         .get("coordinator")
     )
     data = getattr(coordinator, "data", None)
-    last_success_ts = getattr(coordinator, "last_success_ts", None)
-    if data is None or last_success_ts is None:
+    last_success_monotonic = getattr(coordinator, "last_success_monotonic", None)
+    if data is None or last_success_monotonic is None:
         return None
-    if time.time() - last_success_ts > TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS:
+    if time.monotonic() - last_success_monotonic > TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS:
         return None
     return data
 

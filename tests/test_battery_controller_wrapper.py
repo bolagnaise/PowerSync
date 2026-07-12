@@ -143,6 +143,7 @@ def test_tesla_backup_reserve_prefers_fresh_local_readback_over_cloud_cache():
                             "coordinator": SimpleNamespace(
                                 data=SimpleNamespace(backup_reserve_percent=10),
                                 last_success_ts=time.time(),
+                                last_success_monotonic=time.monotonic(),
                             )
                         },
                         "tesla_coordinator": SimpleNamespace(
@@ -162,6 +163,51 @@ def test_tesla_backup_reserve_prefers_fresh_local_readback_over_cloud_cache():
         restore()
 
 
+def test_tesla_backup_reserve_local_readback_survives_wall_clock_jump(monkeypatch):
+    """HD-26: freshness must be judged on a monotonic clock, not wall-clock.
+
+    An NTP step on the HA host can jump time.time() far ahead without any
+    real time passing. A freshness gate based on wall-clock would then
+    treat a snapshot taken moments ago as stale and wrongly fall back to
+    the cloud-cached reserve.
+    """
+    module, restore = _load_controller_module()
+    try:
+        real_wall = time.time()
+        real_mono = time.monotonic()
+        hass = SimpleNamespace(
+            states=_States({}),
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "powerwall_local": {
+                            "coordinator": SimpleNamespace(
+                                data=SimpleNamespace(backup_reserve_percent=10),
+                                last_success_ts=real_wall,
+                                last_success_monotonic=real_mono,
+                            )
+                        },
+                        "tesla_coordinator": SimpleNamespace(
+                            _site_info_cache={
+                                "default_real_mode": "self_consumption",
+                                "backup_reserve_percent": 18,
+                            }
+                        ),
+                    }
+                }
+            },
+        )
+        controller = module.BatteryControllerWrapper(hass, "tesla")
+
+        # Simulate an NTP step: wall clock jumps far ahead of when the
+        # snapshot was stamped, while the monotonic clock barely advances.
+        monkeypatch.setattr(module.time, "time", lambda: real_wall + 10_000)
+
+        assert asyncio.run(controller.get_backup_reserve()) == 10
+    finally:
+        restore()
+
+
 def test_tesla_backup_reserve_prefers_pending_local_write_over_readbacks():
     module, restore = _load_controller_module()
     try:
@@ -175,6 +221,7 @@ def test_tesla_backup_reserve_prefers_pending_local_write_over_readbacks():
                             "coordinator": SimpleNamespace(
                                 data=SimpleNamespace(backup_reserve_percent=18),
                                 last_success_ts=time.time(),
+                                last_success_monotonic=time.monotonic(),
                             )
                         },
                         "tesla_coordinator": SimpleNamespace(
@@ -206,6 +253,7 @@ def test_tesla_backup_reserve_ignores_stale_local_readback():
                             "coordinator": SimpleNamespace(
                                 data=SimpleNamespace(backup_reserve_percent=10),
                                 last_success_ts=time.time() - 120,
+                                last_success_monotonic=time.monotonic() - 120,
                             )
                         },
                         "tesla_coordinator": SimpleNamespace(
@@ -282,6 +330,7 @@ def test_read_backup_reserve_pending_local_write_is_live():
                             "coordinator": SimpleNamespace(
                                 data=SimpleNamespace(backup_reserve_percent=18),
                                 last_success_ts=time.time(),
+                                last_success_monotonic=time.monotonic(),
                             )
                         },
                         "tesla_coordinator": SimpleNamespace(
@@ -315,6 +364,7 @@ def test_read_backup_reserve_fresh_local_snapshot_is_live():
                             "coordinator": SimpleNamespace(
                                 data=SimpleNamespace(backup_reserve_percent=10),
                                 last_success_ts=time.time(),
+                                last_success_monotonic=time.monotonic(),
                             )
                         },
                         "tesla_coordinator": SimpleNamespace(

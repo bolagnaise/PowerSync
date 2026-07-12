@@ -430,6 +430,7 @@ def test_local_powerwall_home_load_excludes_observed_ev_power():
     local_coord = SimpleNamespace(
         data=SimpleNamespace(load_w=10_700.0),
         last_success_ts=time.time(),
+        last_success_monotonic=time.monotonic(),
     )
     entity = sensor.TeslaEnergySensor(
         SimpleNamespace(data={"load_power": 3.6, "ev_power": 7.1}),
@@ -463,6 +464,7 @@ def test_local_powerwall_home_load_never_goes_negative_after_ev_subtraction():
     local_coord = SimpleNamespace(
         data=SimpleNamespace(load_w=2_000.0),
         last_success_ts=time.time(),
+        last_success_monotonic=time.monotonic(),
     )
     entity = sensor.TeslaEnergySensor(
         SimpleNamespace(data={"load_power": 0.0, "ev_power": 7.1}),

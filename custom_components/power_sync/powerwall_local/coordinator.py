@@ -90,6 +90,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         self._entry_id = entry.entry_id
         self._consecutive_failures = 0
         self._last_success_ts: float | None = None
+        self._last_success_monotonic: float | None = None
         # Flips True when the gateway rejects our RSA signature — ie the
         # user revoked the key from the Tesla app or did a factory reset.
         # Surfaces via the app banner and a re-pair push notification.
@@ -121,6 +122,10 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
     @property
     def last_success_ts(self) -> float | None:
         return self._last_success_ts
+
+    @property
+    def last_success_monotonic(self) -> float | None:
+        return self._last_success_monotonic
 
     @property
     def reachable(self) -> bool:
@@ -183,6 +188,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         )
         if not cloud_fallback_pending:
             self._last_success_ts = _time.time()
+            self._last_success_monotonic = _time.monotonic()
         self._consecutive_failures = 0
         self._update_backup_reserve_offset(snap)
         return snap

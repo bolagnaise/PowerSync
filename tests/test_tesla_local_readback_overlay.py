@@ -152,6 +152,7 @@ def _hass(local_data=None, *, local_age_seconds=0, cloud_site_info=None):
         local_coord = SimpleNamespace(
             data=local_data,
             last_success_ts=time.time() - local_age_seconds,
+            last_success_monotonic=time.monotonic() - local_age_seconds,
         )
     return SimpleNamespace(
         data={

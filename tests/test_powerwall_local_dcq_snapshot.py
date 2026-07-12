@@ -242,6 +242,7 @@ def _make_poll_coordinator(entry_data: dict) -> "coordinator_mod.PowerwallLocalC
     coord._client = _FakeLocalClient()
     coord._consecutive_failures = 0
     coord._last_success_ts = 100.0
+    coord._last_success_monotonic = 100.0
     return coord
 
 
@@ -250,13 +251,17 @@ def test_coordinator_skips_freshness_restamp_after_cloud_fallback_write():
     failed-local/succeeded-cloud write must not re-stamp _last_success_ts,
     because it is re-fetching the gateway's still-stale (unwritten) local
     snapshot -- stamping it fresh would make battery_controller's 30s
-    LIVE-trust window treat the stale reserve as trustworthy."""
+    LIVE-trust window treat the stale reserve as trustworthy.
+
+    HD-26: the PW-4 skip must gate the monotonic stamp identically to the
+    wall-clock stamp, since freshness consumers now compare monotonic time."""
     entry_data = {"powerwall_local_cloud_fallback_pending": True}
     coord = _make_poll_coordinator(entry_data)
 
     asyncio.run(coord._async_update_data())
 
     assert coord._last_success_ts == 100.0
+    assert coord._last_success_monotonic == 100.0
     assert "powerwall_local_cloud_fallback_pending" not in entry_data
 
 
@@ -268,10 +273,13 @@ def test_coordinator_restamps_freshness_on_next_poll_after_marker_consumed():
 
     asyncio.run(coord._async_update_data())
     assert coord._last_success_ts == 100.0
+    assert coord._last_success_monotonic == 100.0
 
     asyncio.run(coord._async_update_data())
     assert coord._last_success_ts != 100.0
     assert coord._last_success_ts is not None
+    assert coord._last_success_monotonic != 100.0
+    assert coord._last_success_monotonic is not None
 
 
 def test_coordinator_restamps_freshness_when_no_fallback_pending():
@@ -282,6 +290,8 @@ def test_coordinator_restamps_freshness_when_no_fallback_pending():
 
     assert coord._last_success_ts != 100.0
     assert coord._last_success_ts is not None
+    assert coord._last_success_monotonic != 100.0
+    assert coord._last_success_monotonic is not None
 
 
 def test_coordinator_detects_hidden_reserve_offset_from_cloud_site_info():

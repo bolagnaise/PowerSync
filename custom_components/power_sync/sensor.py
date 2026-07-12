@@ -2560,11 +2560,11 @@ def _local_data_is_fresh(local_coord: Any) -> bool:
     """True iff the local coordinator's last successful update is recent."""
     if local_coord is None or local_coord.data is None:
         return False
-    last_ts = getattr(local_coord, "last_success_ts", None)
+    last_ts = getattr(local_coord, "last_success_monotonic", None)
     if last_ts is None:
         return False
     import time as _time
-    return (_time.time() - last_ts) <= _LOCAL_STALE_SECONDS
+    return (_time.monotonic() - last_ts) <= _LOCAL_STALE_SECONDS
 
 
 def _coordinator_data_is_fresh(coordinator: Any) -> bool:
