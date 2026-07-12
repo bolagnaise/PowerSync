@@ -596,6 +596,8 @@ CONFIRMED by adversarial verification unless noted:
   `handle_solar_curtailment_with_websocket_data` — the same flap class 5a50030f fixed in
   `should_curtail_ac_coupled` (its `with_hysteresis` helper is the ready-made fix); each
   brand path needs its own enter/exit state threading. Bounded: flap only at ~1 c/kWh.
+
+> **FIXED in e107175b (2026-07-11)** — replaced all 10 raw `export_earnings < 1` comparisons across the 9 brand handlers with `with_hysteresis(enter=1.0, exit=1.2)`, mirroring 5a50030f's `should_curtail_ac_coupled` fix; test tests/test_boundary_flap_hysteresis.py.
 - **HD-26** (filed 2026-07-10, deliberate deferral from 0406a920) Wall-clock freshness
   gate: `powerwall_local/coordinator.py` stamps `_last_success_ts = time.time()` and all
   freshness consumers compare wall-clock, so an NTP jump skews the ≤30 s window. A naive
@@ -603,6 +605,8 @@ CONFIRMED by adversarial verification unless noted:
   (~:314/:327) as a wall-clock value. **Fix**: add a SEPARATE monotonic field for the
   freshness comparisons, keep the wall-clock field for the API; preserve PW-4's one-shot
   `_CLOUD_FALLBACK_PENDING_KEY` skip (662843d9) around the stamp.
+
+> **FIXED in fd57f672 (2026-07-11)** — added a separate monotonic field for freshness comparisons (number.py, select.py, battery_controller.py, sensor.py) while keeping `_last_success_ts` wall-clock for the `views.py` API surface; test tests/test_battery_controller_wrapper.py::test_tesla_backup_reserve_local_readback_survives_wall_clock_jump.
 - **HD-27** (filed 2026-07-10, HD-14 limitation) A genuine 0 W DNSP export limit is
   indistinguishable from an already-curtailed 0 in Sigenergy's `_original_pv_limit`
   capture (731380b6 refuses zero captures, which protects the common case but means a
