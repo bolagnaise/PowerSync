@@ -285,7 +285,7 @@ def test_monitoring_switch_reads_updated_config_entry_options():
     assert monitoring_switch.write_count == 1
 
 
-def test_monitoring_switch_restores_sigenergy_native_control_when_enabled():
+def test_monitoring_switch_restores_sigenergy_without_native_handoff_when_enabled():
     hass = _Hass("SystemGridConnected")
     entry = types.SimpleNamespace(
         entry_id="entry-1",
@@ -308,7 +308,7 @@ def test_monitoring_switch_restores_sigenergy_native_control_when_enabled():
         (
             "power_sync",
             "restore_normal",
-            {"source": "manual", "_force_restore": True, "_native_control": True},
+            {"source": "manual", "_force_restore": True},
             True,
         ),
     ]

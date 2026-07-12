@@ -1784,7 +1784,7 @@ class BatteryOptimizer:
             if p_export[t] > 0:
                 priority_bonus = (
                     max(0.0, p_import[t] - p_export[t]) + 0.01
-                    if _priority_export_slot(t)
+                    if _priority_export_slot(t) and p_export_bonus[t] <= 0
                     else 0.0
                 )
                 c[grid_export_var(t)] = -(

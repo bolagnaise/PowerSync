@@ -169,3 +169,71 @@ def test_greedy_matches_lp_action_in_priority_window(battery_optimizer_module):
     greedy_exports = _window_exports(greedy_result)
     assert lp_exports > 0
     assert greedy_exports > 0
+
+
+def test_zerohero_bonus_does_not_force_expensive_prefill(
+    battery_optimizer_module,
+):
+    """ZeroHero's capped bonus must be valued at its actual total export rate.
+
+    A 15c/kWh Super Export bucket is worth exporting against a later cheap
+    recharge, but it must not be inflated by the current import-price spread.
+    That inflation made a 52.8c/kWh pre-window top-up look profitable.
+    """
+    module = battery_optimizer_module
+    if not module.HIGHS_AVAILABLE:
+        pytest.skip("highspy not installed — LP side of the regression unavailable")
+
+    pre_window = 12
+    export_window = 36
+    post_window = 240
+    n = pre_window + export_window + post_window
+    result = module.BatteryOptimizer(
+        capacity_wh=40300,
+        max_charge_w=21000,
+        max_discharge_w=23000,
+        backup_reserve=0.40,
+        hardware_reserve=0.10,
+        interval_minutes=5,
+        horizon_hours=24,
+    ).optimize(
+        import_prices=(
+            [0.528] * pre_window
+            + [5.528] * export_window
+            + [0.407] * 156
+            + [0.0] * 36
+            + [0.407] * (post_window - 156 - 36)
+        ),
+        export_prices=(
+            [0.02] * pre_window + [0.10] * export_window + [0.0] * post_window
+        ),
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.2] * n,
+        current_soc=0.98,
+        acquisition_cost_kwh=0.40,
+        allow_battery_export=(
+            [False] * pre_window + [True] * export_window + [False] * post_window
+        ),
+        block_battery_charge=(
+            [False] * pre_window + [True] * export_window + [False] * post_window
+        ),
+        allow_grid_charge=True,
+        grid_charge_allowed=(
+            [True] * pre_window + [False] * export_window + [True] * post_window
+        ),
+        export_bonus_prices=(
+            [0.0] * pre_window + [0.05] * export_window + [0.0] * post_window
+        ),
+        export_bonus_cap_kwh=15.0,
+        priority_export_slots=(
+            [False] * pre_window + [True] * export_window + [False] * post_window
+        ),
+        priority_export_enabled=True,
+    )
+
+    pre_window_charge_kwh = sum(
+        max(0.0, action.battery_charge_w or 0.0)
+        for action in result.schedule.actions[:pre_window]
+    ) * (5 / 60) / 1000
+
+    assert pre_window_charge_kwh == pytest.approx(0.0)

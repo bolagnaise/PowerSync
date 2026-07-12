@@ -1167,8 +1167,6 @@ class MonitoringModeSwitch(SwitchEntity):
         )
 
         restore_data = {"source": "manual", "_force_restore": True}
-        if self._entry.data.get(CONF_SIGENERGY_STATION_ID):
-            restore_data["_native_control"] = True
         try:
             await self.hass.services.async_call(
                 DOMAIN,

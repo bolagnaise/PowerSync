@@ -9440,12 +9440,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     await self.hass.services.async_call(
                         DOMAIN,
                         SERVICE_RESTORE_NORMAL,
-                        {"source": "manual", "_native_control": True},
+                        {"source": "manual", "_force_restore": True},
                         blocking=True,
                     )
                 except Exception as err:
                     _LOGGER.warning(
-                        "Monitoring mode enabled but Sigenergy native/VPP restore failed: %s",
+                        "Monitoring mode enabled but Sigenergy restore failed: %s",
                         err,
                     )
 

@@ -9342,8 +9342,6 @@ class ProviderConfigView(HomeAssistantView):
                 )
                 if bool(new_options.get(CONF_MONITORING_MODE, False)):
                     restore_data = {"source": "manual", "_force_restore": True}
-                    if entry.data.get(CONF_SIGENERGY_STATION_ID):
-                        restore_data["_native_control"] = True
                     try:
                         await self._hass.services.async_call(
                             DOMAIN,
@@ -17362,8 +17360,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if not is_sigenergy:
             return False
         if call is not None and bool(call.data.get("_native_control")):
-            return True
-        if _is_monitoring_mode():
             return True
         return not _powersync_optimization_control_active()
 

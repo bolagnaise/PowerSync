@@ -583,6 +583,7 @@ def test_sigenergy_restore_normal_uses_context_aware_native_control():
     assert "CONF_OPTIMIZATION_ENABLED" in owner_helper_source
     assert "OPT_PROVIDER_POWERSYNC" in owner_helper_source
     assert "return not _powersync_optimization_control_active()" in helper_source
+    assert "if _is_monitoring_mode()" not in helper_source
     assert "sigenergy_native_control = _sigenergy_restore_native_control(call)" in restore_source
     assert "force_restore = bool(call.data.get(\"_force_restore\"))" in restore_source
     assert "monitoring_restore_allowed = allow_monitoring_restore or sigenergy_native_control or force_restore" in restore_source
@@ -598,10 +599,9 @@ def test_provider_config_monitoring_enable_forces_restore_normal():
 
     assert method_source is not None
     assert 'if "monitoring_mode" in data:' in method_source
-    assert "CONF_SIGENERGY_STATION_ID" in method_source
     assert "SERVICE_RESTORE_NORMAL" in method_source
     assert 'restore_data = {"source": "manual", "_force_restore": True}' in method_source
-    assert 'restore_data["_native_control"] = True' in method_source
+    assert 'restore_data["_native_control"] = True' not in method_source
 
 
 def test_restore_normal_force_restore_releases_tesla_even_without_saved_state():
