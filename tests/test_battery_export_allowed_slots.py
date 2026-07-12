@@ -388,6 +388,41 @@ def test_tesla_force_charge_allowed_when_action_slot_is_free(opt_module):
     assert coordinator._tesla_force_charge_should_yield_to_live_solar(action) is False
 
 
+def test_forecast_data_exposes_battery_discharge_split_for_lp_chart(opt_module):
+    coordinator = _coordinator(opt_module, "amber")
+    coordinator._solar_nowcast_derate = 1.0
+    coordinator._last_solar_nowcast_ratio = None
+    coordinator._last_solar_forecast = []
+    coordinator._last_load_forecast = []
+    coordinator._last_planned_ev_load_forecast_w = None
+    coordinator._last_display_import_prices = []
+    coordinator._last_import_prices = []
+    coordinator._last_display_export_prices = []
+    coordinator._last_export_prices = []
+    start = datetime(2026, 7, 12, 17, 30, tzinfo=timezone(timedelta(hours=10)))
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start,
+            action="export",
+            power_w=5500,
+            soc=0.80,
+            battery_discharge_w=7500,
+        )
+    ]
+
+    coordinator._current_schedule = SimpleNamespace(
+        actions=actions,
+        battery_consume_w=[2000],
+        battery_export_w=[5500],
+    )
+
+    data = coordinator.get_forecast_data()
+
+    assert data["battery_discharge_forecast"] == [7.5]
+    assert data["battery_home_consumption_forecast"] == [2.0]
+    assert data["battery_export_forecast"] == [5.5]
+
+
 def test_tesla_force_charge_does_not_yield_when_solar_misses_charge_target(
     opt_module,
     monkeypatch,

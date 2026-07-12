@@ -654,6 +654,33 @@ def test_eur_price_forecast_uses_major_rate_and_ct_minor_attributes():
     assert entity.extra_state_attributes["minor_price_unit"] == "ct/kWh"
 
 
+def test_lp_battery_forecast_exposes_home_and_export_split_attributes():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.LP_FORECAST_SENSORS if d.key == "lp_battery_power_forecast")
+    entity = sensor.LPForecastSensor(
+        SimpleNamespace(get_forecast_data=lambda: {
+            "battery_schedule_available": True,
+            "battery_power_now_kw": 7.5,
+            "battery_charge_peak_kw": 0.0,
+            "battery_discharge_peak_kw": 7.5,
+            "battery_charge_forecast": [0.0],
+            "battery_discharge_forecast": [7.5],
+            "battery_home_consumption_forecast": [2.0],
+            "battery_export_forecast": [5.5],
+            "battery_power_forecast": [7.5],
+        }),
+        desc,
+        _entry("amber"),
+    )
+    entity.hass = _hass("AUD")
+
+    attrs = entity.extra_state_attributes
+
+    assert attrs["discharge_values_kw"] == [7.5]
+    assert attrs["home_consumption_values_kw"] == [2.0]
+    assert attrs["export_values_kw"] == [5.5]
+
+
 def test_nzd_tariff_schedule_prefers_tariff_currency_metadata():
     sensor = _sensor_module()
     hass = _hass("GBP")

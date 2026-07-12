@@ -56,6 +56,22 @@ def test_optimizer_windows_use_combined_visual_card():
     assert "Future Force Charge" not in source
 
 
+def test_lp_battery_power_chart_splits_home_consumption_from_export():
+    """LP battery forecast should show where discharge is going."""
+    source = STRATEGY_PATH.read_text()
+    chart_source = source[
+        source.index("function _lpBatteryPowerChart"):
+        source.index("function _curtailmentStatus")
+    ]
+
+    assert "attribute: 'charge_values_kw'" in chart_source
+    assert "attribute: 'home_consumption_values_kw'" in chart_source
+    assert "name: 'Powering Home'" in chart_source
+    assert "attribute: 'export_values_kw'" in chart_source
+    assert "name: 'Export'" in chart_source
+    assert "attribute: 'discharge_values_kw'" not in chart_source
+
+
 def test_dashboard_uses_tariff_schedule_instead_of_duplicate_price_history():
     """Dynamic tariffs should not show a current-state history chart beside the schedule."""
     source = STRATEGY_PATH.read_text()

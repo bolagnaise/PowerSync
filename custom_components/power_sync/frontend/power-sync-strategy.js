@@ -6855,7 +6855,8 @@ function _lpBatteryPowerChart(e) {
     yUnit: 'kW',
     series: [
       { entity: e('lp_battery_power_forecast'), attribute: 'charge_values_kw', name: 'Charge', color: '#2196F3', fill: true },
-      { entity: e('lp_battery_power_forecast'), attribute: 'discharge_values_kw', name: 'Discharge', color: '#4CAF50', fill: true },
+      { entity: e('lp_battery_power_forecast'), attribute: 'home_consumption_values_kw', name: 'Powering Home', color: '#FF9800', fill: true },
+      { entity: e('lp_battery_power_forecast'), attribute: 'export_values_kw', name: 'Export', color: '#4CAF50', fill: true },
     ],
   };
 }

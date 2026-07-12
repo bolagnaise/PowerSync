@@ -10607,13 +10607,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data["export_prices"] = disp_export
 
         if self._current_schedule and self._current_schedule.actions:
+            schedule = self._current_schedule
             charge_kw = [
                 -round((action.battery_charge_w or 0.0) / 1000.0, 3)
-                for action in self._current_schedule.actions
+                for action in schedule.actions
             ]
             discharge_kw = [
                 round((action.battery_discharge_w or 0.0) / 1000.0, 3)
-                for action in self._current_schedule.actions
+                for action in schedule.actions
+            ]
+            home_consumption_kw = [
+                round(float(value or 0.0) / 1000.0, 3)
+                for value in getattr(schedule, "battery_consume_w", [])
+            ]
+            export_kw = [
+                round(float(value or 0.0) / 1000.0, 3)
+                for value in getattr(schedule, "battery_export_w", [])
             ]
             net_kw = [
                 round(discharge_kw[i] + charge_kw[i], 3)
@@ -10625,6 +10634,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data["battery_schedule_available"] = True
             data["battery_charge_forecast"] = charge_kw
             data["battery_discharge_forecast"] = discharge_kw
+            data["battery_home_consumption_forecast"] = home_consumption_kw
+            data["battery_export_forecast"] = export_kw
             data["battery_power_forecast"] = net_kw
 
         return data
