@@ -22297,6 +22297,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             export_earnings, import_price or 0, current_state,
         )
 
+        # HD-25: hysteresis on the uneconomic-export boundary (1c/kWh) so a price
+        # hovering at the threshold doesn't flap curtail/restore every poll.
+        export_uneconomic = with_hysteresis(
+            export_earnings,
+            entry_data.get("foxess_curtail_export_uneconomic", False),
+            enter_threshold=1.0,
+            exit_threshold=1.2,
+        )
+        entry_data["foxess_curtail_export_uneconomic"] = export_uneconomic
+
         # Get FoxESS backend from coordinator (Modbus or Cloud)
         fc = entry_data.get("foxess_coordinator")
         if not fc:
@@ -22306,7 +22316,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         controller = getattr(fc, "_controller", fc)
 
         try:
-            if export_earnings < 1:
+            if export_uneconomic:
                 if _foxess_force_dispatch_active():
                     if current_state != "normal":
                         entry_data["foxess_curtailment_state"] = "normal"
@@ -22436,6 +22446,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             export_earnings, import_price or 0, current_state,
         )
 
+        # HD-25: hysteresis on the uneconomic-export boundary (1c/kWh) so a price
+        # hovering at the threshold doesn't flap curtail/restore every poll.
+        export_uneconomic = with_hysteresis(
+            export_earnings,
+            entry_data.get("sigenergy_curtail_export_uneconomic", False),
+            enter_threshold=1.0,
+            exit_threshold=1.2,
+        )
+        entry_data["sigenergy_curtail_export_uneconomic"] = export_uneconomic
+
         # Get Sigenergy controller from coordinator
         sig_coord = entry_data.get("sigenergy_coordinator")
         if not sig_coord or not hasattr(sig_coord, '_controller') or not sig_coord._controller:
@@ -22445,7 +22465,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         controller = sig_coord._controller
 
         try:
-            if export_earnings < 1:
+            if export_uneconomic:
                 import time as _time_mod
 
                 _sigenergy_reapply_interval = 900
@@ -22574,6 +22594,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             export_earnings, import_price or 0, current_state,
         )
 
+        # HD-25: hysteresis on the uneconomic-export boundary (1c/kWh) so a price
+        # hovering at the threshold doesn't flap curtail/restore every poll.
+        export_uneconomic = with_hysteresis(
+            export_earnings,
+            entry_data.get("alphaess_curtail_export_uneconomic", False),
+            enter_threshold=1.0,
+            exit_threshold=1.2,
+        )
+        entry_data["alphaess_curtail_export_uneconomic"] = export_uneconomic
+
         ae_coord = entry_data.get("alphaess_coordinator")
         if not ae_coord or not hasattr(ae_coord, "_controller") or not ae_coord._controller:
             _LOGGER.debug("AlphaESS curtailment: no controller available")
@@ -22582,7 +22612,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         controller = ae_coord._controller
 
         try:
-            if export_earnings < 1:
+            if export_uneconomic:
                 if _alphaess_force_dispatch_active():
                     _LOGGER.info(
                         "AlphaESS curtailment skipped while force dispatch is active; "
@@ -22658,10 +22688,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             current_state,
         )
 
+        # HD-25: hysteresis on the uneconomic-export boundary (1c/kWh) so a price
+        # hovering at the threshold doesn't flap curtail/restore every poll.
+        export_uneconomic = with_hysteresis(
+            export_earnings,
+            entry_data.get("solaredge_curtail_export_uneconomic", False),
+            enter_threshold=1.0,
+            exit_threshold=1.2,
+        )
+        entry_data["solaredge_curtail_export_uneconomic"] = export_uneconomic
+
         controller = _get_solaredge_curtailment_controller(entry_data)
 
         try:
-            if export_earnings < 1:
+            if export_uneconomic:
                 if _solaredge_force_dispatch_active(entry_data):
                     if current_state != "normal":
                         await _restore_solaredge_curtailment_for_dispatch(
@@ -22797,6 +22837,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             export_earnings, import_price or 0, current_state,
         )
 
+        # HD-25: hysteresis on the uneconomic-export boundary (1c/kWh) so a price
+        # hovering at the threshold doesn't flap curtail/restore every poll.
+        export_uneconomic = with_hysteresis(
+            export_earnings,
+            entry_data.get("goodwe_curtail_export_uneconomic", False),
+            enter_threshold=1.0,
+            exit_threshold=1.2,
+        )
+        entry_data["goodwe_curtail_export_uneconomic"] = export_uneconomic
+
         gw_coord = entry_data.get("goodwe_coordinator")
         if not gw_coord or not hasattr(gw_coord, "_controller") or not gw_coord._controller:
             _LOGGER.debug("GoodWe curtailment: no controller available")
@@ -22805,7 +22855,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         controller = gw_coord._controller
 
         try:
-            if export_earnings < 1:
+            if export_uneconomic:
                 if _goodwe_force_export_active(entry_data):
                     if current_state != "normal":
                         await _restore_goodwe_curtailment_for_export(
@@ -22975,6 +23025,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             export_earnings, import_price or 0, current_state,
         )
 
+        # HD-25: hysteresis on the uneconomic-export boundary (1c/kWh) so a price
+        # hovering at the threshold doesn't flap curtail/restore every poll.
+        export_uneconomic = with_hysteresis(
+            export_earnings,
+            entry_data.get("sungrow_curtail_export_uneconomic", False),
+            enter_threshold=1.0,
+            exit_threshold=1.2,
+        )
+        entry_data["sungrow_curtail_export_uneconomic"] = export_uneconomic
+
         sungrow_coord = entry_data.get("sungrow_coordinator")
         native_available = bool(
             sungrow_coord and hasattr(sungrow_coord, "set_export_limit")
@@ -22986,9 +23046,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ev_needs_headroom = (
                 await _active_solar_surplus_ev_needs_inverter_headroom()
             )
-            should_curtail_for_price = export_earnings < 1 and not ev_needs_headroom
+            should_curtail_for_price = export_uneconomic and not ev_needs_headroom
 
-            if native_available and export_earnings < 1 and ev_needs_headroom:
+            if native_available and export_uneconomic and ev_needs_headroom:
                 if current_state != "normal":
                     _LOGGER.info(
                         "Sungrow curtailment RESTORED: solar surplus EV needs PV headroom "
@@ -23132,7 +23192,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
 
         export_earnings = -feedin_price
-        should_curtail_for_price = export_earnings < 1
+        # HD-25: hysteresis on the uneconomic-export boundary (1c/kWh) so a price
+        # hovering at the threshold doesn't flap curtail/restore every poll.
+        should_curtail_for_price = with_hysteresis(
+            export_earnings,
+            entry_data.get("ac_inverter_curtail_export_uneconomic", False),
+            enter_threshold=1.0,
+            exit_threshold=1.2,
+        )
+        entry_data["ac_inverter_curtail_export_uneconomic"] = should_curtail_for_price
         _LOGGER.info(
             "AC inverter curtailment check from %s: import=%sc/kWh, "
             "export_earnings=%.2fc/kWh, action=%s",
@@ -23313,9 +23381,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error fetching site_info: {err}")
                 return
 
+            # HD-25: hysteresis on the uneconomic-export boundary (1c/kWh) so a price
+            # hovering at the threshold doesn't flap curtail/restore every poll.
+            export_uneconomic = with_hysteresis(
+                export_earnings,
+                entry_data.get("tesla_dc_periodic_curtail_export_uneconomic", False),
+                enter_threshold=1.0,
+                exit_threshold=1.2,
+            )
+            entry_data["tesla_dc_periodic_curtail_export_uneconomic"] = export_uneconomic
+
             # CURTAILMENT LOGIC: Curtail when export earnings < 1c/kWh
             # (i.e., when feedin_price > -1, meaning you earn less than 1c or pay to export)
-            if export_earnings < 1:
+            if export_uneconomic:
                 _LOGGER.info(f"🚫 CURTAILMENT CHECK: Export earnings {export_earnings:.2f}c/kWh (<1c)")
 
                 # Always apply Tesla export='never' when export earnings are negative
@@ -23687,9 +23765,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error fetching site_info: {err}")
                 return
 
+            # HD-25: hysteresis on the uneconomic-export boundary (1c/kWh) so a price
+            # hovering at the threshold doesn't flap curtail/restore every poll.
+            export_uneconomic = with_hysteresis(
+                export_earnings,
+                entry_data.get("tesla_dc_websocket_curtail_export_uneconomic", False),
+                enter_threshold=1.0,
+                exit_threshold=1.2,
+            )
+            entry_data["tesla_dc_websocket_curtail_export_uneconomic"] = export_uneconomic
+
             # CURTAILMENT LOGIC: Curtail when export earnings < 1c/kWh
             # (i.e., when feedin_price > -1, meaning you earn less than 1c or pay to export)
-            if export_earnings < 1:
+            if export_uneconomic:
                 _LOGGER.info(f"🚫 CURTAILMENT CHECK: Export earnings {export_earnings:.2f}c/kWh (<1c)")
 
                 # Always apply Tesla export='never' when export earnings are negative

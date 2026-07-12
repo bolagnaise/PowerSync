@@ -227,3 +227,170 @@ def test_aemo_spike_no_flap_while_price_hovers_at_boundary(monkeypatch):
     assert results[4] is False, "flapped back into spike mode at $295/MWh while still in the dead zone"
     # Clean re-entry at $305.
     assert results[5] is True
+
+
+# ---------------------------------------------------------------------------
+# HD-25: brand-specific curtailment handlers (HD-15 follow-up)
+# ---------------------------------------------------------------------------
+# should_curtail_ac_coupled was fixed for the same boundary-flap disease in
+# 5a50030f (HD-15), but the 9 brand-native/AC-inverter curtailment handlers
+# below still compared the raw `export_earnings < 1` statelessly. Each now
+# threads its own with_hysteresis-gated `export_uneconomic` decision through
+# entry_data so a price hovering at ~1c/kWh doesn't flap curtail/restore on
+# every poll or WebSocket tick.
+
+
+def _build_handle_ac_inverter_curtailment_only(with_hysteresis):
+    """Extract and exec handle_ac_inverter_curtailment_only with a stub closure."""
+    calls = []
+
+    async def apply_inverter_curtailment(*, curtail, import_price=None, export_earnings=None):
+        calls.append(curtail)
+
+    hass = SimpleNamespace(data={"power_sync": {"test_entry": {}}})
+    entry = SimpleNamespace(options={}, data={}, entry_id="test_entry")
+    namespace = {
+        "hass": hass,
+        "DOMAIN": "power_sync",
+        "entry": entry,
+        "amber_coordinator": None,
+        "localvolts_coordinator": None,
+        "aemo_sensor_coordinator": None,
+        "flow_power_kwatch_coordinator": None,
+        "octopus_coordinator": None,
+        "get_current_prices_for_curtailment": lambda *a, **k: (None, None, None),
+        "_LOGGER": SimpleNamespace(
+            debug=lambda *a, **k: None,
+            info=lambda *a, **k: None,
+            warning=lambda *a, **k: None,
+            error=lambda *a, **k: None,
+        ),
+        "apply_inverter_curtailment": apply_inverter_curtailment,
+        "with_hysteresis": with_hysteresis,
+    }
+    exec(
+        textwrap.dedent(_nested_function_source("handle_ac_inverter_curtailment_only")),
+        namespace,
+    )
+    return namespace["handle_ac_inverter_curtailment_only"], calls
+
+
+def test_ac_inverter_curtailment_only_no_flap_while_export_earnings_hovers_at_boundary():
+    with_hysteresis = _load_tariff_utils().with_hysteresis
+    handler, calls = _build_handle_ac_inverter_curtailment_only(with_hysteresis)
+
+    async def run():
+        for export_earnings in (0.9, 1.05, 0.95, 1.25, 1.1, 0.99):
+            await handler(feedin_price=-export_earnings, import_price=5.0)
+
+    asyncio.run(run())
+
+    # Clean entry (0.9c) curtails; the dead zone (1.05c, 0.95c, 1.1c) must not
+    # flap the decision; clean exit (1.25c) restores; clean re-entry (0.99c)
+    # curtails again.
+    assert calls == [True, True, True, False, False, True], calls
+
+
+class _FakeFoxessController:
+    """Stand-in for the FoxESS coordinator/controller curtail/restore surface."""
+
+    def __init__(self):
+        self.calls = []
+        self.data = {}
+
+    async def curtail(self):
+        self.calls.append("curtail")
+        return True
+
+    async def restore_curtailment(self):
+        self.calls.append("restore")
+        return True
+
+
+def _build_handle_foxess_curtailment(with_hysteresis, controller):
+    hass = SimpleNamespace(
+        data={"power_sync": {"test_entry": {"foxess_coordinator": controller}}}
+    )
+    entry = SimpleNamespace(options={}, data={}, entry_id="test_entry")
+    namespace = {
+        "hass": hass,
+        "DOMAIN": "power_sync",
+        "entry": entry,
+        "force_charge_state": {"active": False},
+        "force_discharge_state": {"active": False},
+        "_optimizer_current_force_action_matches": lambda action: False,
+        "amber_coordinator": None,
+        "localvolts_coordinator": None,
+        "aemo_sensor_coordinator": None,
+        "flow_power_kwatch_coordinator": None,
+        "octopus_coordinator": None,
+        "get_current_prices_for_curtailment": lambda *a, **k: (None, None, None),
+        "_LOGGER": SimpleNamespace(
+            debug=lambda *a, **k: None,
+            info=lambda *a, **k: None,
+            warning=lambda *a, **k: None,
+            error=lambda *a, **k: None,
+        ),
+        "with_hysteresis": with_hysteresis,
+    }
+    exec(textwrap.dedent(_nested_function_source("handle_foxess_curtailment")), namespace)
+    return namespace["handle_foxess_curtailment"]
+
+
+def test_foxess_curtailment_no_flap_while_export_earnings_hovers_at_boundary():
+    with_hysteresis = _load_tariff_utils().with_hysteresis
+    controller = _FakeFoxessController()
+    handler = _build_handle_foxess_curtailment(with_hysteresis, controller)
+
+    async def run():
+        for export_earnings in (0.9, 1.05, 0.95, 1.25, 1.1, 0.99):
+            await handler(feedin_price=-export_earnings, import_price=5.0)
+
+    asyncio.run(run())
+
+    # Only the decisive crossings should command the hardware: curtail on
+    # clean entry (0.9c), restore on clean exit (1.25c), curtail again on
+    # clean re-entry (0.99c). The dead-zone values (1.05c, 0.95c, 1.1c) must
+    # not trigger additional curtail()/restore_curtailment() calls.
+    assert controller.calls == ["curtail", "restore", "curtail"], controller.calls
+
+
+def test_brand_curtailment_handlers_use_hysteresis_not_raw_boundary():
+    """Source-level guard: every HD-25 handler must route its curtail decision
+    through with_hysteresis (own entry_data key) instead of the raw
+    `export_earnings < 1` comparison the flap bug used."""
+
+    handler_keys = {
+        "handle_foxess_curtailment": "foxess_curtail_export_uneconomic",
+        "handle_sigenergy_curtailment": "sigenergy_curtail_export_uneconomic",
+        "handle_alphaess_curtailment": "alphaess_curtail_export_uneconomic",
+        "handle_solaredge_curtailment": "solaredge_curtail_export_uneconomic",
+        "handle_goodwe_curtailment": "goodwe_curtail_export_uneconomic",
+        "handle_sungrow_curtailment": "sungrow_curtail_export_uneconomic",
+        "handle_ac_inverter_curtailment_only": "ac_inverter_curtail_export_uneconomic",
+        "handle_solar_curtailment_check": "tesla_dc_periodic_curtail_export_uneconomic",
+        "handle_solar_curtailment_with_websocket_data": "tesla_dc_websocket_curtail_export_uneconomic",
+    }
+
+    # handle_ac_inverter_curtailment_only stores the hysteresis result directly
+    # in should_curtail_for_price (it has no separate export_uneconomic local).
+    write_var_overrides = {"handle_ac_inverter_curtailment_only": "should_curtail_for_price"}
+
+    seen_keys = set()
+    for name, key in handler_keys.items():
+        source = _nested_function_source(name)
+        write_var = write_var_overrides.get(name, "export_uneconomic")
+        assert "export_earnings < 1" not in source, f"{name} still has the raw boundary comparison"
+        assert f'entry_data.get("{key}", False)' in source, f"{name} missing hysteresis read for {key}"
+        assert f'entry_data["{key}"] = {write_var}' in source, f"{name} missing hysteresis write for {key}"
+        assert "with_hysteresis(" in source, f"{name} does not call with_hysteresis"
+        assert key not in seen_keys, f"{key} reused across handlers -- state must not cross-contaminate"
+        seen_keys.add(key)
+
+    # handle_sungrow_curtailment has two consumption sites for the same
+    # computed decision (native curtail branch + AC-inverter routing) -- both
+    # must reuse the single per-invocation `export_uneconomic`, not recompute
+    # or fall back to the raw comparison.
+    sungrow_source = _nested_function_source("handle_sungrow_curtailment")
+    assert "should_curtail_for_price = export_uneconomic and not ev_needs_headroom" in sungrow_source
+    assert "if native_available and export_uneconomic and ev_needs_headroom:" in sungrow_source

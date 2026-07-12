@@ -110,7 +110,7 @@ def test_sungrow_curtailment_releases_limit_for_active_solar_surplus_ev():
     assert "get_ev_battery_level" in helper
     assert 'state.get("paused")' in helper
     assert "_active_solar_surplus_ev_needs_inverter_headroom" in handler
-    assert "should_curtail_for_price = export_earnings < 1 and not ev_needs_headroom" in handler
+    assert "should_curtail_for_price = export_uneconomic and not ev_needs_headroom" in handler
     assert "solar surplus EV needs PV headroom" in handler
     assert "curtail=should_curtail_for_price" in handler
 

@@ -23,13 +23,26 @@ import ast
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+import importlib.util
 
 
 ROOT = Path(__file__).resolve().parent.parent
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
+TARIFF_UTILS_PATH = ROOT / "custom_components" / "power_sync" / "tariff_utils.py"
 
 DOMAIN = "power_sync"
 ENTRY_ID = "test_entry"
+
+
+def _load_with_hysteresis():
+    """Load the real HD-15/HD-24/HD-25 hysteresis helper from tariff_utils.py."""
+    spec = importlib.util.spec_from_file_location(
+        "power_sync_tariff_utils_for_alphaess_test", TARIFF_UTILS_PATH
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module.with_hysteresis
 
 
 def _function_source(name: str) -> str:
@@ -103,6 +116,7 @@ def _load_handler(entry_data: dict, *, force_charge_active: bool = False,
         "force_charge_state": {"active": force_charge_active},
         "force_discharge_state": {"active": force_discharge_active},
         "_optimizer_current_force_action_matches": _optimizer_current_force_action_matches,
+        "with_hysteresis": _load_with_hysteresis(),
     }
     exec(_function_source("handle_alphaess_curtailment"), namespace)
     return namespace["handle_alphaess_curtailment"], hass
