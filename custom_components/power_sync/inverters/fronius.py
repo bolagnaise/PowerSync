@@ -287,9 +287,16 @@ class FroniusController(InverterController):
 
             _LOGGER.info(f"Fronius model detected: {self._model_string}")
 
-            # Parse capacity from model string
-            # Look for patterns like "5.0", "10.0", "8.2" etc.
-            match = re.search(r'(\d+\.?\d*)', self._model_string)
+            # GEN24 is a product-family name, not the inverter's 24 kW rating.
+            # Prefer the power token immediately after it, then preserve the
+            # legacy first-number behaviour for models such as Primo 5.0-1.
+            match = re.search(
+                r'\bGEN24\b\s+(\d+(?:\.\d+)?)\b',
+                self._model_string,
+                re.IGNORECASE,
+            )
+            if match is None:
+                match = re.search(r'\b(\d+(?:\.\d+)?)\b', self._model_string)
             if match:
                 capacity_kw = float(match.group(1))
                 self._rated_capacity_w = int(capacity_kw * 1000)
