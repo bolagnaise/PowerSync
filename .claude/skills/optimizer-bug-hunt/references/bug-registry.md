@@ -613,6 +613,13 @@ CONFIRMED by adversarial verification unless noted:
   true-zero config won't survive a curtail cycle). Needs a captured-flag design (persist
   "curtailed by PowerSync" state instead of inferring from the limit value).
 
+  > **Fix attempt REJECTED 2026-07-12 (correctly) — still OPEN.** The attempt tweaked
+  > capture branches without the persisted marker and was proven a behavioral no-op by
+  > an empirical register-write probe; its tests failed only via AttributeError on a
+  > new ClassVar, not behavior. Genuine-0W vs curtailed-0W is irreducible across a
+  > restart without persisted 'curtailed by PowerSync' state — the fix REQUIRES the
+  > persistence layer (entry_data + force-state pattern, constructor/entry wiring) as
+  > its own scoped candidate. Do not re-attempt without it.
 - **HD-1** Open-Meteo tail carry-forward: zero-fill past the last forecast point to match
   Solcast (`load_estimator.py::_parse_open_meteo_watts`). Currently benign (real data ends
   with night zeros).
