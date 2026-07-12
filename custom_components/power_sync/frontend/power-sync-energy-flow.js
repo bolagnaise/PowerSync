@@ -1075,6 +1075,11 @@ import {
     return raw;
   }
 
+  function displayedHomeLoadPower(rawLoadPower, evDrawPower, loadIncludesEv) {
+    if (!loadIncludesEv) return rawLoadPower;
+    return Math.max(0, rawLoadPower - Math.max(0, evDrawPower));
+  }
+
   function toPct(entityState, fallback = 0) {
     if (!entityState) return fallback;
     const candidates = [
@@ -2114,12 +2119,17 @@ import {
       const roofBCurrent = safeNum(this._entityState(cfg.entities.roof_b_current)?.state, 0);
       let batteryPower = toWatt(this._entityState(cfg.entities.battery_power));
       if (cfg.battery_invert) batteryPower *= -1;
-      const loadPower = toWatt(this._entityState(cfg.entities.load_power));
+      const rawLoadPower = toWatt(this._entityState(cfg.entities.load_power));
       const batteryLevel = toPct(this._entityState(cfg.entities.battery_level), 0);
       const batteryConfigured = !!(cfg.entities.battery_power || cfg.entities.battery_level);
       const evData = this._collectEvData();
       const evDrawPower = evData.totalDrawPower;
       const evSupplyPower = evData.totalSupplyPower;
+      const loadPower = displayedHomeLoadPower(
+        rawLoadPower,
+        evDrawPower,
+        cfg.load_includes_ev,
+      );
       const solarMin = this._flowThreshold('solar_min_w', FLOW_MIN_W);
       const gridMin = this._flowThreshold('grid_min_w', FLOW_MIN_W);
       const batteryMin = this._flowThreshold('battery_min_w', FLOW_MIN_W);

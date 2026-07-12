@@ -6543,6 +6543,13 @@ function _optimizerStatus(e, showForceChargeWindows = false, showForceDischargeW
   };
 }
 
+function _loadIncludesGenericEv(evPowerAttrs = {}) {
+  return (
+    evPowerAttrs.vehicle_id === 'generic_ev' ||
+    evPowerAttrs.charger_type === 'generic'
+  );
+}
+
 function _teslaStyleFlow(e, hass, findSensor) {
   // Auto-detect weather entity — try common patterns
   let weatherEntity = null;
@@ -6600,6 +6607,11 @@ function _teslaStyleFlow(e, hass, findSensor) {
       config.entities.ev_battery = evBattery;
     }
     const evPowerAttrs = hass.states[evPower]?.attributes || {};
+    if (_loadIncludesGenericEv(evPowerAttrs)) {
+      // Inverter/site load normally includes a generic charger's draw. The
+      // flow card renders EV as its own branch, so remove that draw from Home.
+      config.load_includes_ev = true;
+    }
     if (
       !config.entities.ev_presence &&
       (Object.prototype.hasOwnProperty.call(evPowerAttrs, 'is_connected') ||

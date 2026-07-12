@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
+import subprocess
 
 
 ENERGY_FLOW_PATH = (
@@ -71,3 +73,31 @@ def test_energy_flow_does_not_treat_ev_power_as_battery_percent():
     assert "toPct(presenceState, Number.NaN)" not in source
     assert "toPct(switchState, Number.NaN)" not in source
     assert "hasBatteryEntity: Number.isFinite(batteryPct)" in source
+
+
+def test_energy_flow_can_remove_generic_ev_draw_from_reported_home_load():
+    """Generic charger draw must not appear in both Home and EV branches."""
+    source = ENERGY_FLOW_PATH.read_text()
+    helper = re.search(
+        r"function displayedHomeLoadPower\([^)]*\) \{.*?\n  \}",
+        source,
+        re.DOTALL,
+    )
+    assert helper is not None
+    assert "displayedHomeLoadPower(" in source[source.index("_renderDynamic()") :]
+
+    checks = """
+      const cases = [
+        [8000, 7000, true, 1000],
+        [8000, 7000, false, 8000],
+        [8000, -7000, true, 8000],
+        [8000, 0, true, 8000],
+        [5000, 7000, true, 0],
+        [12000, 9000, true, 3000],
+      ];
+      for (const [raw, ev, included, expected] of cases) {
+        const actual = displayedHomeLoadPower(raw, ev, included);
+        if (actual !== expected) throw new Error(`${raw}/${ev}/${included}: ${actual}`);
+      }
+    """
+    subprocess.run(["node", "-e", f"{helper.group(0)}\n{checks}"], check=True)

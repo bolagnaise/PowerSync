@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
+import subprocess
 
 
 STRATEGY_PATH = (
@@ -394,6 +396,33 @@ def test_dashboard_uses_power_sync_ev_power_attributes_for_presence():
     assert "const evPowerAttrs = hass.states[evPower]?.attributes || {};" in source
     assert "Object.prototype.hasOwnProperty.call(evPowerAttrs, 'is_connected')" in source
     assert "config.entities.ev_presence = evPower;" in source
+
+
+def test_dashboard_marks_generic_charger_load_as_including_ev_draw():
+    """Only generic-charger flows need EV draw removed from raw site load."""
+    source = STRATEGY_PATH.read_text()
+    helper = re.search(
+        r"function _loadIncludesGenericEv\([^)]*\) \{.*?\n\}",
+        source,
+        re.DOTALL,
+    )
+    assert helper is not None
+    assert "config.load_includes_ev = true;" in source
+
+    checks = """
+      const cases = [
+        [{ vehicle_id: 'generic_ev' }, true],
+        [{ charger_type: 'generic' }, true],
+        [{ vehicle_id: 'tesla_5YJ3', charger_type: 'tesla' }, false],
+        [{ charger_type: 'teslemetry' }, false],
+        [{}, false],
+      ];
+      for (const [attrs, expected] of cases) {
+        const actual = _loadIncludesGenericEv(attrs);
+        if (actual !== expected) throw new Error(`${JSON.stringify(attrs)}: ${actual}`);
+      }
+    """
+    subprocess.run(["node", "-e", f"{helper.group(0)}\n{checks}"], check=True)
 
 
 def test_dashboard_layout_storage_reconciles_card_changes():
