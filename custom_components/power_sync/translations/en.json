@@ -427,12 +427,12 @@
         "data_description": {
           "optimization_provider": "Smart Optimization uses an LP solver to minimise costs. Native mode uses your battery's built-in TOU scheduler.",
           "optimization_enabled": "Turn the LP optimizer on or off without changing the saved Smart Optimization settings.",
-          "optimization_auto_apply_reserve": "Adjusts the software optimizer reserve floor from forecast recommendations. Your hardware backup reserve stays user controlled.",
+          "optimization_auto_apply_reserve": "Adjusts the software reserve used for intentional battery export. Natural self-consumption may continue to the hardware backup reserve, which stays user controlled.",
           "optimization_ev_integration": "Adds EV demand from PowerSync-managed charger schedules to Smart Optimization. Leave this off when the planned EV load forecast sensor already represents the same charging demand.",
           "optimization_load_entity": "Optional recorder-backed live household load sensor for Smart Optimization history. Use a no-EV load sensor here if your home load history includes EV charging and you also add planned EV load separately.",
           "optimization_planned_ev_load_entity": "Optional sensor with a planned_load attribute for forecast-only EV demand. PowerSync always adds this sensor to the load forecast when selected, but does not control the charger.",
           "monitoring_mode": "Block battery and inverter control commands while still updating prices, sensors, and plans for observation.",
-          "optimization_backup_reserve": "The optimizer will never discharge below this percentage. Default 20% is a good starting point. Your battery's hardware backup reserve (set in the Tesla/Sigenergy app) is separate.",
+          "optimization_backup_reserve": "The optimizer will not intentionally export battery energy below this percentage. Natural self-consumption may continue to the separate hardware backup reserve. Default 20% is a good starting point.",
           "hardware_backup_reserve": "The battery's own backup reserve for grid outages. PowerSync restores this level after temporary hold or force-control modes.",
           "optimization_battery_capacity_wh": "Total usable battery capacity in kWh. This should match the battery specs shown in the mobile app.",
           "optimization_max_charge_w": "Maximum grid charge power in kW that the LP optimizer may request.",
@@ -911,7 +911,7 @@
         },
         "data_description": {
           "battery_management_mode": "Manual = PowerSync automations control charge/discharge. TOU Sync = prices synced to battery's built-in scheduler. Smart Optimization = LP solver minimises costs.",
-          "optimization_backup_reserve": "The optimizer will not discharge below this level. Separate from your battery's hardware backup reserve (set in the mobile app)."
+          "optimization_backup_reserve": "Intentional battery export stops at this level. Natural self-consumption may continue to the separate hardware backup reserve."
         },
         "submit": "Next"
       },
@@ -1025,6 +1025,7 @@
       "invalid_tariff": "This tariff code is not recognised for the selected network distributor. Check the code on your electricity bill.",
       "invalid_token_format": "Token format is not recognised. PowerSync tokens start with 'psync_' -- make sure you copied the full string.",
       "invalid_time": "Enter a valid 24-hour time in HH:MM format.",
+      "cloud_flow_grid_entity_required": "Select a grid power sensor -- it is required to enable the PowerSync Cloud energy-flow reporter.",
       "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again.",
       "solax_missing_entities": "Could not find the required solax_modbus entities in the selected integration entry. The first missing entity was: {first_missing}. Make sure you selected the correct Solax Modbus integration. If your entities use a prefix like solax_modbus, enter that in Entity prefix override.",
       "solax_connect_failed": "Failed to validate Solax entities. Check the selected integration entry and try again.",
@@ -1095,7 +1096,8 @@
           "ev_charging": "EV charging",
           "weather": "Weather & solar forecast",
           "auto_update": "PowerSync auto-update",
-          "solax_battery_options": "Solax connection"
+          "solax_battery_options": "Solax connection",
+          "cloud_flow": "PowerSync Cloud energy-flow reporter"
         }
       },
       "battery_system": {
@@ -1180,6 +1182,29 @@
         "data_description": {
           "auto_update_enabled": "When enabled, PowerSync looks for an install-capable HACS update entity once per day.",
           "auto_update_time": "Local Home Assistant time. Default is 03:00."
+        },
+        "submit": "Save"
+      },
+      "cloud_flow": {
+        "title": "PowerSync Cloud energy-flow reporter",
+        "description": "Push your live grid, solar, battery, and load power to PowerSync Cloud so it can drive charge-on-solar decisions even without a Tesla energy site. Sign convention: grid power should read positive when importing from the grid and negative when exporting (enable 'Invert grid sign' if your sensor reads the opposite way); battery power should read positive when discharging and negative when charging. Requires the PowerSync Cloud flow-reporter beta flag on your account -- pushes are simply skipped until it's granted.",
+        "data": {
+          "cloud_flow_report": "Report energy flow to PowerSync Cloud",
+          "cloud_flow_grid_entity": "Grid power sensor",
+          "cloud_flow_solar_entity": "Solar power sensor",
+          "cloud_flow_battery_power_entity": "Battery power sensor",
+          "cloud_flow_battery_soc_entity": "Battery level (SoC) sensor",
+          "cloud_flow_load_entity": "Home load sensor",
+          "cloud_flow_invert_grid": "Invert grid sign"
+        },
+        "data_description": {
+          "cloud_flow_report": "When enabled, PowerSync pushes a flow update to PowerSync Cloud roughly every 30 seconds.",
+          "cloud_flow_grid_entity": "Required to enable reporting. Positive = importing from the grid, negative = exporting.",
+          "cloud_flow_solar_entity": "Optional. Solar production power.",
+          "cloud_flow_battery_power_entity": "Optional. Positive = discharging, negative = charging.",
+          "cloud_flow_battery_soc_entity": "Optional. Battery level as a percentage (0-100%).",
+          "cloud_flow_load_entity": "Optional. Home consumption power.",
+          "cloud_flow_invert_grid": "Enable if your grid power sensor reads positive on export instead of import."
         },
         "submit": "Save"
       },
@@ -1403,12 +1428,12 @@
         "data_description": {
           "optimization_provider": "Smart Optimization uses an LP solver to minimise costs. Native mode uses your battery's built-in TOU scheduler.",
           "optimization_enabled": "Turn the LP optimizer on or off without changing the saved Smart Optimization settings.",
-          "optimization_auto_apply_reserve": "Adjusts the software optimizer reserve floor from forecast recommendations. Your hardware backup reserve stays user controlled.",
+          "optimization_auto_apply_reserve": "Adjusts the software reserve used for intentional battery export. Natural self-consumption may continue to the hardware backup reserve, which stays user controlled.",
           "optimization_ev_integration": "Adds EV demand from PowerSync-managed charger schedules to Smart Optimization. Leave this off when the planned EV load forecast sensor already represents the same charging demand.",
           "optimization_load_entity": "Optional recorder-backed live household load sensor for Smart Optimization history. Use a no-EV load sensor here if your home load history includes EV charging and you also add planned EV load separately.",
           "optimization_planned_ev_load_entity": "Optional sensor with a planned_load attribute for forecast-only EV demand. PowerSync always adds this sensor to the load forecast when selected, but does not control the charger.",
           "monitoring_mode": "Block battery and inverter control commands while still updating prices, sensors, and plans for observation.",
-          "optimization_backup_reserve": "The optimizer will never discharge below this percentage. Default 20% is a good starting point. Your battery's hardware backup reserve (set in the Tesla/Sigenergy app) is separate.",
+          "optimization_backup_reserve": "The optimizer will not intentionally export battery energy below this percentage. Natural self-consumption may continue to the separate hardware backup reserve. Default 20% is a good starting point.",
           "hardware_backup_reserve": "The battery's own backup reserve for grid outages. PowerSync restores this level after temporary hold or force-control modes.",
           "optimization_battery_capacity_wh": "Total usable battery capacity in kWh. This should match the battery specs shown in the mobile app.",
           "optimization_max_charge_w": "Maximum grid charge power in kW that the LP optimizer may request.",

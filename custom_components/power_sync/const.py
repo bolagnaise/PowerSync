@@ -1205,6 +1205,21 @@ POWERSYNC_API_BASE_URL = "https://api.powersync.cc/api/proxy"
 POWERSYNC_AUTH_START_URL = "https://api.powersync.cc/auth/start"
 POWERSYNC_AUTH_ME_URL = "https://api.powersync.cc/auth/me"
 
+# PowerSync Cloud energy-flow reporter (opt-in) — pushes local grid/solar/
+# battery/load telemetry to /v1/flow every DEFAULT_CLOUD_FLOW_INTERVAL
+# seconds in a ChargeHQ-compatible shape, so the cloud can drive
+# charge-on-solar decisions for battery-less / non-Tesla-energy-site
+# accounts. NOT under /api/proxy — uses the same psync_ bearer token.
+POWERSYNC_FLOW_API_URL = "https://api.powersync.cc/v1/flow"
+CONF_CLOUD_FLOW_REPORT = "cloud_flow_report"
+CONF_CLOUD_FLOW_GRID_ENTITY = "cloud_flow_grid_entity"
+CONF_CLOUD_FLOW_SOLAR_ENTITY = "cloud_flow_solar_entity"
+CONF_CLOUD_FLOW_BATTERY_POWER_ENTITY = "cloud_flow_battery_power_entity"
+CONF_CLOUD_FLOW_BATTERY_SOC_ENTITY = "cloud_flow_battery_soc_entity"
+CONF_CLOUD_FLOW_LOAD_ENTITY = "cloud_flow_load_entity"
+CONF_CLOUD_FLOW_INVERT_GRID = "cloud_flow_invert_grid"
+DEFAULT_CLOUD_FLOW_INTERVAL = 30
+
 
 def get_tesla_api_base_url(
     provider: str | None, fleet_base_url: str | None = None

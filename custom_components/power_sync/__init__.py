@@ -424,6 +424,7 @@ from .const import (
     POWERSYNC_API_BASE_URL,
     TESLA_PROVIDER_POWERSYNC,
     get_tesla_api_base_url,
+    CONF_CLOUD_FLOW_REPORT,
     CONF_AEMO_SPIKE_ENABLED,
     CONF_AEMO_REGION,
     CONF_AEMO_SPIKE_THRESHOLD,
@@ -19139,6 +19140,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry,
     )
 
+    # Opt-in PowerSync Cloud energy-flow reporter. Options changes reload the
+    # whole entry (see _async_options_update_listener below), so starting it
+    # here and stopping it in async_unload_entry also covers "stop/replace on
+    # options change".
+    if entry.options.get(CONF_CLOUD_FLOW_REPORT, entry.data.get(CONF_CLOUD_FLOW_REPORT, False)):
+        from .cloud_flow_reporter import CloudFlowReporter
+
+        cloud_flow_reporter = CloudFlowReporter(hass, entry)
+        cloud_flow_reporter.start()
+        hass.data[DOMAIN][entry.entry_id]["cloud_flow_reporter"] = cloud_flow_reporter
+
     # Track firmware version for change notifications (Tesla only)
     if tesla_coordinator:
         last_known_firmware = stored_data.get("last_known_firmware")
@@ -35076,6 +35088,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if zaptec_client := entry_data.get("zaptec_client"):
         await zaptec_client.close()
         _LOGGER.debug("Closed Zaptec Cloud client")
+
+    # Stop the PowerSync Cloud flow reporter if it was started
+    if cloud_flow_reporter := entry_data.get("cloud_flow_reporter"):
+        await cloud_flow_reporter.stop()
+        entry_data["cloud_flow_reporter"] = None
+        _LOGGER.debug("Stopped PowerSync cloud flow reporter")
 
     # Cancel OCPP session polling
     if unsub_ocpp := entry_data.get("unsub_ocpp_poll"):

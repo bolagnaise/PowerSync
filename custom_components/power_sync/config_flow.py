@@ -44,6 +44,13 @@ from .const import (
     CONF_AUTO_UPDATE_ENABLED,
     CONF_AUTO_UPDATE_TIME,
     DEFAULT_AUTO_UPDATE_TIME,
+    CONF_CLOUD_FLOW_REPORT,
+    CONF_CLOUD_FLOW_GRID_ENTITY,
+    CONF_CLOUD_FLOW_SOLAR_ENTITY,
+    CONF_CLOUD_FLOW_BATTERY_POWER_ENTITY,
+    CONF_CLOUD_FLOW_BATTERY_SOC_ENTITY,
+    CONF_CLOUD_FLOW_LOAD_ENTITY,
+    CONF_CLOUD_FLOW_INVERT_GRID,
     CONF_TESLEMETRY_API_TOKEN,
     CONF_TESLA_ENERGY_SITE_ID,
     CONF_POWERWALL_LOCAL_IP,
@@ -6889,6 +6896,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             "ev_charging",
             "weather",
             "auto_update",
+            "cloud_flow",
         ])
 
         return self.async_show_menu(
@@ -7664,6 +7672,110 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         DEFAULT_AUTO_UPDATE_TIME,
                     ),
                 ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            }),
+            errors=errors,
+        )
+
+    async def async_step_cloud_flow(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: opt-in PowerSync Cloud energy-flow reporter.
+
+        Pushes local grid/solar/battery/load telemetry to PowerSync Cloud
+        (ChargeHQ-compatible shape) so accounts without a Tesla energy site
+        can still get charge-on-solar decisions. Requires the
+        `ha_flow_reporter` beta flag on the account -- the reporter simply
+        backs off if it isn't granted yet.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            enabled = bool(user_input.get(CONF_CLOUD_FLOW_REPORT, False))
+            grid_entity = user_input.get(CONF_CLOUD_FLOW_GRID_ENTITY, "")
+            if enabled and not grid_entity:
+                errors[CONF_CLOUD_FLOW_GRID_ENTITY] = "cloud_flow_grid_entity_required"
+            else:
+                return self._save_and_finish({
+                    CONF_CLOUD_FLOW_REPORT: enabled,
+                    CONF_CLOUD_FLOW_GRID_ENTITY: grid_entity,
+                    CONF_CLOUD_FLOW_SOLAR_ENTITY: user_input.get(
+                        CONF_CLOUD_FLOW_SOLAR_ENTITY, ""
+                    ),
+                    CONF_CLOUD_FLOW_BATTERY_POWER_ENTITY: user_input.get(
+                        CONF_CLOUD_FLOW_BATTERY_POWER_ENTITY, ""
+                    ),
+                    CONF_CLOUD_FLOW_BATTERY_SOC_ENTITY: user_input.get(
+                        CONF_CLOUD_FLOW_BATTERY_SOC_ENTITY, ""
+                    ),
+                    CONF_CLOUD_FLOW_LOAD_ENTITY: user_input.get(
+                        CONF_CLOUD_FLOW_LOAD_ENTITY, ""
+                    ),
+                    CONF_CLOUD_FLOW_INVERT_GRID: bool(
+                        user_input.get(CONF_CLOUD_FLOW_INVERT_GRID, False)
+                    ),
+                })
+
+        current_grid_entity = self._get_option(CONF_CLOUD_FLOW_GRID_ENTITY, "")
+        current_solar_entity = self._get_option(CONF_CLOUD_FLOW_SOLAR_ENTITY, "")
+        current_battery_power_entity = self._get_option(
+            CONF_CLOUD_FLOW_BATTERY_POWER_ENTITY, ""
+        )
+        current_battery_soc_entity = self._get_option(
+            CONF_CLOUD_FLOW_BATTERY_SOC_ENTITY, ""
+        )
+        current_load_entity = self._get_option(CONF_CLOUD_FLOW_LOAD_ENTITY, "")
+
+        return self.async_show_form(
+            step_id="cloud_flow",
+            data_schema=vol.Schema({
+                vol.Optional(
+                    CONF_CLOUD_FLOW_REPORT,
+                    default=self._get_option(CONF_CLOUD_FLOW_REPORT, False),
+                ): BooleanSelector(),
+                vol.Optional(
+                    CONF_CLOUD_FLOW_GRID_ENTITY,
+                    description=(
+                        {"suggested_value": current_grid_entity}
+                        if current_grid_entity
+                        else None
+                    ),
+                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                vol.Optional(
+                    CONF_CLOUD_FLOW_SOLAR_ENTITY,
+                    description=(
+                        {"suggested_value": current_solar_entity}
+                        if current_solar_entity
+                        else None
+                    ),
+                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                vol.Optional(
+                    CONF_CLOUD_FLOW_BATTERY_POWER_ENTITY,
+                    description=(
+                        {"suggested_value": current_battery_power_entity}
+                        if current_battery_power_entity
+                        else None
+                    ),
+                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                vol.Optional(
+                    CONF_CLOUD_FLOW_BATTERY_SOC_ENTITY,
+                    description=(
+                        {"suggested_value": current_battery_soc_entity}
+                        if current_battery_soc_entity
+                        else None
+                    ),
+                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                vol.Optional(
+                    CONF_CLOUD_FLOW_LOAD_ENTITY,
+                    description=(
+                        {"suggested_value": current_load_entity}
+                        if current_load_entity
+                        else None
+                    ),
+                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                vol.Optional(
+                    CONF_CLOUD_FLOW_INVERT_GRID,
+                    default=self._get_option(CONF_CLOUD_FLOW_INVERT_GRID, False),
+                ): BooleanSelector(),
             }),
             errors=errors,
         )
