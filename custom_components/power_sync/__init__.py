@@ -18231,6 +18231,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if sungrow_coordinator:
         try:
             await sungrow_coordinator.async_config_entry_first_refresh()
+            export_control_restored = (
+                await sungrow_coordinator.async_restore_persisted_export_control()
+            )
+            if not export_control_restored:
+                _LOGGER.warning(
+                    "Sungrow interrupted export control could not be fully restored; "
+                    "the persisted recovery state was retained"
+                )
             _LOGGER.info("Sungrow Modbus coordinator initialized successfully")
         except Exception as e:
             _LOGGER.warning("Sungrow Modbus coordinator failed to initialize: %s", e)

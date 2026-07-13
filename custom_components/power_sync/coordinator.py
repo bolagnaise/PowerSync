@@ -4373,6 +4373,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
     _BLOCKED_DISCHARGE_GRID_LOAD_RATIO = 0.6
     _BLOCKED_DISCHARGE_BATTERY_KW = 0.1
     _BLOCKED_DISCHARGE_RESERVE_MARGIN = 2.0
+    _EXPORT_CONTROL_STORAGE_VERSION = 1
 
     def __init__(
         self,
@@ -4399,6 +4400,15 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._entry_id = entry_id
         self._controller = SungrowSHController(host, port, slave_id)
         self._energy_acc = EnergyAccumulator(hass, "sungrow")
+        self._export_control_store = (
+            Store(
+                hass,
+                self._EXPORT_CONTROL_STORAGE_VERSION,
+                f"{DOMAIN}.sungrow_export_control.{entry_id}",
+            )
+            if entry_id
+            else None
+        )
         # Sungrow/WiNet Modbus is sensitive to overlapping TCP operations.
         # Keep each coordinator poll or control command as one serialized
         # transaction so a refresh cannot close/reopen the shared client in the
@@ -4412,6 +4422,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._baseline_date: str | None = None  # ISO date string
         self._pre_control_charge_limit_kw: float | None = None
         self._pre_control_discharge_limit_kw: float | None = None
+        self._pre_control_export_limit_w: int | None = None
+        self._pre_control_export_limit_captured = False
 
         super().__init__(
             hass,
@@ -4758,6 +4770,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 )
                 normal_limit_kw = configured_limit_kw
 
+            if not await self._persist_export_control_state(target_export_w):
+                return False
+
             forced_power_w = int(round(normal_limit_kw * 1000))
             limit_changed = False
             export_limit_changed = False
@@ -4782,6 +4797,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                                 "Sungrow spread export: failed to set discharge limit to %.2fkW",
                                 normal_limit_kw,
                             )
+                            await self._restore_captured_export_limit()
                             return False
 
                 export_limit_changed = await self._controller.set_export_limit(target_export_w)
@@ -4790,13 +4806,13 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                         "Sungrow spread export: failed to set grid export limit to %dW",
                         target_export_w,
                     )
+                    await self._restore_captured_export_limit()
                     await self._restore_captured_discharge_limit()
                     return False
 
                 result = await self._controller.force_discharge(power_w=forced_power_w)
             except Exception:
-                if export_limit_changed:
-                    await self._restore_captured_export_limit()
+                await self._restore_captured_export_limit()
                 if limit_changed:
                     await self._restore_captured_discharge_limit()
                 raise
@@ -4924,6 +4940,94 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             export_limit_w if export_limit_enabled and export_limit_w is not None else None
         )
         self._pre_control_export_limit_captured = True
+
+    async def _persist_export_control_state(self, target_export_w: int) -> bool:
+        """Persist temporary Sungrow export ownership before changing registers."""
+        store = getattr(self, "_export_control_store", None)
+        if store is None:
+            return True
+
+        baseline_limit_w = getattr(self, "_pre_control_export_limit_w", None)
+        state = {
+            "active": True,
+            "baseline_enabled": baseline_limit_w is not None,
+            "baseline_limit_w": baseline_limit_w,
+            "target_export_w": int(target_export_w),
+        }
+        try:
+            await store.async_save(state)
+        except Exception as err:
+            _LOGGER.warning(
+                "Could not persist Sungrow temporary export state; refusing control write: %s",
+                err,
+            )
+            return False
+        return True
+
+    async def _clear_persisted_export_control_state(self) -> bool:
+        """Clear temporary Sungrow export ownership after registers are restored."""
+        store = getattr(self, "_export_control_store", None)
+        if store is None:
+            return True
+
+        try:
+            await store.async_save({"active": False})
+        except Exception as err:
+            _LOGGER.warning(
+                "Could not clear persisted Sungrow temporary export state: %s",
+                err,
+            )
+            return False
+        return True
+
+    async def async_restore_persisted_export_control(self) -> bool:
+        """Recover an optimizer-owned Sungrow export limit after a reload."""
+        store = getattr(self, "_export_control_store", None)
+        if store is None:
+            return True
+
+        try:
+            state = await store.async_load()
+        except Exception as err:
+            _LOGGER.warning("Could not load persisted Sungrow export state: %s", err)
+            return False
+
+        if not isinstance(state, dict) or not state.get("active"):
+            return True
+
+        baseline_limit_w: int | None = None
+        if state.get("baseline_enabled"):
+            try:
+                baseline_limit_w = int(round(float(state.get("baseline_limit_w"))))
+            except (TypeError, ValueError):
+                _LOGGER.warning(
+                    "Persisted Sungrow export state has an invalid enabled baseline; "
+                    "leaving it intact for recovery"
+                )
+                return False
+            if baseline_limit_w < 0:
+                _LOGGER.warning(
+                    "Persisted Sungrow export state has a negative baseline; "
+                    "leaving it intact for recovery"
+                )
+                return False
+
+        self._pre_control_export_limit_w = baseline_limit_w
+        self._pre_control_export_limit_captured = True
+        _LOGGER.warning(
+            "Recovering interrupted Sungrow temporary export control (target=%sW, baseline=%s)",
+            state.get("target_export_w"),
+            f"{baseline_limit_w}W" if baseline_limit_w is not None else "disabled",
+        )
+        try:
+            return await self.restore_normal()
+        except Exception as err:
+            _LOGGER.warning(
+                "Could not restore interrupted Sungrow temporary export control; "
+                "the persisted recovery state was retained: %s",
+                err,
+            )
+            return False
 
     async def _resolve_normal_discharge_limit_kw(self) -> float | None:
         """Resolve the Sungrow discharge cap to restore for self-consumption.
@@ -5242,10 +5346,13 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         else:
             limit_ok = await self._controller.set_export_limit(int(restore_limit_w))
 
+        persisted_ok = False
         if limit_ok:
+            persisted_ok = await self._clear_persisted_export_control_state()
+        if limit_ok and persisted_ok:
             self._pre_control_export_limit_w = None
             self._pre_control_export_limit_captured = False
-        return bool(limit_ok)
+        return bool(limit_ok and persisted_ok)
 
     async def restore_work_mode_from_idle(self) -> bool:
         """Restore self-consumption mode and discharge limit after IDLE."""

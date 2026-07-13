@@ -596,6 +596,22 @@ class _FakeSungrowController:
         return self._rate_limit_writable
 
 
+class _FakeStore:
+    def __init__(self, initial=None, *, fail_save=False):
+        self.data = initial
+        self.saved: list[dict] = []
+        self.fail_save = fail_save
+
+    async def async_load(self):
+        return self.data
+
+    async def async_save(self, data):
+        if self.fail_save:
+            raise OSError("storage unavailable")
+        self.data = dict(data)
+        self.saved.append(dict(data))
+
+
 class _FakeEnergyAccumulator:
     _last_update = True
 
@@ -1434,6 +1450,100 @@ def test_sungrow_spread_export_uses_export_limit_not_discharge_cap():
     assert fake_controller.restore_normal_calls == 1
     assert fake_controller.discharge_rate_limits == [7.9, 7.9]
     assert fake_controller.export_limits == [4400, 5000]
+
+
+@pytest.mark.parametrize(
+    ("baseline_enabled", "baseline_limit_w", "expected_restore_limit"),
+    (
+        (False, 0, None),
+        (True, 5000, 5000),
+    ),
+)
+def test_sungrow_spread_export_restores_persisted_baseline_after_restart(
+    baseline_enabled,
+    baseline_limit_w,
+    expected_restore_limit,
+):
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_restart_cycle():
+        fake_controller = _FakeSungrowController()
+        fake_controller.battery_data = {
+            "charge_rate_limit_kw": 7.9,
+            "discharge_rate_limit_kw": 7.9,
+            "export_limit_enabled": baseline_enabled,
+            "export_limit_w": baseline_limit_w,
+        }
+        store = _FakeStore()
+
+        first_coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            fake_controller,
+        )
+        first_coordinator._export_control_store = store
+        first_coordinator.data = dict(fake_controller.battery_data)
+        force_result = await first_coordinator.force_grid_export(
+            duration_minutes=30,
+            export_limit_w=2580,
+        )
+        active_state = dict(store.data)
+
+        restarted_coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            fake_controller,
+        )
+        restarted_coordinator._export_control_store = store
+        restore_result = (
+            await restarted_coordinator.async_restore_persisted_export_control()
+        )
+        return force_result, restore_result, active_state, store, fake_controller
+
+    try:
+        force_result, restore_result, active_state, store, fake_controller = asyncio.run(
+            run_restart_cycle()
+        )
+    finally:
+        restore()
+
+    assert force_result
+    assert restore_result
+    assert active_state == {
+        "active": True,
+        "baseline_enabled": baseline_enabled,
+        "baseline_limit_w": expected_restore_limit,
+        "target_export_w": 2580,
+    }
+    assert fake_controller.restore_normal_calls == 1
+    assert fake_controller.export_limits == [2580, expected_restore_limit]
+    assert store.data == {"active": False}
+
+
+def test_sungrow_spread_export_refuses_hardware_write_when_state_cannot_persist():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_failed_persistence():
+        fake_controller = _FakeSungrowController()
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            fake_controller,
+        )
+        coordinator._export_control_store = _FakeStore(fail_save=True)
+        coordinator.data = dict(fake_controller.battery_data)
+        force_result = await coordinator.force_grid_export(
+            duration_minutes=30,
+            export_limit_w=2580,
+        )
+        return force_result, fake_controller
+
+    try:
+        force_result, fake_controller = asyncio.run(run_failed_persistence())
+    finally:
+        restore()
+
+    assert not force_result
+    assert fake_controller.discharge_rate_limits == []
+    assert fake_controller.export_limits == []
+    assert fake_controller.force_discharge_power_w == []
 
 
 def test_sungrow_spread_export_continues_when_discharge_limit_unsupported():

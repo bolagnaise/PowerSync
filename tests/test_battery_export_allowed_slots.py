@@ -6307,12 +6307,13 @@ def test_target_export_force_refreshes_when_optimizer_power_changes(opt_module):
     assert coordinator._optimizer_force_state["power_w"] == 8000
 
 
-def test_spread_export_force_refresh_keeps_existing_lower_target(opt_module):
+def test_spread_export_force_refresh_applies_higher_target_within_grid_cap(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
     coordinator.battery_system = "goodwe"
     coordinator._config.spread_export_enabled = True
     coordinator._config.max_discharge_w = 20000
+    coordinator._config.max_grid_export_w = 9000
     start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
     actions = [
         SimpleNamespace(
@@ -6328,8 +6329,8 @@ def test_spread_export_force_refresh_keeps_existing_lower_target(opt_module):
 
     asyncio.run(coordinator._execute_optimizer_action(actions[0]))
 
-    assert battery.force_discharge_calls == [(15, 8899, True, None)]
-    assert coordinator._optimizer_force_state["power_w"] == 8899
+    assert battery.force_discharge_calls == [(15, 9000, True, None)]
+    assert coordinator._optimizer_force_state["power_w"] == 9000
 
 
 def test_non_target_export_force_ignores_power_change_when_window_is_valid(opt_module):
