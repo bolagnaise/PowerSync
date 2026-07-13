@@ -2405,7 +2405,7 @@ def test_api_current_action_uses_effective_runtime_action(opt_module):
     assert data["next_action"] == "self_consumption"
 
 
-def test_api_current_action_reflects_no_idle_runtime_override(opt_module):
+def test_api_preserves_solver_exempt_idle_when_no_idle_is_enabled(opt_module):
     coordinator = _coordinator(opt_module, "flow_power")
     coordinator._config.disable_idle_enabled = True
     now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
@@ -2466,13 +2466,13 @@ def test_api_current_action_reflects_no_idle_runtime_override(opt_module):
     data = coordinator.get_api_data()
 
     assert data["planned_current_action"] == "idle"
-    assert data["effective_current_action"] == "self_consumption"
-    assert data["current_action"] == "self_consumption"
+    assert data["effective_current_action"] == "idle"
+    assert data["current_action"] == "idle"
     assert data["current_power_w"] == -300
     assert data["next_action"] == "charge"
     assert data["next_action_power_w"] == 5000
-    assert data["next_actions"][0]["action"] == "self_consumption"
-    assert data["next_actions"][0]["planned_action"] == "idle"
+    assert data["next_actions"][0]["action"] == "idle"
+    assert "planned_action" not in data["next_actions"][0]
 
 
 def test_get_current_action_returns_none_past_schedule_end(opt_module):
@@ -3023,7 +3023,26 @@ def test_active_optimizer_export_at_reserve_is_canceled_not_extended(opt_module)
     assert coordinator._last_executed_action == "self_consumption"
 
 
-def test_profit_max_home_load_export_floor_cancels_active_export(opt_module):
+def test_optimizer_export_may_finish_exactly_at_reserve(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.18)
+    coordinator.battery_system = "goodwe"
+    coordinator._config.backup_reserve = 0.15
+    action = SimpleNamespace(
+        action="export",
+        power_w=3000,
+        soc=0.15,
+        timestamp=datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc),
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_discharge_calls
+    assert coordinator._last_executed_action == "export"
+
+
+def test_stale_profit_max_bridge_metadata_does_not_raise_export_floor(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.10)
     coordinator.battery_system = "goodwe"
@@ -3039,17 +3058,16 @@ def test_profit_max_home_load_export_floor_cancels_active_export(opt_module):
         timestamp=datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc),
     )
     coordinator._current_schedule = SimpleNamespace(actions=[action])
-    coordinator._set_optimizer_force_state("discharge", 15, 5000)
+    coordinator._set_optimizer_force_state("discharge", 5, 5000)
 
     asyncio.run(coordinator._execute_optimizer_action(action))
 
-    assert battery.force_discharge_calls == []
-    assert battery.restore_normal_calls == 1
-    assert coordinator._optimizer_force_state["active"] is False
-    assert coordinator._last_executed_action == "self_consumption"
+    assert battery.force_discharge_calls
+    assert battery.restore_normal_calls == 0
+    assert coordinator._optimizer_force_state["active"] is True
 
 
-def test_profit_max_home_load_export_floor_blocks_projected_export(opt_module):
+def test_profit_max_uses_configured_export_floor_not_bridge_metadata(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.18)
     coordinator.battery_system = "goodwe"
@@ -3069,11 +3087,11 @@ def test_profit_max_home_load_export_floor_blocks_projected_export(opt_module):
 
     asyncio.run(coordinator._execute_optimizer_action(action))
 
-    assert battery.force_discharge_calls == []
-    assert coordinator._last_executed_action == "self_consumption"
+    assert battery.force_discharge_calls
+    assert coordinator._last_executed_action == "export"
 
 
-def test_auto_apply_home_load_export_floor_blocks_projected_export_without_profit_max(
+def test_auto_apply_uses_active_reserve_not_bridge_metadata_without_profit_max(
     opt_module,
 ):
     battery = _FakeBattery()
@@ -3095,11 +3113,11 @@ def test_auto_apply_home_load_export_floor_blocks_projected_export_without_profi
 
     asyncio.run(coordinator._execute_optimizer_action(action))
 
-    assert battery.force_discharge_calls == []
-    assert coordinator._last_executed_action == "self_consumption"
+    assert battery.force_discharge_calls
+    assert coordinator._last_executed_action == "export"
 
 
-def test_auto_apply_per_slot_export_floor_blocks_projected_export(opt_module):
+def test_stale_per_slot_export_floor_does_not_override_active_reserve(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.30)
     coordinator.battery_system = "goodwe"
@@ -3120,8 +3138,8 @@ def test_auto_apply_per_slot_export_floor_blocks_projected_export(opt_module):
 
     asyncio.run(coordinator._execute_optimizer_action(action))
 
-    assert battery.force_discharge_calls == []
-    assert coordinator._last_executed_action == "self_consumption"
+    assert battery.force_discharge_calls
+    assert coordinator._last_executed_action == "export"
 
 
 def test_scheduled_ev_preserve_release_restores_no_discharge_mode(opt_module):

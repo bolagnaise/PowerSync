@@ -993,7 +993,7 @@ def test_optimization_options_exposes_enabled_toggle():
             step["data"]["optimization_auto_apply_reserve"]
             == "Auto-apply optimizer reserve"
         )
-        assert "hardware backup reserve stays user controlled" in step[
+        assert "Natural self-consumption may continue" in step[
             "data_description"
         ]["optimization_auto_apply_reserve"]
         assert step["data"]["optimization_disable_idle"] == "Disable idle mode"
@@ -1212,7 +1212,7 @@ def test_initial_smart_optimization_configuration_exposes_enabled_toggle():
             step["data"]["optimization_auto_apply_reserve"]
             == "Auto-apply optimizer reserve"
         )
-        assert "hardware backup reserve stays user controlled" in step[
+        assert "Natural self-consumption may continue" in step[
             "data_description"
         ]["optimization_auto_apply_reserve"]
         assert step["data"]["optimization_disable_idle"] == "Disable idle mode"

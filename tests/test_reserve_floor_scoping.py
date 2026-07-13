@@ -306,9 +306,8 @@ def _slot_timestamps(count: int, *, start_hour: int, start_minute: int = 0):
     return [base + timedelta(minutes=5 * idx) for idx in range(count)]
 
 
-def test_matched_per_slot_floor_wins_over_cross_run_scalar(opt_module):
-    """Morning export run's own (lower) floor must not be overridden by the
-    evening run's (higher) scalar recommendation for the same day."""
+def test_stale_per_slot_and_scalar_floors_do_not_override_active_reserve(opt_module):
+    """Legacy bridge metadata cannot raise the active optimizer reserve."""
     coordinator = _coordinator(opt_module, backup_reserve=0.10)
     coordinator._auto_apply_reserve_enabled = True
 
@@ -337,14 +336,11 @@ def test_matched_per_slot_floor_wins_over_cross_run_scalar(opt_module):
 
     floor = coordinator._force_discharge_reserve_floor(morning_action)
 
-    # Must be the morning run's own per-slot floor (30%), NOT the evening
-    # scalar (60%).
-    assert floor == pytest.approx(0.30)
+    assert floor == pytest.approx(0.10)
 
 
-def test_action_outside_tracked_slots_still_gets_scalar_base(opt_module):
-    """An action whose timestamp isn't in the tracked per-slot arrays falls
-    back to the scalar recommendation, as before."""
+def test_action_outside_stale_slots_uses_active_reserve(opt_module):
+    """Unmatched legacy bridge metadata cannot become a global floor."""
     coordinator = _coordinator(opt_module, backup_reserve=0.10)
     coordinator._auto_apply_reserve_enabled = True
 
@@ -369,12 +365,11 @@ def test_action_outside_tracked_slots_still_gets_scalar_base(opt_module):
 
     floor = coordinator._force_discharge_reserve_floor(evening_action)
 
-    assert floor == pytest.approx(0.60)
+    assert floor == pytest.approx(0.10)
 
 
-def test_no_action_call_still_uses_scalar_as_global_base(opt_module):
-    """The `action=None` global-floor call has no timestamp to match against
-    per-slot data, so the scalar recommendation must still apply."""
+def test_no_action_call_uses_active_reserve_not_stale_scalar(opt_module):
+    """The global runtime guard uses only the active optimizer reserve."""
     coordinator = _coordinator(opt_module, backup_reserve=0.10)
     coordinator._auto_apply_reserve_enabled = True
 
@@ -391,7 +386,7 @@ def test_no_action_call_still_uses_scalar_as_global_base(opt_module):
 
     floor = coordinator._force_discharge_reserve_floor()
 
-    assert floor == pytest.approx(0.60)
+    assert floor == pytest.approx(0.10)
 
 
 def test_matched_zero_per_slot_floor_still_wins_over_scalar(opt_module):

@@ -28,13 +28,12 @@ COORDINATOR_PATH = (
     ROOT / "custom_components" / "power_sync" / "optimization" / "coordinator.py"
 )
 
-# The overlay calls that make up the post-solve override chain, in the order
-# _run_optimization applies them.
+# Disable Idle is solver-native. These are the remaining physical overlays,
+# in the order _run_optimization applies them before one reconciliation.
 _OVERLAY_CALL_MARKERS = (
     "self._spread_import_schedule(",
     "self._spread_export_schedule(",
     "self._bridge_short_export_gaps(",
-    "self._disable_idle_schedule(",
     "self._apply_offgrid_overlay(",
 )
 
@@ -58,33 +57,34 @@ def _run_optimization_source() -> str:
 def _chain_blocks(method_source: str) -> list[str]:
     """Split the method source into the two override-chain blocks.
 
-    Each chain starts right after ``self._last_optimizer_result = result``
-    (set once per LP solve — there are exactly two solves: the initial run
-    and the reserve-floor rerun) and ends at the next statement that reads
-    from the fully-overlaid schedule (``reserve_recommendation = dict(`` for
-    chain 1, ``if reserve_recommendation and result.reserve_recommendation:``
-    for chain 2).
+    Each chain starts from the solve-local ``schedule = result.schedule`` and
+    ends immediately before the atomic ``_last_optimizer_result`` commit.
+    There are two structurally identical chains: the initial solve and the
+    optional Auto-Apply reserve rerun.
     """
-    start_marker = "self._last_optimizer_result = result"
-    starts = [m.start() for m in re.finditer(re.escape(start_marker), method_source)]
+    start_marker = "schedule = result.schedule"
+    starts = [
+        m.start()
+        for m in re.finditer(
+            rf"(?m)^\s*{re.escape(start_marker)}\s*$",
+            method_source,
+        )
+    ]
     assert len(starts) == 2, (
-        f"expected exactly 2 LP-solve result assignments (initial + reserve-floor "
+        f"expected exactly 2 solve-local schedule chains (initial + Auto-Apply "
         f"rerun), found {len(starts)} — _run_optimization's structure changed, "
         f"update this test's chain boundaries"
     )
-
-    chain1_end = method_source.index("reserve_recommendation = dict(", starts[0])
-    chain2_end = method_source.index(
-        "if reserve_recommendation and result.reserve_recommendation:", starts[1]
-    )
-
-    chain1 = method_source[starts[0]:chain1_end]
-    chain2 = method_source[starts[1]:chain2_end]
-    return [chain1, chain2]
+    return [
+        method_source[
+            start:method_source.index("self._last_optimizer_result = result", start)
+        ]
+        for start in starts
+    ]
 
 
 def test_override_chain_blocks_are_present_and_ordered():
-    """Sanity check the extraction itself found both chains with all five
+    """Sanity check the extraction found both remaining overlay chains
     overlays present, in the documented order, before asserting atomicity."""
     method_source = _run_optimization_source()
     chains = _chain_blocks(method_source)
@@ -94,7 +94,7 @@ def test_override_chain_blocks_are_present_and_ordered():
         positions = [chain.index(marker) for marker in _OVERLAY_CALL_MARKERS]
         assert positions == sorted(positions), (
             "override calls are not in the expected spread-import -> "
-            "spread-export -> bridge -> disable-idle -> offgrid order"
+            "spread-export -> bridge -> offgrid order"
         )
 
 
@@ -117,35 +117,26 @@ def test_current_schedule_committed_exactly_once_per_chain():
             f"self._current_schedule partially overlaid"
         )
 
-        # The single commit must come after every overlay call in this chain
-        # (i.e. it is the last thing the chain does, not interleaved between
-        # overlays).
+        reconcile = chain.index("self._optimizer.reconcile_result_with_schedule(")
         last_overlay_call = max(chain.index(marker) for marker in _OVERLAY_CALL_MARKERS)
-        assert assignments[0] > last_overlay_call, (
+        assert reconcile > last_overlay_call
+        assert assignments[0] > reconcile, (
             f"chain {i}: self._current_schedule is assigned before the override "
-            f"chain finishes running all its overlays"
+            f"chain is reconciled"
         )
 
 
-def test_result_schedule_committed_exactly_once_per_chain():
-    """Same atomicity requirement for result.schedule, which mirrors
-    self._current_schedule through the chain."""
+def test_result_schedule_reconciled_exactly_once_per_chain():
+    """The canonical finalizer is the only result/schedule mutation surface."""
     method_source = _run_optimization_source()
     chains = _chain_blocks(method_source)
 
     for i, chain in enumerate(chains, start=1):
-        assignments = [
-            m.start() for m in re.finditer(r"result\.schedule\s*=", chain)
-        ]
-        assert len(assignments) == 1, (
-            f"chain {i}: expected exactly one result.schedule assignment, found "
-            f"{len(assignments)}"
-        )
+        assert chain.count("self._optimizer.reconcile_result_with_schedule(") == 1
+        assert re.search(r"result\.schedule\s*=", chain) is None
         last_overlay_call = max(chain.index(marker) for marker in _OVERLAY_CALL_MARKERS)
-        assert assignments[0] > last_overlay_call, (
-            f"chain {i}: result.schedule is assigned before the override chain "
-            f"finishes running all its overlays"
-        )
+        reconcile = chain.index("self._optimizer.reconcile_result_with_schedule(")
+        assert reconcile > last_overlay_call
 
 
 def test_overlay_calls_thread_a_local_variable_not_self_current_schedule():

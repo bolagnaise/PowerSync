@@ -1479,7 +1479,7 @@ def test_charge_block_mask_prevents_greedy_fallback_charging(
     optimizer = _optimizer(battery_optimizer_module)
 
     unblocked = optimizer.optimize(
-        import_prices=[0.05] * 12,
+        import_prices=[0.05] * 6 + [0.30] * 6,
         export_prices=[0.04] * 12,
         solar_forecast=[0.0] * 12,
         load_forecast=[0.1] * 12,
@@ -1489,7 +1489,7 @@ def test_charge_block_mask_prevents_greedy_fallback_charging(
         block_battery_charge=[False] * 12,
     )
     blocked = optimizer.optimize(
-        import_prices=[0.05] * 12,
+        import_prices=[0.05] * 6 + [0.30] * 6,
         export_prices=[0.04] * 12,
         solar_forecast=[0.0] * 12,
         load_forecast=[0.1] * 12,
@@ -1760,7 +1760,7 @@ def test_fit_export_above_acquisition_not_blocked_by_peak_import(
     assert max(result.grid_export_w[today_start:today_start + 24]) > 1000
 
 
-def test_priority_export_uses_surplus_above_bridge_floor(
+def test_priority_export_uses_surplus_above_optimizer_floor(
     battery_optimizer_module,
 ):
     optimizer = battery_optimizer_module.BatteryOptimizer(
@@ -1804,13 +1804,11 @@ def test_priority_export_uses_surplus_above_bridge_floor(
     export_actions = [action for action in export_window if action.action == "export"]
     assert export_actions
     assert max(result.grid_export_w[export_start:export_end]) > 1000
-    assert min(action.soc for action in export_actions) >= 0.15
-    assert result.reserve_recommendation["home_load_bridge_next_charge_reason"] == (
-        "scheduled_grid_charge"
-    )
+    assert min(action.soc for action in export_actions) >= 0.10
+    assert "home_load_bridge_kwh" not in result.reserve_recommendation
 
 
-def test_priority_export_skips_when_bridge_floor_consumes_surplus(
+def test_priority_export_does_not_add_a_mandatory_home_load_bridge(
     battery_optimizer_module,
 ):
     optimizer = battery_optimizer_module.BatteryOptimizer(
@@ -1839,8 +1837,8 @@ def test_priority_export_skips_when_bridge_floor_consumes_surplus(
     )
 
     export_window = result.schedule.actions[:12]
-    assert not any(action.action == "export" for action in export_window)
-    assert max(result.grid_export_w[:12]) == pytest.approx(0.0)
+    assert any(action.action == "export" for action in export_window)
+    assert max(result.grid_export_w[:12]) > 100
 
 
 def test_priority_export_applies_to_generic_export_windows(
@@ -2154,7 +2152,7 @@ def test_reserve_recommendation_marks_no_charge_in_horizon(
     assert recommendation["protects_until"].startswith("2026-05-04T00:55")
 
 
-def test_reserve_recommendation_reports_export_floor_for_home_load_bridge(
+def test_reserve_recommendation_does_not_create_home_load_export_bridge(
     battery_optimizer_module,
 ):
     optimizer = battery_optimizer_module.BatteryOptimizer(
@@ -2194,11 +2192,9 @@ def test_reserve_recommendation_reports_export_floor_for_home_load_bridge(
         load=[1.0] * 24,
     )
 
-    assert recommendation["home_load_bridge_next_charge_reason"] == "forecast_solar_surplus"
-    assert recommendation["home_load_bridge_kwh"] == pytest.approx(1.0)
-    assert 15 <= recommendation["home_load_export_floor_percent"] <= 17
-    assert recommendation["home_load_bridge_start"].startswith("2026-05-04T00:30")
-    assert recommendation["home_load_bridge_until"].startswith("2026-05-04T01:30")
+    assert "home_load_bridge_next_charge_reason" not in recommendation
+    assert "home_load_bridge_kwh" not in recommendation
+    assert "home_load_export_floor_percent" not in recommendation
 
 
 def test_export_reserve_floor_limits_planned_export_and_home_load_projection(
@@ -2231,10 +2227,7 @@ def test_export_reserve_floor_limits_planned_export_and_home_load_projection(
     assert export_actions
     # Forced export is gated at the floor: it never drives SOC below it.
     assert min(action.soc for action in export_actions) >= 0.55
-    # Once it can no longer export, the battery idles at the floor.
-    assert any(action.action == "idle" for action in result.schedule.actions)
-    # After the export window, the home-load bridge reserve is consumed to serve
-    # load: self-consumption draws the reported SOC naturally below the export
+    # After the export window, self-consumption draws the reported SOC naturally below the export
     # floor (it is an export gate, not a hard SOC floor), matching what the
     # battery actually does — but never below the real hardware reserve.
     self_consumption_socs = [
@@ -2275,9 +2268,9 @@ def test_high_export_reserve_floor_limits_first_export_window(
     export_actions = [a for a in schedule.actions if a.action == "export"]
     assert export_actions
     assert min(action.soc for action in export_actions) >= 0.92
-    assert min(action.soc for action in schedule.actions) >= 0.92
-    assert schedule.actions[2].action == "idle"
-    assert schedule.actions[2].battery_discharge_w == 0
+    assert min(action.soc for action in schedule.actions) < 0.92
+    assert schedule.actions[2].action == "self_consumption"
+    assert schedule.actions[2].battery_discharge_w > 0
 
 
 def test_export_capped_solar_surplus_during_charge_block_stays_feasible(
@@ -2364,7 +2357,7 @@ def test_build_schedule_caps_export_actions_at_optimizer_reserve(
     )
 
 
-def test_build_schedule_converts_priority_export_idle_to_export(
+def test_build_schedule_does_not_invent_priority_export_from_idle(
     battery_optimizer_module,
 ):
     optimizer = battery_optimizer_module.BatteryOptimizer(
@@ -2393,13 +2386,12 @@ def test_build_schedule_converts_priority_export_idle_to_export(
         priority_export_slots=[True, True, True],
     )
 
-    assert schedule.actions[0].action == "export"
-    assert schedule.actions[0].power_w == 4500.0
-    assert schedule.actions[0].battery_discharge_w == 5000.0
-    assert all(action.action != "idle" for action in schedule.actions)
+    assert schedule.actions[0].action == "idle"
+    assert schedule.actions[0].power_w == 0.0
+    assert schedule.actions[0].battery_discharge_w == 0.0
 
 
-def test_build_schedule_converts_priority_export_self_consumption_to_export(
+def test_build_schedule_does_not_invent_priority_export_from_self_consumption(
     battery_optimizer_module,
 ):
     optimizer = battery_optimizer_module.BatteryOptimizer(
@@ -2428,9 +2420,9 @@ def test_build_schedule_converts_priority_export_self_consumption_to_export(
         priority_export_slots=[True],
     )
 
-    assert schedule.actions[0].action == "export"
-    assert schedule.actions[0].power_w == 5500.0
-    assert schedule.actions[0].battery_discharge_w == 7500.0
+    assert schedule.actions[0].action == "self_consumption"
+    assert schedule.actions[0].power_w == 2000.0
+    assert schedule.actions[0].battery_discharge_w == 2000.0
 
 
 def test_build_schedule_keeps_non_priority_profitable_hold_idle(

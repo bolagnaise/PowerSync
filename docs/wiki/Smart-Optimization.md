@@ -16,9 +16,10 @@ saved Smart Optimization settings but does not own battery dispatch.
 
 ### Minimum discharge level
 
-The optimizer reserve floor. Smart Optimization will not intentionally discharge
-below this level. This is separate from the battery hardware backup reserve used
-for grid outages.
+The software boundary for intentional battery-to-grid export. Natural
+self-consumption may continue below this level to the separate hardware backup
+reserve. Merely allowing export in a slot does not turn this value into a global
+SOC hold or recharge target.
 
 ### Hardware backup reserve
 
@@ -74,8 +75,8 @@ battery above the cap, and it does not change the battery's outage reserve.
 
 The maximum grid import/export, spread import/export, No Idle, and auto-applied
 reserve controls are also advanced settings because they change solver limits or
-post-processing behavior. They are grouped with the grid-charge price and SOC cap
-in the mobile app.
+the final physical trajectory. They are grouped with the grid-charge price and SOC
+cap in the mobile app.
 
 ## Profit Max
 
@@ -85,6 +86,16 @@ value assigned to ending the forecast horizon with a high battery SOC.
 
 Profit Max does not, by itself, force the battery to be full by a deadline. Use
 Charge By Time for that behavior.
+
+Profit Max uses the same reserve model as normal Smart Optimization: intentional
+export stops at the active optimizer reserve, while later household
+self-consumption may continue to the hardware reserve. It does not add a hidden
+home-load bridge or require an overnight top-up. Grid charging is scheduled only
+when the modeled tariff value, efficiency, limits, and future load/export value
+make it worthwhile.
+Provider priority is permission, not a synthetic subsidy: export below the
+modeled acquisition cost is allowed only when an actual, reachable quantity of
+cheaper future recharge is paired with it.
 
 For Flow Power users, Profit Max still unlocks the Flow Power Happy Hour export
 window behavior: battery export is allowed during the configured Happy Hour

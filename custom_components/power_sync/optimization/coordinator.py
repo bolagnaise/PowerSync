@@ -1198,44 +1198,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _force_discharge_reserve_floor(self, action: Any | None = None) -> float:
         """Return the software floor used before force discharge/export commands."""
+        # Auto-Apply may update the configured optimizer reserve, but there is
+        # no second hidden home-load bridge floor. Runtime export protection
+        # therefore uses the same active reserve the solver modeled.
         floor = self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
-        action_timestamp = getattr(action, "timestamp", None)
-        matched_per_slot = False
-        if self.auto_apply_reserve_enabled and action_timestamp is not None:
-            timestamps = getattr(self, "_active_export_reserve_floor_timestamps", None) or []
-            floors = getattr(self, "_active_export_reserve_floor_slots", None) or []
-            for idx, timestamp in enumerate(timestamps):
-                if timestamp == action_timestamp and idx < len(floors):
-                    floor = max(floor, floors[idx])
-                    matched_per_slot = True
-                    break
-        if not matched_per_slot and self.auto_apply_reserve_enabled:
-            recommendation = (
-                getattr(getattr(self, "_last_optimizer_result", None), "reserve_recommendation", {})
-                or {}
-            )
-            export_floor = self._reserve_ratio(
-                recommendation.get("home_load_export_floor_percent"),
-                None,
-            )
-            if export_floor is not None:
-                bridge_export_start = recommendation.get(
-                    "home_load_bridge_after_export_start"
-                )
-                if bridge_export_start:
-                    try:
-                        bridge_start = datetime.fromisoformat(
-                            str(bridge_export_start)
-                        )
-                        now = dt_util.now()
-                        if bridge_start.tzinfo is not None:
-                            now = now.astimezone(bridge_start.tzinfo)
-                        if bridge_start.date() != now.date():
-                            export_floor = None
-                    except (TypeError, ValueError):
-                        pass
-            if export_floor is not None:
-                floor = max(floor, export_floor)
         return max(0.0, min(1.0, floor))
 
     def _auto_export_reserve_floor(
@@ -1515,7 +1481,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         projected_soc = self._reserve_ratio(getattr(action, "soc", None))
         if soc_now is not None and soc_now <= reserve + 0.0001:
             return True, projected_soc
-        if projected_soc is not None and projected_soc <= reserve + 0.0001:
+        # A modeled export slot may legitimately finish exactly on the active
+        # reserve. Block only plans that cross it; the next cycle is blocked by
+        # the live starting-SOC guard above.
+        if projected_soc is not None and projected_soc < reserve - 0.0001:
             return True, projected_soc
         return False, projected_soc
 
@@ -1526,10 +1495,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Apply one forecast optimizer reserve update after a solve."""
         if not bool(getattr(self, "_auto_apply_reserve_enabled", False)):
             return False
-        # Never act on a relaxed/greedy fallback solve. Those run with an
-        # artificially lowered reserve floor (5%), so their reserve
-        # recommendation is not a real forecast — applying it would ratchet the
-        # optimiser reserve down to the hardware floor and leave it there.
+        # Never act on an infeasible safety fallback. It deliberately returns
+        # no economic reserve recommendation, so Auto-Apply must wait for the
+        # next successful solve rather than ratcheting from a degraded plan.
         if not bool(getattr(result, "feasible", True)):
             return False
         recommendation = getattr(result, "reserve_recommendation", {}) or {}
@@ -3513,6 +3481,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         schedule_timestamps,
                         priority_export_slots,
                         any(priority_export_slots),
+                        self._should_disable_idle_schedule(),
                     )
                 finally:
                     if reserve_floor is not None:
@@ -3527,7 +3496,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             used_recommendation_floor = recommendation_floor is not None
 
-            self._last_optimizer_result = result
             schedule = result.schedule
             if self._should_spread_import_schedule():
                 schedule = self._spread_import_schedule(
@@ -3547,13 +3515,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 schedule,
                 export_prices,
             )
-            if self._should_disable_idle_schedule():
-                schedule = self._disable_idle_schedule(
-                    schedule,
-                    solar_forecast=solar_forecast,
-                    load_forecast=load_forecast,
-                    initial_soc=soc,
-                )
             self._last_update_time = dt_util.now()
 
             # Apply off-grid curtailment overlay if enabled — converts
@@ -3563,47 +3524,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 schedule = self._apply_offgrid_overlay(
                     schedule, export_prices,
                 )
-            self._current_schedule = schedule
-            result.schedule = schedule
-
-            reserve_recommendation = dict(
-                getattr(result, "reserve_recommendation", {}) or {}
+            result = self._optimizer.reconcile_result_with_schedule(
+                result,
+                schedule,
+                import_prices=import_prices,
+                export_prices=export_prices,
+                solar=solar_forecast,
+                load=load_forecast,
+                export_bonus_prices=self._last_zerohero_bonus_prices,
+                export_bonus_cap_kwh=self._last_zerohero_bonus_cap_kwh,
+                import_bonus_prices=self._last_zerocharge_bonus_prices,
+                import_bonus_cap_kwh=self._last_zerocharge_bonus_cap_kwh,
+                initial_soc=soc,
             )
+            self._current_schedule = result.schedule
+            self._last_optimizer_result = result
+
             reserve_changed = self._apply_auto_reserve_recommendation(result)
-            if getattr(result, "reserve_recommendation", {}) or {}:
-                reserve_recommendation = dict(
-                    getattr(result, "reserve_recommendation", {}) or {}
-                )
-            export_reserve_floor = None
-            export_reserve_metadata: dict[str, Any] = {}
-            if self.auto_apply_reserve_enabled:
-                export_reserve_floor, export_reserve_metadata = (
-                    self._post_processed_export_reserve_floor_slots(
-                        self._current_schedule,
-                        solar_forecast,
-                        load_forecast,
-                    )
-                )
-            if export_reserve_metadata:
-                reserve_recommendation.update(export_reserve_metadata)
-            if export_reserve_floor is None:
-                export_reserve_floor = self._auto_export_reserve_floor(
-                    reserve_recommendation
-                )
-                if export_reserve_floor is None:
-                    export_reserve_floor = self._auto_export_reserve_floor_slots(
-                        reserve_recommendation,
-                        len(import_prices),
-                    )
-            if (
-                reserve_changed
-                or used_recommendation_floor
-                or export_reserve_floor is not None
-            ):
-                result = await _run_optimizer_once(
-                    export_reserve_floor=export_reserve_floor
-                )
-                self._last_optimizer_result = result
+            if reserve_changed or used_recommendation_floor:
+                result = await _run_optimizer_once()
                 schedule = result.schedule
                 if self._should_spread_import_schedule():
                     schedule = self._spread_import_schedule(
@@ -3618,83 +3557,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     schedule = self._spread_export_schedule(
                         schedule,
                         battery_export_allowed,
-                        export_reserve_floor=export_reserve_floor,
                     )
                 schedule = self._bridge_short_export_gaps(
                     schedule,
                     export_prices,
-                    export_reserve_floor=export_reserve_floor,
                 )
-                if self._should_disable_idle_schedule():
-                    schedule = self._disable_idle_schedule(
-                        schedule,
-                        solar_forecast=solar_forecast,
-                        load_forecast=load_forecast,
-                        initial_soc=soc,
-                    )
                 if self._should_apply_offgrid_overlay():
                     schedule = self._apply_offgrid_overlay(
                         schedule, export_prices,
                     )
-                self._current_schedule = schedule
-                result.schedule = schedule
-                if reserve_recommendation and result.reserve_recommendation:
-                    for recommendation_key in (
-                        "configured_optimizer_reserve_percent",
-                        "manual_optimizer_reserve_percent",
-                        "home_load_export_floor_percent",
-                    ):
-                        if recommendation_key in reserve_recommendation:
-                            result.reserve_recommendation.setdefault(
-                                recommendation_key,
-                                reserve_recommendation[recommendation_key],
-                            )
-                    if export_reserve_floor is not None:
-                        result.reserve_recommendation.setdefault(
-                            "applied_export_reserve_floor_percent",
-                            int(
-                                round(
-                                    (
-                                        max(export_reserve_floor)
-                                        if isinstance(export_reserve_floor, list)
-                                        else export_reserve_floor
-                                    )
-                                    * 100
-                                )
-                            ),
-                        )
+                result = self._optimizer.reconcile_result_with_schedule(
+                    result,
+                    schedule,
+                    import_prices=import_prices,
+                    export_prices=export_prices,
+                    solar=solar_forecast,
+                    load=load_forecast,
+                    export_bonus_prices=self._last_zerohero_bonus_prices,
+                    export_bonus_cap_kwh=self._last_zerohero_bonus_cap_kwh,
+                    import_bonus_prices=self._last_zerocharge_bonus_prices,
+                    import_bonus_cap_kwh=self._last_zerocharge_bonus_cap_kwh,
+                    initial_soc=soc,
+                )
+                self._current_schedule = result.schedule
+                self._last_optimizer_result = result
                 self._last_update_time = dt_util.now()
-
-            final_export_reserve_floor = None
-            final_export_reserve_metadata: dict[str, Any] = {}
-            if self.auto_apply_reserve_enabled:
-                final_export_reserve_floor, final_export_reserve_metadata = (
-                    self._post_processed_export_reserve_floor_slots(
-                        self._current_schedule,
-                        solar_forecast,
-                        load_forecast,
-                    )
-                )
-            if final_export_reserve_floor is not None:
-                self._set_active_export_reserve_floor_slots(
-                    final_export_reserve_floor,
-                    self._current_schedule,
-                )
-                result.reserve_recommendation = dict(
-                    getattr(result, "reserve_recommendation", {}) or {}
-                )
-                result.reserve_recommendation.update(final_export_reserve_metadata)
-                result.reserve_recommendation.setdefault(
-                    "applied_export_reserve_floor_percent",
-                    int(round(max(final_export_reserve_floor) * 100)),
-                )
-            elif export_reserve_floor is not None:
-                self._set_active_export_reserve_floor_slots(
-                    export_reserve_floor if isinstance(export_reserve_floor, list) else None,
-                    self._current_schedule,
-                )
-            else:
-                self._set_active_export_reserve_floor_slots(None, None)
+            self._set_active_export_reserve_floor_slots(None, None)
 
             # Store forecast data for LP forecast sensors
             self._has_solar_forecast = solar_forecast is not None and any(v > 0 for v in (solar_forecast or []))
@@ -4000,8 +3888,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return the action that runtime execution will apply."""
         if action_name != "idle":
             return action_name
-        if self._should_disable_idle_schedule():
-            return "self_consumption"
+        # No Idle is modeled into the emitted trajectory. Any IDLE that remains
+        # is an explicit solver exemption (for example a Charge By Time deadline
+        # or below-reserve recovery hold) and must remain executable.
         if timestamp is not None and self._is_in_demand_window_at(timestamp):
             return "self_consumption"
         return action_name
@@ -4132,12 +4021,37 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 and action_charge_w <= 0
                 and action_discharge_w <= 0
             )
+            projected_deadline_soc = _advance_soc(
+                soc_cursor,
+                0.0,
+                _natural_discharge_w(index, soc_cursor),
+            )
+            if (
+                projected_deadline_soc is not None
+                and charge_by_time_target_slot is not None
+            ):
+                for future_index in range(
+                    index + 1,
+                    min(len(actions), charge_by_time_target_slot),
+                ):
+                    future_action = actions[future_index]
+                    projected_deadline_soc = _advance_soc(
+                        projected_deadline_soc,
+                        float(
+                            getattr(future_action, "battery_charge_w", 0.0) or 0.0
+                        ),
+                        float(
+                            getattr(future_action, "battery_discharge_w", 0.0)
+                            or 0.0
+                        ),
+                    )
             should_preserve_charge_by_time_hold = (
                 charge_by_time_target_slot is not None
                 and index < charge_by_time_target_slot
-                and soc_cursor is not None
-                and soc_cursor < charge_by_time_target_soc - 0.0001
                 and (action_name == "idle" or should_simulate_self_use)
+                and projected_deadline_soc is not None
+                and projected_deadline_soc
+                < charge_by_time_target_soc - 0.0001
             )
             should_preserve_below_reserve_recovery_hold = (
                 action_name == "idle"
@@ -5558,12 +5472,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.info(
                     "Optimizer: Skipping %s — calibration suspected, using self_consumption",
                     effective_action,
-                )
-                effective_action = "self_consumption"
-
-            if effective_action == "idle" and self._should_disable_idle_schedule():
-                _LOGGER.info(
-                    "No Idle mode: overriding optimizer IDLE to self_consumption"
                 )
                 effective_action = "self_consumption"
 
