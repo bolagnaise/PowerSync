@@ -1,0 +1,12 @@
+{
+  "eval_id": 0,
+  "eval_name": "hold-soc-stuck-after-restart",
+  "prompt": "PowerSync Discord ticket: a Sigenergy user engaged 'Hold Battery SOC' for 4 hours yesterday evening with Smart Optimization switched OFF. Home Assistant restarted about an hour into the hold. This morning the battery neither charges nor discharges and the UI shows no hold active. Diagnose the root cause, the exact code path that loses the state, worst-affected brands, and what a fix must cover.",
+  "assertions": [
+    "Identifies that hold_soc_state and its expiry timer are in-memory only (per-setup locals in async_setup_entry) and are lost on HA restart or config-entry reload",
+    "Identifies that persist_force_mode_state serializes only force charge/discharge, so Hold SoC is never persisted (engaging Hold writes None)",
+    "Identifies that no startup path restores or exits a stale hold: restore_force_mode_from_persistence ignores hold, and _restore_disabled_optimizer_reserve_if_stale cannot detect a standby work mode (reserve-keyed) or excludes Sigenergy",
+    "Notes the disabled-optimizer condition: with the optimizer enabled the next cycle would overwrite the stale mode, so the frozen state persists only when optimization is off",
+    "Fix outline includes persisting hold state with an absolute expiry and restoring or exiting it during setup (or an equivalent non-reserve-keyed startup cleanup)"
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "skill_name": "optimizer-bug-hunt",
+  "evals": [
+    {
+      "id": 0,
+      "eval_name": "hold-soc-stuck-after-restart",
+      "prompt": "PowerSync Discord ticket: a Sigenergy user engaged 'Hold Battery SOC' for 4 hours yesterday evening with Smart Optimization switched OFF. Home Assistant restarted about an hour into the hold (they were updating another integration). This morning the battery neither charges nor discharges — it's frozen — and the PowerSync UI shows no hold or force mode active. Integration version is current. Diagnose the root cause in this repo (custom_components/power_sync/) and describe the exact code path that loses the state, which brands are worst affected, and what a fix would need to cover. READ-ONLY: do not modify any repository files. Write your diagnosis to the output file you were given.",
+      "expected_output": "Identifies that hold_soc_state and its expiry timer are in-memory only, persist_force_mode_state only serializes force charge/discharge (writing None when only Hold is active), restart wipes the state with no startup detector (restore_force_mode_from_persistence ignores hold; _restore_disabled_optimizer_reserve_if_stale is reserve-keyed and excludes Sigenergy), and the disabled-optimizer cohort has no next-cycle overwrite; fix = persist hold state with absolute expiry + restore-or-exit on setup.",
+      "files": []
+    },
+    {
+      "id": 1,
+      "eval_name": "tesla-reserve-stuck-after-disable",
+      "prompt": "PowerSync Discord ticket: a Tesla Powerwall user disabled Smart Optimization while their EV was charging during a scheduled EV preserve window. Afterwards the Powerwall's backup reserve stayed at 74% (which matched the battery SOC at that moment) instead of returning to their configured 20%, and the Tesla app shows the elevated reserve. It never recovered. Integration version is current. Diagnose the root cause in this repo (custom_components/power_sync/): trace the exact code path that raises the reserve and the path that fails to restore it on disable. READ-ONLY: do not modify any repository files. Write your diagnosis to the output file you were given.",
+      "expected_output": "Identifies that Tesla lacks set_no_discharge_mode so EV preserve falls back to _set_idle_hold_mode(preserve_charge=True) which raises the hardware reserve to ~SOC and snapshots _pre_idle_backup_reserve; disable() gates the idle cleanup on _last_executed_action == 'idle' (it is 'no_discharge'), the EV release only restores work mode, Tesla restore_normal has no saved reserve, and the startup self-heal excludes Tesla — so nothing restores the reserve.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "eval_name": "spread-export-overwrites-charge-slot",
+      "prompt": "PowerSync Discord ticket: a Flow Power user with the 'Spread Export' toggle enabled reports that the optimizer's published plan contained a cheap overnight grid-charge slot, but at that time the battery actually EXPORTED instead of charging — the decisions log summary counted more export slots than the LP solution should have produced. Integration version is current. Diagnose the root cause in this repo (custom_components/power_sync/): find where a planned charge action can be rewritten to export after the LP solve, and state the conditions required. READ-ONLY: do not modify any repository files. Write your diagnosis to the output file you were given.",
+      "expected_output": "Identifies _spread_export_schedule in optimization/coordinator.py: spread_positions takes every slot in a contiguous export-allowed run filtered only by SOC>floor, never by the slot's original action; the default allowed mask (_positive_price_export_slots) marks every positive-export-price slot so the run can span LP charge slots; conditions = spread_export_enabled + target-export-power brand + all-positive export prices across the run.",
+      "files": []
+    }
+  ]
+}

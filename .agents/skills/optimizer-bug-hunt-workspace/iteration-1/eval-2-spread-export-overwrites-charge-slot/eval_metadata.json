@@ -1,0 +1,12 @@
+{
+  "eval_id": 2,
+  "eval_name": "spread-export-overwrites-charge-slot",
+  "prompt": "PowerSync Discord ticket: a Flow Power user with 'Spread Export' enabled reports the optimizer's plan showed a cheap overnight grid-charge slot, but the battery exported during that slot instead. Find where a planned charge action can be rewritten to export after the LP solve and state the conditions required.",
+  "assertions": [
+    "Identifies _spread_export_schedule in optimization/coordinator.py as the post-solve override that rewrites the slot",
+    "Identifies that spread_positions includes every slot of a contiguous export-allowed run filtered only by SOC above the floor, never by the slot's original LP action",
+    "Identifies that the export-allowed mask derives from positive export prices (_positive_price_export_slots), so a contiguous run can span slots the LP planned as charge",
+    "States the gating conditions: spread_export_enabled plus a brand supporting target export power (_supports_target_export_power)",
+    "Fix outline excludes non-export/discharge original actions (preserves charge slots) from the spread positions"
+  ]
+}

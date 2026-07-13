@@ -1,0 +1,22 @@
+[
+  {"query": "my powersync optimiser exported the whole battery at 6am when prices were negative, tariff is amber. why would it do that?", "should_trigger": true},
+  {"query": "ticket #482: sungrow user says the battery sat idle all through the zerohero super export window last night, they're on 2.12.785. can you dig into the code and find out why", "should_trigger": true},
+  {"query": "sigenergy over modbus — battery_mode sensor says self_consumption but the inverter is stuck with a 0W discharge cap after the EV finished charging. root cause?", "should_trigger": true},
+  {"query": "why does sensor.power_sync_optimization_status show a charge slot at 2am but the decisions log line counted it as export?", "should_trigger": true},
+  {"query": "user disabled smart optimization and now their powerwall backup reserve is stuck at 80%, won't go back to their configured 20. trace it", "should_trigger": true},
+  {"query": "need to fix a bug in _build_schedule where free import slots report the wrong grid_import_w", "should_trigger": true},
+  {"query": "im about to change how _spread_import_schedule flattens charge windows in coordinator.py — anything i should watch out for before touching it?", "should_trigger": true},
+  {"query": "flow power happy hour didn't trigger any export yesterday at 17:30, debug log attached in ticket 517. whats the root cause", "should_trigger": true},
+  {"query": "battery grid-charged during the demand window even though allow grid charging is toggled off — where do I even start in this repo?", "should_trigger": true},
+  {"query": "the LP says infeasible in the logs every morning around 4am and the plan goes stale, can you investigate battery_optimizer.py", "should_trigger": true},
+  {"query": "add a new sensor to powersync that shows daily export earnings in dollars", "should_trigger": false},
+  {"query": "the powersync mobile app settings page times out when saving EV settings — looks like the HTTP view is blocking", "should_trigger": false},
+  {"query": "write the release notes for v2.12.786 and bump the manifest", "should_trigger": false},
+  {"query": "sweep the discord tickets and tell me which ones have new replies", "should_trigger": false},
+  {"query": "user gets 'GoodWe coordinator not available' in their logs and no entities are created — goodwe lan kit-20 on tcp 502", "should_trigger": false},
+  {"query": "sungrow winet-s keeps dropping the modbus connection every few hours, how do we make the integration reconnect automatically", "should_trigger": false},
+  {"query": "write me a quick python script to backtest my amber price csv against my solar generation history", "should_trigger": false},
+  {"query": "the hassfest workflow is red on the manifest key ordering, fix CI", "should_trigger": false},
+  {"query": "can we add support for sofar solar inverters? modbus register map attached", "should_trigger": false},
+  {"query": "the energy flow card in the powersync dashboard shows NaN for grid power on iOS safari", "should_trigger": false}
+]

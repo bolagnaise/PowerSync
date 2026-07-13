@@ -1,0 +1,37 @@
+{
+  "run_id": "tesla-reserve-stuck-after-disable-with_skill",
+  "expectations": [
+    {
+      "text": "Identifies the Tesla EV-preserve fallback (_set_idle_hold_mode(preserve_charge=True)) raising reserve to ~SOC with _pre_idle_backup_reserve snapshot",
+      "passed": true,
+      "evidence": "\"TeslaEnergyCoordinator has no set_no_discharge_mode ... \u2192 fallback _set_idle_hold_mode(battery, preserve_charge=True)\"; \"reserve = min(max(soc_pct, 0), 80) \u2192 set_backup_reserve(74)\"; \"snapshots _pre_idle_backup_reserve = _startup_backup_reserve (config 20%)\""
+    },
+    {
+      "text": "Identifies disable() gating idle cleanup on _last_executed_action == 'idle' while marker is 'no_discharge'",
+      "passed": true,
+      "evidence": "\"the reserve cleanup is gated on self._last_executed_action == 'idle' (:2940); marker is 'no_discharge' \u2192 _restore_pre_idle_backup_reserve never runs\""
+    },
+    {
+      "text": "Identifies the EV release path restores work mode only, never the Tesla reserve",
+      "passed": true,
+      "evidence": "\"falls through to battery_controller.restore_normal() \u2192 power_sync.restore_normal service, which restores a reserve only from force-state saved_backup_reserve or hold-SoC state \u2014 neither exists here \u2192 mode/tariff only\""
+    },
+    {
+      "text": "Notes no later rescue (self-heal excludes Tesla, optimizer disabled)",
+      "passed": true,
+      "evidence": "\"the per-cycle Tesla reserve reset needs the optimizer enabled; _restore_disabled_optimizer_reserve_if_stale excludes Tesla at line 129; and on re-enable the drift check can even adopt 74% as the user's reserve\""
+    },
+    {
+      "text": "Fix outline restores pre-idle reserve in disable() whenever set (ungated from 'idle')",
+      "passed": true,
+      "evidence": "\"disable(): run _restore_pre_idle_backup_reserve whenever _pre_idle_backup_reserve is not None (ungate from == 'idle')\" plus release-side symmetry, adoption-path guard, and a runtime guard for already-stuck installs"
+    }
+  ],
+  "notes": "5/5. Extras: found the reserve-adoption corollary, log fingerprint, remediation guidance, and proposed extending tests/test_optimizer_restore_retry.py with the OB-2 retry contract. Cross-checked registry (OB-3) then verified line-by-line at HEAD.",
+  "summary": {
+    "passed": 5,
+    "failed": 0,
+    "total": 5,
+    "pass_rate": 1.0
+  }
+}
