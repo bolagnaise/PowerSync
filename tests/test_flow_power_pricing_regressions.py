@@ -36,6 +36,14 @@ def _class_source(file_path: Path, class_name: str) -> str:
     raise AssertionError(f"{class_name} not found")
 
 
+def _function_source(file_path: Path, function_name: str) -> str:
+    module = ast.parse(file_path.read_text())
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            return ast.unparse(node)
+    raise AssertionError(f"{function_name} not found")
+
+
 class _FakeResponse:
     def __init__(self, payload, status=200):
         self._payload = payload
@@ -121,6 +129,92 @@ def _aemo_data(price: float = 8.0) -> dict:
         "last_update": datetime(2026, 6, 8, 0, 0, tzinfo=timezone.utc),
         "source": "aemo_api",
     }
+
+
+def test_cost_tracking_uses_flow_power_kwatch_current_price():
+    """KWatch-only installs must expose a price to the energy cost accumulator."""
+    coordinator_path = COMPONENT_ROOT / "coordinator.py"
+    saved_modules = {
+        name: sys.modules.get(name)
+        for name in ("power_sync", "power_sync.const", "power_sync.flow_power_pricing")
+    }
+
+    package = types.ModuleType("power_sync")
+    package.__path__ = [str(COMPONENT_ROOT)]
+    const_module = types.ModuleType("power_sync.const")
+    for name, value in {
+        "CONF_ELECTRICITY_PROVIDER": "electricity_provider",
+        "CONF_PEA_ENABLED": "pea_enabled",
+        "CONF_FLOW_POWER_BASE_RATE": "flow_power_base_rate",
+        "CONF_PEA_CUSTOM_VALUE": "pea_custom_value",
+        "CONF_FLOW_POWER_STATE": "flow_power_state",
+        "FLOW_POWER_DEFAULT_BASE_RATE": 28.0,
+        "FLOW_POWER_HAPPY_HOUR_PERIODS": {"PERIOD_17_30"},
+    }.items():
+        setattr(const_module, name, value)
+    pricing_module = types.ModuleType("power_sync.flow_power_pricing")
+    pricing_module.resolve_flow_power_pricing_context = lambda *args: object()
+    pricing_module.calculate_flow_power_pea = lambda wholesale, *_args, **_kwargs: wholesale - 10.0
+
+    sys.modules["power_sync"] = package
+    sys.modules["power_sync.const"] = const_module
+    sys.modules["power_sync.flow_power_pricing"] = pricing_module
+    try:
+        namespace = {
+            "__name__": "power_sync.coordinator_cost_test",
+            "__package__": "power_sync",
+            "Any": object,
+            "DOMAIN": "power_sync",
+            "HomeAssistant": object,
+            "_LOGGER": SimpleNamespace(debug=lambda *args, **kwargs: None),
+            "_flow_power_export_rate_dollars": lambda *_args: 0.45,
+            "dt_util": SimpleNamespace(
+                now=lambda: datetime(2026, 7, 13, 12, 5, tzinfo=timezone.utc)
+            ),
+        }
+        exec(
+            "from __future__ import annotations\n"
+            + _function_source(coordinator_path, "_get_current_prices"),
+            namespace,
+        )
+
+        entry_id = "kwatch-cost-entry"
+        config_entry = SimpleNamespace(
+            data={},
+            options={
+                "electricity_provider": "flow_power",
+                "pea_enabled": True,
+                "flow_power_base_rate": 28.0,
+                "flow_power_state": "QLD1",
+            },
+        )
+        kwatch_coordinator = SimpleNamespace(
+            data={
+                "current": [
+                    {"channelType": "general", "perKwh": 12.0},
+                    {"channelType": "feedIn", "perKwh": -12.0},
+                ]
+            }
+        )
+        hass = SimpleNamespace(
+            data={
+                "power_sync": {
+                    entry_id: {"flow_power_kwatch_coordinator": kwatch_coordinator}
+                }
+            },
+            config_entries=SimpleNamespace(async_get_entry=lambda candidate: config_entry),
+        )
+
+        buy_price, sell_price = namespace["_get_current_prices"](hass, entry_id)
+
+        assert buy_price == 0.30
+        assert sell_price == 0.0
+    finally:
+        for name, module in saved_modules.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
 
 
 def _kwatch_coordinator_test_env():

@@ -383,7 +383,7 @@ def _flow_power_export_rate_dollars(config_entry: Any, state: str) -> float:
 def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | None, float | None]:
     """Get current buy/sell prices in $/kWh for cost tracking.
 
-    Priority: Amber coordinator → AEMO/Flow Power coordinator → tariff schedule.
+    Priority: Amber coordinator → AEMO/Flow Power KWatch coordinator → tariff schedule.
     Returns (buy_price_per_kwh, sell_price_per_kwh) or (None, None) on failure.
     """
     try:
@@ -409,8 +409,13 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                 # Negate so sell_price is positive when earning, negative when paying
                 return (buy_dollar, -sell_dollar)
 
-        # Try AEMO sensor coordinator (Flow Power and AEMO users)
-        aemo_coordinator = entry_data.get("aemo_sensor_coordinator")
+        # Both Flow Power market-price sources publish the same Amber-compatible
+        # current-price shape. KWatch-only installs do not create the AEMO
+        # coordinator, so cost tracking must use their KWatch coordinator.
+        aemo_coordinator = (
+            entry_data.get("aemo_sensor_coordinator")
+            or entry_data.get("flow_power_kwatch_coordinator")
+        )
         if aemo_coordinator and aemo_coordinator.data:
             current_prices = aemo_coordinator.data.get("current", [])
             wholesale_cents = None
