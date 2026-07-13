@@ -4076,6 +4076,7 @@ def test_tesla_export_uses_contiguous_export_window_duration(opt_module):
 def test_single_slot_self_consumption_gap_between_exports_is_bridged(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator._config.max_discharge_w = 10000
     start = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
     actions = [
         SimpleNamespace(
@@ -4106,7 +4107,7 @@ def test_single_slot_self_consumption_gap_between_exports_is_bridged(opt_module)
 
     assert [action.action for action in actions] == ["export", "export", "export"]
     assert actions[1].power_w == 7000
-    assert actions[1].battery_discharge_w == 7000
+    assert actions[1].battery_discharge_w == 8200
 
 
 def test_single_slot_export_gap_is_not_bridged_below_reserve(opt_module):
@@ -5238,8 +5239,8 @@ def test_spread_export_schedule_uses_export_power_for_target_batteries(opt_modul
         opt_module.ScheduleAction(
             timestamp=start + idx * timedelta(minutes=5),
             action="export" if idx < 2 else "self_consumption",
-            power_w=600 if idx < 2 else 0,
-            battery_discharge_w=2000 if idx < 2 else 0,
+            power_w=600 if idx < 2 else 1400,
+            battery_discharge_w=2000 if idx < 2 else 1400,
         )
         for idx in range(4)
     ]
@@ -5255,6 +5256,123 @@ def test_spread_export_schedule_uses_export_power_for_target_batteries(opt_modul
     assert [action.power_w for action in spread.actions] == [300.0] * 4
     export_wh = sum(action.power_w for action in spread.actions) * (5 / 60)
     assert export_wh == pytest.approx(600 * 2 * (5 / 60), abs=0.1)
+    assert [action.battery_discharge_w for action in spread.actions] == [1700.0] * 4
+
+
+def test_spread_export_schedule_preserves_home_load_without_export_headroom(opt_module):
+    coordinator = _coordinator(opt_module, "octopus")
+    coordinator.battery_system = "goodwe"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.max_discharge_w = 5000
+    start = datetime(2026, 5, 3, 9, 0, tzinfo=timezone.utc)
+    schedule = opt_module.OptimizationSchedule(
+        actions=[
+            opt_module.ScheduleAction(
+                timestamp=start,
+                action="export",
+                power_w=1000,
+                battery_discharge_w=2000,
+            ),
+            opt_module.ScheduleAction(
+                timestamp=start + timedelta(minutes=5),
+                action="self_consumption",
+                power_w=5000,
+                battery_discharge_w=5000,
+            ),
+            opt_module.ScheduleAction(
+                timestamp=start + timedelta(minutes=10),
+                action="export",
+                power_w=1000,
+                battery_discharge_w=2000,
+            ),
+        ],
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread = coordinator._spread_export_schedule(schedule, [True, True, True])
+
+    assert spread.actions[0].action == "export"
+    assert spread.actions[0].power_w == 1000.0
+    assert spread.actions[0].battery_discharge_w == 2000.0
+    assert spread.actions[1].action == "self_consumption"
+    assert spread.actions[1].power_w == 5000.0
+    assert spread.actions[1].battery_discharge_w == 5000.0
+    assert spread.actions[2].action == "export"
+    assert spread.actions[2].power_w == 1000.0
+    assert spread.actions[2].battery_discharge_w == 2000.0
+
+    coordinator._bridge_short_export_gaps(spread, [0.45, 0.45, 0.45])
+
+    assert spread.actions[1].action == "self_consumption"
+    assert spread.actions[1].power_w == 5000.0
+    assert spread.actions[1].battery_discharge_w == 5000.0
+
+
+def test_spread_export_schedule_reallocates_around_variable_home_load(opt_module):
+    coordinator = _coordinator(opt_module, "octopus")
+    coordinator.battery_system = "goodwe"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.max_discharge_w = 5000
+    start = datetime(2026, 5, 3, 9, 0, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="export" if idx < 2 else "self_consumption",
+            power_w=600 if idx < 2 else 4900,
+            battery_discharge_w=2000 if idx < 2 else 4900,
+        )
+        for idx in range(4)
+    ]
+    schedule = opt_module.OptimizationSchedule(actions, 0, 0, start)
+
+    spread = coordinator._spread_export_schedule(schedule, [True] * 4)
+
+    assert [action.power_w for action in spread.actions] == [500.0, 500.0, 100.0, 100.0]
+    assert [action.battery_discharge_w for action in spread.actions] == [
+        1900.0,
+        1900.0,
+        5000.0,
+        5000.0,
+    ]
+    export_wh = sum(action.power_w for action in spread.actions) * (5 / 60)
+    assert export_wh == pytest.approx(600 * 2 * (5 / 60), abs=0.1)
+
+
+def test_spread_export_schedule_preserves_home_at_export_floor(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power", profit_max=True)
+    coordinator.battery_system = "goodwe"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.battery_capacity_wh = 10000
+    coordinator._config.max_discharge_w = 5000
+    coordinator._optimizer = SimpleNamespace(efficiency=1.0)
+    start = datetime(2026, 5, 3, 17, 30, tzinfo=timezone.utc)
+    schedule = opt_module.OptimizationSchedule(
+        actions=[
+            opt_module.ScheduleAction(
+                timestamp=start,
+                action="export",
+                power_w=1000,
+                soc=0.30,
+                battery_discharge_w=2000,
+            )
+        ],
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread = coordinator._spread_export_schedule(
+        schedule,
+        [True],
+        export_reserve_floor=0.30,
+    )
+
+    assert spread.actions[0].action == "self_consumption"
+    assert spread.actions[0].power_w == 1000.0
+    assert spread.actions[0].battery_discharge_w == 1000.0
+    assert spread.actions[0].soc == pytest.approx(0.2917, abs=0.0001)
 
 
 def test_spread_import_schedule_flattens_planned_energy_across_same_price_window(opt_module):

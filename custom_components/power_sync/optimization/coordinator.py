@@ -4272,6 +4272,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 previous_action,
                 next_action,
             )
+            gap_action = actions[gap_start]
+            home_discharge_w = max(
+                0.0,
+                float(getattr(gap_action, "battery_discharge_w", 0.0) or 0.0),
+            )
+            max_discharge_w = max(
+                0.0,
+                float(getattr(self._config, "max_discharge_w", 0.0) or 0.0),
+            )
+            bridge_power_w = min(
+                bridge_power_w,
+                max(0.0, max_discharge_w - home_discharge_w),
+            )
+            if bridge_power_w <= 0:
+                continue
+            battery_discharge_w = home_discharge_w + bridge_power_w
             reserve_floor = self._bridge_export_reserve_floor(
                 export_reserve_floor,
                 gap_start,
@@ -4280,7 +4296,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not self._can_bridge_export_gap_above_reserve(
                 previous_action,
                 actions[gap_start:gap_end],
-                bridge_power_w,
+                battery_discharge_w,
                 reserve_floor,
             ):
                 continue
@@ -4289,11 +4305,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 gap_action.action = export_action
                 gap_action.power_w = bridge_power_w
                 gap_action.battery_charge_w = 0.0
-                gap_action.battery_discharge_w = max(
-                    getattr(gap_action, "battery_discharge_w", 0.0) or 0.0,
-                    bridge_power_w,
+                gap_action.battery_discharge_w = battery_discharge_w
+                bridged_soc = self._bridged_gap_soc(
+                    previous_action,
+                    battery_discharge_w,
                 )
-                bridged_soc = self._bridged_gap_soc(previous_action, bridge_power_w)
                 if bridged_soc is not None:
                     gap_action.soc = bridged_soc
                 bridged += 1
@@ -4309,7 +4325,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self,
         previous_action: Any,
         gap_actions: list[Any],
-        bridge_power_w: float,
+        battery_discharge_w: float,
         reserve_floor: float | None = None,
     ) -> bool:
         """Return False when bridging would export below the configured floor."""
@@ -4333,7 +4349,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return False
         if any(soc <= reserve_floor + 1e-6 for soc in gap_socs):
             return False
-        bridged_soc = self._bridged_gap_soc(previous_action, bridge_power_w)
+        bridged_soc = self._bridged_gap_soc(previous_action, battery_discharge_w)
         if bridged_soc is None:
             return True
         return bridged_soc >= reserve_floor - 1e-6
@@ -4363,7 +4379,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _bridged_gap_soc(
         self,
         previous_action: Any,
-        bridge_power_w: float,
+        battery_discharge_w: float,
     ) -> float | None:
         """Estimate SOC after one bridged export slot."""
         previous_soc = self._reserve_ratio(getattr(previous_action, "soc", None), None)
@@ -4379,9 +4395,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         efficiency = float(
             getattr(getattr(self, "_optimizer", None), "efficiency", 0.92) or 0.92
         )
-        removed_wh = max(0.0, float(bridge_power_w or 0.0)) * interval_hours / max(
-            efficiency,
-            0.001,
+        removed_wh = (
+            max(0.0, float(battery_discharge_w or 0.0))
+            * interval_hours
+            / max(efficiency, 0.001)
         )
         return max(0.0, min(1.0, round(previous_soc - removed_wh / capacity_wh, 4)))
 
@@ -6463,10 +6480,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return None
             return self._reserve_ratio(getattr(new_actions[pos], "soc", None), None)
 
-        def _advance_export_soc(soc: float, export_w: float) -> float:
+        def _battery_home_discharge_w(action: ScheduleAction) -> float:
+            discharge_w = max(
+                0.0,
+                float(getattr(action, "battery_discharge_w", 0.0) or 0.0),
+            )
+            if getattr(action, "action", None) in SELF_USE_ACTIONS:
+                return discharge_w
+            if getattr(action, "action", None) in EXPORT_ACTIONS:
+                export_w = max(
+                    0.0,
+                    min(
+                        float(getattr(action, "power_w", 0.0) or 0.0),
+                        discharge_w,
+                    ),
+                )
+                return max(0.0, discharge_w - export_w)
+            return 0.0
+
+        def _advance_discharge_soc(soc: float, battery_discharge_w: float) -> float:
             if capacity_wh <= 0:
                 return soc
-            removed_wh = max(0.0, export_w) * interval_hours / max(efficiency, 0.001)
+            removed_wh = (
+                max(0.0, battery_discharge_w)
+                * interval_hours
+                / max(efficiency, 0.001)
+            )
             return max(0.0, min(1.0, soc - removed_wh / capacity_wh))
 
         def _available_export_w(soc: float, floor: float) -> float:
@@ -6534,21 +6573,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     fallback_soc = _action_soc(start - 1)
                     if fallback_soc is None:
                         fallback_soc = floor
+                    fallback_cursor = fallback_soc
                     for pos in range(start, end):
                         original = actions[pos]
                         if getattr(original, "action", None) in ("export", "discharge"):
+                            home_discharge_w = _battery_home_discharge_w(original)
+                            soc_after = (
+                                _advance_discharge_soc(fallback_cursor, home_discharge_w)
+                                if fallback_cursor is not None
+                                else original.soc
+                            )
                             new_actions[pos] = ScheduleAction(
                                 timestamp=original.timestamp,
                                 action="self_consumption",
-                                power_w=0.0,
+                                power_w=home_discharge_w,
                                 soc=(
-                                    round(fallback_soc, 4)
-                                    if fallback_soc is not None
+                                    round(soc_after, 4)
+                                    if fallback_cursor is not None
                                     else original.soc
                                 ),
                                 battery_charge_w=0.0,
-                                battery_discharge_w=0.0,
+                                battery_discharge_w=home_discharge_w,
                             )
+                            if fallback_cursor is not None:
+                                fallback_cursor = soc_after
                     continue
 
             export_cap_w = (
@@ -6556,30 +6604,68 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if self._config.max_grid_export_w is not None
                 else self._config.max_discharge_w
             )
-            target_w = min(
-                float(max(0, export_cap_w)),
-                export_wh / (len(spread_positions) * interval_hours),
-            )
-            target_w = round(max(0.0, target_w), 1)
-            if target_w <= 0:
+            export_cap_w = float(max(0, export_cap_w))
+            remaining_export_w = export_wh / interval_hours
+            unassigned_positions = list(spread_positions)
+            target_by_position: dict[int, float] = {}
+            while unassigned_positions and remaining_export_w > 0:
+                equal_target_w = remaining_export_w / len(unassigned_positions)
+                constrained_positions = []
+                for pos in unassigned_positions:
+                    home_discharge_w = _battery_home_discharge_w(actions[pos])
+                    headroom_w = min(
+                        export_cap_w,
+                        max(
+                            0.0,
+                            float(self._config.max_discharge_w or 0)
+                            - home_discharge_w,
+                        ),
+                    )
+                    if headroom_w + 0.05 < equal_target_w:
+                        target_by_position[pos] = headroom_w
+                        remaining_export_w -= headroom_w
+                        constrained_positions.append(pos)
+                if not constrained_positions:
+                    for pos in unassigned_positions:
+                        target_by_position[pos] = equal_target_w
+                    remaining_export_w = 0.0
+                    break
+                unassigned_positions = [
+                    pos for pos in unassigned_positions if pos not in constrained_positions
+                ]
+
+            target_by_position = {
+                pos: round(max(0.0, target_by_position.get(pos, 0.0)), 1)
+                for pos in spread_positions
+            }
+            if not any(target_by_position.values()):
                 fallback_soc = _action_soc(start - 1)
                 if fallback_soc is None:
                     fallback_soc = _action_soc(start)
+                fallback_cursor = fallback_soc
                 for pos in spread_positions:
                     original = actions[pos]
                     if getattr(original, "action", None) in ("export", "discharge"):
+                        home_discharge_w = _battery_home_discharge_w(original)
+                        soc_after = (
+                            _advance_discharge_soc(fallback_cursor, home_discharge_w)
+                            if fallback_cursor is not None
+                            else original.soc
+                        )
                         new_actions[pos] = ScheduleAction(
                             timestamp=original.timestamp,
                             action="self_consumption",
-                            power_w=0.0,
+                            power_w=home_discharge_w,
                             soc=(
-                                round(fallback_soc, 4)
-                                if fallback_soc is not None
+                                round(soc_after, 4)
+                                if fallback_cursor is not None
                                 else original.soc
                             ),
                             battery_charge_w=0.0,
-                            battery_discharge_w=0.0,
+                            battery_discharge_w=home_discharge_w,
                         )
+                        if fallback_cursor is not None:
+                            fallback_cursor = soc_after
                 continue
 
             soc_cursor = _action_soc(start - 1)
@@ -6587,16 +6673,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 soc_cursor = _action_soc(start)
             for pos in spread_positions:
                 original = actions[pos]
-                slot_target_w = target_w
+                home_discharge_w = _battery_home_discharge_w(original)
+                slot_target_w = target_by_position[pos]
+                slot_target_w = min(
+                    slot_target_w,
+                    max(
+                        0.0,
+                        float(self._config.max_discharge_w or 0) - home_discharge_w,
+                    ),
+                )
                 if floor is not None and soc_cursor is not None:
                     slot_target_w = min(
                         slot_target_w,
-                        _available_export_w(soc_cursor, floor),
+                        max(
+                            0.0,
+                            _available_export_w(soc_cursor, floor) - home_discharge_w,
+                        ),
                     )
                     slot_target_w = round(max(0.0, slot_target_w), 1)
                 if slot_target_w > 0:
+                    battery_discharge_w = home_discharge_w + slot_target_w
                     soc_after = (
-                        _advance_export_soc(soc_cursor, slot_target_w)
+                        _advance_discharge_soc(soc_cursor, battery_discharge_w)
                         if soc_cursor is not None
                         else original.soc
                     )
@@ -6606,40 +6704,56 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         power_w=slot_target_w,
                         soc=round(soc_after, 4) if soc_cursor is not None else original.soc,
                         battery_charge_w=0.0,
-                        battery_discharge_w=slot_target_w,
+                        battery_discharge_w=battery_discharge_w,
                     )
                     if soc_cursor is not None:
                         soc_cursor = soc_after
                 else:
+                    battery_discharge_w = home_discharge_w
+                    soc_after = (
+                        _advance_discharge_soc(soc_cursor, battery_discharge_w)
+                        if soc_cursor is not None
+                        else original.soc
+                    )
                     new_actions[pos] = ScheduleAction(
                         timestamp=original.timestamp,
                         action="self_consumption",
-                        power_w=0.0,
+                        power_w=battery_discharge_w,
                         soc=(
-                            round(soc_cursor, 4)
+                            round(soc_after, 4)
                             if soc_cursor is not None
                             else original.soc
                         ),
                         battery_charge_w=0.0,
-                        battery_discharge_w=0.0,
+                        battery_discharge_w=battery_discharge_w,
                     )
+                    if soc_cursor is not None:
+                        soc_cursor = soc_after
             for pos in range(start, end):
                 if pos in spread_positions:
                     continue
                 original = actions[pos]
                 if getattr(original, "action", None) in ("export", "discharge"):
+                    home_discharge_w = _battery_home_discharge_w(original)
+                    soc_after = (
+                        _advance_discharge_soc(soc_cursor, home_discharge_w)
+                        if soc_cursor is not None
+                        else original.soc
+                    )
                     new_actions[pos] = ScheduleAction(
                         timestamp=original.timestamp,
                         action="self_consumption",
-                        power_w=0.0,
+                        power_w=home_discharge_w,
                         soc=(
-                            round(soc_cursor, 4)
+                            round(soc_after, 4)
                             if soc_cursor is not None
                             else original.soc
                         ),
                         battery_charge_w=0.0,
-                        battery_discharge_w=0.0,
+                        battery_discharge_w=home_discharge_w,
                     )
+                    if soc_cursor is not None:
+                        soc_cursor = soc_after
 
         return OptimizationSchedule(
             actions=new_actions,
