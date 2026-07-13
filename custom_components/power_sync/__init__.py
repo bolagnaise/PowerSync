@@ -11797,6 +11797,7 @@ class EVVehiclesView(HomeAssistantView):
             is_online = False
             battery_range = None
             time_to_full = None
+            provider_battery_capacity_kwh = None
 
             for entity in entity_registry.entities.values():
                 if entity.device_id != device.id:
@@ -11807,6 +11808,23 @@ class EVVehiclesView(HomeAssistantView):
                     continue
 
                 eid = entity.entity_id.lower()
+
+                # Provider capacity is accepted only from an explicit capacity
+                # entity; range and time-to-full remain telemetry only.
+                if eid.startswith("sensor.") and (
+                    "battery_capacity" in eid or "usable_capacity" in eid
+                ):
+                    try:
+                        capacity_value = float(state.state)
+                        unit = str(
+                            state.attributes.get("unit_of_measurement", "kWh")
+                        ).lower()
+                        if unit == "wh":
+                            capacity_value /= 1000
+                        if 1 <= capacity_value <= 250:
+                            provider_battery_capacity_kwh = capacity_value
+                    except (ValueError, TypeError):
+                        pass
 
                 # Battery level: sensor.*_battery_level
                 if eid.startswith("sensor.") and "battery_level" in eid:
@@ -11865,6 +11883,7 @@ class EVVehiclesView(HomeAssistantView):
                 "is_plugged_in": is_plugged_in,
                 "charger_power": None,
                 "time_to_full_charge": time_to_full,
+                "provider_battery_capacity_kwh": provider_battery_capacity_kwh,
                 "is_online": is_online,
                 "data_updated_at": dt_util.now().isoformat(),
                 "source": "byd_cloud",
@@ -11934,6 +11953,7 @@ class EVVehiclesView(HomeAssistantView):
                     charge_limit = None
                     is_plugged_in = False
                     charger_power = None
+                    provider_battery_capacity_kwh = None
                     latest_entity_update = None
 
                     device_entities = []
@@ -11953,6 +11973,24 @@ class EVVehiclesView(HomeAssistantView):
                             continue
 
                         entity_id_lower = entity.entity_id.lower()
+
+                        if entity.entity_id.startswith("sensor.") and (
+                            "battery_capacity" in entity_id_lower
+                            or "usable_capacity" in entity_id_lower
+                        ) and state.state not in ("unknown", "unavailable"):
+                            try:
+                                capacity_value = float(state.state)
+                                unit = str(
+                                    state.attributes.get(
+                                        "unit_of_measurement", "kWh"
+                                    )
+                                ).lower()
+                                if unit == "wh":
+                                    capacity_value /= 1000
+                                if 1 <= capacity_value <= 250:
+                                    provider_battery_capacity_kwh = capacity_value
+                            except (ValueError, TypeError):
+                                pass
 
                         if ("battery" in entity_id_lower and
                             "sensor." in entity_id_lower and
@@ -12024,6 +12062,7 @@ class EVVehiclesView(HomeAssistantView):
                         "charge_limit_soc": charge_limit,
                         "is_plugged_in": is_plugged_in,
                         "charger_power": charger_power,
+                        "provider_battery_capacity_kwh": provider_battery_capacity_kwh,
                         "is_online": True,
                         "data_updated_at": fleet_updated_at,
                         "source": "fleet_api",
@@ -12168,6 +12207,54 @@ class EVVehiclesView(HomeAssistantView):
                     "message": message
                 })
 
+            # Attach one shared capacity contract to every provider vehicle.
+            from .automations.ev_vehicle_capacity import (
+                resolve_ev_battery_capacity,
+                vehicle_ids_match,
+            )
+            from .const import CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH
+
+            vehicle_configs = []
+            for entry_data in self._hass.data.get(DOMAIN, {}).values():
+                if isinstance(entry_data, dict) and entry_data.get("automation_store"):
+                    stored = getattr(entry_data["automation_store"], "_data", {}) or {}
+                    vehicle_configs = stored.get("vehicle_charging_configs", [])
+                    break
+            fallback_capacity = config.get(CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH)
+            for vehicle in vehicles:
+                stable_id = vehicle.get("vehicle_id") or vehicle.get("vin")
+                stored_config = next(
+                    (
+                        item for item in vehicle_configs
+                        if vehicle_ids_match(item.get("vehicle_id"), stable_id)
+                    ),
+                    {},
+                )
+                provider_capacity = vehicle.get("provider_battery_capacity_kwh")
+                if provider_capacity is None:
+                    provider_capacity = vehicle.get("battery_capacity_kwh")
+                anonymous = vehicle.get("brand") == "generic" or str(
+                    stable_id or ""
+                ).lower().startswith("ocpp_")
+                capacity = resolve_ev_battery_capacity(
+                    manual_capacity_kwh=(
+                        None if anonymous else stored_config.get("battery_capacity_kwh")
+                    ),
+                    charger_fallback_capacity_kwh=(
+                        stored_config.get("charger_fallback_battery_capacity_kwh")
+                        or (
+                            stored_config.get("battery_capacity_kwh")
+                            if anonymous else None
+                        )
+                        or fallback_capacity
+                    ),
+                    provider_capacity_kwh=provider_capacity,
+                    model=vehicle.get("model"),
+                    trim=vehicle.get("trim"),
+                    anonymous_loadpoint=anonymous,
+                )
+                vehicle.update(capacity.to_dict())
+
             return web.json_response({
                 "success": True,
                 "vehicles": vehicles,
@@ -12223,28 +12310,57 @@ class EVVehiclesSyncView(HomeAssistantView):
                 if store:
                     stored_data = getattr(store, '_data', {}) or {}
                     vehicle_configs = stored_data.get("vehicle_charging_configs", [])
-                    existing_ids = {c.get("vehicle_id") for c in vehicle_configs}
+                    from .automations.ev_vehicle_capacity import vehicle_ids_match
 
                     configs_added = 0
+                    configs_updated = 0
                     for i, vehicle in enumerate(vehicles):
                         vehicle_id = vehicle.get("vehicle_id") or vehicle.get("vin")
-                        if vehicle_id and vehicle_id not in existing_ids:
+                        existing = next(
+                            (
+                                config for config in vehicle_configs
+                                if vehicle_ids_match(config.get("vehicle_id"), vehicle_id)
+                            ),
+                            None,
+                        )
+                        if vehicle_id and existing is None:
                             # Create default config for new vehicle
                             new_config = {
                                 "vehicle_id": vehicle_id,
                                 "display_name": vehicle.get("display_name", f"Vehicle {i + 1}"),
                                 "priority": i + 1,  # First vehicle = 1 (primary), second = 2, etc.
                                 "solar_charging_enabled": True,
+                                "vehicle_model": vehicle.get("model"),
+                                "vehicle_trim": vehicle.get("trim"),
+                                "provider_battery_capacity_kwh": vehicle.get(
+                                    "provider_battery_capacity_kwh"
+                                ),
                             }
                             vehicle_configs.append(new_config)
                             configs_added += 1
                             _LOGGER.info(f"Auto-created vehicle config for {vehicle_id}")
+                        elif existing is not None:
+                            before = dict(existing)
+                            if vehicle.get("model"):
+                                existing["vehicle_model"] = vehicle["model"]
+                            if vehicle.get("trim"):
+                                existing["vehicle_trim"] = vehicle["trim"]
+                            if vehicle.get("provider_battery_capacity_kwh") is not None:
+                                existing["provider_battery_capacity_kwh"] = vehicle[
+                                    "provider_battery_capacity_kwh"
+                                ]
+                            if existing != before:
+                                configs_updated += 1
 
-                    if configs_added > 0:
+                    if configs_added > 0 or configs_updated > 0:
                         stored_data["vehicle_charging_configs"] = vehicle_configs
                         store._data = stored_data
                         await store.async_save()
-                        _LOGGER.info(f"Saved {configs_added} new vehicle config(s)")
+                        _LOGGER.info(
+                            "Saved EV config sync: %d added, %d updated",
+                            configs_added,
+                            configs_updated,
+                        )
 
             # Return response with sync count
             response_data["synced"] = len(vehicles)
@@ -13480,6 +13596,44 @@ class VehicleChargingConfigView(HomeAssistantView):
                 return entry_data["automation_store"]
         return None
 
+    def _generic_capacity_fallback(self) -> float | None:
+        """Return the optional shared capacity for anonymous charger profiles."""
+        from .const import CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH
+
+        entries = self._hass.config_entries.async_entries(DOMAIN)
+        if not entries:
+            return None
+        options = {**entries[0].data, **entries[0].options}
+        return options.get(CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH)
+
+    def _capacity_contract(self, config: dict) -> dict:
+        """Resolve public capacity metadata for one stored vehicle profile."""
+        from .automations.ev_vehicle_capacity import resolve_ev_battery_capacity
+
+        vehicle_id = str(config.get("vehicle_id") or "")
+        charger_type = str(config.get("charger_type") or "").lower()
+        anonymous = (
+            charger_type in ("generic", "ocpp")
+            or vehicle_id.lower().startswith(("generic_", "ocpp_"))
+        ) and not (
+            vehicle_id.lower().startswith(("ble_", "byd_"))
+            or (len(vehicle_id) == 17 and vehicle_id.isalnum())
+        )
+        fallback = config.get(
+            "charger_fallback_battery_capacity_kwh",
+            config.get("battery_capacity_kwh") if anonymous else None,
+        )
+        if fallback is None:
+            fallback = self._generic_capacity_fallback()
+        return resolve_ev_battery_capacity(
+            manual_capacity_kwh=None if anonymous else config.get("battery_capacity_kwh"),
+            charger_fallback_capacity_kwh=fallback,
+            provider_capacity_kwh=config.get("provider_battery_capacity_kwh"),
+            model=config.get("vehicle_model", config.get("model")),
+            trim=config.get("vehicle_trim", config.get("trim")),
+            anonymous_loadpoint=anonymous,
+        ).to_dict()
+
     def _dynamic_state_matches_config(self, state: dict, config: dict | None) -> bool:
         """Return true when runtime dynamic state belongs to a removed config."""
         if not config:
@@ -13579,10 +13733,14 @@ class VehicleChargingConfigView(HomeAssistantView):
             # Get stored vehicle configs (use _data directly, it's already loaded)
             data = getattr(store, '_data', {}) or {}
             vehicle_configs = data.get("vehicle_charging_configs", [])
+            resolved_configs = [
+                {**config, **self._capacity_contract(config)}
+                for config in vehicle_configs
+            ]
 
             return web.json_response({
                 "success": True,
-                "configs": vehicle_configs
+                "configs": resolved_configs
             })
 
         except Exception as e:
@@ -13615,12 +13773,63 @@ class VehicleChargingConfigView(HomeAssistantView):
             stored_data = getattr(store, '_data', {}) or {}
             vehicle_configs = stored_data.get("vehicle_charging_configs", [])
 
+            from .automations.ev_vehicle_capacity import (
+                validate_ev_battery_capacity,
+                vehicle_ids_match,
+            )
+            existing_config = next(
+                (
+                    config for config in vehicle_configs
+                    if vehicle_ids_match(config.get("vehicle_id"), vehicle_id)
+                ),
+                {},
+            )
+            charger_type = str(
+                data.get("charger_type")
+                or existing_config.get("charger_type")
+                or ""
+            ).lower()
+            stable_id = str(vehicle_id).lower()
+            anonymous = (
+                charger_type in ("generic", "ocpp")
+                or stable_id.startswith(("generic_", "ocpp_"))
+            ) and not (
+                stable_id.startswith(("ble_", "byd_"))
+                or (len(stable_id) == 17 and stable_id.isalnum())
+            )
+            capacity_changed = "battery_capacity_kwh" in data
+            if "battery_capacity_kwh" in data:
+                try:
+                    capacity = validate_ev_battery_capacity(
+                        data["battery_capacity_kwh"]
+                    )
+                except ValueError as err:
+                    return web.json_response({
+                        "success": False,
+                        "error": str(err),
+                    }, status=400)
+                if anonymous:
+                    data["charger_fallback_battery_capacity_kwh"] = capacity
+                    data.pop("battery_capacity_kwh", None)
+                    if capacity is None:
+                        existing_config.pop(
+                            "charger_fallback_battery_capacity_kwh", None
+                        )
+                        existing_config.pop("battery_capacity_kwh", None)
+                else:
+                    data["battery_capacity_kwh"] = capacity
+
             # Find and update or add config
             config_found = False
+
             for i, config in enumerate(vehicle_configs):
-                if config.get("vehicle_id") == vehicle_id:
+                if vehicle_ids_match(config.get("vehicle_id"), vehicle_id):
                     # Update existing config
-                    vehicle_configs[i] = {**config, **data}
+                    vehicle_configs[i] = {
+                        **config,
+                        **data,
+                        "vehicle_id": config.get("vehicle_id") or vehicle_id,
+                    }
                     config_found = True
                     break
 
@@ -13629,7 +13838,12 @@ class VehicleChargingConfigView(HomeAssistantView):
                 new_config = {
                     "vehicle_id": vehicle_id,
                     "display_name": data.get("display_name", f"Vehicle {vehicle_id}"),
-                    "charger_type": data.get("charger_type", "tesla"),
+                    "charger_type": data.get(
+                        "charger_type",
+                        "generic" if stable_id.startswith("generic_") else (
+                            "ocpp" if stable_id.startswith("ocpp_") else "tesla"
+                        ),
+                    ),
                     "charger_switch_entity": data.get("charger_switch_entity"),
                     "charger_amps_entity": data.get("charger_amps_entity"),
                     "charger_status_entity": data.get("charger_status_entity"),
@@ -13655,6 +13869,13 @@ class VehicleChargingConfigView(HomeAssistantView):
                     "priority": data.get("priority", 1),
                     "home_battery_minimum": data.get("home_battery_minimum", 80),
                     "pause_if_battery_below": data.get("pause_if_battery_below", 70),
+                    "battery_capacity_kwh": data.get("battery_capacity_kwh"),
+                    "charger_fallback_battery_capacity_kwh": data.get(
+                        "charger_fallback_battery_capacity_kwh"
+                    ),
+                    "provider_battery_capacity_kwh": data.get("provider_battery_capacity_kwh"),
+                    "vehicle_model": data.get("vehicle_model", data.get("model")),
+                    "vehicle_trim": data.get("vehicle_trim", data.get("trim")),
                 }
                 vehicle_configs.append(new_config)
 
@@ -13672,7 +13893,7 @@ class VehicleChargingConfigView(HomeAssistantView):
                 executor = get_auto_schedule_executor()
                 if executor:
                     saved_config = next(
-                        (c for c in vehicle_configs if c.get("vehicle_id") == vehicle_id),
+                        (c for c in vehicle_configs if vehicle_ids_match(c.get("vehicle_id"), vehicle_id)),
                         None,
                     )
                     synced_vehicle_ids = [
@@ -13719,6 +13940,9 @@ class VehicleChargingConfigView(HomeAssistantView):
                             state = executor.get_state(synced_vehicle_id)
                             state.current_plan = None
                             state.last_plan_update = None
+                            await executor._regenerate_plan(
+                                synced_vehicle_id, settings, state
+                            )
                             _LOGGER.debug(
                                 "Synced charger params to auto-schedule for %s: "
                                 "max=%dA, voltage=%dV, phases=%d",
@@ -13765,6 +13989,7 @@ class VehicleChargingConfigView(HomeAssistantView):
                         state = executor.get_state(vehicle_id)
                         state.current_plan = None
                         state.last_plan_update = None
+                        await executor._regenerate_plan(vehicle_id, settings, state)
                         _LOGGER.debug(
                             "Synced charger params to auto-schedule for %s: "
                             "max=%dA, voltage=%dV, phases=%d",
@@ -13776,9 +14001,25 @@ class VehicleChargingConfigView(HomeAssistantView):
             except Exception:
                 pass  # Non-critical — params will sync on next evaluation cycle
 
+            if capacity_changed:
+                for entry_data in self._hass.data.get(DOMAIN, {}).values():
+                    if not isinstance(entry_data, dict):
+                        continue
+                    coordinator = entry_data.get("optimization_coordinator")
+                    schedule_refresh = getattr(
+                        coordinator, "_schedule_settings_reoptimization", None
+                    )
+                    if schedule_refresh:
+                        schedule_refresh()
+
+            saved = next(
+                c for c in vehicle_configs
+                if vehicle_ids_match(c.get("vehicle_id"), vehicle_id)
+            )
+
             return web.json_response({
                 "success": True,
-                "config": vehicle_configs[-1] if not config_found else next(c for c in vehicle_configs if c.get("vehicle_id") == vehicle_id)
+                "config": {**saved, **self._capacity_contract(saved)},
             })
 
         except Exception as e:
@@ -14307,19 +14548,56 @@ class ChargingScheduleView(HomeAssistantView):
 
             # Look up per-vehicle charger params from vehicle_charging_configs
             charger_power_kw = 7.0  # default
-            battery_capacity_kwh = 60.0  # default
+            matched_config = None
             store = self._get_store()
             if store:
                 stored_data = getattr(store, '_data', {}) or {}
+                from .automations.ev_vehicle_capacity import vehicle_ids_match
                 for vc in stored_data.get("vehicle_charging_configs", []):
-                    if vc.get("vehicle_id") == vehicle_id or vehicle_id == "_default":
+                    if vehicle_ids_match(vc.get("vehicle_id"), vehicle_id) or vehicle_id == "_default":
+                        matched_config = vc
                         max_amps = vc.get("max_amps", vc.get("max_charge_amps", 32))
                         voltage = vc.get("voltage", 230)
                         phases = vc.get("phases", 1)
                         charger_power_kw = (max_amps * voltage * phases) / 1000
-                        if "battery_capacity_kwh" in vc:
-                            battery_capacity_kwh = vc["battery_capacity_kwh"]
                         break
+
+            from .automations.ev_vehicle_capacity import resolve_ev_battery_capacity
+            from .const import CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH
+
+            config_options = {}
+            entries = self._hass.config_entries.async_entries(DOMAIN)
+            if entries:
+                config_options = {**entries[0].data, **entries[0].options}
+            matched_config = matched_config or {}
+            stable_id = str(vehicle_id or "").lower()
+            anonymous = (
+                vehicle_id == "_default"
+                or stable_id.startswith(("generic_", "ocpp_"))
+                or matched_config.get("charger_type") in ("generic", "ocpp")
+            ) and not (
+                stable_id.startswith(("ble_", "byd_"))
+                or (len(stable_id) == 17 and stable_id.isalnum())
+            )
+            resolved_capacity = resolve_ev_battery_capacity(
+                manual_capacity_kwh=(
+                    None if anonymous else matched_config.get("battery_capacity_kwh")
+                ),
+                charger_fallback_capacity_kwh=(
+                    matched_config.get("charger_fallback_battery_capacity_kwh")
+                    or (
+                        matched_config.get("battery_capacity_kwh")
+                        if anonymous else None
+                    )
+                    or config_options.get(CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH)
+                ),
+                provider_capacity_kwh=matched_config.get(
+                    "provider_battery_capacity_kwh"
+                ),
+                model=matched_config.get("vehicle_model", matched_config.get("model")),
+                trim=matched_config.get("vehicle_trim", matched_config.get("trim")),
+                anonymous_loadpoint=anonymous,
+            )
 
             # Generate plan
             plan = await planner.plan_charging(
@@ -14329,7 +14607,7 @@ class ChargingScheduleView(HomeAssistantView):
                 target_time=target_time,
                 priority=priority,
                 charger_power_kw=charger_power_kw,
-                battery_capacity_kwh=battery_capacity_kwh,
+                resolved_capacity=resolved_capacity,
             )
 
             return web.json_response({
@@ -15004,6 +15282,10 @@ class EVWidgetDataView(HomeAssistantView):
                 _dynamic_ev_state,
                 _calculate_solar_surplus,
             )
+            from .automations.ev_charging_planner import (
+                _vehicle_config_matches,
+                get_auto_schedule_executor,
+            )
             from .solar_surplus_config import get_stored_solar_surplus_config
 
             entry_id = self._config_entry.entry_id
@@ -15074,6 +15356,7 @@ class EVWidgetDataView(HomeAssistantView):
 
             # Get dynamic EV state
             vehicles = _dynamic_ev_state.get(entry_id, {})
+            auto_executor = get_auto_schedule_executor()
 
             widget_data = []
             for vehicle_id, state in vehicles.items():
@@ -15170,10 +15453,40 @@ class EVWidgetDataView(HomeAssistantView):
                         pass
 
                 # Estimate ETA (rough calculation)
+                effective_capacity_kwh = params.get(
+                    "effective_battery_capacity_kwh",
+                    params.get("battery_capacity_kwh", 60),
+                )
+                capacity_source = params.get(
+                    "battery_capacity_source", "default_estimate"
+                )
+                manual_capacity_kwh = params.get("battery_capacity_kwh")
+                if auto_executor:
+                    matched_settings_id = next(
+                        (
+                            settings_id for settings_id in auto_executor._settings
+                            if _vehicle_config_matches(settings_id, vehicle_id)
+                        ),
+                        None,
+                    )
+                    if matched_settings_id is not None:
+                        resolved_capacity = auto_executor.resolve_vehicle_capacity(
+                            matched_settings_id,
+                            auto_executor._settings[matched_settings_id],
+                        )
+                        effective_capacity_kwh = (
+                            resolved_capacity.effective_battery_capacity_kwh
+                        )
+                        capacity_source = resolved_capacity.battery_capacity_source
+                        manual_capacity_kwh = resolved_capacity.battery_capacity_kwh
                 eta_minutes = None
                 if current_power_kw > 0 and target_soc > current_soc:
-                    battery_capacity_kwh = params.get("battery_capacity_kwh", 60)
-                    energy_needed_kwh = (target_soc - current_soc) / 100 * battery_capacity_kwh
+                    energy_needed_kwh = (
+                        (target_soc - current_soc)
+                        / 100
+                        * effective_capacity_kwh
+                        / 0.9
+                    )
                     eta_minutes = int(energy_needed_kwh / current_power_kw * 60)
 
                 # Determine connected status. For Tesla, only use the matched
@@ -15223,6 +15536,9 @@ class EVWidgetDataView(HomeAssistantView):
                     "current_power_kw": round(current_power_kw, 2),
                     "source": source,
                     "eta_minutes": eta_minutes,
+                    "battery_capacity_kwh": manual_capacity_kwh,
+                    "effective_battery_capacity_kwh": effective_capacity_kwh,
+                    "battery_capacity_source": capacity_source,
                     "surplus_kw": round(surplus_kw, 2),
                 })
 
@@ -15865,6 +16181,58 @@ class EVLoadpointStatusView(HomeAssistantView):
                 get_ev_last_commands(self._hass, self._config_entry),
             )
 
+            from .automations.ev_vehicle_capacity import (
+                resolve_ev_battery_capacity,
+                vehicle_ids_match,
+            )
+            from .const import CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH
+
+            automation_store = entry_data.get("automation_store")
+            stored_data = getattr(automation_store, "_data", {}) or {}
+            vehicle_configs = stored_data.get("vehicle_charging_configs", [])
+            for loadpoint in loadpoints:
+                loadpoint_id = loadpoint.get("loadpoint_id")
+                vehicle_config = next(
+                    (
+                        item for item in vehicle_configs
+                        if vehicle_ids_match(item.get("vehicle_id"), loadpoint_id)
+                    ),
+                    {},
+                )
+                charger_type = str(
+                    loadpoint.get("charger_type")
+                    or vehicle_config.get("charger_type")
+                    or ""
+                ).lower()
+                stable_id = str(loadpoint_id or "").lower()
+                anonymous = (
+                    charger_type in ("generic", "ocpp")
+                    or stable_id.startswith(("generic_", "ocpp_"))
+                ) and not (
+                    stable_id.startswith(("ble_", "byd_"))
+                    or (len(stable_id) == 17 and stable_id.isalnum())
+                )
+                capacity = resolve_ev_battery_capacity(
+                    manual_capacity_kwh=(
+                        None if anonymous else vehicle_config.get("battery_capacity_kwh")
+                    ),
+                    charger_fallback_capacity_kwh=(
+                        vehicle_config.get("charger_fallback_battery_capacity_kwh")
+                        or (
+                            vehicle_config.get("battery_capacity_kwh")
+                            if anonymous else None
+                        )
+                        or opts.get(CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH)
+                    ),
+                    provider_capacity_kwh=vehicle_config.get(
+                        "provider_battery_capacity_kwh"
+                    ),
+                    model=vehicle_config.get("vehicle_model"),
+                    trim=vehicle_config.get("vehicle_trim"),
+                    anonymous_loadpoint=anonymous,
+                )
+                loadpoint.update(capacity.to_dict())
+
             coordinator = get_ev_charging_coordinator()
             price_level = get_price_level_executor()
             scheduled = get_scheduled_charging_executor()
@@ -16190,6 +16558,7 @@ class AutoScheduleSettingsView(HomeAssistantView):
 
             settings = {}
             for vehicle_id, vehicle_settings in executor._settings.items():
+                executor.resolve_vehicle_capacity(vehicle_id, vehicle_settings)
                 settings[vehicle_id] = vehicle_settings.to_dict()
 
             return web.json_response({
@@ -16284,6 +16653,7 @@ class AutoScheduleStatusView(HomeAssistantView):
             states = executor.get_all_states()
             settings = {}
             for vehicle_id, vehicle_settings in executor._settings.items():
+                executor.resolve_vehicle_capacity(vehicle_id, vehicle_settings)
                 # Derive legacy fields from departure_times for backward compat
                 legacy_departure_time = None
                 legacy_departure_days = []
@@ -16294,6 +16664,9 @@ class AutoScheduleStatusView(HomeAssistantView):
                     "enabled": vehicle_settings.enabled,
                     "priority": vehicle_settings.priority.value,
                     "target_soc": vehicle_settings.target_soc,
+                    "battery_capacity_kwh": vehicle_settings.battery_capacity_kwh,
+                    "effective_battery_capacity_kwh": vehicle_settings.effective_battery_capacity_kwh,
+                    "battery_capacity_source": vehicle_settings.battery_capacity_source,
                     "departure_time": legacy_departure_time,
                     "departure_days": legacy_departure_days,
                     "departure_times": {str(k): v for k, v in vehicle_settings.departure_times.items()},

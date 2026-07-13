@@ -16,7 +16,7 @@ except (FileNotFoundError, json.JSONDecodeError):
     POWER_SYNC_VERSION = "0.0.0"
 
 # Dashboard JS version — bump this to cache-bust the strategy JS independently of the app version
-DASHBOARD_JS_VERSION = "44"
+DASHBOARD_JS_VERSION = "45"
 
 # User-Agent for API identification
 POWER_SYNC_USER_AGENT = f"PowerSync/{POWER_SYNC_VERSION} HomeAssistant"
@@ -145,6 +145,7 @@ CONF_GENERIC_CHARGER_STATUS_ENTITY = "generic_charger_status_entity"
 CONF_GENERIC_CHARGER_POWER_ENTITY = "generic_charger_power_entity"
 CONF_GENERIC_CHARGER_SOC_ENTITY = "generic_charger_soc_entity"
 CONF_GENERIC_CHARGER_SOC_ENTITY_2 = "generic_charger_soc_entity_2"
+CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH = "generic_charger_battery_capacity_kwh"
 
 # Sigenergy EV Charger configuration
 CONF_SIGENERGY_CHARGER_ENABLED = "sigenergy_charger_enabled"

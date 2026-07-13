@@ -39,6 +39,14 @@ from ..solar_surplus_config import (
     get_solar_surplus_min_battery_soc,
     normalize_solar_surplus_config,
 )
+from .ev_vehicle_capacity import (
+    CAPACITY_SOURCE_CHARGER_FALLBACK,
+    CAPACITY_SOURCE_DEFAULT_ESTIMATE,
+    ResolvedEVBatteryCapacity,
+    resolve_ev_battery_capacity,
+    validate_ev_battery_capacity,
+    vehicle_ids_match,
+)
 
 
 class SensitiveDataFilter(logging.Filter):
@@ -383,6 +391,9 @@ class ChargingPlan:
     target_soc: int
     target_time: Optional[str]  # ISO format
     energy_needed_kwh: float
+    battery_capacity_kwh: Optional[float] = None
+    effective_battery_capacity_kwh: float = 60.0
+    battery_capacity_source: str = CAPACITY_SOURCE_DEFAULT_ESTIMATE
 
     # Planned windows
     windows: List[PlannedChargingWindow] = field(default_factory=list)
@@ -405,6 +416,11 @@ class ChargingPlan:
             "target_soc": self.target_soc,
             "target_time": self.target_time,
             "energy_needed_kwh": round(self.energy_needed_kwh, 2),
+            "battery_capacity_kwh": self.battery_capacity_kwh,
+            "effective_battery_capacity_kwh": round(
+                self.effective_battery_capacity_kwh, 2
+            ),
+            "battery_capacity_source": self.battery_capacity_source,
             "planned_windows": [
                 {
                     "start_time": w.start_time,
@@ -2044,15 +2060,6 @@ class ChargingPlanner:
     - Battery capacity and efficiency
     """
 
-    # Typical EV battery sizes (kWh)
-    BATTERY_SIZES = {
-        "tesla_model_3_sr": 57.5,
-        "tesla_model_3_lr": 82,
-        "tesla_model_y_sr": 57.5,
-        "tesla_model_y_lr": 82,
-        "default": 60,
-    }
-
     # Charging efficiency (AC to DC)
     CHARGING_EFFICIENCY = 0.9
 
@@ -2199,8 +2206,8 @@ class ChargingPlanner:
         current_soc: int,
         target_soc: int,
         target_time: Optional[datetime],
+        resolved_capacity: ResolvedEVBatteryCapacity,
         charger_power_kw: float = 7.0,
-        battery_capacity_kwh: float = 60.0,
         priority: ChargingPriority = ChargingPriority.SOLAR_PREFERRED,
     ) -> ChargingPlan:
         """
@@ -2211,13 +2218,17 @@ class ChargingPlanner:
             current_soc: Current state of charge (%)
             target_soc: Target state of charge (%)
             target_time: Optional deadline (must be charged by this time)
+            resolved_capacity: Explicit shared capacity-resolution result
             charger_power_kw: Maximum charger power
-            battery_capacity_kwh: Vehicle battery capacity
             priority: Charging priority strategy
 
         Returns:
             ChargingPlan with optimal windows
         """
+        if not isinstance(resolved_capacity, ResolvedEVBatteryCapacity):
+            raise TypeError("resolved_capacity must be a ResolvedEVBatteryCapacity")
+        battery_capacity_kwh = resolved_capacity.effective_battery_capacity_kwh
+
         # Calculate energy needed
         soc_delta = target_soc - current_soc
         if soc_delta <= 0:
@@ -2227,6 +2238,7 @@ class ChargingPlanner:
                 target_soc=target_soc,
                 target_time=target_time.isoformat() if target_time else None,
                 energy_needed_kwh=0,
+                **resolved_capacity.to_dict(),
                 can_meet_target=True,
             )
 
@@ -2292,6 +2304,11 @@ class ChargingPlanner:
                 battery_power_schedule=battery_power_schedule,
             )
 
+        plan.battery_capacity_kwh = resolved_capacity.battery_capacity_kwh
+        plan.effective_battery_capacity_kwh = (
+            resolved_capacity.effective_battery_capacity_kwh
+        )
+        plan.battery_capacity_source = resolved_capacity.battery_capacity_source
         return plan
 
     async def _plan_solar_only(
@@ -3053,6 +3070,16 @@ class AutoScheduleSettings:
     vehicle_id: str = "_default"
     display_name: str = "EV"
 
+    # Usable EV battery capacity. The manual value is authoritative when set;
+    # effective/source are refreshed by the shared resolver before planning.
+    battery_capacity_kwh: Optional[float] = None
+    effective_battery_capacity_kwh: float = 60.0
+    battery_capacity_source: str = CAPACITY_SOURCE_DEFAULT_ESTIMATE
+    charger_fallback_battery_capacity_kwh: Optional[float] = None
+    provider_battery_capacity_kwh: Optional[float] = None
+    vehicle_model: Optional[str] = None
+    vehicle_trim: Optional[str] = None
+
     # Target settings
     target_soc: int = 80
     departure_time: Optional[str] = None  # HH:MM format (legacy, kept for backward compat)
@@ -3171,6 +3198,13 @@ class AutoScheduleSettings:
             "pre_charge_wake_off_service": "pre_charge_wake_off_service",
             "pre_charge_wake_on_service_data": "pre_charge_wake_on_service_data",
             "pre_charge_wake_off_service_data": "pre_charge_wake_off_service_data",
+            "battery_capacity_kwh": "battery_capacity_kwh",
+            "charger_fallback_battery_capacity_kwh": "charger_fallback_battery_capacity_kwh",
+            "provider_battery_capacity_kwh": "provider_battery_capacity_kwh",
+            "vehicle_model": "vehicle_model",
+            "model": "vehicle_model",
+            "vehicle_trim": "vehicle_trim",
+            "trim": "vehicle_trim",
         }
         for source_key, attr_name in field_map.items():
             if source_key in config:
@@ -3189,6 +3223,13 @@ class AutoScheduleSettings:
             "enabled": self.enabled,
             "vehicle_id": self.vehicle_id,
             "display_name": self.display_name,
+            "battery_capacity_kwh": self.battery_capacity_kwh,
+            "effective_battery_capacity_kwh": self.effective_battery_capacity_kwh,
+            "battery_capacity_source": self.battery_capacity_source,
+            "charger_fallback_battery_capacity_kwh": self.charger_fallback_battery_capacity_kwh,
+            "provider_battery_capacity_kwh": self.provider_battery_capacity_kwh,
+            "vehicle_model": self.vehicle_model,
+            "vehicle_trim": self.vehicle_trim,
             "target_soc": self.target_soc,
             "departure_time": legacy_departure_time,
             "departure_days": legacy_departure_days,
@@ -3314,6 +3355,21 @@ class AutoScheduleSettings:
             enabled=data.get("enabled", False),
             vehicle_id=data.get("vehicle_id", "_default"),
             display_name=data.get("display_name", "EV"),
+            battery_capacity_kwh=data.get("battery_capacity_kwh"),
+            effective_battery_capacity_kwh=data.get(
+                "effective_battery_capacity_kwh", 60.0
+            ),
+            battery_capacity_source=data.get(
+                "battery_capacity_source", CAPACITY_SOURCE_DEFAULT_ESTIMATE
+            ),
+            charger_fallback_battery_capacity_kwh=data.get(
+                "charger_fallback_battery_capacity_kwh"
+            ),
+            provider_battery_capacity_kwh=data.get(
+                "provider_battery_capacity_kwh"
+            ),
+            vehicle_model=data.get("vehicle_model", data.get("model")),
+            vehicle_trim=data.get("vehicle_trim", data.get("trim")),
             target_soc=data.get("target_soc", 80),
             departure_time=data.get("departure_time"),
             departure_days=data.get("departure_days", [0, 1, 2, 3, 4]),
@@ -3392,23 +3448,16 @@ class AutoScheduleState:
                 "estimated_solar_kwh": self.current_plan.estimated_solar_kwh if self.current_plan else 0,
                 "estimated_grid_kwh": self.current_plan.estimated_grid_kwh if self.current_plan else 0,
                 "estimated_cost_cents": self.current_plan.estimated_cost_cents if self.current_plan else 0,
+                "battery_capacity_kwh": self.current_plan.battery_capacity_kwh if self.current_plan else None,
+                "effective_battery_capacity_kwh": self.current_plan.effective_battery_capacity_kwh if self.current_plan else 60.0,
+                "battery_capacity_source": self.current_plan.battery_capacity_source if self.current_plan else CAPACITY_SOURCE_DEFAULT_ESTIMATE,
             } if self.current_plan else None,
         }
 
 
 def _vehicle_config_matches(vehicle_id: str | None, config_vehicle_id: str | None) -> bool:
     """Return True when a stored charger config belongs to this runtime vehicle."""
-    if not vehicle_id or not config_vehicle_id:
-        return False
-    if str(vehicle_id) == str(config_vehicle_id):
-        return True
-    vehicle_norm = str(vehicle_id)
-    config_norm = str(config_vehicle_id)
-    if vehicle_norm.startswith("ble_") and vehicle_norm[4:] == config_norm:
-        return True
-    if config_norm.startswith("ble_") and config_norm[4:] == vehicle_norm:
-        return True
-    return False
+    return vehicle_ids_match(vehicle_id, config_vehicle_id)
 
 
 def _vehicle_config_value(
@@ -3719,6 +3768,7 @@ class AutoScheduleExecutor:
             # Sync them immediately so restored plans do not fall back to 32A.
             for vehicle_id, settings in self._settings.items():
                 self._sync_charger_params_from_vehicle_configs(vehicle_id, settings)
+                self.resolve_vehicle_capacity(vehicle_id, settings)
 
             # Load cached SoC values
             self._cached_soc = stored_data.get("cached_vehicle_soc", {})
@@ -3795,13 +3845,20 @@ class AutoScheduleExecutor:
         if vehicle_id not in self._settings:
             self._settings[vehicle_id] = AutoScheduleSettings(vehicle_id=vehicle_id)
             self._state[vehicle_id] = AutoScheduleState(vehicle_id=vehicle_id)
-        return self._settings[vehicle_id]
+        settings = self._settings[vehicle_id]
+        self.resolve_vehicle_capacity(vehicle_id, settings)
+        return settings
 
     def update_settings(self, vehicle_id: str, updates: dict) -> AutoScheduleSettings:
         """Update settings for a vehicle."""
         settings = self.get_settings(vehicle_id)
 
         for key, value in updates.items():
+            if key in (
+                "battery_capacity_kwh",
+                "charger_fallback_battery_capacity_kwh",
+            ):
+                value = validate_ev_battery_capacity(value)
             if key == "priority" and isinstance(value, str):
                 try:
                     value = ChargingPriority(value)
@@ -3849,6 +3906,7 @@ class AutoScheduleExecutor:
                         if consume_level > 0:
                             settings.departure_preserve_home_battery[day] = False
 
+        self.resolve_vehicle_capacity(vehicle_id, settings)
         return settings
 
     def get_state(self, vehicle_id: str) -> AutoScheduleState:
@@ -4350,6 +4408,72 @@ class AutoScheduleExecutor:
         except Exception:
             pass
 
+    @staticmethod
+    def _is_anonymous_loadpoint(
+        vehicle_id: str,
+        settings: AutoScheduleSettings,
+    ) -> bool:
+        """Return whether a generic/OCPP ID represents a shared charger only."""
+        if settings.charger_type not in ("generic", "ocpp"):
+            return False
+        stable_id = str(vehicle_id or "").strip().lower()
+        if stable_id.startswith("ble_"):
+            return False
+        if len(stable_id) == 17 and stable_id.isalnum():
+            return False
+        if stable_id.startswith(("byd_", "vehicle_", "provider_")):
+            return False
+        return True
+
+    def resolve_vehicle_capacity(
+        self,
+        vehicle_id: str,
+        settings: Optional[AutoScheduleSettings] = None,
+    ) -> ResolvedEVBatteryCapacity:
+        """Resolve and publish one vehicle's usable planning capacity."""
+        settings = settings or self.get_settings(vehicle_id)
+        self._sync_charger_params_from_vehicle_configs(vehicle_id, settings)
+
+        from ..const import CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH
+
+        config = {}
+        config_entry = getattr(self, "config_entry", None)
+        if config_entry:
+            config = {
+                **getattr(config_entry, "data", {}),
+                **getattr(config_entry, "options", {}),
+            }
+        anonymous_loadpoint = self._is_anonymous_loadpoint(vehicle_id, settings)
+        charger_fallback = settings.charger_fallback_battery_capacity_kwh
+        if charger_fallback is None:
+            charger_fallback = config.get(CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH)
+        resolved = resolve_ev_battery_capacity(
+            manual_capacity_kwh=(
+                None if anonymous_loadpoint else settings.battery_capacity_kwh
+            ),
+            charger_fallback_capacity_kwh=(
+                settings.battery_capacity_kwh
+                if anonymous_loadpoint and settings.battery_capacity_kwh is not None
+                else charger_fallback
+            ),
+            provider_capacity_kwh=settings.provider_battery_capacity_kwh,
+            model=settings.vehicle_model,
+            trim=settings.vehicle_trim,
+            anonymous_loadpoint=anonymous_loadpoint,
+        )
+        if anonymous_loadpoint:
+            settings.charger_fallback_battery_capacity_kwh = (
+                resolved.effective_battery_capacity_kwh
+                if resolved.battery_capacity_source == CAPACITY_SOURCE_CHARGER_FALLBACK
+                else None
+            )
+        settings.battery_capacity_kwh = resolved.battery_capacity_kwh
+        settings.effective_battery_capacity_kwh = (
+            resolved.effective_battery_capacity_kwh
+        )
+        settings.battery_capacity_source = resolved.battery_capacity_source
+        return resolved
+
     async def _evaluate_vehicle(
         self,
         vehicle_id: str,
@@ -4811,6 +4935,7 @@ class AutoScheduleExecutor:
             current_soc = await self._get_vehicle_soc(vehicle_id)
 
         try:
+            resolved_capacity = self.resolve_vehicle_capacity(vehicle_id, settings)
             # Use per-day priority based on the target departure day
             effective_priority = settings.get_effective_priority(
                 target_time.weekday() if target_time else now.weekday()
@@ -4820,6 +4945,7 @@ class AutoScheduleExecutor:
                 current_soc=current_soc,
                 target_soc=settings.target_soc,
                 target_time=target_time,
+                resolved_capacity=resolved_capacity,
                 priority=effective_priority,
                 charger_power_kw=(settings.max_charge_amps * settings.voltage * settings.phases) / 1000,
             )

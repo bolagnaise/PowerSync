@@ -359,6 +359,22 @@ def test_ev_charging_save_preserves_fallback_generic_soc_sensor():
     assert "final_data[CONF_GENERIC_CHARGER_SOC_ENTITY_2]" in method_source
 
 
+def test_ev_charging_generic_capacity_round_trip_and_clear():
+    """Anonymous chargers expose one optional, clearable capacity fallback."""
+    source = CONFIG_FLOW_PATH.read_text()
+    form = ast.get_source_segment(source, _options_flow_method("async_step_ev_charging"))
+    save = ast.get_source_segment(source, _options_flow_method("_save_ev_options"))
+
+    assert form is not None
+    assert save is not None
+    assert "CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH" in form
+    assert "min=1.0" in form
+    assert "max=250.0" in form
+    assert "step=0.1" in form
+    assert "final_data.pop(CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH, None)" in save
+    assert "float(\n                generic_capacity\n            )" in save
+
+
 def test_ev_charging_save_allows_clearing_generic_charger_entities():
     source = CONFIG_FLOW_PATH.read_text()
     method = _options_flow_method("_save_ev_options")
@@ -407,6 +423,13 @@ def test_ev_charging_fallback_generic_soc_sensor_is_translated():
             ]
             assert "primary SoC sensor" in step["data_description"][
                 "generic_charger_soc_entity_2"
+            ]
+            assert (
+                step["data"]["generic_charger_battery_capacity_kwh"]
+                == "Usable EV battery capacity"
+            )
+            assert "estimated 60 kWh" in step["data_description"][
+                "generic_charger_battery_capacity_kwh"
             ]
 
 

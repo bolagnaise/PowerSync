@@ -215,12 +215,25 @@ def test_dashboard_ev_panel_is_registered_and_api_cached():
     assert "power_sync/ev/scheduled_charging/settings" in source
     assert "power_sync/ev/auto_schedule/status" in source
     assert "power_sync/ev/auto_schedule/toggle" in source
+    assert "power_sync/ev/vehicle_config" in source
     assert "power_sync/ev/boost" in source
     assert "start_policy_charging" in source
     assert "this._scheduleRenderIfChanged();" in hass_setter
     assert "this._scheduleRender();" not in hass_setter
     assert "data: this._data" in render_signature
     assert "policy: this._policy" in render_signature
+
+
+def test_dashboard_ev_capacity_editor_uses_vehicle_config_api():
+    """Each Smart Schedule row should expose effective capacity and a clearable override."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "Usable capacity ${this._escHtml(effectiveCapacity ?? 60)} kWh" in source
+    assert "data-capacity-input" in source
+    assert "data-capacity-save" in source
+    assert "data-capacity-clear" in source
+    assert "battery_capacity_kwh: value" in source
+    assert "value < 1 || value > 250" in source
 
 
 def test_ev_panel_hides_zero_amps_while_charging_without_amp_telemetry():

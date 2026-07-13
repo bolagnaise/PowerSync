@@ -383,6 +383,7 @@ from .const import (
     CONF_GENERIC_CHARGER_POWER_ENTITY,
     CONF_GENERIC_CHARGER_SOC_ENTITY,
     CONF_GENERIC_CHARGER_SOC_ENTITY_2,
+    CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH,
     # Sigenergy EV charger configuration
     CONF_SIGENERGY_CHARGER_ENABLED,
     CONF_SIGENERGY_CHARGER_TYPE,
@@ -12020,6 +12021,18 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_GENERIC_CHARGER_SOC_ENTITY_2,
                 default=self._get_option(CONF_GENERIC_CHARGER_SOC_ENTITY_2, ""),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Optional(
+                CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH,
+                default=self._get_option(
+                    CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH, None
+                ),
+            ): NumberSelector(NumberSelectorConfig(
+                min=1.0,
+                max=250.0,
+                step=0.1,
+                mode=NumberSelectorMode.BOX,
+                unit_of_measurement="kWh",
+            )),
             # Sigenergy EVAC/EVDC charger direct Modbus control
             vol.Optional(
                 CONF_SIGENERGY_CHARGER_ENABLED,
@@ -12148,6 +12161,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         final_data[CONF_GENERIC_CHARGER_SOC_ENTITY_2] = ev_input.get(
             CONF_GENERIC_CHARGER_SOC_ENTITY_2, ""
         ).strip()
+        generic_capacity = ev_input.get(CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH)
+        if generic_capacity is None:
+            final_data.pop(CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH, None)
+        else:
+            final_data[CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH] = float(
+                generic_capacity
+            )
 
         # Add Sigenergy EV charger settings
         final_data[CONF_SIGENERGY_CHARGER_ENABLED] = ev_input.get(

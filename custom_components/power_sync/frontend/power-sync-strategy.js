@@ -3087,6 +3087,7 @@ const EV_PANEL_PATHS = {
   scheduled: 'power_sync/ev/scheduled_charging/settings',
   autoStatus: 'power_sync/ev/auto_schedule/status',
   autoToggle: 'power_sync/ev/auto_schedule/toggle',
+  vehicleConfig: 'power_sync/ev/vehicle_config',
   boost: 'power_sync/ev/boost',
 };
 
@@ -3246,11 +3247,12 @@ class PowerSyncEVPanel extends HTMLElement {
       throw new Error(status.error || 'EV status API unavailable');
     }
 
-    const [solar, price, scheduled, autoStatus] = await Promise.allSettled([
+    const [solar, price, scheduled, autoStatus, vehicleConfig] = await Promise.allSettled([
       this._hass.callApi('GET', EV_PANEL_PATHS.solar),
       this._hass.callApi('GET', EV_PANEL_PATHS.price),
       this._hass.callApi('GET', EV_PANEL_PATHS.scheduled),
       this._hass.callApi('GET', EV_PANEL_PATHS.autoStatus),
+      this._hass.callApi('GET', EV_PANEL_PATHS.vehicleConfig),
     ]);
 
     const modeErrors = [];
@@ -3281,6 +3283,7 @@ class PowerSyncEVPanel extends HTMLElement {
       priceSettings: unwrap(price, 'settings', {}),
       scheduledSettings: unwrap(scheduled, 'settings', {}),
       autoStatus: autoScheduleStatus,
+      vehicleConfigs: unwrap(vehicleConfig, 'configs', []),
       modeErrors,
       fetchedAt: new Date().toISOString(),
     };
@@ -3709,6 +3712,35 @@ class PowerSyncEVPanel extends HTMLElement {
           font-weight: 600;
           line-height: 1.25;
         }
+        .capacity-editor {
+          display: flex;
+          align-items: end;
+          flex-wrap: wrap;
+          gap: 6px;
+          margin-top: 7px;
+        }
+        .capacity-editor label {
+          display: grid;
+          gap: 3px;
+          color: var(--secondary-text-color);
+          font-size: 10px;
+          font-weight: 700;
+        }
+        .capacity-editor input {
+          box-sizing: border-box;
+          width: 92px;
+          min-height: 32px;
+          padding: 5px 7px;
+          border: 1px solid var(--divider-color);
+          border-radius: 7px;
+          background: var(--ha-card-background, var(--card-background-color, #fff));
+          color: var(--primary-text-color);
+        }
+        .capacity-editor .command {
+          min-height: 32px;
+          padding: 5px 8px;
+          font-size: 11px;
+        }
         @media (max-width: 560px) {
           .status,
           .control-row,
@@ -3924,17 +3956,32 @@ class PowerSyncEVPanel extends HTMLElement {
 
   _smartScheduleCard() {
     const settings = this._data?.autoStatus?.settings || {};
+    const vehicleConfigs = this._data?.vehicleConfigs || [];
     const entries = Object.entries(settings);
     const rows = entries.length ? entries.map(([vehicleId, vehicle], index) => {
       const enabled = !!vehicle.enabled;
       const loadpoint = this._loadpoints().find((lp) => lp.loadpoint_id === vehicleId);
       const name = loadpoint ? this._loadpointLabel(loadpoint) : `Vehicle ${index + 1}`;
       const departure = vehicle.departure_time || Object.values(vehicle.departure_times || {})[0] || 'Not set';
+      const config = vehicleConfigs.find((item) => item.vehicle_id === vehicleId) || {};
+      const effectiveCapacity = config.effective_battery_capacity_kwh ?? vehicle.effective_battery_capacity_kwh;
+      const capacitySource = config.battery_capacity_source || vehicle.battery_capacity_source || 'default_estimate';
+      const manualCapacity = config.battery_capacity_kwh
+        ?? (capacitySource === 'charger_fallback' ? effectiveCapacity : '');
+      const sourceLabel = capacitySource === 'manual' ? 'configured' : this._title(capacitySource);
       return `
         <div class="smart-row">
           <div>
             <div class="smart-name">${this._escHtml(name)}</div>
             <div class="smart-meta">Target ${this._escHtml(vehicle.target_soc ?? '--')}% | Departure ${this._escHtml(departure)}</div>
+            <div class="smart-meta">Usable capacity ${this._escHtml(effectiveCapacity ?? 60)} kWh | ${this._escHtml(sourceLabel)}</div>
+            <div class="capacity-editor">
+              <label>Capacity override (kWh)
+                <input type="number" min="1" max="250" step="0.1" inputmode="decimal" data-capacity-input="${this._escAttr(vehicleId)}" value="${this._escAttr(manualCapacity)}" placeholder="Automatic">
+              </label>
+              <button class="command" data-capacity-save="${this._escAttr(vehicleId)}" ${this._savingKey ? 'disabled' : ''}>Save</button>
+              <button class="command" data-capacity-clear="${this._escAttr(vehicleId)}" ${this._savingKey || manualCapacity === '' ? 'disabled' : ''}>Clear</button>
+            </div>
           </div>
           <button class="command" data-smart-toggle="${this._escAttr(vehicleId)}" data-enabled="${enabled ? 'false' : 'true'}" ${this._savingKey ? 'disabled' : ''}>
             <ha-icon icon="${enabled ? 'mdi:toggle-switch' : 'mdi:toggle-switch-off-outline'}"></ha-icon><span>${enabled ? 'On' : 'Off'}</span>
@@ -3980,6 +4027,12 @@ class PowerSyncEVPanel extends HTMLElement {
     });
     this.shadowRoot.querySelectorAll('[data-smart-toggle]').forEach((button) => {
       button.addEventListener('click', () => this._toggleSmartSchedule(button.dataset.smartToggle, button.dataset.enabled === 'true'));
+    });
+    this.shadowRoot.querySelectorAll('[data-capacity-save]').forEach((button) => {
+      button.addEventListener('click', () => this._saveVehicleCapacity(button.dataset.capacitySave, false));
+    });
+    this.shadowRoot.querySelectorAll('[data-capacity-clear]').forEach((button) => {
+      button.addEventListener('click', () => this._saveVehicleCapacity(button.dataset.capacityClear, true));
     });
   }
 
@@ -4047,6 +4100,22 @@ class PowerSyncEVPanel extends HTMLElement {
       EV_PANEL_PATHS.autoToggle,
       { vehicle_id: vehicleId, enabled },
       'Smart schedule updated',
+    );
+  }
+
+  async _saveVehicleCapacity(vehicleId, clear) {
+    const input = this.shadowRoot.querySelector(`[data-capacity-input="${CSS.escape(vehicleId)}"]`);
+    const value = clear ? null : Number(input?.value);
+    if (!clear && (!Number.isFinite(value) || value < 1 || value > 250)) {
+      this._notice = { type: 'error', message: 'Capacity must be between 1 and 250 kWh' };
+      this._scheduleRender();
+      return;
+    }
+    await this._runCommand(
+      `capacity:${vehicleId}`,
+      EV_PANEL_PATHS.vehicleConfig,
+      { vehicle_id: vehicleId, battery_capacity_kwh: value },
+      clear ? 'Capacity override cleared' : 'Capacity updated',
     );
   }
 
