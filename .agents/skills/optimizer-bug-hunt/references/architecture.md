@@ -82,17 +82,22 @@ overrides **in this order**, each reassigning `self._current_schedule` increment
 3. `_bridge_short_export_gaps` — always runs, early-returns for dynamic tariffs
    (Amber/AEMO/FlowPowerKWatch). Mutates ScheduleAction objects **in place** (everything
    else builds fresh objects). Checks price match + reserve, not export permission.
-4. `_disable_idle_schedule` — provider-gated + `disable_idle_enabled`.
+4. No Idle is modeled in `BatteryOptimizer.optimize(..., disable_idle=True)` before
+   publication. Ordinary hold slots become self-consumption with matching battery-to-home
+   flow; only explicit Charge By Time holds remain IDLE.
 5. `_apply_offgrid_overlay` — Tesla+Powerwall-paired only.
 
-The whole block can run **twice**: after `_apply_auto_reserve_recommendation` / export
-reserve floor computation, a second `_run_optimizer_once` re-solves with the new floors.
+The whole block can run **twice**: before `_apply_auto_reserve_recommendation`,
+`_set_forecast_bridge_reserve_recommendation` derives one seed-independent target from the
+saved manual buffer plus forecast net home load between the end of the full eligible
+export window and the next charge. A second `_run_optimizer_once` re-solves with that
+intentional-export floor; the final result gets the same bridge metadata for sensors/API.
 
 **Decisions log** (`custom_components.power_sync.optimization.coordinator.decisions`,
 pinned INFO): one aggregate per-cycle line of action *counts* from the FINAL post-override
-schedule. There is no per-slot decision line. Runtime may still convert idle →
-self_consumption (disable-idle at execution, `_effective_runtime_action` inside demand
-windows), so the log can legitimately say `idle=N` while hardware runs self-consumption.
+schedule. There is no per-slot decision line. Runtime may still convert IDLE →
+self-consumption inside a demand window via `_effective_runtime_action`; No Idle itself is
+already reflected in the final schedule, graph flows, decisions log, and hardware action.
 
 **Execution selection**: `_get_current_action` picks the slot with
 `timestamp <= now < next.timestamp`; past the last timestamp it returns the **final slot

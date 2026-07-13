@@ -22,11 +22,18 @@ reviewer or support thread. Baseline v2.12.783.
   self-consumption in the emitted plan drains to `min(soc_0, hardware_reserve)`
   (`_natural_self_consumption_floor`). A hard floor requires raising the HARDWARE reserve.
   This is documented in-code and is the #1 semantic misunderstanding in tickets.
+- **Auto-Apply Reserve preserves the manual buffer indirectly.** It raises the
+  intentional-export floor by forecast net home load from the end of the full eligible
+  export window to the next charging opportunity. It never lowers below the saved manual
+  minimum, does not turn that software value into a hard hardware floor, and must use the
+  full eligible window rather than the emitted export-run length (which depends on the
+  starting floor and creates 0%-collapse/upward-ratchet feedback).
 - **Export/bridge reserve floor** is an end-of-window *boundary condition* on `E[t+1]`
   for export periods — NOT a floor later self-consumption respects (intra-period discharge
   uses the pre-raise `base_reserve_floor` snapshot). Intentional.
 - **"Reserve floor" vs "planning reserve / bridge to next cheap window"** are different
-  features — users often mean the latter (see AGENTS.md vocabulary note).
+  behaviors — the manual floor provides the former; Auto-Apply explicitly adds the latter
+  for planned export windows (see AGENTS.md vocabulary note).
 - `_pre_idle_backup_reserve` is snapshotted **only when it is None** — this is the guard
   that stops stacked modes (idle entered during EV-preserve etc.) from capturing a
   temporary reserve as the user's "real" one. Don't "fix" it into unconditional snapshots.
@@ -62,10 +69,10 @@ reviewer or support thread. Baseline v2.12.783.
 
 ## Logging and status semantics
 
-- The decisions logger emits **aggregate counts of planned actions** post-override. Runtime
-  converts idle → self_consumption under disable-idle or demand windows
-  (`_effective_runtime_action`), so `idle=N` in the log with self-consumption on hardware
-  is a documented gap, not a command-path bug.
+- The decisions logger emits **aggregate counts of planned actions** post-override. No Idle
+  is modeled before publication, so its ordinary self-consumption slots agree across the
+  log, graphs, and executor. Runtime can still convert IDLE → self-consumption inside a
+  demand window via `_effective_runtime_action`.
 - `[MONITORING] Optimizer would execute: ...` = no hardware command was sent (AGENTS.md
   gate 3).
 - `self_consumption` in logs is not "force discharge" — describe logged actions verbatim.
@@ -74,7 +81,8 @@ reviewer or support thread. Baseline v2.12.783.
 ## Intentional behaviors that look like bugs
 
 - **Idle holds are intentional SOC preservation** unless "Disable Idle" is on (converts
-  idle → self-consumption).
+  ordinary idle → self-consumption). Explicit Charge By Time holds remain IDLE so the
+  executor does not consume energy needed by that deadline.
 - **AC curtailment deliberately skips when the battery can absorb the solar**; threshold is
   export_earnings < 1 c/kWh.
 - Fronius GEN24/BYD 200–370 W battery movement in Auto is inverter self-balancing, not a

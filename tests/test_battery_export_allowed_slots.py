@@ -1120,13 +1120,13 @@ def test_auto_apply_reserve_applies_clamped_optimizer_recommendation(opt_module)
 
     changed = coordinator._apply_auto_reserve_recommendation(
         SimpleNamespace(
-            reserve_recommendation={"suggested_optimizer_reserve_percent": 30}
+            reserve_recommendation={"suggested_optimizer_reserve_percent": 70}
         )
     )
 
     assert changed is True
-    assert coordinator._config.backup_reserve == 0.30
-    assert update_calls[-1]["backup_reserve"] == 0.30
+    assert coordinator._config.backup_reserve == 0.70
+    assert update_calls[-1]["backup_reserve"] == 0.70
     # The forecast floor is applied to the running optimiser only — it must NOT
     # write the config entry (that fired a dashboard refresh every ~5 minutes).
     assert updates == []
@@ -1138,11 +1138,12 @@ def test_auto_apply_reserve_applies_clamped_optimizer_recommendation(opt_module)
     )
 
     assert changed is True
-    assert coordinator._config.backup_reserve == 0.20
+    assert coordinator._config.backup_reserve == 0.50
+    assert update_calls[-1]["backup_reserve"] == 0.50
     assert updates == []
 
 
-def test_profit_max_auto_apply_can_lower_to_forecast_reserve(opt_module):
+def test_profit_max_auto_apply_never_lowers_below_manual_reserve(opt_module):
     coordinator = _coordinator(
         opt_module,
         "flow_power",
@@ -1184,13 +1185,90 @@ def test_profit_max_auto_apply_can_lower_to_forecast_reserve(opt_module):
         SimpleNamespace(reserve_recommendation=recommendation)
     )
 
-    assert changed is True
-    assert coordinator._config.backup_reserve == 0.05
-    assert update_calls[-1]["backup_reserve"] == 0.05
+    assert changed is False
+    assert coordinator._config.backup_reserve == 0.15
+    assert update_calls == []
     # Runtime-only: no per-cycle config-entry write.
     assert updates == []
     assert recommendation["manual_optimizer_reserve_percent"] == 15
-    assert recommendation["applied_optimizer_reserve_percent"] == 5
+    assert recommendation["applied_optimizer_reserve_percent"] == 15
+
+
+def test_auto_apply_forecast_bridge_is_independent_of_export_run_length(opt_module):
+    """Ticket #263: the manual seed must not choose between 0% and a ratchet."""
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        optimization_backup_reserve=0.15,
+        optimization_manual_reserve=0.15,
+        optimization_auto_apply_reserve=True,
+        hardware_backup_reserve=0.0,
+    )
+    coordinator._auto_apply_reserve_enabled = True
+    coordinator._manual_backup_reserve = 0.15
+    coordinator._config.backup_reserve = 0.15
+    coordinator._config.battery_capacity_wh = 40000
+    coordinator._config.interval_minutes = 60
+    coordinator._startup_backup_reserve = 0
+    coordinator._optimizer = SimpleNamespace(efficiency=1.0)
+
+    start = datetime(2026, 7, 13, 17, 0, tzinfo=timezone.utc)
+    export_allowed = [False, True, True, True] + [False] * 6
+
+    def _result(export_slots):
+        actions = []
+        for idx in range(10):
+            is_export = idx in export_slots
+            is_charge = idx == 8
+            actions.append(
+                opt_module.ScheduleAction(
+                    timestamp=start + timedelta(hours=idx),
+                    action=(
+                        "export"
+                        if is_export
+                        else ("charge" if is_charge else "self_consumption")
+                    ),
+                    power_w=5000 if is_export or is_charge else 0,
+                    soc=0.50,
+                    battery_charge_w=5000 if is_charge else 0,
+                    battery_discharge_w=5000 if is_export else 0,
+                )
+            )
+        return SimpleNamespace(
+            schedule=opt_module.OptimizationSchedule(
+                actions=actions,
+                predicted_cost=0,
+                predicted_savings=0,
+                last_updated=start,
+            ),
+            reserve_recommendation={"suggested_optimizer_reserve_percent": 0},
+        )
+
+    short_export = _result({1})
+    full_window_export = _result({1, 2, 3})
+    solar = None
+    load = [0.0] * 4 + [1.0] * 4 + [0.0] * 2
+
+    coordinator._set_forecast_bridge_reserve_recommendation(
+        short_export,
+        export_allowed,
+        solar,
+        load,
+    )
+    coordinator._set_forecast_bridge_reserve_recommendation(
+        full_window_export,
+        export_allowed,
+        solar,
+        load,
+    )
+
+    for result in (short_export, full_window_export):
+        recommendation = result.reserve_recommendation
+        assert recommendation["manual_optimizer_reserve_percent"] == 15
+        assert recommendation["forecast_bridge_kwh"] == pytest.approx(4.0)
+        assert recommendation["forecast_bridge_reserve_percent"] == 10
+        assert recommendation["suggested_optimizer_reserve_percent"] == 25
+        assert recommendation["next_charge_reason"] == "scheduled_grid_charge"
 
 
 def test_auto_apply_reserve_ignores_home_load_export_bridge_floor(opt_module):
@@ -1317,12 +1395,12 @@ def test_auto_apply_export_bridge_floor_can_exceed_lowered_active_reserve(opt_mo
         "flow_power",
         profit_max=True,
         optimization_backup_reserve=0.40,
-        optimization_manual_reserve=0.40,
+        optimization_manual_reserve=0.20,
         optimization_auto_apply_reserve=True,
         hardware_backup_reserve=0.0,
     )
     coordinator._auto_apply_reserve_enabled = True
-    coordinator._manual_backup_reserve = 0.40
+    coordinator._manual_backup_reserve = 0.20
     coordinator._config.backup_reserve = 0.40
     coordinator._config.battery_capacity_wh = 40000
     coordinator._startup_backup_reserve = 0
@@ -2405,7 +2483,7 @@ def test_api_current_action_uses_effective_runtime_action(opt_module):
     assert data["next_action"] == "self_consumption"
 
 
-def test_api_preserves_solver_exempt_idle_when_no_idle_is_enabled(opt_module):
+def test_api_no_idle_publishes_modeled_self_use_and_exempt_idle(opt_module):
     coordinator = _coordinator(opt_module, "flow_power")
     coordinator._config.disable_idle_enabled = True
     now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
@@ -2473,6 +2551,28 @@ def test_api_preserves_solver_exempt_idle_when_no_idle_is_enabled(opt_module):
     assert data["next_action_power_w"] == 5000
     assert data["next_actions"][0]["action"] == "idle"
     assert "planned_action" not in data["next_actions"][0]
+
+    # Ordinary No Idle slots are modeled as self-consumption before
+    # publication, so the 24-hour Action Plan must show that same action.
+    self_use_actions = [
+        _api_action(now, "self_consumption", 1200, 0.55),
+        _api_action(now + timedelta(minutes=5), "self_consumption", 1200, 0.54),
+        _api_action(now + timedelta(minutes=10), "charge", 5000, 0.60),
+    ]
+    coordinator._current_schedule = SimpleNamespace(
+        actions=self_use_actions,
+        to_api_response=lambda: {
+            "timestamps": [action.timestamp.isoformat() for action in self_use_actions],
+            "soc": [action.soc for action in self_use_actions],
+            "actions": [action.action for action in self_use_actions],
+        },
+    )
+    coordinator._get_current_action = lambda: self_use_actions[0]
+
+    data = coordinator.get_api_data()
+
+    assert data["current_action"] == "self_consumption"
+    assert data["next_actions"][0]["action"] == "self_consumption"
 
 
 def test_get_current_action_returns_none_past_schedule_end(opt_module):
@@ -4351,7 +4451,7 @@ def test_flow_power_no_idle_schedule_simulates_home_load(opt_module):
     assert converted.actions[1].soc < converted.actions[0].soc
 
 
-def test_no_idle_preserves_below_reserve_hold_before_planned_recovery_charge(
+def test_no_idle_uses_self_consumption_at_hardware_floor_before_recovery_charge(
     opt_module,
 ):
     coordinator = _coordinator(opt_module, "flow_power")
@@ -4368,7 +4468,7 @@ def test_no_idle_preserves_below_reserve_hold_before_planned_recovery_charge(
                 timestamp=start,
                 action="idle",
                 power_w=0,
-                soc=0.11,
+                soc=0.10,
                 battery_charge_w=0,
                 battery_discharge_w=0,
             ),
@@ -4376,7 +4476,7 @@ def test_no_idle_preserves_below_reserve_hold_before_planned_recovery_charge(
                 timestamp=start + timedelta(minutes=5),
                 action="idle",
                 power_w=0,
-                soc=0.11,
+                soc=0.10,
                 battery_charge_w=0,
                 battery_discharge_w=0,
             ),
@@ -4398,15 +4498,15 @@ def test_no_idle_preserves_below_reserve_hold_before_planned_recovery_charge(
         schedule,
         solar_forecast=[0.0, 0.0, 0.0],
         load_forecast=[5.0, 5.0, 5.0],
-        initial_soc=0.11,
+        initial_soc=0.10,
     )
 
     assert [action.action for action in converted.actions] == [
-        "idle",
-        "idle",
+        "self_consumption",
+        "self_consumption",
         "charge",
     ]
-    assert [action.soc for action in converted.actions] == [0.11, 0.11, 0.13]
+    assert [action.soc for action in converted.actions] == [0.10, 0.10, 0.1188]
     assert converted.actions[0].battery_discharge_w == 0
     assert converted.actions[1].battery_discharge_w == 0
 
@@ -4669,7 +4769,7 @@ def test_no_idle_setting_clears_stale_unsupported_provider_value(opt_module):
     assert background_tasks == ["powersync_settings_reoptimize"]
 
 
-def test_flow_power_no_idle_executor_overrides_idle(opt_module):
+def test_flow_power_no_idle_executor_preserves_solver_exempt_idle(opt_module):
     battery = _FakeBattery(backup_reserve=20)
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
     coordinator._entry.options["electricity_provider"] = "flow_power"
@@ -4683,11 +4783,12 @@ def test_flow_power_no_idle_executor_overrides_idle(opt_module):
     )
 
     assert battery.self_consumption_calls == 1
-    assert battery.backup_reserve_calls == [20]
-    assert coordinator._last_executed_action == "self_consumption"
+    assert battery.backup_reserve_calls == [80]
+    assert coordinator._idle_hold_reserve == 80
+    assert coordinator._last_executed_action == "idle"
 
 
-def test_flow_power_no_idle_monitoring_reports_self_consumption(opt_module, caplog):
+def test_flow_power_no_idle_monitoring_reports_solver_exempt_idle(opt_module, caplog):
     battery = _FakeBattery(backup_reserve=20)
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
     coordinator._entry.data["monitoring_mode"] = True
@@ -4704,8 +4805,8 @@ def test_flow_power_no_idle_monitoring_reports_self_consumption(opt_module, capl
 
     assert battery.self_consumption_calls == 0
     assert coordinator._last_executed_action == "export"
-    assert "Optimizer would execute: self_consumption" in caplog.text
-    assert "Optimizer would execute: idle" not in caplog.text
+    assert "Optimizer would execute: idle" in caplog.text
+    assert "Optimizer would execute: self_consumption" not in caplog.text
 
 
 def test_single_slot_export_gap_with_price_change_is_not_bridged(opt_module):

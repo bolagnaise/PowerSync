@@ -4314,7 +4314,8 @@ class BatteryOptimizer:
                     _charge_by_time_hold_required(t, soc)
                 )
                 preserve_recovery_hold = (
-                    soc <= optimizer_reserve
+                    not disable_idle
+                    and soc <= optimizer_reserve
                     and soc
                     <= self_consumption_floor
                     + BELOW_RESERVE_RECOVERY_HOLD_MARGIN_SOC

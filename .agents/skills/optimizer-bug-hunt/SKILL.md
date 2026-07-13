@@ -55,7 +55,7 @@ from a first reading — run the verification playbook first.
 | ZeroHero / Happy Hour / free-import / export-bonus window misbehavior | §5 tariff windows | Bonus arrays, +$5/kWh in-window import penalty, bridge floors computed in TWO places, greedy-path parity, DST far-horizon labeling |
 | Battery under-charged before a peak; phantom solar; load estimate off | §6 inputs | Solcast zero-fills forecast tails, Open-Meteo carries the last value forward; nowcast derate can persist overnight; check which the user runs |
 | Optimizer "did nothing" / stale plan / double commands / acts after disable | §7 cycle lifecycle | Two independent 5-min cadences; exception path keeps old schedule silently; price-triggered solve is untracked and survives `disable()` (confirmed) |
-| Sensor/status disagrees with behavior | §2 (decisions log semantics) + §7 (publication) | Decisions log counts *planned* actions; runtime converts idle→self_consumption under disable-idle/demand windows — a documented gap, not a bug |
+| Sensor/status disagrees with behavior | §2 (decisions log semantics) + §7 (publication) | No Idle is modeled before publication so graphs and execution agree; demand windows can still rewrite runtime IDLE to self-consumption |
 
 ## Fix discipline (hard-won, specific to this subsystem)
 

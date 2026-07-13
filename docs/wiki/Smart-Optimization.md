@@ -21,6 +21,19 @@ self-consumption may continue below this level to the separate hardware backup
 reserve. Merely allowing export in a slot does not turn this value into a global
 SOC hold or recharge target.
 
+### Auto-apply optimizer reserve
+
+When enabled, the selected minimum discharge level becomes the buffer that the
+forecast should retain until the next charging opportunity. For each planned
+export window, PowerSync adds the forecast net household load between the end of
+the full eligible export window and the next grid or solar charge. The resulting
+Calculated Reserve stops intentional export early enough for forecast
+self-consumption to finish at the selected buffer.
+
+Auto-Apply never lowers the Calculated Reserve below the selected minimum. It
+does not change the hardware backup reserve or force the battery to recharge;
+actual unforecast load can still consume the software buffer.
+
 ### Hardware backup reserve
 
 The battery's own backup reserve. PowerSync restores this value after temporary
@@ -89,10 +102,11 @@ Charge By Time for that behavior.
 
 Profit Max uses the same reserve model as normal Smart Optimization: intentional
 export stops at the active optimizer reserve, while later household
-self-consumption may continue to the hardware reserve. It does not add a hidden
-home-load bridge or require an overnight top-up. Grid charging is scheduled only
-when the modeled tariff value, efficiency, limits, and future load/export value
-make it worthwhile.
+self-consumption may continue to the hardware reserve. Profit Max by itself does
+not add a hidden home-load bridge or require an overnight top-up. When Auto-Apply
+Optimizer Reserve is enabled, its explicit forecast bridge raises only the
+intentional-export floor. Grid charging is scheduled only when the modeled tariff
+value, efficiency, limits, and future load/export value make it worthwhile.
 Provider priority is permission, not a synthetic subsidy: export below the
 modeled acquisition cost is allowed only when an actual, reachable quantity of
 cheaper future recharge is paired with it.
@@ -137,7 +151,9 @@ same-price import windows instead of using maximum charge power immediately.
 For supported TOU plans, No Idle mode replaces optimizer idle hold actions with
 self-consumption. If Charge By Time is active and the battery is below the target
 SOC before the target time, PowerSync preserves the hold behavior needed to meet
-the deadline.
+the deadline. The 24-hour Action Plan and battery-power graph show the final modeled
+behavior: ordinary No Idle periods appear as self-consumption and battery-to-home
+power, while an explicit Charge By Time hold remains IDLE.
 
 ## App and API fields
 

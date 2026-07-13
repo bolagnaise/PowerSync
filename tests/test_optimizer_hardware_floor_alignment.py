@@ -568,6 +568,44 @@ def test_disable_idle_is_modeled_before_future_export(
     assert no_idle.grid_export_w[1] == pytest.approx(1000.0, abs=0.1)
     assert no_idle.schedule.actions[-1].soc == pytest.approx(0.10, abs=1e-6)
     assert no_idle.schedule.predicted_cost == pytest.approx(-0.80, abs=0.01)
+    graph_data = no_idle.schedule.to_api_response()
+    assert graph_data["battery_consume_w"][0] == pytest.approx(1000.0, abs=0.1)
+    assert graph_data["battery_export_w"][0] == pytest.approx(0.0, abs=0.1)
+
+
+def test_disable_idle_stays_self_consumption_at_hardware_floor_before_recovery(
+    battery_optimizer_module,
+    monkeypatch,
+):
+    """A future charge must not turn floor-bound No Idle slots back into IDLE."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, "highs")
+    optimizer = _optimizer(
+        module,
+        backup_reserve=0.15,
+        hardware_reserve=0.05,
+        max_charge_w=5000,
+        horizon_hours=3,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.50, 0.10, 0.50],
+        export_prices=[0.0, 0.0, 1.00],
+        solar_forecast=[0.0, 0.0, 0.0],
+        load_forecast=[1.0, 0.0, 0.0],
+        current_soc=0.05,
+        allow_battery_export=[False, False, True],
+        block_battery_charge=[False, False, True],
+        allow_grid_charge=True,
+        grid_charge_allowed=[False, True, False],
+        disable_idle=True,
+    )
+
+    assert result.solver_used == "highs"
+    assert result.schedule.actions[0].action == "self_consumption"
+    assert result.schedule.actions[0].soc == pytest.approx(0.05, abs=1e-6)
+    assert result.schedule.actions[0].battery_discharge_w == pytest.approx(0.0)
+    assert any(action.action == "charge" for action in result.schedule.actions[1:])
 
 
 def test_reconcile_result_updates_cost_and_grid_flows_after_final_schedule(

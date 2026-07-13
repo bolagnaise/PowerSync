@@ -427,7 +427,7 @@
         "data_description": {
           "optimization_provider": "Smart Optimization uses an LP solver to minimise costs. Native mode uses your battery's built-in TOU scheduler.",
           "optimization_enabled": "Turn the LP optimizer on or off without changing the saved Smart Optimization settings.",
-          "optimization_auto_apply_reserve": "Adjusts the software reserve used for intentional battery export. Natural self-consumption may continue to the hardware backup reserve, which stays user controlled.",
+          "optimization_auto_apply_reserve": "Preserves the selected minimum as a forecast buffer by adding expected home load between an export window and the next charge. Natural self-consumption may continue toward that buffer; Auto-Apply never lowers below your selected minimum or changes the hardware backup reserve.",
           "optimization_ev_integration": "Adds EV demand from PowerSync-managed charger schedules to Smart Optimization. Leave this off when the planned EV load forecast sensor already represents the same charging demand.",
           "optimization_load_entity": "Optional recorder-backed live household load sensor for Smart Optimization history. Use a no-EV load sensor here if your home load history includes EV charging and you also add planned EV load separately.",
           "optimization_planned_ev_load_entity": "Optional sensor with a planned_load attribute for forecast-only EV demand. PowerSync always adds this sensor to the load forecast when selected, but does not control the charger.",
@@ -1428,7 +1428,7 @@
         "data_description": {
           "optimization_provider": "Smart Optimization uses an LP solver to minimise costs. Native mode uses your battery's built-in TOU scheduler.",
           "optimization_enabled": "Turn the LP optimizer on or off without changing the saved Smart Optimization settings.",
-          "optimization_auto_apply_reserve": "Adjusts the software reserve used for intentional battery export. Natural self-consumption may continue to the hardware backup reserve, which stays user controlled.",
+          "optimization_auto_apply_reserve": "Preserves the selected minimum as a forecast buffer by adding expected home load between an export window and the next charge. Natural self-consumption may continue toward that buffer; Auto-Apply never lowers below your selected minimum or changes the hardware backup reserve.",
           "optimization_ev_integration": "Adds EV demand from PowerSync-managed charger schedules to Smart Optimization. Leave this off when the planned EV load forecast sensor already represents the same charging demand.",
           "optimization_load_entity": "Optional recorder-backed live household load sensor for Smart Optimization history. Use a no-EV load sensor here if your home load history includes EV charging and you also add planned EV load separately.",
           "optimization_planned_ev_load_entity": "Optional sensor with a planned_load attribute for forecast-only EV demand. PowerSync always adds this sensor to the load forecast when selected, but does not control the charger.",
