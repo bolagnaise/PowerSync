@@ -344,6 +344,39 @@ def test_sigenergy_upload_groups_day_aware_static_tou_slots(
     ]
 
 
+def test_sigenergy_upload_uses_provider_label_for_buy_and_sell(
+    sigenergy_api_module,
+):
+    session = _FakeTariffSession([_FakeTariffResponse(200, payload={"code": 0})])
+    client = sigenergy_api_module.SigenergyAPIClient(
+        access_token="token",
+        token_expires_at=datetime.utcnow() + timedelta(hours=1),
+        session=session,
+    )
+
+    result = asyncio.run(
+        client.set_tariff_rate(
+            station_id="123",
+            buy_prices=[{"timeRange": "00:00-00:30", "price": 14.2}],
+            sell_prices=[{"timeRange": "00:00-00:30", "price": 9.3}],
+            plan_name="PowerSync Flow Power",
+            provider_label="Flow Power",
+        )
+    )
+
+    payload = session.post_kwargs[0]["json"]
+
+    assert result == {"success": True, "message": "Tariff updated"}
+    assert payload["buyPrice"]["staticPricing"]["providerName"] == "Flow Power"
+    assert payload["sellPrice"]["staticPricing"]["providerName"] == "Flow Power"
+    assert payload["buyPrice"]["staticPricing"]["planName"] == (
+        "PowerSync Flow Power 30-min"
+    )
+    assert payload["sellPrice"]["staticPricing"]["planName"] == (
+        "PowerSync Flow Power 30-min"
+    )
+
+
 def test_sigenergy_manual_sync_uses_static_tou_without_price_coordinator():
     init_source = (COMPONENT_ROOT / "__init__.py").read_text()
 

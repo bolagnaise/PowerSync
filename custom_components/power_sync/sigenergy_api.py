@@ -521,6 +521,7 @@ class SigenergyAPIClient:
 
         buy_week_prices = _group_sigenergy_prices_by_week_range(buy_prices)
         sell_week_prices = _group_sigenergy_prices_by_week_range(sell_prices)
+        provider_name = provider_label.strip() or "Amber"
 
         # Build the payload in Sigenergy's expected format
         payload = {
@@ -529,7 +530,7 @@ class SigenergyAPIClient:
             "buyPrice": {
                 "dynamicPricing": None,
                 "staticPricing": {
-                    "providerName": "Amber",
+                    "providerName": provider_name,
                     "tariffCode": "",
                     "tariffName": "",
                     "currencyCode": "Cent",
@@ -546,7 +547,7 @@ class SigenergyAPIClient:
             "sellPrice": {
                 "dynamicPricing": None,
                 "staticPricing": {
-                    "providerName": "Amber",
+                    "providerName": provider_name,
                     "tariffCode": "",
                     "tariffName": "",
                     "currencyCode": "Cent",
