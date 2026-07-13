@@ -30,6 +30,8 @@ from .schedule_reader import ScheduleAction, OptimizationSchedule
 _LOGGER = logging.getLogger(__name__)
 
 BELOW_RESERVE_RECOVERY_HOLD_MARGIN_SOC = 0.02
+PRE_WINDOW_REACHABLE_TARGET_MARGIN_SOC = 0.005
+PRE_WINDOW_REACHABILITY_MARGIN_SOC = 1e-6
 # Most horizons stabilize in two passes. A realistic two-day provider window
 # can need six as the natural self-use boundary advances across adjacent base
 # slots, so keep a small bounded allowance before using the projected plan.
@@ -2267,10 +2269,18 @@ class BatteryOptimizer:
 
                 max_soc_gain = max_stored_kwh / cap
                 max_reachable = min(1.0, soc_0 + max_soc_gain)
-                # 0.5% buffer so a tight LP doesn't flip infeasible from rounding
+                # Keep the established 0.5% feasibility margin while the
+                # configured target is reachable. Once execution has fallen
+                # behind that target, use only a numerical margin: granting a
+                # fresh 0.5% on every rolling solve ratchets the deadline down.
+                reachability_margin = (
+                    PRE_WINDOW_REACHABLE_TARGET_MARGIN_SOC
+                    if self.pre_window_soc_target <= max_reachable + 1e-9
+                    else PRE_WINDOW_REACHABILITY_MARGIN_SOC
+                )
                 pre_window_effective_target = min(
                     self.pre_window_soc_target,
-                    max_reachable - 0.005,
+                    max_reachable - reachability_margin,
                 )
                 A_ub_rows += 1
 

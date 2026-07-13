@@ -249,8 +249,10 @@ def test_grid_charge_soc_cap_caps_unreachable_deadline_without_solar(
 
     assert result.feasible is True
     assert result.solver_used == "highs"
-    assert sum(result.grid_import_w) == pytest.approx(2950.0)
-    assert result.grid_import_w[3] == pytest.approx(2950.0)
+    # Once the configured deadline is already unreachable, do not subtract a
+    # fresh 0.5% from the reachable grid-charge cap on every rolling solve.
+    assert sum(result.grid_import_w) == pytest.approx(3000.0)
+    assert result.grid_import_w[3] == pytest.approx(3000.0)
 
 
 def test_zero_grid_import_limit_is_treated_as_unset_cap(
@@ -406,6 +408,48 @@ def test_pre_window_target_is_capped_by_grid_import_limit(
     )
 
     assert max(result.grid_import_w) <= 11100.1
+
+
+def test_pre_window_reachability_buffer_does_not_ratchet_deadline_down(
+    battery_optimizer_module,
+):
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=1000,
+        max_discharge_w=1000,
+        efficiency=1.0,
+        backup_reserve=0.05,
+        interval_minutes=60,
+        horizon_hours=5,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.0
+    current_soc = 0.60
+
+    # Re-solve the same physically tight deadline after each executed slot.
+    # A feasibility margin may lower the target once, but each new solve must
+    # not grant another margin and progressively abandon reachable SOC.
+    for slots_to_deadline in range(4, 0, -1):
+        optimizer.pre_window_slot = slots_to_deadline
+        result = optimizer.optimize(
+            import_prices=[0.50]
+            + [0.10] * (slots_to_deadline - 1)
+            + [0.50] * (5 - slots_to_deadline),
+            export_prices=[0.0] * 4 + [0.50],
+            solar_forecast=[0.0] * 5,
+            load_forecast=[0.0] * 5,
+            current_soc=current_soc,
+            acquisition_cost_kwh=0.0,
+            allow_battery_export=[False] * 4 + [True],
+            allow_grid_charge=True,
+        )
+        assert result.feasible is True
+        current_soc = result.schedule.actions[0].soc
+
+    assert current_soc >= 0.994
 
 
 def test_pre_window_reachability_uses_grid_import_charge_limit_source():
