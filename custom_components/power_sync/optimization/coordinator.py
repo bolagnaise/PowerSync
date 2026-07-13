@@ -347,6 +347,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_grid_charge_cap_import_prices: list[float] | None = None  # $/kWh hard cap reference
         self._last_export_boost_allowed_slots: list[bool] = []
         self._last_price_timestamps: list[datetime] | None = None
+        self._pending_price_timestamps: list[datetime] | None = None
         self._last_planned_ev_load_forecast_w: list[float] | None = None
         self._last_zerohero_bonus_prices: list[float] | None = None
         self._last_zerohero_bonus_cap_kwh: float | None = None
@@ -2112,6 +2113,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _price_timestamps(self, n: int) -> list[datetime]:
         """Return local timestamps aligned with the current optimizer interval."""
+        pending_timestamps = getattr(self, "_pending_price_timestamps", None)
+        if pending_timestamps and len(pending_timestamps) >= n:
+            return pending_timestamps[:n]
         if self._last_price_timestamps and len(self._last_price_timestamps) >= n:
             return self._last_price_timestamps[:n]
 
@@ -2123,6 +2127,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             microsecond=0,
         )
         return [start + timedelta(minutes=idx * interval) for idx in range(n)]
+
+    def _commit_price_forecast_cache(
+        self,
+        import_prices: list[float],
+        export_prices: list[float],
+    ) -> None:
+        """Atomically accept prices and their staged interval grid."""
+        self._last_import_prices = import_prices
+        self._last_export_prices = export_prices
+        pending_timestamps = getattr(self, "_pending_price_timestamps", None)
+        if pending_timestamps is not None:
+            self._last_price_timestamps = pending_timestamps
+        self._pending_price_timestamps = None
 
     def _zerohero_window_slots(self, n: int) -> list[bool]:
         """Return optimizer slots inside the configured ZeroHero window."""
@@ -3391,6 +3408,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Optimization in progress — queuing forced re-optimization")
         await self._optimization_lock.acquire()
         try:
+            self._pending_price_timestamps = None
+
             # Retry battery auto-detection if still on defaults
             # (site_info may not have been available during initial setup)
             if self._battery_specs_source == "default":
@@ -3728,6 +3747,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             self._current_schedule = result.schedule
             self._last_optimizer_result = result
+            self._commit_price_forecast_cache(import_prices, export_prices)
 
             reserve_changed = self._apply_auto_reserve_recommendation(result)
             if reserve_changed or used_recommendation_floor:
@@ -3783,8 +3803,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._has_solar_forecast = solar_forecast is not None and any(v > 0 for v in (solar_forecast or []))
             self._last_solar_forecast = solar_forecast
             self._last_load_forecast = load_forecast
-            self._last_import_prices = import_prices
-            self._last_export_prices = export_prices
 
             # Track actual cost for this interval (midnight-to-midnight daily cost)
             self._track_actual_cost()
@@ -3841,6 +3859,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as e:
             _LOGGER.error("Optimization failed: %s", e, exc_info=True)
         finally:
+            self._pending_price_timestamps = None
             self._optimization_lock.release()
 
     async def _wait_for_restart_force_restore(self) -> bool:
@@ -9014,6 +9033,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 confidence_horizon_hours=decay_horizon,
                             )
 
+                        # Keep the successfully built price values coupled to
+                        # their original interval grid. Cached actions can execute
+                        # after the wall clock crosses a slot boundary; synthesizing
+                        # a fresh grid then would shift every cached price one
+                        # position. Stage a fresh grid every run so a successful
+                        # provider switch cannot retain static-TOU metadata.
+                        self._pending_price_timestamps = [
+                            current_window + timedelta(minutes=idx * interval)
+                            for idx in range(n_steps)
+                        ]
+
                         _price_label = "Flow Power" if is_flow_power else "Dynamic"
                         _LOGGER.debug(
                             "%s prices: %d steps, display %.1fc-%.1fc, "
@@ -9176,7 +9206,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_display_import_prices = display_import
         self._last_display_export_prices = display_export
         self._last_grid_charge_cap_import_prices = list(import_prices)
-        self._last_price_timestamps = timestamps
+        self._pending_price_timestamps = timestamps
 
         # Apply saving session overlay to TOU prices
         import_prices, export_prices = self._apply_saving_session_prices(import_prices, export_prices)

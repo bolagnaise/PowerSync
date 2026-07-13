@@ -1744,6 +1744,227 @@ def test_flow_power_decays_far_future_import_spikes_but_keeps_happy_hour_export(
     assert export_prices[happy_hour_slot] == pytest.approx(0.45)
 
 
+def test_flow_power_export_price_gate_keeps_forecast_origin_across_boundary(
+    opt_module,
+    monkeypatch,
+):
+    solve_time = datetime(2026, 5, 3, 17, 25, tzinfo=timezone.utc)
+    clock = {"now": solve_time}
+    monkeypatch.setattr(
+        opt_module.dt_util,
+        "now",
+        lambda *args, **kwargs: clock["now"],
+    )
+
+    forecast = []
+    for offset in (0, 30):
+        slot_start = solve_time + timedelta(minutes=offset)
+        forecast.append(_dynamic_price_entry(slot_start, 20.0, "general"))
+        forecast.append(_dynamic_price_entry(slot_start, 1.0, "feedIn"))
+
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "flow_power",
+        forecast,
+    )
+    coordinator._entry.options["flow_power_state"] = "NSW1"
+    stale_origin = solve_time - timedelta(hours=1)
+    stale_timestamps = [
+        stale_origin + timedelta(minutes=5 * idx)
+        for idx in range(12)
+    ]
+    coordinator._last_price_timestamps = stale_timestamps
+
+    import_prices, export_prices = asyncio.run(
+        coordinator._get_price_forecast()
+    )
+
+    boundary = solve_time + timedelta(minutes=5)
+    assert export_prices[:2] == pytest.approx([0.0, 0.45])
+    assert coordinator._last_price_timestamps == stale_timestamps
+    assert coordinator._pending_price_timestamps[:2] == [solve_time, boundary]
+
+    coordinator._commit_price_forecast_cache(import_prices, export_prices)
+
+    assert coordinator._last_price_timestamps[:2] == [solve_time, boundary]
+
+    action = opt_module.ScheduleAction(
+        timestamp=boundary,
+        action="export",
+        power_w=4200.0,
+    )
+    clock["now"] = boundary
+
+    assert (
+        coordinator._current_export_price_for_action(export_prices, action)
+        == pytest.approx(0.45)
+    )
+
+
+def test_failed_dynamic_replan_keeps_last_accepted_price_timestamp_pair(
+    opt_module,
+):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    accepted_origin = datetime(2026, 5, 3, 17, 20, tzinfo=timezone.utc)
+    accepted_timestamps = [
+        accepted_origin + timedelta(minutes=5 * idx)
+        for idx in range(3)
+    ]
+    accepted_import_prices = [0.30, 0.31, 0.32]
+    accepted_export_prices = [0.0, 0.0, 0.45]
+    staged_timestamps = [
+        accepted_origin + timedelta(minutes=5 * (idx + 1))
+        for idx in range(3)
+    ]
+
+    coordinator._optimizer = object()
+    coordinator._enabled = True
+    coordinator._optimization_lock = asyncio.Lock()
+    coordinator._battery_specs_source = "config"
+    coordinator._ev_integration_enabled = False
+    coordinator._last_price_timestamps = accepted_timestamps
+    coordinator._last_import_prices = accepted_import_prices
+    coordinator._last_export_prices = accepted_export_prices
+    coordinator._pending_price_timestamps = None
+
+    async def no_restart_restore_pending():
+        return False
+
+    async def stage_new_prices():
+        coordinator._pending_price_timestamps = staged_timestamps
+        assert coordinator._price_timestamps(3) == staged_timestamps
+        assert coordinator._last_price_timestamps == accepted_timestamps
+        assert coordinator._last_export_prices == accepted_export_prices
+        return [0.33, 0.34, 0.35], [0.0, 0.45, 0.45]
+
+    async def fail_after_price_forecast():
+        raise RuntimeError("downstream forecast failure")
+
+    coordinator._wait_for_restart_force_restore = no_restart_restore_pending
+    coordinator._get_price_forecast = stage_new_prices
+    coordinator._get_solar_forecast = fail_after_price_forecast
+
+    asyncio.run(coordinator._run_optimization())
+
+    assert coordinator._last_price_timestamps == accepted_timestamps
+    assert coordinator._last_import_prices == accepted_import_prices
+    assert coordinator._last_export_prices == accepted_export_prices
+    assert coordinator._pending_price_timestamps is None
+
+
+def test_optional_second_pass_failure_keeps_first_published_schedule_price_pair(
+    opt_module,
+):
+    method_source = inspect.getsource(
+        opt_module.OptimizationCoordinator._run_optimization
+    )
+    first_schedule_publish = method_source.index(
+        "self._current_schedule = result.schedule"
+    )
+    first_result_publish = method_source.index(
+        "self._last_optimizer_result = result",
+        first_schedule_publish,
+    )
+    price_cache_commit = method_source.index(
+        "self._commit_price_forecast_cache(import_prices, export_prices)",
+        first_result_publish,
+    )
+    optional_second_pass = method_source.index(
+        "reserve_changed = self._apply_auto_reserve_recommendation(result)",
+        price_cache_commit,
+    )
+    assert (
+        first_schedule_publish
+        < first_result_publish
+        < price_cache_commit
+        < optional_second_pass
+    )
+
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    old_origin = datetime(2026, 5, 3, 17, 20, tzinfo=timezone.utc)
+    new_origin = old_origin + timedelta(minutes=5)
+    old_schedule = SimpleNamespace(name="old")
+    first_schedule = SimpleNamespace(name="first-pass")
+    old_import_prices = [0.30, 0.31]
+    old_export_prices = [0.0, 0.45]
+    new_import_prices = [0.32, 0.33]
+    new_export_prices = [0.45, 0.45]
+    new_timestamps = [new_origin, new_origin + timedelta(minutes=5)]
+    coordinator._current_schedule = old_schedule
+    coordinator._last_import_prices = old_import_prices
+    coordinator._last_export_prices = old_export_prices
+    coordinator._last_price_timestamps = [
+        old_origin,
+        old_origin + timedelta(minutes=5),
+    ]
+    coordinator._pending_price_timestamps = new_timestamps
+
+    try:
+        coordinator._current_schedule = first_schedule
+        coordinator._commit_price_forecast_cache(
+            new_import_prices,
+            new_export_prices,
+        )
+        raise RuntimeError("optional auto-reserve re-solve failed")
+    except RuntimeError:
+        pass
+
+    assert coordinator._current_schedule is first_schedule
+    assert coordinator._last_import_prices == new_import_prices
+    assert coordinator._last_export_prices == new_export_prices
+    assert coordinator._last_price_timestamps == new_timestamps
+    assert coordinator._pending_price_timestamps is None
+
+
+def test_dynamic_to_static_failed_replan_keeps_dynamic_price_timestamp_pair(
+    opt_module,
+    monkeypatch,
+):
+    static_origin = datetime(2026, 5, 3, 10, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        opt_module.dt_util,
+        "now",
+        lambda *args, **kwargs: static_origin,
+    )
+    coordinator = _coordinator_with_static_tou_provider(opt_module)
+    dynamic_origin = static_origin - timedelta(minutes=5)
+    dynamic_timestamps = [
+        dynamic_origin + timedelta(minutes=5 * idx)
+        for idx in range(12)
+    ]
+    dynamic_import_prices = [0.40] * 12
+    dynamic_export_prices = [0.0] + [0.45] * 11
+
+    coordinator._optimizer = object()
+    coordinator._enabled = True
+    coordinator._optimization_lock = asyncio.Lock()
+    coordinator._battery_specs_source = "config"
+    coordinator._ev_integration_enabled = False
+    coordinator._last_price_timestamps = dynamic_timestamps
+    coordinator._last_import_prices = dynamic_import_prices
+    coordinator._last_export_prices = dynamic_export_prices
+    coordinator._pending_price_timestamps = None
+
+    async def no_restart_restore_pending():
+        return False
+
+    async def fail_after_static_price_forecast():
+        assert coordinator._price_timestamps(12)[0] == static_origin
+        assert coordinator._last_price_timestamps == dynamic_timestamps
+        assert coordinator._last_export_prices == dynamic_export_prices
+        raise RuntimeError("downstream forecast failure")
+
+    coordinator._wait_for_restart_force_restore = no_restart_restore_pending
+    coordinator._get_solar_forecast = fail_after_static_price_forecast
+
+    asyncio.run(coordinator._run_optimization())
+
+    assert coordinator._last_price_timestamps == dynamic_timestamps
+    assert coordinator._last_import_prices == dynamic_import_prices
+    assert coordinator._last_export_prices == dynamic_export_prices
+    assert coordinator._pending_price_timestamps is None
+
+
 def test_flow_power_grid_charge_cap_uses_display_import_before_lp_decay(
     opt_module,
     monkeypatch,
