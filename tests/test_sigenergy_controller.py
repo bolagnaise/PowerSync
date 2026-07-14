@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import importlib
 import sys
 import types
@@ -589,3 +590,156 @@ def test_restore_uses_stored_original_limit_not_safety_cap(sigenergy_module):
         (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(5000)),
     ]
     assert controller._original_pv_limit is None
+
+
+def test_configured_export_cap_replaces_active_curtailment_restore_baseline(
+    sigenergy_module,
+):
+    """A mobile cap change during curtailment must become the restore target.
+
+    The controller may already hold the pre-curtailment rated limit.  Keeping
+    that stale snapshot would restore above the user's newly selected cap when
+    the tariff leaves the curtailment window.
+    """
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    controller._original_pv_limit = 16800
+    writes: list[tuple[int, list[int]]] = []
+
+    async def connect():
+        return True
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, list(values)))
+        return True
+
+    async def get_status():
+        return types.SimpleNamespace(is_curtailed=False)
+
+    controller.connect = connect
+    controller._write_holding_registers = write
+    controller.get_status = get_status
+
+    controller.set_configured_export_limit(5.0)
+
+    assert controller._configured_max_export_limit_kw == 5.0
+    assert controller._original_pv_limit == 5000
+    assert asyncio.run(controller.restore())
+    assert writes == [
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(5000)),
+    ]
+
+
+def test_apply_configured_export_cap_keeps_active_curtailment_at_zero(
+    sigenergy_module,
+):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    controller._original_pv_limit = 16800
+    writes: list[tuple[int, list[int]]] = []
+
+    async def connect():
+        return True
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, list(values)))
+        return True
+
+    controller.connect = connect
+    controller._write_holding_registers = write
+
+    assert asyncio.run(
+        controller.apply_configured_export_limit(5.0, curtailment_active=True)
+    )
+    assert writes == [
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(0)),
+    ]
+    assert controller._configured_max_export_limit_kw == 5.0
+    assert controller._original_pv_limit == 5000
+
+
+def test_apply_active_export_cap_does_not_recapture_stale_live_limit(
+    sigenergy_module,
+):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    assert controller._original_pv_limit is None
+    writes: list[tuple[int, list[int]]] = []
+
+    async def connect():
+        return True
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, list(values)))
+        return True
+
+    async def get_current_export_limit():
+        raise AssertionError("active cap update must not recapture the live register")
+
+    async def get_status():
+        return types.SimpleNamespace(is_curtailed=False)
+
+    controller.connect = connect
+    controller._write_holding_registers = write
+    controller._get_current_export_limit = get_current_export_limit
+    controller.get_status = get_status
+
+    assert asyncio.run(
+        controller.apply_configured_export_limit(5.0, curtailment_active=True)
+    )
+    assert controller._original_pv_limit == 5000
+    assert asyncio.run(controller.restore())
+    assert writes == [
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(0)),
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(5000)),
+    ]
+
+
+def test_apply_configured_export_cap_rolls_back_after_failed_write(
+    sigenergy_module,
+):
+    controller = sigenergy_module.SigenergyController(
+        host="127.0.0.1",
+        max_export_limit_kw=16.8,
+    )
+    controller._original_pv_limit = 16800
+
+    async def connect():
+        return True
+
+    async def write(address, values, slave_id=None):
+        return False
+
+    controller.connect = connect
+    controller._write_holding_registers = write
+
+    assert not asyncio.run(
+        controller.apply_configured_export_limit(5.0, curtailment_active=False)
+    )
+    assert controller._configured_max_export_limit_kw == 16.8
+    assert controller._original_pv_limit == 16800
+
+
+def test_sigenergy_settings_post_persists_and_reoptimizes_export_cap():
+    """The Controls API must update durable restore and planning state."""
+    source = (COMPONENT_ROOT / "__init__.py").read_text()
+    tree = ast.parse(source)
+    view = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SigenergySettingsView"
+    )
+    post = next(
+        node
+        for node in view.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "post"
+    )
+    post_source = ast.get_source_segment(source, post)
+
+    assert post_source is not None
+    assert "controller.apply_configured_export_limit" in post_source
+    assert "CONF_SIGENERGY_EXPORT_LIMIT_KW" in post_source
+    assert 'entry_data["_skip_reload"] = True' in post_source
+    assert "opt_coordinator.update_config(" in post_source
+    assert "max_grid_export_w" in post_source
+    assert "opt_coordinator.force_reoptimize()" in post_source
+    assert post_source.index("if success:") < post_source.index(
+        'entry_data["_skip_reload"] = True'
+    )

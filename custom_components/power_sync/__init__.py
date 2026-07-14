@@ -7790,21 +7790,58 @@ class SigenergySettingsView(HomeAssistantView):
 
             if "export_limit_kw" in body:
                 export_limit = body["export_limit_kw"]
-                if export_limit is None:
-                    success = await controller.restore_export_limit()
-                else:
+                configured_limit_kw = None
+                if export_limit is not None:
                     try:
-                        val = float(export_limit)
-                        if not (0.0 <= val <= 1000.0):
+                        configured_limit_kw = float(export_limit)
+                        if not (0.0 <= configured_limit_kw <= 1000.0):
                             return web.json_response(
                                 {"success": False, "error": "export_limit_kw must be 0-1000"},
                                 status=400
                             )
-                        success = await controller.set_export_limit(val)
                     except (ValueError, TypeError):
                         return web.json_response(
                             {"success": False, "error": "Invalid export_limit_kw value"},
                             status=400
+                        )
+
+                curtailment_active = (
+                    entry_data.get("sigenergy_curtailment_state") == "curtailed"
+                )
+                success = await controller.apply_configured_export_limit(
+                    configured_limit_kw,
+                    curtailment_active=curtailment_active,
+                )
+
+                if success:
+                    # Treat the Controls value as the durable site cap, not
+                    # just a one-off Modbus write.  Commit config and LP state
+                    # only after the inverter accepted the hardware command.
+                    new_data = dict(entry.data)
+                    if configured_limit_kw is None:
+                        persisted_changed = CONF_SIGENERGY_EXPORT_LIMIT_KW in new_data
+                        new_data.pop(CONF_SIGENERGY_EXPORT_LIMIT_KW, None)
+                    else:
+                        persisted_changed = (
+                            new_data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW)
+                            != configured_limit_kw
+                        )
+                        new_data[CONF_SIGENERGY_EXPORT_LIMIT_KW] = configured_limit_kw
+                    if persisted_changed:
+                        entry_data["_skip_reload"] = True
+                        self._hass.config_entries.async_update_entry(entry, data=new_data)
+
+                    opt_coordinator = entry_data.get("optimization_coordinator")
+                    if opt_coordinator:
+                        opt_coordinator.update_config(
+                            max_grid_export_w=(
+                                None
+                                if configured_limit_kw is None
+                                else int(round(configured_limit_kw * 1000))
+                            )
+                        )
+                        self._hass.async_create_task(
+                            opt_coordinator.force_reoptimize()
                         )
                 results["export_limit_kw"] = success
 

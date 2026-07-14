@@ -907,6 +907,62 @@ class SigenergyController(InverterController):
         finally:
             await transaction.__aexit__(None, None, None)
 
+    def set_configured_export_limit(self, limit_kw: Optional[float]) -> None:
+        """Update the durable export cap and any active curtailment baseline.
+
+        The mobile Controls endpoint can change the user's site cap while a
+        zero-export curtailment is active.  In that case ``_original_pv_limit``
+        already contains the old restore target, so it must move with the
+        configured cap or the next restore will undo the user's change.
+        """
+        if limit_kw is None:
+            self._configured_max_export_limit_kw = None
+            if self._original_pv_limit is not None:
+                self._original_pv_limit = None
+            return
+
+        normalized_kw = max(0.0, float(limit_kw))
+        self._configured_max_export_limit_kw = normalized_kw
+        if self._original_pv_limit is not None:
+            self._original_pv_limit = int(normalized_kw * self.GAIN_POWER)
+
+    async def apply_configured_export_limit(
+        self,
+        limit_kw: Optional[float],
+        *,
+        curtailment_active: bool,
+    ) -> bool:
+        """Apply a durable cap without lifting active zero-export protection.
+
+        Runtime restore state is committed only when the hardware write
+        succeeds.  This keeps the prior cap authoritative after a failed
+        Modbus request and prevents the optimizer/config layers from advancing
+        ahead of the inverter.
+        """
+        previous_configured = self._configured_max_export_limit_kw
+        previous_original = self._original_pv_limit
+        self.set_configured_export_limit(limit_kw)
+
+        if curtailment_active:
+            # Do not write the normal cap before zero export or let curtail()
+            # recapture a stale live register after reload.  Establish the
+            # requested restore target explicitly, then write only zero.
+            self._original_pv_limit = (
+                None
+                if limit_kw is None
+                else int(max(0.0, float(limit_kw)) * self.GAIN_POWER)
+            )
+            success = await self.set_export_limit(0.0)
+        elif limit_kw is None:
+            success = await self.restore_export_limit()
+        else:
+            success = await self.set_export_limit(float(limit_kw))
+
+        if not success:
+            self._configured_max_export_limit_kw = previous_configured
+            self._original_pv_limit = previous_original
+        return success
+
     async def restore_export_limit(self) -> bool:
         """Restore the export limit to the safety cap (or unlimited if no cap).
 
