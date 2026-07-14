@@ -12,7 +12,7 @@ from __future__ import annotations
 import importlib
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -796,6 +796,49 @@ def test_disable_idle_holds_after_last_charge_to_protect_deadline(
     assert result.schedule.actions[0].action == "charge"
     assert result.schedule.actions[2].action == "idle"
     assert result.schedule.actions[2].soc >= 0.595
+
+
+def test_disable_idle_does_not_hold_for_export_capped_at_reserve(
+    battery_optimizer_module,
+):
+    """A capped future export must not create a false deadline shortfall."""
+    module = battery_optimizer_module
+    optimizer = _optimizer(
+        module,
+        backup_reserve=0.76,
+        hardware_reserve=0.05,
+        horizon_hours=4,
+    )
+    optimizer.pre_window_slot = 4
+    optimizer.pre_window_soc_target = 1.0
+    optimizer.export_reserve_floor = 0.76
+    start = datetime(2026, 7, 14, 6, 40, tzinfo=timezone.utc)
+
+    schedule = optimizer._build_schedule(
+        n=4,
+        grid_import=[1.0, 0.0, 0.0, 0.0],
+        grid_export=[0.0, 2.4, 0.0, 0.0],
+        battery_charge=[0.0, 0.0, 2.4, 0.0],
+        battery_discharge=[0.0, 2.4, 0.0, 0.0],
+        solar=[0.0, 0.0, 2.4, 0.0],
+        load=[1.0, 0.0, 0.0, 0.0],
+        soc_0=1.0,
+        import_prices=[0.50, 0.50, 0.10, 0.10],
+        export_prices=[0.0, 0.45, 0.0, 0.0],
+        block_battery_charge=[False] * 4,
+        schedule_timestamps=[start + timedelta(hours=slot) for slot in range(4)],
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 4,
+        priority_export_slots=[False, True, False, False],
+        disable_idle=True,
+    )
+
+    assert schedule.actions[0].action == "self_consumption"
+    assert schedule.actions[0].battery_discharge_w == pytest.approx(1000.0)
+    assert schedule.actions[1].action == "export"
+    assert schedule.actions[1].battery_discharge_w == pytest.approx(1400.0)
+    assert schedule.actions[1].soc == pytest.approx(0.76)
+    assert schedule.actions[2].soc == pytest.approx(1.0)
 
 
 def test_greedy_charges_when_cheap_energy_can_fund_profitable_export(

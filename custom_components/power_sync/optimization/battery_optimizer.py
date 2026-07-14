@@ -4231,6 +4231,51 @@ class BatteryOptimizer:
                 else:
                     charge_future_kw = max(0.0, battery_charge[future_idx])
                     discharge_future_kw = max(0.0, battery_discharge[future_idx])
+                    intentional_export = (
+                        grid_export[future_idx] > threshold_kw
+                        and discharge_future_kw > threshold_kw
+                    )
+                    if intentional_export:
+                        configured_floor = (
+                            self._configured_export_reserve_floor_for_range(
+                                future_idx,
+                                future_idx + 1,
+                            )
+                        )
+                        future_export_floor = max(
+                            optimizer_reserve,
+                            configured_floor,
+                        )
+                        export_room_kw = (
+                            max(0.0, projected_soc - future_export_floor)
+                            * cap
+                            * eff
+                            / dt
+                        )
+                        if export_room_kw <= threshold_kw:
+                            net_home_kw = max(
+                                0.0,
+                                load[future_idx] - solar[future_idx],
+                            )
+                            natural_room_kw = (
+                                max(
+                                    0.0,
+                                    projected_soc - self_consumption_floor,
+                                )
+                                * cap
+                                * eff
+                                / dt
+                            )
+                            discharge_future_kw = min(
+                                self.max_discharge_kw,
+                                net_home_kw,
+                                natural_room_kw,
+                            )
+                        else:
+                            discharge_future_kw = min(
+                                discharge_future_kw,
+                                export_room_kw,
+                            )
                 projected_soc += (
                     charge_future_kw * eff - discharge_future_kw / eff
                 ) * dt / cap
