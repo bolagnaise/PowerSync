@@ -4529,6 +4529,7 @@ class PowerSyncLayout extends HTMLElement {
     this._customizing = enabled;
     if (!enabled) {
       this._showingHidden = false;
+      if (wasShowingHidden) this._resetHeightLock();
       for (const item of this._hiddenItems()) item.remove();
       if (wasShowingHidden) this._appliedLayoutSignature = '';
     }
@@ -4712,6 +4713,7 @@ class PowerSyncLayout extends HTMLElement {
     this._dragPlaceholder = null;
     this._clearDragStyles(item);
     this._dragItem = null;
+    this._resetHeightLock();
     this._saveOrder();
   }
 

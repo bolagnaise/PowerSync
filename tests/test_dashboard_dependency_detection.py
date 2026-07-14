@@ -557,10 +557,21 @@ def test_dashboard_layout_locks_stable_height_across_card_refreshes():
     assert "columnCount !== this._lastLayoutColumnCount || widthDelta >= 80" in resize_scheduler
     assert "this._resetHeightLock();" in resize_scheduler
 
-    for method_name in ("_resetOrder", "_hideItem", "_showHiddenItems", "_unhideItem"):
+    for method_name in (
+        "_resetOrder",
+        "_hideItem",
+        "_showHiddenItems",
+        "_unhideItem",
+        "_dropPointerReorder",
+    ):
         method_start = layout_source.index(f"  {method_name}(")
         method_end = layout_source.index("\n  }", method_start)
         assert "this._resetHeightLock();" in layout_source[method_start:method_end]
+
+    set_customizing_start = layout_source.index("  _setCustomizing(")
+    set_customizing_end = layout_source.index("\n  }", set_customizing_start)
+    set_customizing_source = layout_source[set_customizing_start:set_customizing_end]
+    assert "if (wasShowingHidden) this._resetHeightLock();" in set_customizing_source
 
 
 def test_dashboard_height_lock_runtime_lifecycle_and_geometry_changes():
@@ -631,6 +642,27 @@ def test_dashboard_height_lock_runtime_lifecycle_and_geometry_changes():
       const trueChange = resized._scheduleLayoutForResize({ contentRect: { width: 500, height: 900 } });
       assert(trueChange === true, 'material same-column resize was not treated as geometry change');
       assert(resized.style.minHeight === '', 'material resize retained stale height');
+
+      const customized = new PowerSyncLayout();
+      customized._built = true;
+      customized._showingHidden = true;
+      customized._items = [];
+      customized._updateHeightLock(1100);
+      customized._hiddenItems = () => [];
+      customized._updateToolbarState = () => {};
+      customized._scheduleLayout = () => {};
+      customized._setCustomizing(false);
+      assert(customized.style.minHeight === '', 'leaving hidden-card preview retained stale height');
+
+      const reordered = new PowerSyncLayout();
+      reordered._built = true;
+      reordered._updateHeightLock(1000);
+      const parent = { insertBefore: () => {} };
+      reordered._dragPlaceholder = { parentElement: parent, remove: () => {} };
+      reordered._clearDragStyles = () => {};
+      reordered._saveOrder = () => {};
+      reordered._dropPointerReorder({});
+      assert(reordered.style.minHeight === '', 'completed card reorder retained stale height');
     """
 
     subprocess.run(["node", "-e", prelude + class_source + checks], check=True)
