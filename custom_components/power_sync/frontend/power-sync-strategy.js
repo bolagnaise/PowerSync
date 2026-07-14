@@ -4282,6 +4282,7 @@ class PowerSyncLayout extends HTMLElement {
     this._appliedLayoutSignature = '';
     this._lastLayoutWidth = 0;
     this._lastLayoutColumnCount = 0;
+    this._maxObservedHeight = 0;
   }
 
   setConfig(config) {
@@ -4294,11 +4295,44 @@ class PowerSyncLayout extends HTMLElement {
     for (const c of this._cards) c.hass = hass;
   }
 
+  connectedCallback() {
+    if (!this._built) return;
+    this._resetHeightLock();
+    this._observeLayout();
+    this._scheduleLayout();
+  }
+
   disconnectedCallback() {
     if (this._resizeObserver) {
       this._resizeObserver.disconnect();
       this._resizeObserver = null;
     }
+  }
+
+  _observeLayout() {
+    if (this._resizeObserver || !('ResizeObserver' in window)) return;
+    this._resizeObserver = new ResizeObserver((entries) => {
+      const entry = entries?.[0];
+      const geometryChanged = this._scheduleLayoutForResize(entry);
+      if (!geometryChanged) {
+        this._updateHeightLock(entry?.contentRect?.height);
+      } else {
+        requestAnimationFrame(() => this._updateHeightLock(this.getBoundingClientRect().height));
+      }
+    });
+    this._resizeObserver.observe(this);
+  }
+
+  _updateHeightLock(height) {
+    const nextHeight = Math.ceil(Number(height) || 0);
+    if (nextHeight <= 1 || nextHeight <= this._maxObservedHeight + 1) return;
+    this._maxObservedHeight = nextHeight;
+    this.style.minHeight = `${nextHeight}px`;
+  }
+
+  _resetHeightLock() {
+    this._maxObservedHeight = 0;
+    this.style.minHeight = '';
   }
 
   _scheduleLayout() {
@@ -4327,16 +4361,26 @@ class PowerSyncLayout extends HTMLElement {
       ? entry.contentBoxSize[0]
       : entry?.contentBoxSize;
     const width = box?.inlineSize || entry?.contentRect?.width || this.getBoundingClientRect().width || window.innerWidth || 0;
-    const columnCount = this._columnCountForWidth(width);
+    const columnCount = Math.min(
+      this._columnCountForWidth(width),
+      Math.max(1, this._layoutItems().length),
+    );
     const widthDelta = Math.abs(width - this._lastLayoutWidth);
+    const geometryChanged = Boolean(
+      this._lastLayoutColumnCount && (
+        columnCount !== this._lastLayoutColumnCount || widthDelta >= 80
+      )
+    );
+    if (geometryChanged) this._resetHeightLock();
     if (
       this._lastLayoutColumnCount &&
       columnCount === this._lastLayoutColumnCount &&
       widthDelta < 80
     ) {
-      return;
+      return false;
     }
     this._scheduleLayout();
+    return geometryChanged;
   }
 
   _flattenCards() {
@@ -4501,6 +4545,7 @@ class PowerSyncLayout extends HTMLElement {
 
   _resetOrder() {
     this._cancelActiveDrag();
+    this._resetHeightLock();
     try { localStorage.removeItem(this._storageKey); } catch (_) {}
     this._saveHiddenKeys([]);
     for (const item of this._items) item.dataset.hidden = 'false';
@@ -4516,6 +4561,7 @@ class PowerSyncLayout extends HTMLElement {
   _hideItem(item) {
     if (item.dataset.hidden === 'true' || this._visibleItems().length <= 1) return;
     this._cancelActiveDrag();
+    this._resetHeightLock();
     item.dataset.hidden = 'true';
     if (!this._showingHidden) item.remove();
     this._saveHiddenKeys(this._hiddenItems().map(hiddenItem => hiddenItem.dataset.key));
@@ -4527,6 +4573,7 @@ class PowerSyncLayout extends HTMLElement {
   _showHiddenItems() {
     this._cancelActiveDrag();
     if (this._hiddenItems().length === 0) return;
+    this._resetHeightLock();
     this._showingHidden = !this._showingHidden;
     if (this._showingHidden) this._customizing = true;
     if (!this._showingHidden) {
@@ -4544,6 +4591,7 @@ class PowerSyncLayout extends HTMLElement {
   _unhideItem(item) {
     if (item.dataset.hidden !== 'true') return;
     this._cancelActiveDrag();
+    this._resetHeightLock();
     item.dataset.hidden = 'false';
     this._saveHiddenKeys(this._hiddenItems().map(hiddenItem => hiddenItem.dataset.key));
     this._appliedLayoutSignature = '';
@@ -5057,10 +5105,7 @@ class PowerSyncLayout extends HTMLElement {
     grid.className = 'grid';
     root.appendChild(grid);
 
-    if ('ResizeObserver' in window) {
-      this._resizeObserver = new ResizeObserver((entries) => this._scheduleLayoutForResize(entries?.[0]));
-      this._resizeObserver.observe(this);
-    }
+    this._observeLayout();
 
     let helpers;
     try { helpers = await window.loadCardHelpers(); } catch (_) {}

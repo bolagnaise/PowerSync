@@ -505,7 +505,7 @@ def test_dashboard_layout_does_not_rebalance_on_every_state_tick():
     hass_setter = source[
         source.index("  set hass(hass) {", source.index("class PowerSyncLayout extends HTMLElement {")):
         source.index(
-            "  disconnectedCallback()",
+            "  connectedCallback()",
             source.index("  set hass(hass) {", source.index("class PowerSyncLayout extends HTMLElement {")),
         )
     ]
@@ -516,7 +516,8 @@ def test_dashboard_layout_does_not_rebalance_on_every_state_tick():
 
     assert "for (const c of this._cards) c.hass = hass;" in hass_setter
     assert "this._scheduleLayout();" not in hass_setter
-    assert "_scheduleLayoutForResize(entries?.[0])" in source
+    assert "const entry = entries?.[0];" in source
+    assert "this._scheduleLayoutForResize(entry)" in source
     assert "widthDelta < 80" in resize_scheduler
     assert "columnCount === this._lastLayoutColumnCount" in resize_scheduler
     assert "_toggleItemHidden(item)" in source
@@ -532,6 +533,107 @@ def test_dashboard_layout_does_not_rebalance_on_every_state_tick():
     assert "Unhide dashboard card" in source
     assert ".item.hidden-preview" in source
     assert "const visibleItems = this._layoutItems();" in source
+
+
+def test_dashboard_layout_locks_stable_height_across_card_refreshes():
+    """Transient card rerenders must not collapse the iOS dashboard scroll range."""
+    source = STRATEGY_PATH.read_text()
+    layout_source = source[source.index("class PowerSyncLayout extends HTMLElement {"):]
+
+    assert "this._maxObservedHeight = 0;" in layout_source
+    assert "_updateHeightLock(height)" in layout_source
+    assert "this.style.minHeight = `${nextHeight}px`;" in layout_source
+    assert "_resetHeightLock()" in layout_source
+    assert "this.style.minHeight = '';" in layout_source
+    assert "this._updateHeightLock(entry?.contentRect?.height)" in layout_source
+    assert "connectedCallback()" in layout_source
+    assert "this._observeLayout();" in layout_source
+
+    resize_scheduler = layout_source[
+        layout_source.index("  _scheduleLayoutForResize(entry) {"):
+        layout_source.index("  _flattenCards()", layout_source.index("  _scheduleLayoutForResize(entry) {"))
+    ]
+    assert "Math.max(1, this._layoutItems().length)" in resize_scheduler
+    assert "columnCount !== this._lastLayoutColumnCount || widthDelta >= 80" in resize_scheduler
+    assert "this._resetHeightLock();" in resize_scheduler
+
+    for method_name in ("_resetOrder", "_hideItem", "_showHiddenItems", "_unhideItem"):
+        method_start = layout_source.index(f"  {method_name}(")
+        method_end = layout_source.index("\n  }", method_start)
+        assert "this._resetHeightLock();" in layout_source[method_start:method_end]
+
+
+def test_dashboard_height_lock_runtime_lifecycle_and_geometry_changes():
+    """The height lock should survive refreshes and reset on real geometry changes."""
+    source = STRATEGY_PATH.read_text()
+    class_start = source.index("class PowerSyncLayout extends HTMLElement {")
+    class_end = source.index("\nif (!customElements.get('power-sync-layout'))", class_start)
+    class_source = source[class_start:class_end]
+    prelude = """
+      let observerCount = 0;
+      let disconnectCount = 0;
+      class FakeResizeObserver {
+        constructor(callback) { this.callback = callback; observerCount += 1; }
+        observe(target) { this.target = target; }
+        disconnect() { disconnectCount += 1; }
+      }
+      global.HTMLElement = class {
+        constructor() {
+          this.style = { minHeight: '' };
+          this._rect = { width: 390, height: 1200 };
+        }
+        attachShadow() { return {}; }
+        getBoundingClientRect() { return this._rect; }
+      };
+      global.ResizeObserver = FakeResizeObserver;
+      global.window = {
+        innerWidth: 390,
+        ResizeObserver: FakeResizeObserver,
+        matchMedia: () => ({ matches: true }),
+      };
+      global.requestAnimationFrame = () => 1;
+    """
+    checks = """
+      const assert = (condition, message) => { if (!condition) throw new Error(message); };
+
+      const layout = new PowerSyncLayout();
+      layout._built = true;
+      layout._updateHeightLock(1200);
+      layout._updateHeightLock(0);
+      assert(layout.style.minHeight === '1200px', 'transient collapse lowered the lock');
+      layout._observeLayout();
+      assert(observerCount === 1, 'initial observer was not created');
+      layout.disconnectedCallback();
+      assert(disconnectCount === 1 && layout._resizeObserver === null, 'observer did not disconnect');
+      layout.connectedCallback();
+      assert(observerCount === 2, 'observer was not recreated after reconnect');
+      assert(layout.style.minHeight === '', 'reconnect kept stale geometry');
+
+      const limited = new PowerSyncLayout();
+      limited._built = true;
+      limited._items = [
+        { dataset: { hidden: 'false' } },
+        { dataset: { hidden: 'false' } },
+      ];
+      limited._lastLayoutColumnCount = 2;
+      limited._lastLayoutWidth = 1400;
+      limited._updateHeightLock(900);
+      const falseChange = limited._scheduleLayoutForResize({ contentRect: { width: 1400, height: 900 } });
+      assert(falseChange === false, 'raw breakpoint count overrode the effective lane count');
+      assert(limited.style.minHeight === '900px', 'unchanged geometry cleared the lock');
+
+      const resized = new PowerSyncLayout();
+      resized._built = true;
+      resized._items = [{ dataset: { hidden: 'false' } }];
+      resized._lastLayoutColumnCount = 1;
+      resized._lastLayoutWidth = 390;
+      resized._updateHeightLock(900);
+      const trueChange = resized._scheduleLayoutForResize({ contentRect: { width: 500, height: 900 } });
+      assert(trueChange === true, 'material same-column resize was not treated as geometry change');
+      assert(resized.style.minHeight === '', 'material resize retained stale height');
+    """
+
+    subprocess.run(["node", "-e", prelude + class_source + checks], check=True)
 
 
 def test_battery_health_uses_native_dashboard_card():
