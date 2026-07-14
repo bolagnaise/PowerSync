@@ -59,10 +59,16 @@ from power_sync.inverters.solax_battery import SolaxBatteryController  # noqa: E
 
 
 class _FakeState:
-    def __init__(self, entity_id: str, state: str = "0", options: list[str] | None = None):
+    def __init__(
+        self,
+        entity_id: str,
+        state: str = "0",
+        options: list[str] | None = None,
+        attributes: dict | None = None,
+    ):
         self.entity_id = entity_id
         self.state = state
-        self.attributes = {"options": options or []}
+        self.attributes = {"options": options or [], **(attributes or {})}
 
 
 class _FakeStates:
@@ -284,6 +290,41 @@ def test_mode1_allows_missing_backup_reserve_entity():
     assert asyncio.run(controller.connect())
     assert controller._control_profile == "remote_control"
     assert not asyncio.run(controller.set_backup_reserve(30))
+
+
+def test_backup_reserve_honors_entity_minimum_below_15_percent():
+    states = _base_states()
+    reserve = next(
+        state
+        for state in states
+        if state.entity_id == "number.solax_selfuse_discharge_min_soc"
+    )
+    reserve.attributes.update({"min": 10, "max": 100})
+    hass = _FakeHass(states + _mode1_states())
+    controller = SolaxBatteryController(hass, entity_prefix="solax")
+
+    assert asyncio.run(controller.set_backup_reserve(10))
+    assert ("number", "set_value", {
+        "entity_id": "number.solax_selfuse_discharge_min_soc",
+        "value": 10,
+    }) in hass.services.calls
+
+    assert asyncio.run(controller.set_backup_reserve(12))
+    assert ("number", "set_value", {
+        "entity_id": "number.solax_selfuse_discharge_min_soc",
+        "value": 12,
+    }) in hass.services.calls
+
+
+def test_backup_reserve_keeps_legacy_15_percent_fallback_without_bounds():
+    hass = _FakeHass(_base_states() + _mode1_states())
+    controller = SolaxBatteryController(hass, entity_prefix="solax")
+
+    assert asyncio.run(controller.set_backup_reserve(10))
+    assert ("number", "set_value", {
+        "entity_id": "number.solax_selfuse_discharge_min_soc",
+        "value": 15,
+    }) in hass.services.calls
 
 
 def test_discovery_prefers_live_state_over_stale_registry_entity():

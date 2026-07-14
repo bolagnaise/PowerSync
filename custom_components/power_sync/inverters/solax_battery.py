@@ -603,7 +603,7 @@ class SolaxBatteryController:
     # -- Reserve / mode / export ------------------------------------------
 
     async def set_backup_reserve(self, percent: int) -> bool:
-        """Set backup reserve (minimum SOC). Clamped to [15, 100]."""
+        """Set backup reserve using the mapped number entity's supported bounds."""
         await self._ensure_connected()
         if not self._entity_exists("backup_reserve"):
             _LOGGER.warning(
@@ -611,11 +611,32 @@ class SolaxBatteryController:
                 ", ".join(_WRITE_ENTITIES["backup_reserve"]),
             )
             return False
-        clamped = max(15, min(100, int(percent)))
+        # Older SolaX models commonly expose a 15% minimum, but newer
+        # selfuse_discharge_min_soc entities can advertise and accept 10%.
+        # Trust HA's number bounds when present and retain the historical 15%
+        # fallback for entities that provide no metadata.
+        minimum = 15.0
+        maximum = 100.0
+        entity_id = self._entity_map.get("backup_reserve")
+        state = self.hass.states.get(entity_id) if entity_id else None
+        attributes = state.attributes if state else {}
+        try:
+            minimum = float(
+                attributes.get("min", attributes.get("native_min_value", minimum))
+            )
+            maximum = float(
+                attributes.get("max", attributes.get("native_max_value", maximum))
+            )
+        except (TypeError, ValueError):
+            minimum = 15.0
+            maximum = 100.0
+        minimum = max(0.0, min(100.0, minimum))
+        maximum = max(minimum, min(100.0, maximum))
+        clamped = max(minimum, min(maximum, int(percent)))
         await self._set_number("backup_reserve", clamped)
         if self._control_profile == "force_time" and self._entity_exists("grid_tied_min_soc"):
             await self._set_number("grid_tied_min_soc", clamped)
-        _LOGGER.info("Solax backup reserve set to %d%%", clamped)
+        _LOGGER.info("Solax backup reserve set to %g%%", clamped)
         return True
 
     async def get_backup_reserve(self) -> int | None:
