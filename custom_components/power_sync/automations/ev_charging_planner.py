@@ -95,6 +95,7 @@ _LOGGER.addFilter(SensitiveDataFilter())
 MIN_CHARGING_POWER_KW = 1.4
 FULL_EV_SOC = 100
 EXTERNAL_SCHEDULED_STOP_SUPPRESS_SECONDS = 15 * 60
+EXTERNAL_SMART_SCHEDULE_STOP_SUPPRESS_SECONDS = 15 * 60
 
 
 def _format_price_log_value(price_cents: Optional[float]) -> str:
@@ -3523,6 +3524,9 @@ class AutoScheduleExecutor:
         self._future_demand_preserve_reason = ""
         self._active_charging_preserve_vehicles: set[str] = set()
         self._active_charging_preserve_reasons: Dict[str, str] = {}
+        self._last_external_smart_schedule_stops: Dict[
+            str, Tuple[str, float]
+        ] = {}
 
     def _resolve_vehicle_vin(self, vehicle_id: str) -> Optional[str]:
         """Resolve sequential vehicle_id to actual VIN or BLE identifier.
@@ -4640,6 +4644,20 @@ class AutoScheduleExecutor:
                     # Clear tracked charge rate
                     self._current_charge_amps.pop(vehicle_id, None)
                     _LOGGER.info(f"🤖 ML EV Charging: Stopping charge for {vehicle_id} - {reason}")
+                elif await self._stop_external_charging_if_needed(
+                    vehicle_id,
+                    settings,
+                    state,
+                    reason,
+                ):
+                    state.last_decision = "stopped"
+                    state.last_decision_reason = reason
+                    self._sync_active_charging_preserve_intent(
+                        vehicle_id,
+                        effective_preserve_home_battery,
+                        state,
+                        reason,
+                    )
                 else:
                     state.last_decision = "waiting"
                     state.last_decision_reason = reason
@@ -4864,13 +4882,23 @@ class AutoScheduleExecutor:
             )
             state.last_decision = "started"
             state.last_decision_reason = reason
-        elif not should_charge and state.is_charging:
-            # Restore backup reserve when stopping - we'll set it again when next window starts
-            await self._stop_charging(vehicle_id, settings, state)
-            state.last_decision = "stopped"
+        elif not should_charge:
+            if state.is_charging:
+                # Restore backup reserve when stopping - we'll set it again when next window starts
+                await self._stop_charging(vehicle_id, settings, state)
+                state.last_decision = "stopped"
+            elif await self._stop_external_charging_if_needed(
+                vehicle_id,
+                settings,
+                state,
+                reason,
+            ):
+                state.last_decision = "stopped"
+            else:
+                state.last_decision = "waiting"
             state.last_decision_reason = reason
         else:
-            state.last_decision = "charging" if state.is_charging else "waiting"
+            state.last_decision = "charging"
             state.last_decision_reason = reason
         self._sync_active_charging_preserve_intent(
             vehicle_id,
@@ -5198,7 +5226,20 @@ class AutoScheduleExecutor:
     def _sync_future_demand_preserve_intent(self) -> None:
         """Keep optimiser no-discharge intent aligned with unavailable EV demand."""
         unavailable_with_demand = []
+        now = dt_util.now()
+        weekday = (
+            now.weekday()
+            if hasattr(now, "weekday")
+            else _ha_local_now_naive().weekday()
+        )
         for vehicle_id, state in self._state.items():
+            settings = self._settings.get(vehicle_id)
+            if (
+                settings is None
+                or not settings.enabled
+                or not settings.get_effective_preserve_home_battery(weekday)
+            ):
+                continue
             if state.last_decision not in ("away", "unplugged"):
                 continue
             if self._has_future_plan_demand(state):
@@ -5855,12 +5896,123 @@ class AutoScheduleExecutor:
             if success:
                 state.is_charging = True
                 state.started_at = datetime.now()
+                stop_key = vehicle_vin or vehicle_id
+                self._last_external_smart_schedule_stops.pop(stop_key, None)
                 _LOGGER.info(f"Auto-schedule: Started {dynamic_mode} charging for {vehicle_id}")
                 # Note: Notifications are sent by _action_start_ev_charging_dynamic
             else:
                 _LOGGER.warning(f"Auto-schedule: Failed to start charging for {vehicle_id}")
         except Exception as e:
             _LOGGER.error(f"Auto-schedule: Error starting charging for {vehicle_id}: {e}")
+
+    def _external_smart_schedule_stop_recent(
+        self,
+        vehicle_id: str,
+        reason: str,
+    ) -> bool:
+        """Return whether the same external Smart Schedule stop was just sent."""
+        last_stop = self._last_external_smart_schedule_stops.get(vehicle_id)
+        if not last_stop:
+            return False
+        last_reason, last_time = last_stop
+        if last_reason != reason:
+            return False
+        return (
+            time.monotonic() - last_time
+        ) < EXTERNAL_SMART_SCHEDULE_STOP_SUPPRESS_SECONDS
+
+    async def _stop_external_charging_if_needed(
+        self,
+        vehicle_id: str,
+        settings: AutoScheduleSettings,
+        state: AutoScheduleState,
+        reason: str,
+    ) -> bool:
+        """Stop verified untracked charging while Smart Schedule wants to wait."""
+        from ..const import DOMAIN
+        from .ev_ownership import owner_family
+
+        vehicle_vin = (
+            self._resolve_vehicle_vin(vehicle_id)
+            if vehicle_id != "_default"
+            else None
+        )
+        if vehicle_vin is None:
+            opts = {
+                **getattr(self.config_entry, "data", {}),
+                **getattr(self.config_entry, "options", {}),
+            }
+            if _effective_auto_schedule_charger_type(settings, opts) != "tesla":
+                return False
+            vehicle_vin = await _resolve_unspecified_tesla_start_vin(
+                self.hass,
+                self.config_entry,
+                None,
+            )
+            if vehicle_vin is None:
+                _LOGGER.debug(
+                    "Auto-schedule external stop skipped: no unique Tesla loadpoint"
+                )
+                return False
+        loadpoint_id = vehicle_vin or vehicle_id
+        active_mode = _get_active_dynamic_ev_mode(
+            self.hass,
+            self.config_entry,
+            loadpoint_id,
+        )
+        if active_mode and owner_family(active_mode) != owner_family("smart_schedule"):
+            _LOGGER.info(
+                "Auto-schedule leaving %s charging state alone: %s owns the loadpoint",
+                loadpoint_id,
+                active_mode,
+            )
+            return False
+
+        if self._external_smart_schedule_stop_recent(loadpoint_id, reason):
+            _LOGGER.debug(
+                "Auto-schedule external stop suppressed for %s: %s",
+                loadpoint_id,
+                reason,
+            )
+            return False
+
+        if not await is_ev_actively_charging(
+            self.hass,
+            self.config_entry,
+            vehicle_vin=vehicle_vin,
+        ):
+            return False
+
+        _LOGGER.info(
+            "Auto-schedule detected %s charging while waiting — sending stop: %s",
+            loadpoint_id,
+            reason,
+        )
+        stopped = await _stop_coordinated_charging(
+            self.hass,
+            DOMAIN,
+            self.config_entry,
+            expected_owner_mode="smart_schedule",
+            reason=reason,
+            vehicle_vin=loadpoint_id,
+            command="stop_smart_schedule_external",
+            stop_untracked=True,
+            log_prefix="Auto-schedule",
+        )
+        if stopped:
+            state.is_charging = False
+            state.started_at = None
+            state.current_window = None
+            await self._restore_curtailment(state)
+            _LOGGER.info(
+                "Auto-schedule: Stopped untracked charging for %s",
+                vehicle_id,
+            )
+            self._last_external_smart_schedule_stops[loadpoint_id] = (
+                reason,
+                time.monotonic(),
+            )
+        return stopped
 
     async def _stop_charging(
         self,
