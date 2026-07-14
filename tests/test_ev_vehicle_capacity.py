@@ -85,6 +85,7 @@ CAPACITY_SOURCE_PROVIDER = capacity.CAPACITY_SOURCE_PROVIDER
 ResolvedEVBatteryCapacity = capacity.ResolvedEVBatteryCapacity
 canonical_vehicle_id = capacity.canonical_vehicle_id
 resolve_ev_battery_capacity = capacity.resolve_ev_battery_capacity
+resolve_ev_battery_capacity_contract = capacity.resolve_ev_battery_capacity_contract
 validate_ev_battery_capacity = capacity.validate_ev_battery_capacity
 vehicle_ids_match = capacity.vehicle_ids_match
 
@@ -370,6 +371,40 @@ def test_anonymous_generic_uses_shared_charger_fallback_not_manual():
     assert resolved.effective_battery_capacity_kwh == 44.4
     assert resolved.battery_capacity_source == CAPACITY_SOURCE_CHARGER_FALLBACK
     assert resolved.battery_capacity_kwh is None
+
+
+def test_capacity_contract_exposes_legacy_profile_fallback_for_clear():
+    contract = resolve_ev_battery_capacity_contract(
+        {
+            "vehicle_id": "generic_ev",
+            "charger_type": "generic",
+            "battery_capacity_kwh": 80,
+        },
+        anonymous_loadpoint=True,
+        shared_charger_fallback_capacity_kwh=60,
+    )
+
+    assert contract == {
+        "battery_capacity_kwh": None,
+        "effective_battery_capacity_kwh": 80.0,
+        "battery_capacity_source": CAPACITY_SOURCE_CHARGER_FALLBACK,
+        "charger_fallback_battery_capacity_kwh": 80.0,
+    }
+
+
+def test_capacity_contract_does_not_expose_shared_fallback_as_local_override():
+    contract = resolve_ev_battery_capacity_contract(
+        {
+            "vehicle_id": "ocpp_evse_1",
+            "charger_type": "ocpp",
+        },
+        anonymous_loadpoint=True,
+        shared_charger_fallback_capacity_kwh=60,
+    )
+
+    assert contract["effective_battery_capacity_kwh"] == 60.0
+    assert contract["battery_capacity_source"] == CAPACITY_SOURCE_CHARGER_FALLBACK
+    assert contract["charger_fallback_battery_capacity_kwh"] is None
 
 
 def test_clearing_manual_override_falls_back_to_provider():

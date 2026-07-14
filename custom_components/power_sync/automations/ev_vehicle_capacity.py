@@ -201,3 +201,48 @@ def resolve_ev_battery_capacity(
         DEFAULT_EV_BATTERY_CAPACITY_KWH,
         CAPACITY_SOURCE_DEFAULT_ESTIMATE,
     )
+
+
+def resolve_ev_battery_capacity_contract(
+    config: Mapping[str, Any],
+    *,
+    anonymous_loadpoint: bool,
+    shared_charger_fallback_capacity_kwh: Any = None,
+) -> dict[str, float | str | None]:
+    """Resolve the API contract while preserving a profile-local fallback.
+
+    Anonymous generic/OCPP profiles historically stored their capacity in
+    ``battery_capacity_kwh``.  Expose that legacy value through the dedicated
+    charger-fallback field so API clients can distinguish and clear it.  A
+    shared integration fallback remains resolution-only and is deliberately
+    not presented as a profile-local override.
+    """
+    explicit_charger_fallback = None
+    if anonymous_loadpoint:
+        if "charger_fallback_battery_capacity_kwh" in config:
+            explicit_charger_fallback = config.get(
+                "charger_fallback_battery_capacity_kwh"
+            )
+        else:
+            explicit_charger_fallback = config.get("battery_capacity_kwh")
+
+    resolved = resolve_ev_battery_capacity(
+        manual_capacity_kwh=(
+            None if anonymous_loadpoint else config.get("battery_capacity_kwh")
+        ),
+        charger_fallback_capacity_kwh=(
+            explicit_charger_fallback
+            if explicit_charger_fallback is not None
+            else shared_charger_fallback_capacity_kwh
+        ),
+        provider_capacity_kwh=config.get("provider_battery_capacity_kwh"),
+        model=config.get("vehicle_model", config.get("model")),
+        trim=config.get("vehicle_trim", config.get("trim")),
+        anonymous_loadpoint=anonymous_loadpoint,
+    )
+    return {
+        **resolved.to_dict(),
+        "charger_fallback_battery_capacity_kwh": _valid_capacity_or_none(
+            explicit_charger_fallback
+        ),
+    }

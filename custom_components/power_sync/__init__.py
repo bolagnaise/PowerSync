@@ -13753,7 +13753,9 @@ class VehicleChargingConfigView(HomeAssistantView):
 
     def _capacity_contract(self, config: dict) -> dict:
         """Resolve public capacity metadata for one stored vehicle profile."""
-        from .automations.ev_vehicle_capacity import resolve_ev_battery_capacity
+        from .automations.ev_vehicle_capacity import (
+            resolve_ev_battery_capacity_contract,
+        )
 
         vehicle_id = str(config.get("vehicle_id") or "")
         charger_type = str(config.get("charger_type") or "").lower()
@@ -13764,20 +13766,13 @@ class VehicleChargingConfigView(HomeAssistantView):
             vehicle_id.lower().startswith(("ble_", "byd_"))
             or (len(vehicle_id) == 17 and vehicle_id.isalnum())
         )
-        fallback = config.get(
-            "charger_fallback_battery_capacity_kwh",
-            config.get("battery_capacity_kwh") if anonymous else None,
-        )
-        if fallback is None:
-            fallback = self._generic_capacity_fallback()
-        return resolve_ev_battery_capacity(
-            manual_capacity_kwh=None if anonymous else config.get("battery_capacity_kwh"),
-            charger_fallback_capacity_kwh=fallback,
-            provider_capacity_kwh=config.get("provider_battery_capacity_kwh"),
-            model=config.get("vehicle_model", config.get("model")),
-            trim=config.get("vehicle_trim", config.get("trim")),
+        return resolve_ev_battery_capacity_contract(
+            config,
             anonymous_loadpoint=anonymous,
-        ).to_dict()
+            shared_charger_fallback_capacity_kwh=(
+                self._generic_capacity_fallback()
+            ),
+        )
 
     def _dynamic_state_matches_config(self, state: dict, config: dict | None) -> bool:
         """Return true when runtime dynamic state belongs to a removed config."""

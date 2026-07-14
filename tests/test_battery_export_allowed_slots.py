@@ -267,6 +267,7 @@ def _coordinator(
     **options,
 ):
     coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator.battery_system = "tesla"
     base_options = {"electricity_provider": provider}
     base_options.update(options)
     coordinator._entry = SimpleNamespace(options=base_options, data={})
