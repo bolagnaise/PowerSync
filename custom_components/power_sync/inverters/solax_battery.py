@@ -615,27 +615,21 @@ class SolaxBatteryController:
         # selfuse_discharge_min_soc entities can advertise and accept 10%.
         # Trust HA's number bounds when present and retain the historical 15%
         # fallback for entities that provide no metadata.
-        minimum = 15.0
-        maximum = 100.0
-        entity_id = self._entity_map.get("backup_reserve")
-        state = self.hass.states.get(entity_id) if entity_id else None
-        attributes = state.attributes if state else {}
-        try:
-            minimum = float(
-                attributes.get("min", attributes.get("native_min_value", minimum))
-            )
-            maximum = float(
-                attributes.get("max", attributes.get("native_max_value", maximum))
-            )
-        except (TypeError, ValueError):
-            minimum = 15.0
-            maximum = 100.0
-        minimum = max(0.0, min(100.0, minimum))
-        maximum = max(minimum, min(100.0, maximum))
-        clamped = max(minimum, min(maximum, int(percent)))
+        clamped = self._clamp_number_to_entity_bounds(
+            "backup_reserve",
+            int(percent),
+            default_minimum=15.0,
+            default_maximum=100.0,
+        )
         await self._set_number("backup_reserve", clamped)
         if self._control_profile == "force_time" and self._entity_exists("grid_tied_min_soc"):
-            await self._set_number("grid_tied_min_soc", clamped)
+            grid_tied_clamped = self._clamp_number_to_entity_bounds(
+                "grid_tied_min_soc",
+                int(percent),
+                default_minimum=15.0,
+                default_maximum=100.0,
+            )
+            await self._set_number("grid_tied_min_soc", grid_tied_clamped)
         _LOGGER.info("Solax backup reserve set to %g%%", clamped)
         return True
 
@@ -834,6 +828,36 @@ class SolaxBatteryController:
             return float(state.state)
         except (ValueError, TypeError):
             return None
+
+    def _clamp_number_to_entity_bounds(
+        self,
+        key: str,
+        value: float,
+        *,
+        default_minimum: float,
+        default_maximum: float,
+    ) -> float:
+        """Clamp a write to the bounds advertised by its mapped HA number entity."""
+        entity_id = self._entity_map.get(key)
+        state = self.hass.states.get(entity_id) if entity_id else None
+        attributes = state.attributes if state else {}
+
+        def _bound(attribute: str, native_attribute: str, fallback: float) -> float:
+            try:
+                return float(
+                    attributes.get(
+                        attribute,
+                        attributes.get(native_attribute, fallback),
+                    )
+                )
+            except (TypeError, ValueError):
+                return fallback
+
+        minimum = _bound("min", "native_min_value", default_minimum)
+        maximum = _bound("max", "native_max_value", default_maximum)
+        minimum = max(0.0, min(100.0, minimum))
+        maximum = max(minimum, min(100.0, maximum))
+        return max(minimum, min(maximum, value))
 
     async def _set_number(self, key: str, value: float) -> None:
         entity_id = self._entity_map.get(key)

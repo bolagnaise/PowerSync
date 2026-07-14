@@ -327,6 +327,38 @@ def test_backup_reserve_keeps_legacy_15_percent_fallback_without_bounds():
     }) in hass.services.calls
 
 
+def test_force_time_backup_reserve_uses_each_number_entities_own_bounds():
+    states = _base_states()
+    reserve = next(
+        state
+        for state in states
+        if state.entity_id == "number.solax_selfuse_discharge_min_soc"
+    )
+    reserve.attributes.update({"min": 10, "max": 100})
+    hass = _FakeHass(states + _mode1_states())
+    controller = SolaxBatteryController(hass, entity_prefix="solax")
+    assert asyncio.run(controller.connect())
+
+    grid_tied = _FakeState(
+        "number.solax_battery_minimum_capacity_grid_tied",
+        "15",
+        attributes={"min": 15, "max": 100},
+    )
+    hass.states._states[grid_tied.entity_id] = grid_tied
+    controller._control_profile = "force_time"
+    controller._entity_map["grid_tied_min_soc"] = grid_tied.entity_id
+
+    assert asyncio.run(controller.set_backup_reserve(10))
+    assert ("number", "set_value", {
+        "entity_id": "number.solax_selfuse_discharge_min_soc",
+        "value": 10,
+    }) in hass.services.calls
+    assert ("number", "set_value", {
+        "entity_id": "number.solax_battery_minimum_capacity_grid_tied",
+        "value": 15,
+    }) in hass.services.calls
+
+
 def test_discovery_prefers_live_state_over_stale_registry_entity():
     hass = _FakeHass(_base_states() + _mode1_states())
     controller = SolaxBatteryController(hass)
