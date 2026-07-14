@@ -375,6 +375,31 @@ def test_ev_charging_generic_capacity_round_trip_and_clear():
     assert "float(\n                generic_capacity\n            )" in save
 
 
+def test_ev_charging_generic_capacity_has_no_null_selector_default():
+    """Optional number selectors must omit absent values instead of validating None."""
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_ev_charging")
+    capacity_marker = next(
+        node
+        for node in ast.walk(method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "vol"
+        and node.func.attr == "Optional"
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH"
+    )
+
+    assert all(keyword.arg != "default" for keyword in capacity_marker.keywords)
+    assert any(keyword.arg == "description" for keyword in capacity_marker.keywords)
+    marker_source = ast.get_source_segment(source, capacity_marker)
+    assert marker_source is not None
+    assert '"suggested_value": current_generic_capacity' in marker_source
+    assert "current_generic_capacity is not None" in marker_source
+
+
 def test_ev_charging_save_allows_clearing_generic_charger_entities():
     source = CONFIG_FLOW_PATH.read_text()
     method = _options_flow_method("_save_ev_options")

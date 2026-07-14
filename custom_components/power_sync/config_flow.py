@@ -11944,6 +11944,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         # Build schema for EV and OCPP options
         current_ev_enabled = self._get_option(CONF_EV_CHARGING_ENABLED, False)
         current_ev_provider = self._get_option(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+        current_generic_capacity = self._get_option(
+            CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH, None
+        )
 
         schema_dict: dict[vol.Marker, Any] = {
             # EV Charging settings
@@ -12023,8 +12026,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH,
-                default=self._get_option(
-                    CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH, None
+                description=(
+                    {"suggested_value": current_generic_capacity}
+                    if current_generic_capacity is not None
+                    else None
                 ),
             ): NumberSelector(NumberSelectorConfig(
                 min=1.0,
