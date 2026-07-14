@@ -743,3 +743,50 @@ def test_sigenergy_settings_post_persists_and_reoptimizes_export_cap():
     assert post_source.index("if success:") < post_source.index(
         'entry_data["_skip_reload"] = True'
     )
+
+
+def test_sigenergy_settings_get_keeps_configured_cap_visible_during_curtailment():
+    """Controls must not replace the durable cap with the temporary live 0 kW.
+
+    Sigenergy curtailment writes zero to the physical export-limit register.
+    The existing mobile client renders ``export_limit_kw`` as the Controls
+    value, so that field must prefer the configured site cap while exposing
+    the live register separately for diagnostics.
+    """
+    source = (COMPONENT_ROOT / "__init__.py").read_text()
+    tree = ast.parse(source)
+    resolver = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_sigenergy_controls_export_limit_kw"
+    )
+    resolver_module = ast.Module(body=[resolver], type_ignores=[])
+    ast.fix_missing_locations(resolver_module)
+    namespace: dict[str, object] = {}
+    exec(compile(resolver_module, str(COMPONENT_ROOT / "__init__.py"), "exec"), namespace)
+    resolve = namespace["_sigenergy_controls_export_limit_kw"]
+
+    assert callable(resolve)
+    assert resolve(5.0, 0.0) == 5.0
+    assert resolve(0.0, 16.8) == 0.0
+    assert resolve(None, 16.8) == 16.8
+    assert resolve(5.0, None) == 5.0
+
+    view = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SigenergySettingsView"
+    )
+    get = next(
+        node
+        for node in view.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "get"
+    )
+    get_source = ast.get_source_segment(source, get)
+
+    assert get_source is not None
+    assert "configured_export_limit_kw = entry.data.get(" in get_source
+    assert "CONF_SIGENERGY_EXPORT_LIMIT_KW" in get_source
+    assert '"effective_export_limit_kw": effective_export_limit_kw' in get_source
+    assert '"export_limit_kw": _sigenergy_controls_export_limit_kw(' in get_source

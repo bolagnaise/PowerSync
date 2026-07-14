@@ -7570,6 +7570,18 @@ class SungrowDiagnosticsView(HomeAssistantView):
             )
 
 
+def _sigenergy_controls_export_limit_kw(
+    configured_export_limit_kw: float | None,
+    effective_export_limit_kw: float | None,
+) -> float | None:
+    """Return the durable Controls cap, falling back to the live register."""
+    return (
+        configured_export_limit_kw
+        if configured_export_limit_kw is not None
+        else effective_export_limit_kw
+    )
+
+
 class SigenergySettingsView(HomeAssistantView):
     """HTTP view to get/set Sigenergy battery settings for mobile app Controls."""
 
@@ -7619,12 +7631,15 @@ class SigenergySettingsView(HomeAssistantView):
 
             data = sigenergy_coordinator.data
             controller = sigenergy_coordinator._controller
+            configured_export_limit_kw = entry.data.get(
+                CONF_SIGENERGY_EXPORT_LIMIT_KW
+            )
 
             # Read current charge/discharge limits and backup reserve from Modbus
             charge_limit_kw = None
             discharge_limit_kw = None
             backup_reserve = None
-            export_limit_kw = None
+            effective_export_limit_kw = None
 
             try:
                 if await controller.connect():
@@ -7656,7 +7671,9 @@ class SigenergySettingsView(HomeAssistantView):
                     if export_regs and len(export_regs) >= 2:
                         raw = controller._to_unsigned32(export_regs[0], export_regs[1])
                         if raw < controller.EXPORT_LIMIT_UNLIMITED:
-                            export_limit_kw = round(raw / controller.GAIN_POWER, 2)
+                            effective_export_limit_kw = round(
+                                raw / controller.GAIN_POWER, 2
+                            )
 
                     # Read EMS work mode (U16)
                     ems_regs = await controller._read_input_registers(
@@ -7679,7 +7696,16 @@ class SigenergySettingsView(HomeAssistantView):
                 "load_power": data.get("load_power"),
                 "charge_rate_limit_kw": charge_limit_kw,
                 "discharge_rate_limit_kw": discharge_limit_kw,
-                "export_limit_kw": export_limit_kw,
+                # Controls edits a durable site cap.  Curtailment can
+                # temporarily write 0 kW to the live register, but that
+                # effective value must not replace the configured slider
+                # value or invite an accidental cap change on refresh.
+                "export_limit_kw": _sigenergy_controls_export_limit_kw(
+                    configured_export_limit_kw,
+                    effective_export_limit_kw,
+                ),
+                "configured_export_limit_kw": configured_export_limit_kw,
+                "effective_export_limit_kw": effective_export_limit_kw,
                 "backup_reserve": backup_reserve,
                 "ems_work_mode": data.get("ems_work_mode"),
                 "solar_curtailment_enabled": curtailment_state == "curtailed",
