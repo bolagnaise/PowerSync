@@ -5175,18 +5175,115 @@ def test_spread_export_schedule_respects_auto_reserve_export_floor(opt_module):
         export_reserve_floor=0.56,
     )
 
-    assert [action.action for action in spread.actions] == [
-        "export",
-        "export",
-        "self_consumption",
-        "self_consumption",
-        "self_consumption",
-        "self_consumption",
-    ]
+    assert [action.action for action in spread.actions] == ["export"] * 6
+    assert [action.power_w for action in spread.actions] == [2500.0] * 6
     assert min(
         action.soc for action in spread.actions if action.action == "export"
     ) >= 0.56
-    assert spread.actions[-1].soc == pytest.approx(0.05)
+    original_wh = sum(action.power_w for action in actions) * (5 / 60)
+    spread_wh = sum(action.power_w for action in spread.actions) * (5 / 60)
+    assert spread_wh == pytest.approx(original_wh, abs=0.1)
+
+
+def test_spread_export_uses_full_window_when_lp_soc_already_reached_floor(opt_module):
+    coordinator = _coordinator(opt_module, "globird", profit_max=True)
+    coordinator.battery_system = "sigenergy"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.battery_capacity_wh = 32200
+    coordinator._config.max_discharge_w = 5000
+    coordinator._config.max_grid_export_w = 5000
+    coordinator._optimizer = SimpleNamespace(efficiency=1.0)
+    start = datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start - timedelta(minutes=5),
+            action="self_consumption",
+            power_w=0,
+            soc=0.99,
+            battery_discharge_w=0,
+        )
+    ]
+    actions.extend(
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="export" if idx < 18 else "self_consumption",
+            power_w=5000 if idx < 18 else 0,
+            soc=(0.99 - (0.48 * idx / 17)) if idx < 18 else 0.51,
+            battery_discharge_w=5000 if idx < 18 else 0,
+        )
+        for idx in range(36)
+    )
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread = coordinator._spread_export_schedule(
+        schedule,
+        [False] + [True] * 36,
+        export_reserve_floor=0.51,
+    )
+
+    assert [action.action for action in spread.actions[1:]] == ["export"] * 36
+    assert [action.power_w for action in spread.actions[1:]] == [2500.0] * 36
+    assert min(action.soc for action in spread.actions[1:]) >= 0.51
+    original_wh = sum(action.power_w for action in actions[1:]) * (5 / 60)
+    spread_wh = sum(action.power_w for action in spread.actions[1:]) * (5 / 60)
+    assert spread_wh == pytest.approx(original_wh, abs=0.1)
+
+
+def test_spread_export_soc_cursor_includes_charge_before_first_export(opt_module):
+    coordinator = _coordinator(opt_module, "globird", profit_max=True)
+    coordinator.battery_system = "sigenergy"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.battery_capacity_wh = 10000
+    coordinator._config.max_charge_w = 6000
+    coordinator._config.max_discharge_w = 5000
+    coordinator._config.max_grid_export_w = 5000
+    coordinator._optimizer = SimpleNamespace(efficiency=1.0)
+    start = datetime(2026, 7, 14, 17, 55, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start,
+            action="self_consumption",
+            power_w=0,
+            soc=0.30,
+        ),
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=5),
+            action="charge",
+            power_w=6000,
+            soc=0.35,
+            battery_charge_w=6000,
+        ),
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=10),
+            action="export",
+            power_w=3000,
+            soc=0.325,
+            battery_discharge_w=3000,
+        ),
+    ]
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread = coordinator._spread_export_schedule(
+        schedule,
+        [False, True, True],
+        export_reserve_floor=0.30,
+    )
+
+    assert spread.actions[1].action == "charge"
+    assert spread.actions[1].battery_charge_w == 6000
+    assert spread.actions[2].action == "export"
+    assert spread.actions[2].power_w == 3000
+    assert spread.actions[2].soc == pytest.approx(0.325)
 
 
 def test_spread_export_schedule_defaults_to_configured_reserve_floor(opt_module):

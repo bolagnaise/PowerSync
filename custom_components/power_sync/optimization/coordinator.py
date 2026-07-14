@@ -6635,6 +6635,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return max(0.0, min(1.0, soc - removed_wh / capacity_wh))
 
+        def _advance_action_soc(soc: float, action: ScheduleAction) -> float:
+            if capacity_wh <= 0:
+                return soc
+            charge_w = max(
+                0.0,
+                float(getattr(action, "battery_charge_w", 0.0) or 0.0),
+            )
+            discharge_w = max(
+                0.0,
+                float(getattr(action, "battery_discharge_w", 0.0) or 0.0),
+            )
+            stored_wh = charge_w * interval_hours * max(efficiency, 0.001)
+            removed_wh = (
+                discharge_w
+                * interval_hours
+                / max(efficiency, 0.001)
+            )
+            return max(
+                0.0,
+                min(1.0, soc + (stored_wh - removed_wh) / capacity_wh),
+            )
+
         def _available_export_w(soc: float, floor: float) -> float:
             if capacity_wh <= 0:
                 return 0.0
@@ -6683,11 +6705,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             ]
             floor = self._reserve_ratio(window_floor, None)
-            if floor is not None and any(_action_soc(pos) is not None for pos in spread_positions):
+            first_export_pos = next(
+                pos
+                for pos in spread_positions
+                if getattr(actions[pos], "action", None) in ("export", "discharge")
+            )
+            if floor is not None:
+                # SOC labels after the first raw export describe the concentrated
+                # LP plan that this pass is about to replace. Using those depleted
+                # labels to select later slots makes the spread denominator collapse
+                # at the reserve floor and leaves export pinned at the original cap.
+                # Leading slots still use their pre-export SOC labels so a window
+                # that begins below the floor cannot manufacture an export action.
                 spread_positions = [
                     pos
                     for pos in spread_positions
-                    if (
+                    if pos >= first_export_pos
+                    or (
                         self._reserve_ratio(
                             getattr(actions[pos], "soc", None),
                             None,
@@ -6696,35 +6730,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                     > floor + 0.0001
                 ]
-                if not spread_positions:
-                    fallback_soc = _action_soc(start - 1)
-                    if fallback_soc is None:
-                        fallback_soc = floor
-                    fallback_cursor = fallback_soc
-                    for pos in range(start, end):
-                        original = actions[pos]
-                        if getattr(original, "action", None) in ("export", "discharge"):
-                            home_discharge_w = _battery_home_discharge_w(original)
-                            soc_after = (
-                                _advance_discharge_soc(fallback_cursor, home_discharge_w)
-                                if fallback_cursor is not None
-                                else original.soc
-                            )
-                            new_actions[pos] = ScheduleAction(
-                                timestamp=original.timestamp,
-                                action="self_consumption",
-                                power_w=home_discharge_w,
-                                soc=(
-                                    round(soc_after, 4)
-                                    if fallback_cursor is not None
-                                    else original.soc
-                                ),
-                                battery_charge_w=0.0,
-                                battery_discharge_w=home_discharge_w,
-                            )
-                            if fallback_cursor is not None:
-                                fallback_cursor = soc_after
-                    continue
 
             export_cap_w = (
                 self._config.max_grid_export_w
@@ -6798,8 +6803,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             soc_cursor = _action_soc(start - 1)
             if soc_cursor is None:
                 soc_cursor = _action_soc(start)
-            for pos in spread_positions:
+            spread_position_set = set(spread_positions)
+            for pos in range(start, end):
                 original = actions[pos]
+                if pos not in spread_position_set:
+                    if soc_cursor is not None:
+                        soc_cursor = _advance_action_soc(soc_cursor, original)
+                    continue
                 home_discharge_w = _battery_home_discharge_w(original)
                 slot_target_w = target_by_position[pos]
                 slot_target_w = min(
@@ -6853,31 +6863,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         ),
                         battery_charge_w=0.0,
                         battery_discharge_w=battery_discharge_w,
-                    )
-                    if soc_cursor is not None:
-                        soc_cursor = soc_after
-            for pos in range(start, end):
-                if pos in spread_positions:
-                    continue
-                original = actions[pos]
-                if getattr(original, "action", None) in ("export", "discharge"):
-                    home_discharge_w = _battery_home_discharge_w(original)
-                    soc_after = (
-                        _advance_discharge_soc(soc_cursor, home_discharge_w)
-                        if soc_cursor is not None
-                        else original.soc
-                    )
-                    new_actions[pos] = ScheduleAction(
-                        timestamp=original.timestamp,
-                        action="self_consumption",
-                        power_w=home_discharge_w,
-                        soc=(
-                            round(soc_after, 4)
-                            if soc_cursor is not None
-                            else original.soc
-                        ),
-                        battery_charge_w=0.0,
-                        battery_discharge_w=home_discharge_w,
                     )
                     if soc_cursor is not None:
                         soc_cursor = soc_after
