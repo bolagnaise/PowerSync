@@ -129,6 +129,8 @@ class SigenergyController(InverterController):
         slave_id: int = 1,
         model: Optional[str] = None,
         max_export_limit_kw: Optional[float] = None,
+        configured_charge_rate_limit_kw: Optional[float] = None,
+        configured_discharge_rate_limit_kw: Optional[float] = None,
     ):
         """Initialize Sigenergy controller.
 
@@ -138,6 +140,8 @@ class SigenergyController(InverterController):
             slave_id: Modbus slave ID (default: 1)
             model: Sigenergy model (optional)
             max_export_limit_kw: User-configured DNSP export limit in kW (None = auto-detect)
+            configured_charge_rate_limit_kw: User-configured normal charge cap in kW
+            configured_discharge_rate_limit_kw: User-configured normal discharge cap in kW
         """
         super().__init__(host, port, slave_id, model)
         self._client: Optional[AsyncModbusTcpClient] = None
@@ -145,6 +149,8 @@ class SigenergyController(InverterController):
         self._original_pv_limit: Optional[int] = None  # Store original limit for restore
         self._use_inverter_registers: Optional[bool] = None  # None=unknown, True=inverter, False=plant
         self._configured_max_export_limit_kw = max_export_limit_kw
+        self._configured_charge_rate_limit_kw = configured_charge_rate_limit_kw
+        self._configured_discharge_rate_limit_kw = configured_discharge_rate_limit_kw
         self._restore_backup_reserve_pct: Optional[int] = None  # Set by optimizer for restore_normal
         # For AC Charger setups: AC Charger is slave 1, inverter is slave 2
         # Use user-configured slave_id for inverter registers instead of hardcoded default
@@ -1062,6 +1068,20 @@ class SigenergyController(InverterController):
             _LOGGER.error(f"Error setting discharge rate limit: {e}")
             return False
 
+    async def apply_configured_charge_rate_limit(self, limit_kw: float) -> bool:
+        """Apply and remember the user's normal-operation charge cap."""
+        success = await self.set_charge_rate_limit(limit_kw)
+        if success:
+            self._configured_charge_rate_limit_kw = float(limit_kw)
+        return success
+
+    async def apply_configured_discharge_rate_limit(self, limit_kw: float) -> bool:
+        """Apply and remember the user's normal-operation discharge cap."""
+        success = await self.set_discharge_rate_limit(limit_kw)
+        if success:
+            self._configured_discharge_rate_limit_kw = float(limit_kw)
+        return success
+
     async def set_self_consumption_mode(self) -> bool:
         """Set Remote EMS to maximum self-consumption mode.
 
@@ -1191,6 +1211,17 @@ class SigenergyController(InverterController):
                 target_kw = max(0.0, float(power_kw))
             except (TypeError, ValueError):
                 target_kw = 10.0
+            if (
+                self._configured_charge_rate_limit_kw is not None
+                and target_kw > self._configured_charge_rate_limit_kw
+            ):
+                _LOGGER.info(
+                    "Force charge target %.2f kW exceeds configured charge cap "
+                    "%.2f kW — clamping",
+                    target_kw,
+                    self._configured_charge_rate_limit_kw,
+                )
+                target_kw = self._configured_charge_rate_limit_kw
 
             scaled_value = int(target_kw * self.GAIN_POWER)
             scaled_value = min(max(scaled_value, 0), 0xFFFFFFFE)
@@ -1270,6 +1301,17 @@ class SigenergyController(InverterController):
                         self._configured_max_export_limit_kw,
                     )
                     effective_kw = self._configured_max_export_limit_kw
+            if (
+                self._configured_discharge_rate_limit_kw is not None
+                and effective_kw > self._configured_discharge_rate_limit_kw
+            ):
+                _LOGGER.info(
+                    "Force discharge target %.2f kW exceeds configured discharge "
+                    "cap %.2f kW — clamping",
+                    effective_kw,
+                    self._configured_discharge_rate_limit_kw,
+                )
+                effective_kw = self._configured_discharge_rate_limit_kw
 
             # The two Sigenergy discharge modes behave differently across sites:
             # PV-first preserves solar but may not pull from the battery; ESS-first
@@ -1365,40 +1407,104 @@ class SigenergyController(InverterController):
         finally:
             await transaction.__aexit__(None, None, None)
 
-    async def _restore_ess_max_limits_to_rated(self) -> None:
-        """Restore ESS max charge/discharge limits to rated values.
+    async def _restore_ess_max_limits_to_rated(
+        self,
+        *,
+        use_configured_caps: bool = True,
+    ) -> bool:
+        """Restore ESS max limits to configured caps or rated values.
 
-        Force charge/discharge may have set lower limits — this restores
-        them to the hardware-rated values so normal operation isn't constrained.
+        Force/preserve activity may have set temporary lower limits. Normal
+        PowerSync operation returns to the user's durable caps when present;
+        handing control back to the inverter deliberately clears them to rated.
         """
-        try:
-            rated_charge_regs = await self._read_input_registers(self.REG_ESS_RATED_CHARGE_POWER, 2)
-            rated_discharge_regs = await self._read_input_registers(self.REG_ESS_RATED_DISCHARGE_POWER, 2)
+        async def resolve_target(
+            configured_kw: float | None,
+            rated_register: int,
+            label: str,
+        ) -> tuple[int | None, str]:
+            if use_configured_caps and configured_kw is not None:
+                return (
+                    int(max(0.0, float(configured_kw)) * self.GAIN_POWER),
+                    "configured",
+                )
+            try:
+                rated_regs = await self._read_input_registers(rated_register, 2)
+            except Exception as err:
+                _LOGGER.warning("Failed to read rated ESS %s limit: %s", label, err)
+                return None, "rated"
+            if not rated_regs or len(rated_regs) < 2:
+                _LOGGER.warning("Rated ESS %s limit is unavailable", label)
+                return None, "rated"
+            rated_value = self._to_unsigned32(rated_regs[0], rated_regs[1])
+            if not 0 < rated_value < self.EXPORT_LIMIT_UNLIMITED:
+                _LOGGER.warning(
+                    "Rated ESS %s limit is invalid: %s",
+                    label,
+                    rated_value,
+                )
+                return None, "rated"
+            return rated_value, "rated"
 
-            if rated_charge_regs and len(rated_charge_regs) >= 2:
-                rated_charge = self._to_unsigned32(rated_charge_regs[0], rated_charge_regs[1])
-                if 0 < rated_charge < self.EXPORT_LIMIT_UNLIMITED:
-                    values = self._from_unsigned32(rated_charge)
-                    await self._write_holding_registers(self.REG_ESS_MAX_CHARGE_LIMIT, values)
-                    _LOGGER.debug(f"Restored ESS max charge limit to rated: {rated_charge / self.GAIN_POWER} kW")
+        async def write_target(
+            register: int,
+            target: int | None,
+            source: str,
+            label: str,
+        ) -> bool:
+            if target is None:
+                return False
+            try:
+                success = await self._write_holding_registers(
+                    register,
+                    self._from_unsigned32(target),
+                )
+            except Exception as err:
+                _LOGGER.warning("Failed to restore ESS %s limit: %s", label, err)
+                return False
+            if not success:
+                _LOGGER.warning("Failed to write ESS %s limit", label)
+                return False
+            _LOGGER.debug(
+                "Restored ESS max %s limit to %s: %s kW",
+                label,
+                source,
+                target / self.GAIN_POWER,
+            )
+            return True
 
-            if rated_discharge_regs and len(rated_discharge_regs) >= 2:
-                rated_discharge = self._to_unsigned32(rated_discharge_regs[0], rated_discharge_regs[1])
-                if 0 < rated_discharge < self.EXPORT_LIMIT_UNLIMITED:
-                    values = self._from_unsigned32(rated_discharge)
-                    await self._write_holding_registers(self.REG_ESS_MAX_DISCHARGE_LIMIT, values)
-                    _LOGGER.debug(f"Restored ESS max discharge limit to rated: {rated_discharge / self.GAIN_POWER} kW")
-
-        except Exception as e:
-            _LOGGER.warning(f"Failed to restore ESS max limits to rated: {e}")
+        charge_target, charge_source = await resolve_target(
+            self._configured_charge_rate_limit_kw,
+            self.REG_ESS_RATED_CHARGE_POWER,
+            "charge",
+        )
+        discharge_target, discharge_source = await resolve_target(
+            self._configured_discharge_rate_limit_kw,
+            self.REG_ESS_RATED_DISCHARGE_POWER,
+            "discharge",
+        )
+        charge_success = await write_target(
+            self.REG_ESS_MAX_CHARGE_LIMIT,
+            charge_target,
+            charge_source,
+            "charge",
+        )
+        discharge_success = await write_target(
+            self.REG_ESS_MAX_DISCHARGE_LIMIT,
+            discharge_target,
+            discharge_source,
+            "discharge",
+        )
+        return charge_success and discharge_success
 
     async def restore_normal(self, native_control: bool = False) -> bool:
         """Restore normal self-consumption operation.
 
         By default, sets Remote EMS to maximum self-consumption mode (mode 2),
         restores grid export limit to the safety cap, and restores ESS max
-        limits to rated values. Remote EMS stays enabled so PowerSync can
-        transition to charge/discharge modes quickly.
+        limits to configured user caps (or rated values when no caps exist).
+        Remote EMS stays enabled so PowerSync can transition to
+        charge/discharge modes quickly.
 
         When ``native_control`` is true, clears PowerSync limits and disables
         Remote EMS so Sigenergy native/VPP control can resume.
@@ -1425,23 +1531,58 @@ class SigenergyController(InverterController):
             if not export_result:
                 _LOGGER.warning("Failed to restore grid export limit")
 
-            # 3. Restore ESS max limits to rated values
-            await self._restore_ess_max_limits_to_rated()
-
-            if native_control:
-                result = await self.disable_remote_ems()
-                if not result:
-                    return False
+            # 3. Restore durable user caps for PowerSync control. Native/VPP
+            # handoff clears PowerSync's caps back to the hardware ratings.
+            ess_limits_result = await self._restore_ess_max_limits_to_rated(
+                use_configured_caps=not native_control,
+            )
+            if not ess_limits_result:
+                _LOGGER.warning("Failed to fully restore ESS max limits")
 
             # 4. Restore backup reserve if a target is set
             # Sigenergy firmware may reset backup SOC when Remote EMS mode
             # is toggled. Write it back to ensure the user's setting persists.
+            reserve_result = True
             if self._restore_backup_reserve_pct is not None:
-                await self.set_backup_reserve(self._restore_backup_reserve_pct)
-                _LOGGER.info(
-                    "Sigenergy backup reserve restored to %d%%",
-                    self._restore_backup_reserve_pct,
+                reserve_result = await self.set_backup_reserve(
+                    self._restore_backup_reserve_pct
                 )
+                if reserve_result:
+                    _LOGGER.info(
+                        "Sigenergy backup reserve restored to %d%%",
+                        self._restore_backup_reserve_pct,
+                    )
+
+            # 5. Hand control back only after every PowerSync-owned limit and
+            # reserve has been restored. Disabling Remote EMS earlier could
+            # strand a temporary cap if any later cleanup step fails.
+            native_result = True
+            if native_control:
+                if export_result and ess_limits_result and reserve_result:
+                    native_result = await self.disable_remote_ems()
+                else:
+                    native_result = False
+                    _LOGGER.warning(
+                        "Keeping Remote EMS enabled because native cleanup "
+                        "did not restore all limits"
+                    )
+
+            restore_succeeded = bool(
+                export_result
+                and ess_limits_result
+                and native_result
+                and reserve_result
+            )
+            if not restore_succeeded:
+                _LOGGER.warning(
+                    "Sigenergy restore incomplete: export=%s ess_limits=%s "
+                    "native=%s reserve=%s",
+                    export_result,
+                    ess_limits_result,
+                    native_result,
+                    reserve_result,
+                )
+                return False
 
             if native_control:
                 _LOGGER.info("Sigenergy restored to native/VPP control")

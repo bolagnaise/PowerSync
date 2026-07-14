@@ -86,6 +86,37 @@ OPTIMIZER_FORCE_DISCHARGE_MIN_COMMITMENT = timedelta(minutes=20)
 SUNGROW_INFERRED_RESTORE_COOLDOWN = timedelta(minutes=5)
 
 
+def sigenergy_capped_optimizer_limit_w(
+    raw_limit_w: Any,
+    configured_cap_kw: Any,
+) -> int | None:
+    """Return an optimizer limit bounded by the durable Sigenergy cap.
+
+    The optimizer setting remains the user's raw planning preference. The
+    Sigenergy Controls cap is a separate hardware ceiling and must never raise
+    that preference when the cap is increased later.
+    """
+    try:
+        raw_w = None if raw_limit_w is None else max(0, int(float(raw_limit_w)))
+    except (TypeError, ValueError):
+        raw_w = None
+
+    try:
+        cap_w = (
+            None
+            if configured_cap_kw is None
+            else max(0, int(round(float(configured_cap_kw) * 1000)))
+        )
+    except (TypeError, ValueError):
+        cap_w = None
+
+    if cap_w is None:
+        return raw_w
+    if raw_w is None:
+        return cap_w
+    return min(raw_w, cap_w)
+
+
 def _flow_power_network_tariff_rate(
     when: datetime,
     network: str,
@@ -5344,14 +5375,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     projected_text,
                                     opt_reserve * 100,
                                 )
+                                restore_success = True
+                                if hasattr(battery, "restore_normal"):
+                                    restore_success = await battery.restore_normal()
+                                elif hasattr(battery, "set_self_consumption_mode"):
+                                    restore_success = await battery.set_self_consumption_mode()
+                                if restore_success is False:
+                                    _LOGGER.warning(
+                                        "Optimizer: Force-discharge reserve restore failed; "
+                                        "retaining force state for retry"
+                                    )
+                                    return
                                 if force_state.get("scope") == "optimizer":
                                     self._clear_optimizer_force_state()
                                 elif self._force_state_clearer:
                                     self._force_state_clearer()
-                                if hasattr(battery, "restore_normal"):
-                                    await battery.restore_normal()
-                                elif hasattr(battery, "set_self_consumption_mode"):
-                                    await battery.set_self_consumption_mode()
                                 self._last_executed_planned_action = action.action
                                 self._last_executed_action = "self_consumption"
                                 return
@@ -5581,13 +5619,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "force %s to execute new action",
                     force_type, action.action, force_type,
                 )
+                optimizer_force_snapshot = None
                 if force_state.get("scope") == "optimizer":
+                    optimizer_force_snapshot = dict(self._optimizer_force_state)
                     self._clear_optimizer_force_state()
                 elif self._force_state_clearer:
                     self._force_state_clearer()
                 battery = self._executor.battery_controller
+                restore_success = True
                 if hasattr(battery, "restore_normal"):
-                    await battery.restore_normal()
+                    restore_success = await battery.restore_normal()
+                if restore_success is False:
+                    if optimizer_force_snapshot is not None:
+                        self._optimizer_force_state = optimizer_force_snapshot
+                    _LOGGER.warning(
+                        "Optimizer: Restore after canceling force %s failed; "
+                        "retaining optimizer force state for retry",
+                        force_type,
+                    )
+                    return
                 await self._restore_pre_idle_backup_reserve(
                     battery,
                     f"after canceling force {force_type}",
@@ -11411,7 +11461,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "max_grid_charge_price", "grid_charge_soc_cap",
             "allow_grid_charge", "backup_reserve", "horizon_hours",
         ]
-        config_updates = {k: v for k, v in settings.items() if k in config_keys}
+        raw_config_updates = {k: v for k, v in settings.items() if k in config_keys}
+        config_updates = dict(raw_config_updates)
         if "interval_minutes" in settings:
             self._config.interval_minutes = FIXED_OPTIMIZATION_INTERVAL_MINUTES
         if config_updates:
@@ -11441,6 +11492,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         config_updates["horizon_hours"] = horizon_hours
                     else:
                         config_updates.pop("horizon_hours", None)
+
+            if self.battery_system == "sigenergy" and self._entry:
+                from ..const import (
+                    CONF_SIGENERGY_CHARGE_RATE_LIMIT_KW,
+                    CONF_SIGENERGY_DISCHARGE_RATE_LIMIT_KW,
+                )
+
+                if "max_charge_w" in config_updates:
+                    config_updates["max_charge_w"] = (
+                        sigenergy_capped_optimizer_limit_w(
+                            raw_config_updates["max_charge_w"],
+                            self._entry.data.get(
+                                CONF_SIGENERGY_CHARGE_RATE_LIMIT_KW
+                            ),
+                        )
+                    )
+                if "max_discharge_w" in config_updates:
+                    config_updates["max_discharge_w"] = (
+                        sigenergy_capped_optimizer_limit_w(
+                            raw_config_updates["max_discharge_w"],
+                            self._entry.data.get(
+                                CONF_SIGENERGY_DISCHARGE_RATE_LIMIT_KW
+                            ),
+                        )
+                    )
 
             self.update_config(**config_updates)
             response["changes"].append(f"config: {list(config_updates.keys())}")

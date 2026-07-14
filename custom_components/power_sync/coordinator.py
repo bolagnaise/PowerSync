@@ -3823,6 +3823,8 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
         slave_id: int = 1,
         entry_id: str = "",
         max_export_limit_kw: Optional[float] = None,
+        configured_charge_rate_limit_kw: Optional[float] = None,
+        configured_discharge_rate_limit_kw: Optional[float] = None,
     ) -> None:
         """Initialize the coordinator.
 
@@ -3833,6 +3835,8 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
             slave_id: Modbus slave ID (default: 1)
             entry_id: Config entry ID for price lookups
             max_export_limit_kw: User-configured DNSP export limit in kW
+            configured_charge_rate_limit_kw: User-configured normal charge cap in kW
+            configured_discharge_rate_limit_kw: User-configured normal discharge cap in kW
         """
         from .inverters.sigenergy import SigenergyController
 
@@ -3840,7 +3844,14 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
         self.port = port
         self.slave_id = slave_id
         self._entry_id = entry_id
-        self._controller = SigenergyController(host, port, slave_id, max_export_limit_kw=max_export_limit_kw)
+        self._controller = SigenergyController(
+            host,
+            port,
+            slave_id,
+            max_export_limit_kw=max_export_limit_kw,
+            configured_charge_rate_limit_kw=configured_charge_rate_limit_kw,
+            configured_discharge_rate_limit_kw=configured_discharge_rate_limit_kw,
+        )
         self._energy_acc = EnergyAccumulator(hass, "sigenergy")
         # Rated charge/discharge power in kW — cached after first successful
         # read from input registers 30079/30081. Static hardware spec so it

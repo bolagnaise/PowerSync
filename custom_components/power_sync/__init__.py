@@ -567,6 +567,8 @@ from .const import (
     CONF_SIGENERGY_MODBUS_HOST,
     CONF_SIGENERGY_MODBUS_PORT,
     CONF_SIGENERGY_MODBUS_SLAVE_ID,
+    CONF_SIGENERGY_CHARGE_RATE_LIMIT_KW,
+    CONF_SIGENERGY_DISCHARGE_RATE_LIMIT_KW,
     CONF_SIGENERGY_EXPORT_LIMIT_KW,
     CONF_SIGENERGY_ACCESS_TOKEN,
     CONF_SIGENERGY_REFRESH_TOKEN,
@@ -817,7 +819,10 @@ from .currency import (
 )
 from .inverters import get_inverter_controller
 from .tariff_utils import with_hysteresis
-from .optimization.coordinator import OptimizationCoordinator
+from .optimization.coordinator import (
+    OptimizationCoordinator,
+    sigenergy_capped_optimizer_limit_w,
+)
 from .coordinator import (
     AmberPriceCoordinator,
     AmberUsageCoordinator,
@@ -7582,6 +7587,58 @@ def _sigenergy_controls_export_limit_kw(
     )
 
 
+def _sigenergy_controls_rate_limit_kw(
+    configured_rate_limit_kw: float | None,
+    effective_rate_limit_kw: float | None,
+) -> float | None:
+    """Return the durable Controls rate cap, falling back to live hardware."""
+    return (
+        configured_rate_limit_kw
+        if configured_rate_limit_kw is not None
+        else effective_rate_limit_kw
+    )
+
+
+def _validate_sigenergy_settings_payload(
+    body: dict[str, Any],
+) -> tuple[dict[str, Any], str | None]:
+    """Validate and normalize every Sigenergy Controls field before writes."""
+    validated: dict[str, Any] = {}
+
+    if "backup_reserve" in body:
+        try:
+            value = int(body["backup_reserve"])
+        except (ValueError, TypeError):
+            return {}, "Invalid backup_reserve value"
+        if not 0 <= value <= 100:
+            return {}, "backup_reserve must be 0-100"
+        validated["backup_reserve"] = value
+
+    for key in ("charge_rate_limit_kw", "discharge_rate_limit_kw"):
+        if key not in body:
+            continue
+        try:
+            value = float(body[key])
+        except (ValueError, TypeError):
+            return {}, f"Invalid {key} value"
+        if not 0.0 <= value <= 100.0:
+            return {}, f"{key} must be 0-100"
+        validated[key] = value
+
+    if "export_limit_kw" in body:
+        value = body["export_limit_kw"]
+        if value is not None:
+            try:
+                value = float(value)
+            except (ValueError, TypeError):
+                return {}, "Invalid export_limit_kw value"
+            if not 0.0 <= value <= 1000.0:
+                return {}, "export_limit_kw must be 0-1000"
+        validated["export_limit_kw"] = value
+
+    return validated, None
+
+
 class SigenergySettingsView(HomeAssistantView):
     """HTTP view to get/set Sigenergy battery settings for mobile app Controls."""
 
@@ -7634,10 +7691,16 @@ class SigenergySettingsView(HomeAssistantView):
             configured_export_limit_kw = entry.data.get(
                 CONF_SIGENERGY_EXPORT_LIMIT_KW
             )
+            configured_charge_limit_kw = entry.data.get(
+                CONF_SIGENERGY_CHARGE_RATE_LIMIT_KW
+            )
+            configured_discharge_limit_kw = entry.data.get(
+                CONF_SIGENERGY_DISCHARGE_RATE_LIMIT_KW
+            )
 
             # Read current charge/discharge limits and backup reserve from Modbus
-            charge_limit_kw = None
-            discharge_limit_kw = None
+            effective_charge_limit_kw = None
+            effective_discharge_limit_kw = None
             backup_reserve = None
             effective_export_limit_kw = None
 
@@ -7649,8 +7712,8 @@ class SigenergySettingsView(HomeAssistantView):
                     )
                     if charge_regs and len(charge_regs) >= 2:
                         raw = controller._to_unsigned32(charge_regs[0], charge_regs[1])
-                        if 0 < raw < controller.EXPORT_LIMIT_UNLIMITED:
-                            charge_limit_kw = round(raw / controller.GAIN_POWER, 2)
+                        if raw < controller.EXPORT_LIMIT_UNLIMITED:
+                            effective_charge_limit_kw = round(raw / controller.GAIN_POWER, 2)
 
                     # Read discharge rate limit (U32, gain 1000, kW)
                     discharge_regs = await controller._read_holding_registers(
@@ -7658,8 +7721,8 @@ class SigenergySettingsView(HomeAssistantView):
                     )
                     if discharge_regs and len(discharge_regs) >= 2:
                         raw = controller._to_unsigned32(discharge_regs[0], discharge_regs[1])
-                        if 0 < raw < controller.EXPORT_LIMIT_UNLIMITED:
-                            discharge_limit_kw = round(raw / controller.GAIN_POWER, 2)
+                        if raw < controller.EXPORT_LIMIT_UNLIMITED:
+                            effective_discharge_limit_kw = round(raw / controller.GAIN_POWER, 2)
 
                     # Read backup reserve
                     backup_reserve = await controller.get_backup_reserve()
@@ -7694,8 +7757,18 @@ class SigenergySettingsView(HomeAssistantView):
                 "solar_power": data.get("solar_power"),
                 "grid_power": data.get("grid_power"),
                 "load_power": data.get("load_power"),
-                "charge_rate_limit_kw": charge_limit_kw,
-                "discharge_rate_limit_kw": discharge_limit_kw,
+                "charge_rate_limit_kw": _sigenergy_controls_rate_limit_kw(
+                    configured_charge_limit_kw,
+                    effective_charge_limit_kw,
+                ),
+                "configured_charge_rate_limit_kw": configured_charge_limit_kw,
+                "effective_charge_rate_limit_kw": effective_charge_limit_kw,
+                "discharge_rate_limit_kw": _sigenergy_controls_rate_limit_kw(
+                    configured_discharge_limit_kw,
+                    effective_discharge_limit_kw,
+                ),
+                "configured_discharge_rate_limit_kw": configured_discharge_limit_kw,
+                "effective_discharge_rate_limit_kw": effective_discharge_limit_kw,
                 # Controls edits a durable site cap.  Curtailment can
                 # temporarily write 0 kW to the live register, but that
                 # effective value must not replace the configured slider
@@ -7714,8 +7787,8 @@ class SigenergySettingsView(HomeAssistantView):
             _LOGGER.info(
                 "Sigenergy settings: SOC=%.1f%%, charge=%.1fkW, discharge=%.1fkW, backup=%s%%",
                 data.get("battery_level", 0),
-                charge_limit_kw if charge_limit_kw is not None else 0,
-                discharge_limit_kw if discharge_limit_kw is not None else 0,
+                effective_charge_limit_kw if effective_charge_limit_kw is not None else 0,
+                effective_discharge_limit_kw if effective_discharge_limit_kw is not None else 0,
                 backup_reserve if backup_reserve is not None else "?",
             )
             return web.json_response(result)
@@ -7751,6 +7824,12 @@ class SigenergySettingsView(HomeAssistantView):
 
         try:
             body = await _parse_json_request(request)
+            validated, validation_error = _validate_sigenergy_settings_payload(body)
+            if validation_error:
+                return web.json_response(
+                    {"success": False, "error": validation_error},
+                    status=400,
+                )
 
             entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
@@ -7763,74 +7842,40 @@ class SigenergySettingsView(HomeAssistantView):
 
             controller = sigenergy_coordinator._controller
             results = {}
+            new_data = dict(entry.data)
+            new_options = dict(entry.options)
+            persisted_changed = False
+            optimizer_cap_updates = {}
 
-            if "backup_reserve" in body:
-                try:
-                    val = int(body["backup_reserve"])
-                    if not (0 <= val <= 100):
-                        return web.json_response(
-                            {"success": False, "error": "backup_reserve must be 0-100"},
-                            status=400
-                        )
-                    success = await controller.set_backup_reserve(val)
-                    if success:
-                        controller._restore_backup_reserve_pct = val
-                except (ValueError, TypeError):
-                    return web.json_response(
-                        {"success": False, "error": "Invalid backup_reserve value"},
-                        status=400
-                    )
+            if "backup_reserve" in validated:
+                val = validated["backup_reserve"]
+                success = await controller.set_backup_reserve(val)
+                if success:
+                    controller._restore_backup_reserve_pct = val
                 results["backup_reserve"] = success
 
-            if "charge_rate_limit_kw" in body:
-                try:
-                    val = float(body["charge_rate_limit_kw"])
-                    if not (0.0 <= val <= 100.0):
-                        return web.json_response(
-                            {"success": False, "error": "charge_rate_limit_kw must be 0-100"},
-                            status=400
-                        )
-                    success = await controller.set_charge_rate_limit(val)
-                except (ValueError, TypeError):
-                    return web.json_response(
-                        {"success": False, "error": "Invalid charge_rate_limit_kw value"},
-                        status=400
-                    )
+            if "charge_rate_limit_kw" in validated:
+                val = validated["charge_rate_limit_kw"]
+                success = await controller.apply_configured_charge_rate_limit(val)
                 results["charge_rate_limit_kw"] = success
+                if success:
+                    if new_data.get(CONF_SIGENERGY_CHARGE_RATE_LIMIT_KW) != val:
+                        new_data[CONF_SIGENERGY_CHARGE_RATE_LIMIT_KW] = val
+                        persisted_changed = True
+                    optimizer_cap_updates["max_charge_w"] = val
 
-            if "discharge_rate_limit_kw" in body:
-                try:
-                    val = float(body["discharge_rate_limit_kw"])
-                    if not (0.0 <= val <= 100.0):
-                        return web.json_response(
-                            {"success": False, "error": "discharge_rate_limit_kw must be 0-100"},
-                            status=400
-                        )
-                    success = await controller.set_discharge_rate_limit(val)
-                except (ValueError, TypeError):
-                    return web.json_response(
-                        {"success": False, "error": "Invalid discharge_rate_limit_kw value"},
-                        status=400
-                    )
+            if "discharge_rate_limit_kw" in validated:
+                val = validated["discharge_rate_limit_kw"]
+                success = await controller.apply_configured_discharge_rate_limit(val)
                 results["discharge_rate_limit_kw"] = success
+                if success:
+                    if new_data.get(CONF_SIGENERGY_DISCHARGE_RATE_LIMIT_KW) != val:
+                        new_data[CONF_SIGENERGY_DISCHARGE_RATE_LIMIT_KW] = val
+                        persisted_changed = True
+                    optimizer_cap_updates["max_discharge_w"] = val
 
-            if "export_limit_kw" in body:
-                export_limit = body["export_limit_kw"]
-                configured_limit_kw = None
-                if export_limit is not None:
-                    try:
-                        configured_limit_kw = float(export_limit)
-                        if not (0.0 <= configured_limit_kw <= 1000.0):
-                            return web.json_response(
-                                {"success": False, "error": "export_limit_kw must be 0-1000"},
-                                status=400
-                            )
-                    except (ValueError, TypeError):
-                        return web.json_response(
-                            {"success": False, "error": "Invalid export_limit_kw value"},
-                            status=400
-                        )
-
+            if "export_limit_kw" in validated:
+                configured_limit_kw = validated["export_limit_kw"]
                 curtailment_active = (
                     entry_data.get("sigenergy_curtailment_state") == "curtailed"
                 )
@@ -7843,19 +7888,16 @@ class SigenergySettingsView(HomeAssistantView):
                     # Treat the Controls value as the durable site cap, not
                     # just a one-off Modbus write.  Commit config and LP state
                     # only after the inverter accepted the hardware command.
-                    new_data = dict(entry.data)
                     if configured_limit_kw is None:
-                        persisted_changed = CONF_SIGENERGY_EXPORT_LIMIT_KW in new_data
+                        export_persisted_changed = CONF_SIGENERGY_EXPORT_LIMIT_KW in new_data
                         new_data.pop(CONF_SIGENERGY_EXPORT_LIMIT_KW, None)
                     else:
-                        persisted_changed = (
+                        export_persisted_changed = (
                             new_data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW)
                             != configured_limit_kw
                         )
                         new_data[CONF_SIGENERGY_EXPORT_LIMIT_KW] = configured_limit_kw
-                    if persisted_changed:
-                        entry_data["_skip_reload"] = True
-                        self._hass.config_entries.async_update_entry(entry, data=new_data)
+                    persisted_changed = persisted_changed or export_persisted_changed
 
                     opt_coordinator = entry_data.get("optimization_coordinator")
                     if opt_coordinator:
@@ -7870,6 +7912,46 @@ class SigenergySettingsView(HomeAssistantView):
                             opt_coordinator.force_reoptimize()
                         )
                 results["export_limit_kw"] = success
+
+            if optimizer_cap_updates:
+                opt_coordinator = entry_data.get("optimization_coordinator")
+                if opt_coordinator:
+                    optimizer_config_updates = {}
+                    optimizer_key_map = {
+                        "max_charge_w": CONF_OPTIMIZATION_MAX_CHARGE_W,
+                        "max_discharge_w": CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+                    }
+                    for optimizer_key, configured_cap_kw in optimizer_cap_updates.items():
+                        persisted_key = optimizer_key_map[optimizer_key]
+                        raw_limit_w = entry.options.get(
+                            persisted_key,
+                            entry.data.get(persisted_key),
+                        )
+                        if raw_limit_w is None:
+                            raw_limit_w = getattr(
+                                opt_coordinator._config,
+                                optimizer_key,
+                            )
+                            new_options[persisted_key] = int(raw_limit_w)
+                            persisted_changed = True
+                        optimizer_config_updates[optimizer_key] = (
+                            sigenergy_capped_optimizer_limit_w(
+                                raw_limit_w,
+                                configured_cap_kw,
+                            )
+                        )
+                    opt_coordinator.update_config(**optimizer_config_updates)
+                    self._hass.async_create_task(
+                        opt_coordinator.force_reoptimize()
+                    )
+
+            if persisted_changed:
+                entry_data["_skip_reload"] = True
+                self._hass.config_entries.async_update_entry(
+                    entry,
+                    data=new_data,
+                    options=new_options,
+                )
 
             # Trigger coordinator refresh to get updated values
             await sigenergy_coordinator.async_request_refresh()
@@ -18146,6 +18228,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 slave_id=sigenergy_modbus_slave_id,
                 entry_id=entry.entry_id,
                 max_export_limit_kw=sigenergy_export_limit_kw,
+                configured_charge_rate_limit_kw=entry.data.get(
+                    CONF_SIGENERGY_CHARGE_RATE_LIMIT_KW
+                ),
+                configured_discharge_rate_limit_kw=entry.data.get(
+                    CONF_SIGENERGY_DISCHARGE_RATE_LIMIT_KW
+                ),
             )
         else:
             _LOGGER.warning("Sigenergy mode enabled but no Modbus host configured - energy sensors will be unavailable")
@@ -25505,6 +25593,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             entry.data.get(CONF_SIGENERGY_MODBUS_SLAVE_ID, 1),
                         ),
                         max_export_limit_kw=entry.data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW),
+                        configured_charge_rate_limit_kw=entry.data.get(
+                            CONF_SIGENERGY_CHARGE_RATE_LIMIT_KW
+                        ),
+                        configured_discharge_rate_limit_kw=entry.data.get(
+                            CONF_SIGENERGY_DISCHARGE_RATE_LIMIT_KW
+                        ),
                     )
                     try:
                         power_kw = power_w / 1000 if power_w > 0 else 10.0
@@ -25674,6 +25768,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     port=modbus_port,
                     slave_id=modbus_slave_id,
                     max_export_limit_kw=export_limit_kw,
+                    configured_charge_rate_limit_kw=entry.data.get(
+                        CONF_SIGENERGY_CHARGE_RATE_LIMIT_KW
+                    ),
+                    configured_discharge_rate_limit_kw=entry.data.get(
+                        CONF_SIGENERGY_DISCHARGE_RATE_LIMIT_KW
+                    ),
                 )
 
                 # Enable Remote EMS + set discharge mode + set rate
@@ -27036,6 +27136,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             entry.data.get(CONF_SIGENERGY_MODBUS_SLAVE_ID, 1),
                         ),
                         max_export_limit_kw=entry.data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW),
+                        configured_charge_rate_limit_kw=entry.data.get(
+                            CONF_SIGENERGY_CHARGE_RATE_LIMIT_KW
+                        ),
+                        configured_discharge_rate_limit_kw=entry.data.get(
+                            CONF_SIGENERGY_DISCHARGE_RATE_LIMIT_KW
+                        ),
                     )
                     try:
                         power_kw = power_w / 1000 if power_w > 0 else 10.0
@@ -27197,6 +27303,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     port=modbus_port,
                     slave_id=modbus_slave_id,
                     max_export_limit_kw=export_limit_kw,
+                    configured_charge_rate_limit_kw=entry.data.get(
+                        CONF_SIGENERGY_CHARGE_RATE_LIMIT_KW
+                    ),
+                    configured_discharge_rate_limit_kw=entry.data.get(
+                        CONF_SIGENERGY_DISCHARGE_RATE_LIMIT_KW
+                    ),
                 )
 
                 # Cancel active discharge mode if switching to charge
@@ -28614,6 +28726,66 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return True
 
+        def _schedule_sigenergy_restore_retry(reason: str) -> bool:
+            """Retry failed hardware cleanup without losing force state."""
+            if restore_retry_count >= 3:
+                _LOGGER.error(
+                    "Sigenergy restore_normal still failing after %d retries; "
+                    "leaving force state active for manual restore (%s)",
+                    restore_retry_count,
+                    reason,
+                )
+                return False
+
+            retry_state = (
+                force_charge_state
+                if restore_was_force_charging or force_charge_state.get("active")
+                else force_discharge_state
+            )
+            retry_at = dt_util.utcnow() + timedelta(seconds=60)
+            next_retry = restore_retry_count + 1
+
+            async def _retry_sigenergy_restore(_now):
+                if source != "optimizer" and not (
+                    force_charge_state.get("active")
+                    or force_discharge_state.get("active")
+                ):
+                    _LOGGER.debug(
+                        "Sigenergy restore retry skipped; force state is no longer active"
+                    )
+                    return
+                _LOGGER.warning(
+                    "Retrying Sigenergy restore_normal after incomplete restore "
+                    "(%s, attempt %d)",
+                    reason,
+                    next_retry,
+                )
+                await hass.services.async_call(
+                    DOMAIN,
+                    SERVICE_RESTORE_NORMAL,
+                    {
+                        "source": source,
+                        "_restore_retry": next_retry,
+                        "_allow_monitoring_restore": True,
+                        "_native_control": sigenergy_native_control,
+                    },
+                    blocking=True,
+                )
+
+            if retry_state.get("cancel_expiry_timer"):
+                retry_state["cancel_expiry_timer"]()
+            retry_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                hass,
+                _retry_sigenergy_restore,
+                retry_at,
+            )
+            _LOGGER.warning(
+                "Sigenergy restore_normal incomplete; retry %d scheduled in 60 seconds (%s)",
+                next_retry,
+                reason,
+            )
+            return True
+
         def _saved_hold_soc_backup_reserve() -> int | None:
             saved = hold_soc_state.get("saved_backup_reserve")
             if saved is None:
@@ -28637,6 +28809,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 if not modbus_host:
                     _LOGGER.warning("Restore normal: Sigenergy Modbus host not configured")
+                    _schedule_sigenergy_restore_retry("Modbus host not configured")
+                    if source == "optimizer":
+                        raise HomeAssistantError(
+                            "Sigenergy restore failed: Modbus host not configured"
+                        )
+                    return
                 else:
                     modbus_port = entry.options.get(
                         CONF_SIGENERGY_MODBUS_PORT,
@@ -28653,6 +28831,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         port=modbus_port,
                         slave_id=modbus_slave_id,
                         max_export_limit_kw=export_limit_kw,
+                        configured_charge_rate_limit_kw=entry.data.get(
+                            CONF_SIGENERGY_CHARGE_RATE_LIMIT_KW
+                        ),
+                        configured_discharge_rate_limit_kw=entry.data.get(
+                            CONF_SIGENERGY_DISCHARGE_RATE_LIMIT_KW
+                        ),
                     )
 
                     native_control = sigenergy_native_control
@@ -28672,6 +28856,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             )
                     else:
                         _LOGGER.warning("Sigenergy restore_normal failed")
+                        # Keep force state active and retry hardware cleanup
+                        # instead of reporting a false successful restore.
+                        _schedule_sigenergy_restore_retry("hardware restore returned false")
+                        if source == "optimizer":
+                            raise HomeAssistantError(
+                                "Sigenergy hardware restore returned false"
+                            )
+                        return
 
                 if _restore_superseded("Sigenergy restore"):
                     return
@@ -28719,8 +28911,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 await persist_force_mode_state()
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 _LOGGER.error(f"Error in Sigenergy restore normal: {e}", exc_info=True)
+                _schedule_sigenergy_restore_retry(str(e))
+                if source == "optimizer":
+                    raise HomeAssistantError(
+                        "Sigenergy restore_normal failed"
+                    ) from e
                 return
 
         # Check if this is a FoxESS system
@@ -30081,13 +30280,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             "ESS limits restored)"
                         )
                     else:
-                        _LOGGER.warning("Sigenergy self-consumption restore failed")
+                        raise HomeAssistantError(
+                            "Sigenergy self-consumption restore failed"
+                        )
                 else:
-                    _LOGGER.error("Self-consumption: Sigenergy coordinator/controller not available")
+                    raise HomeAssistantError(
+                        "Sigenergy self-consumption coordinator/controller unavailable"
+                    )
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 _LOGGER.error(f"Error setting Sigenergy self-consumption: {e}", exc_info=True)
-                return
+                raise HomeAssistantError(
+                    "Sigenergy self-consumption restore failed"
+                ) from e
 
         # Check if this is an AlphaESS system
         is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
@@ -34201,10 +34408,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             saved_capacity_wh = _positive_int_setting(
                 CONF_OPTIMIZATION_BATTERY_CAPACITY_WH
             )
-            saved_max_charge_w = _positive_int_setting(
+            saved_max_charge_w = _nonnegative_optional_int_setting(
                 CONF_OPTIMIZATION_MAX_CHARGE_W
             )
-            saved_max_discharge_w = _positive_int_setting(
+            saved_max_discharge_w = _nonnegative_optional_int_setting(
                 CONF_OPTIMIZATION_MAX_DISCHARGE_W
             )
             saved_max_grid_import_w = _positive_int_setting(
@@ -34274,6 +34481,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 optimizer_config_updates["max_charge_w"] = saved_max_charge_w
             if saved_max_discharge_w is not None:
                 optimizer_config_updates["max_discharge_w"] = saved_max_discharge_w
+            if is_sigenergy:
+                configured_charge_limit_kw = entry.data.get(
+                    CONF_SIGENERGY_CHARGE_RATE_LIMIT_KW
+                )
+                configured_discharge_limit_kw = entry.data.get(
+                    CONF_SIGENERGY_DISCHARGE_RATE_LIMIT_KW
+                )
+                if configured_charge_limit_kw is not None:
+                    optimizer_config_updates["max_charge_w"] = (
+                        sigenergy_capped_optimizer_limit_w(
+                            saved_max_charge_w,
+                            configured_charge_limit_kw,
+                        )
+                    )
+                if configured_discharge_limit_kw is not None:
+                    optimizer_config_updates["max_discharge_w"] = (
+                        sigenergy_capped_optimizer_limit_w(
+                            saved_max_discharge_w,
+                            configured_discharge_limit_kw,
+                        )
+                    )
             optimizer_config_updates["max_grid_import_w"] = saved_max_grid_import_w
             optimizer_config_updates["max_grid_export_w"] = saved_max_grid_export_w
             optimizer_config_updates["max_grid_charge_price"] = (
