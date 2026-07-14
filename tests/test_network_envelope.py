@@ -379,3 +379,112 @@ def test_configured_missing_status_or_expiry_source_fails_closed() -> None:
     assert snapshot.effective_limit_w == 1500
     assert snapshot.active_export_permitted is False
     assert "release gate" in snapshot.reason
+
+
+class _StrictStates:
+    """State registry that rejects invalid optional entity lookups."""
+
+    def __init__(self, values):
+        self.values = values
+        self.calls = []
+
+    def get(self, entity_id):
+        if entity_id in (None, ""):
+            raise AssertionError(f"invalid state lookup: {entity_id!r}")
+        self.calls.append(entity_id)
+        return self.values.get(entity_id)
+
+
+def _manager_with_source_schedule(schedule_entity=...):
+    now = datetime.now(timezone.utc)
+    source_schedule = [
+        {
+            "start": now.isoformat(),
+            "end": (now + timedelta(minutes=30)).isoformat(),
+            "limit_w": 1_500,
+        }
+    ]
+    values = {
+        "sensor.limit": SimpleNamespace(
+            state="10000",
+            attributes={
+                "unit_of_measurement": "W",
+                "status": "valid",
+                "valid_until": (now + timedelta(hours=1)).isoformat(),
+                "schedule": source_schedule,
+            },
+            last_updated=now,
+        ),
+    }
+    data = {
+        "network_export_mode": "monitoring",
+        "network_export_scope": "aggregate_pcc",
+        "network_export_limit_entity": "sensor.limit",
+        "network_export_fallback_limit_w": 500,
+    }
+    if schedule_entity is not ...:
+        data["network_export_schedule_entity"] = schedule_entity
+    states = _StrictStates(values)
+    manager = network.HANetworkEnvelopeManager(
+        SimpleNamespace(states=states),
+        SimpleNamespace(entry_id="powersync", data=data, options={}),
+        lambda: None,
+    )
+    manager._fresh_post_subscription = True
+    manager._last_received_at = now
+
+    async def trusted(_entity_id):
+        return network.ProvenanceResult(True)
+
+    manager._provenance = trusted
+    return manager, states, now
+
+
+@pytest.mark.parametrize("schedule_entity", [..., None, ""])
+def test_unset_schedule_entity_uses_source_attribute_without_lookup(
+    schedule_entity,
+) -> None:
+    manager, states, _now = _manager_with_source_schedule(schedule_entity)
+
+    snapshot = asyncio.run(manager._build_snapshot())
+
+    assert [point.limit_w for point in snapshot.schedule] == [1_500]
+    assert states.calls == ["sensor.limit"]
+
+
+def test_configured_schedule_entity_still_overrides_source_attribute() -> None:
+    manager, states, now = _manager_with_source_schedule("sensor.schedule")
+    states.values["sensor.schedule"] = SimpleNamespace(
+        state="active",
+        attributes={
+            "schedule": [
+                {
+                    "start": now.isoformat(),
+                    "end": (now + timedelta(minutes=30)).isoformat(),
+                    "limit_w": 2_500,
+                }
+            ]
+        },
+        last_updated=now,
+    )
+
+    snapshot = asyncio.run(manager._build_snapshot())
+
+    assert [point.limit_w for point in snapshot.schedule] == [2_500]
+    assert states.calls == ["sensor.limit", "sensor.schedule"]
+
+
+@pytest.mark.parametrize("pcc_entity", [..., None, ""])
+def test_unset_pcc_entity_returns_unavailable_without_lookup(pcc_entity) -> None:
+    data = {}
+    if pcc_entity is not ...:
+        data["network_export_pcc_power_entity"] = pcc_entity
+    states = _StrictStates({})
+    manager = network.HANetworkEnvelopeManager(
+        SimpleNamespace(states=states),
+        SimpleNamespace(entry_id="powersync", data=data, options={}),
+        lambda: None,
+    )
+
+    assert manager.pcc_export_w() == (None, None)
+    assert states.calls == []

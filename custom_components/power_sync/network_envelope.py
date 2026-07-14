@@ -457,7 +457,10 @@ class HANetworkEnvelopeManager:
             or expiry is None
         ):
             status = "invalid_expiry_source"
-        schedule_state = self.hass.states.get(settings.get("network_export_schedule_entity"))
+        schedule_entity = str(settings.get("network_export_schedule_entity") or "")
+        schedule_state = (
+            self.hass.states.get(schedule_entity) if schedule_entity else None
+        )
         schedule_raw = (
             (getattr(schedule_state, "attributes", {}) or {}).get("schedule")
             if schedule_state is not None
@@ -547,7 +550,10 @@ class HANetworkEnvelopeManager:
     def pcc_export_w(self) -> tuple[float | None, datetime | None]:
         settings = dict(getattr(self.entry, "data", {}) or {})
         settings.update(getattr(self.entry, "options", {}) or {})
-        state = self.hass.states.get(settings.get("network_export_pcc_power_entity"))
+        pcc_entity = str(settings.get("network_export_pcc_power_entity") or "")
+        if not pcc_entity:
+            return None, None
+        state = self.hass.states.get(pcc_entity)
         value = _state_power_w(state, allow_negative=True)
         if value is None:
             return None, None
