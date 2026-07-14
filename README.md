@@ -14,7 +14,7 @@
 
 </div>
 
-> **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, AlphaESS, ESY Sunhome, Solax, SAJ, Fronius, SolarEdge, Neovolt, Bytewatt, Anker, Amber Electric, Localvolts, Flow Power, GloBird, Octopus Energy, EPEX/ENTSO-E, or AEMO. Use at your own risk.
+> **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, AlphaESS, ESY Sunhome, Solax, SAJ, Fronius, SolarEdge, Neovolt, Bytewatt, Anker, Amber Electric, Localvolts, Flow Power, GloBird, CovaU, SA Power Networks, Octopus Energy, EPEX/ENTSO-E, or AEMO. Use at your own risk.
 
 > [!WARNING]
 > **The built-in optimizer is actively under development.** You should expect occasional bugs and schedules that don't behave as expected — particularly on unusual tariffs, battery configurations, or edge cases. If you see something odd, please report it on [Discord](https://discord.gg/eaWDWxEWE3) with your tariff details and the action plan it generated.
@@ -68,6 +68,7 @@ Solar inverters that bypass the battery can be curtailed during negative feed-in
 | **Localvolts** | Australia | Real-time 5-min wholesale pricing (API key + Partner ID) |
 | **Flow Power / AEMO** | Australia | Wholesale pricing |
 | **Globird / AEMO VPP** | Australia | Retail tariff schedule + AEMO spike detection |
+| **CovaU SolarMax** | Australia | Fixture-backed NSW, Queensland and South Australia stepped tariffs with measured daily free-import and premium-export quotas |
 | **Octopus Energy** | UK | Dynamic 30-min (Agile, Go, Intelligent Go, Flux, Tracker). Reads from [BottlecapDave's integration](https://github.com/BottlecapDave/HomeAssistant-OctopusEnergy) when installed |
 | **EPEX Day-Ahead** | EU (DE, AT, BE, NL, DK, SE) | Hourly day-ahead pricing with configurable surcharge & tax |
 | **NZ TOU** | New Zealand | Static TOU (Octopus NZ, Electric Kiwi, Contact Energy, Custom) |
@@ -115,7 +116,8 @@ Or manually:
 | Feature | Description | Wiki |
 |---------|-------------|------|
 | **Battery System Setup** | Tesla, FoxESS, Sigenergy, GoodWe, Sungrow, AlphaESS, ESY Sunhome, Solax Hybrid, SAJ H2/HS2, Fronius GEN24 storage, SolarEdge, Anker Solix, and custom/external controller setup guides | [Setup Guide](https://github.com/bolagnaise/PowerSync/wiki/Battery-System-Setup) |
-| **Smart Optimization** | Built-in LP optimizer calculates optimal charge/discharge schedule using prices, solar, and load. Optional controls include Profit Max, Charge By Time, auto-applied forecast reserve, selected household load history, planned EV load, and GloBird ZeroHero/ZeroCharge settlement overlays for versioned plan terms such as Jul 2026 and older legacy plans. **Solar forecasting via Solcast or Open-Meteo Solar Forecast must be configured for accurate scheduling.** | [Details](https://github.com/bolagnaise/PowerSync/wiki/Smart-Optimization) |
+| **Smart Optimization** | Built-in LP optimizer calculates optimal charge/discharge schedule using prices, solar, and load. Optional controls include Profit Max, Charge By Time, auto-applied forecast reserve, selected household load history, planned EV load, and measured quota settlement for GloBird ZeroHero/ZeroCharge and CovaU SolarMax. **Solar forecasting via Solcast or Open-Meteo Solar Forecast must be configured for accurate scheduling.** | [Details](https://github.com/bolagnaise/PowerSync/wiki/Smart-Optimization) |
+| **Flexible Exports** | Reads a fail-closed operating envelope from separately certified site equipment exposed in Home Assistant. This release is monitoring-only while the required SAPN site soak is completed; active enforcement remains release-gated. PowerSync is not a CSIP-AUS client and provides no network-limit override. | [Details](https://github.com/bolagnaise/PowerSync/wiki/Smart-Optimization#network-export-limits--flexible-exports) |
 | **EV Smart Charging** | Coordinate EV charging with battery optimization — Solar, Cheapest, Deadline modes | [Details](https://github.com/bolagnaise/PowerSync/wiki/EV-Smart-Charging) |
 | **Advanced Features** | AEMO spike detection, solar curtailment, spike protection, export boost, **off-grid control** | [Details](https://github.com/bolagnaise/PowerSync/wiki/Advanced-Features) |
 | **Sensors** | Core power sensors, daily energy tracking, FoxESS Modbus sensors, optimizer status | [Full List](https://github.com/bolagnaise/PowerSync/wiki/Sensors) |

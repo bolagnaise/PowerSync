@@ -2205,6 +2205,15 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const ev = Array.isArray(schedule.ev_charging_w) ? schedule.ev_charging_w : [];
     const importPrice = Array.isArray(schedule.import_price) ? schedule.import_price : [];
     const exportPrice = Array.isArray(schedule.export_price) ? schedule.export_price : [];
+    const gridExportLimit = Array.isArray(schedule.grid_export_limit_w)
+      ? schedule.grid_export_limit_w
+      : [];
+    const hasGridExportLimit = gridExportLimit.some(value => (
+      value !== null
+      && value !== undefined
+      && value !== ''
+      && Number.isFinite(Number(value))
+    ));
     const intervalMinutes = this._intervalMinutes(timestamps);
     const count = Math.min(
       Math.round(24 * 60 / intervalMinutes),
@@ -2226,6 +2235,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         evKw: this._kw(ev[i]),
         importPrice: this._minorPrice(importPrice[i]),
         exportPrice: this._minorPrice(exportPrice[i]),
+        gridExportLimitKw: this._kw(gridExportLimit[i]),
       });
     }
 
@@ -2243,6 +2253,13 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         ];
     if (hasEv) {
       powerSeries.push({ key: 'evKw', label: 'EV', color: '#7E57C2' });
+    }
+    if (hasGridExportLimit) {
+      powerSeries.push({
+        key: 'gridExportLimitKw',
+        label: 'Network export limit',
+        color: '#EC407A',
+      });
     }
     const reserve = this._optimizerReserve(data);
     const idleHold = this._idleHoldReserve(data);
@@ -5593,6 +5610,16 @@ class PowerSyncStrategy {
       const globirdCard = _globirdProvider(findProviderSensor);
       if (globirdCard) left.push(globirdCard);
     }
+    if (hasProviderSensor('covau', ['plan', 'free_import_remaining', 'premium_export_remaining'])) {
+      const covauCard = _covauProvider(findProviderSensor);
+      if (covauCard) left.push(covauCard);
+    }
+
+    // Read-only operating envelope from certified site equipment.  This card
+    // deliberately exposes no limit override or bypass control.
+    if (hasE('network_export_limit')) {
+      left.push(_networkExportEnvelope(e('network_export_limit')));
+    }
 
     // --- Left Column: Missing dependency warnings ---
     if (missing.length > 0) {
@@ -7482,6 +7509,44 @@ function _globirdProvider(findProviderSensor) {
     title: 'GloBird Pricing',
     show_header_toggle: false,
     entities,
+  };
+}
+
+function _covauProvider(findProviderSensor) {
+  const candidates = [
+    ['plan', 'SolarMax Plan'],
+    ['free_import_remaining', 'Free Import Remaining'],
+    ['premium_export_remaining', 'Premium Export Remaining'],
+  ];
+  const entities = candidates
+    .map(([suffix, name]) => {
+      const entity = findProviderSensor('covau', suffix);
+      return entity ? { entity, name } : null;
+    })
+    .filter(Boolean);
+  if (entities.length === 0) return null;
+  return {
+    type: 'entities',
+    title: 'CovaU SolarMax',
+    show_header_toggle: false,
+    entities,
+  };
+}
+
+function _networkExportEnvelope(entity) {
+  return {
+    type: 'entities',
+    title: 'Grid Connection / Flexible Exports',
+    show_header_toggle: false,
+    entities: [
+      { entity, name: 'Current Export Limit', icon: 'mdi:transmission-tower-export' },
+      { type: 'attribute', entity, attribute: 'mode', name: 'Mode' },
+      { type: 'attribute', entity, attribute: 'source_status', name: 'Source' },
+      { type: 'attribute', entity, attribute: 'fallback_limit_w', name: 'Approved Fallback', suffix: ' W' },
+      { type: 'attribute', entity, attribute: 'next_limit_w', name: 'Next Limit', suffix: ' W' },
+      { type: 'attribute', entity, attribute: 'next_change_at', name: 'Next Change' },
+      { type: 'attribute', entity, attribute: 'reason', name: 'Status' },
+    ],
   };
 }
 

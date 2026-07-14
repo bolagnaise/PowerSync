@@ -77,7 +77,7 @@ def _install_sensor_stubs() -> None:
     )
     ha_config_entries.ConfigEntry = type("ConfigEntry", (), {})
     ha_const.UnitOfEnergy = SimpleNamespace(KILO_WATT_HOUR="kWh")
-    ha_const.UnitOfPower = SimpleNamespace(KILO_WATT="kW")
+    ha_const.UnitOfPower = SimpleNamespace(KILO_WATT="kW", WATT="W")
     ha_const.UnitOfTemperature = SimpleNamespace(CELSIUS="°C")
     ha_const.UnitOfTime = SimpleNamespace(HOURS="h")
     ha_const.PERCENTAGE = "%"
@@ -282,6 +282,73 @@ def test_flow_power_current_import_price_prefers_tariff_schedule():
     assert attrs["final_rate_cents"] == 25.0
     assert attrs["price_source"] == "flow_power_kwatch"
     assert attrs["price_spike"] is None
+
+
+def test_covau_price_and_quota_sensors_use_live_provider_contract():
+    sensor = _sensor_module()
+    entry = _entry("covau")
+    contract = {
+        "plan": {
+            "plan_id": "COV1117616MRE2@EME",
+            "display_name": "SolarMax SA Residential TOU",
+        },
+        "prices": {
+            "import": {"c_per_kwh": 0.0, "base_c_per_kwh": 35.17},
+            "export": {"c_per_kwh": 15.0, "base_c_per_kwh": 5.0},
+        },
+        "tariff_day": "2026-05-03",
+        "settlement_confidence": "authoritative",
+        "settlement_reason": None,
+        "quotas": {
+            "import": {
+                "rule_id": "covau_solarmax_free_import",
+                "remaining_kwh": 42.5,
+            },
+            "export": {
+                "rule_id": "covau_solarmax_premium_export",
+                "remaining_kwh": 21.25,
+            },
+        },
+    }
+    coordinator = SimpleNamespace(get_provider_contract=lambda: contract)
+    hass = SimpleNamespace(
+        config=SimpleNamespace(currency="AUD"),
+        data={
+            sensor.DOMAIN: {
+                entry.entry_id: {"optimization_coordinator": coordinator}
+            }
+        },
+    )
+
+    import_price = sensor.TariffPriceSensor(
+        hass,
+        entry,
+        sensor.SENSOR_TYPE_CURRENT_IMPORT_PRICE,
+        "Current Import Price",
+    )
+    export_price = sensor.TariffPriceSensor(
+        hass,
+        entry,
+        sensor.SENSOR_TYPE_CURRENT_EXPORT_PRICE,
+        "Current Export Price",
+    )
+    free_remaining = sensor.CovaUProviderSensor(
+        hass,
+        entry,
+        sensor.COVAU_SENSOR_IMPORT_REMAINING,
+    )
+    premium_remaining = sensor.CovaUProviderSensor(
+        hass,
+        entry,
+        sensor.COVAU_SENSOR_EXPORT_REMAINING,
+    )
+
+    assert import_price.native_value == 0.0
+    assert export_price.native_value == 0.15
+    assert import_price.extra_state_attributes["quota"]["remaining_kwh"] == 42.5
+    assert free_remaining.native_value == 42.5
+    assert premium_remaining.native_value == 21.25
+    assert free_remaining.extra_state_attributes["settlement_confidence"] == "authoritative"
 
 
 def test_dedicated_flow_power_import_price_keeps_coordinator_calculation():

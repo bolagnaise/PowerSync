@@ -203,6 +203,7 @@ from .const import (
     SENSOR_FAMILY_LP_OPTIMIZER,
     SENSOR_FAMILY_BATTERY,
     SENSOR_FAMILY_SOLAR_INVERTER,
+    SENSOR_FAMILY_GRID_HOME,
     SENSOR_FAMILY_PRICING,
     SENSOR_FAMILY_FLOW_POWER,
     SENSOR_FAMILY_AEMO,
@@ -232,6 +233,7 @@ from .flow_power_pricing import (
     calculate_flow_power_pea,
     resolve_flow_power_pricing_context,
 )
+from .network_envelope import HANetworkEnvelopeManager, NetworkExportEnvelope
 from . import get_current_price_from_tariff_schedule
 
 _LOGGER = logging.getLogger(__name__)
@@ -1524,6 +1526,62 @@ SOLCAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
 )
 
 
+class NetworkExportLimitSensor(SensorEntity):
+    """Expose the certified controller's read-only network export envelope."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Network Export Limit"
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 0
+    _attr_icon = "mdi:transmission-tower-export"
+
+    def __init__(
+        self,
+        manager: HANetworkEnvelopeManager,
+        entry: ConfigEntry,
+    ) -> None:
+        self._manager = manager
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_network_export_limit"
+        self._attr_suggested_object_id = "power_sync_network_export_limit"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_GRID_HOME)
+
+    @property
+    def native_value(self) -> float | None:
+        return self._manager.snapshot.effective_limit_w
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        snapshot = self._manager.snapshot
+        attributes = snapshot.to_dict()
+        next_change = snapshot.next_change_at
+        attributes["next_limit_w"] = (
+            snapshot.limit_for_interval(
+                next_change,
+                next_change + timedelta(seconds=1),
+            )
+            if next_change is not None
+            else None
+        )
+        return attributes
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(self._manager.add_listener(self._handle_envelope_update))
+
+    @callback
+    def _handle_envelope_update(
+        self,
+        _old: NetworkExportEnvelope,
+        _new: NetworkExportEnvelope,
+    ) -> None:
+        self.async_write_ha_state()
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -1563,6 +1621,15 @@ async def async_setup_entry(
     is_anker_solix = domain_data.get("is_anker_solix", False)
 
     entities: list[SensorEntity] = []
+    electricity_provider = entry.options.get(
+        CONF_ELECTRICITY_PROVIDER,
+        entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
+    )
+
+    network_envelope_manager = domain_data.get("network_envelope_manager")
+    if network_envelope_manager is not None:
+        entities.append(NetworkExportLimitSensor(network_envelope_manager, entry))
+        _LOGGER.info("Network export limit sensor added")
 
     # Add price sensors
     # For Amber/Localvolts users: use AmberPriceSensor with live API data
@@ -1602,11 +1669,14 @@ async def async_setup_entry(
         # The sensor handles missing tariff_schedule gracefully (returns None until
         # the tariff is fetched later during setup). This avoids a race condition
         # where sensors were skipped because tariff_schedule hadn't been fetched yet.
-        electricity_provider = entry.options.get(
-            CONF_ELECTRICITY_PROVIDER,
-            entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
+        tou_providers = (
+            "globird",
+            "covau",
+            "aemo_vpp",
+            "other",
+            "tou_only",
+            "octopus",
         )
-        tou_providers = ("globird", "aemo_vpp", "other", "tou_only", "octopus")
         tariff_schedule = domain_data.get("tariff_schedule")
         if tariff_schedule or electricity_provider in tou_providers:
             _LOGGER.info(
@@ -1631,6 +1701,17 @@ async def async_setup_entry(
             )
         else:
             _LOGGER.debug("No price coordinator or known provider - skipping price sensors")
+
+    if electricity_provider == "covau":
+        entities.extend(
+            CovaUProviderSensor(hass, entry, sensor_type)
+            for sensor_type in (
+                COVAU_SENSOR_PLAN,
+                COVAU_SENSOR_IMPORT_REMAINING,
+                COVAU_SENSOR_EXPORT_REMAINING,
+            )
+        )
+        _LOGGER.info("CovaU plan and quota sensors added")
 
     # Add energy sensors - select the correct coordinator for battery system type
     # All coordinators return data with same field names (solar_power, grid_power, etc.)
@@ -3587,6 +3668,157 @@ class LPForecastSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity):
 
 
 SIGNAL_TARIFF_UPDATED = "power_sync_tariff_updated_{}"
+COVAU_SENSOR_PLAN = "covau_plan"
+COVAU_SENSOR_IMPORT_REMAINING = "covau_free_import_remaining"
+COVAU_SENSOR_EXPORT_REMAINING = "covau_premium_export_remaining"
+
+
+def _covau_provider_contract_for_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> dict[str, Any] | None:
+    """Read the live CovaU contract, with a conservative config fallback."""
+    runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    quota_runtime = runtime.get("covau_quota_runtime")
+    if quota_runtime is not None:
+        return quota_runtime.contract()
+    coordinator = runtime.get("optimization_coordinator")
+    if coordinator is not None and hasattr(coordinator, "get_provider_contract"):
+        contract = coordinator.get_provider_contract()
+        if contract is not None:
+            return contract
+
+    from .const import (
+        CONF_COVAU_EXPORT_ENERGY_ENTITY,
+        CONF_COVAU_IMPORT_ENERGY_ENTITY,
+        CONF_COVAU_PLAN_SNAPSHOT,
+    )
+
+    raw = entry.options.get(
+        CONF_COVAU_PLAN_SNAPSHOT,
+        entry.data.get(CONF_COVAU_PLAN_SNAPSHOT),
+    )
+    if not isinstance(raw, dict):
+        return None
+    try:
+        from .covau import (
+            CovaUPlanSnapshot,
+            covau_provider_contract,
+            covau_quota_rules,
+        )
+        from .quota import QuotaLedger
+
+        snapshot = CovaUPlanSnapshot.from_dict(raw)
+        return covau_provider_contract(
+            snapshot,
+            QuotaLedger(covau_quota_rules(snapshot)),
+            import_energy_entity=entry.options.get(
+                CONF_COVAU_IMPORT_ENERGY_ENTITY,
+                entry.data.get(CONF_COVAU_IMPORT_ENERGY_ENTITY),
+            ),
+            export_energy_entity=entry.options.get(
+                CONF_COVAU_EXPORT_ENERGY_ENTITY,
+                entry.data.get(CONF_COVAU_EXPORT_ENERGY_ENTITY),
+            ),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+class CovaUProviderSensor(SensorEntity):
+    """Expose the selected SolarMax plan and measured daily quota balances."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        sensor_type: str,
+    ) -> None:
+        self.hass = hass
+        self._entry = entry
+        self._sensor_type = sensor_type
+        self._attr_unique_id = f"{entry.entry_id}_{sensor_type}"
+        self._attr_has_entity_name = True
+        self._attr_suggested_object_id = f"power_sync_{sensor_type}"
+        self._unsub_time_interval = None
+        if sensor_type == COVAU_SENSOR_PLAN:
+            self._attr_name = "CovaU Plan"
+            self._attr_icon = "mdi:file-document-outline"
+        elif sensor_type == COVAU_SENSOR_IMPORT_REMAINING:
+            self._attr_name = "CovaU Free Import Remaining"
+            self._attr_icon = "mdi:transmission-tower-import"
+            self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+            self._attr_device_class = SensorDeviceClass.ENERGY
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+            self._attr_suggested_display_precision = 2
+        else:
+            self._attr_name = "CovaU Premium Export Remaining"
+            self._attr_icon = "mdi:transmission-tower-export"
+            self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+            self._attr_device_class = SensorDeviceClass.ENERGY
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+            self._attr_suggested_display_precision = 2
+
+    @property
+    def device_info(self):
+        return provider_pricing_device_info(self._entry.entry_id, "covau")
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+
+        @callback
+        def _periodic_update(_now=None):
+            self.async_write_ha_state()
+
+        self._unsub_time_interval = async_track_time_interval(
+            self.hass,
+            _periodic_update,
+            timedelta(minutes=1),
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._unsub_time_interval:
+            self._unsub_time_interval()
+
+    @property
+    def native_value(self) -> str | float | None:
+        contract = _covau_provider_contract_for_entry(self.hass, self._entry)
+        if not contract:
+            return None
+        if self._sensor_type == COVAU_SENSOR_PLAN:
+            return contract.get("plan", {}).get("display_name")
+        direction = (
+            "import"
+            if self._sensor_type == COVAU_SENSOR_IMPORT_REMAINING
+            else "export"
+        )
+        value = contract.get("quotas", {}).get(direction, {}).get("remaining_kwh")
+        return float(value) if value is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        contract = _covau_provider_contract_for_entry(self.hass, self._entry)
+        if not contract:
+            return {}
+        attributes: dict[str, Any] = {
+            "tariff_day": contract.get("tariff_day"),
+            "settlement_confidence": contract.get("settlement_confidence"),
+            "settlement_reason": contract.get("settlement_reason"),
+            "plan": contract.get("plan"),
+        }
+        if self._sensor_type == COVAU_SENSOR_PLAN:
+            attributes["prices"] = contract.get("prices")
+            attributes["quotas"] = contract.get("quotas")
+            attributes["import_energy_entity"] = contract.get("import_energy_entity")
+            attributes["export_energy_entity"] = contract.get("export_energy_entity")
+        else:
+            direction = (
+                "import"
+                if self._sensor_type == COVAU_SENSOR_IMPORT_REMAINING
+                else "export"
+            )
+            attributes.update(contract.get("quotas", {}).get(direction, {}))
+        return attributes
 
 
 class TariffScheduleSensor(SensorEntity):
@@ -3921,6 +4153,22 @@ class TariffPriceSensor(PowerSyncCurrencyMixin, RestoredNumericStateMixin, Senso
     @property
     def native_value(self) -> float | None:
         """Return the current price from tariff schedule."""
+        electricity_provider = self._entry.options.get(
+            CONF_ELECTRICITY_PROVIDER,
+            self._entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
+        )
+        if electricity_provider == "covau":
+            contract = _covau_provider_contract_for_entry(self.hass, self._entry)
+            if contract:
+                direction = (
+                    "import"
+                    if self._sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE
+                    else "export"
+                )
+                price = contract.get("prices", {}).get(direction, {}).get("c_per_kwh")
+                if price is not None:
+                    return round(float(price) / 100.0, 4)
+
         tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
         if not tariff_data:
             return self._restored_numeric_value(self._sensor_type)
@@ -3942,6 +4190,33 @@ class TariffPriceSensor(PowerSyncCurrencyMixin, RestoredNumericStateMixin, Senso
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return additional attributes."""
+        electricity_provider = self._entry.options.get(
+            CONF_ELECTRICITY_PROVIDER,
+            self._entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
+        )
+        if electricity_provider == "covau":
+            contract = _covau_provider_contract_for_entry(self.hass, self._entry)
+            if not contract:
+                return {}
+            direction = (
+                "import"
+                if self._sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE
+                else "export"
+            )
+            return _entity_currency_attrs(
+                self,
+                {
+                    "source": "covau_aer_cdr",
+                    "current_period": contract.get("quotas", {})
+                    .get(direction, {})
+                    .get("rule_id"),
+                    "plan_name": contract.get("plan", {}).get("display_name"),
+                    "plan_id": contract.get("plan", {}).get("plan_id"),
+                    "settlement_confidence": contract.get("settlement_confidence"),
+                    "quota": contract.get("quotas", {}).get(direction),
+                },
+            )
+
         tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
         if not tariff_data:
             return {}

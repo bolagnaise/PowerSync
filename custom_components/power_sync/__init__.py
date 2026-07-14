@@ -788,6 +788,7 @@ from .const import (
     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
     CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
     CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+    CONF_NETWORK_EXPORT_PCC_MAX_AGE_SECONDS,
     CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
     CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
@@ -819,6 +820,11 @@ from .currency import (
 )
 from .inverters import get_inverter_controller
 from .tariff_utils import with_hysteresis
+from .network_envelope import (
+    ExportGuard,
+    HANetworkEnvelopeManager,
+    NetworkExportEnvelope,
+)
 from .optimization.coordinator import (
     OptimizationCoordinator,
     sigenergy_capped_optimizer_limit_w,
@@ -2382,6 +2388,27 @@ class AEMOSpikeManager:
     async def _enter_spike_mode(self, current_price: float) -> None:
         """Enter spike mode: save tariff, switch to autonomous, upload spike tariff."""
 
+        entry_runtime = (
+            getattr(self.hass, "data", {})
+            .get("power_sync", {})
+            .get(getattr(self.entry, "entry_id", ""), {})
+        )
+        envelope_guard = entry_runtime.get("network_export_guard")
+        blocked_reason = None
+        if (
+            envelope_guard is not None
+            and envelope_guard.manager.snapshot.mode != "off"
+        ):
+            snapshot = envelope_guard.manager.snapshot
+            blocked_reason = snapshot.fault or snapshot.reason or snapshot.mode
+        if blocked_reason is not None:
+            _LOGGER.warning(
+                "AEMO Tesla spike export blocked by network envelope (%s); "
+                "tariff-driven export cannot be clamped to a watt-level headroom",
+                blocked_reason,
+            )
+            return
+
         _LOGGER.warning(
             "SPIKE DETECTED: $%.2f/MWh >= $%.0f/MWh threshold - entering spike mode",
             current_price,
@@ -3048,6 +3075,27 @@ class SavingSessionTariffManager:
 
     async def _enter_session_mode(self, session) -> None:
         """Save tariff, create session tariff, upload to Tesla."""
+
+        entry_runtime = (
+            getattr(self.hass, "data", {})
+            .get("power_sync", {})
+            .get(getattr(self.entry, "entry_id", ""), {})
+        )
+        envelope_guard = entry_runtime.get("network_export_guard")
+        blocked_reason = None
+        if (
+            envelope_guard is not None
+            and envelope_guard.manager.snapshot.mode != "off"
+        ):
+            snapshot = envelope_guard.manager.snapshot
+            blocked_reason = snapshot.fault or snapshot.reason or snapshot.mode
+        if blocked_reason is not None:
+            _LOGGER.warning(
+                "Octopus Tesla saving-session export blocked by network envelope (%s); "
+                "tariff-driven export cannot be clamped to a watt-level headroom",
+                blocked_reason,
+            )
+            return
 
         _LOGGER.warning(
             "SAVING SESSION STARTING: %s (%s - %s, %d octopoints/kWh) - entering session mode",
@@ -7199,6 +7247,25 @@ async def _parse_json_request(request: web.Request, max_bytes: int = MAX_REQUEST
     return _json.loads(body_bytes)
 
 
+def _network_envelope_blocks_unguarded_export_write(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> str | None:
+    """Deny legacy direct-write endpoints when the network envelope is enabled.
+
+    Those endpoints predate the centralized guard and their actuator methods do
+    not accept a clamped power value. They must not form a bypass around the
+    guarded service/coordinator command paths.
+    """
+    guard = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get(
+        "network_export_guard"
+    )
+    if guard is None or guard.manager.snapshot.mode == "off":
+        return None
+    snapshot = guard.manager.snapshot
+    return snapshot.fault or snapshot.reason or snapshot.mode
+
+
 class SungrowSettingsView(HomeAssistantView):
     """HTTP view to get Sungrow battery settings for mobile app Controls."""
 
@@ -7527,7 +7594,16 @@ class SungrowDiagnosticsView(HomeAssistantView):
 
             if "export_limit_w" in body:
                 export_limit = body["export_limit_w"]
-                if export_limit is None:
+                blocked_reason = _network_envelope_blocks_unguarded_export_write(
+                    self._hass, entry
+                )
+                if blocked_reason is not None:
+                    success = False
+                    _LOGGER.warning(
+                        "Sungrow export-limit write blocked by network envelope (%s)",
+                        blocked_reason,
+                    )
+                elif export_limit is None:
                     success = await sungrow_coordinator.set_export_limit(None)
                 else:
                     try:
@@ -7554,7 +7630,17 @@ class SungrowDiagnosticsView(HomeAssistantView):
 
             if "force_discharge" in body:
                 if body["force_discharge"]:
-                    success = await sungrow_coordinator.force_discharge()
+                    blocked_reason = _network_envelope_blocks_unguarded_export_write(
+                        self._hass, entry
+                    )
+                    if blocked_reason is not None:
+                        success = False
+                        _LOGGER.warning(
+                            "Sungrow direct force discharge blocked by network envelope (%s)",
+                            blocked_reason,
+                        )
+                    else:
+                        success = await sungrow_coordinator.force_discharge()
                 else:
                     success = await sungrow_coordinator.restore_normal()
                 results["force_discharge"] = success
@@ -8131,8 +8217,24 @@ class FoxESSSettingsView(HomeAssistantView):
                 # App sends 0-based indices: 0=Self Use, 1=Feed-in, 2=Backup,
                 # 3=Force Charge, 4=Force Discharge.
                 # Translate to model-specific register values (H3-Pro/Smart use 1-based).
+                blocked_reason = (
+                    _network_envelope_blocks_unguarded_export_write(
+                        self._hass, entry
+                    )
+                    if requested_mode in (0, 1, 4)
+                    else None
+                )
+                if blocked_reason is not None:
+                    results["work_mode"] = False
+                    _LOGGER.warning(
+                        "FoxESS export-capable work mode blocked by network envelope (%s)",
+                        blocked_reason,
+                    )
+                    requested_mode = -1
                 controller = foxess_coordinator._controller
-                if controller and hasattr(controller, '_register_map') and controller._register_map:
+                if requested_mode < 0:
+                    success = False
+                elif controller and hasattr(controller, '_register_map') and controller._register_map:
                     reg = controller._register_map
                     mode_map = {
                         0: reg.work_mode_self_use,
@@ -8192,7 +8294,17 @@ class FoxESSSettingsView(HomeAssistantView):
 
             if "force_discharge" in body:
                 if body["force_discharge"]:
-                    success = await foxess_coordinator.force_discharge()
+                    blocked_reason = _network_envelope_blocks_unguarded_export_write(
+                        self._hass, entry
+                    )
+                    if blocked_reason is not None:
+                        success = False
+                        _LOGGER.warning(
+                            "FoxESS direct force discharge blocked by network envelope (%s)",
+                            blocked_reason,
+                        )
+                    else:
+                        success = await foxess_coordinator.force_discharge()
                 else:
                     success = await foxess_coordinator.restore_normal()
                 results["force_discharge"] = success
@@ -9036,6 +9148,82 @@ class ProviderConfigView(HomeAssistantView):
                     ),
                 }
 
+            elif electricity_provider == "covau":
+                from .const import (
+                    CONF_COVAU_DISTRIBUTOR,
+                    CONF_COVAU_EXPORT_ENERGY_ENTITY,
+                    CONF_COVAU_IMPORT_ENERGY_ENTITY,
+                    CONF_COVAU_MANUAL_TARIFF,
+                    CONF_COVAU_PLAN_ID,
+                    CONF_COVAU_PLAN_SNAPSHOT,
+                    CONF_COVAU_POSTCODE,
+                )
+
+                def _covau_entry_value(key: str, default=None):
+                    return entry.options.get(key, entry.data.get(key, default))
+
+                entry_runtime = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                quota_runtime = entry_runtime.get("covau_quota_runtime")
+                opt_coordinator = entry_runtime.get("optimization_coordinator")
+                provider_contract = (
+                    quota_runtime.contract()
+                    if quota_runtime is not None
+                    else opt_coordinator.get_provider_contract()
+                    if opt_coordinator is not None
+                    and hasattr(opt_coordinator, "get_provider_contract")
+                    else None
+                )
+                if provider_contract is None:
+                    snapshot_raw = _covau_entry_value(CONF_COVAU_PLAN_SNAPSHOT)
+                    if isinstance(snapshot_raw, dict):
+                        try:
+                            from .covau import (
+                                CovaUPlanSnapshot,
+                                covau_provider_contract,
+                                covau_quota_rules,
+                            )
+                            from .quota import QuotaLedger
+
+                            snapshot = CovaUPlanSnapshot.from_dict(snapshot_raw)
+                            provider_contract = covau_provider_contract(
+                                snapshot,
+                                QuotaLedger(covau_quota_rules(snapshot)),
+                                import_energy_entity=_covau_entry_value(
+                                    CONF_COVAU_IMPORT_ENERGY_ENTITY
+                                ),
+                                export_energy_entity=_covau_entry_value(
+                                    CONF_COVAU_EXPORT_ENERGY_ENTITY
+                                ),
+                            )
+                        except (KeyError, TypeError, ValueError):
+                            _LOGGER.warning(
+                                "CovaU provider config contains an invalid plan snapshot",
+                                exc_info=True,
+                            )
+
+                config_metadata = {
+                    "postcode": _covau_entry_value(CONF_COVAU_POSTCODE, ""),
+                    "plan_id": _covau_entry_value(CONF_COVAU_PLAN_ID, ""),
+                    "distributor": _covau_entry_value(CONF_COVAU_DISTRIBUTOR, ""),
+                    "manual_tariff": bool(
+                        _covau_entry_value(CONF_COVAU_MANUAL_TARIFF, False)
+                    ),
+                    "import_energy_entity": _covau_entry_value(
+                        CONF_COVAU_IMPORT_ENERGY_ENTITY, ""
+                    ),
+                    "export_energy_entity": _covau_entry_value(
+                        CONF_COVAU_EXPORT_ENERGY_ENTITY, ""
+                    ),
+                }
+                # The mobile/public v1 contract lives at config root. Keep the
+                # setup metadata as additive fields so older settings screens
+                # still have their read-only identifiers during rollout.
+                config = (
+                    {**provider_contract, **config_metadata}
+                    if isinstance(provider_contract, dict)
+                    else config_metadata
+                )
+
             elif electricity_provider == "flow_power":
                 # Flow Power settings
                 config = {
@@ -9375,6 +9563,18 @@ class ProviderConfigView(HomeAssistantView):
             return web.json_response(
                 {"success": False, "error": "PowerSync not configured"},
                 status=503
+            )
+
+        if entry.options.get(
+            CONF_ELECTRICITY_PROVIDER,
+            entry.data.get(CONF_ELECTRICITY_PROVIDER),
+        ) == "covau":
+            return web.json_response(
+                {
+                    "success": False,
+                    "error": "CovaU plan snapshots and settlement meters are read-only here; use Home Assistant options to change them",
+                },
+                status=405,
             )
 
         try:
@@ -17681,6 +17881,89 @@ async def async_remove_config_entry_device(
     )
 
 
+class NetworkEnvelopeView(HomeAssistantView):
+    """Read-only network export envelope endpoint."""
+
+    url = "/api/power_sync/network_envelope"
+    name = "api:power_sync:network_envelope"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._hass = hass
+        self._entry = entry
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return the entry's current atomic network envelope snapshot."""
+        entry_data = self._hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        manager = entry_data.get("network_envelope_manager")
+        if manager is None:
+            return web.json_response(
+                {
+                    "success": False,
+                    "error": "Network export envelope is not initialized",
+                },
+                status=503,
+            )
+        return web.json_response(
+            {
+                "success": True,
+                "network_envelope": manager.snapshot.to_dict(),
+            }
+        )
+
+
+def _sync_covau_withdrawn_plan_issue(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    electricity_provider: str,
+) -> None:
+    """Keep using an immutable withdrawn snapshot while raising an HA repair."""
+    from homeassistant.helpers import issue_registry as ir
+
+    issue_id = f"covau_plan_withdrawn_{entry.entry_id}"
+    snapshot = entry.options.get(
+        "covau_plan_snapshot",
+        entry.data.get("covau_plan_snapshot"),
+    )
+    if (
+        electricity_provider != "covau"
+        or not isinstance(snapshot, dict)
+        or snapshot.get("manual")
+        or not snapshot.get("withdrawn_date")
+    ):
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+        return
+
+    raw_withdrawn = str(snapshot["withdrawn_date"])
+    try:
+        withdrawn_date = datetime.fromisoformat(
+            raw_withdrawn.replace("Z", "+00:00")
+        ).date()
+    except ValueError:
+        _LOGGER.warning(
+            "CovaU cached plan %s has an invalid withdrawn date: %s",
+            snapshot.get("plan_id"),
+            raw_withdrawn,
+        )
+        return
+    if withdrawn_date > dt_util.now().date():
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+        return
+
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id,
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="covau_plan_withdrawn",
+        translation_placeholders={
+            "plan_id": str(snapshot.get("plan_id") or "unknown"),
+            "withdrawn_date": raw_withdrawn,
+        },
+    )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
     _LOGGER.info("=" * 60)
@@ -17755,6 +18038,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_ELECTRICITY_PROVIDER,
         entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
     )
+    _sync_covau_withdrawn_plan_issue(hass, entry, electricity_provider)
     has_amber = bool(entry.data.get(CONF_AMBER_API_TOKEN))
 
     # Determine correct title based on provider
@@ -17772,6 +18056,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         expected_title = "PowerSync EPEX"
     elif electricity_provider == "nz":
         expected_title = "PowerSync NZ"
+    elif electricity_provider == "covau":
+        expected_title = "PowerSync CovaU SolarMax"
     else:
         expected_title = "PowerSync Amber"
 
@@ -17844,7 +18130,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Check for custom tariff providers (Globird, AEMO VPP, etc.)
     # These don't need a real-time pricing API — they use a TOU schedule from config
     # (synced to Tesla if Tesla, or used directly for Sungrow/FoxESS/etc.)
-    has_custom_tariff_provider = electricity_provider in ("globird", "aemo_vpp", "tou_only", "other", "nz")
+    has_custom_tariff_provider = electricity_provider in (
+        "globird",
+        "aemo_vpp",
+        "tou_only",
+        "other",
+        "nz",
+        "covau",
+    )
     has_tesla_site = bool(entry.data.get(CONF_TESLA_ENERGY_SITE_ID))
 
     def _is_monitoring_mode() -> bool:
@@ -19643,6 +19936,194 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "_mode_stick_failures": [],  # list of timestamps for calibration detection
         "_calibration_check_unsub": None,
     }
+
+    if electricity_provider == "covau":
+        from .const import (
+            CONF_COVAU_EXPORT_ENERGY_ENTITY,
+            CONF_COVAU_IMPORT_ENERGY_ENTITY,
+            CONF_COVAU_PLAN_SNAPSHOT,
+            CONF_CUSTOM_GRID_POWER_ENTITY,
+        )
+        from .covau import CovaUPlanSnapshot, CovaUQuotaRuntime
+
+        def _covau_grid_power_kw() -> float | None:
+            """Read PCC power dynamically; positive import, negative export."""
+            custom_entity = entry.options.get(
+                CONF_CUSTOM_GRID_POWER_ENTITY,
+                entry.data.get(CONF_CUSTOM_GRID_POWER_ENTITY),
+            )
+            if custom_entity:
+                state = hass.states.get(custom_entity)
+                try:
+                    value = float(getattr(state, "state", None))
+                except (TypeError, ValueError):
+                    value = None
+                if value is not None:
+                    unit = str(
+                        (getattr(state, "attributes", {}) or {}).get(
+                            "unit_of_measurement", "W"
+                        )
+                    ).lower()
+                    return value if unit == "kw" else value / 1000.0
+
+            runtime_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            for key in (
+                "tesla_coordinator",
+                "sigenergy_coordinator",
+                "sungrow_coordinator",
+                "foxess_coordinator",
+                "goodwe_coordinator",
+                "alphaess_coordinator",
+                "esy_sunhome_coordinator",
+                "solax_coordinator",
+                "saj_h2_coordinator",
+                "fronius_reserva_coordinator",
+                "neovolt_coordinator",
+                "solaredge_coordinator",
+                "anker_solix_coordinator",
+            ):
+                coordinator_data = getattr(runtime_data.get(key), "data", None)
+                if not isinstance(coordinator_data, dict):
+                    continue
+                try:
+                    return float(coordinator_data["grid_power"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+            return None
+
+        snapshot_raw = entry.options.get(
+            CONF_COVAU_PLAN_SNAPSHOT,
+            entry.data.get(CONF_COVAU_PLAN_SNAPSHOT),
+        )
+        try:
+            covau_snapshot = CovaUPlanSnapshot.from_dict(snapshot_raw)
+            covau_runtime = CovaUQuotaRuntime(
+                hass,
+                entry,
+                covau_snapshot,
+                grid_power_kw_getter=_covau_grid_power_kw,
+                import_energy_entity=entry.options.get(
+                    CONF_COVAU_IMPORT_ENERGY_ENTITY,
+                    entry.data.get(CONF_COVAU_IMPORT_ENERGY_ENTITY),
+                ),
+                export_energy_entity=entry.options.get(
+                    CONF_COVAU_EXPORT_ENERGY_ENTITY,
+                    entry.data.get(CONF_COVAU_EXPORT_ENERGY_ENTITY),
+                ),
+            )
+            await covau_runtime.async_start()
+        except Exception as err:
+            _LOGGER.exception("CovaU quota runtime initialization failed: %s", err)
+        else:
+            hass.data[DOMAIN][entry.entry_id]["covau_quota_runtime"] = covau_runtime
+            _LOGGER.info(
+                "CovaU measured quota settlement initialized for plan %s",
+                covau_snapshot.plan_id,
+            )
+
+    def _network_static_export_limit_w() -> float | None:
+        """Return the configured static site cap for envelope normalization."""
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        optimization = entry_data.get("optimization_coordinator")
+        configured = getattr(getattr(optimization, "_config", None), "max_grid_export_w", None)
+        if configured is None:
+            configured = entry.options.get(
+                CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+                entry.data.get(CONF_OPTIMIZATION_MAX_GRID_EXPORT_W),
+            )
+        try:
+            value = float(configured)
+        except (TypeError, ValueError):
+            return None
+        return max(0.0, value)
+
+    async def _stop_guarded_network_export() -> bool:
+        """Conservatively release active PowerSync export control on a guard fault."""
+        if not hass.services.has_service(DOMAIN, SERVICE_RESTORE_NORMAL):
+            _LOGGER.error(
+                "Network export guard could not stop export: restore service unavailable"
+            )
+            return False
+        try:
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_RESTORE_NORMAL,
+                {
+                    "source": "network_envelope",
+                    "_force_restore": True,
+                    "_allow_monitoring_restore": True,
+                },
+                blocking=True,
+            )
+        except Exception as err:
+            _LOGGER.error("Network export guard restore failed: %s", err)
+            return False
+
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        if entry_data.get("force_discharge_state", {}).get("active"):
+            return False
+        active_getter = getattr(
+            entry_data.get("optimization_coordinator"),
+            "get_active_force_state",
+            None,
+        )
+        if callable(active_getter):
+            try:
+                active_force = active_getter() or {}
+            except Exception as err:
+                _LOGGER.debug(
+                    "Network export guard could not verify optimizer force state: %s",
+                    err,
+                )
+                return False
+            if active_force.get("active") and active_force.get("type") in {
+                "discharge",
+                "export",
+            }:
+                return False
+        return True
+
+    network_envelope_manager = HANetworkEnvelopeManager(
+        hass,
+        entry,
+        _network_static_export_limit_w,
+    )
+    try:
+        pcc_max_age_seconds = int(
+            entry.options.get(
+                CONF_NETWORK_EXPORT_PCC_MAX_AGE_SECONDS,
+                entry.data.get(CONF_NETWORK_EXPORT_PCC_MAX_AGE_SECONDS, 120),
+            )
+        )
+    except (TypeError, ValueError):
+        pcc_max_age_seconds = 120
+    network_export_guard = ExportGuard(
+        network_envelope_manager,
+        stop_export=_stop_guarded_network_export,
+        pcc_max_age_seconds=max(1, pcc_max_age_seconds),
+    )
+    hass.data[DOMAIN][entry.entry_id]["network_envelope_manager"] = (
+        network_envelope_manager
+    )
+    hass.data[DOMAIN][entry.entry_id]["network_export_guard"] = network_export_guard
+    try:
+        await network_envelope_manager.async_start()
+    except Exception as err:
+        _LOGGER.exception("Network export envelope initialization failed: %s", err)
+        try:
+            await network_envelope_manager.async_set_fault(
+                "network export envelope initialization failed"
+            )
+        except Exception:
+            _LOGGER.debug(
+                "Could not publish the network export envelope startup fault",
+                exc_info=True,
+            )
+    hass.http.register_view(NetworkEnvelopeView(hass, entry))
+    _LOGGER.info(
+        "Network export envelope initialized in %s mode",
+        network_envelope_manager.snapshot.mode,
+    )
 
     # Build the local Powerwall coordinator before entities are created. Tesla
     # energy sensors attach a second listener to this coordinator so paired
@@ -25541,6 +26022,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return
 
+        # Every service-originated export path (manual, automation, optimizer
+        # hardware extension) passes this single entry-scoped gate before the
+        # brand router below can reach an actuator. Numeric zero is a real
+        # deny limit; it must never fall through to a brand's "0 means max"
+        # convention.
+        network_guard = _fd_entry_data.get("network_export_guard")
+        if network_guard is not None:
+            command_power_w = await network_guard.clamp_requested_export_w(
+                command_power_w
+            )
+            if command_power_w <= 0:
+                snapshot = network_guard.manager.snapshot
+                _LOGGER.warning(
+                    "Force discharge blocked by network envelope (%s)",
+                    snapshot.fault or snapshot.reason or snapshot.mode,
+                )
+                return
+
+        async def _guarded_force_discharge_write(writer) -> bool:
+            """Recheck the atomic envelope immediately before an actuator write."""
+            if network_guard is None:
+                return bool(await writer(command_power_w))
+            return await network_guard.async_guard_write(command_power_w, writer)
+
         extend_hardware = call.data.get("_extend_hardware", False)
 
         # Hardware-only path: fires for BOTH (a) optimizer-issued dispatch and
@@ -25555,18 +26060,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             foxess_coord = entry_data.get("foxess_coordinator")
             if foxess_coord:
                 min_timeout = duration * 60 if source == "optimizer" else 600
-                await foxess_coord.force_discharge(
-                    duration,
-                    power_w=power_w,
-                    min_timeout_seconds=min_timeout,
+                await _guarded_force_discharge_write(
+                    lambda guarded_w: foxess_coord.force_discharge(
+                        duration,
+                        power_w=guarded_w,
+                        min_timeout_seconds=min_timeout,
+                    )
                 )
                 _LOGGER.debug(f"FoxESS force discharge hardware extended ({duration}min, {power_w}W)")
                 return
             sig_coord = entry_data.get("sigenergy_coordinator")
             if sig_coord and getattr(sig_coord, "_controller", None):
                 controller = sig_coord._controller
-                power_kw = power_w / 1000 if power_w > 0 else 10.0
-                await controller.force_discharge(power_kw=power_kw)
+                await _guarded_force_discharge_write(
+                    lambda guarded_w: controller.force_discharge(
+                        power_kw=guarded_w / 1000
+                    )
+                )
                 _LOGGER.debug(f"Sigenergy force discharge hardware extended ({duration}min)")
                 return
             if entry.data.get(CONF_SIGENERGY_STATION_ID):
@@ -25596,8 +26106,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         ),
                     )
                     try:
-                        power_kw = power_w / 1000 if power_w > 0 else 10.0
-                        await controller.force_discharge(power_kw=power_kw)
+                        await _guarded_force_discharge_write(
+                            lambda guarded_w: controller.force_discharge(
+                                power_kw=guarded_w / 1000
+                            )
+                        )
                         _LOGGER.debug(
                             "Sigenergy force discharge hardware extended without coordinator (%dmin)",
                             duration,
@@ -25614,9 +26127,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     and hasattr(sungrow_coord, "force_grid_export")
                 )
                 if spread_export_active:
-                    await sungrow_coord.force_grid_export(
-                        duration,
-                        export_limit_w=power_w,
+                    await _guarded_force_discharge_write(
+                        lambda guarded_w: sungrow_coord.force_grid_export(
+                            duration,
+                            export_limit_w=guarded_w,
+                        )
                     )
                     _LOGGER.debug(
                         "Sungrow spread export hardware refreshed (%dmin, export_limit=%.0fW)",
@@ -25624,55 +26139,89 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         power_w,
                     )
                 else:
-                    await sungrow_coord.force_discharge(duration, power_w=power_w)
+                    await _guarded_force_discharge_write(
+                        lambda guarded_w: sungrow_coord.force_discharge(
+                            duration, power_w=guarded_w
+                        )
+                    )
                     _LOGGER.debug(f"Sungrow force discharge hardware extended ({duration}min)")
                 return
             goodwe_coord = entry_data.get("goodwe_coordinator")
             if goodwe_coord:
-                await _restore_goodwe_curtailment_for_export(
-                    entry_data,
-                    "optimizer force discharge",
-                    force=True,
+                await _guarded_force_discharge_write(
+                    lambda _guarded_w: _restore_goodwe_curtailment_for_export(
+                        entry_data,
+                        "optimizer force discharge",
+                        force=True,
+                    )
                 )
-                await goodwe_coord.force_discharge(duration, power_w=power_w)
+                await _guarded_force_discharge_write(
+                    lambda guarded_w: goodwe_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
                 _LOGGER.debug(f"GoodWe force discharge hardware extended ({duration}min)")
                 return
             alphaess_coord = entry_data.get("alphaess_coordinator")
             if alphaess_coord:
-                await alphaess_coord.force_discharge(duration, power_w=power_w)
+                await _guarded_force_discharge_write(
+                    lambda guarded_w: alphaess_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
                 _LOGGER.debug(f"AlphaESS force discharge hardware extended ({duration}min, {power_w}W)")
                 return
             esy_coord = entry_data.get("esy_sunhome_coordinator")
             if esy_coord:
-                await esy_coord.force_discharge(duration, power_w=power_w)
+                await _guarded_force_discharge_write(
+                    lambda guarded_w: esy_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
                 _LOGGER.debug(f"ESY Sunhome force discharge hardware extended ({duration}min)")
                 return
             fronius_coord = entry_data.get("fronius_reserva_coordinator")
             if fronius_coord:
-                await fronius_coord.force_discharge(duration, power_w=power_w)
+                await _guarded_force_discharge_write(
+                    lambda guarded_w: fronius_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
                 _LOGGER.debug(f"Fronius GEN24 storage force discharge hardware refreshed ({duration}min, {power_w}W)")
                 return
             neovolt_coord = entry_data.get("neovolt_coordinator")
             if neovolt_coord:
-                await neovolt_coord.force_discharge(
-                    duration,
-                    power_w=power_w,
-                    preserve_restore_modes=True,
+                await _guarded_force_discharge_write(
+                    lambda guarded_w: neovolt_coord.force_discharge(
+                        duration,
+                        power_w=guarded_w,
+                        preserve_restore_modes=True,
+                    )
                 )
                 _LOGGER.debug(f"Neovolt force discharge hardware refreshed ({duration}min, {power_w}W)")
                 return
             solaredge_coord = entry_data.get("solaredge_coordinator")
             if solaredge_coord:
-                await _restore_solaredge_curtailment_for_dispatch(
-                    entry_data,
-                    "optimizer force discharge",
+                await _guarded_force_discharge_write(
+                    lambda _guarded_w: _restore_solaredge_curtailment_for_dispatch(
+                        entry_data,
+                        "optimizer force discharge",
+                    )
                 )
-                await solaredge_coord.force_discharge(duration, power_w=power_w)
+                await _guarded_force_discharge_write(
+                    lambda guarded_w: solaredge_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
                 _LOGGER.debug(f"SolarEdge force discharge hardware refreshed ({duration}min, {power_w}W)")
                 return
             anker_coord = entry_data.get("anker_solix_coordinator")
             if anker_coord:
-                await anker_coord.force_discharge(duration, power_w=power_w)
+                await _guarded_force_discharge_write(
+                    lambda guarded_w: anker_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
                 _LOGGER.debug(f"Anker Solix force discharge hardware refreshed ({duration}min, {power_w}W)")
                 return
             _LOGGER.debug(
@@ -25773,8 +26322,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 # Enable Remote EMS + set discharge mode + set rate
                 power_w = command_power_w
-                power_kw = power_w / 1000 if power_w > 0 else 10.0
-                result = await controller.force_discharge(power_kw=power_kw)
+                power_kw = power_w / 1000
+                result = await _guarded_force_discharge_write(
+                    lambda guarded_w: controller.force_discharge(
+                        power_kw=guarded_w / 1000
+                    )
+                )
                 await controller.disconnect()
 
                 if result:
@@ -25830,7 +26383,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 power_w = command_power_w
-                discharge_result = await foxess_coord.force_discharge(duration, power_w=power_w)
+                discharge_result = await _guarded_force_discharge_write(
+                    lambda guarded_w: foxess_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
 
                 if discharge_result:
                     force_discharge_state["active"] = True
@@ -25886,12 +26443,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 power_w = command_power_w
-                await _restore_goodwe_curtailment_for_export(
-                    entry_data,
-                    "force discharge",
-                    force=True,
+                await _guarded_force_discharge_write(
+                    lambda _guarded_w: _restore_goodwe_curtailment_for_export(
+                        entry_data,
+                        "force discharge",
+                        force=True,
+                    )
                 )
-                discharge_result = await goodwe_coord.force_discharge(duration, power_w=power_w)
+                discharge_result = await _guarded_force_discharge_write(
+                    lambda guarded_w: goodwe_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
 
                 if discharge_result:
                     force_discharge_state["active"] = True
@@ -25944,7 +26507,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 power_w = command_power_w
-                discharge_result = await alphaess_coord.force_discharge(duration, power_w=power_w)
+                discharge_result = await _guarded_force_discharge_write(
+                    lambda guarded_w: alphaess_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
 
                 if discharge_result:
                     force_discharge_state["active"] = True
@@ -25997,7 +26564,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 power_w = command_power_w
-                discharge_result = await esy_coord.force_discharge(duration, power_w=power_w)
+                discharge_result = await _guarded_force_discharge_write(
+                    lambda guarded_w: esy_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
 
                 if discharge_result:
                     force_discharge_state["active"] = True
@@ -26054,7 +26625,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 power_w = command_power_w
-                discharge_result = await solax_coord.force_discharge(duration, power_w=power_w)
+                discharge_result = await _guarded_force_discharge_write(
+                    lambda guarded_w: solax_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
 
                 if discharge_result:
                     force_discharge_state["active"] = True
@@ -26104,7 +26679,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 power_w = command_power_w
-                discharge_result = await saj_coord.force_discharge(duration, power_w=power_w)
+                discharge_result = await _guarded_force_discharge_write(
+                    lambda guarded_w: saj_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
 
                 if discharge_result:
                     force_discharge_state["active"] = True
@@ -26154,7 +26733,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 power_w = command_power_w
-                discharge_result = await fronius_coord.force_discharge(duration, power_w=power_w)
+                discharge_result = await _guarded_force_discharge_write(
+                    lambda guarded_w: fronius_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
 
                 if discharge_result:
                     force_discharge_state["active"] = True
@@ -26205,7 +26788,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 power_w = command_power_w
-                discharge_result = await neovolt_coord.force_discharge(duration, power_w=power_w)
+                discharge_result = await _guarded_force_discharge_write(
+                    lambda guarded_w: neovolt_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
 
                 if discharge_result:
                     force_discharge_state["active"] = True
@@ -26256,7 +26843,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 power_w = command_power_w
-                discharge_result = await sungrow_coord.force_discharge(duration, power_w=power_w)
+                discharge_result = await _guarded_force_discharge_write(
+                    lambda guarded_w: sungrow_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
 
                 if discharge_result:
                     force_discharge_state["active"] = True
@@ -26340,11 +26931,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 power_w = command_power_w
-                await _restore_solaredge_curtailment_for_dispatch(
-                    entry_data,
-                    "force discharge",
+                await _guarded_force_discharge_write(
+                    lambda _guarded_w: _restore_solaredge_curtailment_for_dispatch(
+                        entry_data,
+                        "force discharge",
+                    )
                 )
-                discharge_result = await solaredge_coord.force_discharge(duration, power_w=power_w)
+                discharge_result = await _guarded_force_discharge_write(
+                    lambda guarded_w: solaredge_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
 
                 if discharge_result:
                     force_discharge_state["active"] = True
@@ -26407,7 +27004,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_charge_state["expires_at"] = None
 
                 power_w = command_power_w
-                discharge_result = await anker_coord.force_discharge(duration, power_w=power_w)
+                discharge_result = await _guarded_force_discharge_write(
+                    lambda guarded_w: anker_coord.force_discharge(
+                        duration, power_w=guarded_w
+                    )
+                )
 
                 if discharge_result:
                     force_discharge_state["active"] = True
@@ -26456,6 +27057,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not site_configs:
                 force_discharge_state["active"] = False
                 _LOGGER.error("Missing Tesla site ID or token for force discharge")
+                return
+
+            # Tesla force discharge is tariff-driven and exposes no numeric
+            # discharge-power actuator. Passing a clamped value through the
+            # guard and then ignoring it would be unsafe, so Flexible Exports
+            # keeps this brand path deny-only.
+            if (
+                network_guard is not None
+                and network_guard.manager.snapshot.mode != "off"
+            ):
+                force_discharge_state["active"] = False
+                _LOGGER.warning(
+                    "Tesla tariff-driven force discharge blocked while the network "
+                    "envelope is %s because it cannot accept a watt-level clamp",
+                    network_guard.manager.snapshot.mode,
+                )
                 return
 
             session = async_get_clientsession(hass)
@@ -30132,6 +30749,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return
 
+        # A self-consumption transition can release a previous zero-export or
+        # forced mode and thereby increase PCC export. Keep it on the same
+        # deny-only path as explicit discharge. Monitoring suppresses the
+        # transition; Active requires a healthy, armed envelope and checks
+        # fresh PCC telemetry before any brand-specific actuator is reached.
+        _sc_entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        _sc_guard = _sc_entry_data.get("network_export_guard")
+        if _sc_guard is not None and _sc_guard.manager.snapshot.mode != "off":
+            _sc_snapshot = _sc_guard.manager.snapshot
+            if _sc_snapshot.mode == "monitoring":
+                _LOGGER.warning(
+                    "Self-consumption transition blocked by network envelope monitoring mode"
+                )
+                return
+            await _sc_guard.clamp_requested_export_w(0.0)
+            _sc_snapshot = _sc_guard.manager.snapshot
+            if not _sc_snapshot.active_export_permitted or _sc_snapshot.fault:
+                _LOGGER.warning(
+                    "Self-consumption transition blocked by network envelope (%s)",
+                    _sc_snapshot.fault or _sc_snapshot.reason or _sc_snapshot.mode,
+                )
+                return
+
+        async def _guarded_self_consumption_write(writer) -> bool:
+            """Recheck the envelope immediately before a mode actuator write."""
+            if _sc_guard is None:
+                return bool(await writer())
+            return await _sc_guard.async_guard_write(
+                0.0,
+                lambda _guarded_w: writer(),
+            )
+
         user_owned_override = source in ("user", "manual", "unknown")
 
         if user_owned_override and (
@@ -30204,7 +30853,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     return
 
-                success = await foxess_coord.restore_normal()
+                success = await _guarded_self_consumption_write(
+                    foxess_coord.restore_normal
+                )
                 if success:
                     entry_data["foxess_curtailment_state"] = "normal"
                     entry_data.pop("_last_foxess_curtailment_reapply", None)
@@ -30226,7 +30877,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.error("Self-consumption: GoodWe coordinator not available")
                     return
 
-                success = await goodwe_coord.restore_normal()
+                success = await _guarded_self_consumption_write(
+                    goodwe_coord.restore_normal
+                )
                 if success:
                     _LOGGER.info("GoodWe self-consumption mode set (GENERAL)")
                 else:
@@ -30246,7 +30899,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.error("Self-consumption: Sungrow coordinator not available")
                     return
 
-                success = await sungrow_coord.restore_normal()
+                success = await _guarded_self_consumption_write(
+                    sungrow_coord.restore_normal
+                )
                 if success:
                     _LOGGER.info("✅ Sungrow self-consumption mode set")
                 else:
@@ -30268,7 +30923,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     # rather than the bare EMS mode write: a prior no-discharge or
                     # force window may have left REG_ESS_MAX_DISCHARGE_LIMIT at 0,
                     # and only restore_normal resets the ESS limits to rated.
-                    result = await controller.restore_normal()
+                    result = await _guarded_self_consumption_write(
+                        controller.restore_normal
+                    )
                     if result:
                         _LOGGER.info(
                             "Sigenergy self-consumption mode set (Remote EMS mode 2, "
@@ -30299,7 +30956,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ae_coord = entry_data.get("alphaess_coordinator")
                 if ae_coord and hasattr(ae_coord, '_controller') and ae_coord._controller:
                     controller = ae_coord._controller
-                    result = await controller.set_self_consumption_mode()
+                    result = await _guarded_self_consumption_write(
+                        controller.set_self_consumption_mode
+                    )
                     if result:
                         _LOGGER.info("AlphaESS self-consumption mode set (dispatch released, 0722H=0)")
                     else:
@@ -30320,7 +30979,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not esy_coord:
                     _LOGGER.error("Self-consumption: ESY Sunhome coordinator not available")
                     return
-                success = await esy_coord.restore_normal()
+                success = await _guarded_self_consumption_write(
+                    esy_coord.restore_normal
+                )
                 if success:
                     _LOGGER.info("ESY Sunhome self-consumption mode set (Regular Mode)")
                 else:
@@ -30339,7 +31000,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not saj_coord:
                     _LOGGER.error("Self-consumption: SAJ H2 coordinator not available")
                     return
-                success = await saj_coord.restore_normal()
+                success = await _guarded_self_consumption_write(
+                    saj_coord.restore_normal
+                )
                 if success:
                     _LOGGER.info("SAJ H2 self-consumption mode set (passive mode disabled)")
                 else:
@@ -30358,7 +31021,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not fronius_coord:
                     _LOGGER.error("Self-consumption: Fronius GEN24 storage coordinator not available")
                     return
-                success = await fronius_coord.restore_normal()
+                success = await _guarded_self_consumption_write(
+                    fronius_coord.restore_normal
+                )
                 if success:
                     _LOGGER.info("Fronius GEN24 storage self-consumption mode restored (Auto)")
                 else:
@@ -30377,7 +31042,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if not neovolt_coord:
                     _LOGGER.error("Self-consumption: Neovolt coordinator not available")
                     return
-                success = await neovolt_coord.restore_normal()
+                success = await _guarded_self_consumption_write(
+                    neovolt_coord.restore_normal
+                )
                 if success:
                     _LOGGER.info("Neovolt self-consumption mode restored (Normal dispatch)")
                 else:
@@ -30401,7 +31068,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.error("Self-consumption: SolarEdge coordinator not available")
                     return
 
-                success = await solaredge_coord.restore_normal()
+                success = await _guarded_self_consumption_write(
+                    solaredge_coord.restore_normal
+                )
                 if success:
                     _LOGGER.info("SolarEdge self-consumption mode restored")
                 else:
@@ -30421,7 +31090,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.error("Self-consumption: Anker Solix coordinator not available")
                     return
 
-                success = await anker_coord.restore_normal()
+                success = await _guarded_self_consumption_write(
+                    anker_coord.restore_normal
+                )
                 if success:
                     _LOGGER.info("Anker Solix self-consumption mode restored")
                 else:
@@ -30444,7 +31115,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.error("Self-consumption: Solax coordinator not available")
                     return
 
-                success = await solax_coord.restore_normal()
+                success = await _guarded_self_consumption_write(
+                    solax_coord.restore_normal
+                )
                 if success:
                     _LOGGER.info("Solax self-consumption mode restored")
                 else:
@@ -30470,18 +31143,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 }
                 api_base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
 
-                async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
-                    headers=headers,
-                    json={"default_real_mode": "self_consumption"},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        _LOGGER.info("Tesla site %s set to self_consumption mode", site_id)
-                        any_ok = True
-                    else:
+                async def _write_tesla_self_consumption() -> bool:
+                    async with session.post(
+                        f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                        headers=headers,
+                        json={"default_real_mode": "self_consumption"},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            _LOGGER.info(
+                                "Tesla site %s set to self_consumption mode",
+                                site_id,
+                            )
+                            return True
                         text = await response.text()
-                        _LOGGER.warning("Could not set self_consumption mode for site %s: %s - %s", site_id, response.status, text)
+                        _LOGGER.warning(
+                            "Could not set self_consumption mode for site %s: %s - %s",
+                            site_id,
+                            response.status,
+                            text,
+                        )
+                        return False
+
+                if await _guarded_self_consumption_write(
+                    _write_tesla_self_consumption
+                ):
+                    any_ok = True
 
             if any_ok:
                 self_entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
@@ -30512,6 +31199,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info(
                 "[MONITORING] Would set autonomous mode (source=%s) — blocked by monitoring mode",
                 source or "unknown",
+            )
+            return
+
+        _autonomous_guard = (
+            hass.data.get(DOMAIN, {})
+            .get(entry.entry_id, {})
+            .get("network_export_guard")
+        )
+        if (
+            _autonomous_guard is not None
+            and _autonomous_guard.manager.snapshot.mode != "off"
+        ):
+            _LOGGER.warning(
+                "Autonomous/TOU mode blocked while the network envelope is %s; "
+                "this tariff-driven mode cannot accept a watt-level export clamp",
+                _autonomous_guard.manager.snapshot.mode,
             )
             return
 
@@ -31293,6 +31996,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         rule = call.data.get("rule")
         if rule not in ("never", "pv_only", "battery_ok"):
             _LOGGER.error(f"Invalid grid export rule: {rule}. Must be 'never', 'pv_only', or 'battery_ok'.")
+            return
+
+        # A permissive export-rule write can remove an inverter-side cap and
+        # increase both managed battery and unmanaged PV export.  Flexible
+        # Exports therefore permits only the fail-closed `never` transition;
+        # the certified site controller remains the sole authority for
+        # raising a connection limit.
+        _grid_export_entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        _grid_export_manager = _grid_export_entry_data.get("network_envelope_manager")
+        if (
+            rule != "never"
+            and _grid_export_manager is not None
+            and _grid_export_manager.snapshot.mode != "off"
+        ):
+            _LOGGER.warning(
+                "Grid export rule %s blocked while the network envelope is %s",
+                rule,
+                _grid_export_manager.snapshot.mode,
+            )
             return
 
         if _monitoring_mode_should_block_control(call):
@@ -34563,6 +35285,137 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.data[DOMAIN][entry.entry_id]["optimization_coordinator"] = optimization_coordinator
             _LOGGER.info("Smart Optimization coordinator initialized and enabled")
 
+            async def _network_envelope_changed(old, new) -> None:
+                """Apply downward controls immediately; authorize rises after solve."""
+                guard = hass.data[DOMAIN][entry.entry_id].get("network_export_guard")
+                if guard is None:
+                    return
+                if new.fault == "network envelope reoptimization failed":
+                    await _stop_guarded_network_export()
+                    return
+
+                # The manager refreshes every 15 seconds even without entity
+                # events. Use that cadence to detect a post-write PCC
+                # overshoot; waiting for the next export command would leave
+                # an excursion invisible for an unbounded period.
+                if new.mode == "active" and new.active_export_permitted:
+                    await guard.clamp_requested_export_w(0.0)
+                    if network_envelope_manager.snapshot.fault:
+                        return
+
+                requires_reoptimization = any(
+                    getattr(old, field, None) != getattr(new, field, None)
+                    for field in (
+                        "mode",
+                        "scope",
+                        "effective_limit_w",
+                        "schedule",
+                        "active_export_permitted",
+                        "fault",
+                        "safety_margin_w",
+                        "next_change_at",
+                    )
+                )
+                if not requires_reoptimization:
+                    return
+
+                _envelope_now = dt_util.utcnow()
+                new_limit = new.limit_for_interval(
+                    _envelope_now,
+                    _envelope_now + timedelta(seconds=1),
+                )
+                old_limit = guard.approved_limit_w
+                downward = (
+                    new_limit is not None
+                    and float(new_limit) < float(old_limit)
+                )
+                must_stop = (
+                    new.mode == "monitoring"
+                    or (new.mode == "active" and not new.active_export_permitted)
+                    or (new.mode == "active" and downward)
+                )
+                if must_stop:
+                    await _stop_guarded_network_export()
+                if (
+                    new.mode == "active"
+                    and new.fault is None
+                    and new.reason
+                    in {
+                        "network envelope source is stale or invalid",
+                        "PCC telemetry is stale or unavailable",
+                    }
+                ):
+                    # Startup deliberately waits for the first post-subscription
+                    # source event without latching a fault. Once that gate has
+                    # passed, stale/invalid envelope or PCC data is a safety
+                    # event and remains visibly faulted until reload/re-arming.
+                    await network_envelope_manager.async_set_fault(new.reason)
+                    return
+                if new.mode != "active":
+                    guard.reset_reoptimization_approval()
+
+                try:
+                    optimized = await optimization_coordinator._run_optimization(force=True)
+                except Exception as err:
+                    _LOGGER.error(
+                        "Network envelope reoptimization failed for snapshot %s: %s",
+                        new.snapshot_version,
+                        err,
+                    )
+                    if new.mode == "active":
+                        await network_envelope_manager.async_set_fault(
+                            "network envelope reoptimization failed"
+                        )
+                    return
+
+                if not optimized:
+                    _LOGGER.error(
+                        "Network envelope reoptimization did not complete for snapshot %s",
+                        new.snapshot_version,
+                    )
+                    if new.mode == "active":
+                        await network_envelope_manager.async_set_fault(
+                            "network envelope reoptimization failed"
+                        )
+                    return
+
+                if new.mode == "active":
+                    latest = network_envelope_manager.snapshot
+                    semantic_fields = (
+                        "mode",
+                        "scope",
+                        "effective_limit_w",
+                        "schedule",
+                        "active_export_permitted",
+                        "fault",
+                        "safety_margin_w",
+                        "next_change_at",
+                    )
+                    if all(
+                        getattr(latest, field, None) == getattr(new, field, None)
+                        for field in semantic_fields
+                    ):
+                        guard.approve_reoptimized_snapshot(
+                            latest.snapshot_version
+                        )
+
+            network_listener_unsub = network_envelope_manager.add_listener(
+                _network_envelope_changed
+            )
+            hass.data[DOMAIN][entry.entry_id]["network_envelope_listener_unsub"] = (
+                network_listener_unsub
+            )
+            # The manager starts before the optimizer so recorder-restored
+            # state can never arm Active. Once the listener exists, reconcile
+            # the current deny-only snapshot and grant any upward authority
+            # only after this first successful solve.
+            hass.async_create_task(
+                _network_envelope_changed(
+                    NetworkExportEnvelope(),
+                    network_envelope_manager.snapshot,
+                )
+            )
+
             # Add Away Mode and Profit Max switches (deferred from switch platform setup).
             add_away_mode = hass.data[DOMAIN][entry.entry_id].pop("switch_add_away_mode", None)
             if add_away_mode:
@@ -34830,6 +35683,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if key in _optimizer_sensor_keys:
                 ent_reg.async_remove(entity_entry.entity_id)
                 _LOGGER.info("Removed stale optimizer entity: %s", entity_entry.entity_id)
+
+    if (
+        network_envelope_manager.snapshot.mode == "active"
+        and hass.data[DOMAIN][entry.entry_id].get("optimization_coordinator") is None
+    ):
+        await network_envelope_manager.async_set_fault(
+            "active mode requires PowerSync Smart Optimization"
+        )
 
     # Register HTTP endpoints for Smart Optimization
     hass.http.register_view(OptimizationView(hass))
@@ -35691,6 +36552,23 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Tear down TOU sync hooks (AEMO dispatch subscriber + dispatch-trigger
     # coordinator + cron fallback + optional Octopus cron)
     entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
+    if covau_runtime := entry_data.get("covau_quota_runtime"):
+        try:
+            await covau_runtime.async_stop()
+        except Exception as err:
+            _LOGGER.debug("CovaU quota runtime shutdown error: %s", err)
+        entry_data["covau_quota_runtime"] = None
+    if network_listener_unsub := entry_data.get("network_envelope_listener_unsub"):
+        network_listener_unsub()
+        entry_data["network_envelope_listener_unsub"] = None
+    if network_envelope_manager := entry_data.get("network_envelope_manager"):
+        try:
+            await network_envelope_manager.async_stop()
+        except Exception as err:
+            _LOGGER.debug("Network export envelope shutdown error: %s", err)
+        entry_data["network_envelope_manager"] = None
+        entry_data["network_export_guard"] = None
+        _LOGGER.debug("Stopped network export envelope manager")
     if aemo_unsub := entry_data.get("aemo_dispatch_unsub"):
         aemo_unsub()
         _LOGGER.debug("Unsubscribed AEMO new-dispatch listener")

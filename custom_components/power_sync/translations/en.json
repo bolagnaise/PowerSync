@@ -17,6 +17,48 @@
         },
         "submit": "Next"
       },
+      "covau_postcode": {
+        "title": "CovaU SolarMax service area",
+        "description": "Enter the supply postcode to filter the current fixture-backed SolarMax plans. You will confirm the distributor and exact AER plan next.",
+        "data": {
+          "covau_postcode": "Supply postcode"
+        },
+        "submit": "Next"
+      },
+      "covau_plan": {
+        "title": "CovaU SolarMax plan and settlement meters",
+        "description": "Confirm the exact plan and distributor from your bill. PowerSync caches the public AER/CDR snapshot and settles daily allowances only from the selected connection-point import and export energy meters.",
+        "data": {
+          "covau_plan_id": "SolarMax plan",
+          "covau_distributor": "Network distributor",
+          "covau_import_energy_entity": "PCC import energy meter",
+          "covau_export_energy_entity": "PCC export energy meter"
+        },
+        "data_description": {
+          "covau_import_energy_entity": "Preferred: select a monotonic total_increasing connection-point import energy sensor in kWh. Leave blank only to use continuous power-integrated estimation.",
+          "covau_export_energy_entity": "Preferred: select a monotonic total_increasing connection-point export energy sensor in kWh. Leave blank only to use continuous power-integrated estimation."
+        },
+        "submit": "Next"
+      },
+      "covau_manual_tariff": {
+        "title": "Manual CovaU SolarMax tariff",
+        "description": "Validated fallback for a withdrawn or account-specific SolarMax plan. Enter rates in cents per kWh and the daily supply charge in cents. The tariff clock remains fixed AEST (UTC+10).",
+        "data": {
+          "plan_id": "Plan ID",
+          "display_name": "Plan name",
+          "covau_distributor": "Network distributor",
+          "effective_date": "Effective date",
+          "overnight_rate_c_per_kwh": "00:00-06:00 import rate",
+          "day_rate_c_per_kwh": "Day/shoulder import rate",
+          "peak_rate_c_per_kwh": "15:00-21:00 import rate",
+          "supply_c_per_day": "Daily supply charge",
+          "export_base_c_per_kwh": "Base export rate",
+          "free_import_cap_kwh": "Daily free-import allowance",
+          "premium_export_total_c_per_kwh": "Premium export total rate",
+          "premium_export_cap_kwh": "Daily premium-export allowance"
+        },
+        "submit": "Next"
+      },
       "flow_power_setup": {
         "title": "Flow Power pricing",
         "description": "Enter your base rate from your Flow Power bill.",
@@ -1026,6 +1068,12 @@
       "invalid_token_format": "Token format is not recognised. PowerSync tokens start with 'psync_' -- make sure you copied the full string.",
       "invalid_time": "Enter a valid 24-hour time in HH:MM format.",
       "cloud_flow_grid_entity_required": "Select a grid power sensor -- it is required to enable the PowerSync Cloud energy-flow reporter.",
+      "invalid_postcode": "Enter a valid four-digit Australian postcode.",
+      "covau_no_supported_plans": "No current fixture-backed CovaU SolarMax plan is available for that postcode.",
+      "covau_unsupported_plan": "Select one of the supported SolarMax plan IDs or use the validated manual fallback.",
+      "covau_distributor_mismatch": "The distributor must match the selected AER SolarMax plan.",
+      "covau_energy_meter_invalid": "Select a monotonic total_increasing energy sensor using Wh, kWh, or MWh.",
+      "covau_manual_tariff_invalid": "The manual tariff is incomplete or invalid. Rates and caps must be non-negative and the stepped periods must cover the full fixed-AEST day.",
       "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again.",
       "solax_missing_entities": "Could not find the required solax_modbus entities in the selected integration entry. The first missing entity was: {first_missing}. Make sure you selected the correct Solax Modbus integration. If your entities use a prefix like solax_modbus, enter that in Entity prefix override.",
       "solax_connect_failed": "Failed to validate Solax entities. Check the selected integration entry and try again.",
@@ -1064,8 +1112,22 @@
       "captcha_required": "GloBird requested captcha verification. Sign in through the GloBird portal in a browser, then try again.",
       "invalid_credentials": "Email or password is incorrect. Check your Flow Power portal login credentials.",
       "invalid_mfa_code": "Verification code is incorrect or expired. Request a new SMS code and try again.",
+      "covau_unsupported_plan": "Select one of the supported SolarMax plan IDs or keep the currently cached manual plan.",
+      "covau_distributor_mismatch": "The distributor must match the selected AER SolarMax plan.",
+      "covau_energy_meter_invalid": "Select a monotonic total_increasing energy sensor using Wh, kWh, or MWh.",
       "confirm_required": "Confirm the history relink before applying changes.",
       "no_ready_history_relinks": "No ready history relinks were found. Check the preview summary.",
+      "network_export_invalid_mode": "Select a valid network export mode.",
+      "network_export_active_release_pending": "Active mode is not available in this release. Complete the required SAPN monitoring soak before publishing active control.",
+      "network_export_limit_required": "Select the read-only export-limit entity supplied by the certified inverter, gateway, or vendor integration.",
+      "network_export_fallback_required": "Enter the site-approved fixed fallback limit. SAPN sites may use 0 W or 1500 W per phase; use the value from the connection agreement.",
+      "network_export_pcc_required": "Select current PCC/grid power telemetry before enabling the active guard.",
+      "network_export_der_attestation_required": "Active mode requires confirmation that every exporting inverter and battery is covered by the approved site-wide limiter.",
+      "network_export_aggregate_required": "Multi-phase active mode requires one aggregate connection-point limit. Per-phase sources are monitoring-only.",
+      "network_export_source_unregistered": "The limit source must be owned by a registered Home Assistant integration.",
+      "network_export_source_untrusted": "Templates and PowerSync-owned entities cannot arm active export. Select the original certified vendor or inverter entity.",
+      "network_export_limit_invalid": "The selected limit entity must currently expose a non-negative finite power value in W or kW.",
+      "network_export_pcc_invalid": "The selected PCC entity must currently expose a finite power value in W or kW, using positive import and negative export.",
       "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again."
     },
     "step": {
@@ -1090,6 +1152,7 @@
           "anker_solix": "Anker Solix connection",
           "custom_battery": "Custom external controller",
           "optimization": "Optimization mode",
+          "network_export": "Network export limits / Flexible Exports",
           "inverter": "AC inverter curtailment",
           "curtailment": "Curtailment settings",
           "demand_charges": "Demand charge tracking",
@@ -1218,6 +1281,18 @@
           "electricity_provider": "If your retailer is not listed, choose Other / Custom TOU to enter rates manually."
         },
         "submit": "Next"
+      },
+      "covau_options": {
+        "title": "CovaU SolarMax pricing",
+        "description": "Confirm the exact AER plan snapshot, distributor, and authoritative connection-point settlement meters. Enable refresh to explicitly compare and cache a new snapshot for the same plan ID; PowerSync never selects a successor automatically.",
+        "data": {
+          "covau_plan_id": "SolarMax plan",
+          "covau_distributor": "Network distributor",
+          "covau_import_energy_entity": "PCC import energy meter",
+          "covau_export_energy_entity": "PCC export energy meter",
+          "covau_refresh_public_plan": "Refresh this public plan snapshot"
+        },
+        "submit": "Save"
       },
       "tesla_connection": {
         "title": "Tesla API connection",
@@ -1450,6 +1525,37 @@
           "charge_by_time_enabled": "Force Smart Optimization to reach the configured target SOC by the configured time.",
           "charge_by_time_target_time": "HH:MM time for Charge By Time to reach the configured target SOC. Default 17:15.",
           "charge_by_time_target_soc": "Battery SOC Charge By Time should target by the configured time. Default 100%."
+        },
+        "submit": "Save"
+      },
+      "network_export": {
+        "title": "Network export limits / Flexible Exports",
+        "description": "Read a network operating envelope already enforced by certified site equipment. PowerSync is not a CSIP-AUS client and cannot replace, disable, or override SAPN controls. This release is monitoring-only while the required SAPN site soak is completed.",
+        "data": {
+          "network_export_mode": "Operating mode",
+          "network_export_limit_entity": "Certified export-limit entity",
+          "network_export_status_entity": "Envelope status entity",
+          "network_export_expiry_entity": "Envelope expiry entity",
+          "network_export_schedule_entity": "Envelope schedule entity",
+          "network_export_pcc_power_entity": "Connection-point grid power entity",
+          "network_export_scope": "Envelope scope",
+          "network_export_fallback_limit_w": "Site-approved fallback limit",
+          "network_export_safety_margin_w": "Additional safety margin",
+          "network_export_site_phase_count": "Site phase count",
+          "network_export_all_der_attested": "All exporting DER is covered by the approved limiter"
+        },
+        "data_description": {
+          "network_export_mode": "Off ignores the source. Monitoring displays the envelope and suppresses intentional PowerSync export. Active control will be enabled only in a later release after the required SAPN site soak.",
+          "network_export_limit_entity": "Select the original read-only W or kW entity exposed by certified inverter, gateway, or vendor equipment. Templates and PowerSync entities cannot arm Active mode.",
+          "network_export_status_entity": "Optional source status entity. Invalid, unavailable, expired, error, or offline states make the live envelope invalid.",
+          "network_export_expiry_entity": "Optional timestamp entity for the live envelope's expiry.",
+          "network_export_schedule_entity": "Optional entity with a schedule attribute containing start, end, and limit_w entries.",
+          "network_export_pcc_power_entity": "Current aggregate grid/PCC power in W or kW, using positive import and negative export. Required for Active mode.",
+          "network_export_scope": "Use aggregate connection-point scope for active multi-phase sites. Per-phase envelopes remain monitoring-only.",
+          "network_export_fallback_limit_w": "Fixed export limit in watts from the connection agreement, used when the live envelope is stale or invalid. Zero is valid.",
+          "network_export_safety_margin_w": "Extra headroom below the effective limit in watts. PowerSync always enforces at least 250 W or 5%, whichever is larger.",
+          "network_export_site_phase_count": "Number of phases at the connection point. Multi-phase Active mode requires an aggregate source.",
+          "network_export_all_der_attested": "Confirm only when every battery and inverter capable of export is included in the approved whole-site control path."
         },
         "submit": "Save"
       },
@@ -2251,6 +2357,12 @@
       }
     }
   },
+  "issues": {
+    "covau_plan_withdrawn": {
+      "title": "CovaU SolarMax plan snapshot has been withdrawn",
+      "description": "AER plan {plan_id} was withdrawn on {withdrawn_date}. PowerSync will keep using the cached immutable snapshot and will not move you to a successor automatically. Open Configure > Electricity pricing and confirm the exact plan on your current bill, or enter the validated manual tariff."
+    }
+  },
   "entity": {
     "sensor": {
       "current_price": {
@@ -2261,6 +2373,9 @@
       },
       "grid_power": {
         "name": "Grid Power"
+      },
+      "network_export_limit": {
+        "name": "Network Export Limit"
       },
       "battery_power": {
         "name": "Battery Power"

@@ -125,6 +125,9 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_OPTIMIZATION_AUTO_APPLY_RESERVE = "optimization_auto_apply_reserve"
     const_module.CONF_OPTIMIZATION_MANUAL_RESERVE = "optimization_manual_reserve"
     const_module.CONF_GENERIC_CHARGER_POWER_ENTITY = "generic_charger_power_entity"
+    const_module.CONF_COVAU_PLAN_SNAPSHOT = "covau_plan_snapshot"
+    const_module.CONF_COVAU_IMPORT_ENERGY_ENTITY = "covau_import_energy_entity"
+    const_module.CONF_COVAU_EXPORT_ENERGY_ENTITY = "covau_export_energy_entity"
     const_module.CONF_OPTIMIZATION_HORIZON = "optimization_horizon"
     const_module.CONF_OPTIMIZATION_BATTERY_CAPACITY_WH = "battery_capacity_wh"
     const_module.CONF_OPTIMIZATION_ALLOW_GRID_CHARGE = "allow_grid_charge"
@@ -134,6 +137,7 @@ def _install_power_sync_stubs() -> None:
     const_module.NO_IDLE_MODE_PROVIDERS = frozenset({
         "flow_power",
         "globird",
+        "covau",
         "aemo_vpp",
         "other",
         "tou_only",
@@ -271,6 +275,7 @@ def _coordinator(
     base_options = {"electricity_provider": provider}
     base_options.update(options)
     coordinator._entry = SimpleNamespace(options=base_options, data={})
+    coordinator.battery_system = "tesla"
     coordinator._config = opt_module.OptimizationConfig(
         interval_minutes=5,
         horizon_hours=24,
@@ -290,6 +295,13 @@ def _coordinator(
     coordinator._last_price_timestamps = None
     coordinator._last_zerohero_bonus_cap_kwh = None
     coordinator._last_zerohero_bonus_prices = None
+    coordinator._last_zerocharge_bonus_cap_kwh = None
+    coordinator._last_zerocharge_bonus_prices = None
+    coordinator._covau_ledger = None
+    coordinator._covau_snapshot_cache = None
+    coordinator._covau_snapshot_hash = None
+    coordinator._last_covau_config_warning = None
+    coordinator._pending_covau_settlement = {"import": 0.0, "export": 0.0}
     coordinator._actual_zerohero_import_kwh_today = 0.0
     coordinator._actual_zerohero_export_kwh_today = 0.0
     coordinator._actual_zerohero_bonus_export_kwh_today = 0.0
@@ -1830,6 +1842,197 @@ def test_startup_uses_fixed_optimization_interval_not_persisted_value():
 
     assert "saved_interval_minutes = DEFAULT_OPTIMIZATION_INTERVAL" in init_source
     assert "CONF_OPTIMIZATION_INTERVAL, entry.data.get" not in init_source
+
+
+def _covau_snapshot_dict() -> dict:
+    return {
+        "schema_version": 1,
+        "parser_version": 1,
+        "plan_id": "COV1117616MRE2@EME",
+        "display_name": "SolarMax SA Residential TOU",
+        "distributor": "SA Power Networks",
+        "state": "SA",
+        "effective_date": "2026-07-01T00:00:00Z",
+        "withdrawn_date": None,
+        "timezone_token": "AEST",
+        "supply_c_per_day": 172.0,
+        "import_periods": [
+            {"start": "00:00", "end": "06:00", "c_per_kwh": 16.5},
+            {"start": "06:00", "end": "15:00", "c_per_kwh": 35.17},
+            {"start": "15:00", "end": "21:00", "c_per_kwh": 58.78},
+            {"start": "21:00", "end": "24:00", "c_per_kwh": 35.17},
+        ],
+        "export_base_c_per_kwh": 5.0,
+        "free_import_start": "11:00",
+        "free_import_end": "14:00",
+        "free_import_cap_kwh": 50.0,
+        "premium_export_start": "18:00",
+        "premium_export_end": "21:00",
+        "premium_export_cap_kwh": 30.0,
+        "premium_export_total_c_per_kwh": 15.0,
+        "source_kind": "aer_cdr",
+        "source_url": "https://example.test/covau",
+        "source_last_updated": "2026-06-30T14:06:51Z",
+        "content_hash": "fixture-hash",
+        "manual": False,
+    }
+
+
+def test_covau_forecast_partitions_caps_by_fixed_aest_tariff_day(opt_module):
+    now = datetime(2026, 5, 3, 0, 30, tzinfo=timezone.utc)  # 10:30 AEST
+    opt_module.dt_util.now = lambda: now
+    coordinator = _coordinator(
+        opt_module,
+        "covau",
+        covau_plan_snapshot=_covau_snapshot_dict(),
+    )
+    coordinator.hass = SimpleNamespace(data={}, states=SimpleNamespace(get=lambda _eid: None))
+    coordinator._config.horizon_hours = 48
+    state = opt_module.QuotaLedgerState(
+        tariff_day="2026-05-03",
+        timezone_token="AEST",
+        confidence="authoritative",
+        settled_kwh={
+            opt_module.COVAU_IMPORT_RULE_ID: 1.0,
+            opt_module.COVAU_EXPORT_RULE_ID: 2.0,
+        },
+    )
+    coordinator._ensure_covau_ledger(state, now=now)
+
+    prices = coordinator._covau_price_forecast()
+
+    assert prices is not None
+    assert coordinator._last_zerocharge_bonus_cap_kwh == pytest.approx(99.0)
+    assert coordinator._last_zerohero_bonus_cap_kwh == pytest.approx(58.0)
+    assert coordinator._last_import_bonus_caps_by_group == {
+        "2026-05-03": pytest.approx(49.0),
+        "2026-05-04": pytest.approx(50.0),
+    }
+    assert coordinator._last_export_bonus_caps_by_group == {
+        "2026-05-03": pytest.approx(28.0),
+        "2026-05-04": pytest.approx(30.0),
+    }
+    timestamps = coordinator._pending_price_timestamps
+    for bonuses in (
+        coordinator._last_zerocharge_bonus_prices,
+        coordinator._last_zerohero_bonus_prices,
+    ):
+        active = [timestamps[idx] for idx, value in enumerate(bonuses) if value > 0]
+        assert active
+        assert {
+            opt_module.tariff_datetime(value, "AEST").date().isoformat()
+            for value in active
+        } == {"2026-05-03", "2026-05-04"}
+
+    priority = coordinator._priority_export_slots_for_run(
+        len(timestamps),
+        prices[1],
+    )
+    priority_times = [timestamps[idx] for idx, value in enumerate(priority) if value]
+    assert priority_times
+    assert {
+        opt_module.tariff_datetime(value, "AEST").date().isoformat()
+        for value in priority_times
+    } == {"2026-05-03", "2026-05-04"}
+
+    saved = coordinator._quota_state_v2_to_save()
+    assert saved["provider"] == "covau"
+    assert saved["settled_kwh"][opt_module.COVAU_IMPORT_RULE_ID] == 1.0
+
+
+def test_covau_cumulative_pcc_settlement_counts_only_matching_windows(opt_module):
+    snapshot = _covau_snapshot_dict()
+    options = {
+        "covau_plan_snapshot": snapshot,
+        "covau_import_energy_entity": "sensor.grid_import_energy",
+        "covau_export_energy_entity": "sensor.grid_export_energy",
+    }
+    coordinator = _coordinator(opt_module, "covau", **options)
+    first = datetime(2026, 5, 3, 1, 30, tzinfo=timezone.utc)  # 11:30 AEST
+    previous = first - timedelta(minutes=5)
+    states = {
+        "sensor.grid_import_energy": SimpleNamespace(
+            state="100.5",
+            attributes={"unit_of_measurement": "kWh"},
+            last_updated=first,
+        ),
+        "sensor.grid_export_energy": SimpleNamespace(
+            state="200.5",
+            attributes={"unit_of_measurement": "kWh"},
+            last_updated=first,
+        ),
+    }
+    coordinator.hass = SimpleNamespace(
+        data={},
+        states=SimpleNamespace(get=states.get),
+    )
+    state = opt_module.QuotaLedgerState(
+        tariff_day="2026-05-03",
+        timezone_token="AEST",
+        confidence="authoritative",
+        settled_kwh={
+            opt_module.COVAU_IMPORT_RULE_ID: 0.0,
+            opt_module.COVAU_EXPORT_RULE_ID: 0.0,
+        },
+        last_meter_kwh={"import": 100.0, "export": 200.0},
+        last_sample_at={
+            "import": previous.isoformat(),
+            "export": previous.isoformat(),
+        },
+        source_kind={"import": "total_increasing", "export": "total_increasing"},
+    )
+    coordinator._ensure_covau_ledger(state, now=first)
+
+    settled = coordinator._settle_covau_measurements(first, 0.0, 0.0)
+    assert settled == {"import": pytest.approx(0.5), "export": 0.0}
+
+    export_time = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)  # 18:30 AEST
+    states["sensor.grid_import_energy"] = SimpleNamespace(
+        state="100.5",
+        attributes={"unit_of_measurement": "kWh"},
+        last_updated=export_time,
+    )
+    states["sensor.grid_export_energy"] = SimpleNamespace(
+        state="200.9",
+        attributes={"unit_of_measurement": "kWh"},
+        last_updated=export_time,
+    )
+    coordinator._covau_ledger.state.last_sample_at["export"] = (
+        export_time - timedelta(minutes=5)
+    ).isoformat()
+    coordinator._covau_ledger.state.last_meter_kwh["export"] = 200.5
+    settled = coordinator._settle_covau_measurements(export_time, 0.0, 0.0)
+    assert settled == {"import": 0.0, "export": pytest.approx(0.4)}
+    assert coordinator._covau_ledger.remaining_kwh(
+        opt_module.COVAU_IMPORT_RULE_ID
+    ) == pytest.approx(49.5)
+    assert coordinator._covau_ledger.remaining_kwh(
+        opt_module.COVAU_EXPORT_RULE_ID
+    ) == pytest.approx(29.6)
+
+
+def test_globird_legacy_status_is_preserved_while_dual_writing_quota_v2(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_current",
+    )
+    coordinator._last_cost_date = "2026-05-03"
+    coordinator._actual_zerohero_bonus_export_kwh_today = 6.25
+    coordinator._actual_zerocharge_import_kwh_today = 3.5
+
+    legacy = coordinator._zerohero_cost_breakdown()
+    quota_state = coordinator._quota_state_v2_to_save()
+
+    assert legacy["status"] == "enabled"
+    assert legacy["bonus_export_kwh_used"] == pytest.approx(6.25)
+    assert quota_state["provider"] == "globird"
+    assert quota_state["settled_kwh"][
+        opt_module.GLOBIRD_QUOTA_EXPORT_RULE_ID
+    ] == pytest.approx(6.25)
+    assert quota_state["settled_kwh"][
+        opt_module.GLOBIRD_QUOTA_IMPORT_RULE_ID
+    ] == pytest.approx(3.5)
 
 
 def _true_indexes(slots: list[bool]) -> list[int]:

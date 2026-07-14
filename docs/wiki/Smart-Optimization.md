@@ -58,6 +58,61 @@ top-up, and ZeroCharge is modeled separately as a capped free-import window.
 For Jul 2026 terms this means a 12:00-15:00 free-import window with a 50 kWh
 daily cap, plus the 18:00-21:00 Super Export/no-import window.
 
+### CovaU SolarMax
+
+CovaU is configured as an electricity provider. PowerSync supports the current,
+fixture-backed SolarMax products for Ausgrid, Endeavour Energy, Essential
+Energy, Energex and SA Power Networks. Postcode filters the candidates; setup
+still requires confirmation of the exact distributor and AER plan ID.
+
+The selected public AER/CDR plan response and normalized tariff are cached as an
+immutable snapshot. A withdrawn plan is never silently replaced with a
+successor. If a public plan is unavailable or account-specific, setup provides a
+validated manual stepped-tariff fallback.
+
+SolarMax allowances are settled from measured PCC energy, not from the
+optimizer schedule. Select cumulative `total_increasing` import and export
+energy sensors where possible. Power-integrated estimates are accepted only
+while telemetry remains continuous. A telemetry gap or a first setup without a
+valid tariff-day baseline marks quota confidence unknown and disables quota
+bonus optimization until the next reset.
+
+The tariff's `AEST` token means fixed UTC+10. It does not follow Home Assistant
+timezone settings or Adelaide daylight-saving time. Current price sensors show
+the effective marginal price, and the CovaU sensors/API expose cap, settled,
+remaining and planned quota values explicitly in kWh.
+
+## Network export limits / Flexible Exports
+
+Flexible Exports is a separate network constraint, not an electricity provider.
+PowerSync reads a limit exposed by already-certified site equipment through Home
+Assistant. It does not implement IEEE 2030.5, certificates, NEPKI registration,
+SAPN onboarding or DERControl writes, and it must not be described as a
+CSIP-AUS-certified client.
+
+The default mode is **Off**, which preserves existing behavior. **Monitoring**
+shows the envelope and suppresses intentional PowerSync export. This release is
+monitoring-only while the required seven-day SAPN site soak and staged
+fallback/recovery replay are completed. The tested **Active** implementation is
+held behind a runtime release gate and cannot be selected or armed.
+
+When Active is enabled in a later release, it will remain an explicit opt-in and
+will arm only after a fresh post-subscription update, trusted non-template
+entity provenance, a site-approved fallback, fresh PCC telemetry, whole-site
+DER coverage attestation, and a safe site phase/scope combination.
+
+Active enforcement uses the lower of the existing static export cap and the
+valid live envelope. Invalid or missing live data uses the approved fallback; a
+missing fallback fails closed to 0 W. The runtime guard also reserves at least
+250 W or 5% of the effective limit and accounts for unmanaged PCC export before
+allowing a battery export command. A source fault, stale PCC value, overshoot or
+failed stop command disables intentional export and remains visible in Home
+Assistant and the mobile app.
+
+There is no writable network-limit, override or bypass endpoint. The certified
+controller remains authoritative and must continue enforcing the connection
+agreement when Home Assistant or PowerSync is offline.
+
 ## Advanced optimizer controls
 
 Advanced controls change the LP solver's decision boundaries. Leave them at their

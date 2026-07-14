@@ -242,6 +242,25 @@ from .const import (
     ELECTRICITY_PROVIDERS,
     CONF_GLOBIRD_EMAIL,
     CONF_GLOBIRD_PASSWORD,
+    CONF_COVAU_POSTCODE,
+    CONF_COVAU_PLAN_ID,
+    CONF_COVAU_DISTRIBUTOR,
+    CONF_COVAU_PLAN_RAW,
+    CONF_COVAU_PLAN_SNAPSHOT,
+    CONF_COVAU_IMPORT_ENERGY_ENTITY,
+    CONF_COVAU_EXPORT_ENERGY_ENTITY,
+    CONF_COVAU_MANUAL_TARIFF,
+    CONF_NETWORK_EXPORT_MODE,
+    CONF_NETWORK_EXPORT_LIMIT_ENTITY,
+    CONF_NETWORK_EXPORT_STATUS_ENTITY,
+    CONF_NETWORK_EXPORT_EXPIRY_ENTITY,
+    CONF_NETWORK_EXPORT_SCHEDULE_ENTITY,
+    CONF_NETWORK_EXPORT_PCC_POWER_ENTITY,
+    CONF_NETWORK_EXPORT_SCOPE,
+    CONF_NETWORK_EXPORT_FALLBACK_LIMIT_W,
+    CONF_NETWORK_EXPORT_SAFETY_MARGIN_W,
+    CONF_NETWORK_EXPORT_ALL_DER_ATTESTED,
+    CONF_NETWORK_EXPORT_SITE_PHASE_COUNT,
     CONF_GLOBIRD_PLAN,
     GLOBIRD_PLANS,
     GLOBIRD_PLAN_NOT_ZEROHERO,
@@ -529,6 +548,13 @@ from .const import (
     CONF_NZ_DAILY_SUPPLY,
     NZ_RETAILERS,
     NZ_DISTRIBUTION_ZONES,
+)
+from .covau import (
+    SUPPORTED_SOLARMAX_PLANS,
+    async_fetch_covau_plan,
+    covau_plan_candidates,
+    normalize_covau_plan,
+    validate_manual_covau_snapshot,
 )
 from .currency import (
     currency_for_provider,
@@ -1745,6 +1771,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._aemo_only_mode: bool = False  # True if using AEMO spike only (no Amber)
         self._aemo_data: dict[str, Any] = {}
         self._globird_data: dict[str, Any] = {}
+        self._covau_data: dict[str, Any] = {}
         self._flow_power_data: dict[str, Any] = {}
         self._flow_power_sites: list[dict[str, Any]] = []
         self._flow_power_main_options: dict[str, Any] = {}
@@ -1922,6 +1949,11 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if provider == "globird":
                     return await self.async_step_globird_plan()
                 return await self.async_step_aemo_config()
+            elif provider == "covau":
+                self._aemo_only_mode = False
+                self._amber_data = {}
+                self._aemo_data = {CONF_AEMO_SPIKE_ENABLED: False}
+                return await self.async_step_covau_postcode()
             elif provider == "localvolts":
                 # Localvolts: Real-time wholesale pricing (Australia)
                 self._aemo_only_mode = False
@@ -1968,6 +2000,212 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                 }
             ),
+        )
+
+    def _covau_energy_entity_valid(self, entity_id: str | None) -> bool:
+        """Return whether an entity is a monotonic cumulative energy meter."""
+        if not entity_id:
+            return True
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return False
+        attributes = state.attributes or {}
+        state_class = str(attributes.get("state_class") or "").lower()
+        device_class = str(attributes.get("device_class") or "").lower()
+        unit = str(attributes.get("unit_of_measurement") or "").lower()
+        return (
+            state_class == "total_increasing"
+            and device_class == "energy"
+            and unit in {"wh", "kwh", "mwh"}
+        )
+
+    def _auto_detect_covau_energy_entity(self, direction: str) -> str:
+        """Best-effort PCC meter suggestion; the user still confirms it."""
+        tokens = ("import", "consumption") if direction == "import" else ("export", "feed_in", "feedin")
+        candidates = []
+        states = getattr(self.hass.states, "async_all", lambda: [])()
+        for state in states:
+            entity_id = str(getattr(state, "entity_id", "") or "")
+            if self._covau_energy_entity_valid(entity_id) and any(
+                token in entity_id.lower() for token in tokens
+            ):
+                candidates.append(entity_id)
+        return sorted(candidates)[0] if candidates else ""
+
+    async def async_step_covau_postcode(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Filter the current SolarMax family by postcode/state."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            postcode = str(user_input.get(CONF_COVAU_POSTCODE) or "").strip()
+            candidates = covau_plan_candidates(postcode)
+            if not postcode.isdigit() or len(postcode) != 4:
+                errors[CONF_COVAU_POSTCODE] = "invalid_postcode"
+            elif not candidates:
+                errors["base"] = "covau_no_supported_plans"
+            else:
+                self._covau_postcode = postcode
+                self._covau_candidates = candidates
+                return await self.async_step_covau_plan()
+        return self.async_show_form(
+            step_id="covau_postcode",
+            data_schema=vol.Schema({
+                vol.Required(CONF_COVAU_POSTCODE): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.TEXT)
+                )
+            }),
+            errors=errors,
+        )
+
+    async def async_step_covau_plan(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Confirm distributor, exact immutable plan and settlement meters."""
+        errors: dict[str, str] = {}
+        candidates = getattr(self, "_covau_candidates", covau_plan_candidates(None))
+        by_id = {item["plan_id"]: item for item in candidates}
+        if user_input is not None:
+            plan_id = str(user_input.get(CONF_COVAU_PLAN_ID) or "")
+            if plan_id == "manual":
+                self._covau_import_entity = user_input.get(CONF_COVAU_IMPORT_ENERGY_ENTITY) or ""
+                self._covau_export_entity = user_input.get(CONF_COVAU_EXPORT_ENERGY_ENTITY) or ""
+                return await self.async_step_covau_manual_tariff()
+            metadata = by_id.get(plan_id)
+            distributor = str(user_input.get(CONF_COVAU_DISTRIBUTOR) or "")
+            import_entity = user_input.get(CONF_COVAU_IMPORT_ENERGY_ENTITY) or ""
+            export_entity = user_input.get(CONF_COVAU_EXPORT_ENERGY_ENTITY) or ""
+            if metadata is None:
+                errors[CONF_COVAU_PLAN_ID] = "covau_unsupported_plan"
+            elif distributor != metadata["distributor"]:
+                errors[CONF_COVAU_DISTRIBUTOR] = "covau_distributor_mismatch"
+            elif import_entity and not self._covau_energy_entity_valid(import_entity):
+                errors[CONF_COVAU_IMPORT_ENERGY_ENTITY] = "covau_energy_meter_invalid"
+            elif export_entity and not self._covau_energy_entity_valid(export_entity):
+                errors[CONF_COVAU_EXPORT_ENERGY_ENTITY] = "covau_energy_meter_invalid"
+            else:
+                try:
+                    raw = await async_fetch_covau_plan(self.hass, plan_id)
+                    snapshot = normalize_covau_plan(raw, plan_id)
+                except Exception as err:
+                    _LOGGER.warning("CovaU public plan fetch failed for %s: %s", plan_id, err)
+                    errors["base"] = "cannot_connect"
+                else:
+                    self._covau_data = {
+                        CONF_COVAU_POSTCODE: getattr(self, "_covau_postcode", ""),
+                        CONF_COVAU_PLAN_ID: plan_id,
+                        CONF_COVAU_DISTRIBUTOR: distributor,
+                        CONF_COVAU_PLAN_RAW: raw,
+                        CONF_COVAU_PLAN_SNAPSHOT: snapshot.to_dict(),
+                        CONF_COVAU_IMPORT_ENERGY_ENTITY: import_entity,
+                        CONF_COVAU_EXPORT_ENERGY_ENTITY: export_entity,
+                    }
+                    return await self.async_step_battery_system()
+
+        import_default = self._auto_detect_covau_energy_entity("import")
+        export_default = self._auto_detect_covau_energy_entity("export")
+        plan_options = [
+            SelectOptionDict(
+                value=item["plan_id"],
+                label=f"{item['display_name']} — {item['distributor']}",
+            )
+            for item in candidates
+        ] + [SelectOptionDict(value="manual", label="Manual stepped SolarMax tariff")]
+        distributor_options = sorted({item["distributor"] for item in candidates})
+        return self.async_show_form(
+            step_id="covau_plan",
+            data_schema=vol.Schema({
+                vol.Required(CONF_COVAU_PLAN_ID): SelectSelector(
+                    SelectSelectorConfig(options=plan_options, mode=SelectSelectorMode.DROPDOWN)
+                ),
+                vol.Required(CONF_COVAU_DISTRIBUTOR): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[SelectOptionDict(value=value, label=value) for value in distributor_options],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_COVAU_IMPORT_ENERGY_ENTITY,
+                    description={"suggested_value": import_default} if import_default else None,
+                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                vol.Optional(
+                    CONF_COVAU_EXPORT_ENERGY_ENTITY,
+                    description={"suggested_value": export_default} if export_default else None,
+                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+            }),
+            errors=errors,
+        )
+
+    async def async_step_covau_manual_tariff(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Validated manual fallback for withdrawn/account-specific SolarMax plans."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            try:
+                day_rate = float(user_input["day_rate_c_per_kwh"])
+                snapshot = validate_manual_covau_snapshot({
+                    "plan_id": user_input.get("plan_id") or "manual_covau_solarmax",
+                    "display_name": user_input.get("display_name") or "Manual CovaU SolarMax",
+                    "distributor": user_input.get(CONF_COVAU_DISTRIBUTOR) or "Manual",
+                    "effective_date": user_input.get("effective_date") or "",
+                    "supply_c_per_day": user_input["supply_c_per_day"],
+                    "import_periods": [
+                        {"start": "00:00", "end": "06:00", "c_per_kwh": user_input["overnight_rate_c_per_kwh"]},
+                        {"start": "06:00", "end": "11:00", "c_per_kwh": day_rate},
+                        {"start": "11:00", "end": "14:00", "c_per_kwh": day_rate},
+                        {"start": "14:00", "end": "15:00", "c_per_kwh": day_rate},
+                        {"start": "15:00", "end": "21:00", "c_per_kwh": user_input["peak_rate_c_per_kwh"]},
+                        {"start": "21:00", "end": "24:00", "c_per_kwh": day_rate},
+                    ],
+                    "export_base_c_per_kwh": user_input["export_base_c_per_kwh"],
+                    "free_import_start": "11:00",
+                    "free_import_end": "14:00",
+                    "free_import_cap_kwh": user_input["free_import_cap_kwh"],
+                    "premium_export_start": "18:00",
+                    "premium_export_end": "21:00",
+                    "premium_export_cap_kwh": user_input["premium_export_cap_kwh"],
+                    "premium_export_total_c_per_kwh": user_input["premium_export_total_c_per_kwh"],
+                })
+            except (KeyError, TypeError, ValueError) as err:
+                _LOGGER.debug("Manual CovaU tariff validation failed: %s", err)
+                errors["base"] = "covau_manual_tariff_invalid"
+            else:
+                self._covau_data = {
+                    CONF_COVAU_POSTCODE: getattr(self, "_covau_postcode", ""),
+                    CONF_COVAU_PLAN_ID: snapshot.plan_id,
+                    CONF_COVAU_DISTRIBUTOR: snapshot.distributor,
+                    CONF_COVAU_PLAN_SNAPSHOT: snapshot.to_dict(),
+                    CONF_COVAU_MANUAL_TARIFF: True,
+                    CONF_COVAU_IMPORT_ENERGY_ENTITY: getattr(self, "_covau_import_entity", ""),
+                    CONF_COVAU_EXPORT_ENERGY_ENTITY: getattr(self, "_covau_export_entity", ""),
+                }
+                return await self.async_step_battery_system()
+
+        fields: dict[Any, Any] = {
+            vol.Required("plan_id", default="manual_covau_solarmax"): TextSelector(),
+            vol.Required("display_name", default="Manual CovaU SolarMax"): TextSelector(),
+            vol.Required(CONF_COVAU_DISTRIBUTOR): TextSelector(),
+            vol.Optional("effective_date", default=""): TextSelector(),
+        }
+        defaults = {
+            "overnight_rate_c_per_kwh": 16.5,
+            "day_rate_c_per_kwh": 35.17,
+            "peak_rate_c_per_kwh": 58.78,
+            "supply_c_per_day": 171.996,
+            "export_base_c_per_kwh": 5.0,
+            "free_import_cap_kwh": 50.0,
+            "premium_export_total_c_per_kwh": 15.0,
+            "premium_export_cap_kwh": 30.0,
+        }
+        for key, default in defaults.items():
+            fields[vol.Required(key, default=default)] = NumberSelector(
+                NumberSelectorConfig(min=0, max=1000, step=0.001, mode=NumberSelectorMode.BOX)
+            )
+        return self.async_show_form(
+            step_id="covau_manual_tariff",
+            data_schema=vol.Schema(fields),
+            errors=errors,
         )
 
     async def async_step_flow_power_setup(
@@ -2295,6 +2533,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **self._site_data,
             **self._aemo_data,
             **self._globird_data,
+            **self._covau_data,
             **self._flow_power_data,
             **self._octopus_data,
             **self._localvolts_data,
@@ -2365,6 +2604,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             title = "PowerSync Globird"
         elif self._selected_electricity_provider == "flow_power":
             title = "PowerSync Flow Power"
+        elif self._selected_electricity_provider == "covau":
+            title = "PowerSync CovaU SolarMax"
         elif self._selected_electricity_provider == "localvolts":
             title = "PowerSync Localvolts"
         elif self._selected_electricity_provider == "octopus":
@@ -6891,6 +7132,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
         menu_options.extend([
             "optimization",
+            "network_export",
             "inverter",
             "curtailment",
             "demand_charges",
@@ -6903,6 +7145,294 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_menu(
             step_id="init",
             menu_options=menu_options,
+        )
+
+    @staticmethod
+    def _network_export_power_state_valid(
+        hass: HomeAssistant,
+        entity_id: str,
+        *,
+        allow_negative: bool = False,
+    ) -> bool:
+        """Return whether an entity currently exposes finite W/kW power."""
+        state = hass.states.get(entity_id) if entity_id else None
+        if state is None or state.state in (None, "", "unknown", "unavailable"):
+            return False
+        try:
+            value = float(state.state)
+        except (TypeError, ValueError):
+            return False
+        if value != value or value in (float("inf"), float("-inf")):
+            return False
+        if value < 0 and not allow_negative:
+            return False
+        unit = str((state.attributes or {}).get("unit_of_measurement") or "").lower()
+        return unit in {"w", "kw", "watt", "watts", "kilowatt", "kilowatts"}
+
+    def _network_export_active_source_error(self, entity_id: str) -> str | None:
+        """Return an active-mode provenance error for a limit source."""
+        from homeassistant.helpers import entity_registry as er
+
+        registry_entry = er.async_get(self.hass).async_get(entity_id)
+        if registry_entry is None:
+            return "network_export_source_unregistered"
+        platform = str(getattr(registry_entry, "platform", "") or "").lower()
+        if platform in {"template", DOMAIN}:
+            return "network_export_source_untrusted"
+        if not getattr(registry_entry, "unique_id", None):
+            return "network_export_source_untrusted"
+        if not (
+            getattr(registry_entry, "device_id", None)
+            or getattr(registry_entry, "config_entry_id", None)
+        ):
+            return "network_export_source_untrusted"
+        if getattr(registry_entry, "config_entry_id", None) == self.config_entry.entry_id:
+            return "network_export_source_untrusted"
+        return None
+
+    async def async_step_network_export(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure a read-only SAPN/CSIP-AUS network export envelope."""
+        from .network_envelope import NETWORK_EXPORT_ACTIVE_MODE_RELEASED
+
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            mode = str(user_input.get(CONF_NETWORK_EXPORT_MODE) or "off")
+            limit_entity = str(
+                user_input.get(CONF_NETWORK_EXPORT_LIMIT_ENTITY) or ""
+            ).strip()
+            pcc_entity = str(
+                user_input.get(CONF_NETWORK_EXPORT_PCC_POWER_ENTITY) or ""
+            ).strip()
+            scope = str(
+                user_input.get(CONF_NETWORK_EXPORT_SCOPE) or "aggregate_pcc"
+            )
+            phase_count = int(
+                user_input.get(CONF_NETWORK_EXPORT_SITE_PHASE_COUNT) or 1
+            )
+            fallback_limit = user_input.get(CONF_NETWORK_EXPORT_FALLBACK_LIMIT_W)
+            all_der_attested = bool(
+                user_input.get(CONF_NETWORK_EXPORT_ALL_DER_ATTESTED, False)
+            )
+
+            if mode not in {"off", "monitoring", "active"}:
+                errors[CONF_NETWORK_EXPORT_MODE] = "network_export_invalid_mode"
+            elif mode == "active" and not NETWORK_EXPORT_ACTIVE_MODE_RELEASED:
+                errors[CONF_NETWORK_EXPORT_MODE] = (
+                    "network_export_active_release_pending"
+                )
+            elif mode != "off" and not limit_entity:
+                errors[CONF_NETWORK_EXPORT_LIMIT_ENTITY] = (
+                    "network_export_limit_required"
+                )
+            elif mode == "active":
+                if fallback_limit is None:
+                    errors[CONF_NETWORK_EXPORT_FALLBACK_LIMIT_W] = (
+                        "network_export_fallback_required"
+                    )
+                elif not pcc_entity:
+                    errors[CONF_NETWORK_EXPORT_PCC_POWER_ENTITY] = (
+                        "network_export_pcc_required"
+                    )
+                elif not all_der_attested:
+                    errors[CONF_NETWORK_EXPORT_ALL_DER_ATTESTED] = (
+                        "network_export_der_attestation_required"
+                    )
+                elif phase_count > 1 and scope != "aggregate_pcc":
+                    errors[CONF_NETWORK_EXPORT_SCOPE] = (
+                        "network_export_aggregate_required"
+                    )
+                else:
+                    source_error = self._network_export_active_source_error(
+                        limit_entity
+                    )
+                    if source_error:
+                        errors[CONF_NETWORK_EXPORT_LIMIT_ENTITY] = source_error
+                    elif not self._network_export_power_state_valid(
+                        self.hass, limit_entity
+                    ):
+                        errors[CONF_NETWORK_EXPORT_LIMIT_ENTITY] = (
+                            "network_export_limit_invalid"
+                        )
+                    elif not self._network_export_power_state_valid(
+                        self.hass, pcc_entity, allow_negative=True
+                    ):
+                        errors[CONF_NETWORK_EXPORT_PCC_POWER_ENTITY] = (
+                            "network_export_pcc_invalid"
+                        )
+
+            if not errors:
+                updates = {
+                    CONF_NETWORK_EXPORT_MODE: mode,
+                    CONF_NETWORK_EXPORT_LIMIT_ENTITY: limit_entity,
+                    CONF_NETWORK_EXPORT_STATUS_ENTITY: str(
+                        user_input.get(CONF_NETWORK_EXPORT_STATUS_ENTITY) or ""
+                    ).strip(),
+                    CONF_NETWORK_EXPORT_EXPIRY_ENTITY: str(
+                        user_input.get(CONF_NETWORK_EXPORT_EXPIRY_ENTITY) or ""
+                    ).strip(),
+                    CONF_NETWORK_EXPORT_SCHEDULE_ENTITY: str(
+                        user_input.get(CONF_NETWORK_EXPORT_SCHEDULE_ENTITY) or ""
+                    ).strip(),
+                    CONF_NETWORK_EXPORT_PCC_POWER_ENTITY: pcc_entity,
+                    CONF_NETWORK_EXPORT_SCOPE: scope,
+                    CONF_NETWORK_EXPORT_FALLBACK_LIMIT_W: (
+                        int(round(float(fallback_limit)))
+                        if fallback_limit is not None
+                        else None
+                    ),
+                    CONF_NETWORK_EXPORT_SAFETY_MARGIN_W: int(
+                        round(
+                            float(
+                                user_input.get(
+                                    CONF_NETWORK_EXPORT_SAFETY_MARGIN_W, 250
+                                )
+                            )
+                        )
+                    ),
+                    CONF_NETWORK_EXPORT_ALL_DER_ATTESTED: all_der_attested,
+                    CONF_NETWORK_EXPORT_SITE_PHASE_COUNT: phase_count,
+                }
+                return self._save_connection_and_reload(updates)
+
+        default_mode = self._get_option(CONF_NETWORK_EXPORT_MODE, "off")
+        if default_mode == "active" and not NETWORK_EXPORT_ACTIVE_MODE_RELEASED:
+            default_mode = "monitoring"
+        mode_options = [
+            SelectOptionDict(value="off", label="Off"),
+            SelectOptionDict(
+                value="monitoring",
+                label="Monitoring only (recommended first)",
+            ),
+        ]
+        if NETWORK_EXPORT_ACTIVE_MODE_RELEASED:
+            mode_options.append(
+                SelectOptionDict(
+                    value="active",
+                    label="Active export guard (advanced)",
+                )
+            )
+
+        return self.async_show_form(
+            step_id="network_export",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_NETWORK_EXPORT_MODE,
+                        default=default_mode,
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=mode_options,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_NETWORK_EXPORT_LIMIT_ENTITY,
+                        default=self._get_option(
+                            CONF_NETWORK_EXPORT_LIMIT_ENTITY, ""
+                        ),
+                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    vol.Optional(
+                        CONF_NETWORK_EXPORT_STATUS_ENTITY,
+                        default=self._get_option(
+                            CONF_NETWORK_EXPORT_STATUS_ENTITY, ""
+                        ),
+                    ): EntitySelector(EntitySelectorConfig()),
+                    vol.Optional(
+                        CONF_NETWORK_EXPORT_EXPIRY_ENTITY,
+                        default=self._get_option(
+                            CONF_NETWORK_EXPORT_EXPIRY_ENTITY, ""
+                        ),
+                    ): EntitySelector(EntitySelectorConfig()),
+                    vol.Optional(
+                        CONF_NETWORK_EXPORT_SCHEDULE_ENTITY,
+                        default=self._get_option(
+                            CONF_NETWORK_EXPORT_SCHEDULE_ENTITY, ""
+                        ),
+                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    vol.Optional(
+                        CONF_NETWORK_EXPORT_PCC_POWER_ENTITY,
+                        default=self._get_option(
+                            CONF_NETWORK_EXPORT_PCC_POWER_ENTITY, ""
+                        ),
+                    ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                    vol.Required(
+                        CONF_NETWORK_EXPORT_SCOPE,
+                        default=self._get_option(
+                            CONF_NETWORK_EXPORT_SCOPE, "aggregate_pcc"
+                        ),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(
+                                    value="aggregate_pcc",
+                                    label="Aggregate connection point",
+                                ),
+                                SelectOptionDict(
+                                    value="per_phase",
+                                    label="Per-phase source (monitoring only)",
+                                ),
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_NETWORK_EXPORT_FALLBACK_LIMIT_W,
+                        description=(
+                            {"suggested_value": self._get_option(
+                                CONF_NETWORK_EXPORT_FALLBACK_LIMIT_W
+                            )}
+                            if self._get_option(
+                                CONF_NETWORK_EXPORT_FALLBACK_LIMIT_W
+                            ) is not None
+                            else None
+                        ),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=100000,
+                            step=50,
+                            unit_of_measurement="W",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_NETWORK_EXPORT_SAFETY_MARGIN_W,
+                        default=self._get_option(
+                            CONF_NETWORK_EXPORT_SAFETY_MARGIN_W, 250
+                        ),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=250,
+                            max=10000,
+                            step=50,
+                            unit_of_measurement="W",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_NETWORK_EXPORT_SITE_PHASE_COUNT,
+                        default=self._get_option(
+                            CONF_NETWORK_EXPORT_SITE_PHASE_COUNT, 1
+                        ),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=1,
+                            max=3,
+                            step=1,
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_NETWORK_EXPORT_ALL_DER_ATTESTED,
+                        default=self._get_option(
+                            CONF_NETWORK_EXPORT_ALL_DER_ATTESTED, False
+                        ),
+                    ): BooleanSelector(),
+                }
+            ),
+            errors=errors,
         )
 
     async def _route_to_battery_options(self, battery_system: str) -> FlowResult:
@@ -7801,6 +8331,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 return await self.async_step_amber_options()
             if provider == "flow_power":
                 return await self.async_step_flow_power_options()
+            if provider == "covau":
+                return await self.async_step_covau_options()
             if provider in CUSTOM_TOU_PROVIDER_OPTIONS:
                 return await self._async_route_custom_tou_options(provider)
             if provider == "localvolts":
@@ -7832,6 +8364,144 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     ),
                 }
             ),
+        )
+
+    def _covau_options_energy_entity_valid(self, entity_id: str) -> bool:
+        if not entity_id:
+            return True
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return False
+        attrs = state.attributes or {}
+        return (
+            str(attrs.get("state_class") or "").lower() == "total_increasing"
+            and str(attrs.get("device_class") or "").lower() == "energy"
+            and str(attrs.get("unit_of_measurement") or "").lower()
+            in {"wh", "kwh", "mwh"}
+        )
+
+    async def async_step_covau_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Update an exact CovaU snapshot and its measured settlement meters."""
+        errors: dict[str, str] = {}
+        current_plan_id = str(self._get_option(CONF_COVAU_PLAN_ID, "") or "")
+        current_distributor = str(
+            self._get_option(CONF_COVAU_DISTRIBUTOR, "") or ""
+        )
+        current_snapshot = self._get_option(CONF_COVAU_PLAN_SNAPSHOT, None)
+        current_raw = self._get_option(CONF_COVAU_PLAN_RAW, None)
+        refresh_key = "covau_refresh_public_plan"
+
+        if user_input is not None:
+            plan_id = str(user_input.get(CONF_COVAU_PLAN_ID) or "")
+            distributor = str(user_input.get(CONF_COVAU_DISTRIBUTOR) or "")
+            import_entity = str(
+                user_input.get(CONF_COVAU_IMPORT_ENERGY_ENTITY) or ""
+            )
+            export_entity = str(
+                user_input.get(CONF_COVAU_EXPORT_ENERGY_ENTITY) or ""
+            )
+            refresh_public_plan = bool(user_input.get(refresh_key, False))
+            metadata = SUPPORTED_SOLARMAX_PLANS.get(plan_id)
+            keeping_cached_manual = (
+                plan_id == current_plan_id
+                and isinstance(current_snapshot, dict)
+                and bool(current_snapshot.get("manual"))
+            )
+            if metadata is None and not keeping_cached_manual:
+                errors[CONF_COVAU_PLAN_ID] = "covau_unsupported_plan"
+            elif metadata is not None and distributor != metadata["distributor"]:
+                errors[CONF_COVAU_DISTRIBUTOR] = "covau_distributor_mismatch"
+            elif keeping_cached_manual and distributor != current_distributor:
+                errors[CONF_COVAU_DISTRIBUTOR] = "covau_distributor_mismatch"
+            elif import_entity and not self._covau_options_energy_entity_valid(import_entity):
+                errors[CONF_COVAU_IMPORT_ENERGY_ENTITY] = "covau_energy_meter_invalid"
+            elif export_entity and not self._covau_options_energy_entity_valid(export_entity):
+                errors[CONF_COVAU_EXPORT_ENERGY_ENTITY] = "covau_energy_meter_invalid"
+            else:
+                snapshot_dict = current_snapshot
+                raw = current_raw
+                if (
+                    not keeping_cached_manual
+                    and (
+                        refresh_public_plan
+                        or plan_id != current_plan_id
+                        or not isinstance(snapshot_dict, dict)
+                    )
+                ):
+                    try:
+                        raw = await async_fetch_covau_plan(self.hass, plan_id)
+                        snapshot_dict = normalize_covau_plan(raw, plan_id).to_dict()
+                    except Exception as err:
+                        _LOGGER.warning(
+                            "CovaU public plan fetch failed for %s: %s", plan_id, err
+                        )
+                        errors["base"] = "cannot_connect"
+                if not errors:
+                    return self._save_connection_and_reload({
+                        CONF_ELECTRICITY_PROVIDER: "covau",
+                        CONF_COVAU_PLAN_ID: plan_id,
+                        CONF_COVAU_DISTRIBUTOR: distributor,
+                        CONF_COVAU_PLAN_RAW: raw,
+                        CONF_COVAU_PLAN_SNAPSHOT: snapshot_dict,
+                        CONF_COVAU_IMPORT_ENERGY_ENTITY: import_entity,
+                        CONF_COVAU_EXPORT_ENERGY_ENTITY: export_entity,
+                    })
+
+        plan_options = [
+            SelectOptionDict(
+                value=plan_id,
+                label=f"{metadata['display_name']} — {metadata['distributor']}",
+            )
+            for plan_id, metadata in SUPPORTED_SOLARMAX_PLANS.items()
+        ]
+        if current_plan_id and current_plan_id not in SUPPORTED_SOLARMAX_PLANS:
+            plan_options.append(
+                SelectOptionDict(
+                    value=current_plan_id,
+                    label=f"Cached manual plan — {current_plan_id}",
+                )
+            )
+        distributors = sorted(
+            {item["distributor"] for item in SUPPORTED_SOLARMAX_PLANS.values()}
+            | ({current_distributor} if current_distributor else set())
+        )
+        return self.async_show_form(
+            step_id="covau_options",
+            data_schema=vol.Schema({
+                vol.Required(
+                    CONF_COVAU_PLAN_ID,
+                    default=current_plan_id or next(iter(SUPPORTED_SOLARMAX_PLANS)),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=plan_options,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_COVAU_DISTRIBUTOR,
+                    default=current_distributor or distributors[0],
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=value, label=value)
+                            for value in distributors
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_COVAU_IMPORT_ENERGY_ENTITY,
+                    default=self._get_option(CONF_COVAU_IMPORT_ENERGY_ENTITY, ""),
+                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                vol.Optional(
+                    CONF_COVAU_EXPORT_ENERGY_ENTITY,
+                    default=self._get_option(CONF_COVAU_EXPORT_ENERGY_ENTITY, ""),
+                ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+                vol.Required(refresh_key, default=False): BooleanSelector(),
+            }),
+            errors=errors,
         )
 
     async def async_step_provider_portal(

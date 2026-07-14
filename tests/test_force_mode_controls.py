@@ -834,7 +834,8 @@ def test_neovolt_force_discharge_hardware_extension_preserves_restore_modes():
 
     assert function_source is not None
     assert 'neovolt_coord = entry_data.get("neovolt_coordinator")' in function_source
-    assert "await neovolt_coord.force_discharge(" in function_source
+    assert "lambda guarded_w: neovolt_coord.force_discharge(" in function_source
+    assert "await _guarded_force_discharge_write(" in function_source
     assert "preserve_restore_modes=True" in function_source
 
 
@@ -923,7 +924,8 @@ def test_solaredge_dispatch_is_routed_through_services_and_coordinator():
     assert hold_source is not None
 
     assert 'solaredge_coord = entry_data.get("solaredge_coordinator")' in force_discharge_source
-    assert "await solaredge_coord.force_discharge(duration, power_w=power_w)" in force_discharge_source
+    assert "lambda guarded_w: solaredge_coord.force_discharge(" in force_discharge_source
+    assert "await _guarded_force_discharge_write(" in force_discharge_source
     assert "await solaredge_coord.force_charge(duration, power_w=power_w)" in force_charge_source
     assert "await solaredge_coord.restore_normal()" in restore_source
     assert "await solaredge_coord.set_backup_reserve(percent)" in reserve_source
@@ -1884,3 +1886,29 @@ def test_provider_config_view_post_skip_reload_gated_on_persisted_change():
         "ProviderConfigView.post sets _skip_reload unconditionally — a no-op "
         "resubmit strands the flag and swallows the next genuine reload (OB-39)"
     )
+
+
+def test_unclampable_tesla_export_paths_are_denied_by_network_envelope():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+
+    force_discharge = ast.get_source_segment(
+        source, _find_function(tree, "handle_force_discharge")
+    )
+    spike_entry = ast.get_source_segment(
+        source, _find_class_method(tree, "AEMOSpikeManager", "_enter_spike_mode")
+    )
+    session_entry = ast.get_source_segment(
+        source,
+        _find_class_method(
+            tree, "SavingSessionTariffManager", "_enter_session_mode"
+        ),
+    )
+
+    assert force_discharge is not None
+    assert spike_entry is not None
+    assert session_entry is not None
+    assert "Tesla tariff-driven force discharge blocked" in force_discharge
+    for function_source in (spike_entry, session_entry):
+        assert 'entry_runtime.get("network_export_guard")' in function_source
+        assert "cannot be clamped to a watt-level headroom" in function_source

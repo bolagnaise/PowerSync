@@ -213,18 +213,18 @@ def test_goodwe_curtailment_releases_limit_before_force_discharge():
     handler = _function_source("handle_force_discharge")
     helper = _function_source("_restore_goodwe_curtailment_for_export")
 
-    assert handler.count("await _restore_goodwe_curtailment_for_export(") >= 2
+    assert handler.count("lambda _guarded_w: _restore_goodwe_curtailment_for_export(") >= 2
     release_index = handler.index(
-        'await _restore_goodwe_curtailment_for_export(\n                    entry_data,\n                    "optimizer force discharge",'
+        'lambda _guarded_w: _restore_goodwe_curtailment_for_export(\n                        entry_data,\n                        "optimizer force discharge",'
     )
     optimizer_force_index = handler.index(
-        "await goodwe_coord.force_discharge(duration, power_w=power_w)"
+        "lambda guarded_w: goodwe_coord.force_discharge("
     )
     manual_release_index = handler.index(
-        'await _restore_goodwe_curtailment_for_export(\n                    entry_data,\n                    "force discharge",'
+        'lambda _guarded_w: _restore_goodwe_curtailment_for_export(\n                        entry_data,\n                        "force discharge",'
     )
-    manual_force_index = handler.index(
-        "discharge_result = await goodwe_coord.force_discharge(duration, power_w=power_w)"
+    manual_force_index = handler.rindex(
+        "lambda guarded_w: goodwe_coord.force_discharge("
     )
 
     assert release_index < optimizer_force_index
@@ -276,18 +276,18 @@ def test_solaredge_force_dispatch_releases_active_power_curtailment_first():
         "charge_result = await solaredge_coord.force_charge(duration, power_w=power_w)"
     )
 
-    assert discharge_handler.count("await _restore_solaredge_curtailment_for_dispatch(") >= 2
+    assert discharge_handler.count("lambda _guarded_w: _restore_solaredge_curtailment_for_dispatch(") >= 2
     optimizer_discharge_release = discharge_handler.index(
-        'await _restore_solaredge_curtailment_for_dispatch(\n                    entry_data,\n                    "optimizer force discharge",'
+        'lambda _guarded_w: _restore_solaredge_curtailment_for_dispatch(\n                        entry_data,\n                        "optimizer force discharge",'
     )
     optimizer_discharge_call = discharge_handler.index(
-        "await solaredge_coord.force_discharge(duration, power_w=power_w)"
+        "lambda guarded_w: solaredge_coord.force_discharge("
     )
     manual_discharge_release = discharge_handler.rindex(
-        'await _restore_solaredge_curtailment_for_dispatch(\n                    entry_data,\n                    "force discharge",'
+        'lambda _guarded_w: _restore_solaredge_curtailment_for_dispatch(\n                        entry_data,\n                        "force discharge",'
     )
     manual_discharge_call = discharge_handler.rindex(
-        "discharge_result = await solaredge_coord.force_discharge(duration, power_w=power_w)"
+        "lambda guarded_w: solaredge_coord.force_discharge("
     )
 
     assert optimizer_charge_release < optimizer_charge_call

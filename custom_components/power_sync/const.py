@@ -635,6 +635,7 @@ ELECTRICITY_PROVIDERS = {
     "localvolts": "Localvolts — 5-minute NEM wholesale pricing (AU)",
     "flow_power": "Flow Power — wholesale with Happy Hour exports (AU)",
     "globird": "Globird — static tariff with AEMO spike export (AU)",
+    "covau": "CovaU SolarMax — quota-aware free import and premium export (AU)",
     "aemo_vpp": "AEMO VPP — spike detection for VPP plans (AGL, Engie, etc.)",
     "octopus": "Octopus Energy — dynamic Agile/Go/Flux pricing (UK)",
     "epex": "EPEX Day-Ahead — European day-ahead market pricing (EU)",
@@ -645,6 +646,7 @@ ELECTRICITY_PROVIDERS = {
 NO_IDLE_MODE_PROVIDERS = frozenset({
     "flow_power",
     "globird",
+    "covau",
     "aemo_vpp",
     "other",
     "tou_only",
@@ -682,6 +684,31 @@ CONF_GLOBIRD_ZEROCHARGE_END = "globird_zerocharge_end"
 CONF_GLOBIRD_ZEROCHARGE_IMPORT_CAP_KWH = "globird_zerocharge_import_cap_kwh"
 CONF_GLOBIRD_EMAIL = "globird_email"
 CONF_GLOBIRD_PASSWORD = "globird_password"
+
+# CovaU SolarMax public AER/CDR plan and measured quota settlement.
+CONF_COVAU_POSTCODE = "covau_postcode"
+CONF_COVAU_PLAN_ID = "covau_plan_id"
+CONF_COVAU_DISTRIBUTOR = "covau_distributor"
+CONF_COVAU_PLAN_RAW = "covau_plan_raw"
+CONF_COVAU_PLAN_SNAPSHOT = "covau_plan_snapshot"
+CONF_COVAU_IMPORT_ENERGY_ENTITY = "covau_import_energy_entity"
+CONF_COVAU_EXPORT_ENERGY_ENTITY = "covau_export_energy_entity"
+CONF_COVAU_MANUAL_TARIFF = "covau_manual_tariff"
+
+# Read-only network export envelope sourced from certified site equipment.
+CONF_NETWORK_EXPORT_MODE = "network_export_mode"
+CONF_NETWORK_EXPORT_LIMIT_ENTITY = "network_export_limit_entity"
+CONF_NETWORK_EXPORT_STATUS_ENTITY = "network_export_status_entity"
+CONF_NETWORK_EXPORT_EXPIRY_ENTITY = "network_export_expiry_entity"
+CONF_NETWORK_EXPORT_SCHEDULE_ENTITY = "network_export_schedule_entity"
+CONF_NETWORK_EXPORT_PCC_POWER_ENTITY = "network_export_pcc_power_entity"
+CONF_NETWORK_EXPORT_SCOPE = "network_export_scope"
+CONF_NETWORK_EXPORT_FALLBACK_LIMIT_W = "network_export_fallback_limit_w"
+CONF_NETWORK_EXPORT_SAFETY_MARGIN_W = "network_export_safety_margin_w"
+CONF_NETWORK_EXPORT_ALL_DER_ATTESTED = "network_export_all_der_attested"
+CONF_NETWORK_EXPORT_SITE_PHASE_COUNT = "network_export_site_phase_count"
+CONF_NETWORK_EXPORT_SOURCE_MAX_AGE_SECONDS = "network_export_source_max_age_seconds"
+CONF_NETWORK_EXPORT_PCC_MAX_AGE_SECONDS = "network_export_pcc_max_age_seconds"
 GLOBIRD_BASE_URL = "https://myaccount.globirdenergy.com.au"
 GLOBIRD_DEFAULT_USAGE_DAYS = 31
 GLOBIRD_ACCOUNT_UPDATE_INTERVAL_SECONDS = 1800
