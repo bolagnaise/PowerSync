@@ -349,6 +349,10 @@ def test_covau_price_and_quota_sensors_use_live_provider_contract():
     assert free_remaining.native_value == 42.5
     assert premium_remaining.native_value == 21.25
     assert free_remaining.extra_state_attributes["settlement_confidence"] == "authoritative"
+    for quota_sensor in (free_remaining, premium_remaining):
+        assert quota_sensor._attr_device_class == "energy"
+        assert quota_sensor._attr_native_unit_of_measurement == "kWh"
+        assert getattr(quota_sensor, "_attr_state_class", None) is None
 
 
 def test_dedicated_flow_power_import_price_keeps_coordinator_calculation():

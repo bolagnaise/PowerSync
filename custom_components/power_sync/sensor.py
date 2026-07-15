@@ -3749,14 +3749,12 @@ class CovaUProviderSensor(SensorEntity):
             self._attr_icon = "mdi:transmission-tower-import"
             self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
             self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_state_class = SensorStateClass.MEASUREMENT
             self._attr_suggested_display_precision = 2
         else:
             self._attr_name = "CovaU Premium Export Remaining"
             self._attr_icon = "mdi:transmission-tower-export"
             self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
             self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_state_class = SensorStateClass.MEASUREMENT
             self._attr_suggested_display_precision = 2
 
     @property
