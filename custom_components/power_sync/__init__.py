@@ -21693,7 +21693,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     new_data[CONF_SIGENERGY_ACCESS_TOKEN] = token_info.get("access_token")
                     new_data[CONF_SIGENERGY_REFRESH_TOKEN] = token_info.get("refresh_token")
                     new_data[CONF_SIGENERGY_TOKEN_EXPIRES_AT] = token_info.get("expires_at")
-                    hass.config_entries.async_update_entry(entry, data=new_data)
+                    if new_data == entry.data:
+                        return
+                    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(
+                        entry.entry_id, {}
+                    )
+                    entry_data["_skip_reload"] = True
+                    try:
+                        hass.config_entries.async_update_entry(entry, data=new_data)
+                    except Exception:
+                        entry_data.pop("_skip_reload", None)
+                        raise
                     _LOGGER.debug("Persisted refreshed Sigenergy tokens to config entry")
                 except Exception as e:
                     _LOGGER.warning(f"Failed to persist Sigenergy tokens: {e}")
@@ -35698,6 +35708,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.info("Optimization HTTP endpoints registered at /api/power_sync/optimization")
 
     # Reload integration when options change (e.g. optimizer toggled in config flow)
+    # A token refresh can persist during initial setup, before this listener exists.
+    # Discard that one-shot suppression so it cannot swallow the next real update.
+    hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).pop("_skip_reload", None)
     entry.async_on_unload(entry.add_update_listener(_async_options_update_listener))
 
     _LOGGER.info("=" * 60)

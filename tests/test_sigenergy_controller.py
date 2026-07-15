@@ -999,6 +999,235 @@ def test_sigenergy_settings_post_persists_and_reoptimizes_export_cap():
     assert "sigenergy_capped_optimizer_limit_w(" in post_source
 
 
+def test_sigenergy_token_refresh_persistence_skips_config_entry_reload():
+    """Persisting refreshed cloud tokens must not reload the integration."""
+    source_path = COMPONENT_ROOT / "__init__.py"
+    tree = ast.parse(source_path.read_text())
+    setup = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_setup_entry"
+    )
+    helper = next(
+        node
+        for node in ast.walk(setup)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_persist_sigenergy_tokens"
+    )
+    helper_module = ast.Module(body=[helper], type_ignores=[])
+    ast.fix_missing_locations(helper_module)
+
+    class FakeConfigEntries:
+        def __init__(self):
+            self.updates = []
+            self.reloads = []
+
+        def async_update_entry(self, entry, *, data):
+            self.updates.append((entry, data))
+
+        async def async_reload(self, entry_id):
+            self.reloads.append(entry_id)
+
+    entry = types.SimpleNamespace(
+        entry_id="entry-1",
+        data={
+            "sigenergy_access_token": "old-access",
+            "sigenergy_refresh_token": "old-refresh",
+            "sigenergy_token_expires_at": "old-expiry",
+        },
+    )
+    config_entries = FakeConfigEntries()
+    hass = types.SimpleNamespace(
+        data={"power_sync": {"entry-1": {}}},
+        config_entries=config_entries,
+    )
+    namespace = {
+        "hass": hass,
+        "entry": entry,
+        "DOMAIN": "power_sync",
+        "CONF_SIGENERGY_ACCESS_TOKEN": "sigenergy_access_token",
+        "CONF_SIGENERGY_REFRESH_TOKEN": "sigenergy_refresh_token",
+        "CONF_SIGENERGY_TOKEN_EXPIRES_AT": "sigenergy_token_expires_at",
+        "_LOGGER": types.SimpleNamespace(
+            debug=lambda *args: None,
+            info=lambda *args: None,
+            warning=lambda *args: None,
+        ),
+    }
+    exec(compile(helper_module, str(source_path), "exec"), namespace)
+
+    asyncio.run(
+        namespace["_persist_sigenergy_tokens"](
+            {
+                "access_token": "new-access",
+                "refresh_token": "new-refresh",
+                "expires_at": "new-expiry",
+            }
+        )
+    )
+
+    assert len(config_entries.updates) == 1
+    assert hass.data["power_sync"]["entry-1"]["_skip_reload"] is True
+
+    listener = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_async_options_update_listener"
+    )
+    listener_module = ast.Module(body=[listener], type_ignores=[])
+    ast.fix_missing_locations(listener_module)
+    namespace.update({"HomeAssistant": object, "ConfigEntry": object})
+    exec(compile(listener_module, str(source_path), "exec"), namespace)
+    asyncio.run(namespace["_async_options_update_listener"](hass, entry))
+
+    assert config_entries.reloads == []
+    assert "_skip_reload" not in hass.data["power_sync"]["entry-1"]
+
+
+def test_sigenergy_token_refresh_noop_does_not_strand_skip_reload():
+    """An unchanged token callback must not leave a stale reload-skip flag."""
+    source_path = COMPONENT_ROOT / "__init__.py"
+    source = source_path.read_text()
+    tree = ast.parse(source)
+    setup = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_setup_entry"
+    )
+    helper = next(
+        node
+        for node in ast.walk(setup)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_persist_sigenergy_tokens"
+    )
+    helper_module = ast.Module(body=[helper], type_ignores=[])
+    ast.fix_missing_locations(helper_module)
+
+    class FakeConfigEntries:
+        def __init__(self):
+            self.updates = []
+
+        def async_update_entry(self, entry, *, data):
+            self.updates.append((entry, data))
+
+    token_data = {
+        "sigenergy_access_token": "same-access",
+        "sigenergy_refresh_token": "same-refresh",
+        "sigenergy_token_expires_at": "same-expiry",
+    }
+    entry = types.SimpleNamespace(entry_id="entry-1", data=token_data.copy())
+    config_entries = FakeConfigEntries()
+    hass = types.SimpleNamespace(
+        data={"power_sync": {"entry-1": {}}},
+        config_entries=config_entries,
+    )
+    namespace = {
+        "hass": hass,
+        "entry": entry,
+        "DOMAIN": "power_sync",
+        "CONF_SIGENERGY_ACCESS_TOKEN": "sigenergy_access_token",
+        "CONF_SIGENERGY_REFRESH_TOKEN": "sigenergy_refresh_token",
+        "CONF_SIGENERGY_TOKEN_EXPIRES_AT": "sigenergy_token_expires_at",
+        "_LOGGER": types.SimpleNamespace(debug=lambda *args: None, warning=lambda *args: None),
+    }
+    exec(compile(helper_module, str(source_path), "exec"), namespace)
+
+    asyncio.run(
+        namespace["_persist_sigenergy_tokens"](
+            {
+                "access_token": "same-access",
+                "refresh_token": "same-refresh",
+                "expires_at": "same-expiry",
+            }
+        )
+    )
+
+    assert config_entries.updates == []
+    assert "_skip_reload" not in hass.data["power_sync"]["entry-1"]
+
+
+def test_sigenergy_token_refresh_update_failure_clears_skip_reload():
+    """A failed token write must not suppress a later real settings update."""
+    source_path = COMPONENT_ROOT / "__init__.py"
+    tree = ast.parse(source_path.read_text())
+    setup = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_setup_entry"
+    )
+    helper = next(
+        node
+        for node in ast.walk(setup)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_persist_sigenergy_tokens"
+    )
+    helper_module = ast.Module(body=[helper], type_ignores=[])
+    ast.fix_missing_locations(helper_module)
+
+    class FailingConfigEntries:
+        def async_update_entry(self, entry, *, data):
+            raise RuntimeError("write failed")
+
+    entry = types.SimpleNamespace(entry_id="entry-1", data={})
+    hass = types.SimpleNamespace(
+        data={"power_sync": {"entry-1": {}}},
+        config_entries=FailingConfigEntries(),
+    )
+    warnings = []
+    namespace = {
+        "hass": hass,
+        "entry": entry,
+        "DOMAIN": "power_sync",
+        "CONF_SIGENERGY_ACCESS_TOKEN": "sigenergy_access_token",
+        "CONF_SIGENERGY_REFRESH_TOKEN": "sigenergy_refresh_token",
+        "CONF_SIGENERGY_TOKEN_EXPIRES_AT": "sigenergy_token_expires_at",
+        "_LOGGER": types.SimpleNamespace(
+            debug=lambda *args: None,
+            warning=lambda *args: warnings.append(args),
+        ),
+    }
+    exec(compile(helper_module, str(source_path), "exec"), namespace)
+
+    asyncio.run(
+        namespace["_persist_sigenergy_tokens"](
+            {
+                "access_token": "new-access",
+                "refresh_token": "new-refresh",
+                "expires_at": "new-expiry",
+            }
+        )
+    )
+
+    assert warnings
+    assert "_skip_reload" not in hass.data["power_sync"]["entry-1"]
+
+
+def test_setup_clears_token_refresh_skip_before_registering_listener():
+    """A setup-time token write cannot suppress the next real entry update."""
+    source_path = COMPONENT_ROOT / "__init__.py"
+    source = source_path.read_text()
+    tree = ast.parse(source)
+    setup = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_setup_entry"
+    )
+    registration = next(
+        node
+        for node in setup.body
+        if "entry.add_update_listener(_async_options_update_listener)"
+        in (ast.get_source_segment(source, node) or "")
+    )
+    registration_index = setup.body.index(registration)
+    cleanup = setup.body[registration_index - 1]
+    cleanup_source = ast.get_source_segment(source, cleanup)
+
+    assert cleanup_source is not None
+    assert '.pop("_skip_reload", None)' in cleanup_source
+    assert not any(isinstance(node, ast.Await) for node in ast.walk(cleanup))
+
+
 def test_sigenergy_settings_get_prefers_configured_rate_caps_including_zero():
     """Controls shows durable caps while retaining live register diagnostics."""
     source = (COMPONENT_ROOT / "__init__.py").read_text()
