@@ -6202,6 +6202,7 @@ class BatteryHealthView(HomeAssistantView):
             has_pw3_stack,
             known_expansion_dins_from_gateway_config,
             reconcile_pack_remaining_with_aggregate,
+            resolve_physical_battery_count,
             serial_from_din,
             trim_excess_pw3_follower_placeholders,
         )
@@ -6526,9 +6527,9 @@ class BatteryHealthView(HomeAssistantView):
         batt_count = max(bms_module_count, bb_count) if bms_module_count else bb_count
 
         # Cross-validate against Tesla's own site_info battery_count. PW3 units each expose
-        # two BMS sub-modules in the msa components list, so bms_module_count can be 2× the
-        # actual physical Powerwall count. site_info.battery_count is Tesla's authoritative
-        # count of physical units — prefer it when the BMS count exceeds it.
+        # two BMS sub-modules in the msa components list, while the relay can also omit a
+        # physical pack for a cycle. Reconcile Tesla's physical site count with aggregate
+        # full-pack energy so stale or registered-but-uninstalled slots cannot inflate it.
         try:
             _coord = (self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                       .get("tesla_coordinator"))
@@ -6537,13 +6538,19 @@ class BatteryHealthView(HomeAssistantView):
                 if _coord and hasattr(_coord, "_site_info_cache")
                 else None
             )
-            if _site_batt_count and batt_count > _site_batt_count:
+            _derived_batt_count = batt_count
+            batt_count = resolve_physical_battery_count(
+                _derived_batt_count,
+                _site_batt_count,
+                current_wh,
+            )
+            if batt_count != _derived_batt_count:
                 _LOGGER.info(
-                    "fleet_api_bms: BMS module count (%d) exceeds site battery_count (%d) — "
-                    "using site battery_count for rated capacity (PW3 has 2 BMS sub-modules per unit)",
-                    batt_count, _site_batt_count,
+                    "fleet_api_bms: relay-derived count (%d) differs from site battery_count (%d) — "
+                    "using site battery_count for rated capacity",
+                    _derived_batt_count,
+                    batt_count,
                 )
-                batt_count = _site_batt_count
         except Exception:
             pass
 
