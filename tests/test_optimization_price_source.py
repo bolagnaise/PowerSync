@@ -2139,7 +2139,7 @@ def test_schedule_polling_executes_cached_action_before_reoptimizing(opt_module)
     source = inspect.getsource(opt_module.OptimizationCoordinator._schedule_polling_loop)
 
     cached_action_call = "await self._execute_cached_current_action_if_changed()"
-    optimization_call = "await self._run_optimization()"
+    optimization_call = 'await self._run_optimization(execution_trigger="poll")'
 
     assert cached_action_call in source
     assert source.index(cached_action_call) < source.index(optimization_call)

@@ -3054,6 +3054,214 @@ def test_coordinator_refresh_executes_cached_charge_at_action_boundary(opt_modul
     assert coordinator._last_executed_action == "charge"
 
 
+def test_cached_force_is_refreshed_once_when_same_action_crosses_boundary(opt_module):
+    """A retained force action must not let its previous timer expire mid-slot."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.97)
+    coordinator._enabled = True
+    coordinator._optimization_lock = asyncio.Lock()
+    coordinator._execute_lock = asyncio.Lock()
+    coordinator._last_executed_action = "charge"
+    boundary = datetime(2026, 7, 15, 13, 30, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(action="charge", power_w=15000, timestamp=boundary),
+        SimpleNamespace(
+            action="charge",
+            power_w=15000,
+            timestamp=boundary + timedelta(minutes=5),
+        ),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=0,
+            timestamp=boundary + timedelta(minutes=10),
+        ),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    coordinator._boundary_execution = {
+        "slot_start": boundary - timedelta(minutes=5),
+        "slot_end": boundary,
+        "action": "charge",
+        "was_forced": True,
+    }
+    coordinator._optimizer_force_state = {
+        "active": True,
+        "type": "charge",
+        "expires_at": boundary + timedelta(minutes=3),
+        "hardware_expires_at": boundary + timedelta(minutes=3),
+        "power_w": 15000,
+        "started_at": boundary - timedelta(minutes=2),
+        "source": "optimizer",
+        "scope": "optimizer",
+    }
+    original_now = opt_module.dt_util.now
+    original_utcnow = opt_module.dt_util.utcnow
+    opt_module.dt_util.now = lambda *args, **kwargs: boundary
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: boundary
+
+    try:
+        asyncio.run(coordinator._execute_cached_current_action_if_changed())
+        asyncio.run(coordinator._execute_cached_current_action_if_changed())
+    finally:
+        opt_module.dt_util.now = original_now
+        opt_module.dt_util.utcnow = original_utcnow
+
+    assert battery.force_charge_calls == [(10, 15000, True)]
+    assert coordinator._boundary_execution == {
+        "slot_start": boundary,
+        "slot_end": boundary + timedelta(minutes=5),
+        "action": "charge",
+        "was_forced": True,
+    }
+
+
+def test_periodic_slow_solve_defers_new_force_until_next_boundary(opt_module):
+    """A late periodic result must not reverse the cached boundary action."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.97)
+    coordinator.battery_system = "foxess"
+    coordinator._enabled = True
+    coordinator._optimization_lock = asyncio.Lock()
+    coordinator._execute_lock = asyncio.Lock()
+    coordinator._last_executed_action = "charge"
+    boundary = datetime(2026, 7, 15, 13, 10, tzinfo=timezone.utc)
+    now = [boundary]
+    original_now = opt_module.dt_util.now
+    opt_module.dt_util.now = lambda *args, **kwargs: now[0]
+
+    cached_actions = [
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=0,
+            timestamp=boundary,
+        ),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=0,
+            timestamp=boundary + timedelta(minutes=5),
+        ),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=cached_actions)
+
+    try:
+        asyncio.run(coordinator._execute_cached_current_action_if_changed())
+        assert coordinator._boundary_execution == {
+            "slot_start": boundary,
+            "slot_end": boundary + timedelta(minutes=5),
+            "action": "self_consumption",
+            "was_forced": False,
+        }
+
+        fresh_actions = [
+            SimpleNamespace(action="charge", power_w=20000, timestamp=boundary),
+            SimpleNamespace(
+                action="charge",
+                power_w=20000,
+                timestamp=boundary + timedelta(minutes=5),
+            ),
+            SimpleNamespace(
+                action="self_consumption",
+                power_w=0,
+                timestamp=boundary + timedelta(minutes=10),
+            ),
+        ]
+        coordinator._current_schedule = SimpleNamespace(actions=fresh_actions)
+        now[0] = boundary + timedelta(minutes=3, seconds=16)
+
+        asyncio.run(
+            coordinator._execute_optimizer_action(
+                fresh_actions[0],
+                execution_trigger="poll",
+            )
+        )
+
+        assert battery.force_charge_calls == []
+        assert coordinator._last_executed_action == "self_consumption"
+
+        now[0] = boundary + timedelta(minutes=5)
+        asyncio.run(coordinator._execute_cached_current_action_if_changed())
+
+        assert battery.force_charge_calls == [(5, 20000, False)]
+        assert coordinator._last_executed_action == "charge"
+    finally:
+        opt_module.dt_util.now = original_now
+
+
+def test_price_solve_can_override_non_force_boundary_mid_slot(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator.battery_system = "foxess"
+    boundary = datetime(2026, 7, 15, 13, 10, tzinfo=timezone.utc)
+    now = boundary + timedelta(minutes=3)
+    original_now = opt_module.dt_util.now
+    opt_module.dt_util.now = lambda *args, **kwargs: now
+    action = SimpleNamespace(action="charge", power_w=5000, timestamp=boundary)
+    coordinator._current_schedule = SimpleNamespace(
+        actions=[
+            action,
+            SimpleNamespace(
+                action="self_consumption",
+                power_w=0,
+                timestamp=boundary + timedelta(minutes=5),
+            ),
+        ]
+    )
+    coordinator._boundary_execution = {
+        "slot_start": boundary,
+        "slot_end": boundary + timedelta(minutes=5),
+        "action": "self_consumption",
+        "was_forced": False,
+    }
+
+    try:
+        asyncio.run(
+            coordinator._execute_optimizer_action(
+                action,
+                execution_trigger="price",
+            )
+        )
+    finally:
+        opt_module.dt_util.now = original_now
+
+    assert battery.force_charge_calls == [(2, 5000, False)]
+
+
+def test_force_duration_uses_wall_clock_time_remaining_in_action_block(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator.battery_system = "foxess"
+    start = datetime(2026, 7, 15, 13, 10, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(action="charge", power_w=5000, timestamp=start),
+        SimpleNamespace(
+            action="charge",
+            power_w=5000,
+            timestamp=start + timedelta(minutes=5),
+        ),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=0,
+            timestamp=start + timedelta(minutes=10),
+        ),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    original_now = opt_module.dt_util.now
+    opt_module.dt_util.now = lambda *args, **kwargs: start + timedelta(
+        minutes=3,
+        seconds=16,
+    )
+
+    try:
+        duration = coordinator._force_duration_for_action_window(
+            actions[0],
+            {"charge"},
+            allow_boundary_overrun=False,
+        )
+    finally:
+        opt_module.dt_util.now = original_now
+
+    assert duration == 7
+
+
 def _enable_scheduled_ev_preserve(coordinator):
     coordinator.hass.data = {
         "power_sync": {

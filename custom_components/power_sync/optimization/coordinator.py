@@ -96,6 +96,7 @@ FLOW_POWER_NEM_TZ = timezone(timedelta(hours=10))
 EXPORT_ACTIONS = {"discharge", "export"}
 SELF_USE_ACTIONS = {"consume", "self_consumption"}
 CHARGE_ACTIONS = {"charge"}
+FORCED_ACTIONS = CHARGE_ACTIONS | EXPORT_ACTIONS
 OPTIMIZER_FORCE_CHARGE_MIN_COMMITMENT = timedelta(minutes=20)
 OPTIMIZER_FORCE_DISCHARGE_MIN_COMMITMENT = timedelta(minutes=20)
 SUNGROW_INFERRED_RESTORE_COOLDOWN = timedelta(minutes=5)
@@ -477,6 +478,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Track last executed action for mode transitions and status reporting.
         self._last_executed_action: str | None = None
         self._last_executed_planned_action: str | None = None
+        # A cached boundary action owns its wall-clock slot. A slow periodic
+        # solve may publish a newer plan during that slot, but it must not
+        # reverse an accepted non-force boundary action into a new force mode
+        # until the next boundary. This is transient execution metadata only;
+        # the optimizer schedule remains the source of truth for planning.
+        self._boundary_execution: dict[str, Any] | None = None
         # Optimizer-issued force commands use a hardware-only service path for
         # non-Tesla systems so automated actions do not appear as manual force
         # countdowns in the UI. Track that private state here so a later LP
@@ -3873,7 +3880,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         _LOGGER.info("Optimization disabled")
 
-    async def _run_optimization(self, force: bool = False) -> bool:
+    async def _run_optimization(
+        self,
+        force: bool = False,
+        *,
+        execution_trigger: str | None = None,
+    ) -> bool:
         """Run the built-in LP optimizer with current forecast data.
 
         When ``force`` is True (user-initiated re-optimization), queue behind
@@ -4408,7 +4420,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # it here cannot deadlock — _execute_cached_current_action_if_changed
                 # never acquires _optimization_lock.
                 async with self._execute_lock:
-                    await self._execute_optimizer_action(current_action)
+                    await self._execute_optimizer_action(
+                        current_action,
+                        execution_trigger=execution_trigger,
+                    )
             return True
 
         except Exception as e:
@@ -4491,7 +4506,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self._execute_cached_current_action_if_changed()
 
                 # Re-optimize on each interval (executes the resulting action internally)
-                await self._run_optimization()
+                await self._run_optimization(execution_trigger="poll")
 
             except asyncio.CancelledError:
                 break
@@ -4514,7 +4529,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         action_name = getattr(current_action, "action", None)
         if not current_action or not action_name:
             return
-        if action_name == getattr(self, "_last_executed_action", None):
+        if (
+            action_name == getattr(self, "_last_executed_action", None)
+            and (
+                action_name not in FORCED_ACTIONS
+                or self._boundary_execution_matches_action(current_action, action_name)
+            )
+        ):
+            self._record_boundary_execution(current_action, action_name)
             return
         # Reentrancy guard (OB-11): the polling loop and the
         # DataUpdateCoordinator refresh cycle can both cross the same
@@ -4532,14 +4554,56 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._execute_lock = execute_lock
 
         async with execute_lock:
-            if action_name == getattr(self, "_last_executed_action", None):
+            if (
+                action_name == getattr(self, "_last_executed_action", None)
+                and (
+                    action_name not in FORCED_ACTIONS
+                    or self._boundary_execution_matches_action(current_action, action_name)
+                )
+            ):
+                self._record_boundary_execution(current_action, action_name)
                 return
 
             _LOGGER.info(
                 "Optimizer: applying cached schedule action %s on coordinator refresh",
                 action_name,
             )
+            previous_action = getattr(self, "_last_executed_action", None)
             await self._execute_optimizer_action(current_action)
+            applied_action = getattr(self, "_last_executed_action", None)
+            if applied_action == action_name or applied_action != previous_action:
+                self._record_boundary_execution(current_action, applied_action)
+
+    def _boundary_execution_matches_action(
+        self,
+        action: Any,
+        action_name: str,
+    ) -> bool:
+        """Return whether this cached slot/action was already accepted."""
+        boundary_execution = getattr(self, "_boundary_execution", None)
+        return bool(
+            boundary_execution
+            and boundary_execution.get("slot_start")
+            == getattr(action, "timestamp", None)
+            and boundary_execution.get("action") == action_name
+        )
+
+    def _record_boundary_execution(
+        self,
+        action: Any,
+        applied_action: str | None,
+    ) -> None:
+        """Record the action accepted for the cached schedule's current slot."""
+        slot_start = getattr(action, "timestamp", None)
+        if not isinstance(slot_start, datetime) or not applied_action:
+            return
+        interval = max(1, int(getattr(self._config, "interval_minutes", 5) or 5))
+        self._boundary_execution = {
+            "slot_start": slot_start,
+            "slot_end": slot_start + timedelta(minutes=interval),
+            "action": applied_action,
+            "was_forced": applied_action in FORCED_ACTIONS,
+        }
 
     def _seconds_until_next_interval(self) -> float:
         """Return seconds until the next optimizer interval boundary."""
@@ -4624,7 +4688,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if allow_boundary_overrun:
                 requested = max(minimum, block_minutes)
             else:
-                requested = block_minutes
+                # The action may be executed after a slow solve has consumed
+                # part of its window. Do not ask hardware to force for the
+                # full original slots and cross the next action boundary.
+                block_end = None
+                if slots > 0:
+                    final_ts = getattr(actions[start_idx + slots - 1], "timestamp", None)
+                    if isinstance(final_ts, datetime):
+                        block_end = final_ts + timedelta(minutes=interval)
+                now = dt_util.now()
+                if (
+                    isinstance(action_ts, datetime)
+                    and isinstance(block_end, datetime)
+                    and action_ts <= now < block_end
+                ):
+                    remaining_seconds = max(0.0, (block_end - now).total_seconds())
+                    requested = max(1, int(math.ceil(remaining_seconds / 60.0)))
+                else:
+                    requested = block_minutes
 
         try:
             from ..const import DISCHARGE_DURATIONS
@@ -5864,7 +5945,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             soc /= 100.0
         return max(0.0, min(1.0, soc))
 
-    async def _execute_optimizer_action(self, action: Any) -> None:
+    async def _execute_optimizer_action(
+        self,
+        action: Any,
+        *,
+        execution_trigger: str | None = None,
+    ) -> None:
         """Execute an optimizer action on the battery."""
         # Guard against a solve that was in flight when disable() ran (e.g. an
         # untracked price-triggered re-optimization) completing afterwards and
@@ -6433,6 +6519,37 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         effective_action = "self_consumption"
                 except Exception:
                     pass
+
+            # A cached boundary action owns this slot. A periodic solve is
+            # still free to publish a new plan, but it must not introduce a
+            # fresh force mode halfway through a slot that began in a
+            # non-force action. Safety gates above may turn a forced plan into
+            # self-consumption; explicit price/settings/startup/manual runs do
+            # not pass the polling trigger and therefore retain immediate
+            # execution authority.
+            boundary_execution = getattr(self, "_boundary_execution", None)
+            if (
+                execution_trigger == "poll"
+                and effective_action in FORCED_ACTIONS
+                and boundary_execution
+                and not boundary_execution.get("was_forced", False)
+            ):
+                now = dt_util.now()
+                slot_start = boundary_execution.get("slot_start")
+                slot_end = boundary_execution.get("slot_end")
+                if (
+                    isinstance(slot_start, datetime)
+                    and isinstance(slot_end, datetime)
+                    and slot_start <= now < slot_end
+                ):
+                    _LOGGER.info(
+                        "Optimizer: deferring periodic mid-slot %s after cached %s "
+                        "until boundary %s",
+                        effective_action,
+                        boundary_execution.get("action"),
+                        slot_end.isoformat(),
+                    )
+                    return
 
             if effective_action == "charge":
                 if hasattr(battery, "force_charge"):
