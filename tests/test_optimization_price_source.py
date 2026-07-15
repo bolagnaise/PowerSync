@@ -2139,10 +2139,52 @@ def test_schedule_polling_executes_cached_action_before_reoptimizing(opt_module)
     source = inspect.getsource(opt_module.OptimizationCoordinator._schedule_polling_loop)
 
     cached_action_call = "await self._execute_cached_current_action_if_changed()"
+    status_publish_call = "self.async_set_updated_data(self.get_api_data())"
     optimization_call = 'await self._run_optimization(execution_trigger="poll")'
 
     assert cached_action_call in source
-    assert source.index(cached_action_call) < source.index(optimization_call)
+    assert status_publish_call in source
+    assert (
+        source.index(cached_action_call)
+        < source.index(status_publish_call)
+        < source.index(optimization_call)
+    )
+
+
+def test_optimization_publishes_status_after_current_action_execution(opt_module):
+    """The status sensor must include the hardware target just applied by a solve."""
+    source = inspect.getsource(opt_module.OptimizationCoordinator._run_optimization)
+
+    execute_and_publish_call = "await self._execute_current_action_and_publish("
+
+    assert execute_and_publish_call in source
+
+
+def test_current_action_execution_failure_still_publishes_new_plan(opt_module):
+    """A hardware failure must not hide a successfully computed schedule."""
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._enabled = True
+    coordinator._executor = object()
+    coordinator._execute_lock = asyncio.Lock()
+    published = []
+
+    async def fail_execution(*args, **kwargs):
+        raise RuntimeError("hardware write failed")
+
+    coordinator._execute_optimizer_action = fail_execution
+    coordinator.get_api_data = lambda: {"planned_current_power_w": 8347}
+    coordinator.async_set_updated_data = published.append
+    action = SimpleNamespace(action="charge", power_w=8347)
+
+    with pytest.raises(RuntimeError, match="hardware write failed"):
+        asyncio.run(
+            coordinator._execute_current_action_and_publish(
+                action,
+                execution_trigger="poll",
+            )
+        )
+
+    assert published == [{"planned_current_power_w": 8347}]
 
 
 def test_flow_power_aemo_price_source_is_provider_gated():

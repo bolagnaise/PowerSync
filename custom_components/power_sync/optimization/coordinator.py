@@ -4395,11 +4395,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 action_summary,
             )
 
-            # Push fresh data to HA sensors immediately after LP solve.
-            # Without this, sensors only update on the 5-minute DataUpdateCoordinator
-            # interval and can show stale "idle" while the API returns the real action.
-            self.async_set_updated_data(self.get_api_data())
-
             # Execute the current action immediately so the battery responds
             # right after the LP solve — don't wait for the next polling tick
             # (up to 5 minutes away).  The polling loop still re-applies the
@@ -4410,6 +4405,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # (see OB-10). _execute_optimizer_action also guards on _enabled
             # internally, but skip the call — and the lock acquisition below —
             # entirely once disabled rather than relying solely on that.
+            await self._execute_current_action_and_publish(
+                current_action,
+                execution_trigger=execution_trigger,
+            )
+            return True
+
+        except Exception as e:
+            _LOGGER.error("Optimization failed: %s", e, exc_info=True)
+            return False
+        finally:
+            self._pending_price_timestamps = None
+            self._optimization_lock.release()
+
+    async def _execute_current_action_and_publish(
+        self,
+        current_action: Any | None,
+        *,
+        execution_trigger: str | None = None,
+    ) -> None:
+        """Execute a solved action and publish its effective hardware status."""
+        try:
             if current_action and self._executor and self._enabled:
                 # Serialise against _execute_cached_current_action_if_changed
                 # (OB-11): both this in-cycle execution and the cached-action
@@ -4424,14 +4440,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         current_action,
                         execution_trigger=execution_trigger,
                     )
-            return True
-
-        except Exception as e:
-            _LOGGER.error("Optimization failed: %s", e, exc_info=True)
-            return False
         finally:
-            self._pending_price_timestamps = None
-            self._optimization_lock.release()
+            # Publish after the execution attempt so effective-action metadata
+            # includes the hardware target just accepted. The finally preserves
+            # the successfully computed plan if a hardware write raises.
+            self.async_set_updated_data(self.get_api_data())
 
     async def _wait_for_restart_force_restore(self) -> bool:
         """Wait for stale optimizer force cleanup before dispatching hardware."""
@@ -4504,6 +4517,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # before any forecast/API work in the next LP solve can delay
                 # hardware control.
                 await self._execute_cached_current_action_if_changed()
+
+                # The boundary action may update optimizer-owned force power.
+                # Publish that accepted target before a slow forecast/LP pass so
+                # the status sensor stays aligned with the hardware command.
+                self.async_set_updated_data(self.get_api_data())
 
                 # Re-optimize on each interval (executes the resulting action internally)
                 await self._run_optimization(execution_trigger="poll")
