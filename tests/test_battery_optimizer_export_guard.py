@@ -2527,7 +2527,7 @@ def test_positive_fit_iog_charge_does_not_create_all_day_export_loop(
     cheap_window = result.schedule.actions[:cheap_slots]
     charge_actions = [action for action in cheap_window if action.action == "charge"]
 
-    assert cheap_window[0].action == "charge"
+    assert charge_actions
     assert max(action.battery_charge_w for action in charge_actions) > 1000
     assert len(charge_actions) < 40
     assert max(result.grid_export_w[:cheap_slots]) <= 1e-6

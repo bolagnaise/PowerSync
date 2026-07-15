@@ -727,7 +727,7 @@ def test_flat_price_charge_timing_is_stable_across_reserve_margin(
     total_charge_kwh = []
     predicted_costs = []
 
-    for current_soc in (0.0401, 0.0400, 0.0399):
+    for current_soc in (0.0401, 0.0400, 0.0399, 0.0190):
         optimizer = module.BatteryOptimizer(
             capacity_wh=32_000,
             max_charge_w=10_000,
@@ -767,10 +767,18 @@ def test_flat_price_charge_timing_is_stable_across_reserve_margin(
         assert all(0.0 <= action.soc <= 1.0 for action in actions)
         assert all(action.battery_charge_w <= 10_000.1 for action in actions)
 
-    assert first_actions == ["self_consumption"] * 3
-    assert len(set(first_charge_slots)) == 1
-    assert total_charge_kwh == pytest.approx([total_charge_kwh[0]] * 3, abs=0.02)
-    assert predicted_costs == pytest.approx([predicted_costs[0]] * 3, abs=0.01)
+    assert first_actions[:3] == ["self_consumption"] * 3
+    assert first_actions[3] != "charge"
+    assert len(set(first_charge_slots[:3])) == 1
+    assert all(slot < 84 for slot in first_charge_slots)
+    assert total_charge_kwh[:3] == pytest.approx(
+        [total_charge_kwh[0]] * 3,
+        abs=0.02,
+    )
+    assert predicted_costs[:3] == pytest.approx(
+        [predicted_costs[0]] * 3,
+        abs=0.01,
+    )
 
 
 def test_flat_price_pre_window_deadline_still_prefers_earlier_charge(
