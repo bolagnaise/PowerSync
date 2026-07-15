@@ -36,6 +36,8 @@ PRE_WINDOW_REACHABILITY_MARGIN_SOC = 1e-6
 # can need six as the natural self-use boundary advances across adjacent base
 # slots, so keep a small bounded allowance before using the projected plan.
 MODE_PROJECTION_MAX_ITERATIONS = 8
+MODE_PROJECTION_SELF_USE_REL_TOL = 1e-4
+MODE_PROJECTION_SELF_USE_ABS_TOL_KWH = 0.01
 
 # Try to import the HiGHS solver; fall back to greedy if unavailable.
 try:
@@ -1427,6 +1429,7 @@ class BatteryOptimizer:
         left_required: list[float],
         right_modes: list[str],
         right_required: list[float],
+        slot_hours: float,
     ) -> bool:
         """Return True when two physical command projections are equivalent."""
         if left_modes != right_modes:
@@ -1445,13 +1448,17 @@ class BatteryOptimizer:
             end = idx + 1
             while end < len(left_modes) and left_modes[end] == "self_use":
                 end += 1
-            left_total = sum(left_required[idx:end])
-            right_total = sum(right_required[idx:end])
+            left_total = math.fsum(
+                power_kw * slot_hours for power_kw in left_required[idx:end]
+            )
+            right_total = math.fsum(
+                power_kw * slot_hours for power_kw in right_required[idx:end]
+            )
             if not math.isclose(
                 left_total,
                 right_total,
-                rel_tol=1e-4,
-                abs_tol=0.01,
+                rel_tol=MODE_PROJECTION_SELF_USE_REL_TOL,
+                abs_tol=MODE_PROJECTION_SELF_USE_ABS_TOL_KWH,
             ):
                 return False
             idx = end
@@ -1587,6 +1594,7 @@ class BatteryOptimizer:
                     required_self_use_kw or [0.0] * n,
                     next_modes,
                     next_required,
+                    self.dt_hours,
                 ):
                     result.lp_stats["mode_converged"] = True
                     return result

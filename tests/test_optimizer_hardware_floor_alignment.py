@@ -675,6 +675,140 @@ def test_48_hour_mode_alignment_converges_without_fallback(
     assert result.lp_stats["mode_converged"] is True
 
 
+def test_mode_projection_matcher_compares_self_use_energy_per_run(
+    battery_optimizer_module,
+):
+    """Projection equivalence uses bounded energy, never raw power samples."""
+    module = battery_optimizer_module
+    modes = ["self_use", "self_use", "idle", "self_use"]
+    slot_hours = 5 / 60
+
+    assert module.BatteryOptimizer._mode_constraints_match(
+        modes,
+        [1.0, 1.0, 0.0, 1.0],
+        modes,
+        [1.05, 1.05, 0.0, 1.0],
+        slot_hours,
+    )
+    assert not module.BatteryOptimizer._mode_constraints_match(
+        modes,
+        [1.0, 1.0, 0.0, 1.0],
+        modes,
+        [1.07, 1.07, 0.0, 1.0],
+        slot_hours,
+    )
+    assert not module.BatteryOptimizer._mode_constraints_match(
+        modes,
+        [1.0, 1.0, 0.0, 1.0],
+        ["self_use", "idle", "idle", "self_use"],
+        [1.0, 1.0, 0.0, 1.0],
+        slot_hours,
+    )
+    # Opposite differences in distinct runs must not cancel horizon-wide.
+    assert not module.BatteryOptimizer._mode_constraints_match(
+        modes,
+        [1.0, 1.0, 0.0, 1.0],
+        modes,
+        [1.07, 1.07, 0.0, 0.86],
+        slot_hours,
+    )
+
+
+def test_flat_price_charge_timing_is_stable_across_reserve_margin(
+    battery_optimizer_module,
+    monkeypatch,
+):
+    """A rolling solve must not reverse solely at reserve plus two percent."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, "highs")
+    n = 576
+    first_actions = []
+    first_charge_slots = []
+    total_charge_kwh = []
+    predicted_costs = []
+
+    for current_soc in (0.0401, 0.0400, 0.0399):
+        optimizer = module.BatteryOptimizer(
+            capacity_wh=32_000,
+            max_charge_w=10_000,
+            max_discharge_w=19_200,
+            max_grid_import_w=20_000,
+            max_grid_export_w=20_000,
+            efficiency=0.95,
+            backup_reserve=0.02,
+            hardware_reserve=0.0,
+            interval_minutes=5,
+            horizon_hours=48,
+            terminal_weight=0.30,
+        )
+        result = optimizer.optimize(
+            import_prices=[0.142 if idx < 84 else 0.302 for idx in range(n)],
+            export_prices=[0.093] * n,
+            solar_forecast=[0.0] * n,
+            load_forecast=[1.2] * n,
+            current_soc=current_soc,
+            allow_battery_export=[False] * n,
+            block_battery_charge=[False] * n,
+            allow_grid_charge=True,
+            grid_charge_allowed=[True] * n,
+            priority_export_slots=[False] * n,
+            priority_export_enabled=False,
+            disable_idle=False,
+        )
+        actions = result.schedule.actions
+        first_actions.append(actions[0].action)
+        first_charge_slots.append(
+            next(idx for idx, action in enumerate(actions) if action.action == "charge")
+        )
+        total_charge_kwh.append(
+            sum(action.battery_charge_w for action in actions) / 1000.0 * (5 / 60)
+        )
+        predicted_costs.append(result.schedule.predicted_cost)
+        assert all(0.0 <= action.soc <= 1.0 for action in actions)
+        assert all(action.battery_charge_w <= 10_000.1 for action in actions)
+
+    assert first_actions == ["self_consumption"] * 3
+    assert len(set(first_charge_slots)) == 1
+    assert total_charge_kwh == pytest.approx([total_charge_kwh[0]] * 3, abs=0.02)
+    assert predicted_costs == pytest.approx([predicted_costs[0]] * 3, abs=0.01)
+
+
+def test_flat_price_pre_window_deadline_still_prefers_earlier_charge(
+    battery_optimizer_module,
+    monkeypatch,
+):
+    """A genuine SOC deadline retains the explicit prefer-earlier tie-break."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, "highs")
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000,
+        max_charge_w=2_000,
+        max_discharge_w=2_000,
+        efficiency=1.0,
+        backup_reserve=0.10,
+        hardware_reserve=0.05,
+        interval_minutes=60,
+        horizon_hours=4,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_slot = 3
+    optimizer.pre_window_soc_target = 0.70
+
+    result = optimizer.optimize(
+        import_prices=[0.10, 0.10, 0.10, 0.50],
+        export_prices=[0.0] * 4,
+        solar_forecast=[0.0] * 4,
+        load_forecast=[0.0] * 4,
+        current_soc=0.30,
+        allow_battery_export=[False] * 4,
+        allow_grid_charge=True,
+    )
+
+    assert result.schedule.actions[0].action == "charge"
+    assert result.schedule.actions[2].soc >= 0.695
+    assert max(action.battery_charge_w for action in result.schedule.actions) <= 2000.1
+
+
 def test_export_clipped_by_reserve_with_concurrent_home_load_reclassifies_to_self_use(
     battery_optimizer_module,
 ):
