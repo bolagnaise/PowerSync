@@ -2128,22 +2128,14 @@ class BatteryOptimizer:
 
         # Deadline mode: when pre_window_soc_target is binding (e.g. must reach
         # 100% before today's Flow Power Happy Hour), flip the import bias so
-        # ties resolve to EARLIER charging. Do the same when the battery is at
-        # the reserve floor: waiting until the end of a flat cheap window leaves
-        # no margin for inverter latency, BMS taper, or forecast jitter.
-        # Solar-SC users with useful SOC and no deadline keep the prefer-later
-        # default so grid imports happen after solar has had a chance to fill
-        # the battery.
+        # ties resolve to EARLIER charging. Without an explicit deadline, keep
+        # the prefer-later default so rolling solves cannot reverse charge timing
+        # merely because SOC crossed a reserve-proximity threshold.
         deadline_mode = (
             allow_grid_charge
-            and (
-                (
-                    self.pre_window_slot is not None
-                    and self.pre_window_slot > 0
-                    and self.pre_window_soc_target > 0.0
-                )
-                or soc_0 <= self.backup_reserve + 0.02
-            )
+            and self.pre_window_slot is not None
+            and self.pre_window_slot > 0
+            and self.pre_window_soc_target > 0.0
         )
 
         # Pre-compute free charging bonus: use median non-free import price
