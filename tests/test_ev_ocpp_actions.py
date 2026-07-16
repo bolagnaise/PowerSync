@@ -434,6 +434,64 @@ def test_solar_surplus_parallel_reserve_allows_excess_above_battery_rate():
     assert surplus_kw == 2.0
 
 
+def test_active_solar_surplus_refreshes_threshold_with_hysteresis(monkeypatch):
+    hass = _Hass([])
+    hass.data["power_sync"]["entry-1"]["automation_store"] = types.SimpleNamespace(
+        _data={
+            "solar_surplus_config": {
+                "enabled": True,
+                "home_battery_minimum": 90,
+                "allow_parallel_charging": False,
+                "household_buffer_kw": 0.5,
+            }
+        }
+    )
+    vehicle_id = "generic_ev"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=10)
+    state["params"].update(
+        {
+            "charger_type": "generic",
+            "min_battery_soc": 80,
+            "pause_below_soc": 70,
+            "notify_on_error": False,
+        }
+    )
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+
+    live_status = {
+        "battery_soc": 81,
+        "grid_power": -2500,
+        "battery_power": -500,
+        "solar_power": 5000,
+        "load_power": 2000,
+    }
+    set_amps_calls = _install_solar_surplus_runtime_stubs(monkeypatch, live_status)
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    state = actions._dynamic_ev_state["entry-1"][vehicle_id]
+    assert state["params"]["min_battery_soc"] == 90
+    assert state["params"]["pause_below_soc"] == 80
+    assert state.get("paused") is not True
+    assert 0 not in set_amps_calls
+
+    live_status["battery_soc"] = 79
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    assert state["paused"] is True
+    assert set_amps_calls[-1] == 0
+
+
 def test_solar_surplus_curtailed_full_battery_keeps_active_ev_headroom():
     surplus_kw = actions._calculate_solar_surplus(
         {

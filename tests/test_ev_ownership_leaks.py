@@ -543,6 +543,102 @@ def test_explicit_vin_stop_is_unaffected_by_resolver(monkeypatch):
     assert ev_ownership.manual_stop_hold_reason(hass, entry, VIN_B) is None
 
 
+def test_ocpp_stop_canonicalizes_matching_generic_solar_session(monkeypatch):
+    """An OCPP charger exposed through generic entities is one loadpoint.
+
+    The mobile OCPP stop endpoint names it ``ocpp_charger`` while Solar Surplus
+    tracks it as ``generic_ev``.  The stop must clear/hold the tracked generic
+    controller without suppressing an unrelated vehicle.
+    """
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", AsyncMock(return_value=True))
+
+    hass = _Hass()
+    entry = _Entry()
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        "generic_ev": {
+            "active": True,
+            "current_amps": 10,
+            "target_amps": 10,
+            "cancel_timer": lambda: None,
+            "params": {
+                "dynamic_mode": "solar_surplus",
+                "owner_mode": "solar_surplus",
+                "charger_type": "generic",
+                "charger_switch_entity": "switch.charger_charge_control",
+            },
+        },
+        VIN_B: _active_tesla_state(VIN_B),
+    }
+
+    result = asyncio.run(
+        actions._execute_single_action(
+            hass,
+            entry,
+            "stop_ev_charging",
+            {
+                "charger_type": "ocpp",
+                "ocpp_charger_id": "charger",
+                "vehicle_id": "ocpp_charger",
+            },
+        )
+    )
+
+    assert result is True
+    assert set(actions._dynamic_ev_state["entry-1"]) == {VIN_B}
+    holds = hass.data["power_sync"]["entry-1"]["ev_manual_stop_holds"]
+    assert set(holds) == {"generic_ev"}
+    assert ev_ownership.manual_stop_hold_reason(hass, entry, "generic_ev") is not None
+    assert ev_ownership.manual_stop_hold_reason(hass, entry, VIN_B) is None
+
+
+def test_solar_surplus_start_respects_matching_manual_stop_hold():
+    hass = _Hass()
+    entry = _Entry()
+    actions._dynamic_ev_state.clear()
+    ev_ownership.record_manual_stop_hold(
+        hass,
+        entry,
+        "generic_ev",
+        reason="Manual stop from mobile",
+    )
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            entry,
+            {
+                "dynamic_mode": "solar_surplus",
+                "owner_mode": "solar_surplus",
+                "vehicle_vin": "generic_ev",
+                "charger_type": "generic",
+            },
+        )
+    )
+
+    assert result is False
+    assert actions._dynamic_ev_state == {}
+
+    hass.data["power_sync"]["entry-1"]["ev_manual_stop_holds"]["generic_ev"][
+        "expires_at"
+    ] = "2000-01-01T00:00:00+00:00"
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            entry,
+            {
+                "dynamic_mode": "solar_surplus",
+                "owner_mode": "solar_surplus",
+                "vehicle_vin": "generic_ev",
+                "charger_type": "generic",
+            },
+        )
+    )
+
+    assert result is True
+    assert actions._dynamic_ev_state["entry-1"]["generic_ev"]["active"] is True
+
+
 # ---------------------------------------------------------------------------
 # HD-18: release/clear must evict a "_default"-held lease when it is
 # released/cleared under a resolved VIN, mirroring claim_ev_ownership's

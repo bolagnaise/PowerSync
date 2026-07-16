@@ -80,6 +80,8 @@ async def _noop_async(*args, **kwargs) -> None:
 def _disable_coordinator(opt_module, *, last_executed_action, pre_idle_reserve, ev_active):
     coordinator = object.__new__(opt_module.OptimizationCoordinator)
     coordinator._enabled = True
+    coordinator.entry_id = "entry-1"
+    coordinator.hass = SimpleNamespace(data={"power_sync": {"entry-1": {}}})
     coordinator._monitoring_mode_active = lambda: False
     coordinator._last_executed_action = last_executed_action
     coordinator._pre_idle_backup_reserve = pre_idle_reserve
@@ -179,6 +181,67 @@ def test_disable_reserve_restore_skipped_under_monitoring_but_stays_pending(opt_
 
         assert calls == []
         assert coordinator._pre_idle_backup_reserve == 78
+
+    asyncio.run(_run())
+
+
+def test_disable_stops_executor_without_restore_writes_under_monitoring(opt_module):
+    """An ordinary reload while already monitoring must perform zero restores."""
+
+    async def _run():
+        coordinator = _disable_coordinator(
+            opt_module,
+            last_executed_action=None,
+            pre_idle_reserve=None,
+            ev_active=False,
+        )
+        coordinator._monitoring_mode_active = lambda: True
+        restore_flags = []
+
+        async def stop(*, restore_normal):
+            restore_flags.append(restore_normal)
+
+        coordinator._executor = SimpleNamespace(stop=stop)
+        coordinator.battery_controller = None
+        coordinator.energy_coordinator = None
+
+        await coordinator.disable()
+
+        assert restore_flags == [False]
+
+    asyncio.run(_run())
+
+
+def test_disable_preserves_explicit_monitoring_enable_handoff(opt_module):
+    """A real off-to-on transition keeps the established one-time cleanup."""
+
+    async def _run():
+        coordinator = _disable_coordinator(
+            opt_module,
+            last_executed_action=None,
+            pre_idle_reserve=None,
+            ev_active=False,
+        )
+        coordinator._monitoring_mode_active = lambda: True
+        coordinator.hass.data["power_sync"]["entry-1"][
+            "_monitoring_enable_restore_pending"
+        ] = True
+        restore_flags = []
+
+        async def stop(*, restore_normal):
+            restore_flags.append(restore_normal)
+
+        coordinator._executor = SimpleNamespace(stop=stop)
+        coordinator.battery_controller = None
+        coordinator.energy_coordinator = None
+
+        await coordinator.disable()
+
+        assert restore_flags == [True]
+        assert (
+            "_monitoring_enable_restore_pending"
+            not in coordinator.hass.data["power_sync"]["entry-1"]
+        )
 
     asyncio.run(_run())
 

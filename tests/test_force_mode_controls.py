@@ -272,7 +272,7 @@ def test_restore_normal_hold_soc_uses_local_first_reserve_service():
     assert '"source": "hold_soc_restore"' in function_source[hold_only_index:site_configs_index]
 
 
-def test_monitoring_mode_optimizer_shutdown_releases_active_control():
+def test_monitoring_mode_optimizer_shutdown_skips_hardware_restore():
     coordinator_source = OPTIMIZATION_COORDINATOR_PATH.read_text()
     coordinator_tree = ast.parse(coordinator_source)
     monitoring_helper = _find_class_method(
@@ -312,8 +312,8 @@ def test_monitoring_mode_optimizer_shutdown_releases_active_control():
     assert 'if not monitoring_mode and self._last_executed_action == "idle":' in disable_source
     assert "skipping IDLE cleanup writes" in disable_source
     assert "skipping scheduled EV no-discharge release" in disable_source
-    assert "before handing off to monitoring mode" in disable_source
-    assert "await self._executor.stop(restore_normal=True)" in disable_source
+    assert "skipping executor restore writes" in disable_source
+    assert "restore_normal=not monitoring_mode or monitoring_enable_restore" in disable_source
     assert "restore_normal: bool = True" in stop_source
     assert "if restore_normal:" in stop_source
     assert "await self._restore_normal_operation()" in stop_source

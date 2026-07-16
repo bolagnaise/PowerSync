@@ -58,6 +58,7 @@ from ..const import (
 from ..solar_surplus_config import (
     DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC,
     get_solar_surplus_min_battery_soc,
+    normalize_solar_surplus_config,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -1362,10 +1363,53 @@ def _ev_action_loadpoint_id(params: Dict[str, Any]) -> str:
     return DEFAULT_VEHICLE_ID
 
 
+def _canonical_manual_stop_loadpoint_id(
+    config_entry: ConfigEntry,
+    params: Dict[str, Any],
+) -> str:
+    """Map an OCPP stop to a matching generic-backed tracked loadpoint.
+
+    A charger configured through PowerSync's generic entity adapter can also be
+    discovered by the mobile app as an OCPP loadpoint.  Only collapse those two
+    ids when the tracked generic controller names the exact same OCPP charger
+    or charge-control switch; never infer equivalence from charger type alone.
+    """
+    loadpoint_id = _ev_action_loadpoint_id(params)
+    if str(params.get("charger_type") or "").lower() != "ocpp":
+        return loadpoint_id
+
+    charger_id = str(params.get("ocpp_charger_id") or "").strip()
+    if not charger_id:
+        return loadpoint_id
+    expected_switch = f"switch.{charger_id}_charge_control".lower()
+
+    matches: list[str] = []
+    for vehicle_id, state in _dynamic_ev_state.get(config_entry.entry_id, {}).items():
+        if not isinstance(state, dict) or not state.get("active"):
+            continue
+        state_params = state.get("params") or {}
+        if str(state_params.get("charger_type") or "").lower() != "generic":
+            continue
+        tracked_ocpp_id = str(state_params.get("ocpp_charger_id") or "").strip()
+        tracked_switch = str(state_params.get("charger_switch_entity") or "").lower()
+        if tracked_ocpp_id == charger_id or tracked_switch == expected_switch:
+            matches.append(str(vehicle_id))
+
+    if len(matches) == 1:
+        _LOGGER.info(
+            "Manual OCPP stop for %s matched tracked generic loadpoint %s",
+            loadpoint_id,
+            matches[0],
+        )
+        return matches[0]
+    return loadpoint_id
+
+
 async def _resolve_manual_stop_hold_vehicle_id(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     params: Dict[str, Any],
+    loadpoint_id: Optional[str] = None,
 ) -> Optional[str]:
     """Resolve which vehicle a no-VIN manual stop's restart-suppression hold
     should be scoped to.
@@ -1382,7 +1426,7 @@ async def _resolve_manual_stop_hold_vehicle_id(
     was never touched. Single-vehicle installs keep falling back to
     ``_default`` exactly as before.
     """
-    loadpoint_id = _ev_action_loadpoint_id(params)
+    loadpoint_id = loadpoint_id or _ev_action_loadpoint_id(params)
     if loadpoint_id != DEFAULT_VEHICLE_ID:
         return loadpoint_id
 
@@ -1905,7 +1949,7 @@ async def _execute_single_action(
         if success and not params.get("skip_ownership"):
             from .ev_ownership import record_manual_stop_hold
 
-            loadpoint_id = _ev_action_loadpoint_id(params)
+            loadpoint_id = _canonical_manual_stop_loadpoint_id(config_entry, params)
             # Resolve which vehicle to scope the restart-suppression hold to
             # BEFORE clearing tracked session state below — a "_default"
             # loadpoint_id makes clear_tracked_ev_charging_session drop every
@@ -1913,7 +1957,7 @@ async def _execute_single_action(
             # overlap" stop-all behavior), which would erase the very
             # "who was actively charging" signal this resolution depends on.
             hold_vehicle_id = await _resolve_manual_stop_hold_vehicle_id(
-                hass, config_entry, params
+                hass, config_entry, params, loadpoint_id
             )
             await clear_tracked_ev_charging_session(
                 hass,
@@ -5284,6 +5328,37 @@ def _non_ev_home_load_kw(live_status: dict, current_ev_power_kw: float) -> float
     return max(0.0, load_power_kw - ev_kw)
 
 
+def _refresh_solar_surplus_runtime_params(
+    hass: HomeAssistant,
+    entry_id: str,
+    params: dict,
+) -> dict:
+    """Apply the latest persisted Solar Surplus policy to an active session."""
+    entry_data = hass.data.get(DOMAIN, {}).get(entry_id, {})
+    store = entry_data.get("automation_store") if isinstance(entry_data, dict) else None
+    stored_data = getattr(store, "_data", {}) or {}
+    raw_config = stored_data.get("solar_surplus_config")
+    if not isinstance(raw_config, dict):
+        return params
+
+    config = normalize_solar_surplus_config(raw_config)
+    min_battery_soc = get_solar_surplus_min_battery_soc(config)
+    params.update(
+        {
+            "household_buffer_kw": config.get("household_buffer_kw", 0.5),
+            "surplus_calculation": config.get("surplus_calculation", "grid_based"),
+            "sustained_surplus_minutes": config.get("sustained_surplus_minutes", 2),
+            "stop_delay_minutes": config.get("stop_delay_minutes", 5),
+            "dual_vehicle_strategy": config.get("dual_vehicle_strategy", "priority_first"),
+            "min_battery_soc": min_battery_soc,
+            "pause_below_soc": max(0, min_battery_soc - 10),
+            "allow_parallel_charging": config.get("allow_parallel_charging", False),
+            "max_battery_charge_rate_kw": config.get("max_battery_charge_rate_kw", 5.0),
+        }
+    )
+    return params
+
+
 async def _dynamic_ev_update_surplus(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -5302,6 +5377,7 @@ async def _dynamic_ev_update_surplus(
         return
 
     params = state.get("params", {})
+    params = _refresh_solar_surplus_runtime_params(hass, entry_id, params)
     params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
     state["params"] = params
 
@@ -6470,8 +6546,31 @@ async def _action_start_ev_charging_dynamic_locked(
         can_claim_ev_ownership,
         can_take_over_ev_ownership,
         claim_ev_ownership,
+        manual_stop_hold_reason,
         record_ev_command,
     )
+
+    if dynamic_mode == "solar_surplus":
+        hold_reason = manual_stop_hold_reason(
+            hass,
+            config_entry,
+            vehicle_id,
+        )
+        if hold_reason:
+            _LOGGER.info(
+                "Solar surplus EV: start suppressed for %s - %s",
+                vehicle_id,
+                hold_reason,
+            )
+            record_ev_command(
+                hass,
+                config_entry,
+                vehicle_id,
+                command=f"start_{owner_mode}",
+                success=False,
+                reason=hold_reason,
+            )
+            return False
 
     entry_vehicles = _dynamic_ev_state.get(entry_id, {})
 

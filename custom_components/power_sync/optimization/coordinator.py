@@ -3786,6 +3786,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         monitoring_mode = self._monitoring_mode_active()
+        entry_data = self.hass.data.get("power_sync", {}).get(self.entry_id, {})
+        monitoring_enable_restore = bool(
+            isinstance(entry_data, dict)
+            and entry_data.pop("_monitoring_enable_restore_pending", False)
+        )
 
         # Safety: restore any pending pre-IDLE backup_reserve before shutting
         # down. Gated on the pending reserve itself, not on
@@ -3865,12 +3870,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._octopus_gate_listener_unsub = None
 
         if self._executor:
-            if monitoring_mode:
+            if monitoring_mode and not monitoring_enable_restore:
                 _LOGGER.info(
-                    "Optimizer shutdown: monitoring mode active — restoring optimizer-owned "
-                    "battery mode before handing off to monitoring mode"
+                    "Optimizer shutdown: monitoring mode active — skipping executor restore writes"
                 )
-            await self._executor.stop(restore_normal=True)
+            await self._executor.stop(
+                restore_normal=not monitoring_mode or monitoring_enable_restore
+            )
 
         if self._ev_coordinator:
             await self._ev_coordinator.stop()

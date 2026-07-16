@@ -9956,6 +9956,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     ),
                 )
             )
+            previous_monitoring_mode = bool(
+                self._get_option(
+                    CONF_MONITORING_MODE,
+                    self.config_entry.data.get(CONF_MONITORING_MODE, False),
+                )
+            )
             if optimization_provider != OPT_PROVIDER_POWERSYNC:
                 optimization_enabled = False
                 auto_apply_reserve_enabled = False
@@ -10215,6 +10221,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             )
             if isinstance(entry_data, dict) and persisted_changed:
                 entry_data["_skip_reload"] = True
+            if (
+                monitoring_mode
+                and not previous_monitoring_mode
+                and isinstance(entry_data, dict)
+                and coordinator is not None
+                and bool(getattr(coordinator, "_enabled", False))
+            ):
+                entry_data["_monitoring_enable_restore_pending"] = True
             self.hass.config_entries.async_update_entry(
                 self.config_entry, data=new_data, options=new_options
             )

@@ -1001,6 +1001,7 @@ def test_optimization_options_exposes_enabled_toggle():
     assert "SERVICE_RESTORE_NORMAL" in method_source
     assert '{"source": "manual", "_force_restore": True}' in method_source
     assert '"_native_control": True' not in method_source
+    assert 'entry_data["_monitoring_enable_restore_pending"] = True' in method_source
     assert "CONF_HARDWARE_BACKUP_RESERVE" in method_source
     assert "new_options[CONF_HARDWARE_BACKUP_RESERVE] = hardware_backup_reserve" in method_source
     assert 'new_options.pop("_user_backup_reserve", None)' in method_source
