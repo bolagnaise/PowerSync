@@ -113,6 +113,34 @@ def _is_number_range_error(error_message: str) -> bool:
     return "out_of_range" in error_lower or "out of range" in error_lower
 
 
+async def _set_generic_charger_amps_entity(
+    hass: HomeAssistant,
+    entity_id: str,
+    amps: int,
+) -> bool:
+    """Set a generic charger's current through its configured HA entity domain."""
+    entity_id = str(entity_id or "").strip()
+    domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
+    if domain not in ("number", "input_number"):
+        _LOGGER.error(
+            "Generic charger amps entity %s must be number.* or input_number.*",
+            entity_id or "<empty>",
+        )
+        return False
+
+    try:
+        await hass.services.async_call(
+            domain,
+            "set_value",
+            {"entity_id": entity_id, "value": amps},
+            blocking=True,
+        )
+        return True
+    except Exception as err:
+        _LOGGER.error("Generic charger set amps failed via %s: %s", entity_id, err)
+        return False
+
+
 def _tesla_entity_max_fallback_amps(
     requested_amps: int,
     entity_min: int,
@@ -3729,13 +3757,10 @@ async def _action_set_ev_charging_amps(
         if not amps_entity:
             _LOGGER.error("Generic charger set amps: no amps entity configured")
             return False
-        try:
-            await hass.services.async_call("number", "set_value", {"entity_id": amps_entity, "value": int(amps)}, blocking=True)
+        if await _set_generic_charger_amps_entity(hass, amps_entity, int(amps)):
             _LOGGER.info("Generic charger set to %dA via %s", amps, amps_entity)
             return True
-        except Exception as e:
-            _LOGGER.error("Generic charger set amps failed: %s", e)
-            return False
+        return False
 
     # Tesla charger: existing logic below
     ev_config = _get_ev_config(config_entry)
@@ -4879,12 +4904,10 @@ async def _set_vehicle_amps(
         try:
             if amps == 0:
                 # Stop/pause charging
-                if amps_entity:
-                    await hass.services.async_call(
-                        "number", "set_value",
-                        {"entity_id": amps_entity, "value": 0},
-                        blocking=True
-                    )
+                if amps_entity and not await _set_generic_charger_amps_entity(
+                    hass, amps_entity, 0
+                ):
+                    return False
                 if switch_entity:
                     await hass.services.async_call(
                         "switch", "turn_off",
@@ -4899,18 +4922,24 @@ async def _set_vehicle_amps(
                     return False
                 if not await _run_pre_charge_wake_sequence(hass, params, "generic"):
                     return False
-                if amps_entity:
-                    await hass.services.async_call(
-                        "number", "set_value",
-                        {"entity_id": amps_entity, "value": amps},
-                        blocking=True
-                    )
+                if amps_entity and not await _set_generic_charger_amps_entity(
+                    hass, amps_entity, amps
+                ):
+                    return False
                 if switch_entity:
-                    await hass.services.async_call(
-                        "switch", "turn_on",
-                        {"entity_id": switch_entity},
-                        blocking=True
-                    )
+                    switch_entity = str(switch_entity).strip()
+                    switch_state = hass.states.get(switch_entity)
+                    if switch_state and str(switch_state.state).lower() == "on":
+                        _LOGGER.debug(
+                            "Generic charger %s already on; skipping duplicate start",
+                            switch_entity,
+                        )
+                    else:
+                        await hass.services.async_call(
+                            "switch", "turn_on",
+                            {"entity_id": switch_entity},
+                            blocking=True
+                        )
             _LOGGER.info(f"Set generic charger to {amps}A via {amps_entity or switch_entity}")
             return True
         except Exception as e:

@@ -1242,6 +1242,61 @@ def test_generic_start_runs_pre_charge_wake_before_switch_on():
     ]
 
 
+def test_generic_set_vehicle_amps_uses_input_number_and_skips_duplicate_start():
+    hass = _Hass([
+        _State("input_number.smart_charge_set_amps", "16"),
+        _State("switch.charger_charge_control", "on"),
+    ])
+
+    result = asyncio.run(
+        actions._set_vehicle_amps(
+            hass,
+            _Entry(),
+            "generic_ev",
+            12,
+            {
+                "charger_type": "generic",
+                "charger_amps_entity": "input_number.smart_charge_set_amps",
+                "charger_switch_entity": "switch.charger_charge_control",
+            },
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        (
+            "input_number",
+            "set_value",
+            {"entity_id": "input_number.smart_charge_set_amps", "value": 12},
+        )
+    ]
+
+
+def test_generic_direct_set_amps_uses_configured_entity_domain():
+    hass = _Hass([_State("input_number.smart_charge_set_amps", "16")])
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            _Entry(),
+            {
+                "charger_type": "generic",
+                "charger_amps_entity": "input_number.smart_charge_set_amps",
+                "amps": 10,
+            },
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        (
+            "input_number",
+            "set_value",
+            {"entity_id": "input_number.smart_charge_set_amps", "value": 10},
+        )
+    ]
+
+
 def test_ocpp_pre_charge_wake_blocks_when_connector_available():
     hass = _Hass([
         _State("switch.evse_1_charge_control", "off"),
