@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -144,6 +145,496 @@ def test_amber_forecast_utc_start_times_normalize_to_ha_local(monkeypatch):
     assert forecast[0].hour == "2026-07-03T20:00:00"
     assert forecast[0].import_cents == 18.0
     assert forecast[0].export_cents == 5.0
+
+
+def test_amber_forecast_drops_past_hours_before_horizon_limit(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda *args, **kwargs: datetime(
+            2026, 7, 16, 18, 10, tzinfo=brisbane_tz
+        ),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+
+    forecast_rows = []
+    for hour, price in (
+        ("2026-07-15T22:00:00Z", 12.0),
+        ("2026-07-15T23:00:00Z", 13.0),
+        ("2026-07-16T08:00:00Z", 37.0),
+        ("2026-07-16T09:00:00Z", 20.0),
+        ("2026-07-16T10:00:00Z", 8.0),
+    ):
+        forecast_rows.extend(
+            (
+                {
+                    "startTime": hour,
+                    "channelType": "general",
+                    "perKwh": price,
+                },
+                {
+                    "startTime": hour,
+                    "channelType": "feedIn",
+                    "perKwh": 5.0,
+                },
+            )
+        )
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(
+        data={"forecast": forecast_rows}
+    )
+    config_entry = _FakeConfigEntry()
+    config_entry.data = {"amber_api_token": "token"}
+
+    forecast = asyncio.run(
+        ev_planner.PriceForecaster(hass, config_entry)._get_amber_forecast(2)
+    )
+
+    assert forecast is not None
+    assert [row.hour for row in forecast] == [
+        "2026-07-16T18:00:00",
+        "2026-07-16T19:00:00",
+    ]
+    assert [row.import_cents for row in forecast] == [37.0, 20.0]
+
+
+def test_solar_preferred_excludes_past_and_post_deadline_windows(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    now = datetime(2026, 7, 16, 18, 10, tzinfo=brisbane_tz)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    surplus_forecast = [
+        ev_planner.SurplusForecast(
+            hour=hour,
+            solar_kw=3.0,
+            load_kw=0.0,
+            surplus_kw=3.0,
+            confidence=0.8,
+        )
+        for hour in (
+            "2026-07-16T12:00:00",
+            "2026-07-17T11:00:00",
+            "2026-07-17T16:00:00",
+        )
+    ]
+    price_forecast = [
+        ev_planner.PriceForecast(
+            hour=hour,
+            import_cents=price,
+            export_cents=5.0,
+            period="shoulder",
+        )
+        for hour, price in (
+            ("2026-07-16T12:00:00", 1.0),
+            ("2026-07-17T13:00:00", 10.0),
+            ("2026-07-17T15:00:00", -5.0),
+        )
+    ]
+
+    plan = asyncio.run(
+        planner._plan_solar_preferred(
+            vehicle_id=VIN,
+            current_soc=60,
+            target_soc=80,
+            target_time=datetime(2026, 7, 17, 15, 0, tzinfo=brisbane_tz),
+            energy_needed_kwh=8.0,
+            charger_power_kw=7.36,
+            surplus_forecast=surplus_forecast,
+            price_forecast=price_forecast,
+        )
+    )
+
+    assert [window.start_time for window in plan.windows] == [
+        "2026-07-17T11:00:00",
+        "2026-07-17T13:00:00",
+    ]
+    assert plan.estimated_solar_kwh == pytest.approx(7.36)
+    assert plan.estimated_grid_kwh == pytest.approx(0.64)
+    assert plan.can_meet_target is True
+
+
+def test_cost_optimized_matches_solar_to_price_by_local_hour(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 7, 16, 18, 0, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    price_forecast = [
+        ev_planner.PriceForecast(
+            hour="2026-07-16T18:00:00",
+            import_cents=5.0,
+            export_cents=0.0,
+            period="offpeak",
+        ),
+        ev_planner.PriceForecast(
+            hour="2026-07-16T19:00:00",
+            import_cents=40.0,
+            export_cents=0.0,
+            period="peak",
+        ),
+    ]
+    surplus_forecast = [
+        ev_planner.SurplusForecast(
+            hour="2026-07-16T19:10:00",
+            solar_kw=3.0,
+            load_kw=0.0,
+            surplus_kw=3.0,
+            confidence=0.8,
+        ),
+        ev_planner.SurplusForecast(
+            hour="2026-07-16T18:10:00",
+            solar_kw=0.0,
+            load_kw=0.0,
+            surplus_kw=0.0,
+            confidence=0.8,
+        ),
+    ]
+
+    plan = asyncio.run(
+        planner._plan_cost_optimized(
+            vehicle_id=VIN,
+            current_soc=60,
+            target_soc=70,
+            target_time=datetime(2026, 7, 16, 21, 0, tzinfo=brisbane_tz),
+            energy_needed_kwh=3.0,
+            charger_power_kw=7.36,
+            surplus_forecast=surplus_forecast,
+            price_forecast=price_forecast,
+        )
+    )
+
+    assert len(plan.windows) == 1
+    assert plan.windows[0].start_time == "2026-07-16T19:00:00"
+    assert plan.windows[0].source == "solar_surplus"
+    assert plan.estimated_solar_kwh == pytest.approx(3.0)
+
+
+def test_time_critical_matches_grid_price_to_surplus_hour(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 7, 16, 18, 0, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    surplus_forecast = [
+        ev_planner.SurplusForecast(
+            hour="2026-07-16T18:10:00",
+            solar_kw=0.0,
+            load_kw=0.0,
+            surplus_kw=0.0,
+            confidence=0.8,
+        ),
+        ev_planner.SurplusForecast(
+            hour="2026-07-16T19:10:00",
+            solar_kw=3.0,
+            load_kw=0.0,
+            surplus_kw=3.0,
+            confidence=0.8,
+        ),
+    ]
+    price_forecast = [
+        ev_planner.PriceForecast(
+            hour="2026-07-16T19:00:00",
+            import_cents=40.0,
+            export_cents=0.0,
+            period="peak",
+        ),
+        ev_planner.PriceForecast(
+            hour="2026-07-16T18:00:00",
+            import_cents=5.0,
+            export_cents=0.0,
+            period="offpeak",
+        ),
+    ]
+
+    plan = asyncio.run(
+        planner._plan_time_critical(
+            vehicle_id=VIN,
+            current_soc=60,
+            target_soc=80,
+            target_time=datetime(2026, 7, 16, 21, 0, tzinfo=brisbane_tz),
+            energy_needed_kwh=10.0,
+            charger_power_kw=7.36,
+            surplus_forecast=surplus_forecast,
+            price_forecast=price_forecast,
+        )
+    )
+
+    grid_windows = [window for window in plan.windows if window.source.startswith("grid")]
+    assert len(grid_windows) == 1
+    assert grid_windows[0].start_time == "2026-07-16T18:00:00"
+    assert grid_windows[0].price_cents_kwh == pytest.approx(5.0)
+
+
+def test_time_critical_keeps_priced_grid_hours_when_solar_horizon_is_short(
+    monkeypatch,
+):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 7, 16, 18, 0, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    surplus_forecast = [
+        ev_planner.SurplusForecast(
+            hour="2026-07-16T19:00:00",
+            solar_kw=3.0,
+            load_kw=0.0,
+            surplus_kw=3.0,
+            confidence=0.8,
+        )
+    ]
+    price_forecast = [
+        ev_planner.PriceForecast(
+            hour="2026-07-16T18:00:00",
+            import_cents=5.0,
+            export_cents=0.0,
+            period="offpeak",
+        ),
+        ev_planner.PriceForecast(
+            hour="2026-07-16T19:00:00",
+            import_cents=40.0,
+            export_cents=0.0,
+            period="peak",
+        ),
+    ]
+
+    plan = asyncio.run(
+        planner._plan_time_critical(
+            vehicle_id=VIN,
+            current_soc=60,
+            target_soc=80,
+            target_time=datetime(2026, 7, 16, 21, 0, tzinfo=brisbane_tz),
+            energy_needed_kwh=10.0,
+            charger_power_kw=7.36,
+            surplus_forecast=surplus_forecast,
+            price_forecast=price_forecast,
+        )
+    )
+
+    assert [window.start_time for window in plan.windows] == [
+        "2026-07-16T18:00:00",
+        "2026-07-16T19:00:00",
+    ]
+    assert plan.estimated_grid_kwh == pytest.approx(7.0)
+    assert plan.estimated_solar_kwh == pytest.approx(3.0)
+    assert plan.can_meet_target is True
+
+
+def test_forecast_hour_key_preserves_repeated_dst_hours():
+    first = ev_planner._forecast_hour_key("2026-11-01T01:00:00-04:00")
+    second = ev_planner._forecast_hour_key("2026-11-01T01:00:00-05:00")
+
+    assert first == "2026-11-01T05:00:00+00:00"
+    assert second == "2026-11-01T06:00:00+00:00"
+    assert first != second
+
+
+def test_amber_forecast_preserves_repeated_dst_hours(monkeypatch):
+    new_york = ZoneInfo("America/New_York")
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 11, 1, 0, 0, tzinfo=new_york),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(new_york),
+        raising=False,
+    )
+    rows = []
+    for hour, price in (
+        ("2026-11-01T01:00:00-04:00", 10.0),
+        ("2026-11-01T01:00:00-05:00", 20.0),
+    ):
+        rows.extend(
+            (
+                {
+                    "startTime": hour,
+                    "channelType": "general",
+                    "perKwh": price,
+                },
+                {
+                    "startTime": hour,
+                    "channelType": "feedIn",
+                    "perKwh": 5.0,
+                },
+            )
+        )
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(
+        data={"forecast": rows}
+    )
+    config_entry = _FakeConfigEntry()
+    config_entry.data = {"amber_api_token": "token"}
+
+    forecast = asyncio.run(
+        ev_planner.PriceForecaster(hass, config_entry)._get_amber_forecast(2)
+    )
+
+    assert forecast is not None
+    assert [row.hour for row in forecast] == [
+        "2026-11-01T01:00:00-04:00",
+        "2026-11-01T01:00:00-05:00",
+    ]
+    assert [row.import_cents for row in forecast] == [10.0, 20.0]
+
+
+def test_ev_planners_keep_repeated_dst_hours_distinct(monkeypatch):
+    new_york = ZoneInfo("America/New_York")
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 11, 1, 0, 0, tzinfo=new_york),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(new_york),
+        raising=False,
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    price_forecast = [
+        ev_planner.PriceForecast(
+            hour=hour,
+            import_cents=price,
+            export_cents=0.0,
+            period="offpeak",
+        )
+        for hour, price in (
+            ("2026-11-01T01:00:00-04:00", 10.0),
+            ("2026-11-01T01:00:00-05:00", 20.0),
+        )
+    ]
+    target = datetime(2026, 11, 1, 3, 0, tzinfo=new_york)
+
+    cheapest = asyncio.run(
+        planner._plan_cost_optimized(
+            vehicle_id=VIN,
+            current_soc=60,
+            target_soc=80,
+            target_time=target,
+            energy_needed_kwh=10.0,
+            charger_power_kw=7.36,
+            surplus_forecast=[],
+            price_forecast=price_forecast,
+        )
+    )
+    deadline = asyncio.run(
+        planner._plan_time_critical(
+            vehicle_id=VIN,
+            current_soc=60,
+            target_soc=80,
+            target_time=target,
+            energy_needed_kwh=10.0,
+            charger_power_kw=7.36,
+            surplus_forecast=[],
+            price_forecast=price_forecast,
+        )
+    )
+
+    expected_starts = [
+        "2026-11-01T01:00:00-04:00",
+        "2026-11-01T01:00:00-05:00",
+    ]
+    assert [window.start_time for window in cheapest.windows] == expected_starts
+    assert [window.start_time for window in deadline.windows] == expected_starts
+    assert cheapest.can_meet_target is True
+    assert deadline.can_meet_target is True
+
+
+@pytest.mark.parametrize(
+    ("current_time", "expected_source"),
+    (
+        (datetime(2026, 11, 1, 1, 30, tzinfo=timezone(timedelta(hours=-4))), "first"),
+        (datetime(2026, 11, 1, 1, 30, tzinfo=timezone(timedelta(hours=-5))), "second"),
+    ),
+)
+def test_should_charge_now_activates_each_repeated_dst_window(
+    monkeypatch,
+    current_time,
+    expected_source,
+):
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: current_time)
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    plan = ev_planner.ChargingPlan(
+        vehicle_id=VIN,
+        current_soc=60,
+        target_soc=80,
+        target_time="2026-11-01T03:00:00-05:00",
+        energy_needed_kwh=10.0,
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time="2026-11-01T01:00:00-04:00",
+                end_time="2026-11-01T01:00:00-05:00",
+                source="first",
+                estimated_power_kw=7.36,
+                estimated_energy_kwh=7.36,
+                price_cents_kwh=10.0,
+                reason="offpeak_rate",
+            ),
+            ev_planner.PlannedChargingWindow(
+                start_time="2026-11-01T01:00:00-05:00",
+                end_time="2026-11-01T02:00:00-05:00",
+                source="second",
+                estimated_power_kw=7.36,
+                estimated_energy_kwh=2.64,
+                price_cents_kwh=20.0,
+                reason="offpeak_rate",
+            ),
+        ],
+    )
+
+    should_charge, _reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=0.0,
+            current_price_cents=50.0,
+            battery_soc=80.0,
+        )
+    )
+
+    assert should_charge is True
+    assert source == expected_source
 
 
 def test_cost_optimized_uses_ha_local_clock_for_window_filtering(monkeypatch):

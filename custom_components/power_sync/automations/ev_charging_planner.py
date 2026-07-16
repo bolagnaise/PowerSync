@@ -13,7 +13,7 @@ import logging
 import statistics
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, time as dt_time
+from datetime import datetime, timedelta, time as dt_time, timezone
 from typing import Optional, List, Dict, Any, Tuple, Iterator, Mapping
 from enum import Enum
 
@@ -131,6 +131,47 @@ def _as_ha_local_naive(value: datetime) -> datetime:
     return value.replace(tzinfo=None)
 
 
+def _schedule_window_for_comparison(
+    start_value: str,
+    end_value: str,
+    now_naive: Optional[datetime] = None,
+) -> tuple[datetime, datetime, datetime]:
+    """Parse a schedule window and return a comparable HA-local current time.
+
+    Most schedule windows are deliberately stored as naive HA-local timestamps.
+    Repeated DST hours retain their UTC offsets so the two occurrences remain
+    distinct.  This helper keeps the normal naive path unchanged while ensuring
+    an offset-bearing repeated-hour window is compared with an aware timestamp.
+    """
+    window_start = datetime.fromisoformat(start_value)
+    window_end = datetime.fromisoformat(end_value)
+    comparison_tz = window_start.tzinfo or window_end.tzinfo
+
+    if comparison_tz is None:
+        return (
+            window_start,
+            window_end,
+            now_naive if now_naive is not None else _ha_local_now_naive(),
+        )
+
+    try:
+        comparison_now = dt_util.now()
+    except Exception:
+        comparison_now = None
+    if comparison_now is None:
+        comparison_now = now_naive or _ha_local_now_naive()
+    if comparison_now.tzinfo is None:
+        comparison_now = comparison_now.replace(tzinfo=comparison_tz)
+    else:
+        comparison_now = comparison_now.astimezone(comparison_tz)
+
+    if window_start.tzinfo is None:
+        window_start = window_start.replace(tzinfo=comparison_tz)
+    if window_end.tzinfo is None:
+        window_end = window_end.replace(tzinfo=comparison_tz)
+    return window_start, window_end, comparison_now
+
+
 def _parse_forecast_hour_local_naive(value: str) -> Optional[datetime]:
     """Parse a forecast timestamp as Home Assistant local time without tzinfo."""
     try:
@@ -138,6 +179,87 @@ def _parse_forecast_hour_local_naive(value: str) -> Optional[datetime]:
     except (TypeError, ValueError):
         return None
     return _as_ha_local_naive(parsed)
+
+
+def _forecast_hour_key(value: str) -> Optional[str]:
+    """Return a normalized hour key without collapsing repeated DST hours."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.replace(minute=0, second=0, microsecond=0).isoformat()
+
+
+def _forecast_window_display_bounds(
+    value: str,
+    end_dt: datetime,
+    *,
+    preserve_offset: bool = False,
+) -> tuple[str, str]:
+    """Return local display bounds while preserving repeated-hour offsets."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        start_dt = _parse_forecast_hour_local_naive(value)
+        if start_dt is None:
+            return value, end_dt.isoformat()
+        return start_dt.isoformat(), end_dt.isoformat()
+
+    local_start_naive = _as_ha_local_naive(parsed)
+    if parsed.tzinfo is None or not preserve_offset:
+        return local_start_naive.isoformat(), end_dt.isoformat()
+
+    duration = max(timedelta(0), end_dt - local_start_naive)
+    try:
+        local_start = dt_util.as_local(parsed)
+        local_end = dt_util.as_local(parsed + duration)
+    except Exception:
+        local_start = parsed.astimezone()
+        local_end = (parsed + duration).astimezone()
+    return local_start.isoformat(), local_end.isoformat()
+
+
+def _repeated_forecast_local_hours(values: List[str]) -> set[str]:
+    """Return local hours represented by multiple absolute intervals."""
+    identities_by_local: dict[str, set[str]] = {}
+    for value in values:
+        local_dt = _parse_forecast_hour_local_naive(value)
+        identity = _forecast_hour_key(value)
+        if local_dt is None or identity is None:
+            continue
+        local_key = local_dt.replace(
+            minute=0,
+            second=0,
+            microsecond=0,
+        ).isoformat()
+        identities_by_local.setdefault(local_key, set()).add(identity)
+    return {
+        local_key
+        for local_key, identities in identities_by_local.items()
+        if len(identities) > 1
+    }
+
+
+def _usable_forecast_window(
+    hour_dt: datetime,
+    now: datetime,
+    target_time: Optional[datetime],
+) -> Optional[tuple[datetime, float]]:
+    """Return the bounded end and usable fraction for a forecast hour."""
+    if target_time is not None and hour_dt >= target_time:
+        return None
+    end_dt = hour_dt + timedelta(hours=1)
+    if target_time is not None and end_dt > target_time:
+        end_dt = target_time
+    usable_fraction = (
+        end_dt - max(hour_dt, now)
+    ).total_seconds() / 3600
+    usable_fraction = max(0.0, min(1.0, usable_fraction))
+    if usable_fraction < 0.1:
+        return None
+    return end_dt, usable_fraction
 
 
 def _configured_ble_prefixes(
@@ -1685,17 +1807,55 @@ class PriceForecaster:
                     continue
 
                 try:
-                    # Parse ISO format time
-                    if "T" in nem_time:
-                        hour_dt = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
-                        hour_dt = _as_ha_local_naive(hour_dt)
-                    else:
+                    # Parse ISO format time. Keep an absolute grouping key for
+                    # aware timestamps so the repeated local hour at the end of
+                    # daylight saving is not collapsed.
+                    if "T" not in nem_time:
                         continue
 
-                    hour_key = hour_dt.strftime("%Y-%m-%dT%H:00")
+                    parsed_dt = datetime.fromisoformat(
+                        nem_time.replace("Z", "+00:00")
+                    )
+                    local_aware = None
+                    if parsed_dt.tzinfo is not None:
+                        try:
+                            local_aware = dt_util.as_local(parsed_dt)
+                        except Exception:
+                            local_aware = parsed_dt.astimezone()
+                    hour_dt = _as_ha_local_naive(parsed_dt).replace(
+                        minute=0,
+                        second=0,
+                        microsecond=0,
+                    )
+                    if parsed_dt.tzinfo is not None:
+                        absolute_hour = parsed_dt.astimezone(timezone.utc).replace(
+                            minute=0,
+                            second=0,
+                            microsecond=0,
+                        )
+                        hour_key = absolute_hour.isoformat()
+                        sort_dt = absolute_hour.replace(tzinfo=None)
+                    else:
+                        hour_key = hour_dt.isoformat()
+                        sort_dt = hour_dt
 
                     if hour_key not in hourly_prices:
-                        hourly_prices[hour_key] = {"import": None, "export": None, "hour_dt": hour_dt}
+                        hourly_prices[hour_key] = {
+                            "import": None,
+                            "export": None,
+                            "hour_dt": hour_dt,
+                            "sort_dt": sort_dt,
+                            "aware_hour": (
+                                local_aware.replace(
+                                    minute=0,
+                                    second=0,
+                                    microsecond=0,
+                                )
+                                if local_aware is not None
+                                and local_aware.tzinfo is not None
+                                else None
+                            ),
+                        }
 
                     channel = price_item.get("channelType", "general")
                     per_kwh = price_item.get("perKwh", 0)
@@ -1714,7 +1874,19 @@ class PriceForecaster:
 
             # Convert to PriceForecast list, sorted by time
             forecasts = []
-            sorted_hours = sorted(hourly_prices.items(), key=lambda x: x[1]["hour_dt"])
+            sorted_hours = sorted(
+                (
+                    item
+                    for item in hourly_prices.items()
+                    if item[1]["hour_dt"] + timedelta(hours=1) > now
+                ),
+                key=lambda x: x[1]["sort_dt"],
+            )
+
+            local_hour_counts: dict[str, int] = {}
+            for _, prices in sorted_hours:
+                local_key = prices["hour_dt"].isoformat()
+                local_hour_counts[local_key] = local_hour_counts.get(local_key, 0) + 1
 
             for hour_key, prices in sorted_hours[:hours]:
                 import_cents = prices["import"] if prices["import"] is not None else 30
@@ -1729,8 +1901,17 @@ class PriceForecaster:
                 else:
                     period = "shoulder"
 
+                local_key = hour_dt.isoformat()
+                aware_hour = prices.get("aware_hour")
+                display_hour = (
+                    aware_hour.isoformat()
+                    if local_hour_counts.get(local_key, 0) > 1
+                    and aware_hour is not None
+                    else local_key
+                )
+
                 forecasts.append(PriceForecast(
-                    hour=hour_dt.isoformat(),
+                    hour=display_hour,
                     import_cents=import_cents,
                     export_cents=export_cents,
                     period=period,
@@ -2328,7 +2509,12 @@ class ChargingPlanner:
         energy_allocated = 0
         total_confidence = 0
         battery_power_schedule = battery_power_schedule or {}
-
+        now = _ha_local_now_naive()
+        target_time_local = (
+            _as_ha_local_naive(target_time)
+            if target_time is not None and target_time.tzinfo is not None
+            else target_time
+        )
         for forecast in surplus_forecast:
             if energy_allocated >= energy_needed_kwh:
                 break
@@ -2337,6 +2523,14 @@ class ChargingPlanner:
                 hour_dt = _parse_forecast_hour_local_naive(forecast.hour)
                 if hour_dt is None:
                     continue
+                usable_window = _usable_forecast_window(
+                    hour_dt,
+                    now,
+                    target_time_local,
+                )
+                if usable_window is None:
+                    continue
+                end_dt, usable_fraction = usable_window
                 hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
 
                 # Dynamic power sharing: calculate available power for EV
@@ -2351,12 +2545,10 @@ class ChargingPlanner:
                 if available_power < MIN_CHARGING_POWER_KW:
                     continue
 
-                energy_this_hour = available_power  # kWh (1 hour)
+                energy_this_hour = available_power * usable_fraction
 
                 # Don't over-allocate
                 energy_this_hour = min(energy_this_hour, energy_needed_kwh - energy_allocated)
-
-                end_dt = hour_dt + timedelta(hours=1)
 
                 windows.append(PlannedChargingWindow(
                     start_time=hour_dt.isoformat(),
@@ -2411,6 +2603,15 @@ class ChargingPlanner:
         total_cost = 0
         total_confidence = 0
         battery_power_schedule = battery_power_schedule or {}
+        now = _ha_local_now_naive()
+        target_time_local = (
+            _as_ha_local_naive(target_time)
+            if target_time is not None and target_time.tzinfo is not None
+            else target_time
+        )
+        repeated_price_hours = _repeated_forecast_local_hours(
+            [price.hour for price in price_forecast]
+        )
 
         # First pass: allocate solar
         for forecast in surplus_forecast:
@@ -2421,6 +2622,14 @@ class ChargingPlanner:
                 hour_dt = _parse_forecast_hour_local_naive(forecast.hour)
                 if hour_dt is None:
                     continue
+                usable_window = _usable_forecast_window(
+                    hour_dt,
+                    now,
+                    target_time_local,
+                )
+                if usable_window is None:
+                    continue
+                end_dt, usable_fraction = usable_window
                 hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
 
                 # Dynamic power sharing with battery
@@ -2434,8 +2643,10 @@ class ChargingPlanner:
                 if available_power < MIN_CHARGING_POWER_KW:
                     continue
 
-                energy_this_hour = min(available_power, energy_needed_kwh - solar_energy - grid_energy)
-                end_dt = hour_dt + timedelta(hours=1)
+                energy_this_hour = min(
+                    available_power * usable_fraction,
+                    energy_needed_kwh - solar_energy - grid_energy,
+                )
 
                 windows.append(PlannedChargingWindow(
                     start_time=hour_dt.isoformat(),
@@ -2464,7 +2675,9 @@ class ChargingPlanner:
 
                 # Check if this hour is already covered by solar
                 already_covered = any(
-                    w.start_time == price_data.hour for w in windows
+                    _forecast_hour_key(w.start_time)
+                    == _forecast_hour_key(price_data.hour)
+                    for w in windows
                 )
                 if already_covered:
                     continue
@@ -2472,6 +2685,14 @@ class ChargingPlanner:
                 hour_dt = _parse_forecast_hour_local_naive(price_data.hour)
                 if hour_dt is None:
                     continue
+                usable_window = _usable_forecast_window(
+                    hour_dt,
+                    now,
+                    target_time_local,
+                )
+                if usable_window is None:
+                    continue
+                end_dt, usable_fraction = usable_window
                 hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
 
                 # Skip hours that fall inside a demand window (unless override set)
@@ -2489,16 +2710,30 @@ class ChargingPlanner:
                 if available_power < MIN_CHARGING_POWER_KW:
                     continue  # Not enough capacity, try next hour
 
-                energy_this_hour = min(available_power, remaining_energy - grid_energy)
-                end_dt = hour_dt + timedelta(hours=1)
+                energy_this_hour = min(
+                    available_power * usable_fraction,
+                    remaining_energy - grid_energy,
+                )
+                display_start, display_end = _forecast_window_display_bounds(
+                    price_data.hour,
+                    end_dt,
+                    preserve_offset=(
+                        hour_dt.replace(
+                            minute=0,
+                            second=0,
+                            microsecond=0,
+                        ).isoformat()
+                        in repeated_price_hours
+                    ),
+                )
 
                 # Label source based on period type
                 source = f"grid_{price_data.period}" if price_data.period else "grid_cheap"
                 reason = "offpeak_rate" if price_data.period == "offpeak" else "cheap_rate"
 
                 windows.append(PlannedChargingWindow(
-                    start_time=hour_dt.isoformat(),
-                    end_time=end_dt.isoformat(),
+                    start_time=display_start,
+                    end_time=display_end,
                     source=source,
                     estimated_power_kw=available_power,
                     estimated_energy_kwh=energy_this_hour,
@@ -2590,6 +2825,14 @@ class ChargingPlanner:
 
         # Build charging options from price forecast (within deadline)
         charging_options = []
+        repeated_price_hours = _repeated_forecast_local_hours(
+            [price.hour for price in price_forecast]
+        )
+        surplus_by_hour = {
+            key: forecast
+            for forecast in surplus_forecast
+            if (key := _forecast_hour_key(forecast.hour)) is not None
+        }
 
         for i, price in enumerate(price_forecast):
             try:
@@ -2617,21 +2860,34 @@ class ChargingPlanner:
                 continue  # Less than 6 minutes usable — skip
 
             # Check for solar surplus at this hour
-            solar_available = 0
-            if i < len(surplus_forecast):
-                solar_available = surplus_forecast[i].surplus_kw
+            surplus = surplus_by_hour.get(_forecast_hour_key(price.hour))
+            solar_available = surplus.surplus_kw if surplus is not None else 0
+            display_start, display_end = _forecast_window_display_bounds(
+                price.hour,
+                hour_end,
+                preserve_offset=(
+                    hour_dt.replace(
+                        minute=0,
+                        second=0,
+                        microsecond=0,
+                    ).isoformat()
+                    in repeated_price_hours
+                ),
+            )
+            option_identity = _forecast_hour_key(price.hour) or display_start
 
             # Solar surplus is free
             if solar_available >= 1.0:
                 charging_options.append({
-                    "hour": hour_dt.isoformat(),
+                    "hour": display_start,
                     "hour_dt": hour_dt,
-                    "end_dt": hour_end,
+                    "end_time": display_end,
+                    "identity": option_identity,
                     "source": "solar_surplus",
                     "power_kw": min(solar_available, charger_power_kw),
                     "cost_cents": 0,  # Solar is free
                     "actual_price": price.import_cents,  # Store actual price for reference
-                    "confidence": surplus_forecast[i].confidence if i < len(surplus_forecast) else 0.5,
+                    "confidence": surplus.confidence if surplus is not None else 0.5,
                     "usable_fraction": usable_fraction,
                 })
 
@@ -2649,9 +2905,10 @@ class ChargingPlanner:
 
             if grid_power > 0.5 and not grid_blocked:  # At least 0.5kW from grid
                 charging_options.append({
-                    "hour": hour_dt.isoformat(),
+                    "hour": display_start,
                     "hour_dt": hour_dt,
-                    "end_dt": hour_end,
+                    "end_time": display_end,
+                    "identity": option_identity,
                     "source": f"grid_{price.period}",
                     "power_kw": grid_power,
                     "cost_cents": price.import_cents,
@@ -2722,18 +2979,18 @@ class ChargingPlanner:
                 break
 
             # Skip if already used this hour
-            hour_key = option["hour_dt"].strftime("%Y-%m-%dT%H")
+            hour_key = option["identity"]
             if hour_key in used_hours:
                 continue
 
             usable = option.get("usable_fraction", 1.0)
             energy_this_hour = min(option["power_kw"] * usable, energy_needed_kwh - energy_allocated)
             hour_dt = option["hour_dt"]
-            end_dt = option.get("end_dt", hour_dt + timedelta(hours=1))
+            end_time = option["end_time"]
 
             windows.append(PlannedChargingWindow(
                 start_time=option["hour"],
-                end_time=end_dt.isoformat(),
+                end_time=end_time,
                 source=option["source"],
                 estimated_power_kw=option["power_kw"],
                 estimated_energy_kwh=energy_this_hour,
@@ -2837,15 +3094,28 @@ class ChargingPlanner:
         grid_energy = 0
         total_cost = 0
 
-        # Reverse the forecasts to work backwards
-        combined = list(zip(surplus_forecast, price_forecast))
+        # Reverse matched forecast hours to work backwards. Amber price data can
+        # contain historical rows, so positional zipping can attach the wrong
+        # price to a future solar interval.
+        surplus_by_hour = {
+            key: surplus
+            for surplus in surplus_forecast
+            if (key := _forecast_hour_key(surplus.hour)) is not None
+        }
+        repeated_price_hours = _repeated_forecast_local_hours(
+            [price.hour for price in price_forecast]
+        )
+        combined = [
+            (surplus_by_hour.get(_forecast_hour_key(price.hour)), price)
+            for price in price_forecast
+        ]
         combined.reverse()
 
         for surplus, price in combined:
             if energy_allocated >= energy_needed_kwh:
                 break
 
-            hour_dt = _parse_forecast_hour_local_naive(surplus.hour)
+            hour_dt = _parse_forecast_hour_local_naive(price.hour)
             if hour_dt is None:
                 continue
 
@@ -2862,7 +3132,7 @@ class ChargingPlanner:
                 continue  # Less than 6 minutes usable — skip
 
             # Use whatever is available, scaled by usable fraction of the hour
-            if surplus.surplus_kw >= 1.0:
+            if surplus is not None and surplus.surplus_kw >= 1.0:
                 # Prefer solar
                 energy_this_hour = min(surplus.surplus_kw, charger_power_kw) * usable_fraction
                 source = "solar_surplus"
@@ -2881,10 +3151,22 @@ class ChargingPlanner:
                 grid_energy += min(energy_this_hour, energy_needed_kwh - energy_allocated)
 
             energy_this_hour = min(energy_this_hour, energy_needed_kwh - energy_allocated)
+            display_start, display_end = _forecast_window_display_bounds(
+                price.hour,
+                end_dt,
+                preserve_offset=(
+                    hour_dt.replace(
+                        minute=0,
+                        second=0,
+                        microsecond=0,
+                    ).isoformat()
+                    in repeated_price_hours
+                ),
+            )
 
             windows.append(PlannedChargingWindow(
-                start_time=hour_dt.isoformat(),
-                end_time=end_dt.isoformat(),
+                start_time=display_start,
+                end_time=display_end,
                 source=source,
                 estimated_power_kw=charger_power_kw,
                 estimated_energy_kwh=energy_this_hour,
@@ -2978,10 +3260,15 @@ class ChargingPlanner:
         # Check if we're in a planned window
         for window in plan.windows:
             try:
-                window_start = datetime.fromisoformat(window.start_time)
-                window_end = datetime.fromisoformat(window.end_time)
+                window_start, window_end, comparison_now = (
+                    _schedule_window_for_comparison(
+                        window.start_time,
+                        window.end_time,
+                        now,
+                    )
+                )
 
-                if window_start <= now < window_end:
+                if window_start <= comparison_now < window_end:
                     _LOGGER.debug(
                         f"In planned window: {window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')} "
                         f"({window.source}, {window.price_cents_kwh:.1f}c/kWh)"
@@ -3031,15 +3318,22 @@ class ChargingPlanner:
         next_window_start = None
         for window in sorted(plan.windows, key=lambda w: w.start_time):
             try:
-                window_start = datetime.fromisoformat(window.start_time)
-                if window_start > now:
+                window_start, _window_end, comparison_now = (
+                    _schedule_window_for_comparison(
+                        window.start_time,
+                        window.end_time,
+                        now,
+                    )
+                )
+                if window_start > comparison_now:
                     next_window_start = window_start
+                    next_window_now = comparison_now
                     break
             except:
                 continue
 
         if next_window_start:
-            hours_until = (next_window_start - now).total_seconds() / 3600
+            hours_until = (next_window_start - next_window_now).total_seconds() / 3600
             return False, f"Waiting for {next_window_start.strftime('%H:%M')} ({hours_until:.1f}h, {min_planned_price:.0f}c)", "waiting"
 
         return False, f"Waiting for better rates (current: {current_price_cents:.0f}c)", "waiting"
@@ -4853,11 +5147,19 @@ class AutoScheduleExecutor:
         # Find current window (if in one)
         current_window = None
         for window in state.current_plan.windows:
-            window_start = datetime.fromisoformat(window.start_time)
-            window_end = datetime.fromisoformat(window.end_time)
-            if window_start <= now < window_end:
-                current_window = window
-                break
+            try:
+                window_start, window_end, comparison_now = (
+                    _schedule_window_for_comparison(
+                        window.start_time,
+                        window.end_time,
+                        _ha_local_now_naive(),
+                    )
+                )
+                if window_start <= comparison_now < window_end:
+                    current_window = window
+                    break
+            except (TypeError, ValueError):
+                continue
 
         state.current_window = current_window
 
