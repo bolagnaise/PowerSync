@@ -141,6 +141,58 @@ async def _set_generic_charger_amps_entity(
         return False
 
 
+async def _start_generic_charger_switch(
+    hass: HomeAssistant,
+    entity_id: str,
+) -> bool:
+    """Start a generic charger switch without duplicating active transactions."""
+    entity_id = str(entity_id or "").strip()
+    if not entity_id.startswith("switch."):
+        _LOGGER.error("Generic charger start: invalid switch entity %s", entity_id)
+        return False
+
+    switch_state = hass.states.get(entity_id)
+    connector_state = None
+    if entity_id.endswith("_charge_control"):
+        charger_id = entity_id.removeprefix("switch.").removesuffix("_charge_control")
+        connector_state = hass.states.get(f"sensor.{charger_id}_status_connector")
+    needs_reset = (
+        connector_state is not None
+        and str(connector_state.state).lower() == "finishing"
+    )
+
+    if (
+        switch_state is not None
+        and str(switch_state.state).lower() == "on"
+        and not needs_reset
+    ):
+        _LOGGER.debug(
+            "Generic charger %s already on; skipping duplicate start",
+            entity_id,
+        )
+        return True
+
+    try:
+        if needs_reset and switch_state and str(switch_state.state).lower() == "on":
+            await hass.services.async_call(
+                "switch",
+                "turn_off",
+                {"entity_id": entity_id},
+                blocking=True,
+            )
+            await asyncio.sleep(1)
+        await hass.services.async_call(
+            "switch",
+            "turn_on",
+            {"entity_id": entity_id},
+            blocking=True,
+        )
+        return True
+    except Exception as err:
+        _LOGGER.error("Generic charger start failed via %s: %s", entity_id, err)
+        return False
+
+
 def _tesla_entity_max_fallback_amps(
     requested_amps: int,
     entity_min: int,
@@ -3330,13 +3382,10 @@ async def _action_start_ev_charging(
             return False
         if not await _run_pre_charge_wake_sequence(hass, params, "generic"):
             return False
-        try:
-            await hass.services.async_call("switch", "turn_on", {"entity_id": switch_entity}, blocking=True)
+        if await _start_generic_charger_switch(hass, switch_entity):
             _LOGGER.info("Generic charger started via %s", switch_entity)
             return True
-        except Exception as e:
-            _LOGGER.error("Generic charger start failed: %s", e)
-            return False
+        return False
 
     # HA-native charger integrations: Wallbox, Easee, native Zaptec, ev_charger,
     # and similar entities that expose service-domain start/stop methods.
@@ -4904,16 +4953,16 @@ async def _set_vehicle_amps(
         try:
             if amps == 0:
                 # Stop/pause charging
-                if amps_entity and not await _set_generic_charger_amps_entity(
-                    hass, amps_entity, 0
-                ):
-                    return False
                 if switch_entity:
                     await hass.services.async_call(
                         "switch", "turn_off",
-                        {"entity_id": switch_entity},
+                        {"entity_id": str(switch_entity).strip()},
                         blocking=True
                     )
+                elif amps_entity and not await _set_generic_charger_amps_entity(
+                    hass, amps_entity, 0
+                ):
+                    return False
             else:
                 # Set amps and ensure charger is on
                 ready, block_reason = _generic_charger_ready_for_start(hass, params)
@@ -4926,20 +4975,10 @@ async def _set_vehicle_amps(
                     hass, amps_entity, amps
                 ):
                     return False
-                if switch_entity:
-                    switch_entity = str(switch_entity).strip()
-                    switch_state = hass.states.get(switch_entity)
-                    if switch_state and str(switch_state.state).lower() == "on":
-                        _LOGGER.debug(
-                            "Generic charger %s already on; skipping duplicate start",
-                            switch_entity,
-                        )
-                    else:
-                        await hass.services.async_call(
-                            "switch", "turn_on",
-                            {"entity_id": switch_entity},
-                            blocking=True
-                        )
+                if switch_entity and not await _start_generic_charger_switch(
+                    hass, switch_entity
+                ):
+                    return False
             _LOGGER.info(f"Set generic charger to {amps}A via {amps_entity or switch_entity}")
             return True
         except Exception as e:
