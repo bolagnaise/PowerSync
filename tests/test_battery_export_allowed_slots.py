@@ -6755,6 +6755,127 @@ def test_tesla_force_extension_reuploads_when_tariff_window_missing(opt_module):
     assert force_state["expires_at"] == datetime(2026, 5, 3, 8, 50, tzinfo=timezone.utc)
 
 
+def test_external_force_charge_refresh_cancels_service_expiry_timer(opt_module):
+    """A service timer created during refresh must not be orphaned."""
+    boundary_now = datetime(2026, 7, 16, 3, 30, tzinfo=timezone.utc)
+    opt_module.dt_util.now = lambda *args, **kwargs: boundary_now
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: boundary_now
+    force_state = {
+        "active": True,
+        "expires_at": boundary_now + timedelta(minutes=1),
+        "hardware_expires_at": boundary_now + timedelta(minutes=1),
+        "source": "optimizer",
+    }
+    service_timer_cancellations = []
+    service_expiry = boundary_now + timedelta(minutes=10, seconds=3)
+
+    class _RefreshingBattery(_FakeBattery):
+        async def force_charge(
+            self,
+            duration_minutes=60,
+            power_w=5000,
+            _extend_hardware=False,
+        ):
+            await super().force_charge(
+                duration_minutes=duration_minutes,
+                power_w=power_w,
+                _extend_hardware=_extend_hardware,
+            )
+            force_state["cancel_expiry_timer"] = (
+                lambda: service_timer_cancellations.append("cancelled")
+            )
+            force_state["expires_at"] = service_expiry
+
+    battery = _RefreshingBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    actions = [
+        SimpleNamespace(
+            action="charge",
+            power_w=5000,
+            timestamp=boundary_now + idx * timedelta(minutes=5),
+        )
+        for idx in range(2)
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    coordinator.hass.data = {
+        "power_sync": {
+            "entry-1": {
+                "force_charge_state": force_state,
+            }
+        }
+    }
+    coordinator._force_state_getter = lambda: {
+        "active": True,
+        "type": "charge",
+        "source": "optimizer",
+    }
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_charge_calls == [(10, 5000, True)]
+    assert service_timer_cancellations == ["cancelled"]
+    assert force_state["cancel_expiry_timer"] is not None
+    assert coordinator.hass.scheduled[-1][1] == service_expiry
+
+
+def test_external_force_extension_timer_ignores_stale_callback(opt_module):
+    """A queued coordinator timer must honor the latest shared expiry."""
+    now = [datetime(2026, 7, 16, 3, 30, tzinfo=timezone.utc)]
+    opt_module.dt_util.now = lambda *args, **kwargs: now[0]
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: now[0]
+    force_state = {
+        "active": True,
+        "expires_at": now[0] + timedelta(minutes=1),
+        "hardware_expires_at": now[0] + timedelta(minutes=60),
+        "source": "optimizer",
+    }
+    restore_calls = []
+
+    async def _record_restore(*args, **kwargs):
+        restore_calls.append((args, kwargs))
+
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.hass.services = SimpleNamespace(async_call=_record_restore)
+    actions = [
+        SimpleNamespace(
+            action="charge",
+            power_w=5000,
+            timestamp=now[0] + idx * timedelta(minutes=5),
+        )
+        for idx in range(2)
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    coordinator.hass.data = {
+        "power_sync": {
+            "entry-1": {
+                "force_charge_state": force_state,
+            }
+        }
+    }
+    coordinator._force_state_getter = lambda: {
+        "active": True,
+        "type": "charge",
+        "source": "optimizer",
+    }
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+    stale_callback, stale_expiry = coordinator.hass.scheduled[-1]
+    now[0] += timedelta(minutes=5)
+    actions.append(
+        SimpleNamespace(
+            action="charge",
+            power_w=5000,
+            timestamp=now[0] + timedelta(minutes=5),
+        )
+    )
+    asyncio.run(coordinator._execute_optimizer_action(actions[1]))
+
+    assert force_state["expires_at"] > stale_expiry
+    asyncio.run(stale_callback(stale_expiry))
+    assert restore_calls == []
+
+
 def test_spread_export_force_extension_reuploads_target_power(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)

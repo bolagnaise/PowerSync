@@ -27477,6 +27477,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if _command_generation[0] != _restore_gen:
                         _LOGGER.debug("Tesla force discharge timer superseded — skipping restore")
                         return
+                    current_expiry = force_discharge_state.get("expires_at")
+                    if current_expiry and _now < current_expiry:
+                        _LOGGER.debug(
+                            "Tesla force discharge timer expiry was extended — skipping stale restore"
+                        )
+                        return
                     if force_discharge_state["active"]:
                         _LOGGER.info("Force discharge expired, auto-restoring normal operation")
                         await hass.services.async_call(
@@ -29002,6 +29008,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     """Auto-restore normal operation when charge expires."""
                     if _command_generation[0] != _restore_gen:
                         _LOGGER.debug("Tesla force charge timer superseded — skipping restore")
+                        return
+                    current_expiry = force_charge_state.get("expires_at")
+                    if current_expiry and _now < current_expiry:
+                        _LOGGER.debug(
+                            "Tesla force charge timer expiry was extended — skipping stale restore"
+                        )
                         return
                     if force_charge_state["active"]:
                         _LOGGER.info("Force charge expired, auto-restoring normal operation")

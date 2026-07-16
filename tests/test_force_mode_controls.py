@@ -1224,6 +1224,38 @@ def test_tesla_force_discharge_arms_cleanup_for_unconfirmed_accepted_upload():
     )
 
 
+def test_tesla_force_timers_ignore_callbacks_before_current_expiry():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    charge_callbacks = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "auto_restore_charge"
+    ]
+    discharge_callbacks = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "auto_restore"
+    ]
+    tesla_charge_source = ast.get_source_segment(
+        source,
+        max(charge_callbacks, key=lambda node: node.lineno),
+    )
+    tesla_discharge_source = ast.get_source_segment(
+        source,
+        max(discharge_callbacks, key=lambda node: node.lineno),
+    )
+
+    assert tesla_charge_source is not None
+    assert tesla_discharge_source is not None
+    assert 'current_expiry = force_charge_state.get("expires_at")' in tesla_charge_source
+    assert "if current_expiry and _now < current_expiry:" in tesla_charge_source
+    assert 'current_expiry = force_discharge_state.get("expires_at")' in tesla_discharge_source
+    assert "if current_expiry and _now < current_expiry:" in tesla_discharge_source
+
+
 def test_restore_normal_does_not_clear_newer_force_command():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

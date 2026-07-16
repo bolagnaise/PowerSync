@@ -6262,7 +6262,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             _LOGGER.warning("Optimizer: failed to re-issue %s for extension: %s", force_type, ext_err)
 
                     if force_scope != "optimizer":
+                        effective_expiry = self._as_utc_datetime(
+                            _ext_state.get("expires_at")
+                        ) or new_expiry
+
                         async def _auto_restore_extended(_now):
+                            current_expiry = self._as_utc_datetime(
+                                _ext_state.get("expires_at")
+                            )
+                            if current_expiry is not None and _now < current_expiry:
+                                _LOGGER.debug(
+                                    "Optimizer: force %s expiry was extended — "
+                                    "skipping stale restore timer",
+                                    force_type,
+                                )
+                                return
                             if _ext_state.get("active"):
                                 _LOGGER.info("⏰ Force %s expired (extended timer), auto-restoring", force_type)
                                 from ..const import DOMAIN as _SVC_DOMAIN
@@ -6271,8 +6285,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 )
 
                         from homeassistant.helpers.event import async_track_point_in_utc_time
+                        # A full hardware refresh can install a new service-owned
+                        # timer while awaited above. Cancel that timer before the
+                        # coordinator takes ownership of the extended expiry.
+                        if _ext_state.get("cancel_expiry_timer"):
+                            _ext_state["cancel_expiry_timer"]()
                         _ext_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
-                            self.hass, _auto_restore_extended, new_expiry,
+                            self.hass, _auto_restore_extended, effective_expiry,
                         )
                     elif not should_refresh_hardware and hardware_expiry is not None:
                         _ext_state["expires_at"] = hardware_expiry
