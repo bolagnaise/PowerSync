@@ -1417,13 +1417,15 @@ def test_finalizer_caps_battery_export_to_remaining_site_headroom(
     assert reconciled.grid_export_w == pytest.approx([1000.0], abs=0.1)
 
 
-def test_full_battery_free_import_does_not_leave_zero_power_force_charge(
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_full_battery_free_import_keeps_full_slot_charge_command(
     battery_optimizer_module,
     monkeypatch,
+    backend,
 ):
-    """A physically clipped free-import action must not command force charge."""
+    """A free-import command persists even when no battery energy can be accepted."""
     module = battery_optimizer_module
-    _select_backend(module, monkeypatch, "highs")
+    _select_backend(module, monkeypatch, backend)
     optimizer = _optimizer(
         module,
         backup_reserve=0.10,
@@ -1451,9 +1453,11 @@ def test_full_battery_free_import_does_not_leave_zero_power_force_charge(
     )
 
     final = reconciled.schedule.actions[0]
-    assert final.action == "self_consumption"
-    assert final.power_w == pytest.approx(0.0, abs=0.1)
+    assert final.action == "charge"
+    assert final.power_w == pytest.approx(10_000.0, abs=0.1)
     assert final.battery_charge_w == pytest.approx(0.0, abs=0.1)
+    assert final.battery_discharge_w == pytest.approx(0.0, abs=0.1)
+    assert final.soc == pytest.approx(1.0, abs=1e-6)
     assert reconciled.grid_import_w == pytest.approx([0.0], abs=0.1)
     assert reconciled.grid_export_w == pytest.approx([0.0], abs=0.1)
 
@@ -1493,18 +1497,159 @@ def test_free_import_emission_obeys_grid_charge_soc_cap(
 
     action = result.schedule.actions[0]
     assert action.action == "charge"
+    assert action.power_w == pytest.approx(5000.0, abs=0.1)
     assert action.battery_charge_w == pytest.approx(3000.0, abs=0.1)
     assert action.soc == pytest.approx(0.40, abs=1e-6)
     assert result.grid_import_w == pytest.approx([3000.0], abs=0.1)
 
+    reconciled = optimizer.reconcile_result_with_schedule(
+        result,
+        result.schedule,
+        import_prices=[-0.10],
+        export_prices=[0.0],
+        solar=[0.0],
+        load=[0.0],
+        initial_soc=0.10,
+    )
+    action = reconciled.schedule.actions[0]
+    assert action.action == "charge"
+    assert action.power_w == pytest.approx(5000.0, abs=0.1)
+    assert action.battery_charge_w == pytest.approx(3000.0, abs=0.1)
+    assert action.soc == pytest.approx(0.40, abs=1e-6)
+    assert reconciled.grid_import_w == pytest.approx([3000.0], abs=0.1)
+
 
 @pytest.mark.parametrize("backend", ["highs", "greedy"])
-def test_solar_only_charge_above_grid_soc_cap_is_not_forced(
+@pytest.mark.parametrize("load_kw", [0.0, 1.0])
+def test_free_import_at_grid_soc_cap_keeps_charge_command(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+    load_kw,
+):
+    """The SOC cap clips accepted energy, not the free-slot command mode."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, backend)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        max_grid_import_w=6_000,
+        efficiency=1.0,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        grid_charge_soc_cap=0.40,
+        interval_minutes=60,
+        horizon_hours=1,
+        terminal_weight=0.0,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.0],
+        export_prices=[0.0],
+        solar_forecast=[0.0],
+        load_forecast=[load_kw],
+        current_soc=0.40,
+        allow_battery_export=[False],
+        allow_grid_charge=True,
+    )
+
+    emitted = result.schedule.actions[0]
+    assert emitted.action == "charge"
+    assert emitted.power_w == pytest.approx(5000.0, abs=0.1)
+    assert emitted.battery_charge_w == pytest.approx(0.0, abs=0.1)
+    assert emitted.battery_discharge_w == pytest.approx(0.0, abs=0.1)
+    assert emitted.soc == pytest.approx(0.40, abs=1e-6)
+
+    reconciled = optimizer.reconcile_result_with_schedule(
+        result,
+        result.schedule,
+        import_prices=[0.0],
+        export_prices=[0.0],
+        solar=[0.0],
+        load=[load_kw],
+        initial_soc=0.40,
+    )
+    final = reconciled.schedule.actions[0]
+    assert final.action == "charge"
+    assert final.power_w == pytest.approx(5000.0, abs=0.1)
+    assert final.battery_charge_w == pytest.approx(0.0, abs=0.1)
+    assert final.battery_discharge_w == pytest.approx(0.0, abs=0.1)
+    assert final.soc == pytest.approx(0.40, abs=1e-6)
+    assert reconciled.grid_import_w == pytest.approx([load_kw * 1000.0], abs=0.1)
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_free_import_command_persists_after_cap_headroom_is_exhausted(
     battery_optimizer_module,
     monkeypatch,
     backend,
 ):
-    """Solar may exceed the grid cap, but must remain a natural action."""
+    """Later free intervals keep charging mode without inventing energy or value."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, backend)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        max_grid_import_w=6_000,
+        efficiency=1.0,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        grid_charge_soc_cap=0.40,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[-0.10, -0.10, -0.10],
+        export_prices=[0.0, 0.0, 0.0],
+        solar_forecast=[0.0, 0.0, 0.0],
+        load_forecast=[1.0, 1.0, 1.0],
+        current_soc=0.30,
+        allow_battery_export=[False, False, False],
+        allow_grid_charge=True,
+    )
+    reconciled = optimizer.reconcile_result_with_schedule(
+        result,
+        result.schedule,
+        import_prices=[-0.10, -0.10, -0.10],
+        export_prices=[0.0, 0.0, 0.0],
+        solar=[0.0, 0.0, 0.0],
+        load=[1.0, 1.0, 1.0],
+        initial_soc=0.30,
+    )
+
+    assert [action.action for action in reconciled.schedule.actions] == [
+        "charge",
+        "charge",
+        "charge",
+    ]
+    assert [action.power_w for action in reconciled.schedule.actions] == pytest.approx(
+        [5000.0, 5000.0, 5000.0], abs=0.1
+    )
+    assert [
+        action.battery_charge_w for action in reconciled.schedule.actions
+    ] == pytest.approx([1000.0, 0.0, 0.0], abs=0.1)
+    assert [action.soc for action in reconciled.schedule.actions] == pytest.approx(
+        [0.40, 0.40, 0.40], abs=1e-6
+    )
+    assert reconciled.grid_import_w == pytest.approx(
+        [2000.0, 1000.0, 1000.0], abs=0.1
+    )
+    assert reconciled.grid_export_w == pytest.approx([0.0, 0.0, 0.0], abs=0.1)
+    assert reconciled.schedule.predicted_cost == pytest.approx(-0.40, abs=0.01)
+    assert reconciled.schedule.predicted_savings == pytest.approx(0.10, abs=0.01)
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_solar_only_charge_above_grid_soc_cap_keeps_free_slot_command(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+):
+    """Solar remains physical flow while free-slot charge intent persists."""
     module = battery_optimizer_module
     _select_backend(module, monkeypatch, backend)
     optimizer = module.BatteryOptimizer(
@@ -1541,10 +1686,58 @@ def test_solar_only_charge_above_grid_soc_cap_is_not_forced(
     )
 
     action = reconciled.schedule.actions[0]
-    assert action.action == "self_consumption"
+    assert action.action == "charge"
+    assert action.power_w == pytest.approx(5000.0, abs=0.1)
     assert action.battery_charge_w == pytest.approx(3000.0, abs=0.1)
     assert action.soc == pytest.approx(0.80, abs=1e-6)
     assert reconciled.grid_import_w == pytest.approx([0.0], abs=0.1)
+
+
+def test_non_free_clipped_charge_still_returns_to_self_consumption(
+    battery_optimizer_module,
+):
+    """The full-slot command exception stops immediately above the free threshold."""
+    module = battery_optimizer_module
+    optimizer = _optimizer(
+        module,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        max_charge_w=5000,
+        horizon_hours=1,
+    )
+    timestamp = datetime(2026, 7, 13, 0, 0, tzinfo=timezone.utc)
+    schedule = module.OptimizationSchedule(
+        actions=[
+            module.ScheduleAction(
+                timestamp=timestamp,
+                action="charge",
+                power_w=5000.0,
+                soc=1.0,
+                battery_charge_w=5000.0,
+                battery_discharge_w=0.0,
+            )
+        ],
+        predicted_cost=0.0,
+        predicted_savings=0.0,
+        last_updated=timestamp,
+    )
+
+    reconciled = optimizer.reconcile_result_with_schedule(
+        module.OptimizerResult(schedule=schedule),
+        schedule,
+        import_prices=[0.0011],
+        export_prices=[0.0],
+        solar=[0.0],
+        load=[0.0],
+        initial_soc=1.0,
+    )
+
+    final = reconciled.schedule.actions[0]
+    assert final.action == "self_consumption"
+    assert final.power_w == pytest.approx(0.0, abs=0.1)
+    assert final.battery_charge_w == pytest.approx(0.0, abs=0.1)
+    assert final.battery_discharge_w == pytest.approx(0.0, abs=0.1)
+    assert final.soc == pytest.approx(1.0, abs=1e-6)
 
 
 def test_realistic_48_hour_flow_power_shape_does_not_collapse_to_greedy(

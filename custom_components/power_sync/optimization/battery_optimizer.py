@@ -4899,6 +4899,7 @@ class BatteryOptimizer:
                     power_w = natural_charge_kw * 1000
 
             if action == "charge" and reported_charge_w > 0:
+                preserve_free_charge_command = free_import_slot
                 solar_surplus_w = max(0.0, solar[t] - load[t]) * 1000.0
                 solar_charge_w = min(reported_charge_w, solar_surplus_w)
                 grid_charge_w = max(0.0, reported_charge_w - solar_charge_w)
@@ -4911,8 +4912,17 @@ class BatteryOptimizer:
                     )
                     grid_charge_w = min(grid_charge_w, allowed_grid_charge_w)
                 reported_charge_w = solar_charge_w + grid_charge_w
-                power_w = min(power_w, reported_charge_w)
-                if grid_charge_w <= ACTION_THRESHOLD_W:
+                # A genuinely free import slot owns the inverter's charge mode
+                # for the complete slot.  Keep that command intent (and its
+                # requested power) even when the configured SOC cap leaves no
+                # battery-energy headroom; physical flow and SOC remain clipped
+                # through reported_charge_w below.
+                if not preserve_free_charge_command:
+                    power_w = min(power_w, reported_charge_w)
+                if (
+                    grid_charge_w <= ACTION_THRESHOLD_W
+                    and not preserve_free_charge_command
+                ):
                     action = "self_consumption"
                     power_w = reported_charge_w
 
@@ -5056,6 +5066,11 @@ class BatteryOptimizer:
             restamped: list[ScheduleAction] = []
             for idx, action in enumerate(actions):
                 emitted_action = action.action
+                preserve_free_charge_command = (
+                    action.action == "charge"
+                    and idx < len(import_prices)
+                    and import_prices[idx] <= 0.001
+                )
                 effective_grid_charge_w = 0.0
                 solar_w = (
                     max(0.0, float(solar[idx] or 0.0)) * 1000.0
@@ -5158,10 +5173,17 @@ class BatteryOptimizer:
 
                 power_w = float(action.power_w or 0.0)
                 if action.action == "charge":
-                    if effective_grid_charge_w <= ACTION_THRESHOLD_W:
+                    # Free import keeps the charge command for the whole slot,
+                    # while charge_w/SOC/grid flows above describe only energy
+                    # the battery can physically accept.  Non-free charge keeps
+                    # the ordinary clipped-action behavior.
+                    if (
+                        effective_grid_charge_w <= ACTION_THRESHOLD_W
+                        and not preserve_free_charge_command
+                    ):
                         emitted_action = "self_consumption"
                         power_w = charge_w
-                    else:
+                    elif not preserve_free_charge_command:
                         power_w = min(power_w, charge_w)
                 elif action.action in ("export", "discharge"):
                     home_discharge_w = min(
