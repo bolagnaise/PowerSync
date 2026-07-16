@@ -683,6 +683,106 @@ def test_battery_health_uses_native_dashboard_card():
     assert "healthGauge('Overall'" not in source
 
 
+def test_battery_health_uses_authoritative_count_when_relay_omits_pack_row():
+    """The aggregate pack count must not shrink with partial relay detail."""
+    source = STRATEGY_PATH.read_text()
+    class_start = source.index("class PowerSyncBatteryHealth extends HTMLElement")
+    class_end = source.index("if (!customElements.get('power-sync-battery-health'))")
+    class_source = source[class_start:class_end]
+    prelude = """
+      class HTMLElement {
+        attachShadow() { this.shadowRoot = { innerHTML: '' }; }
+      }
+    """
+    checks = """
+      const card = new PowerSyncBatteryHealth();
+      card.setConfig({ entity: 'sensor.power_sync_battery_health' });
+      card.hass = { states: { 'sensor.power_sync_battery_health': {
+        state: '106.6',
+        attributes: {
+          source: 'ha_fleet_api_relay',
+          battery_count: 5,
+          original_capacity_kwh: 67.5,
+          current_capacity_kwh: 72.0,
+          battery_1_health_percent: 106.8,
+          battery_1_original_kwh: 14.4,
+          battery_2_health_percent: 106.8,
+          battery_2_original_kwh: 14.4,
+          battery_3_health_percent: 106.2,
+          battery_3_original_kwh: 14.3,
+          battery_4_health_percent: 107.2,
+          battery_4_original_kwh: 14.5,
+        },
+      } } };
+      const html = card.shadowRoot.innerHTML;
+      if (!html.includes('<div class="pill">5 packs</div>')) {
+        throw new Error('authoritative five-pack count was not rendered');
+      }
+      if (!html.includes('4 of 5 packs reported individually; aggregate capacity includes all 5.')) {
+        throw new Error('partial relay detail was not explained');
+      }
+      const renderedRows = (html.match(/class="pack"/g) || []).length;
+      if (renderedRows !== 4) {
+        throw new Error(`partial relay data fabricated rows: ${renderedRows}`);
+      }
+
+      const fallbackCard = new PowerSyncBatteryHealth();
+      fallbackCard.setConfig({ entity: 'sensor.power_sync_battery_health' });
+      fallbackCard.hass = { states: { 'sensor.power_sync_battery_health': {
+        state: '100',
+        attributes: {
+          battery_count: -2,
+          battery_1_health_percent: 100,
+        },
+      } } };
+      if (!fallbackCard.shadowRoot.innerHTML.includes('<div class="pill">1 pack</div>')) {
+        throw new Error('invalid aggregate count did not fall back to detailed rows');
+      }
+
+      const aggregateOnlyCard = new PowerSyncBatteryHealth();
+      aggregateOnlyCard.setConfig({ entity: 'sensor.power_sync_battery_health' });
+      aggregateOnlyCard.hass = { states: { 'sensor.power_sync_battery_health': {
+        state: '106.6',
+        attributes: {
+          battery_count: 5,
+          original_capacity_kwh: 67.5,
+          current_capacity_kwh: 72.0,
+        },
+      } } };
+      const aggregateOnlyHtml = aggregateOnlyCard.shadowRoot.innerHTML;
+      if (!aggregateOnlyHtml.includes('<div class="pill">5 packs</div>')) {
+        throw new Error('aggregate-only authoritative count was not rendered');
+      }
+      if ((aggregateOnlyHtml.match(/class="pack"/g) || []).length !== 0) {
+        throw new Error('aggregate-only data fabricated a detailed row');
+      }
+
+      const ninePackCard = new PowerSyncBatteryHealth();
+      ninePackCard.setConfig({ entity: 'sensor.power_sync_battery_health' });
+      const ninePackAttributes = {
+        battery_count: 9,
+        original_capacity_kwh: 121.5,
+        current_capacity_kwh: 121.5,
+      };
+      for (let index = 1; index <= 9; index++) {
+        ninePackAttributes[`battery_${index}_health_percent`] = 100;
+      }
+      ninePackCard.hass = { states: { 'sensor.power_sync_battery_health': {
+        state: '100',
+        attributes: ninePackAttributes,
+      } } };
+      const ninePackHtml = ninePackCard.shadowRoot.innerHTML;
+      if ((ninePackHtml.match(/class="pack"/g) || []).length !== 9) {
+        throw new Error('valid authoritative count was truncated to eight rows');
+      }
+      if (ninePackHtml.includes('reported individually')) {
+        throw new Error('fully reported nine-pack site was labelled partial');
+      }
+    """
+
+    subprocess.run(["node", "-e", prelude + class_source + checks], check=True)
+
+
 def test_optimizer_plan_charts_have_tooltips():
     """Optimizer SOC/power and price charts should expose hover tooltips."""
     source = STRATEGY_PATH.read_text()

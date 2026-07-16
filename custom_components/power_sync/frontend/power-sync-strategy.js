@@ -1179,6 +1179,8 @@ class PowerSyncBatteryHealth extends HTMLElement {
     const sourceLabel = this._sourceLabel(source);
     const scanLabel = this._dateLabel(attrs.last_scan);
     const packs = this._packRows(attrs);
+    const reportedPackCount = this._validatedPackCount(attrs.battery_count);
+    const displayedPackCount = Number.isFinite(reportedPackCount) ? reportedPackCount : packs.length;
     const hasCapacity = Number.isFinite(current) && Number.isFinite(original);
     const calculatedHealth = hasCapacity && original > 0 ? (current / original) * 100 : NaN;
     const displayHealth = Number.isFinite(health) ? health : (Number.isFinite(soh) ? soh : calculatedHealth);
@@ -1409,7 +1411,7 @@ class PowerSyncBatteryHealth extends HTMLElement {
           <div class="header">
             <div>
               <div class="title">Battery Health</div>
-              <div class="subtitle">${this._escHtml(this._subtitle(source, packs.length))}</div>
+              <div class="subtitle">${this._escHtml(this._subtitle(source, displayedPackCount))}</div>
             </div>
             <ha-icon icon="mdi:battery-heart-variant"></ha-icon>
           </div>
@@ -1427,11 +1429,12 @@ class PowerSyncBatteryHealth extends HTMLElement {
                 <div class="meta">
                   ${sourceLabel ? `<div class="pill">Source: ${this._escHtml(sourceLabel)}</div>` : ''}
                   ${scanLabel ? `<div class="pill">Last scan: ${this._escHtml(scanLabel)}</div>` : ''}
-                  ${packs.length ? `<div class="pill">${packs.length} ${packs.length === 1 ? 'pack' : 'packs'}</div>` : ''}
+                  ${displayedPackCount ? `<div class="pill">${displayedPackCount} ${displayedPackCount === 1 ? 'pack' : 'packs'}</div>` : ''}
                 </div>
               </div>
             </div>
             ${packs.length ? `<div class="packs">${packs.map(pack => this._renderPack(pack)).join('')}</div>` : ''}
+            ${hasCapacity && displayedPackCount > packs.length ? `<div class="note">${packs.length} of ${displayedPackCount} packs reported individually; aggregate capacity includes all ${displayedPackCount}.</div>` : ''}
             ${hasFollower ? '<div class="note">Follower capacity is inferred from aggregate gateway data.</div>' : ''}
           ` : '<div class="empty">No battery health data available yet.</div>'}
         </div>
@@ -1440,7 +1443,8 @@ class PowerSyncBatteryHealth extends HTMLElement {
   }
 
   _packRows(attrs) {
-    const count = Math.min(Number(attrs.battery_count || 0) || 8, 8);
+    const reportedCount = this._validatedPackCount(attrs.battery_count);
+    const count = Number.isFinite(reportedCount) ? reportedCount : 8;
     const rows = [];
     for (let index = 1; index <= count; index++) {
       const health = this._number(attrs[`battery_${index}_health_percent`]);
@@ -1458,6 +1462,11 @@ class PowerSyncBatteryHealth extends HTMLElement {
       });
     }
     return rows;
+  }
+
+  _validatedPackCount(value) {
+    const count = this._number(value);
+    return Number.isInteger(count) && count > 0 && count <= 64 ? count : NaN;
   }
 
   _fallbackPackLabel(index, role, isFollower, isExpansion) {
