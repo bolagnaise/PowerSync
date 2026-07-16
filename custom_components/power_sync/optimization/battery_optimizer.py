@@ -1932,9 +1932,10 @@ class BatteryOptimizer:
             min(1.0, float(getattr(self, "grid_charge_soc_cap", 1.0) or 0.0)),
         )
         grid_charge_cap_active = allow_grid_charge and grid_charge_soc_cap < 0.999
-        grid_charge_cap_headroom_kwh = max(
+        grid_charge_cap_energy_kwh = grid_charge_soc_cap * cap
+        grid_charge_cap_big_m_kwh = max(
             0.0,
-            (grid_charge_soc_cap - soc_0) * cap,
+            cap - grid_charge_cap_energy_kwh,
         )
 
         # Periods where the LP pins battery_charge to zero (see charge bounds
@@ -2080,6 +2081,9 @@ class BatteryOptimizer:
         grid_direction_offset = next_offset
         if direction_binary_active:
             next_offset += p_n
+        grid_charge_cap_binary_offset = next_offset
+        if grid_charge_cap_active:
+            next_offset += p_n
         energy_offset = next_offset
         num_vars = energy_offset + p_n + 1
 
@@ -2112,6 +2116,9 @@ class BatteryOptimizer:
 
         def grid_direction_var(t: int) -> int:
             return grid_direction_offset + t
+
+        def grid_charge_cap_binary_var(t: int) -> int:
+            return grid_charge_cap_binary_offset + t
 
         # === Objective function: cost minimization ===
         # minimize SUM(import_price * grid_import - export_price * grid_export) * dt
@@ -2360,7 +2367,7 @@ class BatteryOptimizer:
         if direction_binary_active:
             A_ub_rows += 2 * p_n
         if grid_charge_cap_active:
-            A_ub_rows += 3 * p_n + 1
+            A_ub_rows += 5 * p_n
         if paired_priority_recharge_periods:
             A_ub_rows += len(paired_priority_recharge_periods) + 1
         if (
@@ -2394,31 +2401,41 @@ class BatteryOptimizer:
                         allow_grid_charge and p_grid_charge_allowed[t],
                     )
 
-                max_stored_kwh = 0.0
-                remaining_grid_stored_kwh = grid_charge_cap_headroom_kwh
+                reachable_energy_kwh = soc_0 * cap
                 for t in range(slots_to_window):
                     charge_limit_kw = _deadline_charge_limit_kw(t)
                     if charge_limit_kw <= 0:
                         continue
                     solar_surplus_kw = max(0.0, p_solar[t] - p_load[t])
                     solar_charge_kw = min(charge_limit_kw, solar_surplus_kw)
-                    max_stored_kwh += solar_charge_kw * eff * p_dt[t]
                     grid_charge_kw = max(0.0, charge_limit_kw - solar_charge_kw)
-                    if grid_charge_kw <= 0:
-                        continue
-                    grid_stored_kwh = grid_charge_kw * eff * p_dt[t]
-                    if grid_charge_cap_active:
-                        grid_stored_kwh = min(
-                            grid_stored_kwh,
-                            remaining_grid_stored_kwh,
+                    if grid_charge_kw > 0:
+                        grid_stored_kwh = grid_charge_kw * eff * p_dt[t]
+                        if grid_charge_cap_active:
+                            grid_stored_kwh = min(
+                                grid_stored_kwh,
+                                max(
+                                    0.0,
+                                    grid_charge_cap_energy_kwh
+                                    - reachable_energy_kwh,
+                                ),
+                            )
+                        reachable_energy_kwh = min(
+                            cap,
+                            reachable_energy_kwh + grid_stored_kwh,
                         )
-                        remaining_grid_stored_kwh = max(
-                            0.0,
-                            remaining_grid_stored_kwh - grid_stored_kwh,
-                        )
-                    max_stored_kwh += grid_stored_kwh
+                    # Grid may fill the available capped headroom first; solar
+                    # remains free to lift the battery above the grid cap.
+                    reachable_energy_kwh = min(
+                        cap,
+                        reachable_energy_kwh
+                        + solar_charge_kw * eff * p_dt[t],
+                    )
 
-                max_soc_gain = max_stored_kwh / cap
+                max_soc_gain = max(
+                    0.0,
+                    reachable_energy_kwh / cap - soc_0,
+                )
                 max_reachable = min(1.0, soc_0 + max_soc_gain)
                 # Keep the established 0.5% feasibility margin while the
                 # configured target is reachable. Once execution has fallen
@@ -2570,9 +2587,30 @@ class BatteryOptimizer:
                 A_ub[len(b_ub), grid_charge_var(t)] = -1.0
                 b_ub.append(max(0.0, p_solar[t] - p_load[t]))
 
-            for t in range(p_n):
+                grid_charge_limit_kw = self._charge_limit_kw(
+                    p_load[t],
+                    p_solar[t],
+                    p_grid_charge_allowed[t],
+                )
+                # A grid-charge flow activates the conditional SOC-cap row.
+                A_ub[len(b_ub), grid_charge_var(t)] = 1.0
+                A_ub[len(b_ub), grid_charge_cap_binary_var(t)] = (
+                    -grid_charge_limit_kw
+                )
+                b_ub.append(0.0)
+
+                # When active, grid energy may fill only the headroom present
+                # at the start of this period. Prior-period discharge therefore
+                # reopens headroom, while solar may still lift E[t+1] above the
+                # cap and same-period discharge cannot launder grid energy.
+                A_ub[len(b_ub), energy_var(t)] = 1.0
                 A_ub[len(b_ub), grid_charge_var(t)] = eff * p_dt[t]
-            b_ub.append(grid_charge_cap_headroom_kwh)
+                A_ub[len(b_ub), grid_charge_cap_binary_var(t)] = (
+                    grid_charge_cap_big_m_kwh
+                )
+                b_ub.append(
+                    grid_charge_cap_energy_kwh + grid_charge_cap_big_m_kwh
+                )
 
         # === Pre-window SOC floor ===
         # Force soc[pre_window_slot - 1] >= target so the battery is filled
@@ -2806,6 +2844,10 @@ class BatteryOptimizer:
             for _t in range(p_n):
                 bounds.append((0.0, 1.0))
 
+        if grid_charge_cap_active:
+            for _t in range(p_n):
+                bounds.append((0.0, 1.0))
+
         bounds.append((soc_0 * cap, soc_0 * cap))
         for t in range(1, p_n + 1):
             upper_soc = solar_prefill_ceilings[t]
@@ -2838,14 +2880,26 @@ class BatteryOptimizer:
             b_eq,
             bounds,
         )
+        integer_indices: list[int] = []
         if direction_binary_active:
+            integer_indices.extend(
+                range(
+                    grid_direction_offset,
+                    grid_direction_offset + p_n,
+                )
+            )
+        if grid_charge_cap_active:
+            integer_indices.extend(
+                range(
+                    grid_charge_cap_binary_offset,
+                    grid_charge_cap_binary_offset + p_n,
+                )
+            )
+        if integer_indices:
             result = _solve_lp_highs(
                 *solve_args,
                 time_limit=LP_SOLVER_TIME_LIMIT_SECONDS,
-                integer_indices=range(
-                    grid_direction_offset,
-                    grid_direction_offset + p_n,
-                ),
+                integer_indices=integer_indices,
             )
         else:
             # Preserve the established wrapper call contract for every tariff
@@ -3482,11 +3536,7 @@ class BatteryOptimizer:
             0.0,
             min(1.0, float(getattr(self, "grid_charge_soc_cap", 1.0) or 0.0)),
         )
-        remaining_grid_charge_stored_kwh = (
-            max(0.0, (grid_charge_soc_cap - soc_0) * cap)
-            if allow_grid_charge and grid_charge_soc_cap < 0.999
-            else float("inf")
-        )
+        grid_charge_cap_active = allow_grid_charge and grid_charge_soc_cap < 0.999
 
         grid_import = [0.0] * n
         grid_export = [0.0] * n
@@ -3766,6 +3816,19 @@ class BatteryOptimizer:
                     max(0.0, charge_kw),
                     max(0.0, (1.0 - projected_soc) * cap / (eff * dt)),
                 )
+                solar_charge_kw = min(
+                    charge_kw,
+                    max(0.0, solar[idx] - load[idx]),
+                )
+                grid_charge_kw = max(0.0, charge_kw - solar_charge_kw)
+                if grid_charge_cap_active:
+                    grid_charge_kw = min(
+                        grid_charge_kw,
+                        max(0.0, grid_charge_soc_cap - projected_soc)
+                        * cap
+                        / max(eff * dt, 1e-9),
+                    )
+                charge_kw = solar_charge_kw + grid_charge_kw
                 net_home_kw = max(0.0, load[idx] - solar[idx])
                 discharge_floor = self_consumption_floor
                 if (
@@ -3843,10 +3906,12 @@ class BatteryOptimizer:
                 total_charge_input_capacity_kwh
                 - solar_charge_input_capacity_kwh,
             )
-            if remaining_grid_charge_stored_kwh != float("inf"):
+            if grid_charge_cap_active:
                 grid_charge_input_capacity_kwh = min(
                     grid_charge_input_capacity_kwh,
-                    remaining_grid_charge_stored_kwh / max(eff, 1e-9),
+                    max(0.0, grid_charge_soc_cap - projected_soc)
+                    * cap
+                    / max(eff, 1e-9),
                 )
             bonus_input_capacity_kwh = 0.0
             import_group = _group_key(import_group_ids, t)
@@ -3995,12 +4060,6 @@ class BatteryOptimizer:
 
                 used_input_kwh = delivered_kwh / max(1e-9, eff * eff)
                 charged_input_kwh += used_input_kwh
-                if uses_grid and remaining_grid_charge_stored_kwh != float("inf"):
-                    remaining_grid_charge_stored_kwh = max(
-                        0.0,
-                        remaining_grid_charge_stored_kwh
-                        - used_input_kwh * eff,
-                    )
                 if uses_bonus:
                     bonus_charge_consumed_by_group[import_group] = (
                         bonus_charge_consumed_by_group.get(import_group, 0.0)
@@ -4170,10 +4229,25 @@ class BatteryOptimizer:
                     0.0,
                     available_charge_input_kwh - solar_charge_input_kwh,
                 )
-                if remaining_grid_charge_stored_kwh != float("inf"):
+                if grid_charge_cap_active:
+                    projected_soc = _projected_soc_before(recharge_idx)
+                    existing_solar_charge_kw = min(
+                        existing_charge_kw,
+                        max(0.0, solar[recharge_idx] - load[recharge_idx]),
+                    )
+                    existing_grid_input_kwh = max(
+                        0.0,
+                        existing_charge_kw - existing_solar_charge_kw,
+                    ) * dt
                     grid_charge_input_kwh = min(
                         grid_charge_input_kwh,
-                        remaining_grid_charge_stored_kwh / max(eff, 1e-9),
+                        max(
+                            0.0,
+                            max(0.0, grid_charge_soc_cap - projected_soc)
+                            * cap
+                            / max(eff, 1e-9)
+                            - existing_grid_input_kwh,
+                        ),
                     )
 
                 recharge_group = _group_key(import_group_ids, recharge_idx)
@@ -4245,15 +4319,6 @@ class BatteryOptimizer:
                         continue
                     added_input_kwh += take_input_kwh
                     remaining_output_kwh -= take_input_kwh * eff * eff
-                    if (
-                        uses_grid
-                        and remaining_grid_charge_stored_kwh != float("inf")
-                    ):
-                        remaining_grid_charge_stored_kwh = max(
-                            0.0,
-                            remaining_grid_charge_stored_kwh
-                            - take_input_kwh * eff,
-                        )
                     if uses_bonus:
                         bonus_charge_consumed_by_group[recharge_group] = (
                             bonus_charge_consumed_by_group.get(recharge_group, 0.0)
@@ -4515,11 +4580,7 @@ class BatteryOptimizer:
             0.0,
             min(1.0, float(getattr(self, "grid_charge_soc_cap", 1.0) or 0.0)),
         )
-        remaining_grid_charge_stored_kwh = (
-            max(0.0, (grid_charge_soc_cap - soc_0) * cap)
-            if allow_grid_charge and grid_charge_soc_cap < 0.999
-            else float("inf")
-        )
+        grid_charge_cap_active = allow_grid_charge and grid_charge_soc_cap < 0.999
 
         def _future_grid_charge_planned(start_idx: int) -> bool:
             for future_idx in range(start_idx + 1, n):
@@ -4841,20 +4902,15 @@ class BatteryOptimizer:
                 solar_surplus_w = max(0.0, solar[t] - load[t]) * 1000.0
                 solar_charge_w = min(reported_charge_w, solar_surplus_w)
                 grid_charge_w = max(0.0, reported_charge_w - solar_charge_w)
-                if remaining_grid_charge_stored_kwh != float("inf"):
+                if grid_charge_cap_active:
                     allowed_grid_charge_w = (
-                        remaining_grid_charge_stored_kwh
+                        max(0.0, grid_charge_soc_cap - soc)
+                        * cap
                         * 1000.0
                         / max(eff * dt, 1e-9)
                     )
                     grid_charge_w = min(grid_charge_w, allowed_grid_charge_w)
                 reported_charge_w = solar_charge_w + grid_charge_w
-                if remaining_grid_charge_stored_kwh != float("inf"):
-                    remaining_grid_charge_stored_kwh = max(
-                        0.0,
-                        remaining_grid_charge_stored_kwh
-                        - grid_charge_w / 1000.0 * eff * dt,
-                    )
                 power_w = min(power_w, reported_charge_w)
                 if grid_charge_w <= ACTION_THRESHOLD_W:
                     action = "self_consumption"
@@ -4984,13 +5040,7 @@ class BatteryOptimizer:
                     float(getattr(self, "grid_charge_soc_cap", 1.0) or 0.0),
                 ),
             )
-            remaining_grid_charge_stored_wh = (
-                max(0.0, grid_charge_soc_cap - soc_cursor)
-                * self.capacity_kwh
-                * 1000.0
-                if grid_charge_soc_cap < 0.999
-                else float("inf")
-            )
+            grid_charge_cap_active = grid_charge_soc_cap < 0.999
 
             def _modeled_export_floor(idx: int) -> float:
                 floor = result.modeled_export_reserve_floor
@@ -5049,19 +5099,15 @@ class BatteryOptimizer:
                 if action.action == "charge" and charge_w > 0:
                     solar_charge_w = min(charge_w, solar_surplus_w)
                     grid_charge_w = max(0.0, charge_w - solar_charge_w)
-                    if remaining_grid_charge_stored_wh != float("inf"):
+                    if grid_charge_cap_active:
                         allowed_grid_charge_w = (
-                            remaining_grid_charge_stored_wh
+                            max(0.0, grid_charge_soc_cap - soc_cursor)
+                            * self.capacity_kwh
+                            * 1000.0
                             / max(self.efficiency * self.dt_hours, 1e-9)
                         )
                         grid_charge_w = min(grid_charge_w, allowed_grid_charge_w)
                     charge_w = solar_charge_w + grid_charge_w
-                    if remaining_grid_charge_stored_wh != float("inf"):
-                        remaining_grid_charge_stored_wh = max(
-                            0.0,
-                            remaining_grid_charge_stored_wh
-                            - grid_charge_w * self.efficiency * self.dt_hours,
-                        )
                     effective_grid_charge_w = grid_charge_w
 
                 discharge_floor = physical_floor

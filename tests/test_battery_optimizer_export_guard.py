@@ -255,6 +255,49 @@ def test_grid_charge_soc_cap_caps_unreachable_deadline_without_solar(
     assert result.grid_import_w[3] == pytest.approx(3000.0)
 
 
+def test_grid_charge_soc_cap_reopens_after_export_before_charge_by_time_deadline(
+    battery_optimizer_module,
+):
+    """A charge deadline cannot truncate an earlier two-hour export window."""
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=49_000,
+        max_charge_w=10_000,
+        max_discharge_w=7_500,
+        efficiency=0.95,
+        backup_reserve=0.20,
+        hardware_reserve=0.05,
+        grid_charge_soc_cap=0.95,
+        interval_minutes=5,
+        horizon_hours=4,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.00
+    optimizer.pre_window_slot = 48
+
+    result = optimizer.optimize(
+        import_prices=[0.50] * 24 + [0.05] * 24,
+        export_prices=[1.00] * 24 + [0.0] * 24,
+        solar_forecast=[0.0] * 44 + [7.0] * 4,
+        load_forecast=[0.0] * 48,
+        current_soc=0.96,
+        allow_battery_export=[True] * 24 + [False] * 24,
+        block_battery_charge=[True] * 24 + [False] * 24,
+        allow_grid_charge=True,
+        grid_charge_allowed=[False] * 24 + [True] * 24,
+    )
+
+    assert result.feasible is True
+    assert result.solver_used == "highs"
+    assert result.grid_export_w[:24] == pytest.approx([7500.0] * 24, abs=0.1)
+    assert sum(result.grid_export_w[:24]) / 1000.0 / 12.0 == pytest.approx(
+        15.0,
+        abs=1e-3,
+    )
+    assert result.schedule.actions[-1].soc >= 0.995 - 1e-4
+
+
 def test_zero_grid_import_limit_is_treated_as_unset_cap(
     battery_optimizer_module,
 ):
