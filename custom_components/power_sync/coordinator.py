@@ -5366,6 +5366,11 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         if limit_ok:
             persisted_ok = await self._clear_persisted_export_control_state()
         if limit_ok and persisted_ok:
+            coord_data = getattr(self, "data", None)
+            if isinstance(coord_data, dict):
+                coord_data["export_limit_enabled"] = restore_limit_w is not None
+                if restore_limit_w is not None:
+                    coord_data["export_limit_w"] = int(restore_limit_w)
             self._pre_control_export_limit_w = None
             self._pre_control_export_limit_captured = False
         return bool(limit_ok and persisted_ok)

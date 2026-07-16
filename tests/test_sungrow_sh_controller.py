@@ -1518,6 +1518,98 @@ def test_sungrow_spread_export_restores_persisted_baseline_after_restart(
     assert store.data == {"active": False}
 
 
+@pytest.mark.parametrize(
+    ("baseline_enabled", "baseline_limit_w", "expected_restore_limit"),
+    (
+        (False, None, None),
+        (True, 5000, 5000),
+    ),
+)
+def test_sungrow_recovery_does_not_recapture_stale_export_target(
+    baseline_enabled,
+    baseline_limit_w,
+    expected_restore_limit,
+):
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    async def run_recovered_export_cycle():
+        old_target_w = 2580
+        new_target_w = 4400
+        fake_controller = _FakeSungrowController()
+        store = _FakeStore(
+            {
+                "active": True,
+                "baseline_enabled": baseline_enabled,
+                "baseline_limit_w": baseline_limit_w,
+                "target_export_w": old_target_w,
+            }
+        )
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            fake_controller,
+        )
+        coordinator._export_control_store = store
+        coordinator.data = {
+            "battery_max_charge_power": 7.9,
+            "battery_max_charge_power_w": 7900,
+            "battery_max_discharge_power": 7.9,
+            "battery_max_discharge_power_w": 7900,
+            "charge_rate_limit_kw": 7.9,
+            "discharge_rate_limit_kw": 7.9,
+            # A coordinator sample taken while the interrupted temporary
+            # export target was still active.
+            "export_limit_enabled": True,
+            "export_limit_w": old_target_w,
+        }
+
+        recovery_result = await coordinator.async_restore_persisted_export_control()
+        force_result = await coordinator.force_grid_export(
+            duration_minutes=30,
+            export_limit_w=new_target_w,
+        )
+        active_state = dict(store.data)
+        restore_result = await coordinator.restore_normal()
+        return (
+            recovery_result,
+            force_result,
+            restore_result,
+            active_state,
+            store,
+            fake_controller,
+            coordinator,
+        )
+
+    try:
+        (
+            recovery_result,
+            force_result,
+            restore_result,
+            active_state,
+            store,
+            fake_controller,
+            coordinator,
+        ) = asyncio.run(run_recovered_export_cycle())
+    finally:
+        restore()
+
+    assert recovery_result
+    assert force_result
+    assert restore_result
+    assert active_state == {
+        "active": True,
+        "baseline_enabled": baseline_enabled,
+        "baseline_limit_w": expected_restore_limit,
+        "target_export_w": 4400,
+    }
+    assert fake_controller.export_limits == [
+        expected_restore_limit,
+        4400,
+        expected_restore_limit,
+    ]
+    assert store.data == {"active": False}
+    assert not coordinator._pre_control_export_limit_captured
+
+
 def test_sungrow_spread_export_refuses_hardware_write_when_state_cannot_persist():
     SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
 
