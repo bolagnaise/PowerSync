@@ -66,6 +66,7 @@ from .const import (
     POWERWALL_LOCAL_POLL_INTERVAL,
     supports_no_idle_mode_provider,
 )
+from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
 
 # Providers that use TOU schedule syncing (Amber, Octopus, Flow Power)
 # GloBird and AEMO VPP use spike detection only — no TOU sync
@@ -1156,29 +1157,29 @@ class MonitoringModeSwitch(SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable monitoring mode — all control commands will be logged but not executed."""
+        if self._current_value():
+            return
         _LOGGER.info("Monitoring mode ENABLED — all battery/inverter commands will be blocked")
-        self._attr_is_on = True
-
-        new_options = {**self._entry.options}
-        new_options[CONF_MONITORING_MODE] = True
-        self.hass.config_entries.async_update_entry(
-            self._entry,
-            options=new_options,
-        )
-
-        restore_data = {"source": "manual", "_force_restore": True}
         try:
-            await self.hass.services.async_call(
-                DOMAIN,
-                SERVICE_RESTORE_NORMAL,
-                restore_data,
-                blocking=True,
-            )
+            await async_prepare_monitoring_handoff(self.hass, self._entry)
         except Exception as err:
+            finish_monitoring_handoff(self.hass, self._entry)
             _LOGGER.warning(
-                "Monitoring mode enabled but restore normal failed: %s",
+                "Monitoring mode was not enabled because cleanup failed: %s",
                 err,
             )
+            return
+
+        self._attr_is_on = True
+        new_options = {**self._entry.options}
+        new_options[CONF_MONITORING_MODE] = True
+        try:
+            self.hass.config_entries.async_update_entry(
+                self._entry,
+                options=new_options,
+            )
+        finally:
+            finish_monitoring_handoff(self.hass, self._entry)
 
         self.async_write_ha_state()
 

@@ -997,11 +997,11 @@ def test_optimization_options_exposes_enabled_toggle():
     assert "planned_ev_load_entity" in method_source
     assert "CONF_MONITORING_MODE" in method_source
     assert "new_options[CONF_MONITORING_MODE] = monitoring_mode" in method_source
-    assert "battery_system == BATTERY_SYSTEM_SIGENERGY and monitoring_mode" in method_source
-    assert "SERVICE_RESTORE_NORMAL" in method_source
-    assert '{"source": "manual", "_force_restore": True}' in method_source
-    assert '"_native_control": True' not in method_source
-    assert 'entry_data["_monitoring_enable_restore_pending"] = True' in method_source
+    assert "monitoring_handoff = monitoring_mode and not previous_monitoring_mode" in method_source
+    assert "await async_prepare_monitoring_handoff(" in method_source
+    assert '"_monitoring_enable_restore_pending"' not in method_source
+    assert "battery_system == BATTERY_SYSTEM_SIGENERGY and monitoring_mode" not in method_source
+    assert "SERVICE_RESTORE_NORMAL" not in method_source
     assert "CONF_HARDWARE_BACKUP_RESERVE" in method_source
     assert "new_options[CONF_HARDWARE_BACKUP_RESERVE] = hardware_backup_reserve" in method_source
     assert 'new_options.pop("_user_backup_reserve", None)' in method_source

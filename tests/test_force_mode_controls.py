@@ -313,7 +313,7 @@ def test_monitoring_mode_optimizer_shutdown_skips_hardware_restore():
     assert "skipping IDLE cleanup writes" in disable_source
     assert "skipping scheduled EV no-discharge release" in disable_source
     assert "skipping executor restore writes" in disable_source
-    assert "restore_normal=not monitoring_mode or monitoring_enable_restore" in disable_source
+    assert "await self._executor.stop(restore_normal=not monitoring_mode)" in disable_source
     assert "restore_normal: bool = True" in stop_source
     assert "if restore_normal:" in stop_source
     assert "await self._restore_normal_operation()" in stop_source
@@ -599,9 +599,13 @@ def test_provider_config_monitoring_enable_forces_restore_normal():
 
     assert method_source is not None
     assert 'if "monitoring_mode" in data:' in method_source
-    assert "SERVICE_RESTORE_NORMAL" in method_source
-    assert 'restore_data = {"source": "manual", "_force_restore": True}' in method_source
-    assert 'restore_data["_native_control"] = True' not in method_source
+    assert "not monitoring_was_enabled" in method_source
+    assert "monitoring_will_be_enabled" in method_source
+    assert "await async_prepare_monitoring_handoff(self._hass, entry)" in method_source
+    assert method_source.index("await async_prepare_monitoring_handoff") < method_source.index(
+        "self._hass.config_entries.async_update_entry"
+    )
+    assert "SERVICE_RESTORE_NORMAL" not in method_source
 
 
 def test_restore_normal_force_restore_releases_tesla_even_without_saved_state():

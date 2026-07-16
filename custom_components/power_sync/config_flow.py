@@ -35,6 +35,7 @@ from .history_migration import (
     format_history_relink_summary,
     preview_history_relink,
 )
+from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
 from .const import (
     DOMAIN,
     CONF_AMBER_API_TOKEN,
@@ -10219,32 +10220,28 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_data != dict(self.config_entry.data)
                 or new_options != dict(self.config_entry.options)
             )
-            if isinstance(entry_data, dict) and persisted_changed:
-                entry_data["_skip_reload"] = True
-            if (
-                monitoring_mode
-                and not previous_monitoring_mode
-                and isinstance(entry_data, dict)
-                and coordinator is not None
-                and bool(getattr(coordinator, "_enabled", False))
-            ):
-                entry_data["_monitoring_enable_restore_pending"] = True
-            self.hass.config_entries.async_update_entry(
-                self.config_entry, data=new_data, options=new_options
-            )
-            if battery_system == BATTERY_SYSTEM_SIGENERGY and monitoring_mode:
+            monitoring_handoff = monitoring_mode and not previous_monitoring_mode
+            if monitoring_handoff:
                 try:
-                    await self.hass.services.async_call(
-                        DOMAIN,
-                        SERVICE_RESTORE_NORMAL,
-                        {"source": "manual", "_force_restore": True},
-                        blocking=True,
+                    await async_prepare_monitoring_handoff(
+                        self.hass, self.config_entry
                     )
                 except Exception as err:
+                    finish_monitoring_handoff(self.hass, self.config_entry)
                     _LOGGER.warning(
-                        "Monitoring mode enabled but Sigenergy restore failed: %s",
+                        "Monitoring mode was not enabled because cleanup failed: %s",
                         err,
                     )
+                    return self.async_abort(reason="monitoring_cleanup_failed")
+            if isinstance(entry_data, dict) and persisted_changed:
+                entry_data["_skip_reload"] = True
+            try:
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data, options=new_options
+                )
+            finally:
+                if monitoring_handoff:
+                    finish_monitoring_handoff(self.hass, self.config_entry)
 
             if structural_change:
                 self.hass.async_create_task(

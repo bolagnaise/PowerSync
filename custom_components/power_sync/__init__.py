@@ -820,6 +820,7 @@ from .currency import (
 )
 from .inverters import get_inverter_controller
 from .tariff_utils import with_hysteresis
+from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
 from .network_envelope import (
     ExportGuard,
     HANetworkEnvelopeManager,
@@ -9684,47 +9685,39 @@ class ProviderConfigView(HomeAssistantView):
             # API-driven saves don't need a full integration restart.
             domain_data = self._hass.data.get(DOMAIN, {})
             entry_data = domain_data.get(entry.entry_id, {})
+            monitoring_was_enabled = bool(
+                entry.options.get(
+                    CONF_MONITORING_MODE,
+                    entry.data.get(CONF_MONITORING_MODE, False),
+                )
+            )
+            monitoring_will_be_enabled = bool(
+                new_options.get(CONF_MONITORING_MODE, False)
+            )
+            monitoring_handoff = (
+                "monitoring_mode" in data
+                and not monitoring_was_enabled
+                and monitoring_will_be_enabled
+            )
+            if monitoring_handoff:
+                try:
+                    await async_prepare_monitoring_handoff(self._hass, entry)
+                except Exception:
+                    finish_monitoring_handoff(self._hass, entry)
+                    raise
             if new_options != dict(entry.options):
                 entry_data["_skip_reload"] = True
-            self._hass.config_entries.async_update_entry(entry, options=new_options)
+            try:
+                self._hass.config_entries.async_update_entry(entry, options=new_options)
+            finally:
+                if monitoring_handoff:
+                    finish_monitoring_handoff(self._hass, entry)
             if "monitoring_mode" in data:
                 async_dispatcher_send(
                     self._hass,
                     f"{DOMAIN}_{entry.entry_id}_monitoring_mode",
                     bool(new_options.get(CONF_MONITORING_MODE, False)),
                 )
-                if bool(new_options.get(CONF_MONITORING_MODE, False)):
-                    restore_data = {"source": "manual", "_force_restore": True}
-                    try:
-                        await self._hass.services.async_call(
-                            DOMAIN,
-                            SERVICE_RESTORE_NORMAL,
-                            restore_data,
-                            blocking=True,
-                        )
-                        # restore_normal releases force modes/native control,
-                        # but never restores an IDLE/EV-elevated backup
-                        # reserve — the restore-side monitoring gate would
-                        # then block the optimizer's own retries, stranding
-                        # it (OB-8). This is the one sanctioned bypass caller
-                        # (see coordinator._restore_pre_idle_backup_reserve).
-                        opt_coord = entry_data.get("optimization_coordinator")
-                        if (
-                            opt_coord
-                            and getattr(opt_coord, "_pre_idle_backup_reserve", None)
-                            is not None
-                            and getattr(opt_coord, "battery_controller", None)
-                        ):
-                            await opt_coord._restore_pre_idle_backup_reserve(
-                                opt_coord.battery_controller,
-                                "monitoring enabled",
-                                bypass_monitoring=True,
-                            )
-                    except Exception as err:
-                        _LOGGER.warning(
-                            "Monitoring mode enabled but restore normal failed: %s",
-                            err,
-                        )
 
             _LOGGER.info("✅ Provider config updated successfully")
             return web.json_response({"success": True})
@@ -18153,7 +18146,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     def _is_monitoring_mode() -> bool:
         """Check if monitoring mode is active (blocks all control commands)."""
-        return entry.options.get(CONF_MONITORING_MODE, entry.data.get(CONF_MONITORING_MODE, False))
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        if isinstance(entry_data, dict) and entry_data.get(
+            "_monitoring_handoff_active", False
+        ):
+            return True
+        return entry.options.get(
+            CONF_MONITORING_MODE,
+            entry.data.get(CONF_MONITORING_MODE, False),
+        )
 
     def _powersync_optimization_control_active() -> bool:
         """Return True when PowerSync Smart Optimization owns dispatch."""

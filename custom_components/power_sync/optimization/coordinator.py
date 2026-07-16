@@ -526,9 +526,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return True when monitoring mode should block hardware writes."""
         if self.battery_system == CUSTOM_BATTERY_SYSTEM:
             return True
+        from ..const import CONF_MONITORING_MODE, DOMAIN
+
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self.entry_id, {})
+        if isinstance(entry_data, dict) and entry_data.get(
+            "_monitoring_handoff_active", False
+        ):
+            return True
         if not self._entry:
             return False
-        from ..const import CONF_MONITORING_MODE
 
         return bool(
             self._entry.options.get(
@@ -3786,12 +3792,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         monitoring_mode = self._monitoring_mode_active()
-        entry_data = self.hass.data.get("power_sync", {}).get(self.entry_id, {})
-        monitoring_enable_restore = bool(
-            isinstance(entry_data, dict)
-            and entry_data.pop("_monitoring_enable_restore_pending", False)
-        )
-
         # Safety: restore any pending pre-IDLE backup_reserve before shutting
         # down. Gated on the pending reserve itself, not on
         # _last_executed_action == "idle" — Tesla's scheduled EV-preserve
@@ -3870,13 +3870,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._octopus_gate_listener_unsub = None
 
         if self._executor:
-            if monitoring_mode and not monitoring_enable_restore:
+            if monitoring_mode:
                 _LOGGER.info(
                     "Optimizer shutdown: monitoring mode active — skipping executor restore writes"
                 )
-            await self._executor.stop(
-                restore_normal=not monitoring_mode or monitoring_enable_restore
-            )
+            await self._executor.stop(restore_normal=not monitoring_mode)
 
         if self._ev_coordinator:
             await self._ev_coordinator.stop()

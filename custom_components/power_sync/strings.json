@@ -1132,7 +1132,8 @@
       "saj_h2_not_installed": "The SAJ H2 Modbus integration is not installed. Install it via HACS (search 'SAJ H2 Inverter Modbus') and add your inverter before continuing.",
       "fronius_reserva_not_installed": "The Fronius Modbus integration is not installed. Install it via HACS and add your GEN24 BYD or Reserva storage system before continuing.",
       "neovolt_not_installed": "The Neovolt Modbus integration is not installed. Install it via HACS and add your Neovolt/Bytewatt system before continuing.",
-      "solax_not_installed": "The Solax Modbus integration is not installed. Install it via HACS (search 'Solax Modbus') and add your inverter before continuing."
+      "solax_not_installed": "The Solax Modbus integration is not installed. Install it via HACS (search 'Solax Modbus') and add your inverter before continuing.",
+      "monitoring_cleanup_failed": "Monitoring Mode was not enabled because PowerSync could not safely release its current battery control. Check the logs and try again."
     }
   },
   "options": {

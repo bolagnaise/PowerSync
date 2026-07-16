@@ -21,8 +21,7 @@ Fix: split the reserve restore in ``disable()`` from the work-mode restore
 avoid double-firing ``restore_work_mode_from_idle`` against the EV
 no-discharge release's own restore). ``_restore_pre_idle_backup_reserve``
 gains a ``bypass_monitoring`` parameter used by exactly one caller: the
-``ProviderConfigView.post`` monitoring-enable branch in ``__init__.py``,
-fired after ``SERVICE_RESTORE_NORMAL`` succeeds.
+shared monitoring transition helper, fired only for a false-to-true change.
 """
 
 from __future__ import annotations
@@ -50,6 +49,7 @@ INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
 COORDINATOR_PATH = (
     ROOT / "custom_components" / "power_sync" / "optimization" / "coordinator.py"
 )
+MONITORING_PATH = ROOT / "custom_components" / "power_sync" / "monitoring.py"
 
 
 @pytest.fixture()
@@ -212,36 +212,62 @@ def test_disable_stops_executor_without_restore_writes_under_monitoring(opt_modu
     asyncio.run(_run())
 
 
-def test_disable_preserves_explicit_monitoring_enable_handoff(opt_module):
-    """A real off-to-on transition keeps the established one-time cleanup."""
+def test_monitoring_handoff_drains_write_then_restores_control_and_reserve(opt_module):
+    """False-to-true handoff drains writes and performs one complete cleanup."""
+    sys.modules["power_sync.const"].SERVICE_RESTORE_NORMAL = "restore_normal"
+    monitoring = importlib.import_module("power_sync.monitoring")
 
     async def _run():
-        coordinator = _disable_coordinator(
-            opt_module,
-            last_executed_action=None,
-            pre_idle_reserve=None,
-            ev_active=False,
+        execute_lock = asyncio.Lock()
+        await execute_lock.acquire()
+        reserve_calls = []
+
+        async def restore_pre_idle(battery, context, *, bypass_monitoring):
+            reserve_calls.append((battery, context, bypass_monitoring))
+            return True
+
+        battery = object()
+        coordinator = SimpleNamespace(
+            _execute_lock=execute_lock,
+            _pre_idle_backup_reserve=78,
+            battery_controller=battery,
+            _restore_pre_idle_backup_reserve=restore_pre_idle,
         )
-        coordinator._monitoring_mode_active = lambda: True
-        coordinator.hass.data["power_sync"]["entry-1"][
-            "_monitoring_enable_restore_pending"
-        ] = True
-        restore_flags = []
+        entry_data = {
+            "optimization_coordinator": coordinator,
+            "force_charge_state": {"active": True},
+        }
+        service_calls = []
 
-        async def stop(*, restore_normal):
-            restore_flags.append(restore_normal)
+        async def async_call(*args, **kwargs):
+            assert entry_data["_monitoring_handoff_active"] is True
+            assert execute_lock.locked() is True
+            service_calls.append((args, kwargs))
+            entry_data["force_charge_state"]["active"] = False
 
-        coordinator._executor = SimpleNamespace(stop=stop)
-        coordinator.battery_controller = None
-        coordinator.energy_coordinator = None
-
-        await coordinator.disable()
-
-        assert restore_flags == [True]
-        assert (
-            "_monitoring_enable_restore_pending"
-            not in coordinator.hass.data["power_sync"]["entry-1"]
+        hass = SimpleNamespace(
+            data={"power_sync": {"entry-1": entry_data}},
+            services=SimpleNamespace(async_call=async_call),
         )
+        entry = SimpleNamespace(entry_id="entry-1")
+
+        handoff = asyncio.create_task(
+            monitoring.async_prepare_monitoring_handoff(hass, entry)
+        )
+        await asyncio.sleep(0)
+        assert service_calls == []
+
+        execute_lock.release()
+        await handoff
+
+        assert len(service_calls) == 1
+        assert service_calls[0][0][2] == {
+            "source": "manual",
+            "_force_restore": True,
+        }
+        assert reserve_calls == [(battery, "monitoring enabled", True)]
+        monitoring.finish_monitoring_handoff(hass, entry)
+        assert "_monitoring_handoff_active" not in entry_data
 
     asyncio.run(_run())
 
@@ -416,7 +442,7 @@ def _class_method_source(path: Path, class_name: str, method_name: str) -> str:
 
 
 def test_s11_provider_config_post_restores_pre_idle_reserve_after_monitoring_enable():
-    source = _class_method_source(INIT_PATH, "ProviderConfigView", "post")
+    source = MONITORING_PATH.read_text()
 
     idx_restore_normal_call = source.index("SERVICE_RESTORE_NORMAL")
     assert "_restore_pre_idle_backup_reserve" in source
@@ -428,6 +454,8 @@ def test_s11_provider_config_post_restores_pre_idle_reserve_after_monitoring_ena
     )
     assert "bypass_monitoring=True" in source
     assert "_pre_idle_backup_reserve" in source
+    assert "if not restored:" in source
+    assert 'raise RuntimeError("pre-IDLE backup reserve restore failed")' in source
 
 
 def test_bypass_monitoring_true_has_exactly_one_caller():
@@ -435,9 +463,9 @@ def test_bypass_monitoring_true_has_exactly_one_caller():
     never gain a second call site."""
 
     coordinator_source = COORDINATOR_PATH.read_text()
-    init_source = INIT_PATH.read_text()
+    monitoring_source = MONITORING_PATH.read_text()
 
-    total = coordinator_source.count("bypass_monitoring=True") + init_source.count(
+    total = coordinator_source.count("bypass_monitoring=True") + monitoring_source.count(
         "bypass_monitoring=True"
     )
     assert total == 1

@@ -314,6 +314,29 @@ def test_monitoring_switch_restores_sigenergy_without_native_handoff_when_enable
     ]
 
 
+def test_monitoring_switch_already_enabled_is_write_free():
+    """Re-submitting monitoring=true must not issue cleanup hardware writes."""
+    hass = _Hass("SystemGridConnected")
+    entry = types.SimpleNamespace(
+        entry_id="entry-1",
+        data={"monitoring_mode": True},
+        options={"monitoring_mode": True},
+    )
+    monitoring_switch = switch.MonitoringModeSwitch(
+        hass,
+        entry,
+        types.SimpleNamespace(
+            key="monitoring_mode",
+            name="Monitoring mode",
+        ),
+    )
+
+    asyncio.run(monitoring_switch.async_turn_on())
+
+    assert entry.options["monitoring_mode"] is True
+    assert hass.services.calls == []
+
+
 def test_force_discharge_switch_uses_selected_duration_and_force_power():
     hass = _Hass("SystemGridConnected")
     hass.states._states["number.power_sync_force_power_kw"] = _State("5.5")
