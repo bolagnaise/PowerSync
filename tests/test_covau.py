@@ -210,6 +210,63 @@ def test_covau_startup_contract_and_translations_are_wired() -> None:
     assert "not keeping_cached_manual" in config_flow_source
 
 
+def test_covau_entry_title_wins_over_legacy_aemo_spike_fallback() -> None:
+    """An explicit CovaU provider must not be relabelled as legacy GloBird."""
+    source = (
+        ROOT / "custom_components" / "power_sync" / "__init__.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    setup = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_setup_entry"
+    )
+    title_branch = next(
+        node
+        for node in setup.body
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(child, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "expected_title"
+                for target in child.targets
+            )
+            for child in ast.walk(node)
+        )
+    )
+    probe = ast.FunctionDef(
+        name="resolve_title",
+        args=ast.arguments(
+            posonlyargs=[],
+            args=[
+                ast.arg(arg="electricity_provider"),
+                ast.arg(arg="has_amber"),
+                ast.arg(arg="entry"),
+            ],
+            kwonlyargs=[],
+            kw_defaults=[],
+            defaults=[],
+        ),
+        body=[title_branch, ast.Return(value=ast.Name(id="expected_title", ctx=ast.Load()))],
+        decorator_list=[],
+    )
+    namespace: dict[str, object] = {
+        "CONF_AEMO_SPIKE_ENABLED": "aemo_spike_enabled",
+    }
+    exec(
+        compile(
+            ast.fix_missing_locations(ast.Module(body=[probe], type_ignores=[])),
+            "<title-probe>",
+            "exec",
+        ),
+        namespace,
+    )
+
+    entry = types.SimpleNamespace(data={"aemo_spike_enabled": True})
+    assert namespace["resolve_title"]("covau", False, entry) == "PowerSync CovaU SolarMax"
+    assert namespace["resolve_title"]("amber", False, entry) == "PowerSync Globird"
+
+
 def test_covau_mobile_provider_contract_is_read_only_at_the_correct_endpoint() -> None:
     source = (
         ROOT / "custom_components" / "power_sync" / "__init__.py"
