@@ -8147,6 +8147,7 @@ class PriceLevelChargingExecutor:
 
             should_charge, reason, mode = decision
             vehicle_state = self._get_or_create_vehicle_state(vin)
+            ignore_duplicate_actions = False
 
             if (
                 vin.startswith("ble_")
@@ -8163,8 +8164,11 @@ class PriceLevelChargingExecutor:
                 decision = (False, reason, "")
                 should_charge = False
                 mode = ""
+                vehicle_state.is_charging = False
+                vehicle_state.charging_mode = ""
                 vehicle_state.last_decision = "waiting"
                 vehicle_state.last_decision_reason = reason
+                ignore_duplicate_actions = True
 
             results[vin] = decision
 
@@ -8172,6 +8176,12 @@ class PriceLevelChargingExecutor:
                 f"Multi-vehicle decision for {name} ({vin}): "
                 f"should_charge={should_charge}, reason={reason}"
             )
+
+            # A SOC-less BLE entry is an alternate control path for the real
+            # Tesla discovered above, not an independently owned vehicle. Do
+            # not probe or stop its shared charger after the real VIN starts.
+            if ignore_duplicate_actions:
+                continue
 
             # Take action per vehicle
             if should_charge and not vehicle_state.is_charging:
