@@ -7421,7 +7421,10 @@ class PriceLevelChargingExecutor:
             vehicle_vin: Optional VIN to check specific vehicle. If None, returns
                          SoC of first vehicle found (backward compatible).
         """
-        from ..const import CONF_GENERIC_CHARGER_ENABLED
+        from ..const import (
+            CONF_GENERIC_CHARGER_ENABLED,
+            TESLA_BLE_SENSOR_CHARGE_LEVEL,
+        )
         from .generic_charger_soc import resolve_generic_charger_soc
         from homeassistant.helpers import entity_registry as er, device_registry as dr
 
@@ -7435,6 +7438,31 @@ class PriceLevelChargingExecutor:
                 if generic_soc is not None:
                     return int(generic_soc)
                 break
+
+        # ESPHome Tesla BLE bridges are not Tesla-domain devices in Home
+        # Assistant's registry, so a BLE vehicle id must be resolved directly
+        # to its configured charge-level entity before the registry searches.
+        if vehicle_vin and vehicle_vin.startswith("ble_"):
+            ble_prefix = vehicle_vin[4:]
+            ble_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=ble_prefix)
+            ble_state = self.hass.states.get(ble_entity)
+            if ble_state and ble_state.state not in (
+                "unavailable",
+                "unknown",
+                "None",
+                None,
+            ):
+                try:
+                    level = float(ble_state.state)
+                    if 0 <= level <= 100:
+                        _LOGGER.debug(
+                            "Found Tesla BLE battery level from %s: %s%%",
+                            ble_entity,
+                            level,
+                        )
+                        return int(level)
+                except (ValueError, TypeError):
+                    pass
 
         # Method 1: Check tesla_vehicles in entry_data (legacy)
         entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
@@ -8138,37 +8166,47 @@ class PriceLevelChargingExecutor:
             await self.apply_preserve_home_battery(False, "No Tesla vehicles discovered")
             return results
 
+        has_vehicle_specific_tesla = any(
+            not vehicle["vin"].startswith("ble_") for vehicle in vehicles
+        )
+        shared_ble_alias_vin: Optional[str] = None
+        if has_vehicle_specific_tesla:
+            first_ble_prefix = _configured_ble_prefixes(self.config_entry)[0]
+            shared_ble_alias_vin = f"ble_{first_ble_prefix}"
+
         for vehicle in vehicles:
             vin = vehicle["vin"]
             name = vehicle.get("name", vin)
+
+            # A real VIN uses the first configured BLE prefix as its command
+            # fallback. The matching BLE discovery row is therefore a second
+            # identifier for the same charger, not an independent vehicle.
+            # Suppress it regardless of whether BLE SOC is available; allowing
+            # a known-SOC alias to act would reintroduce duplicate starts/stops.
+            if vin == shared_ble_alias_vin:
+                reason = (
+                    "Tesla BLE control path shares the configured charger with "
+                    "another Tesla vehicle; using the vehicle-specific decision"
+                )
+                results[vin] = (False, reason, "")
+                vehicle_state = self._get_or_create_vehicle_state(vin)
+                vehicle_state.is_charging = False
+                vehicle_state.charging_mode = ""
+                vehicle_state.last_decision = "waiting"
+                vehicle_state.last_decision_reason = reason
+                _LOGGER.debug(
+                    "Multi-vehicle decision for %s (%s): should_charge=False, reason=%s",
+                    name,
+                    vin,
+                    reason,
+                )
+                continue
 
             # Get charging decision for this vehicle
             decision = await self.get_charging_decision_for_vehicle(vin, current_price_cents)
 
             should_charge, reason, mode = decision
             vehicle_state = self._get_or_create_vehicle_state(vin)
-            ignore_duplicate_actions = False
-
-            if (
-                vin.startswith("ble_")
-                and (
-                    "EV SOC unknown" in reason
-                    or reason.startswith("Opportunity: EV unknown")
-                )
-                and any(not v["vin"].startswith("ble_") for v in vehicles)
-            ):
-                reason = (
-                    "Tesla BLE SOC unavailable while another Tesla vehicle is "
-                    "already discovered; waiting for a vehicle-specific SOC source"
-                )
-                decision = (False, reason, "")
-                should_charge = False
-                mode = ""
-                vehicle_state.is_charging = False
-                vehicle_state.charging_mode = ""
-                vehicle_state.last_decision = "waiting"
-                vehicle_state.last_decision_reason = reason
-                ignore_duplicate_actions = True
 
             results[vin] = decision
 
@@ -8176,12 +8214,6 @@ class PriceLevelChargingExecutor:
                 f"Multi-vehicle decision for {name} ({vin}): "
                 f"should_charge={should_charge}, reason={reason}"
             )
-
-            # A SOC-less BLE entry is an alternate control path for the real
-            # Tesla discovered above, not an independently owned vehicle. Do
-            # not probe or stop its shared charger after the real VIN starts.
-            if ignore_duplicate_actions:
-                continue
 
             # Take action per vehicle
             if should_charge and not vehicle_state.is_charging:

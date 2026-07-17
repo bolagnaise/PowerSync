@@ -3807,6 +3807,17 @@ def test_unknown_vehicle_soc_uses_recovery_price_fallback(monkeypatch):
     assert state.last_decision == "wants_charge"
 
 
+def _mixed_ble_config_entry():
+    return SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "garage_garage_ble_gateway",
+        },
+    )
+
+
 def test_mixed_tesla_ble_unknown_soc_does_not_recovery_start_duplicate(
     monkeypatch,
     fake_actions,
@@ -3866,7 +3877,7 @@ def test_mixed_tesla_ble_unknown_soc_does_not_recovery_start_duplicate(
                 "home_battery_minimum": 0,
             }
         ),
-        _FakeConfigEntry(),
+        _mixed_ble_config_entry(),
     )
 
     results = asyncio.run(executor.evaluate_all_vehicles(7.8))
@@ -3874,8 +3885,8 @@ def test_mixed_tesla_ble_unknown_soc_does_not_recovery_start_duplicate(
     assert results[VIN] == (False, "EV 59% >= 30%, price 7.8c > 5c", "")
     assert results[ble_vin] == (
         False,
-        "Tesla BLE SOC unavailable while another Tesla vehicle is already "
-        "discovered; waiting for a vehicle-specific SOC source",
+        "Tesla BLE control path shares the configured charger with another "
+        "Tesla vehicle; using the vehicle-specific decision",
         "",
     )
     fake_actions._action_start_ev_charging_dynamic.assert_not_awaited()
@@ -3940,7 +3951,7 @@ def test_mixed_tesla_ble_unknown_soc_uses_duplicate_guard_above_recovery_price(
                 "home_battery_minimum": 0,
             }
         ),
-        _FakeConfigEntry(),
+        _mixed_ble_config_entry(),
     )
 
     results = asyncio.run(executor.evaluate_all_vehicles(34.3))
@@ -3948,8 +3959,8 @@ def test_mixed_tesla_ble_unknown_soc_uses_duplicate_guard_above_recovery_price(
     assert results[VIN] == (False, "EV 49% >= 30%, price 34.3c > 5c", "")
     assert results[ble_vin] == (
         False,
-        "Tesla BLE SOC unavailable while another Tesla vehicle is already "
-        "discovered; waiting for a vehicle-specific SOC source",
+        "Tesla BLE control path shares the configured charger with another "
+        "Tesla vehicle; using the vehicle-specific decision",
         "",
     )
     fake_actions._action_start_ev_charging_dynamic.assert_not_awaited()
@@ -4014,7 +4025,7 @@ def test_mixed_tesla_ble_unknown_soc_does_not_opportunity_start_duplicate(
                 "home_battery_minimum": 0,
             }
         ),
-        _FakeConfigEntry(),
+        _mixed_ble_config_entry(),
     )
 
     results = asyncio.run(executor.evaluate_all_vehicles(4.0))
@@ -4026,8 +4037,8 @@ def test_mixed_tesla_ble_unknown_soc_does_not_opportunity_start_duplicate(
     )
     assert results[ble_vin] == (
         False,
-        "Tesla BLE SOC unavailable while another Tesla vehicle is already "
-        "discovered; waiting for a vehicle-specific SOC source",
+        "Tesla BLE control path shares the configured charger with another "
+        "Tesla vehicle; using the vehicle-specific decision",
         "",
     )
     assert fake_actions._action_start_ev_charging_dynamic.await_count == 1
@@ -4099,7 +4110,7 @@ def test_mixed_tesla_ble_unknown_soc_does_not_stop_real_vehicle_after_start(
                 "home_battery_minimum": 0,
             }
         ),
-        _FakeConfigEntry(),
+        _mixed_ble_config_entry(),
     )
 
     results = asyncio.run(executor.evaluate_all_vehicles(10.7))
@@ -4111,8 +4122,8 @@ def test_mixed_tesla_ble_unknown_soc_does_not_stop_real_vehicle_after_start(
     )
     assert results[ble_vin] == (
         False,
-        "Tesla BLE SOC unavailable while another Tesla vehicle is already "
-        "discovered; waiting for a vehicle-specific SOC source",
+        "Tesla BLE control path shares the configured charger with another "
+        "Tesla vehicle; using the vehicle-specific decision",
         "",
     )
     fake_actions._action_start_ev_charging_dynamic.assert_awaited_once()
@@ -4193,3 +4204,171 @@ def test_price_level_generic_soc_uses_fallback_sensor():
     )
 
     assert asyncio.run(executor._get_ev_soc()) == 68
+
+
+def test_price_level_ble_soc_uses_vehicle_specific_charge_level_sensor():
+    ble_vin = "ble_garage_garage_ble_gateway"
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "garage_garage_ble_gateway",
+        },
+    )
+    executor = ev_planner.PriceLevelChargingExecutor(
+        _FakeHass(
+            states={"sensor.garage_garage_ble_gateway_charge_level": "20"},
+            entries=[entry],
+        ),
+        entry,
+    )
+
+    assert asyncio.run(executor._get_ev_soc(ble_vin)) == 20
+
+
+def test_mixed_tesla_ble_known_soc_does_not_start_shared_alias(
+    monkeypatch,
+    fake_actions,
+):
+    ble_vin = "ble_garage_garage_ble_gateway"
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "garage_garage_ble_gateway",
+        },
+    )
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def discovered_vehicles(*args, **kwargs):
+        return [
+            {"vin": VIN, "name": "TSL43", "source": "fleet_api"},
+            {
+                "vin": ble_vin,
+                "name": "Tesla BLE (garage_garage_ble_gateway)",
+                "source": "tesla_ble",
+                "ble_prefix": "garage_garage_ble_gateway",
+            },
+        ]
+
+    async def known_low_soc_decision(self, vehicle_vin, current_price_cents):
+        return (
+            True,
+            "Recovery: EV 20% < 30%, price 10.7c <= 30c",
+            "price_level_recovery",
+        )
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", discovered_vehicles)
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "get_charging_decision_for_vehicle",
+        known_low_soc_decision,
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(_FakeHass(), entry)
+    results = asyncio.run(executor.evaluate_all_vehicles(10.7))
+
+    assert results[VIN][0] is True
+    assert results[ble_vin] == (
+        False,
+        "Tesla BLE control path shares the configured charger with another "
+        "Tesla vehicle; using the vehicle-specific decision",
+        "",
+    )
+    fake_actions._action_start_ev_charging_dynamic.assert_awaited_once()
+    _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
+    assert params["vehicle_vin"] == VIN
+
+
+def test_mixed_tesla_ble_known_high_soc_does_not_stop_shared_session(
+    monkeypatch,
+    fake_actions,
+):
+    ble_vin = "ble_garage_garage_ble_gateway"
+    entry = _mixed_ble_config_entry()
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def discovered_vehicles(*args, **kwargs):
+        return [
+            {"vin": VIN, "name": "TSL43", "source": "fleet_api"},
+            {"vin": ble_vin, "name": "Shared BLE", "source": "tesla_ble"},
+        ]
+
+    async def divergent_known_soc_decision(self, vehicle_vin, current_price_cents):
+        if vehicle_vin == VIN:
+            return (
+                True,
+                "Recovery: EV 20% < 30%, price 10.7c <= 30c",
+                "price_level_recovery",
+            )
+        return False, "EV 80% >= 30%, price 10.7c > 5c", ""
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", discovered_vehicles)
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "get_charging_decision_for_vehicle",
+        divergent_known_soc_decision,
+    )
+    monkeypatch.setattr(
+        ev_planner,
+        "is_ev_actively_charging",
+        AsyncMock(return_value=True),
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(_FakeHass(), entry)
+    results = asyncio.run(executor.evaluate_all_vehicles(10.7))
+
+    assert results[VIN][0] is True
+    assert results[ble_vin][0] is False
+    fake_actions._action_start_ev_charging_dynamic.assert_awaited_once()
+    fake_actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+    ev_planner.is_ev_actively_charging.assert_not_awaited()
+
+
+def test_mixed_tesla_ble_keeps_second_configured_vehicle_actionable(
+    monkeypatch,
+    fake_actions,
+):
+    shared_ble_vin = "ble_garage_gateway"
+    second_ble_vin = "ble_driveway_gateway"
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "garage_gateway,driveway_gateway",
+        },
+    )
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def discovered_vehicles(*args, **kwargs):
+        return [
+            {"vin": VIN, "name": "TSL43", "source": "fleet_api"},
+            {"vin": shared_ble_vin, "name": "Shared BLE", "source": "tesla_ble"},
+            {"vin": second_ble_vin, "name": "Second BLE", "source": "tesla_ble"},
+        ]
+
+    async def charge_decision(self, vehicle_vin, current_price_cents):
+        return True, "Opportunity: EV 20%, price 4.0c <= 5c", "price_level_opportunity"
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", discovered_vehicles)
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "get_charging_decision_for_vehicle",
+        charge_decision,
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(_FakeHass(), entry)
+    results = asyncio.run(executor.evaluate_all_vehicles(4.0))
+
+    assert results[shared_ble_vin][0] is False
+    assert results[VIN][0] is True
+    assert results[second_ble_vin][0] is True
+    started_vins = {
+        call.args[2]["vehicle_vin"]
+        for call in fake_actions._action_start_ev_charging_dynamic.await_args_list
+    }
+    assert started_vins == {VIN, second_ble_vin}
