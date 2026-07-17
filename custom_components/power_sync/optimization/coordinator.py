@@ -697,6 +697,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         soc_pct = int(soc * 100)
         configured_idle_floor = int(self._config.backup_reserve * 100)
 
+        # Sungrow IDLE is implemented with a temporary zero-discharge cap.
+        # Raising the separate off-grid backup reserve is redundant and can
+        # strand an elevated off-grid reserve when firmware accepts register
+        # 13099 writes but does not expose a readable value to restore.
+        if self.battery_system == "sungrow":
+            if not self.energy_coordinator or not hasattr(
+                self.energy_coordinator, "set_backup_mode"
+            ):
+                _LOGGER.warning(
+                    "Optimizer: Sungrow IDLE discharge-cap control is unavailable"
+                )
+                return False
+            if await self.energy_coordinator.set_backup_mode() is False:
+                return False
+            _LOGGER.info(
+                "Optimizer: IDLE — Sungrow discharge-cap hold at %d%% SOC "
+                "(backup reserve unchanged)",
+                soc_pct,
+            )
+            return True
+
         if self.battery_system == "goodwe" and not preserve_charge:
             if hasattr(battery, "set_self_consumption_mode"):
                 await battery.set_self_consumption_mode()

@@ -32,6 +32,7 @@ _STUB_MODULE_NAMES = (
     "homeassistant.util",
     "homeassistant.util.dt",
     "power_sync",
+    "power_sync.coordinator",
     "power_sync.const",
     "power_sync.optimization",
     "power_sync.optimization.battery_optimizer",
@@ -105,6 +106,10 @@ def _install_power_sync_stubs() -> None:
     ps_module = types.ModuleType("power_sync")
     ps_module.__path__ = [str(COMPONENT_ROOT)]
     sys.modules["power_sync"] = ps_module
+
+    coordinator_module = types.ModuleType("power_sync.coordinator")
+    coordinator_module.normalize_custom_power_kw = lambda value: value
+    sys.modules["power_sync.coordinator"] = coordinator_module
 
     optimization_module = types.ModuleType("power_sync.optimization")
     optimization_module.__path__ = [str(COMPONENT_ROOT / "optimization")]
@@ -3966,6 +3971,83 @@ def test_idle_at_reserve_floor_is_not_overridden_to_self_consumption(opt_module)
     assert battery.self_consumption_calls == 1
     assert battery.backup_reserve_calls == [20]
     assert coordinator._last_executed_action == "idle"
+
+
+def test_sungrow_idle_uses_discharge_cap_without_backup_reserve_write(opt_module):
+    class SungrowEnergyCoordinator(_FakeEnergyCoordinator):
+        def __init__(self) -> None:
+            super().__init__()
+            self.backup_mode_calls = 0
+
+        async def set_backup_mode(self):
+            self.backup_mode_calls += 1
+            return True
+
+    battery = _FakeBattery(backup_reserve=10)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.984)
+    coordinator.battery_system = "sungrow"
+    coordinator._startup_backup_reserve = 10
+    energy_coordinator = SungrowEnergyCoordinator()
+    coordinator.energy_coordinator = energy_coordinator
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+
+    assert energy_coordinator.backup_mode_calls == 1
+    assert battery.backup_reserve_calls == []
+    assert coordinator._pre_idle_backup_reserve is None
+    assert coordinator._idle_hold_reserve is None
+    assert coordinator._last_executed_action == "idle"
+
+
+@pytest.mark.parametrize("failure_mode", ["unavailable", "rejected"])
+def test_sungrow_idle_never_falls_back_to_backup_reserve_write(
+    opt_module,
+    failure_mode,
+):
+    class RejectingSungrowEnergyCoordinator(_FakeEnergyCoordinator):
+        async def set_backup_mode(self):
+            return False
+
+    battery = _FakeBattery(backup_reserve=10)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.984)
+    coordinator.battery_system = "sungrow"
+    coordinator.energy_coordinator = (
+        _FakeEnergyCoordinator()
+        if failure_mode == "unavailable"
+        else RejectingSungrowEnergyCoordinator()
+    )
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+
+    assert battery.backup_reserve_calls == []
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_sungrow_idle_does_not_discard_pending_reserve_restore_state(opt_module):
+    class SungrowEnergyCoordinator(_FakeEnergyCoordinator):
+        async def set_backup_mode(self):
+            return True
+
+    battery = _FakeBattery(backup_reserve=10)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.984)
+    coordinator.battery_system = "sungrow"
+    coordinator.energy_coordinator = SungrowEnergyCoordinator()
+    coordinator._pre_idle_backup_reserve = 10
+    coordinator._idle_hold_reserve = 98
+
+    assert asyncio.run(coordinator._set_idle_hold_mode(battery)) is True
+
+    assert battery.backup_reserve_calls == []
+    assert coordinator._pre_idle_backup_reserve == 10
+    assert coordinator._idle_hold_reserve == 98
 
 
 def test_goodwe_idle_does_not_write_dod_reserve_hold(opt_module):
