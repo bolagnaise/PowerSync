@@ -349,6 +349,46 @@ def test_setup_battery_data_reads_only_core_battery_block():
     assert data["battery_temp"] == 20.8
 
 
+def test_battery_data_aborts_poll_when_core_block_times_out():
+    async def run_read():
+        controller = SungrowSHController("192.0.2.10")
+        input_reads: list[tuple[int, int]] = []
+        holding_reads: list[tuple[int, int]] = []
+        disconnect_calls = 0
+
+        async def connect() -> bool:
+            return True
+
+        async def read_input_register(address: int, count: int = 1):
+            input_reads.append((address, count))
+            return None
+
+        async def read_register(address: int, count: int = 1):
+            holding_reads.append((address, count))
+            return None
+
+        async def disconnect() -> None:
+            nonlocal disconnect_calls
+            disconnect_calls += 1
+
+        controller.connect = connect
+        controller._read_input_register = read_input_register
+        controller._read_register = read_register
+        controller.disconnect = disconnect
+
+        data = await controller.get_battery_data()
+        return data, input_reads, holding_reads, disconnect_calls, controller
+
+    data, input_reads, holding_reads, disconnect_calls, controller = asyncio.run(
+        run_read()
+    )
+
+    assert data == {}
+    assert input_reads == [(controller.REG_BATTERY_VOLTAGE, 7)]
+    assert holding_reads == []
+    assert disconnect_calls == 1
+
+
 def test_battery_data_prefers_mkaiser_telemetry_registers_without_write_probe():
     async def run_read():
         controller = SungrowSHController("192.0.2.10")

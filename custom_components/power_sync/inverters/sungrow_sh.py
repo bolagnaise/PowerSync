@@ -1175,18 +1175,25 @@ class SungrowSHController(InverterController):
 
             # Read battery state registers (doc 13020-13026) via FC 0x04
             battery_regs = await self._read_input_register(self.REG_BATTERY_VOLTAGE, 7)
-            if battery_regs and len(battery_regs) >= 7:
-                voltage = round(battery_regs[0] * 0.1, 1)
-                data["battery_voltage"] = voltage
-                if voltage > 0:
-                    self._battery_voltage = voltage
-                data["battery_current"] = round(self._to_signed16(battery_regs[1]) * 0.1, 1)
-                # Prefer the S32 register (5214-5215) which is always signed; fall back to S16 (13022)
-                data["battery_power"] = self._to_signed16(battery_regs[2])
-                data["battery_soc"] = round(battery_regs[3] * 0.1, 1)
-                data["battery_soh"] = round(battery_regs[4] * 0.1, 1)
-                data["battery_temp"] = round(self._to_signed16(battery_regs[5]) * 0.1, 1)
-                data["daily_battery_discharge"] = round(battery_regs[6] * 0.1, 2)
+            if not battery_regs or len(battery_regs) < 7:
+                _LOGGER.warning(
+                    "Sungrow core battery register read failed — aborting this poll "
+                    "and resetting the Modbus connection"
+                )
+                await self.disconnect()
+                return data
+
+            voltage = round(battery_regs[0] * 0.1, 1)
+            data["battery_voltage"] = voltage
+            if voltage > 0:
+                self._battery_voltage = voltage
+            data["battery_current"] = round(self._to_signed16(battery_regs[1]) * 0.1, 1)
+            # Prefer the S32 register (5214-5215) which is always signed; fall back to S16 (13022)
+            data["battery_power"] = self._to_signed16(battery_regs[2])
+            data["battery_soc"] = round(battery_regs[3] * 0.1, 1)
+            data["battery_soh"] = round(battery_regs[4] * 0.1, 1)
+            data["battery_temp"] = round(self._to_signed16(battery_regs[5]) * 0.1, 1)
+            data["daily_battery_discharge"] = round(battery_regs[6] * 0.1, 2)
 
             # Override battery_power with the S32 signed register (5214-5215).
             # Register 13022 can report unsigned on some SH-series firmware, making
