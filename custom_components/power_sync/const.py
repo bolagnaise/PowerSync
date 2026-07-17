@@ -1229,10 +1229,15 @@ FLEET_API_AUTH_URL = "https://auth.tesla.com/oauth2/v3"
 FLEET_API_TOKEN_URL = "https://auth.tesla.com/oauth2/v3/token"
 
 # PowerSync.cc cloud proxy — free OAuth + Tesla Fleet API proxy
-# Users authenticate via Sign in with Tesla on https://api.powersync.cc/auth/start
-# and get a psync_xxx token. Coordinator hits the proxy at /api/proxy/api/1/...
+# The copy/paste OAuth flow has no redirect URI, so identify it explicitly as
+# Home Assistant. Runtime proxy headers immediately refine the effective mode
+# to monitoring or actuating from the config entry. The coordinator uses the
+# resulting psync_xxx token against the proxy at /api/proxy/api/1/...
 POWERSYNC_API_BASE_URL = "https://api.powersync.cc/api/proxy"
-POWERSYNC_AUTH_START_URL = "https://api.powersync.cc/auth/start"
+POWERSYNC_AUTH_START_URL = (
+    "https://api.powersync.cc/auth/start"
+    "?client_type=home_assistant&control_mode=actuating"
+)
 POWERSYNC_AUTH_ME_URL = "https://api.powersync.cc/auth/me"
 
 # PowerSync Cloud energy-flow reporter (opt-in) — pushes local grid/solar/

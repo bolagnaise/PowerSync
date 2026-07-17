@@ -114,6 +114,11 @@ _install_coordinator_stubs()
 sys.modules.pop("power_sync.coordinator", None)
 
 from power_sync.coordinator import DOMAIN, TeslaEnergyCoordinator  # noqa: E402
+from power_sync.const import (  # noqa: E402
+    POWERSYNC_AUTH_START_URL,
+    TESLA_PROVIDER_POWERSYNC,
+    TESLA_PROVIDER_TESLEMETRY,
+)
 
 
 class _FakeEnergyAccumulator:
@@ -341,3 +346,58 @@ def test_saj_h2_load_uses_total_load_power_when_present():
 
     # Direct sensor read (1.8 kW), not the balance formula (which would be 1.0 kW).
     assert status["load_power"] == pytest.approx(1.8)
+
+
+def _tesla_header_subject(*, monitoring_mode: bool, provider: str):
+    entry = types.SimpleNamespace(
+        data={"monitoring_mode": False},
+        options={"monitoring_mode": monitoring_mode},
+    )
+    coordinator = TeslaEnergyCoordinator.__new__(TeslaEnergyCoordinator)
+    coordinator._entry_id = "header-entry"
+    coordinator.api_provider = provider
+    coordinator.hass = types.SimpleNamespace(
+        config_entries=types.SimpleNamespace(
+            async_get_entry=lambda entry_id: entry if entry_id == "header-entry" else None
+        )
+    )
+    return coordinator
+
+
+@pytest.mark.parametrize(
+    ("monitoring_mode", "expected_mode"),
+    [(True, "monitoring"), (False, "actuating")],
+)
+def test_powersync_proxy_headers_report_effective_ha_control_mode(
+    monitoring_mode: bool,
+    expected_mode: str,
+):
+    """Cloud ownership uses explicit HA capability, not token type alone."""
+    coordinator = _tesla_header_subject(
+        monitoring_mode=monitoring_mode,
+        provider=TESLA_PROVIDER_POWERSYNC,
+    )
+
+    headers = coordinator._tesla_headers("psync_test_token")
+
+    assert headers["X-PowerSync-Client-Type"] == "home_assistant"
+    assert headers["X-PowerSync-Control-Mode"] == expected_mode
+    assert int(headers["X-PowerSync-Control-Observed-At"]) > 0
+
+
+def test_non_powersync_tesla_headers_do_not_leak_cloud_ownership_metadata():
+    coordinator = _tesla_header_subject(
+        monitoring_mode=False,
+        provider=TESLA_PROVIDER_TESLEMETRY,
+    )
+
+    headers = coordinator._tesla_headers("teslemetry_test_token")
+
+    assert "X-PowerSync-Client-Type" not in headers
+    assert "X-PowerSync-Control-Mode" not in headers
+    assert "X-PowerSync-Control-Observed-At" not in headers
+
+
+def test_powersync_copy_paste_auth_url_is_explicitly_home_assistant():
+    assert "client_type=home_assistant" in POWERSYNC_AUTH_START_URL
+    assert "control_mode=actuating" in POWERSYNC_AUTH_START_URL

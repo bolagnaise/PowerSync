@@ -46,6 +46,7 @@ from .const import (
     FLOW_POWER_MARKET_AVG,
     FLOW_POWER_KWATCH_REGIONS,
     CONF_FLEET_API_BASE_URL,
+    CONF_MONITORING_MODE,
     TESLA_SITE_INFO_CACHE_TTL_SECONDS,
     CONF_SIGENERGY_CHARGER_ENABLED,
     CONF_SIGENERGY_CHARGER_TYPE,
@@ -1998,11 +1999,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         current_token = self._get_current_token()
         if not current_token:
             raise UpdateFailed("Tesla token temporarily unavailable — will retry next poll")
-        headers = {
-            "Authorization": f"Bearer {current_token}",
-            "Content-Type": "application/json",
-            "User-Agent": POWER_SYNC_USER_AGENT,
-        }
+        headers = self._tesla_headers(current_token)
 
         try:
             # Get live status from Tesla API with retry logic
@@ -2321,11 +2318,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             return None
 
         current_token = self._get_current_token()
-        headers = {
-            "Authorization": f"Bearer {current_token}",
-            "Content-Type": "application/json",
-            "User-Agent": POWER_SYNC_USER_AGENT,
-        }
+        headers = self._tesla_headers(current_token)
 
         try:
             _LOGGER.info(f"Fetching site_info for site {self.site_id}")
@@ -2473,11 +2466,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         disallow_value = not enabled
 
         current_token = self._get_current_token()
-        headers = {
-            "Authorization": f"Bearer {current_token}",
-            "Content-Type": "application/json",
-            "User-Agent": POWER_SYNC_USER_AGENT,
-        }
+        headers = self._tesla_headers(current_token)
 
         try:
             _LOGGER.info(f"Setting grid charging {'enabled' if enabled else 'disabled'} for site {self.site_id}")
@@ -2519,13 +2508,30 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
     # Unified Tesla Energy Site API helper
     # ------------------------------------------------------------------
 
-    def _tesla_headers(self) -> dict[str, str]:
+    def _tesla_headers(self, token: str | None = None) -> dict[str, str]:
         """Build authorization headers using the freshest token."""
-        return {
-            "Authorization": f"Bearer {self._get_current_token()}",
+        headers = {
+            "Authorization": f"Bearer {token or self._get_current_token()}",
             "Content-Type": "application/json",
             "User-Agent": POWER_SYNC_USER_AGENT,
         }
+        if self.api_provider == TESLA_PROVIDER_POWERSYNC:
+            monitoring_mode = False
+            if self._entry_id:
+                entry = self.hass.config_entries.async_get_entry(self._entry_id)
+                if entry:
+                    monitoring_mode = bool(
+                        entry.options.get(
+                            CONF_MONITORING_MODE,
+                            entry.data.get(CONF_MONITORING_MODE, False),
+                        )
+                    )
+            headers["X-PowerSync-Client-Type"] = "home_assistant"
+            headers["X-PowerSync-Control-Mode"] = (
+                "monitoring" if monitoring_mode else "actuating"
+            )
+            headers["X-PowerSync-Control-Observed-At"] = str(int(time.time() * 1000))
+        return headers
 
     async def _tesla_api_call(
         self,
@@ -2855,11 +2861,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             Calendar history data with time_series array, or None if fetch fails
         """
         current_token = self._get_current_token()
-        headers = {
-            "Authorization": f"Bearer {current_token}",
-            "Content-Type": "application/json",
-            "User-Agent": POWER_SYNC_USER_AGENT,
-        }
+        headers = self._tesla_headers(current_token)
 
         try:
             # Get site timezone from site_info
