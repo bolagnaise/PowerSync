@@ -21,6 +21,7 @@ BRIDGE_WIDGET_KEYS = BRIDGE_LOADPOINT_KEYS | {
 GENERIC_CHARGING_STATES = {"charging"}
 GENERIC_CONNECTED_STATES = {
     "connected",
+    "on",
     "plugged",
     "pluggedin",
     "preparing",

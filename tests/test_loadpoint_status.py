@@ -855,6 +855,21 @@ def test_generic_charger_observation_reports_commanded_without_power():
     assert loadpoints[0]["soc"] == 62
 
 
+def test_generic_charger_observation_accepts_binary_sensor_on_as_connected():
+    observation = build_generic_charger_observation(
+        vehicle_name="Generic EV",
+        switch_state="off",
+        status_state="on",
+        power_value="0",
+    )
+
+    loadpoints = build_loadpoint_status({}, [observation])
+
+    assert observation["is_connected"] is True
+    assert loadpoints[0]["connected"] is True
+    assert loadpoints[0]["status"] == "connected_idle"
+
+
 def test_generic_charger_observation_uses_measured_power():
     observation = build_generic_charger_observation(
         vehicle_name="Generic EV",
