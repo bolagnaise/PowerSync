@@ -690,11 +690,25 @@ def test_mode_projection_matcher_compares_self_use_energy_per_run(
         [1.05, 1.05, 0.0, 1.0],
         slot_hours,
     )
+    # Ticket #234's 503-slot self-use run drifted by 17.3 Wh while all command
+    # modes remained identical. Reproduce that run shape so the physically
+    # equivalent projection converges instead of exhausting the iteration loop.
+    ticket_modes = ["self_use"] * 503
+    ticket_left = [1.0] * 503
+    ticket_right = ticket_left.copy()
+    ticket_right[-1] += 0.0173 / slot_hours
+    assert module.BatteryOptimizer._mode_constraints_match(
+        ticket_modes,
+        ticket_left,
+        ticket_modes,
+        ticket_right,
+        slot_hours,
+    )
     assert not module.BatteryOptimizer._mode_constraints_match(
         modes,
         [1.0, 1.0, 0.0, 1.0],
         modes,
-        [1.07, 1.07, 0.0, 1.0],
+        [1.13, 1.13, 0.0, 1.0],
         slot_hours,
     )
     assert not module.BatteryOptimizer._mode_constraints_match(
@@ -709,7 +723,7 @@ def test_mode_projection_matcher_compares_self_use_energy_per_run(
         modes,
         [1.0, 1.0, 0.0, 1.0],
         modes,
-        [1.07, 1.07, 0.0, 0.86],
+        [1.13, 1.13, 0.0, 0.74],
         slot_hours,
     )
 

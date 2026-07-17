@@ -37,7 +37,10 @@ PRE_WINDOW_REACHABILITY_MARGIN_SOC = 1e-6
 # slots, so keep a small bounded allowance before using the projected plan.
 MODE_PROJECTION_MAX_ITERATIONS = 8
 MODE_PROJECTION_SELF_USE_REL_TOL = 1e-4
-MODE_PROJECTION_SELF_USE_ABS_TOL_KWH = 0.01
+# Coarse-period floor projection can move less than 20 Wh per contiguous
+# self-use run between otherwise identical command-mode passes. Keep the bound
+# fixed rather than allowing it to grow with battery capacity or run length.
+MODE_PROJECTION_SELF_USE_ABS_TOL_KWH = 0.02
 
 # Try to import the HiGHS solver; fall back to greedy if unavailable.
 try:
