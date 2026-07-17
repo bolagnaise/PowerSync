@@ -34,6 +34,7 @@ from .const import (
     TESLEMETRY_API_BASE_URL,
     FLEET_API_BASE_URL,
     POWERSYNC_API_BASE_URL,
+    POWERSYNC_AUTH_ME_URL,
     TESLA_PROVIDER_TESLEMETRY,
     TESLA_PROVIDER_FLEET_API,
     TESLA_PROVIDER_POWERSYNC,
@@ -851,6 +852,56 @@ async def _fetch_with_retry(
                 # them as transient stale-token failures instead.
                 if response.status == 401:
                     if raise_auth_failed:
+                        authorization = headers.get("Authorization", "")
+                        is_powersync_proxy = (
+                            url.startswith(f"{POWERSYNC_API_BASE_URL}/")
+                            and authorization.startswith("Bearer psync_")
+                        )
+                        if is_powersync_proxy:
+                            bearer_status: bool | None = None
+                            try:
+                                async with session.get(
+                                    POWERSYNC_AUTH_ME_URL,
+                                    headers={
+                                        "Authorization": authorization,
+                                        "User-Agent": headers.get(
+                                            "User-Agent", POWER_SYNC_USER_AGENT
+                                        ),
+                                    },
+                                    timeout=aiohttp.ClientTimeout(total=10),
+                                ) as auth_response:
+                                    if auth_response.status == 200:
+                                        bearer_status = True
+                                    elif auth_response.status == 401:
+                                        bearer_status = False
+                                    else:
+                                        _LOGGER.warning(
+                                            "PowerSync bearer confirmation returned %s; "
+                                            "treating proxy 401 as transient",
+                                            auth_response.status,
+                                        )
+                            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                                _LOGGER.warning(
+                                    "PowerSync bearer confirmation unavailable; "
+                                    "treating proxy 401 as transient: %s",
+                                    err,
+                                )
+
+                            if bearer_status is not False:
+                                detail = (
+                                    "bearer remains valid"
+                                    if bearer_status is True
+                                    else "bearer confirmation unavailable"
+                                )
+                                _LOGGER.warning(
+                                    "PowerSync proxy returned 401 but %s; retrying "
+                                    "without opening a reauthentication repair",
+                                    detail,
+                                )
+                                last_error = UpdateFailed(
+                                    f"Transient PowerSync authentication failure: {detail}"
+                                )
+                                continue
                         _LOGGER.warning(
                             "Authentication failed (401) — triggering reauth: %s",
                             error_text[:200],

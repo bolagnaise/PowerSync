@@ -146,6 +146,16 @@ class _FakeSession:
         return self.response
 
 
+class _SequenceSession:
+    def __init__(self, responses: list[_FakeResponse]) -> None:
+        self.responses = list(responses)
+        self.urls: list[str] = []
+
+    def get(self, url, *args, **kwargs):
+        self.urls.append(url)
+        return self.responses.pop(0)
+
+
 def _current_price():
     return [
         {
@@ -359,6 +369,54 @@ def test_fetch_with_retry_treats_fleet_token_401_as_update_failure():
         assert "token expired" in str(err)
     else:
         raise AssertionError("Expected UpdateFailed")
+
+
+def test_fetch_with_retry_confirms_powersync_bearer_before_reauth():
+    session = _SequenceSession(
+        [
+            _FakeResponse(401, '{"error":"invalid_token"}'),
+            _FakeResponse(200, payload={"authenticated": True}),
+        ]
+    )
+
+    try:
+        asyncio.run(
+            coordinator._fetch_with_retry(
+                session,
+                f"{coordinator.POWERSYNC_API_BASE_URL}/api/1/products",
+                {"Authorization": "Bearer psync_test_token"},
+                max_retries=1,
+            )
+        )
+    except coordinator.UpdateFailed as err:
+        assert "bearer remains valid" in str(err)
+        assert session.urls[-1] == coordinator.POWERSYNC_AUTH_ME_URL
+    else:
+        raise AssertionError("Expected retryable UpdateFailed")
+
+
+def test_fetch_with_retry_reauths_when_powersync_bearer_is_invalid():
+    session = _SequenceSession(
+        [
+            _FakeResponse(401, '{"error":"invalid_token"}'),
+            _FakeResponse(401, '{"error":"invalid_token"}'),
+        ]
+    )
+
+    try:
+        asyncio.run(
+            coordinator._fetch_with_retry(
+                session,
+                f"{coordinator.POWERSYNC_API_BASE_URL}/api/1/products",
+                {"Authorization": "Bearer psync_test_token"},
+                max_retries=1,
+            )
+        )
+    except coordinator.ConfigEntryAuthFailed as err:
+        assert "invalid_token" in str(err)
+        assert session.urls[-1] == coordinator.POWERSYNC_AUTH_ME_URL
+    else:
+        raise AssertionError("Expected ConfigEntryAuthFailed")
 
 
 def test_tesla_lifetime_totals_clamp_prevents_recorder_decrease():
