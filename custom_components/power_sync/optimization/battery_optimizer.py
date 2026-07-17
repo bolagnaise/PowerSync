@@ -4616,6 +4616,73 @@ class BatteryOptimizer:
                 return False
 
             deadline = min(n, self.pre_window_slot)
+
+            def _max_reachable_charge_kw(idx: int, projected_soc: float) -> float:
+                """Return charge available without changing the projected mode."""
+                intentional_export = (
+                    grid_export[idx] > threshold_kw
+                    and battery_discharge[idx] > threshold_kw
+                )
+                priority_export_slot = (
+                    idx < len(priority_export_slots)
+                    and priority_export_slots[idx]
+                    and export_prices is not None
+                    and idx < len(export_prices)
+                    and export_prices[idx] > 0.001
+                )
+                if (
+                    block_battery_charge[idx]
+                    or priority_export_slot
+                    or intentional_export
+                ):
+                    return 0.0
+
+                net_load_kw = max(0.0, load[idx] - solar[idx])
+                free_import_slot = (
+                    import_prices is not None
+                    and idx < len(import_prices)
+                    and import_prices[idx] <= 0.001
+                    and allow_grid_charge
+                    and grid_charge_allowed[idx]
+                )
+                planned_charge_mode = free_import_slot or (
+                    battery_charge[idx] > threshold_kw
+                    and grid_import[idx] > net_load_kw + threshold_kw
+                )
+                if not planned_charge_mode:
+                    # A self-use or idle mode is not free to become a forced
+                    # grid-charge command on the next projection pass. Keep its
+                    # existing physical flow; only a charge-mode slot provides
+                    # concrete recharge headroom for replacing this hold.
+                    return max(0.0, battery_charge[idx])
+
+                charge_limit_kw = self._charge_limit_kw(
+                    load[idx],
+                    solar[idx],
+                    allow_grid_charge and grid_charge_allowed[idx],
+                )
+                solar_charge_kw = min(
+                    charge_limit_kw,
+                    max(0.0, solar[idx] - load[idx]),
+                )
+                grid_charge_kw = max(0.0, charge_limit_kw - solar_charge_kw)
+                if grid_charge_cap_active:
+                    grid_headroom_kw = (
+                        max(0.0, grid_charge_soc_cap - projected_soc)
+                        * cap
+                        / (eff * dt)
+                    )
+                    grid_charge_kw = min(grid_charge_kw, grid_headroom_kw)
+
+                battery_headroom_kw = (
+                    max(0.0, 1.0 - projected_soc) * cap / (eff * dt)
+                )
+                return min(
+                    charge_limit_kw,
+                    solar_charge_kw + grid_charge_kw,
+                    battery_headroom_kw,
+                )
+
             projected_soc = start_soc
             for future_idx in range(start_idx, deadline):
                 if future_idx == start_idx:
@@ -4647,7 +4714,10 @@ class BatteryOptimizer:
                         charge_future_kw = 0.0
                         discharge_future_kw = 0.0
                 else:
-                    charge_future_kw = max(0.0, battery_charge[future_idx])
+                    charge_future_kw = _max_reachable_charge_kw(
+                        future_idx,
+                        projected_soc,
+                    )
                     discharge_future_kw = max(0.0, battery_discharge[future_idx])
                     intentional_export = (
                         grid_export[future_idx] > threshold_kw
