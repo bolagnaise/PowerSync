@@ -46,6 +46,9 @@ def test_custom_optimizer_telemetry_parser_reads_selected_entities():
     assert "def _get_energy_data(self) -> dict[str, Any] | None:" in coordinator_source
     assert "custom_data = self._read_custom_energy_data()" in coordinator_source
     assert "if self.battery_system == CUSTOM_BATTERY_SYSTEM:" in coordinator_source
+    assert "from ..coordinator import normalize_custom_power_kw" in coordinator_source
+    assert "return normalize_custom_power_kw(value, unit)" in coordinator_source
+    assert "if not math.isfinite(value):" in coordinator_source
 
 
 def test_custom_optimizer_telemetry_feeds_state_and_cost_paths():

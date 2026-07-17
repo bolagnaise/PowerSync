@@ -838,6 +838,7 @@ from .coordinator import (
     SungrowEnergyCoordinator,
     FoxESSEnergyCoordinator,
     FoxESSEntityEnergyCoordinator,
+    CustomEntityEnergyCoordinator,
     FoxESSCloudEnergyCoordinator,
     GoodWeEnergyCoordinator,
     AlphaESSEnergyCoordinator,
@@ -4446,6 +4447,7 @@ async def _calculate_cost_from_statistics(
 
 
 _CALENDAR_ENERGY_SUMMARY_COORDINATORS = (
+    ("custom_energy_coordinator", "Custom external controller"),
     ("sigenergy_coordinator", "Sigenergy"),
     ("sungrow_coordinator", "Sungrow"),
     ("foxess_coordinator", "FoxESS"),
@@ -18496,6 +18498,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     neovolt_coordinator = None
     solaredge_coordinator = None
     anker_solix_coordinator = None
+    custom_energy_coordinator = None
     token_getter = None  # Will be set for Tesla users
 
     if is_sigenergy:
@@ -18986,6 +18989,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info(
             "Running in custom external-controller mode - using selected Home Assistant entities for planner telemetry"
         )
+        custom_energy_coordinator = CustomEntityEnergyCoordinator(
+            hass,
+            source_entities={
+                "battery_level": entry.options.get(
+                    CONF_CUSTOM_BATTERY_LEVEL_ENTITY,
+                    entry.data.get(CONF_CUSTOM_BATTERY_LEVEL_ENTITY, ""),
+                ),
+                "battery_power": entry.options.get(
+                    CONF_CUSTOM_BATTERY_POWER_ENTITY,
+                    entry.data.get(CONF_CUSTOM_BATTERY_POWER_ENTITY, ""),
+                ),
+                "grid_power": entry.options.get(
+                    CONF_CUSTOM_GRID_POWER_ENTITY,
+                    entry.data.get(CONF_CUSTOM_GRID_POWER_ENTITY, ""),
+                ),
+                "solar_power": entry.options.get(
+                    CONF_CUSTOM_SOLAR_POWER_ENTITY,
+                    entry.data.get(CONF_CUSTOM_SOLAR_POWER_ENTITY, ""),
+                ),
+                "load_power": entry.options.get(
+                    CONF_CUSTOM_LOAD_POWER_ENTITY,
+                    entry.data.get(CONF_CUSTOM_LOAD_POWER_ENTITY, ""),
+                ),
+            },
+            entry_id=entry.entry_id,
+        )
     else:
         # Get initial Tesla API token and provider
         # Use get_tesla_api_token() which fetches fresh from tesla_fleet if available
@@ -19160,6 +19189,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.warning("Anker Solix coordinator failed to initialize: %s", e)
             anker_solix_coordinator = None
+    if custom_energy_coordinator:
+        try:
+            await custom_energy_coordinator.async_config_entry_first_refresh()
+            _LOGGER.info("Custom entity energy coordinator initialized successfully")
+        except Exception as e:
+            _LOGGER.warning(
+                "Custom telemetry entities are not ready yet; keeping coordinator "
+                "active so it can retry: %s",
+                e,
+            )
 
     # Initialize demand charge coordinator if enabled (any battery system with grid power data)
     demand_charge_coordinator = None
@@ -19879,6 +19918,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "neovolt_coordinator": neovolt_coordinator,  # For Neovolt / Bytewatt (bridges via Neovolt integration)
         "solaredge_coordinator": solaredge_coordinator,  # For SolarEdge Home battery telemetry
         "anker_solix_coordinator": anker_solix_coordinator,  # For Anker Solix X1/HA bridge telemetry and control
+        "custom_energy_coordinator": custom_energy_coordinator,  # For custom external-controller HA entity telemetry
         "powerwall_local": powerwall_local_runtime or {"client": None, "coordinator": None, "pairing_manager": None},
         "demand_charge_coordinator": demand_charge_coordinator,
         "aemo_spike_manager": aemo_spike_manager,
@@ -19924,6 +19964,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_neovolt": is_neovolt,  # Track if Neovolt battery system
         "is_solaredge": is_solaredge,  # Track if SolarEdge battery/curtailment system
         "is_anker_solix": is_anker_solix,  # Track if Anker Solix battery system
+        "is_custom_battery": is_custom_battery,  # Track custom external-controller telemetry
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
         "sigenergy_curtailment_state": "normal",  # Track Sigenergy DC curtailment state
         "alphaess_curtailment_state": "normal",  # Track AlphaESS DC curtailment state
@@ -36868,7 +36909,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                       "foxess_coordinator", "goodwe_coordinator", "alphaess_coordinator",
                       "solax_coordinator", "saj_h2_coordinator",
                       "fronius_reserva_coordinator", "neovolt_coordinator",
-                      "solaredge_coordinator", "anker_solix_coordinator"):
+                      "solaredge_coordinator", "anker_solix_coordinator",
+                      "custom_energy_coordinator"):
         coord = entry_data.get(coord_key)
         if coord and hasattr(coord, "_energy_acc"):
             try:

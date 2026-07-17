@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, date
 import logging
+import math
 import re
 import time
 from typing import Any, Optional
@@ -78,6 +79,27 @@ LIFETIME_TOTAL_KEYS = (
     "lifetime_battery_discharged_kwh",
     "lifetime_home_kwh",
 )
+
+
+def normalize_custom_power_kw(value: Any, unit: str = "") -> float | None:
+    """Normalize custom HA power telemetry to finite kW."""
+    if value is None:
+        return None
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric_value):
+        return None
+
+    normalized_unit = str(unit or "").strip().lower()
+    if normalized_unit in ("w", "watt", "watts"):
+        return numeric_value / 1000.0
+    if normalized_unit in ("mw", "megawatt", "megawatts"):
+        return numeric_value * 1000.0
+    if normalized_unit in ("kw", "kilowatt", "kilowatts"):
+        return numeric_value
+    return numeric_value / 1000.0 if abs(numeric_value) > 100 else numeric_value
 
 
 def _configured_ac_inverter_power_kw(hass: HomeAssistant, entry_id: str) -> float:
@@ -6113,6 +6135,118 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
     async def async_shutdown(self) -> None:
         """Disconnect from FoxESS system on shutdown."""
         await self._controller.disconnect()
+
+
+class CustomEntityEnergyCoordinator(DataUpdateCoordinator):
+    """Expose custom external-controller telemetry through standard sensors."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        source_entities: dict[str, str],
+        entry_id: str,
+    ) -> None:
+        self._entry_id = entry_id
+        self._source_entities = {
+            key: str(entity_id or "").strip()
+            for key, entity_id in source_entities.items()
+        }
+        self._energy_acc = EnergyAccumulator(hass, f"custom_{entry_id}")
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_custom_entity_energy",
+            update_interval=UPDATE_INTERVAL_ENERGY,
+        )
+
+    def _read_numeric_state(self, key: str) -> tuple[float | None, str]:
+        """Return one selected entity's numeric value and unit."""
+        entity_id = self._source_entities.get(key, "")
+        state = self.hass.states.get(entity_id) if entity_id else None
+        if state is None or state.state in (None, "", "unknown", "unavailable"):
+            return None, entity_id
+        try:
+            value = float(state.state)
+        except (TypeError, ValueError):
+            return None, entity_id
+        if not math.isfinite(value):
+            return None, entity_id
+        unit = str((state.attributes or {}).get("unit_of_measurement") or "")
+        return value, unit
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Read and normalize the five configured custom telemetry entities."""
+        if not self._energy_acc._last_update:
+            await self._energy_acc.async_restore()
+
+        raw_values: dict[str, float] = {}
+        units: dict[str, str] = {}
+        missing: list[str] = []
+        for key in (
+            "battery_level",
+            "battery_power",
+            "grid_power",
+            "solar_power",
+            "load_power",
+        ):
+            value, unit_or_entity = self._read_numeric_state(key)
+            if value is None:
+                missing.append(unit_or_entity or key)
+                continue
+            raw_values[key] = value
+            units[key] = unit_or_entity
+
+        if missing:
+            raise UpdateFailed("custom_missing_entities:" + ",".join(missing))
+
+        solar_kw = normalize_custom_power_kw(
+            raw_values["solar_power"], units["solar_power"]
+        )
+        grid_kw = normalize_custom_power_kw(
+            raw_values["grid_power"], units["grid_power"]
+        )
+        battery_kw = normalize_custom_power_kw(
+            raw_values["battery_power"], units["battery_power"]
+        )
+        load_kw = normalize_custom_power_kw(
+            raw_values["load_power"], units["load_power"]
+        )
+        if None in (solar_kw, grid_kw, battery_kw, load_kw):
+            raise UpdateFailed("custom_invalid_power_value")
+        solar_kw = max(0.0, solar_kw)
+        load_kw = max(0.0, load_kw)
+        battery_level = max(0.0, min(100.0, raw_values["battery_level"]))
+
+        buy, sell = _get_current_prices(self.hass, self._entry_id)
+        self._energy_acc.update(
+            solar_kw,
+            grid_kw,
+            battery_kw,
+            load_kw,
+            buy,
+            sell,
+        )
+        data = {
+            "solar_power": solar_kw,
+            "grid_power": grid_kw,
+            "battery_power": battery_kw,
+            "load_power": load_kw,
+            "battery_level": battery_level,
+            "source_entities": dict(self._source_entities),
+            "energy_summary": self._energy_acc.as_dict(),
+            "last_update": dt_util.utcnow(),
+        }
+        _LOGGER.debug(
+            "Custom entity data: solar=%.2f kW, grid=%.2f kW, "
+            "battery=%.2f kW (%.0f%%), load=%.2f kW",
+            solar_kw,
+            grid_kw,
+            battery_kw,
+            battery_level,
+            load_kw,
+        )
+        return data
 
 
 class FoxESSEntityEnergyCoordinator(DataUpdateCoordinator):

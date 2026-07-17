@@ -1605,6 +1605,7 @@ async def async_setup_entry(
     neovolt_coordinator = domain_data.get("neovolt_coordinator")
     solaredge_coordinator = domain_data.get("solaredge_coordinator")
     anker_solix_coordinator = domain_data.get("anker_solix_coordinator")
+    custom_energy_coordinator = domain_data.get("custom_energy_coordinator")
     demand_charge_coordinator: DemandChargeCoordinator | None = domain_data.get("demand_charge_coordinator")
     aemo_spike_manager = domain_data.get("aemo_spike_manager")
     is_sigenergy = domain_data.get("is_sigenergy", False)
@@ -1619,6 +1620,7 @@ async def async_setup_entry(
     is_neovolt = domain_data.get("is_neovolt", False)
     is_solaredge = domain_data.get("is_solaredge", False)
     is_anker_solix = domain_data.get("is_anker_solix", False)
+    is_custom_battery = domain_data.get("is_custom_battery", False)
 
     entities: list[SensorEntity] = []
     electricity_provider = entry.options.get(
@@ -1739,10 +1741,17 @@ async def async_setup_entry(
         energy_coordinator = solaredge_coordinator
     elif is_anker_solix:
         energy_coordinator = anker_solix_coordinator
+    elif is_custom_battery:
+        energy_coordinator = custom_energy_coordinator
     else:
         energy_coordinator = tesla_coordinator
     if energy_coordinator:
         for description in ENERGY_SENSORS:
+            if (
+                is_custom_battery
+                and description.key == SENSOR_TYPE_GRID_STATUS
+            ):
+                continue
             entities.append(
                 TeslaEnergySensor(
                     coordinator=energy_coordinator,

@@ -30,6 +30,7 @@ from ..const import (
     DEFAULT_OPTIMIZATION_INTERVAL,
     supports_no_idle_mode_provider,
 )
+from ..coordinator import normalize_custom_power_kw
 from ..flow_power_pricing import (
     FlowPowerPricingContext,
     calculate_flow_power_pea,
@@ -1847,14 +1848,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @staticmethod
     def _power_to_kw(value: float | None, unit: str = "") -> float | None:
         """Normalize a power value to kW using unit metadata or a W/kW heuristic."""
-        if value is None:
-            return None
-        unit = unit.lower()
-        if unit in ("w", "watt", "watts"):
-            return value / 1000.0
-        if unit in ("kw", "kilowatt", "kilowatts"):
-            return value
-        return value / 1000.0 if abs(value) > 100 else value
+        return normalize_custom_power_kw(value, unit)
 
     def _read_numeric_state(self, entity_id: str) -> tuple[float | None, str]:
         """Read a numeric HA state and return its value plus unit."""
@@ -1875,6 +1869,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._last_custom_energy_warning != entity_id:
                 _LOGGER.warning(
                     "Custom battery telemetry entity %s is not numeric",
+                    entity_id,
+                )
+                self._last_custom_energy_warning = entity_id
+            return None, ""
+        if not math.isfinite(value):
+            if self._last_custom_energy_warning != entity_id:
+                _LOGGER.warning(
+                    "Custom battery telemetry entity %s is not finite",
                     entity_id,
                 )
                 self._last_custom_energy_warning = entity_id
