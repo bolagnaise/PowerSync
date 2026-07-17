@@ -55,3 +55,6 @@ VERSION
 
 # Local Cloudflare tooling state
 .wrangler/
+
+# Local agent workflow artifacts
+pro-project-approach-review-guidance*.txt
