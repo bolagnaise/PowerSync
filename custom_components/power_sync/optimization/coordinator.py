@@ -12781,6 +12781,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _initial_opt_task; running it here as well caused duplicate Modbus
         writes when both fired at the same 5-min boundary.
         """
+        # Cost and quota settlement must still advance on every coordinator
+        # refresh. A full LP solve can be delayed while an optimizer-owned
+        # force action is active; tracking only after solves then hits the
+        # 10-minute stale-sample cap and under-counts capped tariff energy.
+        # Record the interval before applying a boundary action so it is
+        # attributed to the hardware state that produced the latest telemetry.
+        self._track_actual_cost()
         await self._execute_cached_current_action_if_changed()
         return self.get_api_data()
 
