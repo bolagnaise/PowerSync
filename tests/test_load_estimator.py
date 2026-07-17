@@ -637,6 +637,87 @@ def test_solcast_external_async_forecast_list_is_awaited(monkeypatch):
     assert forecaster.last_forecast_source == "solcast"
 
 
+def test_solcast_prefers_full_integration_forecast_over_two_daily_sensors(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 7, 17, 23, 55, tzinfo=timezone.utc)
+    today_noon = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+    tomorrow_noon = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+    day_three_noon = datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc)
+
+    today_state = SimpleNamespace(
+        entity_id="sensor.solcast_pv_forecast_forecast_today",
+        state="0",
+        attributes={
+            "detailedForecast": [
+                {"period_start": today_noon.isoformat(), "pv_estimate": 1.0},
+            ],
+        },
+    )
+    tomorrow_state = SimpleNamespace(
+        entity_id="sensor.solcast_pv_forecast_forecast_tomorrow",
+        state="10",
+        attributes={
+            "detailedForecast": [
+                {"period_start": tomorrow_noon.isoformat(), "pv_estimate": 1.0},
+            ],
+        },
+    )
+    solcast_api = SimpleNamespace(
+        data_forecasts=[
+            {"period_start": tomorrow_noon, "pv_estimate": 1.0},
+            {"period_start": day_three_noon, "pv_estimate": 2.0},
+        ],
+    )
+    hass = SimpleNamespace(
+        data={"solcast_solar": {"solcast": solcast_api}},
+        states=_FakeStates(
+            [today_state, tomorrow_state],
+            {
+                today_state.entity_id: today_state,
+                tomorrow_state.entity_id: tomorrow_state,
+            },
+        ),
+    )
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+
+    forecast = _run(forecaster.get_forecast(horizon_hours=48, start_time=start))
+
+    assert forecast[25] == 1000.0
+    assert forecast[73] == 2000.0
+    assert forecaster.last_forecast_source == "solcast"
+
+
+def test_solcast_prefers_nested_full_cache_over_partial_coordinator_data(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 7, 17, 23, 55, tzinfo=timezone.utc)
+    tomorrow_noon = datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc)
+    day_three_noon = datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc)
+    tomorrow_period = {
+        "period_start": tomorrow_noon,
+        "pv_estimate": 1.0,
+    }
+    coordinator = SimpleNamespace(
+        data={"detailedForecast": [tomorrow_period]},
+        solcast=SimpleNamespace(
+            data_forecasts=[
+                tomorrow_period,
+                {"period_start": day_three_noon, "pv_estimate": 2.0},
+            ],
+        ),
+    )
+    hass = SimpleNamespace(
+        data={"solcast_solar": {"entry-1": coordinator}},
+        states=_FakeStates(),
+    )
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+
+    forecast = _run(forecaster.get_forecast(horizon_hours=48, start_time=start))
+
+    assert forecast[25] == 1000.0
+    assert forecast[73] == 2000.0
+    assert forecaster.last_forecast_source == "solcast"
+
+
 def test_solar_forecast_invalid_provider_normalizes_to_solcast(monkeypatch):
     module = _load_estimator_module(monkeypatch)
     forecaster = module.SolcastForecaster(

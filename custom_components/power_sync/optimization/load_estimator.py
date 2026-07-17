@@ -1545,9 +1545,24 @@ class SolcastForecaster:
     ) -> list[float] | None:
         """Get forecast from Solcast integration if available."""
         try:
-            # Primary: Read detailedForecast from Solcast sensor attributes
-            # The BJReplay/ha-solcast-solar integration (v4+) exposes
-            # detailedForecast as attributes on forecast_today/tomorrow sensors
+            # Prefer the integration's full cached forecast. Daily sensor
+            # attributes normally expose only today and tomorrow, which leaves
+            # the tail of a rolling 48-hour horizon empty late in the day and
+            # can create a false forecast jump when those sensors roll over.
+            solcast_solar_data = self.hass.data.get("solcast_solar")
+            if solcast_solar_data:
+                forecast = await self._extract_from_solcast_solar_integration(
+                    solcast_solar_data, start_time, n_intervals
+                )
+                if forecast:
+                    _LOGGER.debug(
+                        "Using full solar forecast from Solcast Solar integration hass.data"
+                    )
+                    return forecast
+
+            # Fallback: Read detailedForecast from Solcast sensor attributes.
+            # This preserves compatibility with older integrations and users
+            # that expose forecast sensors without hass.data internals.
             forecast = self._read_from_solcast_sensors(start_time, n_intervals)
             if forecast:
                 _LOGGER.debug(
@@ -1556,16 +1571,6 @@ class SolcastForecaster:
                     len(forecast), max(forecast) if forecast else 0,
                 )
                 return forecast
-
-            # Fallback: try the Solcast Solar integration hass.data
-            solcast_solar_data = self.hass.data.get("solcast_solar")
-            if solcast_solar_data:
-                forecast = await self._extract_from_solcast_solar_integration(
-                    solcast_solar_data, start_time, n_intervals
-                )
-                if forecast:
-                    _LOGGER.debug("Using solar forecast from Solcast Solar integration hass.data")
-                    return forecast
 
             # Fallback: Check for Solcast data in PowerSync's own coordinator
             from ..const import DOMAIN
@@ -1775,8 +1780,22 @@ class SolcastForecaster:
         hass.data["solcast_solar"] is typically a dict of {entry_id: coordinator}.
         """
         try:
+            def parse_cached_forecasts(source: Any) -> list[float] | None:
+                """Parse the full cached forecast exposed by current Solcast releases."""
+                cached = getattr(source, "data_forecasts", None)
+                if not isinstance(cached, (list, tuple)) or not cached:
+                    return None
+                parsed = self._parse_detailed_forecast(
+                    list(cached), start_time, n_intervals
+                )
+                return parsed if parsed and any(v > 0 for v in parsed) else None
+
             # The integration may store a coordinator or direct data
             # Try common data structures used by solcast_solar integration
+
+            result = parse_cached_forecasts(solcast_data)
+            if result:
+                return result
 
             # Check if it's a coordinator with data attribute
             if hasattr(solcast_data, 'data') and solcast_data.data:
@@ -1795,13 +1814,15 @@ class SolcastForecaster:
 
                 # Not forecast data — iterate values looking for coordinators or nested dicts
                 for value in solcast_data.values():
-                    if hasattr(value, 'data') and value.data:
-                        result = self._try_extract_forecast(value.data, start_time, n_intervals)
-                        if result:
-                            return result
+                    result = parse_cached_forecasts(value)
+                    if result:
+                        return result
                     # Also check the coordinator's solcast attribute (Solcast Solar v4+)
                     if hasattr(value, 'solcast'):
                         solcast_api = value.solcast
+                        result = parse_cached_forecasts(solcast_api)
+                        if result:
+                            return result
                         # Try get_forecast_list() method if available
                         if hasattr(solcast_api, 'get_forecast_list'):
                             try:
@@ -1825,6 +1846,10 @@ class SolcastForecaster:
                                 )
                                 if parsed and any(v > 0 for v in parsed):
                                     return parsed
+                    if hasattr(value, 'data') and value.data:
+                        result = self._try_extract_forecast(value.data, start_time, n_intervals)
+                        if result:
+                            return result
                     if isinstance(value, dict):
                         result = self._try_extract_forecast(value, start_time, n_intervals)
                         if result:
