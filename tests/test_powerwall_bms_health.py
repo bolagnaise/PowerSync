@@ -40,7 +40,7 @@ trim_excess_pw3_follower_placeholders = (
 resolve_physical_battery_count = bms_health.resolve_physical_battery_count
 
 
-def test_battery_health_fetch_reconciles_count_with_aggregate_capacity():
+def test_battery_health_fetch_uses_site_info_as_authoritative_count():
     tree = ast.parse(INIT_PATH.read_text())
     method = next(
         child
@@ -63,34 +63,21 @@ def test_battery_health_fetch_reconciles_count_with_aggregate_capacity():
     assert [arg.id for arg in assignment.value.args if isinstance(arg, ast.Name)] == [
         "_derived_batt_count",
         "_site_batt_count",
-        "current_wh",
     ]
 
 
-def test_site_info_corrects_intermittent_relay_pack_undercount():
-    assert resolve_physical_battery_count(4, 5, 71950) == 5
+def test_site_info_corrects_intermittent_relay_pack_undercount_after_degradation():
+    assert resolve_physical_battery_count(4, 5) == 5
 
 
 def test_site_info_still_corrects_double_bms_overcount():
-    assert resolve_physical_battery_count(10, 5, 71950) == 5
-
-
-def test_registered_but_uninstalled_site_pack_does_not_inflate_count():
-    assert resolve_physical_battery_count(1, 4, 14350) == 1
-
-
-def test_stale_lower_site_count_cannot_hide_aggregate_capacity():
-    assert resolve_physical_battery_count(5, 4, 71950) == 5
-
-
-def test_valid_lower_site_count_can_remove_duplicate_bms_module():
-    assert resolve_physical_battery_count(2, 1, 14350) == 1
+    assert resolve_physical_battery_count(10, 5) == 5
 
 
 def test_missing_or_invalid_site_count_preserves_relay_count():
-    assert resolve_physical_battery_count(4, None, 57500) == 4
-    assert resolve_physical_battery_count(4, 0, 57500) == 4
-    assert resolve_physical_battery_count(4, "unknown", 57500) == 4
+    assert resolve_physical_battery_count(4, None) == 4
+    assert resolve_physical_battery_count(4, 0) == 4
+    assert resolve_physical_battery_count(4, "unknown") == 4
 
 
 def test_reconciles_serial_less_near_empty_expansion_from_aggregate_remaining():

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import math
 from typing import Any
 
 
@@ -19,14 +18,12 @@ def _as_float(value: Any) -> float | None:
 def resolve_physical_battery_count(
     relay_count: Any,
     site_battery_count: Any,
-    aggregate_full_wh: Any,
 ) -> int:
     """Reconcile Tesla's physical site count with relay BMS telemetry.
 
     The DeviceController relay can both over-report PW3 BMS sub-modules and
-    intermittently omit a physical pack. Site info can also retain registered
-    but uninstalled expansion slots, so only let it increase the relay count
-    when aggregate full-pack energy makes the relay count physically impossible.
+    intermittently omit a physical pack. Tesla site info reports the physical
+    battery count, so prefer a valid positive site count in either direction.
     """
     try:
         derived_count = max(0, int(relay_count))
@@ -38,30 +35,7 @@ def resolve_physical_battery_count(
     except (TypeError, ValueError):
         authoritative_count = 0
 
-    aggregate_capacity = _as_float(aggregate_full_wh)
-    if authoritative_count <= 0:
-        return derived_count
-
-    # Fresh PW3 packs currently report roughly 14.3-14.5 kWh nominal full
-    # energy. A conservative 16 kWh ceiling leaves firmware/measurement
-    # headroom while still proving that 71.95 kWh cannot belong to four packs.
-    max_nominal_full_pack_wh = 16000.0
-    minimum_physical_count = (
-        math.ceil(aggregate_capacity / max_nominal_full_pack_wh)
-        if aggregate_capacity is not None and aggregate_capacity > 0
-        else 0
-    )
-    if minimum_physical_count and authoritative_count < minimum_physical_count:
-        return derived_count
-
-    if authoritative_count < derived_count:
-        return authoritative_count
-    if (
-        authoritative_count > derived_count
-        and derived_count < minimum_physical_count <= authoritative_count
-    ):
-        return authoritative_count
-    return derived_count
+    return authoritative_count if authoritative_count > 0 else derived_count
 
 
 def serial_from_din(din: Any) -> str | None:

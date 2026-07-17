@@ -49,6 +49,7 @@ def _install_const_stub() -> None:
     const.FLOW_POWER_MARKET_AVG = "market_avg"
     const.FLOW_POWER_KWATCH_REGIONS = {}
     const.CONF_FLEET_API_BASE_URL = "fleet_api_base_url"
+    const.CONF_MONITORING_MODE = "monitoring_mode"
     const.TESLA_SITE_INFO_CACHE_TTL_SECONDS = 3600
     const.CONF_SIGENERGY_CHARGER_ENABLED = "sigenergy_charger_enabled"
     const.CONF_SIGENERGY_CHARGER_HOST = "sigenergy_charger_host"

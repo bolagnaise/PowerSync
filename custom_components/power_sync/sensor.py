@@ -4201,17 +4201,17 @@ class TariffPriceSensor(PowerSyncCurrencyMixin, RestoredNumericStateMixin, Senso
                 if self._sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE
                 else "export"
             )
+            price = contract.get("prices", {}).get(direction, {})
+            quota = contract.get("quotas", {}).get(direction, {})
             return _entity_currency_attrs(
                 self,
                 {
                     "source": "covau_aer_cdr",
-                    "current_period": contract.get("quotas", {})
-                    .get(direction, {})
-                    .get("rule_id"),
+                    "current_period": price.get("period") or quota.get("rule_id"),
                     "plan_name": contract.get("plan", {}).get("display_name"),
                     "plan_id": contract.get("plan", {}).get("plan_id"),
                     "settlement_confidence": contract.get("settlement_confidence"),
-                    "quota": contract.get("quotas", {}).get(direction),
+                    "quota": quota,
                 },
             )
 

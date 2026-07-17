@@ -293,8 +293,16 @@ def test_covau_price_and_quota_sensors_use_live_provider_contract():
             "display_name": "SolarMax SA Residential TOU",
         },
         "prices": {
-            "import": {"c_per_kwh": 0.0, "base_c_per_kwh": 35.17},
-            "export": {"c_per_kwh": 15.0, "base_c_per_kwh": 5.0},
+            "import": {
+                "c_per_kwh": 0.0,
+                "base_c_per_kwh": 35.17,
+                "period": "covau_solarmax_free_import",
+            },
+            "export": {
+                "c_per_kwh": 15.0,
+                "base_c_per_kwh": 5.0,
+                "period": "covau_solarmax_premium_export",
+            },
         },
         "tariff_day": "2026-05-03",
         "settlement_confidence": "authoritative",
@@ -345,6 +353,8 @@ def test_covau_price_and_quota_sensors_use_live_provider_contract():
 
     assert import_price.native_value == 0.0
     assert export_price.native_value == 0.15
+    assert import_price.extra_state_attributes["current_period"] == "covau_solarmax_free_import"
+    assert export_price.extra_state_attributes["current_period"] == "covau_solarmax_premium_export"
     assert import_price.extra_state_attributes["quota"]["remaining_kwh"] == 42.5
     assert free_remaining.native_value == 42.5
     assert premium_remaining.native_value == 21.25
@@ -427,6 +437,8 @@ def test_sungrow_solar_sensor_adds_configured_ac_inverter_output():
             "battery_system": sensor.BATTERY_SYSTEM_SUNGROW,
             "ac_inverter_curtailment_enabled": True,
             "inverter_brand": "sungrow",
+            "inverter_host": "192.0.2.20",
+            "sungrow_host": "192.0.2.10",
         },
         options={},
     )
@@ -1166,7 +1178,7 @@ def test_ev_status_sensor_exposes_idle_sigenergy_evac_presence():
     power_sync._get_ev_vehicle_status = lambda hass, entry: {"ev_power_kw": 0.0}
     power_sync._get_ev_vehicles_status = lambda hass, entry: []
 
-    async def read_sigenergy_charger_state(entry):
+    async def read_sigenergy_charger_state(entry, hass):
         return SimpleNamespace(
             charger_type="evac",
             power_kw=0.0,

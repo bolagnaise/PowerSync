@@ -23,6 +23,8 @@ COVAU_CDR_BASE_URL = "https://cdr.energymadeeasy.gov.au/covau/cds-au/v1/energy/p
 COVAU_SOURCE_KIND = "aer_cdr"
 COVAU_IMPORT_RULE_ID = "covau_solarmax_free_import"
 COVAU_EXPORT_RULE_ID = "covau_solarmax_premium_export"
+COVAU_BASE_IMPORT_PERIOD_ID = "covau_base_import"
+COVAU_BASE_EXPORT_PERIOD_ID = "covau_base_export"
 
 SUPPORTED_SOLARMAX_PLANS: dict[str, dict[str, str]] = {
     "COV1117610MRE2@EME": {
@@ -402,6 +404,16 @@ def covau_provider_contract(
         if export_rule.contains(now)
         else snapshot.export_base_c_per_kwh
     )
+    import_period = (
+        import_rule.rule_id
+        if import_effective != import_base
+        else COVAU_BASE_IMPORT_PERIOD_ID
+    )
+    export_period = (
+        export_rule.rule_id
+        if export_effective != snapshot.export_base_c_per_kwh
+        else COVAU_BASE_EXPORT_PERIOD_ID
+    )
     return {
         "schema_version": COVAU_SCHEMA_VERSION,
         "plan": {
@@ -421,10 +433,12 @@ def covau_provider_contract(
             "import": {
                 "c_per_kwh": round(import_effective, 4),
                 "base_c_per_kwh": round(import_base, 4),
+                "period": import_period,
             },
             "export": {
                 "c_per_kwh": round(export_effective, 4),
                 "base_c_per_kwh": round(snapshot.export_base_c_per_kwh, 4),
+                "period": export_period,
             },
         },
         "tariff_day": ledger.state.tariff_day,

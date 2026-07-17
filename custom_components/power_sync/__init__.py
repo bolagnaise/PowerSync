@@ -6543,7 +6543,6 @@ class BatteryHealthView(HomeAssistantView):
             batt_count = resolve_physical_battery_count(
                 _derived_batt_count,
                 _site_batt_count,
-                current_wh,
             )
             if batt_count != _derived_batt_count:
                 _LOGGER.info(
