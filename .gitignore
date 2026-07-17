@@ -51,3 +51,6 @@ temp/
 
 # Build artifacts
 VERSION
+
+# Local Cloudflare tooling state
+.wrangler/

@@ -1,0 +1,37 @@
+PowerSync ticket #204 force-mode expiry review - 2026-07-16
+
+Prompt summary
+Reviewed a confirmed v2.12.860 timer-ownership defect where a full Tesla force-charge refresh installs a service expiry timer into force_charge_state["cancel_expiry_timer"], then optimization/coordinator.py overwrites that cancel handle with its extended timer without cancelling the service timer. The orphan service timer remains generation-valid and restores early. Asked for the smallest complete fix, a regression-first plan, race analysis, charge/discharge symmetry, and exact validation.
+
+Primary review verdict: ADJUST
+
+- Keep cancellation-before-overwrite in the coordinator. It fixes the primary ownership bug, collapses repeated extensions to one stored timer, and is safe when the previously stored handle has already been cancelled.
+- Add an expires_at guard to the service expiry callback. Cancellation alone cannot guarantee correctness if the callback was already queued or began running; the callback must no-op while the shared active state has a future expires_at.
+- Apply ownership behavior symmetrically because the coordinator path is shared by charge and discharge.
+- Do not perform a larger timer-ownership refactor in this patch.
+
+Fastest compliant path
+
+1. Add a failing behavioral regression in tests/test_battery_export_allowed_slots.py. During the fake force-charge refresh, install a fake service cancel handle into shared force_charge_state. Confirm the coordinator currently overwrites it without cancellation. The fixed behavior must cancel that service handle before storing the coordinator timer.
+2. Add a callback-focused regression for the service restore callback: manually invoke a stale callback while shared expires_at is still in the future and assert it does not restore or clear the active force state.
+3. In custom_components/power_sync/optimization/coordinator.py, immediately before storing the coordinator extension timer, call the cancel function currently in shared state. This catches a timer created during the awaited hardware refresh as well as a previously cancelled handle.
+4. In the narrow force-charge and force-discharge service expiry callbacks in custom_components/power_sync/__init__.py, after active/generation checks and before clearing active state, no-op when the current shared expires_at is later than the callback time.
+5. Run the focused regression first with python3.12, then the whole adjacent timer/force-mode files and the relevant force charge/discharge subset.
+
+Minimum implementation files
+
+- custom_components/power_sync/optimization/coordinator.py
+- custom_components/power_sync/__init__.py
+- tests/test_battery_export_allowed_slots.py
+- the nearest existing service-callback regression file if the callback test belongs there (expected tests/test_force_mode_controls.py)
+
+Edge cases to verify
+
+- No hardware refresh: cancelling an already-cancelled handle stays harmless.
+- Hardware refresh: a newly installed service timer is cancelled before overwrite.
+- Repeated extensions: only the latest coordinator timer remains authoritative.
+- Queued stale callback: future expires_at makes it a no-op.
+- Genuine expiry: callback still restores exactly once at or after expires_at.
+- Charge/discharge symmetry.
+
+The review explicitly rejected a cancellation-only patch as insufficient under an event-loop race, and rejected a broad ownership refactor as unnecessary for this patch.

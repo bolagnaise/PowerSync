@@ -1,0 +1,671 @@
+ChatGPT Pro/Extended Pro Project Approach Review
+Generated: 2026-07-16
+Project: PowerSync /Users/benboller/Developer/power-sync
+
+Original task/spec or current user goal:
+Keep genuinely free import slots in charge mode for their full duration, even after configured or physical SOC headroom is exhausted, while keeping physical battery flow, SOC, and economics clipped to accepted energy.
+
+Current approach reviewed:
+The optimizer initially emits charge for free slots, but both schedule construction and final reconciliation can relabel a clipped charge to self_consumption. The clarified approach separates command intent (charge + requested power) from physical flow (accepted battery charge, SOC, and grid-flow accounting).
+
+How to use this guidance:
+- Use as advisory planning context.
+- Verify claims against local files and tests.
+- Preserve the user's clarified full-slot free-charge requirement.
+- Keep the fix scoped to the optimizer and focused regressions.
+
+============================================================
+First Prompt
+============================================================
+Context: We are already working on PowerSync, a Home Assistant battery optimizer integration. Current HEAD is v2.12.867 on main. A Discord reporter using an SAJ battery in Monitoring Mode asks whether PowerSync can preserve SOC for the rest of a free-import window after the battery reaches its configured grid-charge cap or physical 100%, so home load stays on free grid energy before a later high-price export. Monitoring Mode means PowerSync sent no hardware command; the question concerns the published/recommended action.
+
+Original task/spec or current user goal:
+Triage and handle actionable Discord bugs end to end. A distinct current-code defect may be fixed only when independently demonstrated on current code with a focused failing regression. Preserve current behavior for No Idle users and never emit physically impossible zero-power force-charge actions.
+
+Current approach (inference from current code and independent reproduction):
+- Free-import slots initially emit charge.
+- Final schedule reconciliation clips battery charge to remaining SOC/grid-charge-cap headroom.
+- When clipped charge falls to <=100 W, reconciliation unconditionally relabels the slot self_consumption.
+- In a reproduced scenario with SOC at the configured cap (or physical 100%), positive home load, free import now, and profitable export later, the LP modeled zero battery discharge plus grid import during the free slots and retained later export. Final action reconciliation still emitted self_consumption. Runtime self_consumption permits the battery to serve load, contradicting the modeled trajectory.
+- No Idle off and on currently both produce self_consumption at the clipped free slots. Desired semantics are likely: No Idle off => IDLE/hold when the model preserves SOC via grid import; No Idle on => self_consumption.
+- Candidate patch: add an optional disable_idle input to reconcile_result_with_schedule (default false for compatibility), pass the coordinator's current setting, and when an original charge slot is clipped below threshold, choose IDLE only if No Idle is off and the reconciled/model trajectory requires net grid import with zero battery discharge. Keep self_consumption for No Idle and cases without a modeled hold. Do not keep the charge action.
+- Alternative: modify initial schedule emission, but physical-full clipping occurs again in final reconciliation, so reconciliation still needs policy awareness.
+
+Evidence and constraints:
+- battery_optimizer.py free-import classification around _build_schedule_from_solution.
+- battery_optimizer.py reconcile_result_with_schedule performs physical/cap clipping and current relabel.
+- coordinator.py always reconciles before publication/execution.
+- Existing regression test test_full_battery_free_import_does_not_leave_zero_power_force_charge currently expects self_consumption at zero load; this safety invariant must remain: never command fake force charge.
+- A focused current-code reproduction found modeled grid import 1 kW, modeled battery discharge 0 W, and final self_consumption in free slots before later export.
+- Existing focused tests passed: 3 tests covering full-battery free import and SOC-cap emission.
+- Need LP/greedy parity, No Idle on/off behavior, physical-full and configured-cap cases, zero-load case, and no changes to unrelated dirty worktree files.
+- Use python3.12 pytest locally. Release only after tests and review.
+- Preserve the original task/spec.
+- Do not suggest an easier or reduced task. Stick to what the user wants and preserve the original scope/spec.
+- Stay within the project's framework/tool conventions.
+- Keep changes scoped.
+- Avoid secrets, private browser/session data, and unnecessary private user data.
+- Validate with the relevant local commands.
+
+Is the current approach the best way to continue?
+Give a direct keep/adjust/pivot recommendation. Compare schedule-emission versus final-reconciliation fixes, identify the safest predicate for choosing IDLE versus self_consumption, required data flow/API changes, regression matrix, cross-brand risks, and pitfalls. Do not assume the reporter's actual hardware moved while Monitoring Mode was enabled.
+Show less
+
+First Answer
+============================================================
+Recommendation: KEEP, but adjust
+
+Keep final reconciliation as the authoritative fix point. Do not pivot to a schedule-emission-only fix.
+
+The current diagnosis is consistent with main at v2.12.867: free-import classification initially forces charge, while both schedule emission and final reconciliation unconditionally turn a charge clipped to at most 100 W into self_consumption. Production applies reconciliation after spread/bridge/overlay processing, and neither reconciliation call currently receives the effective No Idle setting.
+
+The candidate patch has the correct overall shape, but it needs two important adjustments:
+
+Choose the replacement action from preserved model-flow evidence, not merely from the fact that charge was clipped.
+
+Make that decision before SOC is advanced, and remove the clipped grid-charge component from the emitted battery flow.
+
+Otherwise, a label-only change can produce an idle action with nonzero charge or an SOC increase that never physically occurred.
+
+Schedule emission versus final reconciliation
+Schedule-emission fix
+
+Emission has two advantages:
+
+It already receives disable_idle.
+
+It has direct access to the LP or greedy flow vectors when mapping them to actions. The ordinary hold classification already treats near-zero battery movement plus grid import as a candidate for idle, with No Idle converting ordinary holds to self_consumption.
+
+However, an emission-only fix is incomplete:
+
+The free-import override deliberately manufactures a charge action even where the model selected zero battery charge.
+
+Spread-import and other post-processing can change the schedule after emission.
+
+Final reconciliation replays SOC and clips charge again against physical 100% and the configured grid-charge cap.
+
+Publication, costing, graph flows, and execution use the reconciled result.
+
+Therefore, correcting only _build_schedule still leaves the same defect available in reconcile_result_with_schedule.
+
+Final-reconciliation fix
+
+Final reconciliation is the right mandatory seam because it sees:
+
+The actual schedule that will be published.
+
+The cumulative SOC after all earlier slots.
+
+Physical charge headroom.
+
+Grid-charge-cap headroom.
+
+Post-processing changes.
+
+It is also where final grid flows and economics are recalculated from the emitted schedule.
+
+The safest scoped approach is:
+
+Put the policy in reconciliation.
+
+Do not duplicate a second, subtly different policy in emission.
+
+Extract a private helper only if both call sites genuinely need identical behavior or direct optimize() consumers must receive the corrected intermediate action.
+
+For the reported production path, reconciliation alone is sufficient and lower risk.
+
+Safest IDLE predicate
+
+Do not use any of these as the deciding signal:
+
+Free import price by itself.
+
+Presence of a later high export price.
+
+SOC equality with the cap.
+
+effective_grid_charge_w <= 100 by itself.
+
+The post-processed action label alone.
+
+Those signals do not prove that the optimizer intended to preserve SOC by importing the home load.
+
+Instead, snapshot the pre-reconciliation modeled grid flows and use power balance to establish that the model intended a hold:
+
+Python
+Run
+modeled_grid_import_w = tuple(result.grid_import_w)
+modeled_grid_export_w = tuple(result.grid_export_w)
+
+For each original charge action after physical and cap clipping:
+
+Python
+Run
+threshold_w = ACTION_THRESHOLD_W
+
+modeled_import_w = modeled_grid_import_w[idx]
+modeled_export_w = modeled_grid_export_w[idx]
+
+modeled_hold = (
+    net_home_w > threshold_w
+    and modeled_import_w > threshold_w
+    and modeled_export_w <= threshold_w
+    and abs(
+        (modeled_import_w - modeled_export_w) - net_home_w
+    ) <= threshold_w
+)
+
+force_charge_clipped_out = (
+    action.action == "charge"
+    and effective_grid_charge_w <= threshold_w
+)
+
+emit_idle = (
+    force_charge_clipped_out
+    and not disable_idle
+    and effective_solar_charge_w <= threshold_w
+    and modeled_hold
+)
+
+This predicate means:
+
+There is meaningful net home demand.
+
+The model planned for the grid to cover approximately that demand.
+
+The model did not plan meaningful grid export.
+
+There was no meaningful modeled net battery movement.
+
+The final physical schedule can no longer perform meaningful force charging.
+
+No Idle is off.
+
+There is no natural solar charge that an IDLE action would incorrectly suppress.
+
+The equality should be tolerance-based, not a strict float comparison. Using the existing 100 W action threshold is consistent with the rest of the action mapper.
+
+Final action handling
+
+When emit_idle is true:
+
+Python
+Run
+emitted_action = "idle"
+charge_w = 0.0
+discharge_w = 0.0
+power_w = 0.0
+
+When force charge was clipped out but emit_idle is false:
+
+Python
+Run
+emitted_action = "self_consumption"
+charge_w = effective_solar_charge_w
+discharge_w = 0.0  # preserve current scoped behavior
+power_w = charge_w
+
+The second branch must remove the grid-sourced charge component. A self_consumption action cannot carry out an 80 W residual grid-charge request merely because it fell below the force-action threshold. Natural solar charging can remain.
+
+Most importantly, decide the final action and flows before this calculation:
+
+Python
+Run
+soc_cursor += (
+    charge_w / 1000.0 * efficiency
+    - discharge_w / 1000.0 / efficiency
+) * dt / capacity
+
+Current reconciliation advances SOC before relabelling the action. Moving the classification ahead of SOC advancement ensures the published SOC follows the action that can actually occur.
+
+If the modeled flow arrays are missing or too short, fall back to self_consumption; do not invent an IDLE hold without evidence.
+
+No Idle behavior
+
+Preserve the effective No Idle behavior exactly:
+
+Effective No Idle off: a clipped free-import charge may become idle when the model proves a hold.
+
+Effective No Idle on: it remains self_consumption.
+
+Explicit No Idle exemptions, such as Charge By Time feasibility holds, remain unaffected.
+
+disable_idle is already part of both LP and greedy optimization and is defined as requiring ordinary slots to use the battery naturally instead of holding SOC. Existing tests also demonstrate the intended difference: with IDLE enabled, the grid supplies the earlier load and more energy remains for export; with No Idle enabled, the battery serves that load and later export is reduced.
+
+Do not opportunistically change No Idle’s complete battery-flow simulation in this patch. A clipped charge relabelled as self_consumption may still deserve a separate publication-flow correction, but changing that now could alter current No Idle forecasts and economics beyond the demonstrated defect.
+
+Required data flow and API changes
+
+Add the keyword-only argument:
+
+Python
+Run
+def reconcile_result_with_schedule(
+    ...,
+    optimizer_reserve: float | None = None,
+    disable_idle: bool = False,
+) -> OptimizerResult:
+
+The default keeps direct call sites source-compatible and matches optimize()’s default policy.
+
+In the coordinator, capture the effective provider-gated setting once for the whole run:
+
+Python
+Run
+disable_idle = self._should_disable_idle_schedule()
+
+Then use the same value for:
+
+The initial optimizer solve.
+
+The first reconciliation.
+
+The optional auto-reserve re-solve.
+
+The second reconciliation.
+
+The effective helper already combines provider support with the configured switch. Do not pass the raw configuration flag directly, and do not call the helper again after the asynchronous solve; the setting could theoretically change while the executor job is running. One captured value guarantees that the action policy used during modeling is the same policy used during publication.
+
+Both current reconciliation call sites need the new argument.
+
+No new public OptimizerResult fields are required for the scoped fix because modeled grid import/export arrays are already present. If a later regression demonstrates ambiguous simultaneous battery charging and discharging, adding pristine modeled battery charge/discharge arrays would be preferable to accumulating more inference heuristics.
+
+Regression matrix
+
+The core regression should run through optimize() and reconcile_result_with_schedule, because that is the path that currently demonstrates the defect.
+
+Case	Backends	No Idle	Expected final free-slot action	Required assertions
+Physical 100%, positive home load, free import, later profitable export	HiGHS + greedy	Off	idle	Zero battery charge/discharge, SOC unchanged, grid supplies load, later export retained
+Same physical-full case	HiGHS + greedy	On	self_consumption	Never charge; preserve current No Idle action policy
+At configured grid-charge cap, positive load, later export	HiGHS + greedy	Off	idle	Same hold assertions
+Same configured-cap case	HiGHS + greedy	On	self_consumption	Never charge
+Full/capped with zero home load	HiGHS + greedy	Both	self_consumption	Zero power, zero battery flow, zero grid flow
+Above grid cap with solar surplus	HiGHS + greedy	Both	self_consumption	Natural solar charging retained; never idle
+Remaining grid-charge headroom greater than 100 W	HiGHS + greedy	Both	charge	Charge power and SOC remain physically bounded
+Remaining grid-charge headroom from 0 to 100 W	HiGHS + greedy	Off/On	idle/self_consumption	Never emit force charge; no grid-sourced battery charge remains
+Charge clipped but model did not import home load as a hold	HiGHS + greedy	Off	self_consumption	Predicate must not manufacture IDLE
+Post-processed/spread charge is clipped only in final reconciliation	At least HiGHS	Off	Based on model predicate	Demonstrates why emission-only is insufficient
+
+Keep the existing safety regressions unchanged:
+
+Full battery plus free import and zero load must remain zero-power self_consumption, never a fake charge command.
+
+Free-import charging must stop at the configured grid-charge cap for both solvers.
+
+Solar charging above the grid-charge cap must remain natural self_consumption.
+
+Existing No Idle future-export behavior must remain unchanged.
+
+Add a coordinator-focused regression proving the captured effective setting reaches both reconciliation calls, including the auto-reserve second pass. Include an unsupported-provider case where the raw No Idle option is true but the effective value remains false.
+
+Cross-brand risks
+IDLE is not implemented identically across brands
+
+The optimizer’s conceptual IDLE means “hold SOC while the grid supplies load,” but active execution is heterogeneous:
+
+Some systems use a backup/hold mode and an elevated reserve.
+
+GoodWe intentionally falls back to self-consumption for ordinary IDLE.
+
+Some generic backends may only restore normal mode and cannot guarantee a hard hold.
+
+Existing generic-brand drift detection is limited.
+
+Do not add battery-brand checks to the optimizer predicate. The published recommendation should represent the modeled energy trajectory. Brand-specific inability to execute an existing IDLE action is a separate controller defect and needs its own reproduction.
+
+SAJ and solar
+
+The SAJ controller exposes a passive zero-power idle operation that holds the battery, but its documented behavior also prevents PV charging while idle. This makes the “no meaningful natural solar charge” guard essential. A broad “clipped charge means IDLE” rule could export solar that the optimizer expected the battery to absorb.
+
+That controller capability does not prove what happened for the reporter: Monitoring Mode prevented execution entirely.
+
+Increased mode transitions
+
+This correction may introduce additional charge → idle → export transitions in active mode. Existing restore and reserve-state behavior must therefore remain untouched, and the existing controller test suites should be run even though the patch is schedule-only.
+
+SOC jitter
+
+Do not classify based on soc == cap or soc == 1.0. Battery readings and interval calculations can jitter. Let physical clipping and the existing 100 W action threshold determine whether force charge remains meaningful.
+
+Runtime demand-window override
+
+Runtime can already replace an IDLE action with self-consumption inside a demand window. Do not alter that policy as part of this defect.
+
+Main implementation pitfalls
+
+Relabelling after SOC advancement. This can publish an IDLE action with an SOC increase from charge that was removed.
+
+Checking only grid charge. A slot with no grid charge but substantial solar charge must be self_consumption, not idle.
+
+Using future-price lookahead. That duplicates optimizer economics and can diverge between LP and greedy. Trust the actual modeled flow.
+
+Reading result.grid_import_w after recomputation. Snapshot modeled flows before reconciliation overwrites them with final schedule flows.
+
+Forgetting the second reconciliation. Auto-reserve can run the complete pipeline twice.
+
+Using the raw No Idle option. Pass the effective provider-gated value captured for the solve.
+
+Leaving a residual grid-charge flow on self_consumption. Strip the grid component whenever the force-charge action is discarded.
+
+Expanding into controller changes. The demonstrated bug is the published schedule classification; brand execution changes need separate evidence.
+
+Monitoring Mode conclusion
+
+Treat the Discord report as evidence about the published/recommended action only. The current execution path checks Monitoring Mode, logs what it would execute, and returns before issuing a battery command. Nothing in this report establishes that the SAJ battery actually discharged, charged, or changed mode.
+
+Validation order
+
+After implementing the focused regression first:
+
+Bash
+python3.12 -m pytest -q \
+  tests/test_optimizer_hardware_floor_alignment.py \
+  tests/test_grid_charge_soc_cap.py \
+  tests/test_optimization_enabled_switch.py \
+  tests/test_saj_h2_controller.py
+
+Then run the full suite:
+
+Bash
+python3.12 -m pytest -q
+
+The release/version bump should follow green focused tests, full-suite validation, and review. This recommendation is based on inspection of current main; I have not executed the local pytest suite in this environment.
+
+============================================================
+Follow-Up Prompt
+============================================================
+Important user clarification received after your review: “if power is free, the charge slot should continue for the entire slot.” This supersedes the earlier inferred constraint that a physically full/capped battery must never retain a zero-accepted-energy force-charge command. The desired command-mode invariant is now explicit:
+
+- A genuinely free import slot (same <=0.001 threshold used by current free_import_slot logic), when grid charging is allowed and the original emitted action is charge, must remain action=charge for the entire free slot even after the configured grid-charge SOC cap or physical 100% leaves no battery energy headroom.
+- Keep the requested charge command power so the inverter remains in grid-supplied charge mode and does not let the battery serve home load.
+- Still clip battery_charge_w and SOC progression to physical/cap headroom, so telemetry and economics do not pretend the battery accepted energy it could not accept.
+- Non-free clipped charge retains current stop/relabel behavior.
+- Monitoring Mode still sends no command.
+- This is deliberately not IDLE and not governed by No Idle.
+
+Given this explicit requirement, revise your recommendation. What is the fastest safe way to implement it while preserving original scope?
+
+Please provide a tight checklist with:
+1. whether both _build_schedule_from_solution and reconcile_result_with_schedule must change to preserve the command across configured-cap and physical-full paths;
+2. the exact narrow predicate and which fields remain command intent versus physical flow;
+3. the minimum tests (LP and greedy, configured cap, physical full, zero/positive load, non-free negative control, reconciliation);
+4. cross-brand or force-duration risks;
+5. minimum files to touch and validation commands.
+
+Preserve the original task/spec. Do not suggest an easier or reduced task. Keep edits scoped. Do not expose private data. Treat this user clarification as authoritative over the earlier no-fake-charge assumption.
+Show less
+
+Follow-Up Answer
+============================================================
+Revised recommendation: pivot the patch, preserve the scope
+
+Replace the proposed IDLE-aware reconciliation fix with a strict separation between charge command intent and physically accepted battery flow.
+
+The fastest safe implementation is two narrowly scoped changes in battery_optimizer.py, plus focused regressions. No coordinator API change, No Idle plumbing, executor change, or SAJ-specific logic is required.
+
+1. Change both schedule construction and final reconciliation
+
+ Change _build_schedule—the current function corresponding to the referenced _build_schedule_from_solution.
+
+ Change reconcile_result_with_schedule.
+
+ Do not change coordinator.py or pass disable_idle.
+
+Both locations are mandatory:
+
+_build_schedule currently creates the full-power charge command for a free slot, then reduces power_w to accepted charge and relabels the action when grid charge falls below 100 W. At the configured cap, that destroys the charge-command intent before reconciliation receives the schedule.
+
+At physical 100%, schedule construction can temporarily treat the free-slot command target as battery flow because the free-import override assigns reported_charge_w = power_w; physical headroom is only authoritatively clipped later in reconciliation.
+
+Reconciliation independently clips physical and grid-cap headroom, then currently performs the same unconditional relabel to self_consumption. It must preserve the command again because all production schedules pass through this finalizer.
+
+Changing only reconciliation is insufficient because the configured-cap path may already have changed the input action to self_consumption. Changing only schedule construction is insufficient because final reconciliation can newly reach physical or cap headroom after cumulative SOC replay or schedule post-processing.
+
+2. Use this exact narrow predicate and field split
+In _build_schedule
+
+Use the existing fully gated free_import_slot calculation unchanged:
+
+Python
+Run
+free_import_slot = (
+    import_prices is not None
+    and import_prices[t] <= 0.001
+    and not charge_blocked
+    and allow_grid_charge
+    and grid_charge_allowed[t]
+)
+
+After action selection:
+
+Python
+Run
+preserve_free_charge_command = (
+    free_import_slot
+    and action == "charge"
+)
+
+The existing free_import_slot already proves that price, charge blocking, global grid-charge permission, and the per-slot permission mask all passed.
+
+In reconcile_result_with_schedule
+
+Use the incoming action as proof that upstream charge eligibility passed:
+
+Python
+Run
+preserve_free_charge_command = (
+    action.action == "charge"
+    and idx < len(import_prices)
+    and import_prices[idx] <= 0.001
+)
+
+Do not add allow_grid_charge, grid_charge_allowed, or disable_idle parameters to reconciliation. An incoming charge action plus the free-price test is sufficient for the current internal pipeline and avoids widening the API.
+
+Preserve these as command intent
+Python
+Run
+action = "charge"
+power_w = original_requested_power_w
+
+For a qualifying free slot:
+
+Never relabel based on effective_grid_charge_w.
+
+Never apply power_w = min(power_w, battery_charge_w).
+
+Preserve the original requested command power even when accepted flow is partially clipped or zero.
+
+This applies not only when headroom is exactly zero, but also when the battery reaches the cap partway through the slot. For example, a 5 kW command may remain power_w=5000, while only 500 W average physical battery charge fits before the cap.
+
+Keep these as physical/model flow
+Python
+Run
+battery_charge_w
+battery_discharge_w
+soc
+grid_import_w
+grid_export_w
+predicted_cost
+predicted_savings
+
+For the preserved charge command:
+
+battery_charge_w is clipped to physical 100% headroom.
+
+Its grid-sourced component is additionally clipped to configured grid-charge-cap headroom.
+
+Solar charging may remain as physical flow when applicable.
+
+battery_discharge_w remains zero.
+
+SOC advances only from the clipped battery_charge_w.
+
+power_w must not participate in SOC or economic calculations.
+
+The final grid-flow calculation already uses battery_charge_w and battery_discharge_w, not command power_w, so keeping a 5 kW command alongside zero accepted battery charge will still report only home-load grid import rather than a fictitious 5 kW battery flow.
+
+The implementation pattern should be:
+
+Python
+Run
+command_power_w = original power_w
+
+# Calculate accepted battery flow.
+accepted_charge_w = min(
+    requested_battery_flow_w,
+    max_charge_w,
+    physical_soc_headroom_w,
+)
+
+# Split accepted physical flow into solar and grid components.
+solar_charge_w = min(accepted_charge_w, solar_surplus_w)
+grid_charge_w = accepted_charge_w - solar_charge_w
+grid_charge_w = min(grid_charge_w, configured_cap_headroom_w)
+
+battery_charge_w = solar_charge_w + grid_charge_w
+
+if preserve_free_charge_command:
+    action = "charge"
+    power_w = command_power_w
+else:
+    # Existing non-free min/relabel behavior.
+
+SOC must be advanced after accepted physical flow has been finalized.
+
+3. Minimum regression set
+
+ Zero-headroom free-command matrix, parametrized across:
+
+HiGHS and greedy.
+
+Configured cap and physical 100%.
+
+Zero load and positive load.
+
+No Idle off and on.
+
+For every row, run both optimize() and reconcile_result_with_schedule and assert:
+
+action == "charge"
+power_w == original requested command power
+battery_charge_w == 0
+battery_discharge_w == 0
+SOC unchanged
+grid_import_w == forecast net home load only
+
+The positive-load scenario should retain the original reproduction shape with a later profitable export and verify that the battery remains available for that export. No Idle must produce the same free-slot command result because this rule is independent of No Idle.
+
+ Partial configured-cap headroom, HiGHS and greedy.
+
+Extend test_free_import_emission_obeys_grid_charge_soc_cap so a 5 kW free-slot command with only 3 kW—or a smaller amount—of cap headroom asserts:
+
+action == "charge"
+power_w == 5000
+battery_charge_w == clipped headroom power
+SOC == configured cap
+
+Repeat the assertions after reconciliation. The existing test already verifies the physical cap for both solvers; it needs the new command-power assertion.
+
+ Physical-full zero-load regression, HiGHS and greedy.
+
+Rename or replace test_full_battery_free_import_does_not_leave_zero_power_force_charge. Its old action expectation is now superseded. New assertions:
+
+action == "charge"
+power_w > 100
+battery_charge_w == 0
+SOC == 1.0
+grid_import_w == 0
+grid_export_w == 0
+
+The protection is now “no fictitious battery energy,” not “no force-charge action.”
+
+ Non-free negative control.
+
+Construct or produce a charge action at full/capped SOC with:
+
+Python
+Run
+import_price = 0.0011  # deliberately just above the free threshold
+
+After reconciliation it must retain current behavior:
+
+action == "self_consumption"
+battery_charge_w == 0
+power_w == 0
+SOC unchanged
+
+This proves the exception is price-bound and does not alter ordinary cheap-charge clipping.
+
+ Update the solar-above-grid-cap expectation.
+
+The existing test expects a free slot with solar-only accepted flow above the grid cap to become self_consumption. That conflicts with the newly authoritative rule because the original qualifying free-slot action is charge. It should instead assert:
+
+action == "charge"
+power_w == original free-slot command
+battery_charge_w == physically accepted solar charge
+grid_import_w == 0
+
+The grid-charge cap still blocks the grid component; it no longer changes the command mode.
+
+4. Cross-brand and force-duration risks
+
+ SAJ does not honour power_w as a target. Its force-charge implementation intentionally ignores the requested watts and enables its TOU charge slot at 100% of rated power. Therefore, power_w is command intent, not a guaranteed hardware rate on SAJ.
+
+ The configured SOC cap becomes a planning/accounting cap during free slots. On brands without an independent hardware maximum-SOC control, retaining force charge can allow actual battery charging beyond PowerSync’s configured grid-charge cap. That follows directly from the clarified requirement. The optimizer will still clip its published battery flow and SOC, so active-mode hardware telemetry may diverge if the inverter continues accepting energy.
+
+ Target-power brands may still receive a live-adjusted command. Runtime currently adjusts free-import charge power using live site-import headroom for systems that support target charge power. Preserve that existing site-limit safety behavior; this optimizer patch should preserve the scheduled power_w, not remove runtime protection.
+
+ Force duration will intentionally become longer. Force-charge continuation and expiry logic group contiguous actions labelled charge. Keeping capped/full free slots as charge means the force mode will span the rest of that free window and active optimizer force state will continue to be extended. That is the requested result. The existing boundary logic must still stop at the first non-charge slot; no duration code change is needed.
+
+ Firmware behavior is not uniform. Some inverters may automatically leave charge behaviour at 100%, while others may stay in a charge/TOU mode. The schedule can guarantee PowerSync’s requested mode, not that every brand will route home load identically.
+
+ Monitoring Mode remains observational only. The execution path returns before sending any hardware command, so this clarification changes only the recommendation displayed for the Discord reporter’s run. It does not establish that their SAJ battery changed mode or power flow.
+
+5. Minimum files and validation
+Implementation files
+
+Only:
+
+custom_components/power_sync/optimization/battery_optimizer.py
+tests/test_optimizer_hardware_floor_alignment.py
+
+Do not touch:
+
+coordinator.py
+executor.py
+SAJ or other inverter controllers
+No Idle configuration/API
+unrelated dirty worktree files
+
+Release metadata should be changed only after tests and review, following the project’s normal release process.
+
+Focused validation
+Bash
+python3.12 -m pytest -q \
+  tests/test_optimizer_hardware_floor_alignment.py \
+  -k "free_import or grid_charge_soc_cap or full_battery or solar_only"
+
+Then validate coordinator eligibility, force-window behaviour, and SAJ control assumptions without changing those files:
+
+Bash
+python3.12 -m pytest -q \
+  tests/test_grid_charge_soc_cap.py \
+  tests/test_force_mode_controls.py \
+  tests/test_saj_h2_controller.py
+
+Run the complete suite:
+
+Bash
+python3.12 -m pytest -q
+
+Confirm scope and patch cleanliness:
+
+Bash
+git diff --check
+git status --short
+git diff -- \
+  custom_components/power_sync/optimization/battery_optimizer.py \
+  tests/test_optimizer_hardware_floor_alignment.py
+
+The release criterion is now: free qualifying charge slots retain positive command intent for the complete slot, while every battery-flow, SOC, grid-flow, and economic field remains physically clipped.
+

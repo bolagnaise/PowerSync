@@ -1,6 +1,6 @@
 ---
 name: optimizer-bug-hunt
-description: Find, verify, and fix bugs in the PowerSync optimizer (LP solver, optimization coordinator, force/reserve state machine, tariff windows, load/solar inputs, schedule execution). Use this whenever a user reports the battery charging/discharging/exporting at the wrong time, a stuck backup reserve or discharge cap, a force mode that never restored, wrong behavior in ZeroHero/Happy Hour/free-import windows, a schedule that disagrees with prices, or any Discord ticket that routes to optimization/. Also use it before writing ANY fix in custom_components/power_sync/optimization/ or the force/reserve logic in __init__.py — it carries subsystem maps, invariants, a verified bug registry, and a verification playbook that prevent wrong fixes.
+description: Find, verify, and fix bugs in the PowerSync optimizer (LP solver, optimization coordinator, force/reserve state machine, tariff windows, load/solar inputs, schedule execution), escalating complex evidenced approaches for Pro review. Use this whenever a user reports the battery charging/discharging/exporting at the wrong time, a stuck backup reserve or discharge cap, a force mode that never restored, wrong behavior in ZeroHero/Happy Hour/free-import windows, a schedule that disagrees with prices, or any Discord ticket that routes to optimization/. Also use it before writing ANY fix in custom_components/power_sync/optimization/ or the force/reserve logic in __init__.py — it carries subsystem maps, invariants, a verified bug registry, and a verification playbook that prevent wrong fixes.
 ---
 
 # PowerSync Optimizer Bug Hunt
@@ -40,9 +40,40 @@ from a first reading — run the verification playbook first.
    no bug.
 5. **Adversarially verify** using `references/verification-playbook.md` — actively try to
    refute your own claim by hunting the compensating mechanism.
-6. **Fix at the root, add a regression test for the newly observed variant**, run
+6. **Review the approach with Pro when the gate below applies.** Do this only after the
+   failure scenario survives adversarial verification and before choosing or editing the fix.
+7. **Fix at the root, add a regression test for the newly observed variant**, run
    `python3.12 -m pytest` on the narrow file first (never bare `python3` — 3.9 fails
    conftest). CI does not run pytest; local verification is the only gate.
+
+## Pro approach-review gate
+
+Use `$pro-project-approach-review` before implementation when a verified current bug meets
+at least one of these conditions:
+
+- Two or more credible root-level fixes or debugging paths remain.
+- The change spans the LP, post-solve, execution, persistence, or brand-control boundaries.
+- The proposed change alters a core invariant, solver formulation, restore lifecycle, or
+  behavior shared across brands.
+- A previous fix missed the newly observed variant or the same failure class keeps recurring.
+- The work requires a major refactor, optimization pass, debugging strategy, or course correction.
+- The user explicitly requests a Pro approach review.
+
+Do not invoke Pro for an unverified suspicion, missing runtime evidence, stale-version behavior,
+or a confirmed registry bug whose root cause, contained fix, blast radius, and regression test are
+already clear. Pro review cannot replace the failure scenario, invariant checks, bug-registry
+match, compensating-mechanism search, or hardware-aware verification.
+
+When the gate applies:
+
+1. Give Pro only redacted facts needed to compare approaches: the failure scenario, surviving
+   evidence, affected invariants and paths, compensating mechanisms already ruled out, competing
+   fixes, regression-test shape, and validation commands.
+2. Require preservation of the reported behavior, LP/greedy parity, restore-side symmetry,
+   per-brand safety, runtime upgrade protection, and the repo's testing/release constraints.
+3. Treat the response as advisory. Reconcile it against live code and the reference files, then
+   adversarially verify any new claim before changing the implementation plan.
+4. Keep saved Pro guidance out of commits and releases unless the user explicitly requests it.
 
 ## Symptom → subsystem router
 

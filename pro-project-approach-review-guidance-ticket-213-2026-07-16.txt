@@ -1,0 +1,40 @@
+ChatGPT Pro Project Approach Review
+Generated: 2026-07-16
+Project: PowerSync ticket 213 grid-charge SOC cap / Charge By Time
+
+Original task:
+Make Charge By Time plan backward from its deadline without suppressing tonight's export. Prior export/discharge must reopen later grid-charge headroom, forced grid charging must stop at the configured SOC cap, and solar must remain allowed above it.
+
+Current approach reviewed:
+Replace the horizon-wide initial-SOC grid-charge quota with chronological per-period headroom in the LP, greedy fallback, deadline reachability, schedule emission, and reconciliation.
+
+How to use this guidance:
+- Advisory only; verify all algebra against the live optimizer.
+- Preserve LP/greedy parity and the original user-visible semantics.
+- Do not commit this guidance with the fix.
+
+============================================================
+First Prompt
+============================================================
+Review whether a continuous constraint E[t] + efficiency*dt*grid_charge[t] <= cap_energy can replace the aggregate quota while allowing starting SOC and solar above the cap, prior discharge to reopen headroom, and no same-slot laundering. Compare it with cumulative-budget, binary, and iterative approaches; identify affected paths and tests.
+
+First Answer
+============================================================
+Recommendation: adjust. The answer correctly identified that the unconditional continuous row would force E[t] <= cap even when grid_charge[t] is zero, making starting/solar SOC above the cap infeasible. It correctly required removal of global remaining-budget logic from LP, greedy, reachability, emission, and reconciliation, and recommended per-slot running-SOC headroom outside the LP.
+
+The answer then proposed a delta-based continuous row. That algebra was rejected locally because it simplifies to the same infeasible absolute row; its alternative cap_energy + E0 right-hand side also grants incorrect excess headroom.
+
+============================================================
+Follow-Up Prompt
+============================================================
+Challenge the invalid delta algebra and review the exact binary formulation:
+  g[t] <= Gmax[t] * y[t]
+  E[t] + eff*dt*g[t] + M_energy*y[t] <= capE + M_energy
+  M_energy = capacity - capE
+with y=1 meaning grid charge is active. Request exact offsets, bounds, integrality, fallback changes, tests, and 576-slot performance checks.
+
+Follow-Up Answer
+============================================================
+Recommendation: keep the binary formulation. Add one binary per coarsened LP period after the existing optional grid-direction block, append both binary ranges to the HiGHS integer-index list, retain the existing grid-charge source-accounting rows, remove every global quota, and use chronological running-SOC headroom in greedy/reachability/emission/reconciliation. Use a tight energy big-M of capacity - capE and the existing per-period charge limit for the power big-M. Validate the reproduced start-above-cap -> export -> cheap recharge -> solar-above-cap deadline scenario, solar-above-cap blocking until later discharge, cheapest-slot selection, same-period laundering protection, coarse periods, and full 576-slot solve time.
+
+The answer printed the conditional headroom row with the opposite binary sign while also defining y=1 as active. The locally verified row is therefore the prompt's form above: +M*y on the left and capE+M on the right. With y=0, g=0 and E may reach full capacity; with y=1, E + stored grid charge is limited to capE.
