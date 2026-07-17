@@ -2,6 +2,7 @@
 from datetime import timedelta
 import json
 from pathlib import Path
+from urllib.parse import urlencode
 
 # Integration domain
 DOMAIN = "power_sync"
@@ -30,6 +31,7 @@ AMBER_WEBSOCKET_START_TIMEOUT_SECONDS = 15.0
 CONF_AMBER_API_TOKEN = "amber_api_token"
 CONF_AMBER_SITE_ID = "amber_site_id"
 CONF_TESLEMETRY_API_TOKEN = "teslemetry_api_token"
+CONF_POWERSYNC_CLIENT_INSTANCE_ID = "powersync_client_instance_id"
 CONF_TESLA_ENERGY_SITE_ID = "tesla_energy_site_id"
 CONF_AUTO_SYNC_ENABLED = "auto_sync_enabled"
 CONF_AUTO_UPDATE_ENABLED = "auto_update_enabled"
@@ -1234,10 +1236,21 @@ FLEET_API_TOKEN_URL = "https://auth.tesla.com/oauth2/v3/token"
 # to monitoring or actuating from the config entry. The coordinator uses the
 # resulting psync_xxx token against the proxy at /api/proxy/api/1/...
 POWERSYNC_API_BASE_URL = "https://api.powersync.cc/api/proxy"
-POWERSYNC_AUTH_START_URL = (
-    "https://api.powersync.cc/auth/start"
-    "?client_type=home_assistant&control_mode=actuating"
-)
+POWERSYNC_AUTH_START_BASE_URL = "https://api.powersync.cc/auth/start"
+
+
+def powersync_auth_start_url(client_instance_id: str | None = None) -> str:
+    """Build the copy/paste OAuth URL for one stable HA config entry."""
+    params = {
+        "client_type": "home_assistant",
+        "control_mode": "actuating",
+    }
+    if client_instance_id:
+        params["client_instance_id"] = client_instance_id
+    return f"{POWERSYNC_AUTH_START_BASE_URL}?{urlencode(params)}"
+
+
+POWERSYNC_AUTH_START_URL = powersync_auth_start_url()
 POWERSYNC_AUTH_ME_URL = "https://api.powersync.cc/auth/me"
 
 # PowerSync Cloud energy-flow reporter (opt-in) — pushes local grid/solar/

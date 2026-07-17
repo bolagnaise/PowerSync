@@ -47,6 +47,7 @@ from .const import (
     FLOW_POWER_KWATCH_REGIONS,
     CONF_FLEET_API_BASE_URL,
     CONF_MONITORING_MODE,
+    CONF_POWERSYNC_CLIENT_INSTANCE_ID,
     TESLA_SITE_INFO_CACHE_TTL_SECONDS,
     CONF_SIGENERGY_CHARGER_ENABLED,
     CONF_SIGENERGY_CHARGER_TYPE,
@@ -2573,6 +2574,14 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                         )
                     )
             headers["X-PowerSync-Client-Type"] = "home_assistant"
+            if self._entry_id:
+                entry = self.hass.config_entries.async_get_entry(self._entry_id)
+                client_instance_id = (
+                    entry.data.get(CONF_POWERSYNC_CLIENT_INSTANCE_ID)
+                    if entry
+                    else None
+                ) or self._entry_id
+                headers["X-PowerSync-Client-Instance-Id"] = client_instance_id
             headers["X-PowerSync-Control-Mode"] = (
                 "monitoring" if monitoring_mode else "actuating"
             )

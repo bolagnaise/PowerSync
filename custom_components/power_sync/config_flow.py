@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from uuid import uuid4
 
 import aiohttp
 import voluptuous as vol
@@ -53,6 +54,7 @@ from .const import (
     CONF_CLOUD_FLOW_LOAD_ENTITY,
     CONF_CLOUD_FLOW_INVERT_GRID,
     CONF_TESLEMETRY_API_TOKEN,
+    CONF_POWERSYNC_CLIENT_INSTANCE_ID,
     CONF_TESLA_ENERGY_SITE_ID,
     CONF_POWERWALL_LOCAL_IP,
     CONF_POWERWALL_LOCAL_PAIRED,
@@ -84,6 +86,7 @@ from .const import (
     CONF_FLEET_API_BASE_URL,
     POWERSYNC_API_BASE_URL,
     POWERSYNC_AUTH_START_URL,
+    powersync_auth_start_url,
     POWERSYNC_AUTH_ME_URL,
     # Battery system selection
     CONF_BATTERY_SYSTEM,
@@ -1754,6 +1757,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._amber_data: dict[str, Any] = {}
         self._amber_sites: list[dict[str, Any]] = []
         self._teslemetry_data: dict[str, Any] = {}
+        self._powersync_client_instance_id = uuid4().hex
         self._tesla_sites: list[dict[str, Any]] = []
         self._site_data: dict[str, Any] = {}
         self._tesla_fleet_available: bool = False
@@ -1861,6 +1865,12 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         **self._reauth_entry.data,
                         CONF_TESLEMETRY_API_TOKEN: powersync_token,
                         CONF_TESLA_API_PROVIDER: TESLA_PROVIDER_POWERSYNC,
+                        CONF_POWERSYNC_CLIENT_INSTANCE_ID: (
+                            self._reauth_entry.data.get(
+                                CONF_POWERSYNC_CLIENT_INSTANCE_ID
+                            )
+                            or self._reauth_entry.entry_id
+                        ),
                     }
                     self.hass.config_entries.async_update_entry(
                         self._reauth_entry, data=new_data
@@ -1882,7 +1892,12 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
             description_placeholders={
-                "auth_url": POWERSYNC_AUTH_START_URL,
+                "auth_url": powersync_auth_start_url(
+                    self._reauth_entry.data.get(
+                        CONF_POWERSYNC_CLIENT_INSTANCE_ID
+                    )
+                    or self._reauth_entry.entry_id
+                ),
             },
         )
 
@@ -5828,6 +5843,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._teslemetry_data = {
                         CONF_TESLEMETRY_API_TOKEN: powersync_token,
                         CONF_TESLA_API_PROVIDER: TESLA_PROVIDER_POWERSYNC,
+                        CONF_POWERSYNC_CLIENT_INSTANCE_ID: (
+                            self._powersync_client_instance_id
+                        ),
                     }
                     self._tesla_sites = validation_result.get("sites", [])
                     return await self.async_step_site_selection()
@@ -5848,7 +5866,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=data_schema,
             errors=errors,
             description_placeholders={
-                "auth_url": POWERSYNC_AUTH_START_URL,
+                "auth_url": powersync_auth_start_url(
+                    self._powersync_client_instance_id
+                ),
             },
         )
 

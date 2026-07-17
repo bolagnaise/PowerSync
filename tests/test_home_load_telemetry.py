@@ -116,6 +116,7 @@ sys.modules.pop("power_sync.coordinator", None)
 from power_sync.coordinator import DOMAIN, TeslaEnergyCoordinator  # noqa: E402
 from power_sync.const import (  # noqa: E402
     POWERSYNC_AUTH_START_URL,
+    powersync_auth_start_url,
     TESLA_PROVIDER_POWERSYNC,
     TESLA_PROVIDER_TESLEMETRY,
 )
@@ -381,6 +382,7 @@ def test_powersync_proxy_headers_report_effective_ha_control_mode(
     headers = coordinator._tesla_headers("psync_test_token")
 
     assert headers["X-PowerSync-Client-Type"] == "home_assistant"
+    assert headers["X-PowerSync-Client-Instance-Id"] == "header-entry"
     assert headers["X-PowerSync-Control-Mode"] == expected_mode
     assert int(headers["X-PowerSync-Control-Observed-At"]) > 0
 
@@ -394,6 +396,7 @@ def test_non_powersync_tesla_headers_do_not_leak_cloud_ownership_metadata():
     headers = coordinator._tesla_headers("teslemetry_test_token")
 
     assert "X-PowerSync-Client-Type" not in headers
+    assert "X-PowerSync-Client-Instance-Id" not in headers
     assert "X-PowerSync-Control-Mode" not in headers
     assert "X-PowerSync-Control-Observed-At" not in headers
 
@@ -401,3 +404,10 @@ def test_non_powersync_tesla_headers_do_not_leak_cloud_ownership_metadata():
 def test_powersync_copy_paste_auth_url_is_explicitly_home_assistant():
     assert "client_type=home_assistant" in POWERSYNC_AUTH_START_URL
     assert "control_mode=actuating" in POWERSYNC_AUTH_START_URL
+
+
+def test_powersync_copy_paste_auth_url_carries_stable_config_entry_identity():
+    auth_url = powersync_auth_start_url("ha-entry-instance-01")
+
+    assert "client_instance_id=ha-entry-instance-01" in auth_url
+    assert "client_type=home_assistant" in auth_url
