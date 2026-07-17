@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import symtable
 from pathlib import Path
 
 
@@ -10,6 +11,19 @@ CONST_PATH = ROOT / "custom_components" / "power_sync" / "const.py"
 CONFIG_FLOW_PATH = ROOT / "custom_components" / "power_sync" / "config_flow.py"
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
 COORDINATOR_PATH = ROOT / "custom_components" / "power_sync" / "optimization" / "coordinator.py"
+
+
+def test_custom_grid_entity_constant_remains_global_during_setup():
+    """A nested import must not shadow this constant before custom setup uses it."""
+    module_table = symtable.symtable(INIT_PATH.read_text(), str(INIT_PATH), "exec")
+    setup_table = next(
+        child for child in module_table.get_children() if child.get_name() == "async_setup_entry"
+    )
+
+    symbol = setup_table.lookup("CONF_CUSTOM_GRID_POWER_ENTITY")
+
+    assert symbol.is_global()
+    assert not symbol.is_local()
 
 
 def test_custom_battery_system_is_setup_stage_with_entities():

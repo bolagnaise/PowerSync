@@ -19994,7 +19994,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_COVAU_EXPORT_ENERGY_ENTITY,
             CONF_COVAU_IMPORT_ENERGY_ENTITY,
             CONF_COVAU_PLAN_SNAPSHOT,
-            CONF_CUSTOM_GRID_POWER_ENTITY,
         )
         from .covau import CovaUPlanSnapshot, CovaUQuotaRuntime
 
