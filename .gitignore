@@ -19,6 +19,7 @@ app.db
 # IDE
 .vscode/
 .idea/
+.agents/
 .claude/
 *.swp
 *.swo

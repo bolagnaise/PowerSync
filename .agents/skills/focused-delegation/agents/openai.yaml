@@ -1,4 +1,0 @@
-interface:
-  display_name: "Focused Delegation"
-  short_description: "Delegate complex PowerSync work without broad fan-out"
-  default_prompt: "Use focused delegation for this task, keeping subagents narrow and performing a final integrated review."
