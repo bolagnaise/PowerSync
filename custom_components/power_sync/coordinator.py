@@ -904,6 +904,52 @@ def _merge_amber_forecasts(forecast_5min: list, forecast_30min: list) -> list:
     return list(forecast_5min) + filtered_30min
 
 
+def _merge_kwatch_forecasts(forecast_5min: list, forecast_30min: list) -> list:
+    """Use 5-minute coverage only before the first 30-minute interval.
+
+    KWatch's forecast endpoints can refresh at slightly different times.  A
+    non-empty 30-minute response may therefore begin after the already
+    available 5-minute forecast.  Keep those earlier high-resolution entries,
+    then let the 30-minute feed own its complete horizon and overlap boundary.
+    """
+    if not forecast_5min:
+        return forecast_30min or []
+    if not forecast_30min:
+        return forecast_5min or []
+
+    first_30min_start = None
+    for entry in forecast_30min:
+        nem_time = entry.get("nemTime")
+        if not nem_time:
+            continue
+        try:
+            interval_end = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
+            interval_start = interval_end - timedelta(
+                minutes=float(entry.get("duration", 30))
+            )
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if first_30min_start is None or interval_start < first_30min_start:
+            first_30min_start = interval_start
+
+    if first_30min_start is None:
+        return forecast_30min
+
+    earlier_5min = []
+    for entry in forecast_5min:
+        nem_time = entry.get("nemTime")
+        if not nem_time:
+            continue
+        try:
+            interval_end = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if interval_end <= first_30min_start:
+            earlier_5min.append(entry)
+
+    return earlier_5min + list(forecast_30min)
+
+
 class AmberPriceCoordinator(DataUpdateCoordinator):
     """Coordinator to fetch Amber electricity price data."""
 
@@ -3544,8 +3590,7 @@ class FlowPowerKWatchPriceCoordinator(DataUpdateCoordinator):
             default_duration=5,
         )
 
-        if not forecast:
-            forecast = forecast_5min
+        forecast = _merge_kwatch_forecasts(forecast_5min, forecast)
         if not forecast:
             raise UpdateFailed(f"No KWatch forecast prices returned for {self.region}")
 

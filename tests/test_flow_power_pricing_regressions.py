@@ -310,6 +310,11 @@ def _kwatch_coordinator_test_env():
     }
     exec(
         "from __future__ import annotations\n"
+        + _function_source(COMPONENT_ROOT / "coordinator.py", "_merge_kwatch_forecasts"),
+        namespace,
+    )
+    exec(
+        "from __future__ import annotations\n"
         + _class_source(COMPONENT_ROOT / "coordinator.py", "FlowPowerKWatchPriceCoordinator"),
         namespace,
     )
@@ -712,6 +717,115 @@ def test_flow_power_kwatch_success_does_not_call_aemo_fallback():
         assert data["kwatch_last_attempt"] is not None
         assert data["kwatch_last_success"] is not None
         assert session.aemo_fallback.refresh_count == 0
+    finally:
+        restore()
+
+
+def test_flow_power_kwatch_uses_5min_forecast_before_first_30min_interval():
+    """Near-term KWatch data must bridge a delayed first 30-minute interval."""
+    cls, _api_error, _update_failed, restore = _kwatch_coordinator_test_env()
+    try:
+        # These timestamps are Amber-compatible interval ends, matching the
+        # production converter: the first 30-minute interval starts at 10:10.
+        session = SimpleNamespace(
+            kwatch_client=_FakeKWatchClient(
+                forecast_5=[
+                    {
+                        "nemTime": "2026-06-08T10:05:00+10:00",
+                        "perKwh": 11.0,
+                        "duration": 5,
+                    },
+                    {
+                        "nemTime": "2026-06-08T10:10:00+10:00",
+                        "perKwh": 12.0,
+                        "duration": 5,
+                    },
+                    {
+                        "nemTime": "2026-06-08T10:15:00+10:00",
+                        "perKwh": 99.0,
+                        "duration": 5,
+                    },
+                ],
+                forecast_30=[
+                    {
+                        "nemTime": "2026-06-08T10:40:00+10:00",
+                        "perKwh": 20.0,
+                        "duration": 30,
+                    },
+                    {
+                        "nemTime": "2026-06-08T11:10:00+10:00",
+                        "perKwh": 21.0,
+                        "duration": 30,
+                    },
+                ],
+            ),
+            aemo_data=_aemo_data(),
+        )
+        coordinator = cls(SimpleNamespace(), "QLD1", "secret-key", session)
+
+        data = asyncio.run(coordinator._async_update_data())
+        general = [
+            (entry["nemTime"], entry["perKwh"])
+            for entry in data["forecast"]
+            if entry["channelType"] == "general"
+        ]
+
+        assert general == [
+            ("2026-06-08T10:05:00+10:00", 11.0),
+            ("2026-06-08T10:10:00+10:00", 12.0),
+            ("2026-06-08T10:40:00+10:00", 20.0),
+            ("2026-06-08T11:10:00+10:00", 21.0),
+        ]
+    finally:
+        restore()
+
+
+def test_flow_power_kwatch_does_not_overlap_complete_30min_forecast():
+    """Five-minute entries must not duplicate an already covered half-hour."""
+    cls, _api_error, _update_failed, restore = _kwatch_coordinator_test_env()
+    try:
+        session = SimpleNamespace(
+            kwatch_client=_FakeKWatchClient(
+                forecast_5=[
+                    {
+                        "nemTime": "2026-06-08T10:05:00+10:00",
+                        "perKwh": 11.0,
+                        "duration": 5,
+                    },
+                    {
+                        "nemTime": "2026-06-08T10:10:00+10:00",
+                        "perKwh": 12.0,
+                        "duration": 5,
+                    },
+                ],
+                forecast_30=[
+                    {
+                        "nemTime": "2026-06-08T10:30:00+10:00",
+                        "perKwh": 20.0,
+                        "duration": 30,
+                    },
+                    {
+                        "nemTime": "2026-06-08T11:00:00+10:00",
+                        "perKwh": 21.0,
+                        "duration": 30,
+                    },
+                ],
+            ),
+            aemo_data=_aemo_data(),
+        )
+        coordinator = cls(SimpleNamespace(), "QLD1", "secret-key", session)
+
+        data = asyncio.run(coordinator._async_update_data())
+        general = [
+            (entry["nemTime"], entry["perKwh"])
+            for entry in data["forecast"]
+            if entry["channelType"] == "general"
+        ]
+
+        assert general == [
+            ("2026-06-08T10:30:00+10:00", 20.0),
+            ("2026-06-08T11:00:00+10:00", 21.0),
+        ]
     finally:
         restore()
 
