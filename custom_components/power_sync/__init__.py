@@ -25091,8 +25091,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "cancel_hardware_refresh_timer": None,
     }
 
-    # Hold-SoC mode: battery locked at current SoC — blocks charge + discharge.
-    # Duration-based like force charge/discharge; auto-restores on expiry.
+    # Hold-SoC mode: brand-specific battery movement suppression. Some brands
+    # can block both directions; others only block discharge while still
+    # accepting excess solar. Duration-based with auto-restore on expiry.
     hold_soc_state = {
         "active": False,
         "saved_operation_mode": None,
@@ -25163,6 +25164,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "expires_at": None,
                 "duration": 0,
             })
+
+    def _clear_hold_soc_state() -> None:
+        """Clear the user-facing Hold SoC state after hardware restore succeeds."""
+        if hold_soc_state.get("cancel_expiry_timer"):
+            try:
+                hold_soc_state["cancel_expiry_timer"]()
+            except Exception:
+                pass
+        hold_soc_state["active"] = False
+        hold_soc_state["expires_at"] = None
+        hold_soc_state["cancel_expiry_timer"] = None
+        async_dispatcher_send(hass, f"{DOMAIN}_hold_soc_state", {
+            "active": False,
+        })
 
     # Store force states in hass.data so TariffPriceView can access them
     # This allows the endpoint to return real tariff instead of fake ML tariff
@@ -25487,15 +25502,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                     try:
                         await hass.services.async_call(
-                            DOMAIN, SERVICE_RESTORE_NORMAL, {"source": "user"}, blocking=True
+                            DOMAIN,
+                            SERVICE_RESTORE_NORMAL,
+                            {"source": "hold_soc_cleanup", "_force_restore": True},
+                            blocking=True,
                         )
-                        _LOGGER.info("✅ Restored normal operation after expired Hold SoC")
+                        if hold_soc_state.get("active"):
+                            _LOGGER.warning(
+                                "Expired Hold SoC restore did not complete; preserving state for retry"
+                            )
+                        else:
+                            _LOGGER.info("✅ Restored normal operation after expired Hold SoC")
                     except Exception as e:
                         _LOGGER.error(f"Error restoring after expired Hold SoC: {e}", exc_info=True)
 
-                    stored_data = await store.async_load() or {}
-                    stored_data["force_mode_state"] = None
-                    await store.async_save(stored_data)
+                    if not hold_soc_state.get("active"):
+                        stored_data = await store.async_load() or {}
+                        stored_data["force_mode_state"] = None
+                        await store.async_save(stored_data)
                 else:
                     # Hold SoC is still active - the inverter/gateway itself
                     # stays in standby/backup mode across a restart (that's
@@ -25527,7 +25551,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             return
                         if hold_soc_state["active"]:
                             _LOGGER.info("⏰ Hold SoC expired (restored timer), auto-restoring")
-                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+                            await hass.services.async_call(
+                                DOMAIN,
+                                SERVICE_RESTORE_NORMAL,
+                                {"source": "hold_soc_cleanup", "_force_restore": True},
+                                blocking=True,
+                            )
 
                     hold_soc_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
                         hass, auto_restore_hold_soc_persisted, expires_at
@@ -29263,6 +29292,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         restore_was_force_discharging = bool(force_discharge_state.get("active"))
         restore_was_force_charging = bool(force_charge_state.get("active"))
         restore_was_hold_soc = bool(hold_soc_state.get("active"))
+        is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
         force_mode_cleanup_restore = restore_was_force_discharging or restore_was_force_charging
         sigenergy_native_control = _sigenergy_restore_native_control(call)
         allow_monitoring_restore = bool(
@@ -29290,21 +29320,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # These are mobile-only visual flags; clearing them on user-sourced
         # restores keeps the Controls screen in sync without forcing the
         # optimizer to touch them.
-        if source in ("user", "manual", "unknown"):
+        if source in ("user", "manual", "unknown", "hold_soc_cleanup"):
             if self_consumption_state.get("active"):
                 _clear_self_consumption_state()
-            if hold_soc_state.get("active"):
-                if hold_soc_state.get("cancel_expiry_timer"):
-                    try:
-                        hold_soc_state["cancel_expiry_timer"]()
-                    except Exception:
-                        pass
-                hold_soc_state["active"] = False
-                hold_soc_state["expires_at"] = None
-                hold_soc_state["cancel_expiry_timer"] = None
-                async_dispatcher_send(hass, f"{DOMAIN}_hold_soc_state", {
-                    "active": False,
-                })
+            # GoodWe entity restore can report False without raising. Keep its
+            # Hold state visible and persisted until EMS auto succeeds.
+            if hold_soc_state.get("active") and not is_goodwe:
+                _clear_hold_soc_state()
 
         # No cooldown: a Stop Charge / Stop Discharge press is a one-shot
         # override that washes through on the next 5-min LP cycle if the
@@ -29649,16 +29671,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
 
         # Check if this is a GoodWe system
-        is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
         if is_goodwe:
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 goodwe_coord = entry_data.get("goodwe_coordinator")
-                if goodwe_coord:
-                    await goodwe_coord.restore_normal()
+                restore_succeeded = bool(
+                    goodwe_coord and await goodwe_coord.restore_normal()
+                )
+
+                if not restore_succeeded:
+                    _LOGGER.error(
+                        "GoodWe restore normal returned False; preserving active control state for retry"
+                    )
+                    return
 
                 if _restore_superseded("GoodWe restore"):
                     return
+
+                if restore_was_hold_soc:
+                    _clear_hold_soc_state()
 
                 force_charge_state["active"] = False
                 force_discharge_state["active"] = False
@@ -30607,10 +30638,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_hold_battery_soc(call: ServiceCall) -> None:
         """Hold current battery SoC for a duration.
 
-        Locks the battery at its current state of charge by routing through
-        each brand's `set_backup_mode` coordinator method (standby on
-        Sigenergy/AlphaESS, min_soc/Feed-In on FoxESS, ECO on GoodWe,
-        autonomous+backup_reserve on Tesla).
+        Suppresses battery movement using each brand's `set_backup_mode`
+        coordinator method. Exact behavior is brand-specific: GoodWe EMS
+        Conserve blocks on-grid discharge but may still accept excess solar.
 
         Duration-based with auto-restore via `restore_normal` on expiry.
         Source-aware: optimizer-sourced calls skip state management so the
@@ -30754,7 +30784,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             if hold_soc_state["active"]:
                 _LOGGER.info("⏰ Hold SoC expired, auto-restoring")
-                await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+                await hass.services.async_call(
+                    DOMAIN,
+                    SERVICE_RESTORE_NORMAL,
+                    {"source": "hold_soc_cleanup", "_force_restore": True},
+                    blocking=True,
+                )
 
         hold_soc_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
             hass, auto_restore_hold_soc, hold_soc_state["expires_at"],

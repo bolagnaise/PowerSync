@@ -1237,6 +1237,14 @@ class BatteryOptimizer:
         first_grid_charge_allowed = grid_charge_allowed[start]
         first_priority_export = priority_export_slots[start]
         first_mode = mode_slots[start]
+        import_group_ids = self._quota_import_group_ids or []
+        export_group_ids = self._quota_export_group_ids or []
+        first_import_group = (
+            import_group_ids[start] if start < len(import_group_ids) else None
+        )
+        first_export_group = (
+            export_group_ids[start] if start < len(export_group_ids) else None
+        )
         min_required_self_use = max_required_self_use = required_self_use_kw[start]
         first_import_free = import_prices[start] <= 0.001
         first_export_free = export_prices[start] <= 0.001
@@ -1282,6 +1290,14 @@ class BatteryOptimizer:
                 or grid_charge_allowed[idx] != first_grid_charge_allowed
                 or priority_export_slots[idx] != first_priority_export
                 or mode_slots[idx] != first_mode
+                or (
+                    import_group_ids[idx] if idx < len(import_group_ids) else None
+                )
+                != first_import_group
+                or (
+                    export_group_ids[idx] if idx < len(export_group_ids) else None
+                )
+                != first_export_group
                 or (import_prices[idx] <= 0.001) != first_import_free
                 or (export_prices[idx] <= 0.001) != first_export_free
                 or (export_bonus_prices[idx] <= 0.001) != first_bonus_free

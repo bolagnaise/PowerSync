@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import ast
+import asyncio
+import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1717,6 +1720,67 @@ def test_goodwe_entity_mode_prefers_solar_first_charge_and_export_discharge_mode
     assert "general_mode" in ems_restore_source
     assert '"options"' in attempts_source
     assert "fallback_option" in ems_source
+
+
+def test_goodwe_hold_soc_dispatches_conserve_and_rejects_unverified_udp_path():
+    source = COORDINATOR_PATH.read_text()
+    tree = ast.parse(source)
+    method = _find_class_method(tree, "GoodWeEnergyCoordinator", "set_backup_mode")
+    method_source = ast.get_source_segment(source, method)
+    assert method_source is not None
+
+    warnings: list[str] = []
+    namespace = {
+        "_LOGGER": SimpleNamespace(
+            warning=lambda message, *args: warnings.append(message % args if args else message)
+        )
+    }
+    exec(textwrap.dedent(method_source), namespace)
+    set_backup_mode = namespace["set_backup_mode"]
+
+    calls: list[tuple[str, int]] = []
+
+    async def _ems_set_mode(mode: str, power_w: int) -> bool:
+        calls.append((mode, power_w))
+        return True
+
+    ems_self = SimpleNamespace(_ems_prefix="goodwe", _ems_set_mode=_ems_set_mode)
+    assert asyncio.run(set_backup_mode(ems_self)) is True
+    assert calls == [("conserve", 0)]
+
+    udp_self = SimpleNamespace(_ems_prefix=None)
+    assert asyncio.run(set_backup_mode(udp_self)) is False
+    assert warnings == [
+        "GoodWe Hold SoC requires EMS entity control; direct UDP hold semantics are not verified"
+    ]
+
+
+def test_goodwe_hold_cleanup_waits_for_success_and_bypasses_monitoring_gate():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    restore = ast.get_source_segment(source, _find_function(tree, "handle_restore_normal"))
+    hold = ast.get_source_segment(source, _find_function(tree, "handle_hold_battery_soc"))
+    persisted = ast.get_source_segment(
+        source, _find_function(tree, "restore_force_mode_from_persistence")
+    )
+
+    assert restore is not None
+    assert hold is not None
+    assert persisted is not None
+    cleanup_payload = '{"source": "hold_soc_cleanup", "_force_restore": True}'
+    assert cleanup_payload in hold
+    assert cleanup_payload in persisted
+    assert 'source in ("user", "manual", "unknown", "hold_soc_cleanup")' in restore
+
+    goodwe_start = restore.index("if is_goodwe:")
+    goodwe_end = restore.index("# Check if this is an AlphaESS system", goodwe_start)
+    goodwe_branch = restore[goodwe_start:goodwe_end]
+    assert "restore_succeeded = bool(" in goodwe_branch
+    assert "if not restore_succeeded:" in goodwe_branch
+    assert "preserving active control state for retry" in goodwe_branch
+    assert goodwe_branch.index("if not restore_succeeded:") < goodwe_branch.index(
+        "_clear_hold_soc_state()"
+    )
 
 
 def test_goodwe_entity_telemetry_uses_direct_polling_only_for_rated_power_probe():

@@ -160,6 +160,39 @@ def test_highs_allocates_each_daily_import_and_export_quota_cap_row(optimizer_mo
     assert result.solver_used == "highs"
 
 
+def test_lp_periods_split_at_quota_group_boundary_after_near_horizon(optimizer_module):
+    n = 90
+    boundary = 75  # Inside the 30-minute coarse period covering slots 72-78.
+    groups = ["day-1"] * boundary + ["day-2"] * (n - boundary)
+    optimizer = _optimizer(optimizer_module)
+    optimizer.set_quota_bonus_groups(
+        import_group_ids=groups,
+        import_caps_by_group={"day-1": 25.0, "day-2": 25.0},
+        export_group_ids=groups,
+        export_caps_by_group={"day-1": 15.0, "day-2": 15.0},
+    )
+
+    periods = optimizer._build_lp_periods(
+        n,
+        [0.35] * n,
+        [0.05] * n,
+        [0.0] * n,
+        [0.0] * n,
+        [True] * n,
+        [False] * n,
+        [True] * n,
+        [0.10] * n,
+        [0.35] * n,
+        [True] * n,
+        [None] * n,
+        [0.0] * n,
+    )
+
+    assert any(period.end == boundary for period in periods)
+    assert any(period.start == boundary for period in periods)
+    assert not any(period.start < boundary < period.end for period in periods)
+
+
 @pytest.mark.parametrize("use_highs", [False, True])
 def test_daily_export_bonus_groups_do_not_share_caps(optimizer_module, use_highs):
     if use_highs and not optimizer_module.HIGHS_AVAILABLE:

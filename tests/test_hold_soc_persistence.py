@@ -137,11 +137,12 @@ def test_restore_force_mode_from_persistence_handles_hold_soc_mode():
     assert 'hold_soc_state["cancel_expiry_timer"] = async_track_point_in_utc_time(' in hold_section
     assert 'async_dispatcher_send(hass, f"{DOMAIN}_hold_soc_state"' in hold_section
 
-    # Expired: issue the brand restore via restore_normal, source="user",
+    # Expired: issue the brand restore via restore_normal as forced cleanup,
     # using the existing retry-safe handle_restore_normal contract rather
     # than reimplementing retries here.
     assert "if now >= expires_at:" in hold_section
-    assert 'SERVICE_RESTORE_NORMAL, {"source": "user"}, blocking=True' in hold_section
+    assert '{"source": "hold_soc_cleanup", "_force_restore": True}' in hold_section
+    assert 'if not hold_soc_state.get("active"):' in hold_section
     assert 'stored_data["force_mode_state"] = None' in hold_section
 
     # Must return before falling into the charge/discharge-only logic below
@@ -231,11 +232,23 @@ def test_restore_force_mode_from_persistence_hold_soc_expired_restores_normal():
     expires_at = fixed_now - timedelta(minutes=5)  # already expired
 
     service_calls: list[tuple[str, str, dict]] = []
+    active_before_call: list[bool] = []
     errors: list[str] = []
+
+    hold_state = {
+        "active": False,
+        "saved_operation_mode": None,
+        "saved_backup_reserve": None,
+        "expires_at": None,
+        "cancel_expiry_timer": None,
+        "locked_soc": None,
+    }
 
     class _FakeServices:
         async def async_call(self, domain, service, data, blocking=True):
             service_calls.append((domain, service, data))
+            active_before_call.append(hold_state["active"])
+            hold_state["active"] = False
 
     class _FakeStore:
         def __init__(self):
@@ -260,14 +273,7 @@ def test_restore_force_mode_from_persistence_hold_soc_expired_restores_normal():
         "datetime": datetime,
         "dt_util": SimpleNamespace(utcnow=lambda: fixed_now, UTC=timezone.utc),
         "_coerce_force_power_w": lambda v: 0,
-        "hold_soc_state": {
-            "active": False,
-            "saved_operation_mode": None,
-            "saved_backup_reserve": None,
-            "expires_at": None,
-            "cancel_expiry_timer": None,
-            "locked_soc": None,
-        },
+        "hold_soc_state": hold_state,
         "hass": SimpleNamespace(services=_FakeServices()),
         "DOMAIN": "power_sync",
         "SERVICE_RESTORE_NORMAL": "restore_normal",
@@ -285,13 +291,14 @@ def test_restore_force_mode_from_persistence_hold_soc_expired_restores_normal():
     # hold_soc_state is populated before the restore call so
     # handle_restore_normal's restore_was_hold_soc branch can do a full
     # cleanup, mirroring the charge/discharge expired path.
-    assert namespace["hold_soc_state"]["active"] is True
+    assert active_before_call == [True]
+    assert namespace["hold_soc_state"]["active"] is False
 
     assert len(service_calls) == 1
     domain, service, data = service_calls[0]
     assert domain == "power_sync"
     assert service == "restore_normal"
-    assert data == {"source": "user"}
+    assert data == {"source": "hold_soc_cleanup", "_force_restore": True}
 
     assert fake_store.saved == {"force_mode_state": None}
 

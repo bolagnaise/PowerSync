@@ -58,11 +58,13 @@ When the prefix is set, PowerSync routes force charge/discharge through those Ho
 
 - Force charge prefers EMS mode `charge_pv`, which keeps PV contributing first and uses grid power for the shortfall; if unavailable, PowerSync falls back to `charge_battery`
 - Force discharge prefers EMS mode `discharge_battery`, which targets battery discharge power directly
+- Hold SoC uses EMS mode `conserve`, which blocks on-grid battery discharge but still allows excess solar to charge the battery
 - If the GoodWe HA integration does not expose the preferred EMS modes, PowerSync falls back to the older supported modes where available
 - Restore normal sets EMS mode to `auto`
 - Requested power is sent to the EMS power limit entity
 
 Telemetry, backup reserve, and export-limit operations still use PowerSync's GoodWe connection.
+Hold SoC requires the EMS entity path; PowerSync does not issue an unverified direct-UDP hold command.
 
 ## Setup checklist
 
