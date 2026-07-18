@@ -5605,7 +5605,7 @@ def test_spread_export_schedule_flattens_planned_energy_across_allowed_window(op
     spread = coordinator._spread_export_schedule(schedule, [True] * 6)
 
     assert {action.action for action in spread.actions} == {"export"}
-    assert [action.power_w for action in spread.actions] == [1666.7] * 6
+    assert [action.power_w for action in spread.actions] == [1666.6] * 6
     original_wh = sum(action.battery_discharge_w for action in actions) * (5 / 60)
     spread_wh = sum(action.battery_discharge_w for action in spread.actions) * (5 / 60)
     assert spread_wh == pytest.approx(original_wh, abs=0.1)
@@ -5728,6 +5728,119 @@ def test_spread_export_uses_full_window_when_lp_soc_already_reached_floor(opt_mo
     assert spread_wh == pytest.approx(original_wh, abs=0.1)
 
 
+@pytest.mark.parametrize(
+    "auto_apply,profit_max,disable_idle",
+    [
+        (False, False, False),
+        (False, False, True),
+        (False, True, False),
+        (False, True, True),
+        (True, False, False),
+        (True, False, True),
+        (True, True, False),
+        (True, True, True),
+    ],
+)
+def test_spread_export_reserve_and_home_load_use_full_window_in_all_modes(
+    opt_module,
+    auto_apply,
+    profit_max,
+    disable_idle,
+):
+    coordinator = _coordinator(opt_module, "globird", profit_max=profit_max)
+    coordinator.battery_system = "sungrow"
+    coordinator._auto_apply_reserve_enabled = auto_apply
+    coordinator._config.auto_apply_reserve_enabled = auto_apply
+    coordinator._config.profit_max_enabled = profit_max
+    coordinator._config.disable_idle_enabled = disable_idle
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.battery_capacity_wh = 20000
+    coordinator._config.max_discharge_w = 7900
+    coordinator._config.max_grid_export_w = 5000
+    coordinator._optimizer = SimpleNamespace(efficiency=0.92)
+    start = datetime(2026, 7, 18, 18, 0, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start - timedelta(minutes=5),
+            action="self_consumption",
+            power_w=0,
+            soc=0.72,
+            battery_discharge_w=0,
+        )
+    ]
+    actions.extend(
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="export" if idx < 18 else "self_consumption",
+            power_w=3000 if idx < 18 else 1500,
+            soc=max(0.20, 0.72 - idx * 0.02),
+            battery_discharge_w=4500 if idx < 18 else 1500,
+        )
+        for idx in range(24)
+    )
+    schedule = opt_module.OptimizationSchedule(actions, 0, 0, start)
+
+    spread = coordinator._spread_export_schedule(
+        schedule,
+        [False] + [True] * 24,
+        export_reserve_floor=0.39,
+    )
+
+    window = spread.actions[1:]
+    assert [action.action for action in window] == ["export"] * 24
+    assert [action.power_w for action in window] == [1536.0] * 24
+    assert [action.battery_discharge_w for action in window] == [3036.0] * 24
+    assert min(action.soc for action in window) >= 0.39
+    assert window[-1].soc == pytest.approx(0.39, abs=0.0001)
+    spread_export_wh = sum(action.power_w for action in window) * (5 / 60)
+    original_export_wh = sum(action.power_w for action in actions[1:19]) * (5 / 60)
+    assert spread_export_wh == pytest.approx(3072.0, abs=0.1)
+    assert spread_export_wh < original_export_wh
+
+
+def test_spread_export_emits_none_when_home_load_alone_crosses_floor(opt_module):
+    coordinator = _coordinator(opt_module, "globird", profit_max=True)
+    coordinator.battery_system = "sigenergy"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.battery_capacity_wh = 10000
+    coordinator._config.max_discharge_w = 5000
+    coordinator._config.max_grid_export_w = 5000
+    coordinator._optimizer = SimpleNamespace(efficiency=1.0)
+    start = datetime(2026, 7, 18, 18, 0, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start - timedelta(minutes=5),
+            action="self_consumption",
+            power_w=0,
+            soc=0.42,
+            battery_discharge_w=0,
+        )
+    ]
+    actions.extend(
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="export" if idx < 2 else "self_consumption",
+            power_w=500 if idx < 2 else 1000,
+            soc=0.40,
+            battery_discharge_w=1500 if idx < 2 else 1000,
+        )
+        for idx in range(4)
+    )
+    schedule = opt_module.OptimizationSchedule(actions, 0, 0, start)
+
+    spread = coordinator._spread_export_schedule(
+        schedule,
+        [False] + [True] * 4,
+        export_reserve_floor=0.39,
+    )
+
+    window = spread.actions[1:]
+    assert [action.action for action in window] == ["self_consumption"] * 4
+    assert [action.power_w for action in window] == [1000.0] * 4
+    assert [action.battery_discharge_w for action in window] == [1000.0] * 4
+    assert window[-1].soc == pytest.approx(0.3867, abs=0.0001)
+
+
 def test_spread_export_soc_cursor_includes_charge_before_first_export(opt_module):
     coordinator = _coordinator(opt_module, "globird", profit_max=True)
     coordinator.battery_system = "sigenergy"
@@ -5832,7 +5945,7 @@ def test_spread_export_schedule_defaults_to_configured_reserve_floor(opt_module)
     )
 
 
-def test_spread_export_schedule_carries_reserve_soc_after_capped_export(opt_module):
+def test_spread_export_schedule_spreads_reserve_limited_energy_across_window(opt_module):
     coordinator = _coordinator(opt_module, "flow_power", profit_max=True)
     coordinator.battery_system = "goodwe"
     coordinator._config.spread_export_enabled = True
@@ -5860,16 +5973,10 @@ def test_spread_export_schedule_carries_reserve_soc_after_capped_export(opt_modu
 
     spread = coordinator._spread_export_schedule(schedule, [True] * 6)
 
-    assert [action.action for action in spread.actions] == [
-        "export",
-        "export",
-        "self_consumption",
-        "self_consumption",
-        "self_consumption",
-        "self_consumption",
-    ]
+    assert [action.action for action in spread.actions] == ["export"] * 6
+    assert [action.power_w for action in spread.actions] == [2000.0] * 6
     assert min(action.soc for action in spread.actions) >= 0.30 - 1e-6
-    assert [action.soc for action in spread.actions[2:]] == [0.30] * 4
+    assert spread.actions[-1].soc == pytest.approx(0.30, abs=0.0001)
 
 
 def test_export_reserve_floor_bridges_after_contiguous_export_run(opt_module):
@@ -6003,15 +6110,13 @@ def test_spread_export_schedule_preserves_home_load_without_export_headroom(opt_
 
     spread = coordinator._spread_export_schedule(schedule, [True, True, True])
 
-    assert spread.actions[0].action == "export"
-    assert spread.actions[0].power_w == 1000.0
-    assert spread.actions[0].battery_discharge_w == 2000.0
-    assert spread.actions[1].action == "self_consumption"
-    assert spread.actions[1].power_w == 5000.0
-    assert spread.actions[1].battery_discharge_w == 5000.0
-    assert spread.actions[2].action == "export"
-    assert spread.actions[2].power_w == 1000.0
-    assert spread.actions[2].battery_discharge_w == 2000.0
+    assert [action.action for action in spread.actions] == ["self_consumption"] * 3
+    assert [action.power_w for action in spread.actions] == [1000.0, 5000.0, 1000.0]
+    assert [action.battery_discharge_w for action in spread.actions] == [
+        1000.0,
+        5000.0,
+        1000.0,
+    ]
 
     coordinator._bridge_short_export_gaps(spread, [0.45, 0.45, 0.45])
 

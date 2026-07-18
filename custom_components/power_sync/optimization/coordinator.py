@@ -7533,73 +7533,87 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else self._config.max_discharge_w
             )
             export_cap_w = float(max(0, export_cap_w))
-            remaining_export_w = export_wh / interval_hours
-            unassigned_positions = list(spread_positions)
-            target_by_position: dict[int, float] = {}
-            while unassigned_positions and remaining_export_w > 0:
-                equal_target_w = remaining_export_w / len(unassigned_positions)
-                constrained_positions = []
-                for pos in unassigned_positions:
-                    home_discharge_w = _battery_home_discharge_w(actions[pos])
-                    headroom_w = min(
-                        export_cap_w,
-                        max(
-                            0.0,
-                            float(self._config.max_discharge_w or 0)
-                            - home_discharge_w,
-                        ),
-                    )
-                    if headroom_w + 0.05 < equal_target_w:
-                        target_by_position[pos] = headroom_w
-                        remaining_export_w -= headroom_w
-                        constrained_positions.append(pos)
-                if not constrained_positions:
-                    for pos in unassigned_positions:
-                        target_by_position[pos] = equal_target_w
-                    remaining_export_w = 0.0
-                    break
-                unassigned_positions = [
-                    pos for pos in unassigned_positions if pos not in constrained_positions
-                ]
-
-            target_by_position = {
-                pos: round(max(0.0, target_by_position.get(pos, 0.0)), 1)
+            spread_position_set = set(spread_positions)
+            headroom_by_position = {
+                pos: min(
+                    export_cap_w,
+                    max(
+                        0.0,
+                        float(self._config.max_discharge_w or 0)
+                        - _battery_home_discharge_w(actions[pos]),
+                    ),
+                )
                 for pos in spread_positions
             }
-            if not any(target_by_position.values()):
-                fallback_soc = _action_soc(start - 1)
-                if fallback_soc is None:
-                    fallback_soc = _action_soc(start)
-                fallback_cursor = fallback_soc
-                for pos in spread_positions:
+            window_start_soc = _action_soc(start - 1)
+            if window_start_soc is None:
+                window_start_soc = _action_soc(start)
+
+            def _rounded_export_target(level_w: float, pos: int) -> float:
+                return round(
+                    max(0.0, min(level_w, headroom_by_position[pos])),
+                    1,
+                )
+
+            def _common_export_level_is_feasible(level_w: float) -> bool:
+                target_export_wh = sum(
+                    _rounded_export_target(level_w, pos) * interval_hours
+                    for pos in spread_positions
+                )
+                if target_export_wh > export_wh + 1e-6:
+                    return False
+
+                candidate_soc = window_start_soc
+                for pos in range(start, end):
                     original = actions[pos]
-                    if getattr(original, "action", None) in ("export", "discharge"):
-                        home_discharge_w = _battery_home_discharge_w(original)
-                        soc_after = (
-                            _advance_discharge_soc(fallback_cursor, home_discharge_w)
-                            if fallback_cursor is not None
-                            else original.soc
-                        )
-                        new_actions[pos] = ScheduleAction(
-                            timestamp=original.timestamp,
-                            action="self_consumption",
-                            power_w=home_discharge_w,
-                            soc=(
-                                round(soc_after, 4)
-                                if fallback_cursor is not None
-                                else original.soc
-                            ),
-                            battery_charge_w=0.0,
-                            battery_discharge_w=home_discharge_w,
-                        )
-                        if fallback_cursor is not None:
-                            fallback_cursor = soc_after
-                continue
+                    if pos not in spread_position_set:
+                        if candidate_soc is not None:
+                            candidate_soc = _advance_action_soc(candidate_soc, original)
+                        continue
+
+                    forced_export_w = _rounded_export_target(level_w, pos)
+                    if candidate_soc is None:
+                        continue
+                    candidate_soc = _advance_discharge_soc(
+                        candidate_soc,
+                        _battery_home_discharge_w(original) + forced_export_w,
+                    )
+                    if (
+                        floor is not None
+                        and forced_export_w > 0
+                        and candidate_soc < floor - 1e-9
+                    ):
+                        return False
+                return True
+
+            # Reserve and forecast-home-load modes may reduce the common export
+            # level, but must not shorten the window. Search one capped water
+            # level against the real sequential SOC path so every eligible slot
+            # either exports for the whole window or none are force-exported.
+            target_by_position = {pos: 0.0 for pos in spread_positions}
+            if spread_positions and all(
+                round(headroom_by_position[pos], 1) > 0
+                for pos in spread_positions
+            ):
+                low_w = 0.0
+                high_w = max(headroom_by_position.values())
+                if _common_export_level_is_feasible(high_w):
+                    low_w = high_w
+                else:
+                    for _ in range(24):
+                        mid_w = (low_w + high_w) / 2.0
+                        if _common_export_level_is_feasible(mid_w):
+                            low_w = mid_w
+                        else:
+                            high_w = mid_w
+                target_by_position = {
+                    pos: _rounded_export_target(low_w, pos)
+                    for pos in spread_positions
+                }
 
             soc_cursor = _action_soc(start - 1)
             if soc_cursor is None:
                 soc_cursor = _action_soc(start)
-            spread_position_set = set(spread_positions)
             for pos in range(start, end):
                 original = actions[pos]
                 if pos not in spread_position_set:
