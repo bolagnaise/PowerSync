@@ -15,6 +15,10 @@ Confidence = Literal["authoritative", "estimated", "unknown"]
 QUOTA_STATE_VERSION = 2
 DEFAULT_CONTINUITY_SECONDS = 10 * 60
 RESET_BASELINE_GRACE_SECONDS = 10 * 60
+INITIAL_BASELINE_UNKNOWN_REASONS = {
+    "first sample arrived after tariff-day reset",
+    "first sample arrived after eligible quota usage could begin",
+}
 
 
 @dataclass(frozen=True)
@@ -148,6 +152,8 @@ class QuotaLedger:
             return 0.0
 
         self.state.source_kind[direction] = "total_increasing"
+        if previous_total is not None and previous_at is not None:
+            self._recover_initial_baseline(direction, previous_at)
 
         if previous_total is None or previous_at is None:
             self.state.last_sample_at[direction] = observed_at.isoformat()
@@ -317,6 +323,23 @@ class QuotaLedger:
         # from the other direction must not accidentally restore confidence.
         # A new tariff-day rollover is the only safe way to re-arm both flags.
         self.state.reset_seen = {"import": False, "export": False}
+
+    def _recover_initial_baseline(
+        self,
+        direction: Direction,
+        first_sample_at: datetime,
+    ) -> None:
+        """Re-evaluate saved pre-window baselines created by older releases."""
+        if (
+            self.state.confidence == "unknown"
+            and self.state.reason in INITIAL_BASELINE_UNKNOWN_REASONS
+            and not self.state.reset_seen.get(direction, False)
+        ):
+            self._establish_baseline(
+                direction,
+                first_sample_at,
+                authoritative=True,
+            )
 
     def _rule(self, rule_id: str) -> QuotaRule:
         for rule in self.rules:

@@ -111,6 +111,31 @@ def test_first_setup_before_quota_windows_establishes_authoritative_baselines() 
     assert ledger.bucket("free").effective_price_c_per_kwh == 0
 
 
+def test_saved_pre_window_unknown_baseline_recovers_after_upgrade() -> None:
+    first_sample = datetime(2026, 7, 14, 8, 59, tzinfo=AEST)
+    state = QuotaLedgerState(
+        tariff_day="2026-07-14",
+        timezone_token="AEST",
+        confidence="unknown",
+        settled_kwh={"free": 0.0, "premium": 0.0},
+        last_meter_kwh={"import": 10.0, "export": 20.0},
+        last_sample_at={
+            "import": first_sample.isoformat(),
+            "export": first_sample.isoformat(),
+        },
+        source_kind={"import": "total_increasing", "export": "total_increasing"},
+        reason="first sample arrived after tariff-day reset",
+    )
+    ledger = QuotaLedger(_rules(), state)
+    after_upgrade = first_sample + timedelta(minutes=1)
+
+    ledger.observe_cumulative("import", 10.0, after_upgrade)
+    ledger.observe_cumulative("export", 20.0, after_upgrade)
+
+    assert ledger.state.confidence == "authoritative"
+    assert ledger.state.reason is None
+
+
 def test_first_setup_at_window_start_is_safe_but_after_start_is_unknown() -> None:
     at_boundary = QuotaLedger(_rules())
     at_start = datetime(2026, 7, 14, 11, 0, tzinfo=AEST)
