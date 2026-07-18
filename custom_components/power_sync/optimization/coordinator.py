@@ -2928,6 +2928,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._load_estimator._temp_alpha is not None
                 if self._load_estimator else False
             ),
+            "history_diagnostics": dict(
+                getattr(self._load_estimator, "_history_diagnostics", {}) or {}
+            ) if self._load_estimator else {},
+            "recent_load_diagnostics": dict(
+                getattr(self._load_estimator, "_recent_load_diagnostics", {}) or {}
+            ) if self._load_estimator else {},
             "away_mode": self.away_mode,
             "away_in_recovery": self._load_estimator._in_recovery if self._load_estimator else False,
             "away_enabled_at": (
@@ -11748,6 +11754,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 data["load_hourly_today_remaining"] = load_summary["hourly_today_remaining"]
                 data["load_hourly_tomorrow"] = load_summary["hourly_tomorrow"]
                 data["load_temperature_adjusted"] = load_summary["temperature_adjusted"]
+                data["load_history_diagnostics"] = load_summary.get(
+                    "history_diagnostics", {}
+                )
+                data["load_recent_diagnostics"] = load_summary.get(
+                    "recent_load_diagnostics", {}
+                )
                 data["load_away_mode"] = load_summary["away_mode"]
                 data["load_away_in_recovery"] = load_summary.get("away_in_recovery", False)
                 data["load_away_enabled_at"] = load_summary.get("away_enabled_at")
@@ -12111,6 +12123,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "load_tomorrow_kwh": load_summary["tomorrow_kwh"],
                 "load_peak_kw": load_summary["peak_kw"],
                 "temperature_adjusted": load_summary["temperature_adjusted"],
+                "history_diagnostics": load_summary.get("history_diagnostics", {}),
+                "recent_load_diagnostics": load_summary.get(
+                    "recent_load_diagnostics", {}
+                ),
                 "away_mode": load_summary["away_mode"],
                 "profit_max_mode": load_summary.get("profit_max_mode", False),
                 "charge_by_time_enabled": load_summary.get("charge_by_time_enabled", False),

@@ -96,7 +96,335 @@ def test_normal_history_fetch_requests_30_days(monkeypatch):
     assert calls["start_time"] == now - timedelta(days=30)
     assert calls["end_time"] == now
     assert calls["entity_ids"] == ["sensor.load"]
-    assert history == [(now - timedelta(days=1), 1200.0)]
+    assert calls["statistics_period"] == "hour"
+    assert calls["statistics_types"] == {"mean"}
+    assert len(history) == 48
+    assert history[0] == (now - timedelta(days=1), 1200.0)
+    assert history[-1] == (now - timedelta(minutes=30), 1200.0)
+
+
+def test_history_merge_uses_statistics_before_raw_cutover(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    statistics = [
+        module.LoadHistoryBucket(
+            start=start + timedelta(hours=hour),
+            energy_wh=500.0,
+            coverage_seconds=3600.0,
+            source="statistics",
+        )
+        for hour in range(4)
+    ]
+    raw = [
+        module.LoadHistoryBucket(
+            start=start + timedelta(hours=2, minutes=30 * half),
+            energy_wh=250.0,
+            coverage_seconds=1800.0,
+            source="states",
+        )
+        for half in range(4)
+    ]
+
+    cutover = module.LoadEstimator._history_cutover(raw)
+    merged = module.LoadEstimator._merge_history_buckets(statistics, raw, cutover)
+
+    assert cutover == start + timedelta(hours=3)
+    assert [bucket.start for bucket in merged] == [
+        start,
+        start + timedelta(hours=1),
+        start + timedelta(hours=2),
+        start + timedelta(hours=3),
+        start + timedelta(hours=3, minutes=30),
+    ]
+    assert [bucket.source for bucket in merged[:3]] == ["statistics"] * 3
+    assert [bucket.source for bucket in merged[3:]] == ["states"] * 2
+
+
+def test_hourly_statistics_split_preserves_energy(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+    buckets = module.LoadEstimator._statistics_to_half_hour_buckets(
+        [{"start": start.timestamp(), "mean": 2.0}],
+        1000.0,
+    )
+
+    assert [bucket.start for bucket in buckets] == [
+        start,
+        start + timedelta(minutes=30),
+    ]
+    assert sum(bucket.energy_wh for bucket in buckets) == 2000.0
+    assert all(bucket.mean_w == 2000.0 for bucket in buckets)
+
+
+def test_recorder_statistics_extend_history_before_raw_retention(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    now = datetime(2026, 5, 9, tzinfo=timezone.utc)
+    calls = {}
+    raw_start = now - timedelta(days=1)
+    statistic_start = now - timedelta(days=20)
+    _install_fake_recorder(
+        monkeypatch,
+        {
+            "sensor.load": [
+                SimpleNamespace(state="1200", last_changed=raw_start),
+            ],
+        },
+        calls,
+        statistics={
+            "sensor.load": [
+                {"start": statistic_start.timestamp(), "mean": 800.0},
+            ],
+        },
+    )
+    hass = SimpleNamespace(
+        states=SimpleNamespace(
+            get=lambda entity_id: SimpleNamespace(
+                attributes={"unit_of_measurement": "W"}
+            )
+        ),
+        async_add_executor_job=_fake_executor,
+    )
+    estimator = module.LoadEstimator(hass, "sensor.load", interval_minutes=5)
+
+    history = _run(estimator._get_load_history())
+
+    assert history[0] == (statistic_start, 800.0)
+    assert history[1] == (statistic_start + timedelta(minutes=30), 800.0)
+    assert any(timestamp >= raw_start + timedelta(hours=1) for timestamp, _ in history)
+    assert estimator._history_diagnostics["history_source"] == "merged"
+    assert estimator._history_diagnostics["history_span_days"] >= 19.0
+
+
+def test_statistics_only_history_remains_usable_when_raw_is_empty(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    now = datetime(2026, 5, 9, tzinfo=timezone.utc)
+    statistic_start = now - timedelta(days=20)
+    calls = {}
+    _install_fake_recorder(
+        monkeypatch,
+        {"sensor.load": []},
+        calls,
+        statistics={
+            "sensor.load": [
+                {"start": statistic_start.timestamp(), "mean": 750.0},
+            ],
+        },
+    )
+    hass = SimpleNamespace(
+        states=SimpleNamespace(
+            get=lambda entity_id: SimpleNamespace(
+                attributes={"unit_of_measurement": "W"}
+            )
+        ),
+        async_add_executor_job=_fake_executor,
+    )
+    estimator = module.LoadEstimator(hass, "sensor.load", interval_minutes=5)
+
+    history = _run(estimator._get_load_history())
+
+    assert history == [
+        (statistic_start, 750.0),
+        (statistic_start + timedelta(minutes=30), 750.0),
+    ]
+    assert estimator._history_diagnostics["history_source"] == "statistics"
+
+
+def test_state_normalization_is_independent_of_update_density(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    sparse = [
+        SimpleNamespace(state="1000", last_changed=start),
+        SimpleNamespace(state="1000", last_changed=start + timedelta(hours=1)),
+    ]
+    dense = [
+        SimpleNamespace(
+            state="1000",
+            last_changed=start + timedelta(minutes=minute),
+        )
+        for minute in range(0, 61, 5)
+    ]
+
+    sparse_buckets = module.LoadEstimator._states_to_half_hour_buckets(
+        sparse, start, start + timedelta(hours=1), 1.0, "states"
+    )
+    dense_buckets = module.LoadEstimator._states_to_half_hour_buckets(
+        dense, start, start + timedelta(hours=1), 1.0, "states"
+    )
+
+    assert [(b.start, round(b.mean_w, 6)) for b in sparse_buckets] == [
+        (b.start, round(b.mean_w, 6)) for b in dense_buckets
+    ]
+    assert [b.energy_wh for b in sparse_buckets] == [500.0, 500.0]
+
+
+def test_state_normalization_does_not_bridge_unavailable_gap(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    states = [
+        SimpleNamespace(state="1000", last_changed=start),
+        SimpleNamespace(
+            state="unavailable",
+            last_changed=start + timedelta(minutes=30),
+        ),
+        SimpleNamespace(state="1000", last_changed=start + timedelta(hours=1)),
+        SimpleNamespace(
+            state="1000",
+            last_changed=start + timedelta(hours=1, minutes=30),
+        ),
+    ]
+
+    buckets = module.LoadEstimator._states_to_half_hour_buckets(
+        states,
+        start,
+        start + timedelta(hours=1, minutes=30),
+        1.0,
+        "states",
+    )
+
+    assert [bucket.start for bucket in buckets] == [
+        start,
+        start + timedelta(hours=1),
+    ]
+    assert [bucket.energy_wh for bucket in buckets] == [500.0, 500.0]
+
+
+def test_baseline_confidence_counts_distinct_dates_not_updates(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    estimator = module.LoadEstimator(SimpleNamespace(), "sensor.load", interval_minutes=5)
+    start = datetime(2026, 7, 18, 19, tzinfo=timezone.utc)
+    same_saturday_updates = [
+        (start - timedelta(days=7) + timedelta(minutes=minute), 1200.0)
+        for minute in range(0, 30, 2)
+    ]
+
+    samples = estimator._distinct_date_samples(same_saturday_updates)
+
+    assert len(samples) == 1
+
+
+def test_recent_daytime_anomaly_does_not_scale_evening_slots(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    estimator = module.LoadEstimator(SimpleNamespace(), "sensor.load", interval_minutes=5)
+    start = datetime(2026, 7, 18, 12, tzinfo=timezone.utc)
+    history = []
+
+    # Prior Thursdays and Fridays establish the exact recent comparison slots.
+    for days_ago in (8, 9, 15, 16, 22, 23, 29):
+        day = start - timedelta(days=days_ago)
+        for half_hour in range(48):
+            history.append(
+                (
+                    day.replace(hour=0, minute=0) + timedelta(minutes=30 * half_hour),
+                    500.0,
+                )
+            )
+
+    # Recent evidence is extreme only around midday; there is no recent
+    # evening evidence, so evening forecast slots must remain neutral.
+    for days_ago in (1, 2):
+        day = start - timedelta(days=days_ago)
+        for half_hour in range(20, 29):
+            history.append(
+                (
+                    day.replace(hour=0, minute=0) + timedelta(minutes=30 * half_hour),
+                    5000.0,
+                )
+            )
+
+    horizon_starts = [start + timedelta(minutes=5 * i) for i in range(24 * 12)]
+    scales = estimator._recent_load_scales(history, start, horizon_starts)
+    scale_19 = scales[int((19 - start.hour) * 12)]
+    scale_20 = scales[int((20 - start.hour) * 12)]
+
+    assert scale_19 == 1.0
+    assert scale_20 == 1.0
+    assert max(scales[:36]) > 1.0
+    assert max(scales) <= 2.5
+
+
+def test_sparse_recent_evidence_cannot_reach_the_scale_cap(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    estimator = module.LoadEstimator(SimpleNamespace(), "sensor.load", interval_minutes=5)
+    start = datetime(2026, 7, 18, 12, tzinfo=timezone.utc)
+    recent = start - timedelta(days=1)
+    history = [
+        (recent - timedelta(days=7 * weeks), 1000.0)
+        for weeks in (1, 2, 3)
+    ]
+    history.append((recent, 10_000.0))
+
+    scales = estimator._recent_load_scales(history, start, [start])
+
+    assert scales == [1.375]
+    assert scales[0] < module.RECENT_LOAD_MAX_SCALE
+
+
+def test_recent_scale_temperature_adjustment_is_applied_once(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    estimator = module.LoadEstimator(SimpleNamespace(), "sensor.load", interval_minutes=5)
+    start = datetime(2026, 7, 18, 12, tzinfo=timezone.utc)
+    history = []
+    recent_samples = []
+
+    for days_ago in (1, 2):
+        recent = start - timedelta(days=days_ago)
+        recent_samples.append(recent)
+        history.extend(
+            (recent - timedelta(days=7 * weeks), 1000.0)
+            for weeks in (1, 2, 3)
+        )
+        # The 1.5x observation is fully explained by a 5 C temperature
+        # deviation at alpha=0.1, so it must not create another regime scale.
+        history.append((recent, 1500.0))
+
+    bucket_temps = {
+        (sample.weekday(), sample.hour, 0): 20.0
+        for sample in recent_samples
+    }
+    scales = estimator._recent_load_scales(
+        history,
+        start,
+        [start],
+        historical_temps=[(sample, 25.0) for sample in recent_samples],
+        bucket_temp_averages=bucket_temps,
+        alpha=0.1,
+    )
+
+    assert scales == [1.0]
+
+
+def test_four_saturday_replay_does_not_recreate_extreme_evening_forecast(monkeypatch):
+    """Reduced replay of the live 5.86 kW evening forecast regression."""
+    module = _load_estimator_module(monkeypatch)
+    estimator = module.LoadEstimator(SimpleNamespace(), "sensor.load", interval_minutes=5)
+    start = datetime(2026, 7, 18, 17, tzinfo=timezone.utc)
+    saturday_hourly_kw = {
+        7: [1.812, 1.401, 2.638, 1.544, 0.857, 0.692],
+        14: [1.241, 0.913, 0.286, 0.352, 0.373, 0.357],
+        21: [1.215, 2.031, 2.149, 0.612, 0.286, 0.134],
+        28: [0.244, 1.399, 0.528, 1.068, 0.638, 0.064],
+    }
+    history = []
+    for days_ago, values in saturday_hourly_kw.items():
+        saturday = start - timedelta(days=days_ago)
+        for hour_offset, value_kw in enumerate(values):
+            for minute in (0, 30):
+                history.append(
+                    (
+                        saturday.replace(
+                            hour=17 + hour_offset,
+                            minute=minute,
+                        ),
+                        value_kw * 1000.0,
+                    )
+                )
+
+    forecast = estimator._forecast_from_history(history, start, 6 * 12)
+
+    assert forecast[2 * 12] < 3000.0  # 19:00 was 5.863 kW
+    assert forecast[3 * 12] < 2500.0  # 20:00 was 4.442 kW
+    assert forecast[5 * 12] < 1500.0  # 22:00 was 1.514 kW
 
 
 def test_history_exact_bucket_uses_multiple_weeks(monkeypatch):
@@ -135,10 +463,10 @@ def test_recent_load_regime_scales_forecast_up_for_winter_step_change(monkeypatc
     start = datetime(2026, 6, 2, 12, tzinfo=timezone.utc)
 
     history = []
-    for hour_offset in range(30 * 24, 72, -1):
-        history.append((start - timedelta(hours=hour_offset), 500.0))
-    for hour_offset in range(48, 0, -1):
-        history.append((start - timedelta(hours=hour_offset), 1500.0))
+    for half_hour_offset in range(30 * 48, 144, -1):
+        history.append((start - timedelta(minutes=30 * half_hour_offset), 500.0))
+    for half_hour_offset in range(96, 0, -1):
+        history.append((start - timedelta(minutes=30 * half_hour_offset), 1500.0))
 
     forecast = estimator._forecast_from_history(history, start, 12)
 
@@ -208,7 +536,7 @@ def test_history_outlier_does_not_dominate_bucket(monkeypatch):
 
     forecast = estimator._forecast_from_history(history, start, 1)
 
-    assert forecast[0] == 1000.0
+    assert round(forecast[0], 6) == 1000.0
 
 
 def test_lone_exact_bucket_blends_with_same_day_type(monkeypatch):
@@ -295,10 +623,14 @@ def test_away_window_is_excluded_from_30_day_history(monkeypatch):
     history = _run(estimator._get_load_history())
 
     assert calls["start_time"] == now - timedelta(days=32)
-    assert history == [
-        (before_away.last_changed, 1000.0),
-        (after_away.last_changed, 1200.0),
-    ]
+    assert history
+    assert all(
+        not (estimator.away_enabled_at <= timestamp < estimator.away_disabled_at)
+        for timestamp, _ in history
+    )
+    assert dict(history)[before_away.last_changed] == 1000.0
+    assert dict(history)[estimator.away_disabled_at] == 9000.0
+    assert dict(history)[after_away.last_changed] == 1200.0
 
 
 def test_ev_charger_power_subtracted_from_load_history(monkeypatch):
@@ -335,12 +667,8 @@ def test_ev_charger_power_subtracted_from_load_history(monkeypatch):
 
     history = _run(estimator._get_load_history())
 
-    assert history == [
-        (load_states[0].last_changed, 500.0),  # before EV history -> unchanged
-        (load_states[1].last_changed, 500.0),  # 7500 - 7000
-        (load_states[2].last_changed, 500.0),  # EV step held from 05-06
-        (load_states[3].last_changed, 500.0),  # 500 - 0
-    ]
+    assert history
+    assert all(round(value, 6) == 500.0 for _, value in history)
 
 
 def test_ev_subtraction_noop_without_configured_entity(monkeypatch):
@@ -364,10 +692,10 @@ def test_ev_subtraction_noop_without_configured_entity(monkeypatch):
 
     history = _run(estimator._get_load_history())
 
-    assert history == [
-        (load_states[0].last_changed, 7500.0),
-        (load_states[1].last_changed, 500.0),
-    ]
+    assert history
+    history_map = dict(history)
+    assert history_map[load_states[0].last_changed] == 7500.0
+    assert history_map[load_states[1].last_changed] == 500.0
 
 
 def test_active_away_mode_records_departure_without_excluding_history(monkeypatch):
@@ -399,7 +727,9 @@ def test_active_away_mode_records_departure_without_excluding_history(monkeypatc
     history = _run(estimator._get_load_history())
 
     assert calls["start_time"] == now - timedelta(days=30)
-    assert history == [(during_away.last_changed, 9000.0)]
+    assert len(history) == 48
+    assert history[0] == (during_away.last_changed, 9000.0)
+    assert all(value == 9000.0 for _, value in history)
 
 
 def test_open_meteo_hass_data_watts_are_expanded_to_optimizer_slots(monkeypatch):
@@ -794,27 +1124,45 @@ class _FakeStates:
         ]
 
 
-def _install_fake_recorder(monkeypatch, history, calls):
+def _install_fake_recorder(monkeypatch, history, calls, statistics=None):
     components_module = types.ModuleType("homeassistant.components")
     recorder_module = types.ModuleType("homeassistant.components.recorder")
     recorder_history_module = types.ModuleType("homeassistant.components.recorder.history")
+    recorder_statistics_module = types.ModuleType(
+        "homeassistant.components.recorder.statistics"
+    )
+    history_marker = object()
+    statistics_marker = object()
 
     class FakeRecorder:
-        async def async_add_executor_job(
-            self,
-            func,
-            hass,
-            start_time,
-            end_time,
-            entity_ids,
-        ):
-            calls["start_time"] = start_time
-            calls["end_time"] = end_time
-            calls["entity_ids"] = entity_ids
-            return history
+        async def async_add_executor_job(self, func, *args):
+            if func is history_marker:
+                hass, start_time, end_time, entity_ids = args
+                calls["start_time"] = start_time
+                calls["end_time"] = end_time
+                calls["entity_ids"] = entity_ids
+                return history
+            if func is statistics_marker:
+                (
+                    hass,
+                    start_time,
+                    end_time,
+                    statistic_ids,
+                    period,
+                    units,
+                    types_requested,
+                ) = args
+                calls["statistics_start_time"] = start_time
+                calls["statistics_end_time"] = end_time
+                calls["statistic_ids"] = statistic_ids
+                calls["statistics_period"] = period
+                calls["statistics_types"] = types_requested
+                return statistics or {}
+            raise AssertionError(f"unexpected recorder function: {func!r}")
 
     recorder_module.get_instance = lambda hass: FakeRecorder()
-    recorder_history_module.get_significant_states = object()
+    recorder_history_module.get_significant_states = history_marker
+    recorder_statistics_module.statistics_during_period = statistics_marker
 
     monkeypatch.setitem(sys.modules, "homeassistant.components", components_module)
     monkeypatch.setitem(sys.modules, "homeassistant.components.recorder", recorder_module)
@@ -822,6 +1170,11 @@ def _install_fake_recorder(monkeypatch, history, calls):
         sys.modules,
         "homeassistant.components.recorder.history",
         recorder_history_module,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "homeassistant.components.recorder.statistics",
+        recorder_statistics_module,
     )
 
 

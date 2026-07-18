@@ -15,8 +15,9 @@ import functools
 import inspect
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta
-from typing import Any
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Literal
 
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
@@ -50,8 +51,30 @@ RECENT_LOAD_DEADBAND = 0.15
 RECENT_LOAD_BLEND = 0.7
 RECENT_LOAD_MIN_SCALE = 0.8
 RECENT_LOAD_MAX_SCALE = 2.5
+HISTORY_BUCKET_SECONDS = 30 * 60
+HISTORY_BUCKET_MIN_COVERAGE_SECONDS = 25 * 60
+RECENT_LOAD_FULL_CONFIDENCE_SAMPLES = 2
+RECENT_LOAD_FULL_CONFIDENCE_DATES = 3
+RECENT_LOAD_MIN_EXPECTED_WH = 100.0
 ACTIVE_AWAY_LOAD_BLEND = 1.0
 ACTIVE_AWAY_LOAD_MIN_SCALE = 0.2
+
+
+@dataclass(frozen=True, slots=True)
+class LoadHistoryBucket:
+    """One normalized Recorder load interval."""
+
+    start: datetime
+    energy_wh: float
+    coverage_seconds: float
+    source: Literal["states", "statistics"]
+
+    @property
+    def mean_w(self) -> float:
+        """Return mean power over the valid portion of the interval."""
+        if self.coverage_seconds <= 0:
+            return 0.0
+        return self.energy_wh * 3600.0 / self.coverage_seconds
 
 _SOLCAST_ESTIMATE_FIELDS = {
     SOLCAST_ESTIMATE: ("pv_estimate", "pv_estimate50"),
@@ -107,10 +130,13 @@ class LoadEstimator:
         self._history_cache: dict[str, list[tuple[datetime, float]]] = {}
         self._cache_time: datetime | None = None
         self._cache_duration = timedelta(hours=1)
+        self._history_diagnostics: dict[str, Any] = {}
+        self._recent_load_diagnostics: dict[str, Any] = {}
 
         # Temperature sensitivity cache
         self._temp_alpha: float | None = None
         self._temp_bucket_averages: dict[tuple[int, int, int], float] | None = None
+        self._temp_history: list[tuple[datetime, float]] = []
         self._temp_alpha_fitted: bool = False  # True once fitting has run (even if α=None)
         self._temp_cache_time: datetime | None = None
         self._get_forecasts_unsupported: bool = False  # Latched when service is missing
@@ -126,6 +152,273 @@ class LoadEstimator:
         if not self.away_disabled_at or not self.away_enabled_at:
             return False
         return (dt_util.utcnow() - self.away_disabled_at) < timedelta(days=AWAY_RECOVERY_DAYS)
+
+    @staticmethod
+    def _states_to_half_hour_buckets(
+        raw_states,
+        start_time: datetime,
+        end_time: datetime,
+        multiplier: float,
+        source: Literal["states", "statistics"] = "states",
+        *,
+        allow_zero: bool = False,
+    ) -> list[LoadHistoryBucket]:
+        """Integrate Recorder state durations into half-hour energy buckets."""
+        states = sorted(
+            (
+                state
+                for state in raw_states
+                if getattr(state, "last_changed", None) is not None
+            ),
+            key=lambda state: state.last_changed,
+        )
+        if not states or end_time <= start_time:
+            return []
+
+        accumulated: dict[datetime, list[float]] = defaultdict(lambda: [0.0, 0.0])
+        for index, state in enumerate(states):
+            interval_start = max(start_time, state.last_changed)
+            interval_end = min(
+                end_time,
+                states[index + 1].last_changed if index + 1 < len(states) else end_time,
+            )
+            if interval_end <= interval_start:
+                continue
+            try:
+                watts = float(state.state) * multiplier
+            except (ValueError, TypeError):
+                continue
+            if allow_zero:
+                valid = 0 <= watts < 100_000
+            else:
+                valid = 0 < watts < 100_000
+            if not valid:
+                continue
+
+            cursor = interval_start
+            while cursor < interval_end:
+                epoch = cursor.timestamp()
+                bucket_epoch = int(epoch // HISTORY_BUCKET_SECONDS) * HISTORY_BUCKET_SECONDS
+                bucket_start = datetime.fromtimestamp(bucket_epoch, tz=cursor.tzinfo)
+                bucket_end = datetime.fromtimestamp(
+                    bucket_epoch + HISTORY_BUCKET_SECONDS,
+                    tz=cursor.tzinfo,
+                )
+                segment_end = min(interval_end, bucket_end)
+                seconds = (segment_end - cursor).total_seconds()
+                if seconds <= 0:
+                    break
+                accumulated[bucket_start][0] += watts * seconds / 3600.0
+                accumulated[bucket_start][1] += seconds
+                cursor = segment_end
+
+        buckets = [
+            LoadHistoryBucket(
+                start=bucket_start,
+                energy_wh=values[0],
+                coverage_seconds=values[1],
+                source=source,
+            )
+            for bucket_start, values in accumulated.items()
+            if values[1] >= HISTORY_BUCKET_MIN_COVERAGE_SECONDS
+        ]
+        return sorted(buckets, key=lambda bucket: bucket.start)
+
+    @staticmethod
+    def _statistics_to_half_hour_buckets(
+        statistics: list[dict[str, Any]] | None,
+        multiplier: float,
+    ) -> list[LoadHistoryBucket]:
+        """Split hourly mean-power statistics into energy-preserving half-hours."""
+        buckets: list[LoadHistoryBucket] = []
+        for entry in statistics or []:
+            start = entry.get("start")
+            mean = entry.get("mean")
+            if isinstance(start, (int, float)):
+                start = datetime.fromtimestamp(start, tz=timezone.utc)
+            if not isinstance(start, datetime) or mean is None:
+                continue
+            try:
+                mean_w = float(mean) * multiplier
+            except (ValueError, TypeError):
+                continue
+            if not (0 < mean_w < 100_000):
+                continue
+            for offset in (0, 30):
+                buckets.append(
+                    LoadHistoryBucket(
+                        start=start + timedelta(minutes=offset),
+                        energy_wh=mean_w * 0.5,
+                        coverage_seconds=HISTORY_BUCKET_SECONDS,
+                        source="statistics",
+                    )
+                )
+        return sorted(buckets, key=lambda bucket: bucket.start)
+
+    @staticmethod
+    def _history_cutover(
+        raw_buckets: list[LoadHistoryBucket],
+    ) -> datetime | None:
+        """Return the first complete hourly boundary covered by raw history."""
+        if not raw_buckets:
+            return None
+        first = min(bucket.start for bucket in raw_buckets)
+        return first.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+
+    @staticmethod
+    def _merge_history_buckets(
+        statistics_buckets: list[LoadHistoryBucket],
+        raw_buckets: list[LoadHistoryBucket],
+        cutover: datetime | None,
+    ) -> list[LoadHistoryBucket]:
+        """Merge normalized sources without overlapping bucket starts."""
+        if not raw_buckets:
+            selected = statistics_buckets
+        elif not statistics_buckets or cutover is None:
+            selected = raw_buckets
+        else:
+            selected = [
+                bucket for bucket in statistics_buckets if bucket.start < cutover
+            ] + [
+                bucket for bucket in raw_buckets if bucket.start >= cutover
+            ]
+
+        deduplicated: dict[datetime, LoadHistoryBucket] = {}
+        for bucket in sorted(selected, key=lambda item: item.start):
+            deduplicated[bucket.start] = bucket
+        return list(deduplicated.values())
+
+    @staticmethod
+    def _subtract_ev_buckets(
+        load_buckets: list[LoadHistoryBucket],
+        ev_bucket_groups: list[list[LoadHistoryBucket]],
+    ) -> list[LoadHistoryBucket]:
+        """Subtract EV mean power only where matching normalized coverage exists."""
+        ev_by_start: dict[datetime, float] = defaultdict(float)
+        for buckets in ev_bucket_groups:
+            for bucket in buckets:
+                ev_by_start[bucket.start] += bucket.mean_w
+        if not ev_by_start:
+            return load_buckets
+        return [
+            LoadHistoryBucket(
+                start=bucket.start,
+                energy_wh=max(0.0, bucket.mean_w - ev_by_start.get(bucket.start, 0.0))
+                * bucket.coverage_seconds
+                / 3600.0,
+                coverage_seconds=bucket.coverage_seconds,
+                source=bucket.source,
+            )
+            for bucket in load_buckets
+        ]
+
+    @classmethod
+    def _build_normalized_history(
+        cls,
+        raw_history: dict | None,
+        statistics: dict | None,
+        load_entity_id: str,
+        ev_entity_ids: list[str],
+        multipliers: dict[str, float],
+        start_time: datetime,
+        end_time: datetime,
+        away_start: datetime | None,
+        away_end: datetime | None,
+    ) -> tuple[list[tuple[datetime, float]], dict[str, Any]]:
+        """Normalize, EV-adjust, merge and away-filter Recorder load history."""
+        raw_load = cls._states_to_half_hour_buckets(
+            (raw_history or {}).get(load_entity_id, []),
+            start_time,
+            end_time,
+            multipliers.get(load_entity_id, 1.0),
+        )
+        raw_ev = [
+            cls._states_to_half_hour_buckets(
+                (raw_history or {}).get(entity_id, []),
+                start_time,
+                end_time,
+                multipliers.get(entity_id, 1.0),
+                allow_zero=True,
+            )
+            for entity_id in ev_entity_ids
+        ]
+        raw_load = cls._subtract_ev_buckets(raw_load, raw_ev)
+
+        statistic_load = cls._statistics_to_half_hour_buckets(
+            (statistics or {}).get(load_entity_id),
+            multipliers.get(load_entity_id, 1.0),
+        )
+        statistic_ev = [
+            cls._statistics_to_half_hour_buckets(
+                (statistics or {}).get(entity_id),
+                multipliers.get(entity_id, 1.0),
+            )
+            for entity_id in ev_entity_ids
+        ]
+        statistic_load = cls._subtract_ev_buckets(statistic_load, statistic_ev)
+
+        cutover = cls._history_cutover(raw_load)
+        merged = cls._merge_history_buckets(statistic_load, raw_load, cutover)
+
+        excluded = 0
+        if away_start is not None and away_end is not None:
+            before = len(merged)
+            merged = [
+                bucket
+                for bucket in merged
+                if not (
+                    bucket.start < away_end
+                    and bucket.start + timedelta(seconds=HISTORY_BUCKET_SECONDS) > away_start
+                )
+            ]
+            excluded = before - len(merged)
+            if merged:
+                away_span = max(timedelta(0), away_end - away_start)
+                cutoff = (
+                    merged[-1].start
+                    - timedelta(days=HISTORY_LOOKBACK_DAYS)
+                    - away_span
+                )
+                merged = [bucket for bucket in merged if bucket.start >= cutoff]
+
+        sources = {bucket.source for bucket in merged}
+        diagnostics = {
+            "history_source": (
+                "merged" if len(sources) > 1 else next(iter(sources), "none")
+            ),
+            "raw_history_hours": round(len(raw_load) * 0.5, 1),
+            "statistics_history_hours": round(len(statistic_load) * 0.5, 1),
+            "history_cutover": cutover.isoformat() if cutover else None,
+            "history_span_days": round(
+                (merged[-1].start - merged[0].start).total_seconds() / 86400.0,
+                1,
+            ) if len(merged) > 1 else 0.0,
+            "history_distinct_days": len(
+                {
+                    (dt_util.as_local(bucket.start) if bucket.start.tzinfo else bucket.start).date()
+                    for bucket in merged
+                }
+            ),
+            "away_excluded_buckets": excluded,
+            "ev_history_entities": len(ev_entity_ids),
+        }
+        return [(bucket.start, bucket.mean_w) for bucket in merged], diagnostics
+
+    @staticmethod
+    def _distinct_date_samples(
+        samples: list[tuple[datetime, float]],
+    ) -> list[tuple[datetime, float]]:
+        """Collapse duplicate updates so each local date contributes once per slot."""
+        by_date: dict[Any, list[tuple[datetime, float]]] = defaultdict(list)
+        for timestamp, value in samples:
+            local_timestamp = dt_util.as_local(timestamp) if timestamp.tzinfo else timestamp
+            by_date[local_timestamp.date()].append((timestamp, value))
+        collapsed: list[tuple[datetime, float]] = []
+        for date_samples in by_date.values():
+            timestamp = max(sample[0] for sample in date_samples)
+            value = sum(sample[1] for sample in date_samples) / len(date_samples)
+            collapsed.append((timestamp, value))
+        return sorted(collapsed, key=lambda sample: sample[0])
 
     async def get_forecast(
         self,
@@ -157,16 +450,17 @@ class LoadEstimator:
                 forecast_temps: list[tuple[datetime, float]] | None = None
                 bucket_temp_avgs: dict | None = None
                 alpha: float | None = None
+                historical_temps: list[tuple[datetime, float]] | None = None
                 if self.weather_entity_id:
-                    forecast_temps, bucket_temp_avgs, alpha = await self._get_temperature_adjustment(
-                        history, horizon_hours
-                    )
-                # Building the forecast iterates the full load history (tens to
-                # hundreds of thousands of recorder points) and re-scans it for
-                # the recent-regime adjustment — heavy, pure-CPU work. Run it off
-                # the event loop so it can't freeze HA on every optimisation
-                # cycle. _forecast_from_history operates only on its arguments
-                # and constants, so it is safe in a worker thread.
+                    (
+                        forecast_temps,
+                        bucket_temp_avgs,
+                        alpha,
+                        historical_temps,
+                    ) = await self._get_temperature_adjustment(history, horizon_hours)
+                # Building the forecast scans the complete normalized history
+                # and applies the recent-regime adjustment. Keep that pure-CPU
+                # work off the event loop.
                 forecast = await self.hass.async_add_executor_job(
                     functools.partial(
                         self._forecast_from_history,
@@ -174,6 +468,7 @@ class LoadEstimator:
                         forecast_temps=forecast_temps,
                         bucket_temp_averages=bucket_temp_avgs,
                         alpha=alpha,
+                        historical_temps=historical_temps,
                     )
                 )
                 avg_w = sum(forecast) / len(forecast) if forecast else 0
@@ -188,6 +483,13 @@ class LoadEstimator:
             _LOGGER.warning("Failed to get load history: %s", e)
 
         # Final fallback: use current load or default
+        self._recent_load_diagnostics = {
+            "mode": "fallback",
+            "recent_matched_hours": 0.0,
+            "local_scale_min": 1.0,
+            "local_scale_max": 1.0,
+            "adjusted_slot_count": 0,
+        }
         current_load = self._get_current_load()
         _LOGGER.warning(
             "Using simple forecast fallback (%.0fW base) — "
@@ -203,6 +505,7 @@ class LoadEstimator:
         the 30-day lookback so the LP uses normal household patterns.
         """
         if not self.load_entity_id:
+            self._history_diagnostics = {"history_source": "not_configured"}
             _LOGGER.debug("No load entity ID configured, skipping history")
             return []
 
@@ -262,58 +565,71 @@ class LoadEstimator:
         try:
             from homeassistant.components.recorder import get_instance
             from homeassistant.components.recorder.history import get_significant_states
+            from homeassistant.components.recorder.statistics import (
+                statistics_during_period,
+            )
 
             instance = get_instance(self.hass)
 
             start_time = now - timedelta(days=days)
             end_time = now
 
-            # Get history from recorder
-            history = await instance.async_add_executor_job(
-                get_significant_states,
-                self.hass,
-                start_time,
-                end_time,
-                [self.load_entity_id],
-            )
+            history_entity_ids = [self.load_entity_id, *self.ev_power_entity_ids]
+            multipliers = {self.load_entity_id: multiplier}
+            multipliers.update(self._resolve_power_multipliers(self.ev_power_entity_ids))
 
-            if not history or self.load_entity_id not in history:
-                _LOGGER.warning("No history found for %s", self.load_entity_id)
-                return []
-
-            # Parsing/filtering the raw states (tens of thousands of points) is
-            # pure-CPU work — run it off the event loop so it can't block HA.
-            result, excluded = await self.hass.async_add_executor_job(
-                self._parse_load_history,
-                history[self.load_entity_id],
-                multiplier,
-                has_away_window,
-                self.away_enabled_at,
-                away_end,
-            )
-
-            # Subtract configured EV charger power from the load history so a
-            # recurring EV charging pattern embedded in the whole-home load
-            # sensor is not double-counted against the planned-EV overlay the
-            # coordinator adds on top of the forecast.
-            if result and self.ev_power_entity_ids:
-                ev_multipliers = self._resolve_power_multipliers(
-                    self.ev_power_entity_ids
-                )
-                ev_history = await instance.async_add_executor_job(
+            raw_history: dict = {}
+            statistics: dict = {}
+            try:
+                raw_history = await instance.async_add_executor_job(
                     get_significant_states,
                     self.hass,
                     start_time,
                     end_time,
-                    self.ev_power_entity_ids,
+                    history_entity_ids,
                 )
-                result = await self.hass.async_add_executor_job(
-                    self._subtract_ev_power,
-                    result,
-                    ev_history,
-                    self.ev_power_entity_ids,
-                    ev_multipliers,
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Raw Recorder load history unavailable for %s: %s",
+                    self.load_entity_id,
+                    exc,
                 )
+
+            try:
+                statistics = await instance.async_add_executor_job(
+                    statistics_during_period,
+                    self.hass,
+                    start_time,
+                    end_time,
+                    set(history_entity_ids),
+                    "hour",
+                    None,
+                    {"mean"},
+                )
+            except Exception as exc:
+                _LOGGER.debug(
+                    "Hourly Recorder statistics unavailable for %s; using raw history: %s",
+                    self.load_entity_id,
+                    exc,
+                )
+
+            result, diagnostics = await self.hass.async_add_executor_job(
+                self._build_normalized_history,
+                raw_history,
+                statistics,
+                self.load_entity_id,
+                self.ev_power_entity_ids,
+                multipliers,
+                start_time,
+                end_time,
+                self.away_enabled_at if has_away_window else None,
+                away_end if has_away_window else None,
+            )
+            self._history_diagnostics = diagnostics
+
+            if not result:
+                _LOGGER.warning("No usable Recorder history found for %s", self.load_entity_id)
+                return []
 
             # Cache the result
             self._history_cache[cache_key] = result
@@ -322,21 +638,26 @@ class LoadEstimator:
             if result:
                 avg_w = sum(v for _, v in result) / len(result)
                 _LOGGER.info(
-                    "Loaded %d history points for %s (avg %.0fW, %.1f days%s)",
+                    "Loaded %d normalized history buckets for %s "
+                    "(avg %.0fW, %.1f days, source=%s, raw=%.1fh, statistics=%.1fh%s)",
                     len(result), self.load_entity_id, avg_w, days,
-                    f", away window excluded ({excluded} points)" if has_away_window else "",
-                )
-            else:
-                _LOGGER.warning(
-                    "History returned for %s but no valid numeric values",
-                    self.load_entity_id,
+                    diagnostics.get("history_source"),
+                    diagnostics.get("raw_history_hours", 0.0),
+                    diagnostics.get("statistics_history_hours", 0.0),
+                    (
+                        ", away window excluded "
+                        f"({diagnostics.get('away_excluded_buckets', 0)} buckets)"
+                        if has_away_window else ""
+                    ),
                 )
             return result
 
         except ImportError:
+            self._history_diagnostics = {"history_source": "recorder_unavailable"}
             _LOGGER.warning("Recorder not available for load history")
             return []
         except Exception as e:
+            self._history_diagnostics = {"history_source": "error"}
             _LOGGER.error("Error fetching load history for %s: %s", self.load_entity_id, e)
             return []
 
@@ -348,6 +669,7 @@ class LoadEstimator:
         forecast_temps: list[tuple[datetime, float]] | None = None,
         bucket_temp_averages: dict | None = None,
         alpha: float | None = None,
+        historical_temps: list[tuple[datetime, float]] | None = None,
     ) -> list[float]:
         """Generate forecast using historical pattern matching with optional temperature scaling.
 
@@ -414,11 +736,233 @@ class LoadEstimator:
         # Apply smoothing
         forecast = self._smooth_forecast(forecast)
 
-        recent_scale = self._recent_load_scale(history, start_time)
-        if recent_scale is not None:
-            forecast = [value * recent_scale for value in forecast]
+        if self.away_mode:
+            recent_scale = self._recent_load_scale(history, start_time)
+            if recent_scale is not None:
+                forecast = [value * recent_scale for value in forecast]
+            self._recent_load_diagnostics = {
+                "mode": "away_global",
+                "global_scale": round(recent_scale or 1.0, 3),
+            }
+        else:
+            horizon_starts = [
+                start_time + timedelta(minutes=self.interval_minutes * index)
+                for index in range(n_intervals)
+            ]
+            recent_scales = self._recent_load_scales(
+                history,
+                start_time,
+                horizon_starts,
+                historical_temps=historical_temps,
+                bucket_temp_averages=bucket_temp_averages,
+                alpha=alpha,
+            )
+            if len(recent_scales) != len(forecast):
+                _LOGGER.warning(
+                    "Recent load scale length mismatch (%d != %d); using neutral scales",
+                    len(recent_scales),
+                    len(forecast),
+                )
+                recent_scales = [1.0] * len(forecast)
+            forecast = [
+                value * recent_scales[index]
+                for index, value in enumerate(forecast)
+            ]
 
         return forecast
+
+    def _recent_load_scales(
+        self,
+        history: list[tuple[datetime, float]],
+        start_time: datetime,
+        horizon_starts: list[datetime],
+        *,
+        historical_temps: list[tuple[datetime, float]] | None = None,
+        bucket_temp_averages: dict[tuple[int, int, int], float] | None = None,
+        alpha: float | None = None,
+    ) -> list[float]:
+        """Return confidence-qualified clock-time-local recent load scales."""
+        neutral = [1.0] * len(horizon_starts)
+        if not history or not horizon_starts:
+            self._recent_load_diagnostics = {
+                "mode": "clock_time_local",
+                "recent_matched_hours": 0.0,
+                "local_scale_min": 1.0,
+                "local_scale_max": 1.0,
+                "adjusted_slot_count": 0,
+            }
+            return neutral
+
+        ref_time = dt_util.as_local(start_time) if start_time.tzinfo else start_time
+        recent_start = ref_time - timedelta(hours=RECENT_LOAD_WINDOW_HOURS)
+        baseline_end = recent_start - timedelta(hours=RECENT_LOAD_BASELINE_EXCLUDE_HOURS)
+        older_pattern: dict[
+            tuple[int, int, int], list[tuple[datetime, float]]
+        ] = defaultdict(list)
+        recent_samples: list[tuple[datetime, float]] = []
+
+        for timestamp, value in history:
+            sample_time = dt_util.as_local(timestamp) if timestamp.tzinfo else timestamp
+            if sample_time < baseline_end:
+                key = (
+                    sample_time.weekday(),
+                    sample_time.hour,
+                    0 if sample_time.minute < 30 else 1,
+                )
+                older_pattern[key].append((timestamp, value))
+            elif recent_start <= sample_time <= ref_time:
+                recent_samples.append((sample_time, value))
+
+        sorted_temps = sorted(historical_temps or [], key=lambda item: item[0])
+        temp_timestamps = [timestamp for timestamp, _ in sorted_temps]
+        observed_wh: dict[int, float] = defaultdict(float)
+        expected_wh: dict[int, float] = defaultdict(float)
+        sample_ratios: dict[int, list[float]] = defaultdict(list)
+        baseline_date_counts: dict[int, list[int]] = defaultdict(list)
+
+        for sample_time, actual_w in recent_samples:
+            key = (
+                sample_time.weekday(),
+                sample_time.hour,
+                0 if sample_time.minute < 30 else 1,
+            )
+            exact_samples = self._clip_outliers(
+                self._distinct_date_samples(older_pattern.get(key, []))
+            )
+            if len(exact_samples) < MIN_EXACT_BUCKET_SAMPLES:
+                continue
+            expected_w = self._weighted_average(exact_samples, sample_time)
+            if expected_w is None or expected_w <= 0:
+                continue
+
+            if (
+                sorted_temps
+                and bucket_temp_averages is not None
+                and alpha is not None
+                and key in bucket_temp_averages
+            ):
+                temperature = self._nearest_temperature(
+                    sample_time,
+                    sorted_temps,
+                    temp_timestamps,
+                )
+                if temperature is not None:
+                    temperature_scale = max(
+                        0.5,
+                        min(
+                            2.5,
+                            1.0
+                            + alpha
+                            * (temperature - bucket_temp_averages[key]),
+                        ),
+                    )
+                    expected_w *= temperature_scale
+
+            slot = sample_time.hour * 2 + (1 if sample_time.minute >= 30 else 0)
+            sample_energy_wh = actual_w * 0.5
+            expected_energy_wh = expected_w * 0.5
+            if expected_energy_wh < RECENT_LOAD_MIN_EXPECTED_WH:
+                continue
+            observed_wh[slot] += sample_energy_wh
+            expected_wh[slot] += expected_energy_wh
+            sample_ratios[slot].append(sample_energy_wh / expected_energy_wh)
+            baseline_date_counts[slot].append(len(exact_samples))
+
+        scale_by_slot: dict[int, float] = {}
+        matched_samples = sum(len(ratios) for ratios in sample_ratios.values())
+        for slot, actual_energy in observed_wh.items():
+            expected_energy = expected_wh.get(slot, 0.0)
+            ratios = sample_ratios.get(slot, [])
+            if expected_energy <= 0 or not ratios:
+                continue
+            ratio = actual_energy / expected_energy
+            if abs(ratio - 1.0) < RECENT_LOAD_DEADBAND:
+                continue
+
+            coverage_confidence = min(
+                1.0,
+                len(ratios) / RECENT_LOAD_FULL_CONFIDENCE_SAMPLES,
+            )
+            date_count = int(self._median(baseline_date_counts[slot]))
+            date_confidence = min(
+                1.0,
+                date_count / RECENT_LOAD_FULL_CONFIDENCE_DATES,
+            )
+            stability_confidence = self._recent_ratio_stability(ratios)
+            confidence = coverage_confidence * date_confidence * stability_confidence
+            candidate = max(
+                RECENT_LOAD_MIN_SCALE,
+                min(RECENT_LOAD_MAX_SCALE, ratio),
+            )
+            scale = 1.0 + confidence * (candidate - 1.0)
+            scale_by_slot[slot] = max(
+                RECENT_LOAD_MIN_SCALE,
+                min(RECENT_LOAD_MAX_SCALE, scale),
+            )
+
+        scales = []
+        for timestamp in horizon_starts:
+            local_timestamp = dt_util.as_local(timestamp) if timestamp.tzinfo else timestamp
+            slot = local_timestamp.hour * 2 + (1 if local_timestamp.minute >= 30 else 0)
+            scales.append(scale_by_slot.get(slot, 1.0))
+
+        adjusted = [scale for scale in scales if abs(scale - 1.0) >= 0.001]
+        self._recent_load_diagnostics = {
+            "mode": "clock_time_local",
+            "recent_matched_hours": round(matched_samples * 0.5, 1),
+            "local_scale_min": round(min(scales) if scales else 1.0, 3),
+            "local_scale_max": round(max(scales) if scales else 1.0, 3),
+            "adjusted_slot_count": len(adjusted),
+            "baseline_date_count_min": min(
+                (min(values) for values in baseline_date_counts.values()),
+                default=0,
+            ),
+            "baseline_date_count_max": max(
+                (max(values) for values in baseline_date_counts.values()),
+                default=0,
+            ),
+        }
+        if adjusted:
+            _LOGGER.info(
+                "Recent clock-time load adjustment: matched=%.1fh, "
+                "adjusted_slots=%d, scale=%.2f-%.2fx",
+                self._recent_load_diagnostics["recent_matched_hours"],
+                self._recent_load_diagnostics["adjusted_slot_count"],
+                self._recent_load_diagnostics["local_scale_min"],
+                self._recent_load_diagnostics["local_scale_max"],
+            )
+        return scales
+
+    @staticmethod
+    def _recent_ratio_stability(ratios: list[float]) -> float:
+        """Return robust confidence in repeated recent time-local ratios."""
+        if len(ratios) < 2:
+            return 0.5
+        median = LoadEstimator._median(ratios)
+        if median <= 0:
+            return 0.0
+        mad = LoadEstimator._median([abs(ratio - median) for ratio in ratios])
+        relative_mad = mad / median
+        return max(0.0, min(1.0, 1.0 - relative_mad / 0.5))
+
+    @staticmethod
+    def _nearest_temperature(
+        timestamp: datetime,
+        sorted_temps: list[tuple[datetime, float]],
+        sorted_timestamps: list[datetime],
+    ) -> float | None:
+        """Return the nearest temperature within two hours."""
+        index = bisect.bisect_left(sorted_timestamps, timestamp)
+        best_temperature = None
+        best_gap = 7200.0
+        for candidate in (index - 1, index):
+            if 0 <= candidate < len(sorted_temps):
+                temp_time, temperature = sorted_temps[candidate]
+                gap = abs((timestamp - temp_time).total_seconds())
+                if gap < best_gap:
+                    best_gap = gap
+                    best_temperature = temperature
+        return best_temperature
 
     def _recent_load_scale(
         self,
@@ -437,24 +981,22 @@ class LoadEstimator:
         ref_time = dt_util.as_local(start_time) if start_time.tzinfo else start_time
         recent_end = ref_time
         active_away = self.away_mode and self.away_enabled_at is not None
-        if active_away:
-            away_start = (
-                dt_util.as_local(self.away_enabled_at)
-                if self.away_enabled_at.tzinfo
-                else self.away_enabled_at
-            )
-            if ref_time.tzinfo and not away_start.tzinfo:
-                away_start = away_start.replace(tzinfo=ref_time.tzinfo)
-            elif away_start.tzinfo and not ref_time.tzinfo:
-                away_start = away_start.replace(tzinfo=None)
-            recent_start = max(
-                away_start,
-                recent_end - timedelta(hours=RECENT_LOAD_WINDOW_HOURS),
-            )
-            baseline_end = away_start
-        else:
-            recent_start = recent_end - timedelta(hours=RECENT_LOAD_WINDOW_HOURS)
-            baseline_end = recent_start - timedelta(hours=RECENT_LOAD_BASELINE_EXCLUDE_HOURS)
+        if not active_away:
+            return None
+        away_start = (
+            dt_util.as_local(self.away_enabled_at)
+            if self.away_enabled_at.tzinfo
+            else self.away_enabled_at
+        )
+        if ref_time.tzinfo and not away_start.tzinfo:
+            away_start = away_start.replace(tzinfo=ref_time.tzinfo)
+        elif away_start.tzinfo and not ref_time.tzinfo:
+            away_start = away_start.replace(tzinfo=None)
+        recent_start = max(
+            away_start,
+            recent_end - timedelta(hours=RECENT_LOAD_WINDOW_HOURS),
+        )
+        baseline_end = away_start
 
         older_pattern: dict[tuple[int, int, int], list[tuple[datetime, float]]] = defaultdict(list)
         recent_samples: list[tuple[datetime, float]] = []
@@ -546,7 +1088,9 @@ class LoadEstimator:
     ) -> float:
         """Return robust weighted load estimate for a day/time bucket."""
         key = (dow, hour, half_hour)
-        exact_samples = self._clip_outliers(pattern.get(key, []))
+        exact_samples = self._clip_outliers(
+            self._distinct_date_samples(pattern.get(key, []))
+        )
         if len(exact_samples) >= MIN_EXACT_BUCKET_SAMPLES:
             exact = self._weighted_average(exact_samples, reference_time)
             if exact is not None:
@@ -603,7 +1147,10 @@ class LoadEstimator:
         samples: list[tuple[datetime, float]] = []
         for day in days:
             samples.extend(pattern.get((day, hour, half_hour), []))
-        return self._weighted_average(samples, reference_time)
+        return self._weighted_average(
+            self._distinct_date_samples(samples),
+            reference_time,
+        )
 
     def _weighted_average(
         self,
@@ -670,10 +1217,15 @@ class LoadEstimator:
         self,
         history: list[tuple[datetime, float]],
         horizon_hours: int,
-    ) -> tuple[list[tuple[datetime, float]] | None, dict | None, float | None]:
-        """Fetch temperature data and return (forecast_temps, bucket_temp_avgs, alpha).
+    ) -> tuple[
+        list[tuple[datetime, float]] | None,
+        dict | None,
+        float | None,
+        list[tuple[datetime, float]] | None,
+    ]:
+        """Return forecast/history temperatures and the fitted adjustment model.
 
-        Uses a 1-hour cache for the fitted alpha.  Returns (None, None, None) if
+        Uses a 1-hour cache for the fitted alpha. Returns neutral values if
         temperature data is unavailable or the fit is too weak to be useful.
         """
         now = dt_util.utcnow()
@@ -685,9 +1237,14 @@ class LoadEstimator:
             and now - self._temp_cache_time < self._cache_duration
         ):
             if self._temp_alpha is None:
-                return None, None, None
+                return None, None, None, self._temp_history or None
             forecast_temps = await self._fetch_forecast_temperatures(horizon_hours)
-            return forecast_temps or None, self._temp_bucket_averages, self._temp_alpha
+            return (
+                forecast_temps or None,
+                self._temp_bucket_averages,
+                self._temp_alpha,
+                self._temp_history or None,
+            )
 
         # Fetch historical temperatures matching the filtered load history
         # window used by the forecast model.
@@ -698,29 +1255,29 @@ class LoadEstimator:
         if not temp_history:
             self._temp_alpha = None
             self._temp_bucket_averages = None
+            self._temp_history = []
             self._temp_alpha_fitted = True
             self._temp_cache_time = now
-            return None, None, None
+            return None, None, None, None
 
-        # Bucketing the full load history (tens of thousands of points) and
-        # fitting the sensitivity coefficient (a bisect per point) is heavy,
-        # pure-CPU work. Run it off the event loop so it can't freeze HA during
-        # the optimiser's first forecast at setup.
+        # Temperature fitting scans the complete normalized load history and
+        # performs a bisect per bucket. Keep it off the event loop.
         bucket_temp_avgs, alpha = await self.hass.async_add_executor_job(
             self._compute_temperature_fit, history, temp_history
         )
 
         self._temp_alpha = alpha
         self._temp_bucket_averages = bucket_temp_avgs
+        self._temp_history = temp_history
         self._temp_alpha_fitted = True
         self._temp_cache_time = now
 
         if alpha is None:
-            return None, None, None
+            return None, None, None, temp_history
 
         # Fetch forecast temperatures
         forecast_temps = await self._fetch_forecast_temperatures(horizon_hours)
-        return forecast_temps or None, bucket_temp_avgs, alpha
+        return forecast_temps or None, bucket_temp_avgs, alpha, temp_history
 
     async def _fetch_historical_temperatures(
         self,
@@ -841,60 +1398,6 @@ class LoadEstimator:
             bucket[key].append(temp_c)
         return {k: sum(v) / len(v) for k, v in bucket.items()}
 
-    @staticmethod
-    def _parse_load_history(
-        raw_states,
-        multiplier: float,
-        has_away_window: bool,
-        away_start: datetime | None,
-        away_end: datetime | None,
-    ) -> tuple[list[tuple[datetime, float]], int]:
-        """Parse + away-filter raw recorder states (executor-only, CPU-bound).
-
-        Iterates every recorder state for the load sensor (tens of thousands of
-        points), so it must not run on the event loop. Pure function over its
-        arguments — safe in a worker thread.
-        """
-        result: list[tuple[datetime, float]] = []
-        for state in raw_states:
-            try:
-                value_watts = float(state.state) * multiplier
-                # Filter invalid values: must be positive and < 100kW residential max
-                if 0 < value_watts < 100_000:
-                    result.append((state.last_changed, value_watts))
-            except (ValueError, TypeError):
-                continue
-
-        # Away Mode recovery: exclude the completed away window
-        # [enabled_at, disabled_at], then keep the most recent 30 days of
-        # the remaining data.
-        excluded = 0
-        if has_away_window:
-            before = len(result)
-            result = [
-                (ts, w) for (ts, w) in result
-                if not (away_start <= ts <= away_end)
-            ]
-            excluded = before - len(result)
-            if result:
-                result.sort(key=lambda h: h[0])
-                # Extend the retention window back by the away duration so
-                # ~HISTORY_LOOKBACK_DAYS of *actual* (non-away) history survive.
-                # A flat calendar cutoff from the newest sample would let the
-                # excluded away gap eat into the window, discarding the extra
-                # pre-away history that _get_load_history deliberately fetched
-                # and collapsing per-bucket sample counts after long trips.
-                away_span = timedelta(0)
-                if away_start is not None and away_end is not None:
-                    away_span = max(timedelta(0), away_end - away_start)
-                cutoff = (
-                    result[-1][0]
-                    - timedelta(days=HISTORY_LOOKBACK_DAYS)
-                    - away_span
-                )
-                result = [h for h in result if h[0] >= cutoff]
-        return result, excluded
-
     def _resolve_power_multipliers(
         self, entity_ids: list[str]
     ) -> dict[str, float]:
@@ -917,56 +1420,6 @@ class LoadEstimator:
             multipliers[eid] = 1000.0 if unit == "kw" else 1.0
         return multipliers
 
-    @staticmethod
-    def _subtract_ev_power(
-        load_samples: list[tuple[datetime, float]],
-        ev_history: dict | None,
-        ev_entity_ids: list[str],
-        ev_multipliers: dict[str, float],
-    ) -> list[tuple[datetime, float]]:
-        """Subtract concurrent EV charger power from each load sample (Watts).
-
-        Pure/CPU-bound (executor-safe). For each load sample, the EV power at
-        that instant is the most recent recorded value of each EV entity at or
-        before the sample time (states are step functions). The load is clamped
-        at zero so a noisy over-subtraction can never produce negative load.
-        """
-        import bisect
-
-        timelines: list[tuple[list[datetime], list[float]]] = []
-        for eid in ev_entity_ids:
-            states = ev_history.get(eid) if ev_history else None
-            if not states:
-                continue
-            mult = ev_multipliers.get(eid, 1.0)
-            ts_list: list[datetime] = []
-            w_list: list[float] = []
-            for state in states:
-                try:
-                    watts = float(state.state) * mult
-                except (ValueError, TypeError):
-                    continue
-                # Ignore implausible/negative charger readings.
-                if not (0 <= watts < 100_000):
-                    continue
-                ts_list.append(state.last_changed)
-                w_list.append(watts)
-            if ts_list:
-                timelines.append((ts_list, w_list))
-
-        if not timelines:
-            return load_samples
-
-        adjusted: list[tuple[datetime, float]] = []
-        for ts, load_w in load_samples:
-            ev_w = 0.0
-            for ts_list, w_list in timelines:
-                idx = bisect.bisect_right(ts_list, ts) - 1
-                if idx >= 0:
-                    ev_w += w_list[idx]
-            adjusted.append((ts, max(0.0, load_w - ev_w)))
-        return adjusted
-
     def _compute_temperature_fit(
         self,
         history: list[tuple[datetime, float]],
@@ -974,10 +1427,9 @@ class LoadEstimator:
     ) -> tuple[dict[tuple[int, int, int], float] | None, float | None]:
         """Bucket the load history and fit temperature sensitivity (executor-only).
 
-        Iterates the full load history (tens of thousands of points) and runs a
-        bisect per point in the fit, so this must NOT run on the event loop — it
-        would block HA during the optimiser's first forecast. Operates purely on
-        the passed-in data, so it is safe to run in a worker thread.
+        Iterates the full normalized history and runs a bisect per bucket, so it
+        must not run on the event loop. It operates only on passed-in data and is
+        safe in a worker thread.
         """
         load_pattern: dict[tuple[int, int, int], list[float]] = defaultdict(list)
         for ts, val in history:
@@ -1075,6 +1527,7 @@ class LoadEstimator:
         self._history_cache.clear()
         self._cache_time = None
         self._temp_bucket_averages = None
+        self._temp_history = []
         self._temp_alpha_fitted = False
         self._temp_cache_time = None
 
