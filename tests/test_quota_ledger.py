@@ -98,6 +98,65 @@ def test_midday_first_setup_is_unknown_but_reset_baselines_restore_confidence() 
     assert ledger.state.confidence == "authoritative"
 
 
+def test_first_setup_before_quota_windows_establishes_authoritative_baselines() -> None:
+    ledger = QuotaLedger(_rules())
+    before_windows = datetime(2026, 7, 14, 8, 59, tzinfo=AEST)
+
+    ledger.observe_cumulative("import", 10, before_windows)
+    ledger.observe_cumulative("export", 20, before_windows)
+
+    assert ledger.state.confidence == "authoritative"
+    assert ledger.state.reason is None
+    assert ledger.state.settled_kwh == {"free": 0.0, "premium": 0.0}
+    assert ledger.bucket("free").effective_price_c_per_kwh == 0
+
+
+def test_first_setup_at_window_start_is_safe_but_after_start_is_unknown() -> None:
+    at_boundary = QuotaLedger(_rules())
+    at_start = datetime(2026, 7, 14, 11, 0, tzinfo=AEST)
+    at_boundary.observe_cumulative("import", 10, at_start)
+    at_boundary.observe_cumulative("export", 20, at_start)
+    assert at_boundary.state.confidence == "authoritative"
+
+    after_boundary = QuotaLedger(_rules())
+    after_start = at_start + timedelta(minutes=1)
+    after_boundary.observe_cumulative("import", 10, after_start)
+    after_boundary.observe_cumulative("export", 20, after_start)
+    assert after_boundary.state.confidence == "unknown"
+    assert (
+        after_boundary.state.reason
+        == "first sample arrived after eligible quota usage could begin"
+    )
+
+
+def test_cross_midnight_window_still_requires_near_reset_baseline() -> None:
+    rules = (
+        QuotaRule("overnight", "import", "AEST", (("23:00", "02:00"),), 10, 30, 30),
+        QuotaRule("premium", "export", "AEST", (("18:00", "21:00"),), 30, 5, 10),
+    )
+    ledger = QuotaLedger(rules)
+    after_grace = datetime(2026, 7, 14, 0, 11, tzinfo=AEST)
+
+    ledger.observe_cumulative("import", 10, after_grace)
+    ledger.observe_cumulative("export", 20, after_grace)
+
+    assert ledger.state.confidence == "unknown"
+    assert ledger.state.reset_seen == {"import": False, "export": True}
+
+
+def test_later_direction_baseline_does_not_clear_an_earlier_meter_fault() -> None:
+    ledger = QuotaLedger(_rules())
+    before_windows = datetime(2026, 7, 14, 8, 0, tzinfo=AEST)
+    ledger.observe_cumulative("import", 10, before_windows)
+    ledger.observe_cumulative("import", 9, before_windows + timedelta(minutes=1))
+
+    ledger.observe_cumulative("export", 20, before_windows + timedelta(minutes=2))
+
+    assert ledger.state.confidence == "unknown"
+    assert ledger.state.reason == "cumulative energy meter reset or decreased"
+    assert ledger.state.reset_seen == {"import": False, "export": True}
+
+
 def test_mixed_meter_and_power_sources_are_never_authoritative() -> None:
     ledger = QuotaLedger(_rules())
     reset = datetime(2026, 7, 14, 0, 1, tzinfo=AEST)
@@ -107,6 +166,22 @@ def test_mixed_meter_and_power_sources_are_never_authoritative() -> None:
 
     assert ledger.state.confidence == "estimated"
     assert ledger.state.settled_kwh == {"free": 0.0, "premium": 0.0}
+
+    ledger.observe_cumulative("export", 20.1, reset + timedelta(minutes=1))
+    assert ledger.state.confidence == "estimated"
+
+
+def test_switching_from_cumulative_meter_to_power_downgrades_confidence() -> None:
+    ledger = QuotaLedger(_rules())
+    before_windows = datetime(2026, 7, 14, 8, 0, tzinfo=AEST)
+    ledger.observe_cumulative("import", 100, before_windows)
+    ledger.observe_cumulative("export", 20, before_windows)
+    assert ledger.state.confidence == "authoritative"
+
+    ledger.observe_power("export", 0, before_windows + timedelta(minutes=1))
+
+    assert ledger.state.confidence == "estimated"
+    assert ledger.state.reason == "quota settlement switched to integrated power"
 
 
 def test_legacy_import_is_idempotent() -> None:

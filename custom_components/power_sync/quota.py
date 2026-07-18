@@ -182,6 +182,9 @@ class QuotaLedger:
         self.state.last_sample_at[direction] = observed_at.isoformat()
         self.state.last_meter_kwh[direction] = None
         self.state.source_kind[direction] = "power_integrated"
+        if self.state.confidence == "authoritative":
+            self.state.confidence = "estimated"
+            self.state.reason = "quota settlement switched to integrated power"
 
         if previous_at is None:
             self._establish_baseline(direction, observed_at, authoritative=False)
@@ -277,26 +280,43 @@ class QuotaLedger:
         authoritative: bool,
     ) -> None:
         local = tariff_datetime(observed_at, self.state.timezone_token)
-        seconds_after_reset = (
-            local - datetime.combine(local.date(), time.min, tzinfo=local.tzinfo)
-        ).total_seconds()
-        if seconds_after_reset <= RESET_BASELINE_GRACE_SECONDS:
+        day_start = datetime.combine(local.date(), time.min, tzinfo=local.tzinfo)
+        seconds_after_reset = (local - day_start).total_seconds()
+        eligible_usage_could_have_elapsed = any(
+            rule.direction == direction
+            and _window_overlap_seconds(day_start, local, rule) > 0
+            for rule in self.rules
+        )
+        if (
+            seconds_after_reset <= RESET_BASELINE_GRACE_SECONDS
+            or not eligible_usage_could_have_elapsed
+        ):
             self.state.reset_seen[direction] = True
             if all(self.state.reset_seen.values()):
+                previously_estimated = self.state.confidence == "estimated"
                 all_authoritative = all(
                     self.state.source_kind.get(item) == "total_increasing"
                     for item in ("import", "export")
                 )
                 self.state.confidence = (
-                    "authoritative" if all_authoritative else "estimated"
+                    "authoritative"
+                    if all_authoritative and not previously_estimated
+                    else "estimated"
                 )
-                self.state.reason = None
+                if not previously_estimated:
+                    self.state.reason = None
         else:
-            self._mark_unknown("first sample arrived after tariff-day reset")
+            self._mark_unknown(
+                "first sample arrived after eligible quota usage could begin"
+            )
 
     def _mark_unknown(self, reason: str) -> None:
         self.state.confidence = "unknown"
         self.state.reason = reason
+        # Once an established baseline is invalidated, a later first sample
+        # from the other direction must not accidentally restore confidence.
+        # A new tariff-day rollover is the only safe way to re-arm both flags.
+        self.state.reset_seen = {"import": False, "export": False}
 
     def _rule(self, rule_id: str) -> QuotaRule:
         for rule in self.rules:
