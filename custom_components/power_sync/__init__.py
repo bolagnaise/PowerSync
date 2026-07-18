@@ -30559,7 +30559,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "sigenergy": {"supported": True, "warning": None},
         "sungrow":   {"supported": True, "warning": None},
         "foxess":    {"supported": True, "warning": None},
-        "goodwe":    {"supported": True, "warning": None},
+        "goodwe":    {
+            "supported": True,
+            "warning": (
+                "GoodWe Hold SoC uses EMS Conserve mode. It blocks on-grid "
+                "discharge, but excess solar may still charge the battery."
+            ),
+        },
         "tesla":     {
             "supported": True,
             "warning": (

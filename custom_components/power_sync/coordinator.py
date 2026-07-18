@@ -7182,6 +7182,16 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
         pct = min(100, max(10, int((power_w / rated) * 100))) if power_w > 0 else 100
         return await self._controller.force_discharge(power_pct=pct, soc_floor=self._discharge_floor_pct)
 
+    async def set_backup_mode(self) -> bool:
+        """Hold on-grid discharge through the verified GoodWe EMS path."""
+        if self._ems_prefix:
+            return await self._ems_set_mode("conserve", 0)
+        _LOGGER.warning(
+            "GoodWe Hold SoC requires EMS entity control; direct UDP hold semantics "
+            "are not verified"
+        )
+        return False
+
     async def restore_normal(self) -> bool:
         """Restore GoodWe to normal operation."""
         if self._ems_prefix:

@@ -125,6 +125,41 @@ def test_highs_direction_binary_prevents_quota_passthrough(optimizer_module):
     )
 
 
+def test_highs_allocates_each_daily_import_and_export_quota_cap_row(optimizer_module):
+    if not optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("highspy unavailable")
+    n = 24
+    groups = ["day-1"] * 12 + ["day-2"] * 12
+    optimizer = _optimizer(optimizer_module)
+    optimizer.set_quota_bonus_groups(
+        import_group_ids=groups,
+        import_caps_by_group={"day-1": 25.0, "day-2": 25.0},
+        export_group_ids=groups,
+        export_caps_by_group={"day-1": 15.0, "day-2": 15.0},
+    )
+    start = datetime(2026, 7, 14, 1, 0, tzinfo=timezone.utc)
+
+    result = optimizer.optimize(
+        import_prices=[0.35] * n,
+        export_prices=[0.05] * n,
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.0] * n,
+        current_soc=0.5,
+        allow_battery_export=[True] * n,
+        allow_grid_charge=True,
+        import_bonus_prices=[0.35] * n,
+        import_bonus_cap_kwh=50,
+        export_bonus_prices=[0.10] * n,
+        export_bonus_cap_kwh=30,
+        priority_export_slots=[True] * n,
+        priority_export_enabled=True,
+        prevent_simultaneous_grid_flow=True,
+        schedule_timestamps=[start + timedelta(minutes=5 * idx) for idx in range(n)],
+    )
+
+    assert result.solver_used == "highs"
+
+
 @pytest.mark.parametrize("use_highs", [False, True])
 def test_daily_export_bonus_groups_do_not_share_caps(optimizer_module, use_highs):
     if use_highs and not optimizer_module.HIGHS_AVAILABLE:
@@ -151,6 +186,8 @@ def test_daily_export_bonus_groups_do_not_share_caps(optimizer_module, use_highs
     finally:
         optimizer_module.HIGHS_AVAILABLE = old
 
+    if use_highs:
+        assert result.solver_used == "highs"
     dt_hours = optimizer.interval_minutes / 60
     day_1_kwh = sum(result.grid_export_w[:6]) / 1000 * dt_hours
     day_2_kwh = sum(result.grid_export_w[6:]) / 1000 * dt_hours

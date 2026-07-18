@@ -1676,6 +1676,7 @@ def test_goodwe_entity_mode_prefers_solar_first_charge_and_export_discharge_mode
 
     charge = _find_class_method(tree, "GoodWeEnergyCoordinator", "force_charge")
     discharge = _find_class_method(tree, "GoodWeEnergyCoordinator", "force_discharge")
+    hold = _find_class_method(tree, "GoodWeEnergyCoordinator", "set_backup_mode")
     restore = _find_class_method(tree, "GoodWeEnergyCoordinator", "restore_normal")
     ems_set_mode = _find_class_method(tree, "GoodWeEnergyCoordinator", "_ems_set_mode")
     ems_restore_operation = _find_class_method(
@@ -1685,6 +1686,7 @@ def test_goodwe_entity_mode_prefers_solar_first_charge_and_export_discharge_mode
 
     charge_source = ast.get_source_segment(source, charge)
     discharge_source = ast.get_source_segment(source, discharge)
+    hold_source = ast.get_source_segment(source, hold)
     restore_source = ast.get_source_segment(source, restore)
     ems_source = ast.get_source_segment(source, ems_set_mode)
     ems_restore_source = ast.get_source_segment(source, ems_restore_operation)
@@ -1692,6 +1694,7 @@ def test_goodwe_entity_mode_prefers_solar_first_charge_and_export_discharge_mode
 
     assert charge_source is not None
     assert discharge_source is not None
+    assert hold_source is not None
     assert restore_source is not None
     assert ems_source is not None
     assert ems_restore_source is not None
@@ -1699,6 +1702,8 @@ def test_goodwe_entity_mode_prefers_solar_first_charge_and_export_discharge_mode
 
     assert '"charge_pv", power_w, fallback_option="charge_battery"' in charge_source
     assert '"sell_power", power_w, fallback_option="discharge_battery"' in discharge_source
+    assert 'return await self._ems_set_mode("conserve", 0)' in hold_source
+    assert "GoodWe Hold SoC requires EMS entity control" in hold_source
     assert '"auto",' in restore_source
     assert "reset_power_limit=True" in restore_source
     assert "restore_operation_mode=True" in restore_source

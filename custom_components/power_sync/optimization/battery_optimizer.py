@@ -2364,9 +2364,19 @@ class BatteryOptimizer:
         pre_window_effective_target: float | None = None
         A_ub_rows = 2 * p_n
         if bonus_export_active:
-            A_ub_rows += 2 * len(bonus_export_periods) + 1
+            export_bonus_cap_rows = (
+                len(self._quota_export_caps_by_group)
+                if self._quota_export_caps_by_group and any(p_export_groups)
+                else 1
+            )
+            A_ub_rows += 2 * len(bonus_export_periods) + export_bonus_cap_rows
         if bonus_import_active:
-            A_ub_rows += len(bonus_import_periods) + 1
+            import_bonus_cap_rows = (
+                len(self._quota_import_caps_by_group)
+                if self._quota_import_caps_by_group and any(p_import_groups)
+                else 1
+            )
+            A_ub_rows += len(bonus_import_periods) + import_bonus_cap_rows
         if direction_binary_active:
             A_ub_rows += 2 * p_n
         if grid_charge_cap_active:
