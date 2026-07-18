@@ -1269,13 +1269,21 @@ def test_auto_apply_forecast_bridge_is_independent_of_export_run_length(opt_modu
 
     coordinator._set_forecast_bridge_reserve_recommendation(
         short_export,
-        export_allowed,
+        coordinator._reference_export_bridge_windows(
+            short_export.schedule,
+            export_allowed,
+            export_allowed,
+        ),
         solar,
         load,
     )
     coordinator._set_forecast_bridge_reserve_recommendation(
         full_window_export,
-        export_allowed,
+        coordinator._reference_export_bridge_windows(
+            full_window_export.schedule,
+            export_allowed,
+            export_allowed,
+        ),
         solar,
         load,
     )
@@ -1287,6 +1295,103 @@ def test_auto_apply_forecast_bridge_is_independent_of_export_run_length(opt_modu
         assert recommendation["forecast_bridge_reserve_percent"] == 10
         assert recommendation["suggested_optimizer_reserve_percent"] == 25
         assert recommendation["next_charge_reason"] == "scheduled_grid_charge"
+        assert (
+            recommendation["forecast_bridge_boundary_source"]
+            == "bounded_priority_window"
+        )
+
+
+def test_auto_apply_forecast_bridge_uses_manual_episode_for_flat_export_tariff(
+    opt_module,
+):
+    """Ticket #286: generic all-horizon permission must not erase the bridge."""
+    coordinator = _coordinator(
+        opt_module,
+        "octopus",
+        optimization_backup_reserve=0.70,
+        optimization_manual_reserve=0.35,
+        optimization_auto_apply_reserve=True,
+        hardware_backup_reserve=0.08,
+    )
+    coordinator._auto_apply_reserve_enabled = True
+    coordinator._manual_backup_reserve = 0.35
+    coordinator._config.backup_reserve = 0.70
+    coordinator._config.battery_capacity_wh = 40000
+    coordinator._config.interval_minutes = 60
+    coordinator._startup_backup_reserve = 8
+    coordinator._optimizer = SimpleNamespace(efficiency=1.0)
+
+    start = datetime(2026, 7, 18, 17, 0, tzinfo=timezone.utc)
+    actions = []
+    for idx in range(12):
+        is_export = idx in {2, 3}
+        is_charge = idx == 8
+        actions.append(
+            opt_module.ScheduleAction(
+                timestamp=start + timedelta(hours=idx),
+                action=(
+                    "export"
+                    if is_export
+                    else ("charge" if is_charge else "self_consumption")
+                ),
+                power_w=5000 if is_export or is_charge else 0,
+                soc=0.50,
+                battery_charge_w=5000 if is_charge else 0,
+                battery_discharge_w=5000 if is_export else 0,
+            )
+        )
+    result = SimpleNamespace(
+        schedule=opt_module.OptimizationSchedule(actions, 0, 0, start),
+        reserve_recommendation={"suggested_optimizer_reserve_percent": 70},
+    )
+
+    windows = coordinator._reference_export_bridge_windows(
+        result.schedule,
+        [True] * len(actions),
+        [False] * len(actions),
+    )
+    coordinator._set_forecast_bridge_reserve_recommendation(
+        result,
+        windows,
+        None,
+        [0.0] * 4 + [1.0] * 4 + [0.0] * 4,
+    )
+
+    assert windows == [(2, 4, "manual_baseline_export_episode")]
+    recommendation = result.reserve_recommendation
+    assert recommendation["manual_optimizer_reserve_percent"] == 35
+    assert recommendation["forecast_bridge_kwh"] == pytest.approx(4.0)
+    assert recommendation["forecast_bridge_reserve_percent"] == 10
+    assert recommendation["suggested_optimizer_reserve_percent"] == 45
+    assert recommendation["needs_optimizer_reserve_raise"] is True
+    assert (
+        recommendation["forecast_bridge_boundary_source"]
+        == "manual_baseline_export_episode"
+    )
+
+
+def test_reference_export_bridge_window_respects_export_denial(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power")
+    start = datetime(2026, 7, 18, 17, 0, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=5 * idx),
+            action="export" if idx in {2, 3} else "self_consumption",
+            power_w=2000 if idx in {2, 3} else 0,
+            soc=0.50,
+            battery_discharge_w=2000 if idx in {2, 3} else 0,
+        )
+        for idx in range(8)
+    ]
+    schedule = opt_module.OptimizationSchedule(actions, 0, 0, start)
+
+    windows = coordinator._reference_export_bridge_windows(
+        schedule,
+        [True, True, True, True, False, False, True, True],
+        [False, True, True, True, True, True, False, False],
+    )
+
+    assert windows == [(2, 4, "bounded_priority_window")]
 
 
 def test_auto_apply_reserve_ignores_home_load_export_bridge_floor(opt_module):
@@ -4767,6 +4872,75 @@ def test_single_slot_export_gap_is_not_bridged_below_reserve(opt_module):
     assert actions[1].power_w == 1200
     assert actions[1].battery_discharge_w == 1200
     assert actions[1].soc == 0.32
+
+
+def test_bridge_short_export_gaps_authoritative_floor_ignores_active_auto_reserve(
+    opt_module,
+):
+    coordinator = _execution_coordinator(opt_module, _FakeBattery(), soc=0.60)
+    coordinator._config.backup_reserve = 0.70
+    coordinator._config.battery_capacity_wh = 10000
+    coordinator._config.max_discharge_w = 5000
+    coordinator._optimizer = SimpleNamespace(efficiency=1.0)
+    start = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
+
+    def _schedule():
+        return SimpleNamespace(
+            actions=[
+                SimpleNamespace(
+                    action="export",
+                    power_w=1000,
+                    battery_charge_w=0,
+                    battery_discharge_w=1000,
+                    soc=0.60,
+                    timestamp=start,
+                ),
+                SimpleNamespace(
+                    action="self_consumption",
+                    power_w=500,
+                    battery_charge_w=0,
+                    battery_discharge_w=500,
+                    soc=0.59,
+                    timestamp=start + timedelta(minutes=5),
+                ),
+                SimpleNamespace(
+                    action="export",
+                    power_w=1000,
+                    battery_charge_w=0,
+                    battery_discharge_w=1000,
+                    soc=0.58,
+                    timestamp=start + timedelta(minutes=10),
+                ),
+            ]
+        )
+
+    active_floor_schedule = _schedule()
+    coordinator._bridge_short_export_gaps(
+        active_floor_schedule,
+        [0.45, 0.45, 0.45],
+    )
+    assert active_floor_schedule.actions[1].action == "self_consumption"
+
+    reference_floor_schedule = _schedule()
+    coordinator._bridge_short_export_gaps(
+        reference_floor_schedule,
+        [0.45, 0.45, 0.45],
+        authoritative_reserve_floor=0.35,
+    )
+    assert reference_floor_schedule.actions[1].action == "export"
+
+
+def test_bridge_short_export_gaps_rejects_two_floor_authorities(opt_module):
+    coordinator = _coordinator(opt_module, "globird")
+    schedule = SimpleNamespace(actions=[])
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        coordinator._bridge_short_export_gaps(
+            schedule,
+            [0.45],
+            export_reserve_floor=0.20,
+            authoritative_reserve_floor=0.30,
+        )
 
 
 def test_single_slot_export_gap_respects_transient_export_floor(opt_module):

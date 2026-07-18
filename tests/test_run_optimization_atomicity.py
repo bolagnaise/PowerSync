@@ -163,3 +163,20 @@ def test_overlay_calls_thread_a_local_variable_not_self_current_schedule():
                 f"the chain again"
             )
             assert "self._current_schedule" not in lhs and "result.schedule" not in lhs
+
+
+def test_auto_apply_bridge_uses_one_frozen_reference_across_both_solves():
+    """Ticket #286: the applied solve must not redefine the manual bridge."""
+    method_source = _run_optimization_source()
+    chains = _chain_blocks(method_source)
+
+    first_chain, second_chain = chains
+    capture = first_chain.index("self._reference_export_bridge_windows(")
+    spread = first_chain.index("self._spread_export_schedule(")
+    assert capture < spread
+    assert "export_reserve_floor=reference_reserve_floor" in first_chain
+    assert "authoritative_reserve_floor=reference_reserve_floor" in first_chain
+    assert "export_reserve_floor=applied_reserve_floor" in second_chain
+    assert "authoritative_reserve_floor=applied_reserve_floor" in second_chain
+    assert method_source.count("self._set_forecast_bridge_reserve_recommendation(") == 1
+    assert "final_recommendation.update(reference_reserve_semantics)" in second_chain

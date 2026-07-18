@@ -1581,7 +1581,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _set_forecast_bridge_reserve_recommendation(
         self,
         result: OptimizerResult,
-        export_allowed: list[bool],
+        reference_export_windows: list[tuple[int, int, str]],
         solar_forecast: list[float] | None,
         load_forecast: list[float] | None,
     ) -> None:
@@ -1593,20 +1593,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         cover forecast net home load until the next charge opportunity, plus
         the user's saved manual buffer.
 
-        Use the full export-eligible window rather than the last emitted export
-        action. Otherwise a higher starting floor shortens the emitted export
-        run, lengthens the apparent bridge, and ratchets its own recommendation
-        upward; a lower starting floor can similarly collapse to 0%.
+        Each reference window is frozen from the manual-baseline schedule before
+        Spread Export rewrites it. Bounded priority windows extend that episode;
+        generic export permission does not, because a flat positive tariff may
+        leave export permitted for the entire forecast horizon.
         """
         if not self.auto_apply_reserve_enabled:
             return
 
         schedule = getattr(result, "schedule", None)
         actions = list(getattr(schedule, "actions", None) or [])
-        slot_count = min(
-            len(actions),
-            len(export_allowed),
-        )
+        slot_count = len(actions)
         if slot_count <= 0:
             return
 
@@ -1649,29 +1646,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except (TypeError, ValueError):
                 return 0.0
 
-        idx = 0
-        while idx < slot_count:
-            if not bool(export_allowed[idx]):
-                idx += 1
+        for raw_start, raw_end, boundary_source in reference_export_windows:
+            window_start = int(raw_start)
+            if window_start < 0 or window_start >= slot_count:
                 continue
-
-            window_start = idx
-            while idx < slot_count and bool(export_allowed[idx]):
-                idx += 1
-            window_end = idx
-
-            has_planned_export = any(
-                getattr(actions[action_idx], "action", None) in EXPORT_ACTIONS
-                and float(
-                    getattr(actions[action_idx], "battery_discharge_w", None)
-                    or getattr(actions[action_idx], "power_w", 0.0)
-                    or 0.0
-                )
-                > 100.0
-                for action_idx in range(window_start, window_end)
-            )
-            if not has_planned_export:
-                continue
+            window_end = max(window_start + 1, min(slot_count, int(raw_end)))
 
             next_charge_idx: int | None = None
             next_charge_reason: str | None = None
@@ -1732,6 +1711,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "forecast_bridge_export_window_end": actions[
                     window_end - 1
                 ].timestamp.isoformat(),
+                "forecast_bridge_boundary_source": boundary_source,
                 "protects_until": actions[protects_until_idx].timestamp.isoformat(),
                 "next_charge_reason": (
                     next_charge_reason or "no_charge_in_horizon"
@@ -1746,11 +1726,69 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             math.ceil(best_target * 100 - 1e-9)
         )
         recommendation["needs_optimizer_reserve_raise"] = (
-            best_target
-            > (self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0)
-            + 0.0001
+            best_target > baseline + 0.0001
         )
         result.reserve_recommendation = recommendation
+
+    def _reference_export_bridge_windows(
+        self,
+        schedule: OptimizationSchedule | None,
+        export_allowed: list[bool],
+        priority_export_slots: list[bool],
+    ) -> list[tuple[int, int, str]]:
+        """Freeze manual-baseline export episodes for reserve bridge planning."""
+        actions = list(getattr(schedule, "actions", None) or [])
+        if not actions:
+            return []
+
+        slot_count = len(actions)
+        allowed = [bool(value) for value in export_allowed[:slot_count]]
+        priority = [bool(value) for value in priority_export_slots[:slot_count]]
+        allowed.extend([False] * (slot_count - len(allowed)))
+        priority.extend([False] * (slot_count - len(priority)))
+        effective_priority = [
+            allowed[idx] and priority[idx] for idx in range(slot_count)
+        ]
+
+        priority_windows: list[tuple[int, int]] = []
+        idx = 0
+        while idx < slot_count:
+            if not effective_priority[idx]:
+                idx += 1
+                continue
+            start = idx
+            while idx < slot_count and effective_priority[idx]:
+                idx += 1
+            priority_windows.append((start, idx))
+
+        def _is_real_export(action: Any) -> bool:
+            if getattr(action, "action", None) not in EXPORT_ACTIONS:
+                return False
+            discharge_w = float(
+                getattr(action, "battery_discharge_w", None)
+                or getattr(action, "power_w", 0.0)
+                or 0.0
+            )
+            return discharge_w > 100.0
+
+        windows: list[tuple[int, int, str]] = []
+        idx = 0
+        while idx < slot_count:
+            if not _is_real_export(actions[idx]):
+                idx += 1
+                continue
+            run_start = idx
+            while idx < slot_count and _is_real_export(actions[idx]):
+                idx += 1
+            run_end = idx
+            boundary_end = run_end
+            boundary_source = "manual_baseline_export_episode"
+            for priority_start, priority_end in priority_windows:
+                if priority_start < run_end and priority_end > run_start:
+                    boundary_end = max(boundary_end, priority_end)
+                    boundary_source = "bounded_priority_window"
+            windows.append((run_start, boundary_end, boundary_source))
+        return windows
 
     def _force_discharge_reaches_reserve(
         self,
@@ -4235,22 +4273,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     ),
                 )
 
-            def _auto_reserve_baseline_floor() -> float | None:
-                if not self.auto_apply_reserve_enabled:
-                    return None
-                manual_reserve = self._reserve_ratio(
-                    getattr(self, "_manual_backup_reserve", None),
-                    self._config.backup_reserve,
+            reference_reserve_floor = (
+                self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
+            )
+            if self.auto_apply_reserve_enabled:
+                reference_reserve_floor = (
+                    self._reserve_ratio(
+                        getattr(self, "_manual_backup_reserve", None),
+                        reference_reserve_floor,
+                    )
+                    or 0.0
                 )
-                if manual_reserve is None:
-                    return None
-                if math.isclose(
-                    manual_reserve,
+            solve_reserve_override = (
+                reference_reserve_floor
+                if self.auto_apply_reserve_enabled
+                and not math.isclose(
+                    reference_reserve_floor,
                     self._config.backup_reserve,
                     abs_tol=0.0001,
-                ):
-                    return None
-                return manual_reserve
+                )
+                else None
+            )
 
             async def _run_optimizer_once(
                 reserve_floor: float | None = None,
@@ -4291,11 +4334,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
 
             # Run LP in executor thread to avoid blocking event loop
-            recommendation_floor = _auto_reserve_baseline_floor()
             result: OptimizerResult = await _run_optimizer_once(
-                recommendation_floor
+                solve_reserve_override
             )
-            used_recommendation_floor = recommendation_floor is not None
+            used_reference_override = solve_reserve_override is not None
 
             schedule = result.schedule
             if self._should_spread_import_schedule():
@@ -4307,14 +4349,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     solar_forecast=solar_forecast,
                     load_forecast=load_forecast,
                 )
+            reference_export_windows = self._reference_export_bridge_windows(
+                schedule,
+                battery_export_allowed,
+                priority_export_slots,
+            )
             if self._should_spread_export_schedule():
                 schedule = self._spread_export_schedule(
                     schedule,
                     battery_export_allowed,
+                    export_reserve_floor=reference_reserve_floor,
                 )
             schedule = self._bridge_short_export_gaps(
                 schedule,
                 export_prices,
+                authoritative_reserve_floor=reference_reserve_floor,
             )
             self._last_update_time = dt_util.now()
 
@@ -4340,17 +4389,39 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             self._set_forecast_bridge_reserve_recommendation(
                 result,
-                battery_export_allowed,
+                reference_export_windows,
                 solar_forecast,
                 load_forecast,
             )
+            reserve_semantic_keys = (
+                "manual_optimizer_reserve_percent",
+                "suggested_optimizer_reserve_percent",
+                "needs_optimizer_reserve_raise",
+                "forecast_bridge_kwh",
+                "forecast_bridge_reserve_percent",
+                "forecast_bridge_export_window_start",
+                "forecast_bridge_export_window_end",
+                "forecast_bridge_boundary_source",
+                "protects_until",
+                "next_charge_reason",
+            )
+            reference_reserve_semantics = {
+                key: value
+                for key, value in dict(
+                    getattr(result, "reserve_recommendation", {}) or {}
+                ).items()
+                if key in reserve_semantic_keys
+            }
             self._current_schedule = result.schedule
             self._last_optimizer_result = result
             self._commit_price_forecast_cache(import_prices, export_prices)
 
             reserve_changed = self._apply_auto_reserve_recommendation(result)
-            if reserve_changed or used_recommendation_floor:
+            if reserve_changed or used_reference_override:
                 result = await _run_optimizer_once()
+                applied_reserve_floor = (
+                    self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
+                )
                 schedule = result.schedule
                 if self._should_spread_import_schedule():
                     schedule = self._spread_import_schedule(
@@ -4365,10 +4436,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     schedule = self._spread_export_schedule(
                         schedule,
                         battery_export_allowed,
+                        export_reserve_floor=applied_reserve_floor,
                     )
                 schedule = self._bridge_short_export_gaps(
                     schedule,
                     export_prices,
+                    authoritative_reserve_floor=applied_reserve_floor,
                 )
                 if self._should_apply_offgrid_overlay():
                     schedule = self._apply_offgrid_overlay(
@@ -4387,12 +4460,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     import_bonus_cap_kwh=self._last_zerocharge_bonus_cap_kwh,
                     initial_soc=soc,
                 )
-                self._set_forecast_bridge_reserve_recommendation(
-                    result,
-                    battery_export_allowed,
-                    solar_forecast,
-                    load_forecast,
+                final_recommendation = dict(
+                    getattr(result, "reserve_recommendation", {}) or {}
                 )
+                for key in reserve_semantic_keys:
+                    final_recommendation.pop(key, None)
+                final_recommendation.update(reference_reserve_semantics)
+                final_recommendation["auto_apply_enabled"] = bool(
+                    self.auto_apply_reserve_enabled
+                )
+                final_recommendation["applied_optimizer_reserve_percent"] = int(
+                    round(applied_reserve_floor * 100)
+                )
+                result.reserve_recommendation = final_recommendation
                 self._current_schedule = result.schedule
                 self._last_optimizer_result = result
                 self._last_update_time = dt_util.now()
@@ -5015,8 +5095,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         schedule: OptimizationSchedule,
         export_prices: list[float] | None = None,
         export_reserve_floor: float | list[float] | None = None,
+        *,
+        authoritative_reserve_floor: float | list[float] | None = None,
     ) -> OptimizationSchedule:
         """Keep export mode through one-slot self-use islands between exports."""
+        if (
+            export_reserve_floor is not None
+            and authoritative_reserve_floor is not None
+        ):
+            raise ValueError(
+                "export_reserve_floor and authoritative_reserve_floor "
+                "are mutually exclusive"
+            )
         actions = getattr(schedule, "actions", None) or []
         if len(actions) < 3:
             return schedule
@@ -5081,11 +5171,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if bridge_power_w <= 0:
                 continue
             battery_discharge_w = home_discharge_w + bridge_power_w
-            reserve_floor = self._bridge_export_reserve_floor(
-                export_reserve_floor,
-                gap_start,
-                gap_end,
-            )
+            if authoritative_reserve_floor is not None:
+                if isinstance(authoritative_reserve_floor, list):
+                    scoped_floors = [
+                        self._reserve_ratio(value, 0.0) or 0.0
+                        for value in authoritative_reserve_floor[gap_start:gap_end]
+                    ]
+                    reserve_floor = max(scoped_floors, default=0.0)
+                else:
+                    reserve_floor = (
+                        self._reserve_ratio(authoritative_reserve_floor, 0.0)
+                        or 0.0
+                    )
+            else:
+                reserve_floor = self._bridge_export_reserve_floor(
+                    export_reserve_floor,
+                    gap_start,
+                    gap_end,
+                )
             if not self._can_bridge_export_gap_above_reserve(
                 previous_action,
                 actions[gap_start:gap_end],
