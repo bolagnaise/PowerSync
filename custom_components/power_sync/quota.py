@@ -19,6 +19,10 @@ INITIAL_BASELINE_UNKNOWN_REASONS = {
     "first sample arrived after tariff-day reset",
     "first sample arrived after eligible quota usage could begin",
 }
+CUMULATIVE_AVAILABILITY_UNKNOWN_REASONS = {
+    "import cumulative energy meter unavailable",
+    "export cumulative energy meter unavailable",
+}
 
 
 @dataclass(frozen=True)
@@ -159,12 +163,14 @@ class QuotaLedger:
             self.state.last_sample_at[direction] = observed_at.isoformat()
             self.state.last_meter_kwh[direction] = total_kwh
             self._establish_baseline(direction, observed_at, authoritative=True)
+            self._restore_availability_if_ready(direction)
             return 0.0
         if abs(total_kwh - previous_total) <= 1e-12:
             # Polling an unchanged monotonic total proves the entity is
             # available (and can establish a new-day baseline), but it is not
             # a new energy timestamp. Retain the last changing sample so a
             # delayed update is apportioned across its real interval.
+            self._restore_availability_if_ready(direction)
             return 0.0
         if total_kwh < previous_total - 1e-9:
             self._mark_unknown("cumulative energy meter reset or decreased")
@@ -173,7 +179,9 @@ class QuotaLedger:
         delta = max(0.0, total_kwh - previous_total)
         self.state.last_sample_at[direction] = observed_at.isoformat()
         self.state.last_meter_kwh[direction] = total_kwh
-        return self._settle_interval(direction, previous_at, observed_at, delta)
+        settled = self._settle_interval(direction, previous_at, observed_at, delta)
+        self._restore_availability_if_ready(direction)
+        return settled
 
     def observe_power(
         self,
@@ -188,12 +196,15 @@ class QuotaLedger:
         self.state.last_sample_at[direction] = observed_at.isoformat()
         self.state.last_meter_kwh[direction] = None
         self.state.source_kind[direction] = "power_integrated"
+        if previous_at is not None:
+            self._recover_initial_baseline(direction, previous_at)
         if self.state.confidence == "authoritative":
             self.state.confidence = "estimated"
             self.state.reason = "quota settlement switched to integrated power"
 
         if previous_at is None:
             self._establish_baseline(direction, observed_at, authoritative=False)
+            self._restore_availability_if_ready(direction)
             return 0.0
         elapsed = (observed_at - previous_at).total_seconds()
         if elapsed <= 0:
@@ -202,7 +213,14 @@ class QuotaLedger:
             self._mark_unknown("power telemetry gap")
             return 0.0
         energy_kwh = max(0.0, _float(power_w)) * elapsed / 3_600_000.0
-        return self._settle_interval(direction, previous_at, observed_at, energy_kwh)
+        settled = self._settle_interval(
+            direction,
+            previous_at,
+            observed_at,
+            energy_kwh,
+        )
+        self._restore_availability_if_ready(direction)
+        return settled
 
     def remaining_kwh(self, rule_id: str) -> float:
         rule = self._rule(rule_id)
@@ -317,8 +335,21 @@ class QuotaLedger:
             )
 
     def _mark_unknown(self, reason: str) -> None:
+        if (
+            reason in CUMULATIVE_AVAILABILITY_UNKNOWN_REASONS
+            and self.state.confidence == "unknown"
+            and self.state.reason not in CUMULATIVE_AVAILABILITY_UNKNOWN_REASONS
+        ):
+            # A temporary availability observation must never replace a
+            # stronger reset, correction, gap, or unsafe-baseline fault.
+            return
         self.state.confidence = "unknown"
         self.state.reason = reason
+        if reason in CUMULATIVE_AVAILABILITY_UNKNOWN_REASONS:
+            # A monotonic total retains energy while its HA state is briefly
+            # unavailable. Preserve established baselines so a later
+            # nondecreasing reading can settle the whole interval safely.
+            return
         # Once an established baseline is invalidated, a later first sample
         # from the other direction must not accidentally restore confidence.
         # A new tariff-day rollover is the only safe way to re-arm both flags.
@@ -332,7 +363,9 @@ class QuotaLedger:
         """Re-evaluate saved pre-window baselines created by older releases."""
         if (
             self.state.confidence == "unknown"
-            and self.state.reason in INITIAL_BASELINE_UNKNOWN_REASONS
+            and self.state.reason
+            in INITIAL_BASELINE_UNKNOWN_REASONS
+            | CUMULATIVE_AVAILABILITY_UNKNOWN_REASONS
             and not self.state.reset_seen.get(direction, False)
         ):
             self._establish_baseline(
@@ -340,6 +373,29 @@ class QuotaLedger:
                 first_sample_at,
                 authoritative=True,
             )
+
+    def _restore_availability_if_ready(
+        self,
+        direction: Direction,
+    ) -> None:
+        """Clear a transient cumulative-meter outage after safe telemetry."""
+        if (
+            self.state.confidence != "unknown"
+            or self.state.reason
+            != f"{direction} cumulative energy meter unavailable"
+            or not all(self.state.reset_seen.values())
+        ):
+            return
+        all_authoritative = all(
+            self.state.source_kind.get(item) == "total_increasing"
+            for item in ("import", "export")
+        )
+        self.state.confidence = "authoritative" if all_authoritative else "estimated"
+        self.state.reason = (
+            None
+            if all_authoritative
+            else "quota settlement includes integrated power"
+        )
 
     def _rule(self, rule_id: str) -> QuotaRule:
         for rule in self.rules:

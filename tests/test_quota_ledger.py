@@ -136,6 +136,143 @@ def test_saved_pre_window_unknown_baseline_recovers_after_upgrade() -> None:
     assert ledger.state.reason is None
 
 
+def test_saved_transient_meter_unavailability_recovers_from_pre_window_samples() -> None:
+    import_sample = datetime(2026, 7, 14, 8, 34, tzinfo=AEST)
+    export_sample = datetime(2026, 7, 14, 10, 41, tzinfo=AEST)
+    state = QuotaLedgerState(
+        tariff_day="2026-07-14",
+        timezone_token="AEST",
+        confidence="unknown",
+        settled_kwh={"free": 0.0, "premium": 0.0},
+        last_meter_kwh={"import": 100.0, "export": 1715.0},
+        last_sample_at={
+            "import": import_sample.isoformat(),
+            "export": export_sample.isoformat(),
+        },
+        source_kind={"import": "total_increasing", "export": "total_increasing"},
+        reset_seen={"import": False, "export": False},
+        reason="export cumulative energy meter unavailable",
+    )
+    ledger = QuotaLedger(_rules(), state)
+    after_upgrade = datetime(2026, 7, 14, 10, 49, tzinfo=AEST)
+
+    ledger.observe_cumulative("import", 100.0, after_upgrade)
+    ledger.observe_cumulative("export", 1715.0, after_upgrade)
+
+    assert ledger.state.confidence == "authoritative"
+    assert ledger.state.reason is None
+    assert ledger.bucket("free").effective_price_c_per_kwh == 0
+
+
+def test_meter_reset_after_transient_unavailability_remains_unknown() -> None:
+    ledger = QuotaLedger(_rules())
+    before_windows = datetime(2026, 7, 14, 8, 0, tzinfo=AEST)
+    ledger.observe_cumulative("import", 100.0, before_windows)
+    ledger.observe_cumulative("export", 20.0, before_windows)
+    assert ledger.state.confidence == "authoritative"
+
+    ledger.mark_unknown("export cumulative energy meter unavailable")
+    ledger.observe_cumulative("import", 100.0, before_windows + timedelta(minutes=1))
+    ledger.observe_cumulative("export", 19.0, before_windows + timedelta(minutes=1))
+
+    assert ledger.state.confidence == "unknown"
+    assert ledger.state.reason == "cumulative energy meter reset or decreased"
+    assert ledger.state.reset_seen == {"import": False, "export": False}
+
+
+def test_transient_unavailability_does_not_overwrite_prior_meter_reset() -> None:
+    ledger = QuotaLedger(_rules())
+    before_windows = datetime(2026, 7, 14, 8, 0, tzinfo=AEST)
+    ledger.observe_cumulative("import", 100.0, before_windows)
+    ledger.observe_cumulative("export", 20.0, before_windows)
+
+    ledger.observe_cumulative("import", 99.0, before_windows + timedelta(minutes=1))
+    ledger.mark_unknown("export cumulative energy meter unavailable")
+    ledger.observe_cumulative("import", 100.0, before_windows + timedelta(minutes=2))
+    ledger.observe_cumulative("export", 20.0, before_windows + timedelta(minutes=2))
+
+    assert ledger.state.confidence == "unknown"
+    assert ledger.state.reason == "cumulative energy meter reset or decreased"
+    assert ledger.state.reset_seen == {"import": False, "export": False}
+
+
+def test_saved_mixed_sources_recover_from_transient_cumulative_unavailability() -> None:
+    first_sample = datetime(2026, 7, 14, 8, 0, tzinfo=AEST)
+    state = QuotaLedgerState(
+        tariff_day="2026-07-14",
+        timezone_token="AEST",
+        confidence="unknown",
+        settled_kwh={"free": 0.0, "premium": 0.0},
+        last_meter_kwh={"import": None, "export": 20.0},
+        last_sample_at={
+            "import": first_sample.isoformat(),
+            "export": first_sample.isoformat(),
+        },
+        source_kind={"import": "power_integrated", "export": "total_increasing"},
+        reset_seen={"import": False, "export": False},
+        reason="export cumulative energy meter unavailable",
+    )
+    ledger = QuotaLedger(_rules(), state)
+    resumed = first_sample + timedelta(minutes=1)
+
+    ledger.observe_power("import", 0.0, resumed)
+    ledger.observe_cumulative("export", 20.0, resumed)
+
+    assert ledger.state.confidence == "estimated"
+    assert ledger.state.reason is None
+
+
+def test_power_fallback_clears_matching_cumulative_unavailability() -> None:
+    ledger = QuotaLedger(_rules())
+    before_windows = datetime(2026, 7, 14, 8, 0, tzinfo=AEST)
+    ledger.observe_cumulative("import", 100.0, before_windows)
+    ledger.observe_cumulative("export", 20.0, before_windows)
+    assert ledger.state.confidence == "authoritative"
+
+    ledger.mark_unknown("import cumulative energy meter unavailable")
+    ledger.observe_power("import", 0.0, before_windows + timedelta(minutes=1))
+
+    assert ledger.state.confidence == "estimated"
+    assert ledger.state.reason == "quota settlement includes integrated power"
+
+
+def test_resumed_cumulative_meter_settles_energy_across_transient_unavailability() -> None:
+    ledger = QuotaLedger(_rules())
+    before_window = datetime(2026, 7, 14, 10, 55, tzinfo=AEST)
+    ledger.observe_cumulative("import", 100.0, before_window)
+    ledger.observe_cumulative("export", 20.0, before_window)
+    assert ledger.state.confidence == "authoritative"
+
+    ledger.mark_unknown("import cumulative energy meter unavailable")
+    settled = ledger.observe_cumulative(
+        "import",
+        102.0,
+        before_window + timedelta(minutes=10),
+    )
+
+    assert settled == pytest.approx(1.0)
+    assert ledger.bucket("free").settled_kwh == pytest.approx(1.0)
+    assert ledger.state.confidence == "authoritative"
+    assert ledger.state.reason is None
+
+
+def test_other_meter_readback_does_not_clear_unavailable_direction() -> None:
+    ledger = QuotaLedger(_rules())
+    before_windows = datetime(2026, 7, 14, 8, 0, tzinfo=AEST)
+    ledger.observe_cumulative("import", 100.0, before_windows)
+    ledger.observe_cumulative("export", 20.0, before_windows)
+
+    ledger.mark_unknown("import cumulative energy meter unavailable")
+    ledger.observe_cumulative("export", 20.0, before_windows + timedelta(minutes=1))
+
+    assert ledger.state.confidence == "unknown"
+    assert ledger.state.reason == "import cumulative energy meter unavailable"
+
+    ledger.observe_cumulative("import", 100.0, before_windows + timedelta(minutes=1))
+    assert ledger.state.confidence == "authoritative"
+    assert ledger.state.reason is None
+
+
 def test_first_setup_at_window_start_is_safe_but_after_start_is_unknown() -> None:
     at_boundary = QuotaLedger(_rules())
     at_start = datetime(2026, 7, 14, 11, 0, tzinfo=AEST)

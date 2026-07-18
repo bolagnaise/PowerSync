@@ -219,6 +219,54 @@ def test_standalone_runtime_uses_current_read_time_for_unchanged_new_day_totals(
     assert runtime.ledger.state.confidence == "authoritative"
 
 
+def test_standalone_runtime_recovers_transient_missing_meter_before_quota_windows() -> None:
+    snapshot = normalize_covau_plan(
+        _raw("COV1117612MRE2@EME"),
+        "COV1117612MRE2@EME",
+    )
+
+    class State:
+        def __init__(self, value):
+            self.state = value
+            self.attributes = {"unit_of_measurement": "kWh"}
+
+    class States:
+        values = {
+            "sensor.import_energy": State("100"),
+            "sensor.export_energy": None,
+        }
+
+        def get(self, entity_id):
+            return self.values.get(entity_id)
+
+    states = States()
+    hass = types.SimpleNamespace(states=states)
+    runtime = CovaUQuotaRuntime(
+        hass,
+        types.SimpleNamespace(entry_id="entry"),
+        snapshot,
+        grid_power_kw_getter=lambda: None,
+        import_energy_entity="sensor.import_energy",
+        export_energy_entity="sensor.export_energy",
+    )
+    aest = timezone(timedelta(hours=10))
+
+    asyncio.run(
+        runtime.async_sample(now=datetime(2026, 7, 18, 8, 34, tzinfo=aest))
+    )
+    assert runtime.ledger.state.confidence == "unknown"
+    assert runtime.ledger.state.reason == "awaiting tariff-day baseline"
+
+    states.values["sensor.export_energy"] = State("1715")
+    asyncio.run(
+        runtime.async_sample(now=datetime(2026, 7, 18, 10, 49, tzinfo=aest))
+    )
+
+    assert runtime.ledger.state.confidence == "authoritative"
+    assert runtime.ledger.state.reason is None
+    assert runtime.ledger.bucket(COVAU_IMPORT_RULE_ID).effective_price_c_per_kwh == 0
+
+
 def test_covau_startup_contract_and_translations_are_wired() -> None:
     integration_source = (
         ROOT / "custom_components" / "power_sync" / "__init__.py"
