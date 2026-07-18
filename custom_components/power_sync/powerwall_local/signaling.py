@@ -251,6 +251,14 @@ def _is_missing_scope_response(status: int, body: str) -> bool:
     return "unauthorized missing scopes" in body_l or "missing scopes" in body_l
 
 
+def _is_hermes_unsupported_response(status: int, body: str) -> bool:
+    """Return True when Tesla permanently routes this token to signed_command."""
+    if status != 412:
+        return False
+    body_l = body.lower()
+    return "not supported" in body_l and "signed_command" in body_l
+
+
 # Type alias: async callable that returns the Tesla access token.
 # Called before each connection to get a fresh token for the hermes
 # JWT exchange.
@@ -452,6 +460,18 @@ class TeslaSignalingClient:
                             continue
                         if resp.status != 200:
                             body = await resp.text()
+                            if _is_hermes_unsupported_response(resp.status, body):
+                                reason = (
+                                    "Tesla does not support Hermes JWT exchange for "
+                                    "this access token; signed_command is required"
+                                )
+                                self._mark_unavailable(reason)
+                                _LOGGER.warning(
+                                    "signaling: Tesla rejected Hermes JWT exchange "
+                                    "with a permanent signed_command requirement. "
+                                    "Stopping endpoint retries and raw-token fallback."
+                                )
+                                return None
                             # The PowerSync.cc proxy returns structured JSON with
                             # `error`, `detail`, and `token_scopes` from the
                             # upstream Tesla response. Log those explicitly so
