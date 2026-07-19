@@ -858,29 +858,86 @@ def test_saved_tariff_prices_calculate_period_before_rate_lookup():
     assert period_index < buy_lookup_index
 
 
-def test_tesla_force_modes_always_reissue_autonomous_mode():
+def test_tesla_force_modes_use_local_first_operation_mode_dispatch():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
     force_discharge = _find_function(tree, "handle_force_discharge")
     force_charge = _find_function(tree, "handle_force_charge")
+    force_apply_mode = _find_function(tree, "_tesla_force_apply_operation_mode")
     force_set_mode = _find_function(tree, "_tesla_force_set_operation_mode")
     force_discharge_source = ast.get_source_segment(source, force_discharge)
     force_charge_source = ast.get_source_segment(source, force_charge)
+    force_apply_mode_source = ast.get_source_segment(source, force_apply_mode)
     force_set_mode_source = ast.get_source_segment(source, force_set_mode)
 
     assert force_discharge_source is not None
     assert force_charge_source is not None
+    assert force_apply_mode_source is not None
     assert force_set_mode_source is not None
     assert 'if saved_mode != "autonomous":' not in force_discharge_source
     assert 'if saved_mode != "autonomous":' not in force_charge_source
-    assert "_tesla_force_set_operation_mode(" in force_discharge_source
-    assert "_tesla_force_set_operation_mode(" in force_charge_source
+    assert "_tesla_force_apply_operation_mode(" in force_discharge_source
+    assert "_tesla_force_apply_operation_mode(" in force_charge_source
     assert '"autonomous"' in force_discharge_source
     assert '"autonomous"' in force_charge_source
+    assert "dispatch_powerwall_write(" in force_apply_mode_source
+    assert "transport.write_config(" in force_apply_mode_source
+    assert "transport.read_config(din)" in force_apply_mode_source
+    assert "hass.services.async_call" not in force_apply_mode_source
+    assert "_tesla_force_set_operation_mode(" in force_apply_mode_source
     assert 'json={"default_real_mode": mode}' in force_set_mode_source
     assert "from .coordinator import _parse_retry_after" in force_set_mode_source
     assert "_tesla_force_confirm_operation_mode(" in force_set_mode_source
     assert "response.status in (429, 500, 502, 503, 504)" in force_set_mode_source
+
+
+def test_tesla_force_discharge_nudge_uses_local_first_backup_reserve_primitive():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    force_discharge = _find_function(tree, "handle_force_discharge")
+    reserve_helper = _find_function(tree, "_tesla_force_apply_backup_reserve")
+    reserve_cloud_helper = _find_function(
+        tree, "_tesla_force_set_backup_reserve_cloud"
+    )
+    force_discharge_source = ast.get_source_segment(source, force_discharge)
+    reserve_helper_source = ast.get_source_segment(source, reserve_helper)
+    reserve_cloud_helper_source = ast.get_source_segment(source, reserve_cloud_helper)
+
+    assert force_discharge_source is not None
+    assert reserve_helper_source is not None
+    assert reserve_cloud_helper_source is not None
+    assert "_tesla_force_apply_backup_reserve(" in force_discharge_source
+    assert "force discharge apply nudge" in force_discharge_source
+    assert "force discharge final apply" in force_discharge_source
+    assert 'f"{api_base}/api/1/energy_sites/{site_id}/backup"' not in force_discharge_source
+    assert "dispatch_powerwall_write(" in reserve_helper_source
+    assert "local_backup_reserve_write_percent(" in reserve_helper_source
+    assert "normalize_local_backup_reserve_percent(" in reserve_helper_source
+    assert "hass.services.async_call" not in reserve_helper_source
+    assert 'f"{api_base}/api/1/energy_sites/{site_id}/backup"' in reserve_cloud_helper_source
+
+
+def test_tesla_force_restore_reuses_local_first_primitives_and_bounds_retry():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    restore_source = ast.get_source_segment(
+        source, _find_function(tree, "handle_restore_normal")
+    )
+    discharge_source = ast.get_source_segment(
+        source, _find_function(tree, "handle_force_discharge")
+    )
+    retry_source = ast.get_source_segment(
+        source, _find_function(tree, "_tesla_force_retry_expiry")
+    )
+
+    assert restore_source is not None
+    assert discharge_source is not None
+    assert retry_source is not None
+    assert "_tesla_force_apply_operation_mode(" in restore_source
+    assert "_tesla_force_apply_backup_reserve(" in restore_source
+    assert "_tesla_force_retry_expiry(" in discharge_source
+    assert 'state["apply_retry_count"]' in retry_source
+    assert "min(120 * (2 ** (retry_count - 1)), 900)" in retry_source
 
 
 def test_set_operation_mode_verifies_readback_and_raises_for_automation_retries():
@@ -1201,12 +1258,15 @@ def test_tesla_force_discharge_applies_backup_reserve_after_tariff_upload():
 
     assert function_source is not None
     tariff_upload_index = function_source.index("send_tariff_to_tesla(")
-    reserve_payload_index = function_source.index('json={"backup_reserve_percent": percent}')
+    reserve_payload_index = function_source.index(
+        "reserve_result = await _tesla_force_apply_backup_reserve("
+    )
     reserve_nudge_index = function_source.index('"force discharge apply nudge"')
     reserve_final_index = function_source.index('"force discharge final apply"')
 
     assert 'site_state["force_discharge_start_reserve"] = api_reserve' in function_source
-    assert 'site_state.get("force_discharge_start_reserve") == 0' in function_source
+    assert '"force_discharge_start_reserve"' in function_source
+    assert "saved_states.get(config[0], {})" in function_source
     assert "await asyncio.sleep(3)" in function_source
     assert tariff_upload_index < reserve_payload_index
     assert reserve_nudge_index < reserve_final_index
@@ -1281,7 +1341,7 @@ def test_restore_normal_does_not_clear_newer_force_command():
     assert '_restore_superseded("initial mode handoff")' in function_source
     assert '_restore_superseded("tariff restore")' in function_source
     assert '_restore_superseded("mode/reserve restore")' in function_source
-    assert "_tesla_force_set_operation_mode(" in function_source
+    assert "_tesla_force_apply_operation_mode(" in function_source
 
 
 def test_tesla_restore_failure_keeps_force_state_for_retry():
@@ -1304,6 +1364,108 @@ def test_tesla_restore_failure_keeps_force_state_for_retry():
     assert "grid charging restore failed for site" in function_source
     assert '"_restore_retry": next_retry' in function_source
     assert "await persist_force_mode_state()" in function_source[failure_guard_index:clear_index]
+
+    dynamic_start = function_source.index(
+        'if electricity_provider in dynamic_providers:'
+    )
+    dynamic_end = function_source.index('elif saved_tariff:', dynamic_start)
+    dynamic_restore = function_source[dynamic_start:dynamic_end]
+    assert 'force_discharge_state["active"] = False' not in dynamic_restore
+    assert 'force_charge_state["active"] = False' not in dynamic_restore
+
+
+def test_tesla_force_charge_partial_apply_arms_immediate_cleanup():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function_source = ast.get_source_segment(
+        source, _find_function(tree, "handle_force_charge")
+    )
+
+    assert function_source is not None
+    helper_start = function_source.index(
+        "async def _cleanup_failed_tesla_force_charge"
+    )
+    helper_end = function_source.index(
+        "# Cancel active discharge mode if switching to charge",
+        helper_start,
+    )
+    helper_source = function_source[helper_start:helper_end]
+    assert 'force_charge_state["active"] = True' in helper_source
+    assert "_tesla_force_retry_expiry(" in helper_source
+    assert "SERVICE_RESTORE_NORMAL" in helper_source
+    assert '"source": "force_cleanup"' in helper_source
+    assert "await persist_force_mode_state()" in helper_source
+    assert function_source.count("await _cleanup_failed_tesla_force_charge(") >= 3
+
+
+def test_tesla_force_discharge_partial_apply_arms_immediate_cleanup():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function_source = ast.get_source_segment(
+        source, _find_function(tree, "handle_force_discharge")
+    )
+
+    assert function_source is not None
+    assert "tesla_force_discharge_mutated = True" in function_source
+    assert "async def _cleanup_failed_tesla_force_discharge" in function_source
+    assert 'force_discharge_state["active"] = True' in function_source
+    assert '"source": "force_cleanup"' in function_source
+    assert "SERVICE_RESTORE_NORMAL" in function_source
+    assert "tariff upload failed after prerequisite writes" in function_source
+
+
+def test_tesla_restore_initial_handoff_is_local_first():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function_source = ast.get_source_segment(
+        source, _find_function(tree, "handle_restore_normal")
+    )
+
+    assert function_source is not None
+    handoff_start = function_source.index(
+        "handoff_result = await _tesla_force_apply_operation_mode("
+    )
+    handoff_end = function_source.index(
+        '# Check if user is using dynamic pricing',
+        handoff_start,
+    )
+    handoff_source = function_source[handoff_start:handoff_end]
+    assert '"self_consumption"' in handoff_source
+    assert 'reason="restore initial handoff"' in handoff_source
+    assert 'session.post(' not in handoff_source
+
+
+def test_tesla_dynamic_restore_bypasses_active_force_tariff_defer_once():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    restore_source = ast.get_source_segment(
+        source, _find_function(tree, "handle_restore_normal")
+    )
+    sync_source = ast.get_source_segment(
+        source, _find_function(tree, "_handle_sync_tou_internal")
+    )
+
+    assert restore_source is not None
+    assert sync_source is not None
+    override_key = '"_allow_force_restore_tou_sync_once"'
+    dynamic_start = restore_source.index(
+        'if electricity_provider in dynamic_providers:'
+    )
+    dynamic_end = restore_source.index('elif saved_tariff:', dynamic_start)
+    dynamic_restore = restore_source[dynamic_start:dynamic_end]
+    assert override_key in dynamic_restore
+    assert dynamic_restore.index(override_key) < dynamic_restore.index(
+        "await hass.services.async_call(DOMAIN, SERVICE_SYNC_TOU"
+    )
+    assert '.pop("_allow_force_restore_tou_sync_once", None)' in sync_source
+    assert (
+        'force_discharge_state.get("active") and not force_restore_sync_override'
+        in sync_source
+    )
+    assert (
+        'force_charge_state.get("active") and not force_restore_sync_override'
+        in sync_source
+    )
 
 
 def test_tesla_force_charge_enables_grid_charging_before_tariff_upload():

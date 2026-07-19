@@ -62,3 +62,28 @@ def test_dynamic_stop_cancels_policy_quick_stop_timer():
 
     assert "quick_stop_timer = state.get(\"quick_stop_timer\")" in method_source
     assert "quick_stop_timer()" in method_source
+
+
+def test_manual_quick_session_restart_resumes_deadline_without_start_resend():
+    source = INIT_PATH.read_text()
+    method_start = source.index("    async def restore_manual_quick_sessions(")
+    method_source = source[
+        method_start:source.index("    def _schedule_policy_quick_stop(", method_start)
+    ]
+
+    assert '"start_ev_charging"' not in method_source
+    assert '"stop_ev_charging"' in method_source
+    assert 'if loadpoint_id in expired:' in method_source
+    assert 'switch_state.state == "off"' in method_source
+    assert "await record_manual_ev_charging_session(" in method_source
+    assert "self._arm_manual_quick_stop(" in method_source
+    assert "stops_at.astimezone(dt_util.UTC)" in method_source
+    assert "dt_util.utcnow()" not in method_source
+
+
+def test_unload_does_not_drop_nonmanual_dynamic_ev_sessions():
+    source = INIT_PATH.read_text()
+    unload_start = source.index("async def async_unload_entry(")
+    unload_source = source[unload_start:]
+
+    assert "_dynamic_ev_state.pop(entry.entry_id" not in unload_source

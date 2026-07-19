@@ -101,8 +101,13 @@ def test_restore_ev_runtime_state_clears_stale_active_ownership():
     hass.data["power_sync"]["entry-1"]["automation_store"] = store
 
     result = ev_ownership.restore_ev_runtime_state(hass, _Entry(), store)
+    for task in hass.created_tasks:
+        asyncio.run(task)
 
-    assert result == {"restored_ownership": 1, "restored_commands": 1}
+    assert result["restored_ownership"] == 1
+    assert result["restored_commands"] == 1
+    assert result["resumable_manual_sessions"] == {}
+    assert result["expired_manual_sessions"] == {}
     assert hass.data["power_sync"]["entry-1"]["ev_ownership"] == {}
     recovered = hass.data["power_sync"]["entry-1"]["ev_recovered_ownership"]
     assert recovered["VIN123"]["owner_mode"] == "manual"
@@ -110,8 +115,6 @@ def test_restore_ev_runtime_state_clears_stale_active_ownership():
     assert last_command["command"] == "ha_restart_recovery"
     assert last_command["success"] is True
     assert "manual ownership" in last_command["reason"]
-    for task in hass.created_tasks:
-        asyncio.run(task)
 
 
 def test_restore_ev_runtime_state_resaves_cleared_snapshot():
@@ -135,6 +138,84 @@ def test_restore_ev_runtime_state_resaves_cleared_snapshot():
     runtime = store._data["ev_runtime_state"]
     assert runtime["active_ownership"] == {}
     assert runtime["last_commands"]["VIN123"]["command"] == "ha_restart_recovery"
+
+
+def test_restore_ev_runtime_state_returns_unexpired_manual_quick_session():
+    store = _Store(
+        {
+            "ev_runtime_state": {
+                "active_ownership": {
+                    "generic_ev": {
+                        "owner": "powersync",
+                        "owner_mode": "manual",
+                        "quick_control": True,
+                        "duration_minutes": 30,
+                        "expires_at": "2099-05-01T01:30:00+00:00",
+                        "resume_params": {
+                            "charger_type": "generic",
+                            "charger_switch_entity": "switch.granny_charger",
+                            "source_mode": "standard",
+                        },
+                    }
+                },
+                "last_commands": {},
+            }
+        }
+    )
+    hass = _Hass()
+    hass.data["power_sync"]["entry-1"]["automation_store"] = store
+
+    result = ev_ownership.restore_ev_runtime_state(hass, _Entry(), store)
+    for task in hass.created_tasks:
+        asyncio.run(task)
+
+    assert result["resumable_manual_sessions"] == {
+        "generic_ev": {
+            "owner": "powersync",
+            "owner_mode": "manual",
+            "quick_control": True,
+            "duration_minutes": 30,
+            "expires_at": "2099-05-01T01:30:00+00:00",
+            "resume_params": {
+                "charger_type": "generic",
+                "charger_switch_entity": "switch.granny_charger",
+                "source_mode": "standard",
+            },
+        }
+    }
+
+
+def test_restore_ev_runtime_state_does_not_resume_expired_manual_quick_session():
+    store = _Store(
+        {
+            "ev_runtime_state": {
+                "active_ownership": {
+                    "generic_ev": {
+                        "owner": "powersync",
+                        "owner_mode": "manual",
+                        "quick_control": True,
+                        "expires_at": "2020-05-01T01:30:00+00:00",
+                        "resume_params": {
+                            "charger_type": "generic",
+                            "charger_switch_entity": "switch.granny_charger",
+                        },
+                    }
+                },
+                "last_commands": {},
+            }
+        }
+    )
+    hass = _Hass()
+    hass.data["power_sync"]["entry-1"]["automation_store"] = store
+
+    result = ev_ownership.restore_ev_runtime_state(hass, _Entry(), store)
+    for task in hass.created_tasks:
+        asyncio.run(task)
+
+    assert result["resumable_manual_sessions"] == {}
+    assert result["expired_manual_sessions"]["generic_ev"]["expires_at"] == (
+        "2020-05-01T01:30:00+00:00"
+    )
 
 
 def test_takeover_flag_only_replaces_solar_surplus_ownership():
