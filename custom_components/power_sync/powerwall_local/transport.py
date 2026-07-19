@@ -14,6 +14,7 @@ are unchanged; the gateway verifies both byte-for-byte.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import math
@@ -41,6 +42,15 @@ _SIGNATURE_TYPE_RSA = 7
 _DOMAIN_ENERGY_DEVICE = 7
 _TAG_END = 0xFF
 _SIGNATURE_TTL_SECONDS = 12
+
+
+def _enum_suffix(enum_type: Any, value: int, prefix: str) -> str:
+    """Return a stable short enum name for local API payloads."""
+    try:
+        name = enum_type.Name(value)
+    except ValueError:
+        return str(value)
+    return name.removeprefix(prefix)
 
 
 def _build_insecure_ssl_context() -> ssl.SSLContext:
@@ -408,7 +418,14 @@ class TEDAPIv1rTransport:
         except Exception:
             return False
 
-    async def set_island_mode(self, din: str, *, off_grid: bool) -> bool:
+    async def set_island_mode(
+        self,
+        din: str,
+        *,
+        off_grid: bool,
+        force: bool | None = None,
+        mode_override: int | None = None,
+    ) -> bool:
         """Send ``TEGAPISetIslandModeRequest`` to the gateway.
 
         This is the real islanding command — it physically opens or closes
@@ -426,17 +443,19 @@ class TEDAPIv1rTransport:
         """
         from . import tesla_local_pb2 as tp
 
-        mode = 2 if off_grid else 1
+        mode = mode_override if mode_override is not None else (6 if off_grid else 1)
+        if force is None:
+            force = off_grid
         env = tp.MessageEnvelope()
-        env.deliveryChannel = 1  # LOCAL_HTTPS (try instead of HERMES_COMMAND)
-        env.sender.local = 2  # LOCAL_PARTICIPANT_CUSTOMER
+        env.deliveryChannel = 2  # HERMES_COMMAND, matching the Tesla app
+        env.sender.authorizedClient = 1  # CUSTOMER_MOBILE_APP
         env.recipient.din = din
         env.teg.setIslandModeRequest.mode = mode
-        env.teg.setIslandModeRequest.force = True
+        env.teg.setIslandModeRequest.force = bool(force)
 
         _LOGGER.info(
-            "set_island_mode: mode=%s (%s) din=%s",
-            mode, "off_grid" if off_grid else "on_grid", din,
+            "set_island_mode: mode=%s force=%s (%s) din=%s",
+            mode, force, "off_grid" if off_grid else "on_grid", din,
         )
         resp = await self.post_v1r(env.SerializeToString(), din)
         if not resp.ok or not resp.inner_bytes:
@@ -528,12 +547,22 @@ class TEDAPIv1rTransport:
         grid contactor on all firmwares, but it stops grid import/export and
         reserves the battery for backup use.
         """
+        if duration_s < 60:
+            raise ValueError("duration_s must be at least 60")
+
+        # Tesla requires a previous event (including an expired one) to be
+        # cancelled before it accepts a replacement. A missing cancel response
+        # is harmless; continue and let the schedule response decide success.
+        await self.cancel_manual_backup(din)
+
         env = combined_pb2.MessageEnvelope()
         env.deliveryChannel = combined_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
         env.sender.authorizedClient = 1
         env.recipient.din = din
         teg_req = env.teg.schedule_manual_backup_event_request
-        teg_req.scheduling_info.duration_seconds = max(60, min(duration_s, 86400))
+        teg_req.scheduling_info.start_time.seconds = int(time.time())
+        teg_req.scheduling_info.duration_seconds = min(duration_s, 86400)
+        teg_req.scheduling_info.priority = (1 << 64) - 1
 
         resp = await self.post_v1r(env.SerializeToString(), din)
         if not resp.ok or not resp.inner_bytes:
@@ -566,3 +595,123 @@ class TEDAPIv1rTransport:
             )
         except Exception:
             return False
+
+    async def get_backup_events(self, din: str) -> dict[str, Any] | None:
+        """Return the active manual backup and scheduled backup events."""
+        env = combined_pb2.MessageEnvelope()
+        env.deliveryChannel = combined_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        env.sender.authorizedClient = 1
+        env.recipient.din = din
+        env.teg.get_backup_events_request.SetInParent()
+
+        resp = await self.post_v1r(env.SerializeToString(), din)
+        if not resp.ok or not resp.inner_bytes:
+            return None
+        try:
+            reply = combined_pb2.MessageEnvelope()
+            reply.ParseFromString(resp.inner_bytes)
+            if not reply.HasField("teg") or not reply.teg.HasField(
+                "get_backup_events_response"
+            ):
+                return None
+            events = reply.teg.get_backup_events_response
+            manual: dict[str, Any] | None = None
+            if events.HasField("manual_backup_event"):
+                scheduling = events.manual_backup_event.scheduling_info
+                end_time = scheduling.start_time.seconds + scheduling.duration_seconds
+                manual = {
+                    "start_time": scheduling.start_time.seconds,
+                    "duration_seconds": scheduling.duration_seconds,
+                    "end_time": end_time,
+                    "active": int(time.time()) < end_time,
+                    "priority": scheduling.priority,
+                }
+            scheduled = [
+                {
+                    "id": event.id,
+                    "name": event.name,
+                    "start_time": event.scheduling_info.start_time.seconds,
+                    "duration_seconds": event.scheduling_info.duration_seconds,
+                    "priority": event.scheduling_info.priority,
+                }
+                for event in events.backup_events
+            ]
+            return {"manual_backup": manual, "backup_events": scheduled}
+        except Exception as err:
+            _LOGGER.debug("get_backup_events parse error: %s", err)
+            return None
+
+    async def list_authorized_clients(self, din: str) -> dict[str, Any] | None:
+        """Read paired authorized clients directly from the gateway over LAN."""
+        env = combined_pb2.MessageEnvelope()
+        env.deliveryChannel = combined_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        env.sender.authorizedClient = 1
+        env.recipient.din = din
+        env.authorization.list_authorized_clients_request.SetInParent()
+
+        resp = await self.post_v1r(env.SerializeToString(), din)
+        if not resp.ok or not resp.inner_bytes:
+            return None
+        try:
+            reply = combined_pb2.MessageEnvelope()
+            reply.ParseFromString(resp.inner_bytes)
+            if not reply.HasField("authorization") or not reply.authorization.HasField(
+                "list_authorized_clients_response"
+            ):
+                return None
+            records = reply.authorization.list_authorized_clients_response
+            clients = [
+                {
+                    "public_key": base64.b64encode(record.public_key).decode("ascii"),
+                    "state": _enum_suffix(
+                        combined_pb2.AuthorizedState,
+                        record.state,
+                        "AUTHORIZED_STATE_",
+                    ),
+                    "type": _enum_suffix(
+                        combined_pb2.AuthorizedClientType,
+                        record.type,
+                        "AUTHORIZED_CLIENT_TYPE_",
+                    ),
+                    "description": record.description,
+                    "key_type": _enum_suffix(
+                        combined_pb2.AuthorizedKeyType,
+                        record.key_type,
+                        "AUTHORIZED_KEY_TYPE_",
+                    ),
+                    "roles": [
+                        _enum_suffix(
+                            combined_pb2.AuthorizationRole,
+                            role,
+                            "AUTHORIZATION_ROLE_",
+                        )
+                        for role in record.roles
+                    ],
+                    "verification": _enum_suffix(
+                        combined_pb2.AuthorizedVerificationType,
+                        record.verification,
+                        "AUTHORIZED_VERIFICATION_TYPE_",
+                    ),
+                    "added_time": (
+                        record.added_time.seconds
+                        if record.HasField("added_time")
+                        else None
+                    ),
+                    "identifier": (
+                        record.identifier if record.HasField("identifier") else None
+                    ),
+                    "authorized_by_public_key": (
+                        base64.b64encode(record.authorized_by_public_key).decode("ascii")
+                        if record.HasField("authorized_by_public_key")
+                        else None
+                    ),
+                }
+                for record in records.clients
+            ]
+            return {
+                "clients": clients,
+                "enable_line_switch_off": records.enable_line_switch_off,
+            }
+        except Exception as err:
+            _LOGGER.debug("list_authorized_clients parse error: %s", err)
+            return None

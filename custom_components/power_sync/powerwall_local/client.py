@@ -13,7 +13,9 @@ without both, this client refuses to construct.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -34,11 +36,43 @@ from .transport import TEDAPIv1rTransport
 _LOGGER = logging.getLogger(__name__)
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+_AUTHORIZED_STATE_CODES = {
+    "PENDING_VERIFICATION": 1,
+    "PENDING_VERIFICATION_TIMEOUT": 2,
+    "VERIFIED": 3,
+    "REMOVED": 4,
+}
+_ISLANDED_GRID_STATES = {"SystemIslandedActive", "SystemIslandedReady"}
 
 
 def is_loopback_host(host: str | None) -> bool:
     """Return True for loopback placeholders that are not real gateway hosts."""
     return str(host or "").strip().lower() in _LOOPBACK_HOSTS
+
+
+def _matching_authorized_client_state(
+    clients: list[dict[str, Any]], public_key_b64: str
+) -> int | None:
+    """Return the numeric state for our key across local/cloud payload shapes."""
+    for client in clients:
+        public_key = client.get("public_key") or client.get("Public_key", "")
+        if public_key != public_key_b64:
+            continue
+        state = client.get("state")
+        if state is None:
+            state = client.get("State")
+        if isinstance(state, int):
+            return state
+        state_text = str(state or "").strip().upper()
+        if state_text.startswith("AUTHORIZED_STATE_"):
+            state_text = state_text.removeprefix("AUTHORIZED_STATE_")
+        if state_text in _AUTHORIZED_STATE_CODES:
+            return _AUTHORIZED_STATE_CODES[state_text]
+        try:
+            return int(state_text)
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 class PowerwallVersion(str, Enum):
@@ -66,6 +100,8 @@ class PowerwallSnapshot:
     operation_mode: str | None
     backup_reserve_percent: int | None
     raw: dict[str, Any]
+    grid_charging_enabled: bool | None = None
+    grid_export_rule: str | None = None
     # Best-effort fields from /api/system_status (PW2; may be None on PW3).
     # Keep None when the endpoint is unsupported so consumers know to skip.
     system_island_state: str | None = None
@@ -211,18 +247,44 @@ class PowerwallLocalClient:
         Returns the state integer (2=pending, 3=verified) or None if
         we couldn't determine it. Matches on our specific public key.
         """
+        our_pubkey_b64 = base64.b64encode(
+            self._transport._public_key_der
+        ).decode()
+
+        if self._local_access_enabled and not is_loopback_host(self._host):
+            try:
+                payload = await self.list_authorized_clients()
+            except Exception as err:
+                _LOGGER.warning(
+                    "verify_pairing: local authorized-client read failed; "
+                    "falling back to Fleet API: %s",
+                    err,
+                )
+            else:
+                if payload is not None:
+                    state = _matching_authorized_client_state(
+                        payload.get("clients") or [], our_pubkey_b64
+                    )
+                    if state is not None:
+                        _LOGGER.info(
+                            "verify_pairing: found our key locally — state=%s",
+                            state,
+                        )
+                        return state
+                    _LOGGER.warning(
+                        "verify_pairing: our key not found in %d local clients",
+                        len(payload.get("clients") or []),
+                    )
+                    return None
+
+        return await self._verify_pairing_cloud(our_pubkey_b64)
+
+    async def _verify_pairing_cloud(self, our_pubkey_b64: str) -> int | None:
+        """Fall back to the existing Fleet API authorized-client lookup."""
         if not self._fleet_api_base or not self._fleet_api_token or not self._energy_site_id:
             return None
 
-        import base64
         import aiohttp
-
-        # Get our public key base64 to match against the gateway's list
-        our_pubkey_b64: str | None = None
-        if self._transport is not None:
-            our_pubkey_b64 = base64.b64encode(
-                self._transport._public_key_der
-            ).decode()
 
         url = (
             f"{self._fleet_api_base}/api/1/energy_sites/"
@@ -268,35 +330,85 @@ class PowerwallLocalClient:
             except (KeyError, TypeError):
                 return None
 
-        # Match our specific key
-        for client in clients:
-            pub = client.get("public_key") or client.get("Public_key", "")
-            state = client.get("state") or client.get("State")
-            if our_pubkey_b64 and pub == our_pubkey_b64:
-                _LOGGER.info(
-                    "verify_pairing: found our key — state=%s", state,
-                )
-                try:
-                    return int(state)
-                except (TypeError, ValueError):
-                    return None
+        state = _matching_authorized_client_state(clients, our_pubkey_b64)
+        if state is not None:
+            _LOGGER.info("verify_pairing: found our key via cloud — state=%s", state)
+            return state
 
         _LOGGER.warning("verify_pairing: our key not found in %d clients", len(clients))
         return None
 
+    async def set_grid_import_export(
+        self,
+        *,
+        customer_preferred_export_rule: str | None = None,
+        disallow_charge_from_grid_with_solar_installed: bool | None = None,
+    ) -> bool:
+        """Write local export and/or grid-charge policy in one config update."""
+        updates: dict[str, Any] = {}
+        if customer_preferred_export_rule is not None:
+            if customer_preferred_export_rule not in ("battery_ok", "pv_only", "never"):
+                raise ValueError(
+                    "customer_preferred_export_rule must be battery_ok, pv_only, or never"
+                )
+            updates["site_info.customer_preferred_export_rule"] = (
+                customer_preferred_export_rule
+            )
+        if disallow_charge_from_grid_with_solar_installed is not None:
+            updates["site_info.disallow_charge_from_grid_with_solar_installed"] = bool(
+                disallow_charge_from_grid_with_solar_installed
+            )
+        if not updates:
+            raise ValueError("at least one grid import/export setting is required")
+        return await self._transport.write_config(self._din, updates)
+
+    async def schedule_max_backup(self, duration_seconds: int = 7200) -> bool:
+        """Schedule a local manual max-backup event."""
+        return await self._transport.schedule_manual_backup(
+            self._din, duration_seconds
+        )
+
+    async def cancel_max_backup(self) -> bool:
+        """Cancel the active local manual max-backup event."""
+        return await self._transport.cancel_manual_backup(self._din)
+
+    async def get_backup_events(self) -> dict[str, Any] | None:
+        """Read local manual and scheduled backup events."""
+        return await self._transport.get_backup_events(self._din)
+
+    async def list_authorized_clients(self) -> dict[str, Any] | None:
+        """Read authorized clients directly from the local gateway."""
+        return await self._transport.list_authorized_clients(self._din)
+
+    async def trigger_islanding(self) -> bool:
+        """Send the explicit local black-start/islanding trigger."""
+        return await self._transport.trigger_islanding(self._din)
+
+    async def _wait_for_grid_state(
+        self, *, off_grid: bool, timeout: float = 12.0
+    ) -> bool:
+        """Confirm a local island command from fresh gateway telemetry."""
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                snapshot = await self.get_snapshot()
+            except Exception as err:
+                _LOGGER.debug("grid-state readback failed while waiting: %s", err)
+            else:
+                is_off_grid = snapshot.grid_status in _ISLANDED_GRID_STATES
+                if is_off_grid == off_grid:
+                    return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(1.0)
+
     async def go_off_grid(self, *, mode_override: int | None = None) -> bool:
         """Physically disconnect from the grid (contactor open).
 
-        Cloud-only via Fleet API ``device_command`` with a signed
-        ``routable_message``. The gateway verifies our RSA signature
-        from the paired key. Local TEDAPI v1r returns success for the
-        same setIslandModeRequest but does not actually operate the
-        contactor — discovered empirically on both PW2 and PW3.
-
-        Because the path is cloud-only, a local LAN IP is NOT required;
-        the client just needs the paired private key + gateway DIN +
-        Fleet API token + energy site ID. ``_send_signed_device_command``
-        handles the signing-and-send.
+        Tries the local V1R set-island + black-start sequence first and accepts
+        it only after fresh local telemetry confirms the contactor state. A
+        gateway acknowledgement without actuation therefore falls through to
+        the proven Fleet ``device_command`` relay path.
 
         Default mode=6 works for both PW2 and PW3. Use ``mode_override``
         to test alternative values.
@@ -326,10 +438,31 @@ class PowerwallLocalClient:
             _LOGGER.warning("go_off_grid: no DIN")
             return False
 
-        # Cloud signed routable_message — the only working path for
-        # both PW2 and PW3. Local TEDAPI v1r returns success but does
-        # not physically operate the contactor.
-        _LOGGER.info("go_off_grid: cloud signed device_command (mode=%d)", mode)
+        if self._local_access_enabled and not is_loopback_host(self._host):
+            try:
+                set_ok = await self._transport.set_island_mode(
+                    self._din,
+                    off_grid=True,
+                    force=True,
+                    mode_override=mode,
+                )
+                trigger_ok = await self.trigger_islanding() if set_ok else False
+                if (set_ok or trigger_ok) and await self._wait_for_grid_state(
+                    off_grid=True
+                ):
+                    _LOGGER.info("go_off_grid: confirmed via local V1R")
+                    return True
+                _LOGGER.warning(
+                    "go_off_grid: local V1R did not confirm islanding; "
+                    "falling back to cloud"
+                )
+            except Exception as err:
+                _LOGGER.warning(
+                    "go_off_grid: local V1R failed; falling back to cloud: %s",
+                    err,
+                )
+
+        _LOGGER.info("go_off_grid: cloud signed device_command fallback (mode=%d)", mode)
         return await self._send_signed_device_command(
             off_grid=True, mode_override=mode,
         )
@@ -339,7 +472,25 @@ class PowerwallLocalClient:
         if not self._din:
             return False
 
-        _LOGGER.info("reconnect_grid: cloud signed device_command (mode=1)")
+        if self._local_access_enabled and not is_loopback_host(self._host):
+            try:
+                local_ok = await self._transport.set_island_mode(
+                    self._din, off_grid=False, force=False
+                )
+                if local_ok and await self._wait_for_grid_state(off_grid=False):
+                    _LOGGER.info("reconnect_grid: confirmed via local V1R")
+                    return True
+                _LOGGER.warning(
+                    "reconnect_grid: local V1R did not confirm reconnection; "
+                    "falling back to cloud"
+                )
+            except Exception as err:
+                _LOGGER.warning(
+                    "reconnect_grid: local V1R failed; falling back to cloud: %s",
+                    err,
+                )
+
+        _LOGGER.info("reconnect_grid: cloud signed device_command fallback (mode=1)")
         return await self._send_signed_device_command(off_grid=False)
 
     async def curtail_via_backup_mode(self) -> bool:
@@ -685,6 +836,23 @@ def _snapshot_from_dcq(
     backup_reserve_percent = normalize_local_backup_reserve_percent(
         raw_backup_reserve_percent
     )
+    disallow_grid_charging = (
+        site_info.get("disallow_charge_from_grid_with_solar_installed")
+        if isinstance(site_info, dict)
+        else None
+    )
+    grid_charging_enabled = (
+        not disallow_grid_charging
+        if isinstance(disallow_grid_charging, bool)
+        else None
+    )
+    grid_export_rule = (
+        site_info.get("customer_preferred_export_rule")
+        if isinstance(site_info, dict)
+        else None
+    )
+    if grid_export_rule not in ("battery_ok", "pv_only", "never"):
+        grid_export_rule = None
 
     # Alerts: DCQ flat list of names; coerce to dict shape consumers expect.
     alerts_active = control.get("alerts", {}).get("active") if isinstance(control.get("alerts"), dict) else None
@@ -727,6 +895,8 @@ def _snapshot_from_dcq(
         operation_mode=operation_mode,
         backup_reserve_percent=backup_reserve_percent,
         raw={"dcq": dcq, "config": cfg},
+        grid_charging_enabled=grid_charging_enabled,
+        grid_export_rule=grid_export_rule,
         system_island_state=system_island_state,
         pw_count=pw_count,
         total_pack_full_wh=full_wh,

@@ -481,6 +481,8 @@ def _sample_cfg() -> dict:
         "site_info": {
             "default_real_mode": "self_consumption",
             "backup_reserve_percent": 15,
+            "disallow_charge_from_grid_with_solar_installed": True,
+            "customer_preferred_export_rule": "pv_only",
         }
     }
 
@@ -496,6 +498,8 @@ def test_snapshot_from_dcq_full_payload():
     assert snap.grid_status == "SystemGridConnected"
     assert snap.operation_mode == "self_consumption"
     assert snap.backup_reserve_percent == 10
+    assert snap.grid_charging_enabled is False
+    assert snap.grid_export_rule == "pv_only"
     assert snap.pw_count == 2
     assert snap.total_pack_full_wh == 27000.0
     assert snap.total_pack_remaining_wh == 8100.0

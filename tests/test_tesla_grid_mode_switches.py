@@ -133,6 +133,7 @@ _ps_const.SENSOR_FAMILY_LP_OPTIMIZER = "lp_optimizer"
 _ps_const.SENSOR_FAMILY_BATTERY = "battery"
 _ps_const.SENSOR_FAMILY_CONTROLS = "controls"
 _ps_const.TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS = 30
+_ps_const.TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
 _ps_const.TESLA_CAPABILITY_WAIT_SECONDS = 30.0
 _ps_const.POWERWALL_LOCAL_POLL_INTERVAL = 2
 _ps_const.family_device_info = lambda entry_id, family: {
@@ -241,6 +242,29 @@ def test_on_grid_command_reconnects_and_shares_pending_state():
     ]
     assert on_grid.is_on is True
     assert off_grid.is_on is False
+
+
+def test_grid_charging_switch_prefers_fresh_local_readback():
+    hass = _Hass("SystemGridConnected")
+    coord = hass.data["power_sync"]["entry-1"]["powerwall_local"]["coordinator"]
+    coord.data.grid_charging_enabled = False
+    coord.last_success_monotonic = switch.time.monotonic()
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = types.SimpleNamespace(
+        _site_info_cache={
+            "components": {
+                "disallow_charge_from_grid_with_solar_installed": False
+            }
+        }
+    )
+    entry = types.SimpleNamespace(
+        entry_id="entry-1",
+        data={"powerwall_local_paired": True},
+        options={},
+    )
+
+    entity = switch.GridChargingSwitch(hass, entry)
+
+    assert entity.is_on is False
 
 
 def test_force_switches_are_added_for_non_tesla_batteries():

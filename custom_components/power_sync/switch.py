@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -62,6 +63,7 @@ from .const import (
     SENSOR_FAMILY_BATTERY,
     SENSOR_FAMILY_CONTROLS,
     TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS,
+    TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
     TESLA_CAPABILITY_WAIT_SECONDS,
     POWERWALL_LOCAL_POLL_INTERVAL,
     supports_no_idle_mode_provider,
@@ -73,6 +75,27 @@ from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_hand
 PROVIDERS_WITH_TOU_SYNC = {"amber", "octopus", "flow_power"}
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _fresh_powerwall_local_snapshot(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> Any | None:
+    """Return a fresh paired local Powerwall snapshot, if available."""
+    if not entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
+        return None
+    coordinator = (
+        hass.data.get(DOMAIN, {})
+        .get(entry.entry_id, {})
+        .get("powerwall_local", {})
+        .get("coordinator")
+    )
+    data = getattr(coordinator, "data", None)
+    last_success_monotonic = getattr(coordinator, "last_success_monotonic", None)
+    if data is None or last_success_monotonic is None:
+        return None
+    if time.monotonic() - last_success_monotonic > TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS:
+        return None
+    return data
 
 
 def _coerce_duration(value: Any, default: int = DEFAULT_DISCHARGE_DURATION) -> int:
@@ -1610,6 +1633,10 @@ class GridChargingSwitch(_TeslaSiteSwitchBase):
 
     @property
     def is_on(self) -> bool | None:
+        local_snapshot = _fresh_powerwall_local_snapshot(self.hass, self._entry)
+        local_enabled = getattr(local_snapshot, "grid_charging_enabled", None)
+        if local_enabled is not None:
+            return bool(local_enabled)
         coord = self._tesla_coord()
         site_info = getattr(coord, "_site_info_cache", None) if coord else None
         if not site_info:

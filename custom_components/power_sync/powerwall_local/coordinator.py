@@ -342,6 +342,8 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             "grid_status": snap.grid_status,
             "operation_mode": snap.operation_mode,
             "backup_reserve_percent": snap.backup_reserve_percent,
+            "grid_charging_enabled": snap.grid_charging_enabled,
+            "grid_export_rule": snap.grid_export_rule,
             "gateway_host": self._client.host,
             "gateway_din": self._client.din,
             "version": self._client.version.value,

@@ -181,6 +181,34 @@ enum AuthorizedClientType {
   AUTHORIZED_CLIENT_TYPE_VEHICLE = 2;
 }
 
+enum AuthorizationRole {
+  AUTHORIZATION_ROLE_INVALID = 0;
+  AUTHORIZATION_ROLE_CUSTOMER = 1;
+  AUTHORIZATION_ROLE_VEHICLE = 2;
+}
+
+enum AuthorizedState {
+  AUTHORIZED_STATE_INVALID = 0;
+  AUTHORIZED_STATE_PENDING_VERIFICATION = 1;
+  AUTHORIZED_STATE_PENDING_VERIFICATION_TIMEOUT = 2;
+  AUTHORIZED_STATE_VERIFIED = 3;
+  AUTHORIZED_STATE_REMOVED = 4;
+}
+
+enum AuthorizedKeyType {
+  AUTHORIZED_KEY_TYPE_INVALID = 0;
+  AUTHORIZED_KEY_TYPE_RSA = 1;
+  AUTHORIZED_KEY_TYPE_ECC = 2;
+}
+
+enum AuthorizedVerificationType {
+  AUTHORIZED_VERIFICATION_TYPE_INVALID = 0;
+  AUTHORIZED_VERIFICATION_TYPE_PRESENCE_PROOF = 1;
+  AUTHORIZED_VERIFICATION_TYPE_BLE = 2;
+  AUTHORIZED_VERIFICATION_TYPE_SIGNED = 3;
+  AUTHORIZED_VERIFICATION_TYPE_HERMES_COMMAND = 4;
+}
+
 message Message {
   MessageEnvelope message = 1;
   Tail tail = 2;
@@ -295,8 +323,31 @@ message EnergySiteNetMessages {
   bytes placeholder = 1;
 }
 
+message AuthorizationRecord {
+  AuthorizedClientType type               = 1;
+  string description                      = 2;
+  AuthorizedKeyType key_type              = 3;
+  bytes public_key                        = 4;
+  repeated AuthorizationRole roles        = 5;
+  AuthorizedState state                   = 6;
+  AuthorizedVerificationType verification = 7;
+  google.protobuf.Timestamp added_time    = 8;
+  optional string identifier              = 9;
+  optional bytes authorized_by_public_key = 10;
+}
+
+message AuthorizationAPIListAuthorizedClientsRequest {}
+
+message AuthorizationAPIListAuthorizedClientsResponse {
+  repeated AuthorizationRecord clients = 1;
+  bool enable_line_switch_off = 2;
+}
+
 message AuthorizationMessages {
-  bytes placeholder = 1;
+  oneof message {
+    AuthorizationAPIListAuthorizedClientsRequest list_authorized_clients_request = 5;
+    AuthorizationAPIListAuthorizedClientsResponse list_authorized_clients_response = 6;
+  }
 }
 
 message GraphQLMessages {

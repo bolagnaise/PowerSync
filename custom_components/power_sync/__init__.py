@@ -32233,6 +32233,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 label="set_grid_export",
             )
             if success:
+                entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(
+                    entry.entry_id, {}
+                )
+                local_coord = (entry_data.get("powerwall_local") or {}).get(
+                    "coordinator"
+                )
+                local_snapshot = getattr(local_coord, "data", None)
+                if local_snapshot is not None:
+                    local_snapshot.grid_export_rule = rule
                 _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
                 if _tesla_coord_for_cache is not None:
                     _tesla_coord_for_cache.invalidate_site_info_cache()
@@ -32241,7 +32250,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
                 )
                 if solar_curtailment_enabled:
-                    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
                     entry_data["manual_export_override"] = True
                     entry_data["manual_export_rule"] = rule
                     _LOGGER.info("Manual export override enabled: %s", rule)
@@ -32284,12 +32292,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error(f"Error clearing manual export override: {e}", exc_info=True)
 
     async def handle_set_grid_charging(call: ServiceCall) -> None:
-        """Enable or disable grid charging.
-
-        Cloud-only — disallow_charge_from_grid_with_solar_installed isn't stored
-        in the gateway's local config.json (verified empirically against PW3
-        firmware 26.2.1). It's cloud-side state Tesla pushes to the gateway.
-        """
+        """Enable or disable grid charging, preferring paired local V1R."""
         enabled = call.data.get("enabled")
         if enabled is None:
             _LOGGER.error("Missing 'enabled' parameter for set_grid_charging")
@@ -32310,31 +32313,90 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info(f"🔌 Setting grid charging to {'enabled' if enabled else 'disabled'}")
 
         try:
-            site_configs = _get_tesla_site_configs(hass, entry)
-            if not site_configs:
-                _LOGGER.error("Missing Tesla site ID or token for set_grid_charging")
-                return
+            from .const import CONF_POWERWALL_LOCAL_DIN
+            from .powerwall_local.dispatch import dispatch_powerwall_write
 
-            session = async_get_clientsession(hass)
-            for site_id, current_token, provider in site_configs:
-                headers = {
-                    "Authorization": f"Bearer {current_token}",
-                    "Content-Type": "application/json",
-                }
-                api_base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
+            async def _local(transport) -> bool:
+                din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
+                if not din:
+                    return False
+                return await transport.write_config(
+                    din,
+                    {
+                        "site_info.disallow_charge_from_grid_with_solar_installed": not enabled
+                    },
+                )
 
-                # Note: Tesla API uses inverted logic - disallow_charge_from_grid_with_solar_installed
-                async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
-                    headers=headers,
-                    json={"disallow_charge_from_grid_with_solar_installed": not enabled},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        _LOGGER.info("Grid charging %s for site %s", 'enabled' if enabled else 'disabled', site_id)
-                    else:
-                        text = await response.text()
-                        _LOGGER.error("Failed to set grid charging for site %s: %s - %s", site_id, response.status, text)
+            async def _cloud() -> bool:
+                site_configs = _get_tesla_site_configs(hass, entry)
+                if not site_configs:
+                    _LOGGER.error("Missing Tesla site ID or token for set_grid_charging")
+                    return False
+
+                any_ok = False
+                session = async_get_clientsession(hass)
+                for site_id, current_token, provider in site_configs:
+                    headers = {
+                        "Authorization": f"Bearer {current_token}",
+                        "Content-Type": "application/json",
+                    }
+                    api_base = get_tesla_api_base_url(
+                        provider, entry.data.get(CONF_FLEET_API_BASE_URL)
+                    )
+
+                    # Tesla API uses inverted logic: disallow grid charging.
+                    async with session.post(
+                        f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
+                        headers=headers,
+                        json={
+                            "disallow_charge_from_grid_with_solar_installed": not enabled
+                        },
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            _LOGGER.info(
+                                "Grid charging %s for site %s",
+                                "enabled" if enabled else "disabled",
+                                site_id,
+                            )
+                            any_ok = True
+                        else:
+                            text = await response.text()
+                            _LOGGER.error(
+                                "Failed to set grid charging for site %s: %s - %s",
+                                site_id,
+                                response.status,
+                                text,
+                            )
+                return any_ok
+
+            success = await dispatch_powerwall_write(
+                hass,
+                entry,
+                local_call=_local,
+                cloud_call=_cloud,
+                label="set_grid_charging",
+            )
+            if success:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                local_coord = (entry_data.get("powerwall_local") or {}).get(
+                    "coordinator"
+                )
+                local_snapshot = getattr(local_coord, "data", None)
+                if local_snapshot is not None:
+                    local_snapshot.grid_charging_enabled = enabled
+                tesla_coord = (
+                    hass.data.get(DOMAIN, {})
+                    .get(entry.entry_id, {})
+                    .get("tesla_coordinator")
+                )
+                if tesla_coord is not None:
+                    tesla_coord.invalidate_site_info_cache()
+                hass.async_create_task(
+                    refresh_powerwall_local_after_settings_write(
+                        "set_grid_charging"
+                    )
+                )
 
         except Exception as e:
             _LOGGER.error(f"Error setting grid charging: {e}", exc_info=True)
@@ -32474,7 +32536,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as err:
             _LOGGER.warning("Failed to persist max_backup_schedule: %s", err)
 
-    async def _restore_max_backup_window(end_ts: float, saved_reserve: int | None) -> None:
+    async def _restore_max_backup_window(
+        end_ts: float,
+        saved_reserve: int | None,
+        local_event: bool = False,
+    ) -> None:
         """Re-arm the restoration timer for an already-active window.
 
         End time and saved reserve come from the persisted Store payload.
@@ -32489,6 +32555,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
         entry_data["max_backup_saved_reserve"] = saved_reserve
         entry_data["max_backup_end_ts"] = end_ts
+        entry_data["max_backup_local_event"] = local_event
 
         if remaining <= 0:
             _LOGGER.info(
@@ -32513,9 +32580,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         target = data.pop("max_backup_saved_reserve", None)
+        local_event = bool(data.pop("max_backup_local_event", False))
         data.pop("max_backup_cancel", None)
         data.pop("max_backup_end_ts", None)
         await _persist_max_backup_schedule(None)
+        if local_event:
+            client = (data.get("powerwall_local") or {}).get("client")
+            if client is not None:
+                try:
+                    await client.cancel_max_backup()
+                except Exception as err:
+                    _LOGGER.warning(
+                        "schedule_max_backup: local event cleanup failed: %s", err
+                    )
+            _LOGGER.info("🛡️ Local max backup event ended")
+            return
         if target is None:
             _LOGGER.warning("schedule_max_backup: no saved reserve to restore")
             return
@@ -32556,17 +32635,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         from homeassistant.helpers.event import async_call_later
 
-        coord = _get_tesla_coordinator_for_service("schedule_max_backup")
-        if coord is None:
+        entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+        local_runtime = entry_data.get("powerwall_local") or {}
+        local_client = local_runtime.get("client")
+        coord = entry_data.get("tesla_coordinator")
+        if coord is None and local_client is None:
+            coord = _get_tesla_coordinator_for_service("schedule_max_backup")
+        if coord is None and local_client is None:
+            _LOGGER.error("schedule_max_backup: no Tesla cloud or local coordinator")
             return
         opt_coord = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("optimization_coordinator")
         if opt_coord is not None and hasattr(opt_coord, "resolve_restore_target"):
             saved_reserve = await opt_coord.resolve_restore_target()
         else:
-            site_info = getattr(coord, "_site_info_cache", None) or {}
-            saved_reserve = site_info.get("backup_reserve_percent")
+            local_snapshot = getattr(local_runtime.get("coordinator"), "data", None)
+            saved_reserve = getattr(
+                local_snapshot, "backup_reserve_percent", None
+            )
+            if saved_reserve is None:
+                site_info = getattr(coord, "_site_info_cache", None) or {}
+                saved_reserve = site_info.get("backup_reserve_percent")
 
-        entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
         prior_cancel = entry_data.get("max_backup_cancel")
         if prior_cancel is not None:
             try:
@@ -32586,16 +32675,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             duration_minutes, saved_reserve,
         )
 
-        await hass.services.async_call(
-            DOMAIN, "set_backup_reserve",
-            {"percent": 100, "source": "user"}, blocking=True,
-        )
+        local_event = False
+        if local_client is not None:
+            try:
+                local_event = bool(
+                    await local_client.schedule_max_backup(duration_minutes * 60)
+                )
+            except Exception as err:
+                _LOGGER.warning(
+                    "schedule_max_backup: local event failed; using reserve fallback: %s",
+                    err,
+                )
+        entry_data["max_backup_local_event"] = local_event
+
+        if local_event:
+            _LOGGER.info("🛡️ Max backup scheduled via local V1R event")
+        else:
+            if saved_reserve is None:
+                entry_data.pop("max_backup_saved_reserve", None)
+                entry_data.pop("max_backup_end_ts", None)
+                entry_data.pop("max_backup_local_event", None)
+                await _persist_max_backup_schedule(None)
+                _LOGGER.error(
+                    "schedule_max_backup: native event unavailable or failed and no trustworthy "
+                    "reserve restore target is available; refusing reserve fallback"
+                )
+                return
+            await hass.services.async_call(
+                DOMAIN, "set_backup_reserve",
+                {"percent": 100, "source": "user"}, blocking=True,
+            )
 
         cancel = async_call_later(hass, duration_minutes * 60, _max_backup_restore)
         entry_data["max_backup_cancel"] = cancel
         await _persist_max_backup_schedule({
             "end_ts": end_ts,
             "saved_reserve": saved_reserve,
+            "local_event": local_event,
         })
 
     async def handle_refresh_calibration(call: ServiceCall) -> None:
@@ -32653,10 +32769,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
         end_ts = schedule.get("end_ts")
         saved_reserve = schedule.get("saved_reserve")
+        local_event = bool(schedule.get("local_event", False))
         if not isinstance(end_ts, (int, float)):
             await _persist_max_backup_schedule(None)
             return
-        await _restore_max_backup_window(float(end_ts), saved_reserve)
+        await _restore_max_backup_window(
+            float(end_ts), saved_reserve, local_event=local_event
+        )
 
     hass.async_create_task(_resume_max_backup_if_persisted())
 

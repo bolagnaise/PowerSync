@@ -289,6 +289,11 @@ class TeslaGridExportRuleSelect(_TeslaSiteSelectBase):
 
     @property
     def current_option(self) -> str | None:
+        local_snap = _fresh_powerwall_local_snapshot(self.hass, self._entry)
+        local_rule = getattr(local_snap, "grid_export_rule", None)
+        if local_rule in self._OPTIONS:
+            return local_rule
+
         # Prefer the cached value written when the user last set the rule
         # via a service call — this survives even when the Tesla API's
         # site_info response omits customer_preferred_export_rule (which
