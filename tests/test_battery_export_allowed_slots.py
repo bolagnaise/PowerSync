@@ -5437,6 +5437,40 @@ def test_no_idle_setting_clears_stale_unsupported_provider_value(opt_module):
     assert background_tasks == ["powersync_settings_reoptimize"]
 
 
+def test_no_idle_setting_reconciles_stale_runtime_without_stuck_reload_flag(
+    opt_module,
+):
+    """A saved true value must repair a stale false runtime value in place.
+
+    Resubmitting the unchanged persisted value does not fire Home Assistant's
+    config-entry update listener, so the reconciliation must also avoid leaving
+    ``_skip_reload`` set for the next unrelated structural change.
+    """
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        optimization_disable_idle=True,
+    )
+    coordinator._entry.data["optimization_disable_idle"] = True
+    coordinator._config.disable_idle_enabled = False
+    updates, run_calls, background_tasks = _prepare_enabled_settings_coordinator(
+        coordinator
+    )
+    entry_data = coordinator.hass.data["power_sync"]["entry-1"]
+
+    result = asyncio.run(
+        coordinator.set_settings({"disable_idle_enabled": True})
+    )
+
+    assert result["success"] is True
+    assert result["changes"] == ["disable_idle_enabled: True"]
+    assert coordinator.disable_idle_enabled is True
+    assert updates == []
+    assert entry_data.get("_skip_reload") is not True
+    assert run_calls == []
+    assert background_tasks == ["powersync_settings_reoptimize"]
+
+
 def test_flow_power_no_idle_executor_preserves_solver_exempt_idle(opt_module):
     battery = _FakeBattery(backup_reserve=20)
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)

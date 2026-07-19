@@ -1165,6 +1165,26 @@ def test_optimization_options_apply_tunables_in_place_without_reload():
     assert "await coordinator._run_optimization()" not in method_source
 
 
+def test_optimization_options_reconciles_unchanged_no_idle_runtime_state():
+    """An unchanged saved No Idle value must still reach the coordinator.
+
+    This repairs runtime/config divergence after an update without requiring
+    the user to save off and then on merely to force a structural reload.
+    """
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_optimization")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    live_settings_start = method_source.index("live_settings = {")
+    live_settings_end = method_source.index(
+        "await coordinator.set_settings(live_settings)"
+    )
+    live_settings_source = method_source[live_settings_start:live_settings_end]
+
+    assert '"disable_idle_enabled": disable_idle' in live_settings_source
+
+
 def test_optimization_settings_api_exposes_planned_ev_load_entity():
     source = INIT_PATH.read_text()
     get_method = _init_class_method("OptimizationSettingsView", "get")

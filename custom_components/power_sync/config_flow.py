@@ -10287,6 +10287,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     "charge_by_time_target_soc": charge_by_time_target_soc,
                     "spread_export_enabled": spread_export_enabled,
                     "spread_import_enabled": spread_import_enabled,
+                    "disable_idle_enabled": disable_idle,
                     "ev_integration": ev_integration_enabled,
                     "load_entity": load_entity,
                     "planned_ev_load_entity": planned_ev_load_entity,
