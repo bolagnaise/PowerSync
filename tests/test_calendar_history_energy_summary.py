@@ -35,6 +35,7 @@ def _calendar_namespace() -> dict[str, Any]:
         "_calendar_statistic_suffixes",
         "_find_calendar_statistic_entity_ids",
         "_calendar_residual_entry",
+        "_calendar_reconcile_current_day_rows",
         "_calendar_range_includes_today",
         "_calendar_statistics_end_dt",
         "_calendar_history_bucket_timestamp",
@@ -86,6 +87,7 @@ def _calendar_namespace() -> dict[str, Any]:
         "_LOGGER": SimpleNamespace(
             info=lambda *args, **kwargs: None,
             debug=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
             error=lambda *args, **kwargs: None,
         ),
     }
@@ -235,6 +237,147 @@ def test_calendar_residual_entry_subtracts_existing_hourly_rows():
     assert residual["home_consumption"] == 7000
     assert residual["solar_energy_exported"] == 4000
     assert residual["consumer_energy_imported"] == 7000
+
+
+def test_current_day_rows_fall_back_to_live_totals_when_statistics_are_stale():
+    """A reset-skewed recorder row must not mix yesterday into today's summary."""
+    namespace = _calendar_namespace()
+    current_entry = {
+        "timestamp": "2026-07-20T20:28:38+10:00",
+        "solar_generation": 40_381,
+        "battery_discharge": 18_350,
+        "battery_charge": 38_680,
+        "grid_import": 13_060,
+        "grid_export": 13_440,
+        "home_consumption": 20_260,
+    }
+    recorder_rows = [
+        {
+            "timestamp": "2026-07-20T00:00:00+10:00",
+            "solar_generation": 23_440,
+            "battery_discharge": 41_922,
+            "battery_charge": 38_754,
+            "grid_import": 31_592,
+            "grid_export": 28_468,
+            "home_consumption": 36_044,
+        }
+    ]
+
+    rows = namespace["_calendar_reconcile_current_day_rows"](
+        recorder_rows,
+        current_entry,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["solar_generation"] == 40_381
+    assert rows[0]["battery_discharge"] == 18_350
+    assert rows[0]["battery_charge"] == 38_680
+    assert rows[0]["grid_import"] == 13_060
+    assert rows[0]["grid_export"] == 13_440
+    assert rows[0]["home_consumption"] == 20_260
+    assert rows[0]["grid_energy_imported"] == 13_060
+    assert rows[0]["grid_energy_exported"] == 13_440
+
+
+def test_current_day_rows_keep_hourly_shape_when_statistics_match_live_totals():
+    namespace = _calendar_namespace()
+    current_entry = {
+        "timestamp": "2026-07-20T20:28:38+10:00",
+        "solar_generation": 10_000,
+        "battery_discharge": 4_000,
+        "battery_charge": 6_000,
+        "grid_import": 12_000,
+        "grid_export": 3_000,
+        "home_consumption": 15_000,
+    }
+    recorder_rows = [
+        {
+            "timestamp": "2026-07-20T08:00:00+10:00",
+            "solar_generation": 6_000,
+            "battery_discharge": 2_000,
+            "battery_charge": 3_000,
+            "grid_import": 6_000,
+            "grid_export": 500,
+            "home_consumption": 8_000,
+        }
+    ]
+
+    rows = namespace["_calendar_reconcile_current_day_rows"](
+        recorder_rows,
+        current_entry,
+    )
+
+    assert len(rows) == 2
+    assert rows[0]["timestamp"] == "2026-07-20T08:00:00+10:00"
+    assert sum(row["grid_import"] for row in rows) == 12_000
+    assert sum(row["grid_export"] for row in rows) == 3_000
+    assert sum(row["solar_generation"] for row in rows) == 10_000
+
+
+def test_current_day_rows_treat_an_authoritative_zero_as_current():
+    namespace = _calendar_namespace()
+    current_entry = {
+        "timestamp": "2026-07-20T08:00:00+10:00",
+        "solar_generation": 10_000,
+        "battery_discharge": 0,
+        "battery_charge": 0,
+        "grid_import": 0,
+        "grid_export": 0,
+        "home_consumption": 0,
+    }
+    recorder_rows = [
+        {
+            "timestamp": "2026-07-20T07:00:00+10:00",
+            "solar_generation": 8_000,
+            "battery_discharge": 0,
+            "battery_charge": 0,
+            "grid_import": 700,
+            "grid_export": 600,
+            "home_consumption": 0,
+        }
+    ]
+
+    rows = namespace["_calendar_reconcile_current_day_rows"](
+        recorder_rows,
+        current_entry,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["solar_generation"] == 10_000
+    assert rows[0]["grid_export"] == 0
+
+
+def test_current_day_rows_keep_recorder_history_for_a_fresh_accumulator():
+    namespace = _calendar_namespace()
+    current_entry = {
+        "timestamp": "2026-07-20T08:00:00+10:00",
+        "solar_generation": 2_000,
+        "battery_discharge": 1_000,
+        "battery_charge": 0,
+        "grid_import": 0,
+        "grid_export": 0,
+        "home_consumption": 0,
+    }
+    recorder_rows = [
+        {
+            "timestamp": "2026-07-20T07:00:00+10:00",
+            "solar_generation": 12_000,
+            "battery_discharge": 5_000,
+            "battery_charge": 0,
+            "grid_import": 0,
+            "grid_export": 0,
+            "home_consumption": 0,
+        }
+    ]
+
+    rows = namespace["_calendar_reconcile_current_day_rows"](
+        recorder_rows,
+        current_entry,
+    )
+
+    assert len(rows) == 1
+    assert sum(row["solar_generation"] for row in rows) == 12_000
+    assert sum(row["battery_discharge"] for row in rows) == 5_000
 
 
 def test_calendar_state_history_rows_convert_daily_totals_to_hourly_deltas():

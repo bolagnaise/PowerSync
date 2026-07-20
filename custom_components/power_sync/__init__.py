@@ -4762,6 +4762,68 @@ def _calendar_residual_entry(
     )
 
 
+def _calendar_reconcile_current_day_rows(
+    rows: list[dict[str, Any]],
+    current_entry: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Keep today's recorder rows consistent with the live daily snapshot.
+
+    Home Assistant's ``change`` statistic can carry a daily-reset sensor's
+    previous terminal value into the new day.  When that happens, appending a
+    non-negative residual produces a mixed-day response because an overcount
+    cannot be subtracted.  The live PowerSync daily sensors are the
+    authoritative current-day total, so fall back to that snapshot when a
+    recorder field materially exceeds it.  Small rounding differences retain
+    the hourly rows and normal residual behavior.
+    """
+    if not rows:
+        return (
+            [_calendar_entry_with_detail_aliases(current_entry)]
+            if _calendar_entry_has_energy(current_entry)
+            else []
+        )
+
+    live_ahead_fields: list[str] = []
+    recorded_ahead_fields: list[str] = []
+    for field in _CALENDAR_STATISTIC_FIELDS:
+        try:
+            live_wh = max(0.0, float(current_entry.get(field) or 0))
+        except (TypeError, ValueError):
+            live_wh = 0.0
+        recorded_wh = 0.0
+        for row in rows:
+            try:
+                recorded_wh += max(0.0, float(row.get(field) or 0))
+            except (TypeError, ValueError):
+                continue
+        material_delta_wh = max(500.0, live_wh * 0.05)
+        if live_wh > recorded_wh + material_delta_wh:
+            live_ahead_fields.append(field)
+        elif recorded_wh > live_wh + material_delta_wh:
+            recorded_ahead_fields.append(field)
+
+    # A fresh or unrestored accumulator is normally behind recorder history in
+    # every field.  The reset-skew failure has a different signature: at least
+    # one live total has progressed beyond recorder while several recorder
+    # totals still carry yesterday's much larger terminal values.  Requiring
+    # both directions avoids replacing valid history for a merely incomplete
+    # accumulator or a small statistics-rounding difference.
+    if live_ahead_fields and len(recorded_ahead_fields) >= 2:
+        _LOGGER.warning(
+            "Calendar day recorder/live totals are materially mixed "
+            "(live ahead: %s; recorder ahead: %s); using the live snapshot",
+            ", ".join(live_ahead_fields),
+            ", ".join(recorded_ahead_fields),
+        )
+        return [_calendar_entry_with_detail_aliases(current_entry)]
+
+    reconciled = list(rows)
+    residual_entry = _calendar_residual_entry(current_entry, rows)
+    if residual_entry:
+        reconciled.append(residual_entry)
+    return reconciled
+
+
 def _calendar_period_range(period: str, end_date: str | None) -> tuple[datetime, datetime] | None:
     """Return local start/end datetimes for a calendar-history request."""
     now = dt_util.now()
@@ -5098,9 +5160,10 @@ async def _calendar_time_series_from_statistics(
         )
         if _calendar_entry_has_energy(current_entry):
             if period == "day" and rows:
-                residual_entry = _calendar_residual_entry(current_entry, rows)
-                if residual_entry:
-                    rows.append(residual_entry)
+                rows = _calendar_reconcile_current_day_rows(
+                    rows,
+                    current_entry,
+                )
             else:
                 rows.append(current_entry)
 
