@@ -1163,6 +1163,17 @@ async def validate_flow_power_api_key(
     return {"success": False, "error": "cannot_connect" if site_lookup_error else "no_sites"}
 
 
+def _should_collect_flow_power_api_key(
+    price_source: str,
+    update_requested: bool,
+    stored_api_key: str | None,
+) -> bool:
+    """Return whether the options flow should show Flow Power API key entry."""
+    return bool(update_requested) or (
+        price_source == "kwatch" and not stored_api_key
+    )
+
+
 def _flow_power_site_label(site: dict[str, Any]) -> str:
     """Return a display label for a Flow Power site."""
     nmi = site.get("nmi", "")
@@ -12864,17 +12875,27 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Step 2b: Flow Power main settings (region, base rate, PEA, sync)."""
         if user_input is not None:
+            update_api_key = bool(
+                user_input.pop("update_flow_power_api_key", False)
+            )
+
             # Store main options temporarily
             self._flow_power_main_options = user_input
 
-            # If switching to Amber and no token exists, collect it first
+            # Collect provider credentials when requested, or when KWatch was
+            # selected without an existing key. Existing secrets stay hidden
+            # and are preserved unless the user explicitly replaces them.
             price_source = user_input.get(CONF_FLOW_POWER_PRICE_SOURCE, "aemo")
+            if _should_collect_flow_power_api_key(
+                price_source,
+                update_api_key,
+                self._get_option(CONF_FLOWPOWER_API_KEY),
+            ):
+                return await self.async_step_flow_power_api_key_options()
             if price_source == "amber" and not self.config_entry.data.get(
                 CONF_AMBER_API_TOKEN
             ):
                 return await self.async_step_flow_power_amber_token()
-            if price_source == "kwatch" and not self._get_option(CONF_FLOWPOWER_API_KEY):
-                return await self.async_step_flow_power_api_key_options()
 
             return await self.async_step_flow_power_network_options()
 
@@ -12928,6 +12949,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             vol.Optional(
                 CONF_AUTO_SYNC_ENABLED,
                 default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
+            ): BooleanSelector(),
+            vol.Optional(
+                "update_flow_power_api_key",
+                default=False,
             ): BooleanSelector(),
         }
 
@@ -12994,6 +13019,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             )
             if validation_result["success"]:
                 self._flow_power_main_options[CONF_FLOWPOWER_API_KEY] = api_key
+                self._remove_legacy_data_keys((CONF_FLOWPOWER_API_KEY,))
                 self._flow_power_sites = validation_result.get("sites", [])
                 if len(self._flow_power_sites) == 1:
                     site = self._flow_power_sites[0]
@@ -13003,10 +13029,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         self._flow_power_main_options,
                         site,
                     )
-                    return await self.async_step_flow_power_network_options()
+                    return await self._async_route_after_flow_power_api_key()
                 if self._flow_power_sites:
                     return await self.async_step_flow_power_site_options()
-                return await self.async_step_flow_power_network_options()
+                return await self._async_route_after_flow_power_api_key()
             errors["base"] = validation_result.get("error", "cannot_connect")
 
         return self.async_show_form(
@@ -13039,7 +13065,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     self._flow_power_main_options,
                     site,
                 )
-                return await self.async_step_flow_power_network_options()
+                return await self._async_route_after_flow_power_api_key()
             errors["base"] = "invalid_site"
 
         return self.async_show_form(
@@ -13062,6 +13088,18 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ),
             errors=errors,
         )
+
+    async def _async_route_after_flow_power_api_key(self) -> FlowResult:
+        """Continue after Flow Power key replacement and collect Amber if needed."""
+        price_source = self._flow_power_main_options.get(
+            CONF_FLOW_POWER_PRICE_SOURCE,
+            self._get_option(CONF_FLOW_POWER_PRICE_SOURCE, "aemo"),
+        )
+        if price_source == "amber" and not self.config_entry.data.get(
+            CONF_AMBER_API_TOKEN
+        ):
+            return await self.async_step_flow_power_amber_token()
+        return await self.async_step_flow_power_network_options()
 
     async def async_step_flow_power_network_options(
         self, user_input: dict[str, Any] | None = None

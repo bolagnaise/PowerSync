@@ -889,6 +889,10 @@ def test_flow_power_api_key_setup_validates_and_routes_sites():
 
 def test_flow_power_options_collects_kwatch_key_before_network_options():
     source = CONFIG_FLOW_PATH.read_text()
+    route_source = ast.get_source_segment(
+        source,
+        _top_level_function("_should_collect_flow_power_api_key"),
+    )
     options_source = ast.get_source_segment(
         source,
         _options_flow_method("async_step_flow_power_options"),
@@ -901,18 +905,54 @@ def test_flow_power_options_collects_kwatch_key_before_network_options():
         source,
         _options_flow_method("async_step_flow_power_site_options"),
     )
+    post_key_route_source = ast.get_source_segment(
+        source,
+        _options_flow_method("_async_route_after_flow_power_api_key"),
+    )
 
+    assert route_source is not None
     assert options_source is not None
     assert api_source is not None
     assert site_source is not None
-    assert 'price_source == "kwatch"' in options_source
+    assert post_key_route_source is not None
+    namespace: dict[str, object] = {}
+    exec(compile(route_source, "<flow-power-api-key-route>", "exec"), namespace)
+    should_collect = namespace["_should_collect_flow_power_api_key"]
+    assert should_collect("kwatch", False, None) is True
+    assert should_collect("kwatch", False, "stored-key") is False
+    assert should_collect("kwatch", True, "stored-key") is True
+    assert should_collect("aemo", True, "stored-key") is True
+    assert should_collect("aemo", False, None) is False
+
+    assert 'user_input.pop("update_flow_power_api_key", False)' in options_source
+    assert "_should_collect_flow_power_api_key(" in options_source
     assert "async_step_flow_power_api_key_options()" in options_source
+    assert options_source.index("_should_collect_flow_power_api_key(") < (
+        options_source.index('price_source == "amber"')
+    )
+    assert '"update_flow_power_api_key"' in options_source
     assert "validate_flow_power_api_key" in api_source
     assert "CONF_FLOWPOWER_API_KEY" in api_source
+    assert "_remove_legacy_data_keys((CONF_FLOWPOWER_API_KEY,))" in api_source
     assert 'self._get_option(CONF_FLOW_POWER_STATE, "NSW1")' in api_source
     assert "async_step_flow_power_site_options()" in api_source
-    assert "async_step_flow_power_network_options()" in api_source
+    assert "_async_route_after_flow_power_api_key()" in api_source
     assert "CONF_FLOWPOWER_NMI" in site_source
+    assert "_async_route_after_flow_power_api_key()" in site_source
+    assert 'price_source == "amber"' in post_key_route_source
+    assert "async_step_flow_power_amber_token()" in post_key_route_source
+    assert "async_step_flow_power_network_options()" in post_key_route_source
+
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        flow_step = json.loads(path.read_text())["options"]["step"][
+            "flow_power_options"
+        ]
+        assert flow_step["data"]["update_flow_power_api_key"] == (
+            "Enter or replace Flow Power API key"
+        )
+        assert "keep the currently stored key unchanged" in flow_step[
+            "data_description"
+        ]["update_flow_power_api_key"]
 
 
 def test_flow_power_network_tariff_prefill_preserves_manual_selection():
