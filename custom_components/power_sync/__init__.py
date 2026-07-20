@@ -5003,6 +5003,8 @@ async def _calendar_time_series_from_state_history(
             start_dt,
             end_dt,
             list(entity_to_field),
+            None,
+            False,
         )
         rows = await hass.async_add_executor_job(
             _calendar_time_series_from_state_history_rows,

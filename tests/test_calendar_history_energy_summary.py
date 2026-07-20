@@ -40,6 +40,7 @@ def _calendar_namespace() -> dict[str, Any]:
         "_calendar_statistics_end_dt",
         "_calendar_history_bucket_timestamp",
         "_calendar_time_series_from_state_history_rows",
+        "_calendar_time_series_from_state_history",
         "_calendar_time_series_totals_kwh",
         "_calculate_cost_from_tariff",
         "_find_season_for_month",
@@ -144,6 +145,38 @@ def _fake_entity_registry(entities: dict[str, Any]):
             ("homeassistant.helpers", previous_helpers),
             ("homeassistant.helpers.entity_registry", previous_registry),
         ):
+            if previous is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous
+
+
+@contextmanager
+def _fake_recorder_history(get_significant_states):
+    class _Recorder:
+        async def async_add_executor_job(self, target, *args):
+            return target(*args)
+
+    recorder = SimpleNamespace(get_instance=lambda hass: _Recorder())
+    history = SimpleNamespace(get_significant_states=get_significant_states)
+    components = SimpleNamespace(recorder=recorder)
+    previous_modules = {
+        name: sys.modules.get(name)
+        for name in (
+            "homeassistant",
+            "homeassistant.components",
+            "homeassistant.components.recorder",
+            "homeassistant.components.recorder.history",
+        )
+    }
+    sys.modules["homeassistant"] = SimpleNamespace(components=components)
+    sys.modules["homeassistant.components"] = components
+    sys.modules["homeassistant.components.recorder"] = recorder
+    sys.modules["homeassistant.components.recorder.history"] = history
+    try:
+        yield
+    finally:
+        for module_name, previous in previous_modules.items():
             if previous is None:
                 sys.modules.pop(module_name, None)
             else:
@@ -509,6 +542,52 @@ def test_calendar_state_history_rows_allow_next_day_reset():
     )
 
     assert [row["solar_generation"] for row in rows] == [8000, 3000]
+
+
+def test_calendar_state_history_excludes_pre_midnight_start_state():
+    namespace = _calendar_namespace()
+    start = datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 20, 6, 26, tzinfo=timezone.utc)
+    captured: dict[str, bool] = {}
+
+    def get_significant_states(
+        hass,
+        start_time,
+        end_time,
+        entity_ids,
+        filters=None,
+        include_start_time_state=True,
+    ):
+        captured["include_start_time_state"] = include_start_time_state
+        states = []
+        if include_start_time_state:
+            # Home Assistant normally injects the pre-range state at start_time.
+            states.append(_history_state("13.2", start_time))
+        states.extend(
+            [
+                _history_state("0", start_time + timedelta(minutes=1)),
+                _history_state("0.03", end_time - timedelta(minutes=1)),
+            ]
+        )
+        return {entity_ids[0]: states}
+
+    async def async_add_executor_job(target, *args):
+        return target(*args)
+
+    hass = SimpleNamespace(async_add_executor_job=async_add_executor_job)
+    with _fake_recorder_history(get_significant_states):
+        rows = asyncio.run(
+            namespace["_calendar_time_series_from_state_history"](
+                hass,
+                "day",
+                start,
+                end,
+                {"grid_import": "sensor.power_sync_daily_grid_import"},
+            )
+        )
+
+    assert captured["include_start_time_state"] is False
+    assert sum(row["grid_import"] for row in rows) == 30
 
 
 def test_calendar_statistic_finder_accepts_foxess_daily_battery_aliases():
