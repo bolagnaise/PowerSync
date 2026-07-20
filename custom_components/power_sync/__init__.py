@@ -21516,12 +21516,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except (ValueError, TypeError):
                 return None
 
-        pea_enabled = entry.options.get(CONF_PEA_ENABLED, True)
+        pea_enabled = entry.options.get(
+            CONF_PEA_ENABLED,
+            entry.data.get(CONF_PEA_ENABLED, True),
+        )
         if pea_enabled:
             from .flow_power_pricing import resolve_flow_power_pricing_context
 
-            base_rate = entry.options.get(CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE)
-            custom_pea = entry.options.get(CONF_PEA_CUSTOM_VALUE)
+            base_rate = entry.options.get(
+                CONF_FLOW_POWER_BASE_RATE,
+                entry.data.get(
+                    CONF_FLOW_POWER_BASE_RATE,
+                    FLOW_POWER_DEFAULT_BASE_RATE,
+                ),
+            )
+            custom_pea = entry.options.get(
+                CONF_PEA_CUSTOM_VALUE,
+                entry.data.get(CONF_PEA_CUSTOM_VALUE),
+            )
             # Non-Tesla display schedules are sensor/dashboard-only. Use the
             # live KWatch interval for the active period's PEA input so the
             # current import price does not fall back to the default wholesale
@@ -22851,7 +22863,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Apply Flow Power PEA pricing (works with both AEMO and Amber price sources)
         if electricity_provider == "flow_power":
             # Check if PEA (Price Efficiency Adjustment) is enabled
-            pea_enabled = entry.options.get(CONF_PEA_ENABLED, True)  # Default True for Flow Power
+            pea_enabled = entry.options.get(
+                CONF_PEA_ENABLED,
+                entry.data.get(CONF_PEA_ENABLED, True),
+            )  # Default True for Flow Power
 
             if pea_enabled:
                 # Use Flow Power PEA pricing model: Base Rate + PEA
@@ -22859,8 +22874,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 from .tariff_converter import apply_flow_power_pea, get_wholesale_lookup
                 from .flow_power_pricing import resolve_flow_power_pricing_context
 
-                base_rate = entry.options.get(CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE)
-                custom_pea = entry.options.get(CONF_PEA_CUSTOM_VALUE)
+                base_rate = entry.options.get(
+                    CONF_FLOW_POWER_BASE_RATE,
+                    entry.data.get(
+                        CONF_FLOW_POWER_BASE_RATE,
+                        FLOW_POWER_DEFAULT_BASE_RATE,
+                    ),
+                )
+                custom_pea = entry.options.get(
+                    CONF_PEA_CUSTOM_VALUE,
+                    entry.data.get(CONF_PEA_CUSTOM_VALUE),
+                )
 
                 # Build wholesale price lookup from forecast data
                 # get_wholesale_lookup() handles both AEMO and Amber data formats

@@ -180,13 +180,14 @@ def test_cost_tracking_uses_flow_power_kwatch_current_price():
 
         entry_id = "kwatch-cost-entry"
         config_entry = SimpleNamespace(
-            data={},
-            options={
+            data={
                 "electricity_provider": "flow_power",
                 "pea_enabled": True,
-                "flow_power_base_rate": 28.0,
+                "flow_power_base_rate": 31.0,
+                "pea_custom_value": 4.0,
                 "flow_power_state": "QLD1",
             },
+            options={},
         )
         kwatch_coordinator = SimpleNamespace(
             data={
@@ -207,7 +208,7 @@ def test_cost_tracking_uses_flow_power_kwatch_current_price():
 
         buy_price, sell_price = namespace["_get_current_prices"](hass, entry_id)
 
-        assert buy_price == 0.30
+        assert buy_price == 0.35
         assert sell_price == 0.0
     finally:
         for name, module in saved_modules.items():
@@ -1432,6 +1433,39 @@ def test_flow_power_display_schedule_pea_uses_current_interval():
 
     assert "sensor/dashboard-only" in helper_source
     assert "current_actual_interval=current_actual_interval" in helper_source
+
+
+def test_flow_power_tariff_schedules_reuse_legacy_entry_data_pricing():
+    source = (COMPONENT_ROOT / "__init__.py").read_text()
+    display_source = source[
+        source.index("def _apply_provider_tariff_adjustments"):
+        source.index("async def _sync_tariff_to_sigenergy")
+    ]
+    sync_start = source.index("async def _handle_sync_tou_internal")
+    sync_source = source[
+        sync_start:
+        source.index("hass.services.async_register(DOMAIN, SERVICE_SYNC_TOU", sync_start)
+    ]
+    main_source = sync_source[
+        sync_source.index("# Apply Flow Power PEA pricing"):
+        sync_source.index("elif flow_power_price_source in")
+    ]
+
+    for pricing_source in (display_source, main_source):
+        pricing_source = "".join(pricing_source.split())
+        assert (
+            "entry.options.get(CONF_PEA_ENABLED,"
+            "entry.data.get(CONF_PEA_ENABLED,True),)"
+        ) in pricing_source
+        assert (
+            "entry.options.get(CONF_FLOW_POWER_BASE_RATE,"
+            "entry.data.get(CONF_FLOW_POWER_BASE_RATE,"
+            "FLOW_POWER_DEFAULT_BASE_RATE,),)"
+        ) in pricing_source
+        assert (
+            "entry.options.get(CONF_PEA_CUSTOM_VALUE,"
+            "entry.data.get(CONF_PEA_CUSTOM_VALUE),)"
+        ) in pricing_source
 
 
 def test_flow_power_main_schedule_pea_ignores_raw_current_interval():

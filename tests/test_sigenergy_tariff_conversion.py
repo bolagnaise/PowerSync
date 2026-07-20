@@ -517,7 +517,8 @@ def test_flow_power_pea_uses_current_wholesale_without_raw_tariff_injection(
     )
 
     adjusted_rates = adjusted["energy_charges"]["Summer"]["rates"]
-    assert adjusted_rates["PERIOD_18_30"] == 0.4196
+    assert adjusted_rates["PERIOD_18_30"] == 0.3311
+    assert adjusted_rates["PERIOD_18_30"] != 0.4196
     assert adjusted_rates["PERIOD_18_30"] != 0.8801
 
 

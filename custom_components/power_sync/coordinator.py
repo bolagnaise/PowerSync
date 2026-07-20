@@ -472,11 +472,21 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                         config_entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
                     )
                     if provider == "flow_power":
-                        pea_enabled = config_entry.options.get(CONF_PEA_ENABLED, True)
-                        fp_base_rate = config_entry.options.get(
-                            CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE
+                        pea_enabled = config_entry.options.get(
+                            CONF_PEA_ENABLED,
+                            config_entry.data.get(CONF_PEA_ENABLED, True),
                         )
-                        fp_custom_pea = config_entry.options.get(CONF_PEA_CUSTOM_VALUE)
+                        fp_base_rate = config_entry.options.get(
+                            CONF_FLOW_POWER_BASE_RATE,
+                            config_entry.data.get(
+                                CONF_FLOW_POWER_BASE_RATE,
+                                FLOW_POWER_DEFAULT_BASE_RATE,
+                            ),
+                        )
+                        fp_custom_pea = config_entry.options.get(
+                            CONF_PEA_CUSTOM_VALUE,
+                            config_entry.data.get(CONF_PEA_CUSTOM_VALUE),
+                        )
                         try:
                             fp_custom_pea_value = (
                                 float(fp_custom_pea)
