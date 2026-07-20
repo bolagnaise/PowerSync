@@ -7456,3 +7456,86 @@ def test_tesla_force_extension_skips_reupload_when_tariff_window_covers_expiry(o
 
     assert battery.force_discharge_calls == []
     assert force_state["expires_at"] == datetime(2026, 5, 3, 8, 50, tzinfo=timezone.utc)
+
+
+def test_tesla_force_charge_does_not_reupload_same_aligned_tariff_boundary(opt_module):
+    """A solve seconds after the cached boundary command must reuse its tariff."""
+    boundary = datetime(2026, 7, 20, 1, 0, tzinfo=timezone.utc)
+    now = boundary + timedelta(seconds=5)
+    opt_module.dt_util.now = lambda *args, **kwargs: now
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: now
+
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.41)
+    actions = [
+        SimpleNamespace(
+            action="charge",
+            power_w=20000,
+            timestamp=boundary + idx * timedelta(minutes=5),
+        )
+        for idx in range(36)
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+
+    tariff_boundary = boundary + timedelta(hours=3)
+    force_state = {
+        "active": True,
+        "type": "charge",
+        "source": "optimizer",
+        "expires_at": tariff_boundary + timedelta(seconds=4),
+        "hardware_expires_at": tariff_boundary,
+        "power_w": 20000,
+    }
+    coordinator.hass.data = {
+        "power_sync": {
+            "entry-1": {
+                "force_charge_state": force_state,
+            }
+        }
+    }
+    coordinator._force_state_getter = lambda: force_state
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_charge_calls == []
+    assert force_state["hardware_expires_at"] == tariff_boundary
+
+
+def test_tesla_force_charge_reuploads_when_plan_extends_tariff_by_one_slot(opt_module):
+    """A real five-minute LP extension must still roll the Tesla tariff forward."""
+    now = datetime(2026, 7, 20, 1, 30, tzinfo=timezone.utc)
+    opt_module.dt_util.now = lambda *args, **kwargs: now
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: now
+
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.41)
+    actions = [
+        SimpleNamespace(
+            action="charge",
+            power_w=20000,
+            timestamp=now + idx * timedelta(minutes=5),
+        )
+        for idx in range(7)
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+
+    force_state = {
+        "active": True,
+        "type": "charge",
+        "source": "optimizer",
+        "expires_at": now + timedelta(minutes=30),
+        "hardware_expires_at": now + timedelta(minutes=30),
+        "power_w": 20000,
+    }
+    coordinator.hass.data = {
+        "power_sync": {
+            "entry-1": {
+                "force_charge_state": force_state,
+            }
+        }
+    }
+    coordinator._force_state_getter = lambda: force_state
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_charge_calls == [(35, 20000.0, True)]

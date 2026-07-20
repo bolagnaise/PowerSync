@@ -6299,15 +6299,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             force_power_w,
                         )
                     )
-                    if force_scope == "optimizer":
-                        now = dt_util.utcnow()
-                        refresh_window = timedelta(
-                            minutes=max(
-                                1,
-                                int(getattr(self._config, "interval_minutes", 5) or 5),
-                            )
-                            + 1
+                    now = dt_util.utcnow()
+                    refresh_window = timedelta(
+                        minutes=max(
+                            1,
+                            int(getattr(self._config, "interval_minutes", 5) or 5),
                         )
+                        + 1
+                    )
+                    if force_scope == "optimizer":
                         should_refresh_hardware = (
                             hardware_expiry is None
                             or hardware_expiry <= now + refresh_window
@@ -6323,11 +6323,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         # Tesla force modes are implemented as uploaded TOU
                         # tariffs. The software timer can be extended cheaply,
                         # but the already-uploaded tariff only covers its
-                        # original 30-minute-aligned window. Refresh when the
-                        # desired expiry reaches beyond that hardware window.
+                        # original 30-minute-aligned window. Refresh when that
+                        # window is near expiry or the desired expiry extends it
+                        # by more than the sub-minute ceil/I/O skew between a
+                        # cached boundary command and the immediately fresh LP.
                         should_refresh_hardware = (
                             hardware_expiry is None
-                            or new_expiry > hardware_expiry - timedelta(minutes=1)
+                            or hardware_expiry <= now + refresh_window
+                            or new_expiry > hardware_expiry + timedelta(minutes=1)
                             or hardware_power_changed
                         )
                     elif force_type == "charge":
