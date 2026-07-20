@@ -58,9 +58,6 @@ CONFIG_OPTION_TEXT_STEP_PAIRS = (
     ("flow_power_setup", "flow_power_options"),
     ("flow_power_site", "flow_power_site_options"),
     ("flow_power_tariff", "flow_power_options"),
-    ("flow_power_portal", "flow_power_options"),
-    ("flow_power_portal_login", "flow_power_portal_reauth"),
-    ("flow_power_portal_mfa", "flow_power_portal_mfa_options"),
     ("amber", "flow_power_amber_token"),
     ("localvolts", "localvolts_options"),
     ("epex", "epex_options"),
@@ -799,7 +796,7 @@ def test_globird_plan_schema_exposes_jul_2026_and_zerocharge_fields():
     )
 
 
-def test_provider_portal_login_has_dedicated_options_sections():
+def test_provider_portal_login_is_globird_only():
     source = CONFIG_FLOW_PATH.read_text()
     init_options = ast.get_source_segment(
         source, _options_flow_method("async_step_init")
@@ -819,7 +816,7 @@ def test_provider_portal_login_has_dedicated_options_sections():
     assert flow_options is not None
     assert globird_options is not None
     assert "provider_portal" in init_options
-    assert "async_step_flow_power_portal_options()" in provider_portal
+    assert "async_step_flow_power_portal_options()" not in provider_portal
     assert "async_step_globird_portal_options()" in provider_portal
     assert "configure_flow_power_portal" not in flow_options
     assert "CONF_FLOWPOWER_EMAIL" not in flow_options
@@ -836,15 +833,12 @@ def test_provider_portal_login_has_dedicated_options_sections():
         assert menu_options["provider_portal"] == "Provider portal login"
 
         flow_step = options_steps["flow_power_options"]
-        assert "Provider portal login page" in flow_step["description"]
+        assert "More > Web Data Access" in flow_step["description"]
         assert "configure_flow_power_portal" not in flow_step["data"]
         assert "flowpower_email" not in flow_step["data"]
         assert "flowpower_password" not in flow_step["data"]
 
-        flow_portal = options_steps["flow_power_portal_options"]
-        assert flow_portal["title"] == "Flow Power portal account"
-        assert "separate from the tariff formula settings" in flow_portal["description"]
-        assert "connect_portal" in flow_portal["data_description"]
+        assert "flow_power_portal_options" not in options_steps
 
         globird_step = options_steps["globird_options"]
         assert "Provider portal login page" in globird_step["description"]
@@ -933,13 +927,11 @@ def test_flow_power_network_tariff_prefill_preserves_manual_selection():
     assert "get_tariff_codes_for_network" in helper
 
 
-def test_provider_portal_login_errors_are_translated_for_setup_and_options():
+def test_globird_portal_login_errors_are_translated_for_setup_and_options():
     provider_error_keys = {
         "cannot_connect",
         "invalid_globird_auth",
         "captcha_required",
-        "invalid_credentials",
-        "invalid_mfa_code",
         "unknown",
     }
 

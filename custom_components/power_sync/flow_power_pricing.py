@@ -24,7 +24,7 @@ class FlowPowerPricingContext:
     bpea_source: str
     gst_multiplier: float
     gst_source: str
-    portal_active: bool
+    account_data_active: bool
 
 
 def _as_float(value: Any) -> float | None:
@@ -62,15 +62,15 @@ def _gst_multiplier(value: Any) -> float | None:
     return parsed
 
 
-def _portal_data(domain_data: Mapping[str, Any]) -> Mapping[str, Any]:
-    data = domain_data.get("flow_power_portal_data")
+def _account_data(domain_data: Mapping[str, Any]) -> Mapping[str, Any]:
+    data = domain_data.get("flow_power_account_data")
     return data if isinstance(data, Mapping) else {}
 
 
-def _preferred_portal_bpea(portal: Mapping[str, Any]) -> float | None:
-    """Pick the most reliable portal/API BPEA value for import pricing."""
-    bpea_import = _as_float(portal.get("bpea_import"))
-    bpea = _as_float(portal.get("bpea"))
+def _preferred_account_bpea(account: Mapping[str, Any]) -> float | None:
+    """Pick the most reliable API account BPEA value for import pricing."""
+    bpea_import = _as_float(account.get("bpea_import"))
+    bpea = _as_float(account.get("bpea"))
 
     if bpea_import is not None and bpea_import > 0:
         return bpea_import
@@ -91,14 +91,14 @@ def resolve_flow_power_pricing_context(
       2. PowerSync rolling raw wholesale TWAP,
       3. hardcoded fallback.
 
-    Flow Power account TWAP from KWatch/portal data is exposed on account
+    Flow Power account TWAP from Web Data API data is exposed on account
     sensors, but it is not used for import PEA pricing because it already
     includes account/network effects that the v2 formula models separately.
     """
     options = options or {}
     data = data or {}
     domain_data = domain_data or {}
-    portal = _portal_data(domain_data)
+    account = _account_data(domain_data)
 
     override = _first_number(
         options.get(CONF_FP_TWAP_OVERRIDE),
@@ -116,18 +116,18 @@ def resolve_flow_power_pricing_context(
         twap = FLOW_POWER_MARKET_AVG
         twap_source = "fallback"
 
-    portal_bpea = _preferred_portal_bpea(portal)
-    if portal_bpea is not None:
-        bpea = portal_bpea
-        bpea_source = "portal"
+    account_bpea = _preferred_account_bpea(account)
+    if account_bpea is not None:
+        bpea = account_bpea
+        bpea_source = "api"
     else:
         bpea = FLOW_POWER_BENCHMARK
         bpea_source = "default"
 
-    portal_gst = _gst_multiplier(portal.get("gst_multiplier"))
-    if portal_gst is not None:
-        gst_multiplier = portal_gst
-        gst_source = "portal"
+    account_gst = _gst_multiplier(account.get("gst_multiplier"))
+    if account_gst is not None:
+        gst_multiplier = account_gst
+        gst_source = "api"
     else:
         gst_multiplier = FLOW_POWER_GST
         gst_source = "default"
@@ -139,7 +139,7 @@ def resolve_flow_power_pricing_context(
         bpea_source=bpea_source,
         gst_multiplier=gst_multiplier,
         gst_source=gst_source,
-        portal_active=bool(portal),
+        account_data_active=bool(account),
     )
 
 

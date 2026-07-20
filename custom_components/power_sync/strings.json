@@ -72,7 +72,7 @@
           "flow_power_state": "Your NEM region determines which wholesale price feed is used. Check your bill if unsure.",
           "network_tariff_combined": "Select the network tariff that matches your electricity bill.",
           "flow_power_base_rate": "The base energy rate from your Flow Power contract, before wholesale adjustments.",
-          "flowpower_api_key": "Optional. Get this from your Flow Power kWatch account page. When set, PowerSync can use the Flow Power API for prices and account metrics."
+          "flowpower_api_key": "Optional for AEMO Direct; required for Flow Power API prices and account metrics. Get it from the Flow Power app under More > Web Data Access."
         },
         "submit": "Next"
       },
@@ -101,41 +101,6 @@
           "fp_tariff_code": "The tariff code from your electricity bill (e.g. RESELE, 6900)."
         },
         "submit": "Next"
-      },
-      "flow_power_portal": {
-        "title": "Flow Power portal",
-        "description": "Connect your portal account to expose actual billing data (PEA, LWAP, TWAP, DLF) and account-specific BPEA/GST pricing inputs. Requires SMS verification.",
-        "data": {
-          "connect_portal": "Connect Flow Power portal account"
-        },
-        "data_description": {
-          "connect_portal": "When enabled, PowerSync fetches account TWAP for sensors and account BPEA/GST for PEA pricing."
-        },
-        "submit": "Next"
-      },
-      "flow_power_portal_login": {
-        "title": "Portal login",
-        "description": "Enter your Flow Power portal credentials. An SMS code will be sent to your registered phone.",
-        "data": {
-          "flowpower_email": "Email address",
-          "flowpower_password": "Password"
-        },
-        "data_description": {
-          "flowpower_email": "The email address you use to log in to the Flow Power portal.",
-          "flowpower_password": "Your Flow Power portal password. Stored securely in Home Assistant."
-        },
-        "submit": "Connect"
-      },
-      "flow_power_portal_mfa": {
-        "title": "SMS verification",
-        "description": "Enter the SMS code sent to your registered phone number.",
-        "data": {
-          "mfa_code": "SMS code"
-        },
-        "data_description": {
-          "mfa_code": "6-digit code from the SMS sent to your Flow Power registered phone. Codes expire after 5 minutes."
-        },
-        "submit": "Connect"
       },
       "amber": {
         "title": "Amber Electric API key",
@@ -1086,9 +1051,7 @@
       "goodwe_ems_entities_missing": "Could not find the GoodWe HA EMS entities for that prefix. Check that the GoodWe Experimental integration exposes matching EMS mode and EMS power limit entities such as select.goodwe_ems_mode and number.goodwe_ems_power_limit, then enter only the prefix.",
       "esy_sunhome_not_installed": "The ESY Sunhome integration is not installed. Install it via HACS (search 'ESY Sunhome') and add a device before continuing.",
       "esy_sunhome_no_device": "No ESY Sunhome device found in the selected integration entry. Verify the ESY Sunhome integration is set up and has a paired device.",
-      "invalid_credentials": "Email or password is incorrect. Check your Flow Power portal login credentials.",
-      "invalid_mfa_code": "Verification code is incorrect or expired. Request a new SMS code and try again.",
-      "invalid_api_key": "Flow Power rejected that API key. Check the value from your kWatch account page and try again.",
+      "invalid_api_key": "Flow Power rejected that API key. Copy the current value from More > Web Data Access and try again.",
       "invalid_site": "Select a Flow Power site from the list.",
       "zaptec_auth_failed": "Zaptec Cloud login failed. Check that your email and password are correct.",
       "zaptec_missing_credentials": "Both email and password are required for Zaptec Cloud authentication.",
@@ -1141,8 +1104,6 @@
       "cannot_connect": "Cannot reach the provider portal. Check your internet connection and that Home Assistant has outbound HTTPS access.",
       "invalid_globird_auth": "Email or password is incorrect. Check your GloBird portal login credentials.",
       "captcha_required": "GloBird requested captcha verification. Sign in through the GloBird portal in a browser, then try again.",
-      "invalid_credentials": "Email or password is incorrect. Check your Flow Power portal login credentials.",
-      "invalid_mfa_code": "Verification code is incorrect or expired. Request a new SMS code and try again.",
       "covau_unsupported_plan": "Select one of the supported SolarMax plan IDs or keep the currently cached manual plan.",
       "covau_distributor_mismatch": "The distributor must match the selected AER SolarMax plan.",
       "covau_energy_meter_invalid": "Select a monotonic total_increasing energy sensor using Wh, kWh, or MWh.",
@@ -1782,7 +1743,7 @@
       },
       "flow_power_options": {
         "title": "Flow Power settings",
-        "description": "Update Flow Power tariff and PEA settings. Portal account login is available from the Provider portal login page in the main Configure menu.",
+        "description": "Update Flow Power API, tariff, and PEA settings. Get the API key from the Flow Power app under More > Web Data Access.",
         "data": {
           "flow_power_state": "NEM region",
           "flow_power_price_source": "Price source",
@@ -1807,41 +1768,6 @@
           "fp_amber_markup": "Retailer margin for the Amber comparison sensor. Regional default is pre-filled."
         },
         "submit": "Next"
-      },
-      "flow_power_portal_options": {
-        "title": "Flow Power portal account",
-        "description": "This section connects PowerSync to the Flow Power customer portal for account-specific metrics such as PEA, LWAP, TWAP, DLF, and demand, plus BPEA/GST pricing inputs. It is separate from the tariff formula settings above and requires SMS verification.",
-        "data": {
-          "connect_portal": "Connect or refresh Flow Power portal login"
-        },
-        "data_description": {
-          "connect_portal": "Continue to the Flow Power credential and SMS verification steps. Leave disabled to keep the existing portal connection unchanged."
-        },
-        "submit": "Next"
-      },
-      "flow_power_portal_reauth": {
-        "title": "Flow Power portal credentials",
-        "description": "Enter the email and password for the Flow Power customer portal. PowerSync will request an SMS code from Flow Power before saving the refreshed portal session.",
-        "data": {
-          "flowpower_email": "Email address",
-          "flowpower_password": "Password"
-        },
-        "data_description": {
-          "flowpower_email": "The email address you use to log in to the Flow Power portal.",
-          "flowpower_password": "Your Flow Power portal password. Stored securely in Home Assistant."
-        },
-        "submit": "Connect"
-      },
-      "flow_power_portal_mfa_options": {
-        "title": "Flow Power SMS verification",
-        "description": "Enter the SMS code Flow Power sent to the phone number registered on your portal account.",
-        "data": {
-          "mfa_code": "SMS code"
-        },
-        "data_description": {
-          "mfa_code": "6-digit code from the SMS sent to your Flow Power registered phone. Codes expire after 5 minutes."
-        },
-        "submit": "Connect"
       },
       "flow_power_amber_token": {
         "title": "Amber API token",
@@ -2396,6 +2322,10 @@
     "covau_plan_withdrawn": {
       "title": "CovaU SolarMax plan snapshot has been withdrawn",
       "description": "AER plan {plan_id} was withdrawn on {withdrawn_date}. PowerSync will keep using the cached immutable snapshot and will not move you to a successor automatically. Open Configure > Electricity pricing and confirm the exact plan on your current bill, or enter the validated manual tariff."
+    },
+    "flow_power_web_data_api_required": {
+      "title": "Flow Power Web Data API key required",
+      "description": "Flow Power has retired automated customer-portal access. Your portal credentials and session cookies were removed. In the Flow Power app, go to **More > Web Data Access**, copy the API key, then open **Settings > Devices & Services > PowerSync > Configure > Electricity pricing & provider** and enter it. AEMO-direct pricing continues while the key is missing, but Flow Power API prices and account metrics are unavailable."
     }
   },
   "entity": {

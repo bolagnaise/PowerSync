@@ -233,8 +233,6 @@ from .const import (
     CONF_ELECTRICITY_PROVIDER,
     CONF_FLOW_POWER_STATE,
     CONF_FLOW_POWER_PRICE_SOURCE,
-    CONF_FLOWPOWER_EMAIL,
-    CONF_FLOWPOWER_PASSWORD,
     CONF_FLOWPOWER_API_KEY,
     CONF_FLOWPOWER_NMI,
     CONF_FLOWPOWER_NETWORK_TARIFF,
@@ -1750,7 +1748,7 @@ def resolve_goodwe_port(protocol: str, port: int | None) -> int:
 class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for PowerSync."""
 
-    VERSION = 7
+    VERSION = 8
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -2369,9 +2367,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._flow_power_data.pop(CONF_NETWORK_DISTRIBUTOR, None)
                 self._flow_power_data.pop(CONF_NETWORK_TARIFF_CODE, None)
 
-            if self._flow_power_data.get(CONF_FLOWPOWER_API_KEY):
-                return await self.async_step_battery_system()
-            return await self.async_step_flow_power_portal()
+            return await self.async_step_battery_system()
 
         # Build combined network+tariff dropdown for the region — all options loaded at render time
         from .tariff_utils import get_tariff_codes_for_network
@@ -2404,102 +2400,6 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         ],
                         mode=SelectSelectorMode.DROPDOWN,
                     )),
-                }
-            ),
-            errors=errors,
-        )
-
-    async def async_step_flow_power_portal(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Offer Flow Power portal connection during initial setup."""
-        if user_input is not None:
-            if user_input.get("connect_portal", True):
-                return await self.async_step_flow_power_portal_login()
-            return await self.async_step_battery_system()
-
-        return self.async_show_form(
-            step_id="flow_power_portal",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional("connect_portal", default=True): BooleanSelector(),
-                }
-            ),
-        )
-
-    async def async_step_flow_power_portal_login(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Authenticate with the Flow Power portal during initial setup."""
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            email = user_input.get(CONF_FLOWPOWER_EMAIL, "")
-            password = user_input.get(CONF_FLOWPOWER_PASSWORD, "")
-            if email and password:
-                try:
-                    from .flow_power_portal import FlowPowerPortalClient
-
-                    self._fp_client = FlowPowerPortalClient()
-                    result = await self._fp_client.authenticate(email, password)
-                    if result.get("status") == "mfa_required":
-                        self._fp_email = email
-                        self._fp_password = password
-                        return await self.async_step_flow_power_portal_mfa()
-                    errors["base"] = "cannot_connect"
-                except ValueError:
-                    errors["base"] = "invalid_credentials"
-                except Exception as err:
-                    _LOGGER.exception("Flow Power portal login failed during setup: %s", err)
-                    errors["base"] = "cannot_connect"
-                    if getattr(self, "_fp_client", None) is not None:
-                        await self._fp_client.close()
-                    self._fp_client = None
-            else:
-                errors["base"] = "invalid_credentials"
-
-        return self.async_show_form(
-            step_id="flow_power_portal_login",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_FLOWPOWER_EMAIL): TextSelector(
-                        TextSelectorConfig(type=TextSelectorType.EMAIL)
-                    ),
-                    vol.Required(CONF_FLOWPOWER_PASSWORD): TextSelector(
-                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
-                    ),
-                }
-            ),
-            errors=errors,
-        )
-
-    async def async_step_flow_power_portal_mfa(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Verify Flow Power SMS MFA during initial setup."""
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            code = user_input.get("mfa_code", "")
-            if code and hasattr(self, "_fp_client"):
-                success = await self._fp_client.verify_mfa(code)
-                if success:
-                    self._flow_power_data[CONF_FLOWPOWER_EMAIL] = self._fp_email
-                    self._flow_power_data[CONF_FLOWPOWER_PASSWORD] = self._fp_password
-                    self.hass.data.setdefault(DOMAIN, {})
-                    self.hass.data[DOMAIN]["_pending_fp_client"] = self._fp_client
-                    return await self.async_step_battery_system()
-                errors["base"] = "invalid_mfa_code"
-            else:
-                errors["base"] = "invalid_mfa_code"
-
-        return self.async_show_form(
-            step_id="flow_power_portal_mfa",
-            data_schema=vol.Schema(
-                {
-                    vol.Required("mfa_code"): TextSelector(
-                        TextSelectorConfig(type=TextSelectorType.TEXT)
-                    ),
                 }
             ),
             errors=errors,
@@ -7117,7 +7017,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         # Build menu options based on current config
         menu_options = ["pricing", "battery_system"]
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
-        if current_provider in ("flow_power", "globird"):
+        if current_provider == "globird":
             menu_options.append("provider_portal")
 
         # Battery connection settings
@@ -8530,8 +8430,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Menu handler: configure provider portal account login."""
         provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
-        if provider == "flow_power":
-            return await self.async_step_flow_power_portal_options()
         if provider == "globird":
             return await self.async_step_globird_portal_options()
         return await self.async_step_init()
@@ -13038,143 +12936,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             data_schema=vol.Schema(schema),
         )
 
-    async def async_step_flow_power_portal_options(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Dedicated Flow Power portal account section (options flow)."""
-        if user_input is not None:
-            if user_input.get("connect_portal", True):
-                return await self.async_step_flow_power_portal_reauth()
-            return self.async_create_entry(
-                title="", data=dict(self.config_entry.options)
-            )
-
-        return self.async_show_form(
-            step_id="flow_power_portal_options",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional("connect_portal", default=True): BooleanSelector(),
-                }
-            ),
-        )
-
-    async def async_step_flow_power_portal_reauth(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Re-authenticate with Flow Power portal (options flow)."""
-        from .const import CONF_FLOWPOWER_EMAIL, CONF_FLOWPOWER_PASSWORD
-
-        errors: dict[str, str] = {}
-        current = {**self.config_entry.data, **self.config_entry.options}
-
-        # Auto-submit stored credentials on first visit
-        if (
-            user_input is None
-            and current.get(CONF_FLOWPOWER_EMAIL)
-            and current.get(CONF_FLOWPOWER_PASSWORD)
-        ):
-            email = current[CONF_FLOWPOWER_EMAIL]
-            password = current[CONF_FLOWPOWER_PASSWORD]
-            try:
-                from .flow_power_portal import FlowPowerPortalClient
-
-                self._fp_client = FlowPowerPortalClient()
-                result = await self._fp_client.authenticate(email, password)
-                if result.get("status") == "mfa_required":
-                    self._fp_email = email
-                    self._fp_password = password
-                    return await self.async_step_flow_power_portal_mfa_options()
-            except ValueError:
-                errors["base"] = "invalid_credentials"
-                self._fp_client = None
-            except Exception as err:
-                _LOGGER.exception(
-                    "Flow Power portal stored-credential login failed: %s", err
-                )
-                errors["base"] = "cannot_connect"
-                if getattr(self, "_fp_client", None) is not None:
-                    await self._fp_client.close()
-                self._fp_client = None
-
-        if user_input is not None:
-            email = user_input.get(CONF_FLOWPOWER_EMAIL, "")
-            password = user_input.get(CONF_FLOWPOWER_PASSWORD, "")
-            if email and password:
-                try:
-                    from .flow_power_portal import FlowPowerPortalClient
-
-                    self._fp_client = FlowPowerPortalClient()
-                    result = await self._fp_client.authenticate(email, password)
-                    if result.get("status") == "mfa_required":
-                        self._fp_email = email
-                        self._fp_password = password
-                        return await self.async_step_flow_power_portal_mfa_options()
-                except ValueError:
-                    errors["base"] = "invalid_credentials"
-                except Exception as err:
-                    _LOGGER.exception(
-                        "Flow Power portal login failed from options: %s", err
-                    )
-                    errors["base"] = "cannot_connect"
-                    if getattr(self, "_fp_client", None) is not None:
-                        await self._fp_client.close()
-                    self._fp_client = None
-            else:
-                errors["base"] = "invalid_credentials"
-
-        return self.async_show_form(
-            step_id="flow_power_portal_reauth",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_FLOWPOWER_EMAIL,
-                        default=current.get(CONF_FLOWPOWER_EMAIL, ""),
-                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.EMAIL)),
-                    vol.Required(
-                        CONF_FLOWPOWER_PASSWORD,
-                        default=current.get(CONF_FLOWPOWER_PASSWORD, ""),
-                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
-                }
-            ),
-            errors=errors,
-        )
-
-    async def async_step_flow_power_portal_mfa_options(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """SMS MFA verification in options flow."""
-        from .const import CONF_FLOWPOWER_EMAIL, CONF_FLOWPOWER_PASSWORD
-
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            code = user_input.get("mfa_code", "")
-            if code and hasattr(self, "_fp_client"):
-                success = await self._fp_client.verify_mfa(code)
-                if success:
-                    # Store credentials and stash client
-                    self.hass.data.setdefault(DOMAIN, {})
-                    self.hass.data[DOMAIN]["_pending_fp_client"] = self._fp_client
-                    return self._save_and_finish(
-                        {
-                            CONF_FLOWPOWER_EMAIL: self._fp_email,
-                            CONF_FLOWPOWER_PASSWORD: self._fp_password,
-                        }
-                    )
-                else:
-                    errors["base"] = "invalid_mfa_code"
-            else:
-                errors["base"] = "invalid_mfa_code"
-
-        return self.async_show_form(
-            step_id="flow_power_portal_mfa_options",
-            data_schema=vol.Schema(
-                {
-                    vol.Required("mfa_code"): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                }
-            ),
-            errors=errors,
-        )
 
     async def async_step_flow_power_amber_token(
         self, user_input: dict[str, Any] | None = None

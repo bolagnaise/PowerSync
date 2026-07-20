@@ -3661,6 +3661,68 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         )
         _LOGGER.info("Migration to version 7 complete (Charge By Time split)")
 
+    if config_entry.version == 7:
+        from homeassistant.helpers import issue_registry as ir
+
+        new_data = {**config_entry.data}
+        new_options = {**config_entry.options}
+        legacy_portal = any(
+            key in values
+            for values in (new_data, new_options)
+            for key in ("flowpower_email", "flowpower_password")
+        )
+
+        for values in (new_data, new_options):
+            values.pop("flowpower_email", None)
+            values.pop("flowpower_password", None)
+            values.pop("connect_portal", None)
+
+        api_key = new_options.get(
+            CONF_FLOWPOWER_API_KEY,
+            new_data.get(CONF_FLOWPOWER_API_KEY),
+        )
+        provider = new_options.get(
+            CONF_ELECTRICITY_PROVIDER,
+            new_data.get(CONF_ELECTRICITY_PROVIDER),
+        )
+        if not api_key and new_options.get(
+            CONF_FLOW_POWER_PRICE_SOURCE,
+            new_data.get(CONF_FLOW_POWER_PRICE_SOURCE),
+        ) == "kwatch":
+            if CONF_FLOW_POWER_PRICE_SOURCE in new_options:
+                new_options[CONF_FLOW_POWER_PRICE_SOURCE] = "aemo"
+            else:
+                new_data[CONF_FLOW_POWER_PRICE_SOURCE] = "aemo"
+
+        hass.config_entries.async_update_entry(
+            config_entry,
+            data=new_data,
+            options=new_options,
+            version=8,
+        )
+        await Store(
+            hass,
+            1,
+            f"{DOMAIN}.fp_session.{config_entry.entry_id}",
+        ).async_remove()
+
+        issue_id = f"flow_power_web_data_api_required_{config_entry.entry_id}"
+        if legacy_portal and provider == "flow_power" and not api_key:
+            ir.async_create_issue(
+                hass,
+                DOMAIN,
+                issue_id,
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="flow_power_web_data_api_required",
+            )
+        else:
+            ir.async_delete_issue(hass, DOMAIN, issue_id)
+
+        _LOGGER.info(
+            "Migration to version 8 complete: removed legacy Flow Power portal access"
+        )
+
     # Within-version migration: foxess_cloud_password → foxess_cloud_api_key
     if "foxess_cloud_password" in config_entry.data and "foxess_cloud_api_key" not in config_entry.data:
         new_data = {**config_entry.data}
@@ -19735,12 +19797,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if fp_tariff_rate is not None:
                 _LOGGER.info("Current network tariff rate: %.2fc/kWh", fp_tariff_rate)
 
-    # Initialize Flow Power portal client for actual account data
-    flow_power_portal_client = None
-    flow_power_portal_data = None
-    flow_power_kwatch_summary_error = None
+    # Load Flow Power account data only through the official Web Data API.
+    flow_power_account_data = None
     if electricity_provider == "flow_power":
-        from .const import CONF_FLOWPOWER_EMAIL, CONF_FLOWPOWER_PASSWORD
         fp_api_key = entry.options.get(
             CONF_FLOWPOWER_API_KEY,
             entry.data.get(CONF_FLOWPOWER_API_KEY),
@@ -19759,54 +19818,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if sites:
                         fp_nmi = sites[0].get("nmi")
                 if fp_nmi:
-                    flow_power_portal_data = await api_client.get_residential_site_summary(fp_nmi)
-                    if flow_power_portal_data:
+                    flow_power_account_data = await api_client.get_residential_site_summary(fp_nmi)
+                    if flow_power_account_data:
                         _LOGGER.info("Flow Power: Account summary loaded via KWatch API")
             except Exception as exc:
-                flow_power_kwatch_summary_error = exc
-        fp_email = entry.options.get(CONF_FLOWPOWER_EMAIL, entry.data.get(CONF_FLOWPOWER_EMAIL))
-        fp_password = entry.options.get(CONF_FLOWPOWER_PASSWORD, entry.data.get(CONF_FLOWPOWER_PASSWORD))
-
-        if flow_power_portal_data is None:
-            # Check for authenticated client from config flow
-            pending_client = hass.data.get(DOMAIN, {}).pop("_pending_fp_client", None)
-            if pending_client is not None:
-                flow_power_portal_client = pending_client
-                _LOGGER.info("Flow Power: Using authenticated portal client from config flow")
-            elif fp_email:
-                # Try to restore session from saved cookies
-                from .flow_power_portal import FlowPowerPortalClient
-                flow_power_portal_client = FlowPowerPortalClient()
-                store = Store(hass, 1, f"{DOMAIN}.fp_session.{entry.entry_id}")
-                try:
-                    saved = await store.async_load()
-                    if saved and saved.get("cookies"):
-                        flow_power_portal_client.import_session_cookies(saved["cookies"])
-                        if await flow_power_portal_client.restore_session():
-                            _LOGGER.info("Flow Power: Portal session restored from cookies")
-                            # Fetch initial account data
-                            flow_power_portal_data = await flow_power_portal_client.get_account_data()
-                            if flow_power_portal_data:
-                                flow_power_portal_data["source"] = "portal_fallback" if fp_api_key else "portal"
-                        else:
-                            _LOGGER.warning("Flow Power: Saved session expired — re-authenticate via options")
-                            flow_power_portal_client = None
-                    else:
-                        flow_power_portal_client = None
-                except Exception as exc:
-                    _LOGGER.warning("Flow Power: Error restoring portal session: %s", exc)
-                    flow_power_portal_client = None
-        if flow_power_kwatch_summary_error is not None:
-            if flow_power_portal_data is not None:
-                _LOGGER.info(
-                    "Flow Power: KWatch account summary unavailable (%s); using portal fallback",
-                    flow_power_kwatch_summary_error,
-                )
-            else:
-                _LOGGER.warning(
-                    "Flow Power: KWatch account summary failed and portal fallback did not load account data: %s",
-                    flow_power_kwatch_summary_error,
-                )
+                _LOGGER.warning("Flow Power KWatch account summary failed: %s", exc)
 
     # Initialize GloBird portal coordinator for account, usage, cost, and
     # readiness sensors. This is additive to the existing GloBird tariff/AEMO
@@ -20121,8 +20137,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "sungrow_power_limit_w": None,  # Current Sungrow load-following export limit
         "amber_usage_coordinator": amber_usage_coordinator,  # For actual metered cost data
         "flow_power_twap_tracker": flow_power_twap_tracker,  # For dynamic PEA pricing
-        "flow_power_portal_client": flow_power_portal_client,  # Authenticated portal client
-        "flow_power_portal_data": flow_power_portal_data,  # Account PEA/LWAP/TWAP/DLF data
+        "flow_power_account_data": flow_power_account_data,  # API account PEA/LWAP/TWAP/DLF data
         "globird_coordinator": globird_coordinator,  # GloBird portal account/usage/cost data
         "fp_tariff_rate": fp_tariff_rate,  # Current network tariff rate (c/kWh) — v2
         "fp_avg_daily_tariff": fp_avg_daily_tariff,  # 24h avg network tariff (c/kWh) — v2
@@ -22887,7 +22902,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 _LOGGER.info(
                     "Applying Flow Power PEA (%s): base_rate=%.1fc, custom_pea=%s, "
-                    "twap=%.2fc (%s), bpea=%.2fc (%s), portal=%s",
+                    "twap=%.2fc (%s), bpea=%.2fc (%s), account_api=%s",
                     flow_power_price_source,
                     base_rate,
                     f"{custom_pea:.1f}c" if custom_pea is not None else "auto",
@@ -22895,7 +22910,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     pricing.twap_source,
                     pricing.bpea,
                     pricing.bpea_source,
-                    pricing.portal_active,
+                    pricing.account_data_active,
                 )
                 tariff = apply_flow_power_pea(
                     tariff, wholesale_prices, base_rate, custom_pea, twap=pricing.twap,
@@ -34872,7 +34887,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN][entry.entry_id]["fp_midnight_cancel"] = fp_midnight_cancel
         _LOGGER.info("Flow Power v2 tariff refresh scheduled (every 5min + midnight recalc)")
 
-    # Set up account data refresh (every 30 min) for KWatch API or portal data.
+    # Set up account data refresh (every 30 min) through the Web Data API.
     if electricity_provider == "flow_power":
         from .const import UPDATE_INTERVAL_FLOWPOWER
 
@@ -34884,60 +34899,52 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_FLOWPOWER_NMI,
             entry.data.get(CONF_FLOWPOWER_NMI),
         )
-        _fp_portal = hass.data[DOMAIN][entry.entry_id].get("flow_power_portal_client")
-        if fp_api_key or (_fp_portal and _fp_portal.is_authenticated):
+        if fp_api_key:
 
-            async def _refresh_fp_portal_data(now):
-                """Fetch latest account data from Flow Power API or portal fallback."""
+            async def _refresh_fp_account_data(now):
+                """Fetch latest account data from the Flow Power API."""
                 data = None
-                if fp_api_key:
-                    try:
-                        from .flow_power_api import FlowPowerAPIClient, FlowPowerAPIError
+                try:
+                    from .flow_power_api import FlowPowerAPIClient, FlowPowerAPIError
 
-                        client_api = FlowPowerAPIClient(
-                            fp_api_key,
-                            async_get_clientsession(hass),
-                        )
-                        nmi = fp_nmi
-                        if not nmi:
-                            try:
-                                sites = await client_api.get_residential_sites()
-                            except FlowPowerAPIError as exc:
-                                _LOGGER.debug(
-                                    "Flow Power KWatch residential site lookup unavailable: %s",
-                                    exc,
-                                )
-                                sites = []
-                            if sites:
-                                nmi = sites[0].get("nmi")
-                        if nmi:
-                            data = await client_api.get_residential_site_summary(nmi)
-                    except Exception as exc:
-                        _LOGGER.warning(
-                            "Flow Power KWatch account refresh failed: %s",
-                            exc,
-                        )
+                    client_api = FlowPowerAPIClient(
+                        fp_api_key,
+                        async_get_clientsession(hass),
+                    )
+                    nmi = fp_nmi
+                    if not nmi:
+                        try:
+                            sites = await client_api.get_residential_sites()
+                        except FlowPowerAPIError as exc:
+                            _LOGGER.debug(
+                                "Flow Power KWatch residential site lookup unavailable: %s",
+                                exc,
+                            )
+                            sites = []
+                        if sites:
+                            nmi = sites[0].get("nmi")
+                    if nmi:
+                        data = await client_api.get_residential_site_summary(nmi)
+                except Exception as exc:
+                    _LOGGER.warning(
+                        "Flow Power KWatch account refresh failed: %s",
+                        exc,
+                    )
 
-                client = hass.data[DOMAIN].get(entry.entry_id, {}).get("flow_power_portal_client")
-                if data is None and client and client.is_authenticated:
-                    data = await client.get_account_data()
-                    if data:
-                        data["source"] = "portal_fallback" if fp_api_key else "portal"
                 if data:
-                    hass.data[DOMAIN][entry.entry_id]["flow_power_portal_data"] = data
-                    _LOGGER.debug("Flow Power account data refreshed: PEA=%.2f, TWAP=%.2f",
-                                  data.get("pea_actual") or 0, data.get("twap") or 0)
-                    # Save session cookies
-                    if client and client.is_authenticated:
-                        fp_store = Store(hass, 1, f"{DOMAIN}.fp_session.{entry.entry_id}")
-                        await fp_store.async_save({"cookies": client.export_session_cookies()})
+                    hass.data[DOMAIN][entry.entry_id]["flow_power_account_data"] = data
+                    _LOGGER.debug(
+                        "Flow Power API account data refreshed: PEA=%.2f, TWAP=%.2f",
+                        data.get("pea_actual") or 0,
+                        data.get("twap") or 0,
+                    )
 
             from homeassistant.helpers.event import async_track_time_interval as _track_fp
-            fp_portal_cancel = _track_fp(
-                hass, _refresh_fp_portal_data, timedelta(seconds=UPDATE_INTERVAL_FLOWPOWER)
+            fp_account_cancel = _track_fp(
+                hass, _refresh_fp_account_data, timedelta(seconds=UPDATE_INTERVAL_FLOWPOWER)
             )
-            hass.data[DOMAIN][entry.entry_id]["fp_portal_cancel"] = fp_portal_cancel
-            _LOGGER.info("Flow Power account data refresh scheduled (every 30min)")
+            hass.data[DOMAIN][entry.entry_id]["fp_account_cancel"] = fp_account_cancel
+            _LOGGER.info("Flow Power API account data refresh scheduled (every 30min)")
 
     # Set up fast load-following update for responsive power limiting.
     # Enphase DPEL can time out quickly, so it is checked every 15 seconds;
@@ -37533,17 +37540,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.debug(f"Error saving TWAP history: {e}")
 
-    # Close Flow Power portal client and save session on unload
-    if fp_portal_cancel := entry_data.get("fp_portal_cancel"):
-        fp_portal_cancel()
-    if fp_client := entry_data.get("flow_power_portal_client"):
-        try:
-            fp_store = Store(hass, 1, f"{DOMAIN}.fp_session.{entry.entry_id}")
-            await fp_store.async_save({"cookies": fp_client.export_session_cookies()})
-            await fp_client.close()
-            _LOGGER.debug("Flow Power portal session saved and closed")
-        except Exception as e:
-            _LOGGER.debug(f"Error closing Flow Power portal: {e}")
+    if fp_account_cancel := entry_data.get("fp_account_cancel"):
+        fp_account_cancel()
 
     # Stop Amber usage coordinator if it exists
     if usage_coord := entry_data.get("amber_usage_coordinator"):

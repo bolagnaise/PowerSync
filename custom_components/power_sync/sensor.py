@@ -2133,18 +2133,15 @@ async def async_setup_entry(
 
             _LOGGER.info("Flow Power price sensors added (import, export, and TWAP)")
 
-            # Add portal sensors if portal is connected
-            from .const import CONF_FLOWPOWER_EMAIL, FLOW_POWER_PORTAL_SENSORS
-            fp_email = entry.options.get(
-                CONF_FLOWPOWER_EMAIL, entry.data.get(CONF_FLOWPOWER_EMAIL)
-            )
+            # Add account sensors when the Flow Power Web Data API is configured.
+            from .const import FLOW_POWER_ACCOUNT_SENSORS
             fp_api_key = entry.options.get(
                 CONF_FLOWPOWER_API_KEY, entry.data.get(CONF_FLOWPOWER_API_KEY)
             )
-            if fp_email or fp_api_key:
-                for sensor_type, name, data_key, unit, icon, source in FLOW_POWER_PORTAL_SENSORS:
+            if fp_api_key:
+                for sensor_type, name, data_key, unit, icon, source in FLOW_POWER_ACCOUNT_SENSORS:
                     entities.append(
-                        FlowPowerPortalSensor(
+                        FlowPowerAccountSensor(
                             hass=hass,
                             entry=entry,
                             sensor_type=sensor_type,
@@ -2155,7 +2152,7 @@ async def async_setup_entry(
                             source_label=source,
                         )
                     )
-                _LOGGER.info("Flow Power portal sensors added (%d sensors)", len(FLOW_POWER_PORTAL_SENSORS))
+                _LOGGER.info("Flow Power API account sensors added (%d sensors)", len(FLOW_POWER_ACCOUNT_SENSORS))
 
     # Add GloBird portal/account sensors if the provider account is connected.
     globird_coordinator = domain_data.get("globird_coordinator")
@@ -5074,7 +5071,7 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
             attributes["bpea_source"] = pricing.bpea_source
             attributes["gst_multiplier"] = pricing.gst_multiplier
             attributes["gst_source"] = pricing.gst_source
-            attributes["portal_pricing_active"] = pricing.portal_active
+            attributes["account_pricing_active"] = pricing.account_data_active
 
             # TWAP override info
             override = self._get_config_value(CONF_FP_TWAP_OVERRIDE)
@@ -5392,11 +5389,11 @@ class FlowPowerAmberComparisonSensor(PowerSyncCurrencyMixin, SensorEntity):
         return _entity_currency_attrs(self, attrs)
 
 
-class FlowPowerPortalSensor(SensorEntity):
-    """Sensor for individual Flow Power portal account metrics.
+class FlowPowerAccountSensor(SensorEntity):
+    """Sensor for individual Flow Power API account metrics.
 
-    Reads from hass.data[DOMAIN][entry_id]["flow_power_portal_data"] which is
-    populated by the portal client every 30 minutes.
+    Reads from hass.data[DOMAIN][entry_id]["flow_power_account_data"] which is
+    populated by the Web Data API every 30 minutes.
     """
 
     def __init__(
@@ -5429,10 +5426,10 @@ class FlowPowerPortalSensor(SensorEntity):
     @property
     def native_value(self) -> float | None:
         domain_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        portal_data = domain_data.get("flow_power_portal_data")
-        if not portal_data:
+        account_data = domain_data.get("flow_power_account_data")
+        if not account_data:
             return None
-        val = portal_data.get(self._data_key)
+        val = account_data.get(self._data_key)
         if val is not None:
             try:
                 return round(float(val), 3)
@@ -5443,8 +5440,8 @@ class FlowPowerPortalSensor(SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         domain_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        portal_data = domain_data.get("flow_power_portal_data") or {}
-        source = portal_data.get("source", self._source_label)
+        account_data = domain_data.get("flow_power_account_data") or {}
+        source = account_data.get("source", self._source_label)
         attrs = {"source": source}
         raw_network_tariff = self._entry.options.get(
             CONF_FLOWPOWER_NETWORK_TARIFF,

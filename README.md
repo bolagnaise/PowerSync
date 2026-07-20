@@ -66,7 +66,7 @@ Solar inverters that bypass the battery can be curtailed during negative feed-in
 |----------|---------|---------|
 | **Amber Electric** | Australia | Dynamic 5-min & 30-min (API token required) |
 | **Localvolts** | Australia | Real-time 5-min wholesale pricing (API key + Partner ID) |
-| **Flow Power / AEMO** | Australia | Wholesale pricing |
+| **Flow Power / AEMO** | Australia | Official Flow Power Web Data API or AEMO wholesale pricing |
 | **Globird / AEMO VPP** | Australia | Retail tariff schedule + AEMO spike detection |
 | **CovaU SolarMax** | Australia | Fixture-backed NSW, Queensland and South Australia stepped tariffs with measured daily free-import and premium-export quotas |
 | **Octopus Energy** | UK | Dynamic 30-min (Agile, Go, Intelligent Go, Flux, Tracker). Reads from [BottlecapDave's integration](https://github.com/BottlecapDave/HomeAssistant-OctopusEnergy) when installed |
@@ -95,7 +95,7 @@ Solar inverters that bypass the battery can be curtailed during negative feed-in
 
 - Home Assistant with [HACS](https://hacs.xyz/) installed
 - A supported battery system with network access, or existing Home Assistant sensors for a custom/external controller setup
-- Electricity provider credentials where required: Amber API token, Localvolts API key + Partner ID, and optional credentials for Flow Power portal or Octopus Saving Sessions
+- Electricity provider credentials where required: Amber API token, Localvolts API key + Partner ID, Flow Power API key from **More > Web Data Access**, or Octopus Saving Sessions credentials
 
 ### Steps
 

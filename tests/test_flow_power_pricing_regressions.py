@@ -442,15 +442,13 @@ def test_flow_power_api_client_posts_key_and_normalizes_sites_summary_and_prices
     assert all(call[2]["x-api-key"] == "secret-key" for call in session.calls)
 
 
-def test_flow_power_kwatch_account_summary_warning_waits_for_portal_fallback():
+def test_flow_power_kwatch_account_summary_has_no_portal_fallback():
     source = (COMPONENT_ROOT / "__init__.py").read_text()
 
-    assert "KWatch account summary failed, trying portal fallback" not in source
-    assert "KWatch account summary unavailable (%s); using portal fallback" in source
-    assert (
-        "KWatch account summary failed and portal fallback did not load account data: %s"
-        in source
-    )
+    assert "FlowPowerPortalClient" not in source
+    assert "flow_power_portal_client" not in source
+    assert "portal fallback" not in source
+    assert "Flow Power KWatch account summary failed: %s" in source
 
 
 def test_flow_power_api_client_decodes_nested_json_string_payloads():
@@ -1031,7 +1029,7 @@ def test_flow_power_pricing_context_uses_raw_twap_with_portal_account_values():
         data={},
         domain_data={
             "flow_power_twap_tracker": SimpleNamespace(twap=8.25),
-            "flow_power_portal_data": {
+            "flow_power_account_data": {
                 "twap": 21.0,
                 "twap_import": 20.5,
                 "bpea": 2.3,
@@ -1044,7 +1042,7 @@ def test_flow_power_pricing_context_uses_raw_twap_with_portal_account_values():
     assert context.twap == 8.25
     assert context.twap_source == "dynamic"
     assert context.bpea == 2.1
-    assert context.bpea_source == "portal"
+    assert context.bpea_source == "api"
     assert context.gst_multiplier == 1.2
     assert round(helper.calculate_flow_power_pea(
         20.0,
@@ -1083,7 +1081,7 @@ def test_flow_power_pricing_context_uses_raw_wholesale_twap_for_pea():
         data={},
         domain_data={
             "flow_power_twap_tracker": SimpleNamespace(twap=11.49),
-            "flow_power_portal_data": {
+            "flow_power_account_data": {
                 "twap": 21.02,
                 "twap_import": 21.02,
                 "bpea_import": 1.7,
@@ -1110,7 +1108,7 @@ def test_flow_power_pricing_context_falls_back_from_zero_import_bpea():
         data={},
         domain_data={
             "flow_power_twap_tracker": SimpleNamespace(twap=11.49),
-            "flow_power_portal_data": {
+            "flow_power_account_data": {
                 "twap": 18.56,
                 "twap_import": 18.56,
                 "bpea": 2.057245,
@@ -1128,7 +1126,7 @@ def test_flow_power_pricing_context_falls_back_from_zero_import_bpea():
     )
 
     assert context.bpea == 2.057245
-    assert context.bpea_source == "portal"
+    assert context.bpea_source == "api"
     assert round(pea, 2) == -12.44
     assert round(34.0 + pea, 2) == 21.56
 
@@ -1141,7 +1139,7 @@ def test_flow_power_portal_account_twap_does_not_double_subtract_network_average
         data={},
         domain_data={
             "flow_power_twap_tracker": SimpleNamespace(twap=8.42),
-            "flow_power_portal_data": {
+            "flow_power_account_data": {
                 "twap": 19.50647193287,
                 "twap_import": 19.50647193287,
                 "bpea": 2.30677,
@@ -1196,7 +1194,7 @@ def test_flow_power_v2_pea_subtracts_average_daily_tariff():
         bpea_source="portal",
         gst_multiplier=1.1,
         gst_source="portal",
-        portal_active=True,
+        account_data_active=True,
     )
 
     pea = helper.calculate_flow_power_pea(
@@ -1252,7 +1250,7 @@ def test_flow_power_pricing_context_uses_override_before_raw_twap():
         data={},
         domain_data={
             "flow_power_twap_tracker": SimpleNamespace(twap=8.25),
-            "flow_power_portal_data": {
+            "flow_power_account_data": {
                 "twap_import": 20.5,
                 "bpea_import": 2.1,
                 "gst_multiplier": 1.1,
@@ -1557,3 +1555,30 @@ def test_network_tariff_dropdown_falls_back_to_legacy_tariffs_attr(monkeypatch):
     assert module.get_tariff_codes_for_network("United") == {
         "VICR_SINGLE": "VICR_SINGLE — Residential Single Rate",
     }
+
+
+def test_legacy_flow_power_portal_transport_is_removed_and_migrated():
+    init_source = (COMPONENT_ROOT / "__init__.py").read_text()
+    config_source = (COMPONENT_ROOT / "config_flow.py").read_text()
+    sensor_source = (COMPONENT_ROOT / "sensor.py").read_text()
+
+    assert not (COMPONENT_ROOT / "flow_power_portal.py").exists()
+    for forbidden in (
+        "FlowPowerPortalClient",
+        "_pending_fp_client",
+        "flow_power_portal_client",
+        "b2clogin.com",
+        "/report/get",
+        "Account/KeepAlive",
+    ):
+        assert forbidden not in init_source
+        assert forbidden not in config_source
+
+    assert "if config_entry.version == 7:" in init_source
+    assert 'values.pop("flowpower_email", None)' in init_source
+    assert 'values.pop("flowpower_password", None)' in init_source
+    assert ".fp_session.{config_entry.entry_id}" in init_source
+    assert 'new_options[CONF_FLOW_POWER_PRICE_SOURCE] = "aemo"' in init_source
+    assert "flow_power_web_data_api_required" in init_source
+    assert "flow_power_account_data" in init_source
+    assert "FlowPowerAccountSensor" in sensor_source

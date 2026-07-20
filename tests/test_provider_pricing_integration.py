@@ -53,18 +53,19 @@ def test_globird_sensors_use_linked_device_and_stable_object_ids():
     assert "cost_attributes(" in source
 
 
-def test_flow_power_portal_sensors_use_provider_device_and_object_ids():
-    """Flow Power portal/account sensors should live under the pricing device."""
+def test_flow_power_api_account_sensors_use_provider_device_and_object_ids():
+    """Flow Power API account sensors should retain their stable entity IDs."""
     source = (COMPONENT_ROOT / "sensor.py").read_text()
     const_source = (COMPONENT_ROOT / "const.py").read_text()
 
-    assert "FLOW_POWER_PORTAL_SENSORS = [" in const_source
+    assert "FLOW_POWER_ACCOUNT_SENSORS = [" in const_source
     assert '"fp_account_pea"' in const_source
     assert '"fp_account_lwap"' in const_source
     assert '"fp_account_avg_usage"' in const_source
     assert '"fp_account_max_usage"' in const_source
     assert "CONF_FLOWPOWER_API_KEY" in source
-    assert "fp_email or fp_api_key" in source
+    assert "if fp_api_key:" in source
+    assert "FlowPowerAccountSensor(" in source
     assert "return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)" in source
     assert 'self._attr_suggested_object_id = f"power_sync_{sensor_type}"' in source
     assert "network_tariff_raw" in source

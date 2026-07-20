@@ -1506,7 +1506,7 @@ def test_flow_power_optimizer_uses_base_rate_from_entry_data(opt_module, monkeyp
     assert coordinator._last_display_import_prices[0] == pytest.approx(0.5443)
 
 
-def test_flow_power_optimizer_uses_raw_twap_with_portal_pricing_inputs(opt_module, monkeypatch):
+def test_flow_power_optimizer_uses_raw_twap_with_account_pricing_inputs(opt_module, monkeypatch):
     async def _executor(fn, *args):
         return fn(*args)
 
@@ -1518,7 +1518,7 @@ def test_flow_power_optimizer_uses_raw_twap_with_portal_pricing_inputs(opt_modul
                 "entry-1": {
                     "fp_avg_daily_tariff": 5.0,
                     "flow_power_twap_tracker": SimpleNamespace(twap=8.0),
-                    "flow_power_portal_data": {
+                    "flow_power_account_data": {
                         "twap": 10.0,
                         "bpea": 2.0,
                         "gst_multiplier": 1.2,
@@ -1595,7 +1595,7 @@ def test_flow_power_optimizer_uses_current_interval_for_active_tariff_slot(
             "power_sync": {
                 "entry-1": {
                     "fp_avg_daily_tariff": 5.0,
-                    "flow_power_portal_data": {
+                    "flow_power_account_data": {
                         "twap": 10.0,
                         "bpea": 2.0,
                         "gst_multiplier": 1.2,

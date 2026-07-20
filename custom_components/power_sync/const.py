@@ -1129,28 +1129,26 @@ FLOW_POWER_BENCHMARK = 1.7       # BPEA - benchmark customer performance (c/kWh)
 FLOW_POWER_PEA_OFFSET = 9.7      # Combined: MARKET_AVG + BENCHMARK (c/kWh)
 FLOW_POWER_DEFAULT_BASE_RATE = 34.0  # Default Flow Power base rate (c/kWh)
 
-# Flow Power Portal configuration
-CONF_FLOWPOWER_EMAIL = "flowpower_email"
-CONF_FLOWPOWER_PASSWORD = "flowpower_password"
+# Flow Power Web Data API configuration
 CONF_FLOWPOWER_API_KEY = "flowpower_api_key"
 CONF_FLOWPOWER_NMI = "flowpower_nmi"
 CONF_FLOWPOWER_NETWORK_TARIFF = "flowpower_network_tariff"
 UPDATE_INTERVAL_FLOWPOWER = 1800  # 30 minutes
 
-# Portal account sensors — (sensor_type, name, data_key, unit, icon, source_label)
-FLOW_POWER_PORTAL_SENSORS = [
-    ("fp_account_pea", "Flow Power PEA (Actual)", "pea_actual", "c/kWh", "mdi:account-cash", "portal"),
-    ("fp_account_pea_30d", "Flow Power PEA 30-Day", "pea_30_days", "c/kWh", "mdi:calendar-month", "portal"),
-    ("fp_account_bpea", "Flow Power BPEA (Benchmark)", "bpea", "c/kWh", "mdi:target", "portal"),
+# API account sensors — (sensor_type, name, data_key, unit, icon, source_label)
+FLOW_POWER_ACCOUNT_SENSORS = [
+    ("fp_account_pea", "Flow Power PEA (Actual)", "pea_actual", "c/kWh", "mdi:account-cash", "api"),
+    ("fp_account_pea_30d", "Flow Power PEA 30-Day", "pea_30_days", "c/kWh", "mdi:calendar-month", "api"),
+    ("fp_account_bpea", "Flow Power BPEA (Benchmark)", "bpea", "c/kWh", "mdi:target", "api"),
     ("fp_account_cpea", "Flow Power CPEA (Customer)", "cpea", "c/kWh", "mdi:account-arrow-right", "calculated"),
-    ("fp_account_pea_import", "Flow Power PEA Import", "pea_actual_import", "c/kWh", "mdi:import", "portal"),
-    ("fp_account_lwap", "Flow Power LWAP", "lwap", "c/kWh", "mdi:scale-balance", "portal"),
-    ("fp_account_lwap_actual", "Flow Power LWAP (Actual)", "lwap_actual", "c/kWh", "mdi:scale-balance", "portal"),
-    ("fp_account_twap", "Flow Power TWAP (Portal)", "twap", "c/kWh", "mdi:chart-timeline-variant", "portal"),
-    ("fp_account_avg_rrp", "Flow Power Avg Spot Price", "avg_rrp", "c/kWh", "mdi:lightning-bolt", "portal"),
-    ("fp_account_dlf", "Flow Power DLF (Site Losses)", "site_losses_dlf", None, "mdi:transmission-tower", "portal"),
-    ("fp_account_avg_usage", "Flow Power Avg Demand", "avg_usage_kw", "kW", "mdi:flash-outline", "portal"),
-    ("fp_account_max_usage", "Flow Power Max Demand", "max_usage_kw", "kW", "mdi:flash-alert", "portal"),
+    ("fp_account_pea_import", "Flow Power PEA Import", "pea_actual_import", "c/kWh", "mdi:import", "api"),
+    ("fp_account_lwap", "Flow Power LWAP", "lwap", "c/kWh", "mdi:scale-balance", "api"),
+    ("fp_account_lwap_actual", "Flow Power LWAP (Actual)", "lwap_actual", "c/kWh", "mdi:scale-balance", "api"),
+    ("fp_account_twap", "Flow Power TWAP (Account)", "twap", "c/kWh", "mdi:chart-timeline-variant", "api"),
+    ("fp_account_avg_rrp", "Flow Power Avg Spot Price", "avg_rrp", "c/kWh", "mdi:lightning-bolt", "api"),
+    ("fp_account_dlf", "Flow Power DLF (Site Losses)", "site_losses_dlf", None, "mdi:transmission-tower", "api"),
+    ("fp_account_avg_usage", "Flow Power Avg Demand", "avg_usage_kw", "kW", "mdi:flash-outline", "api"),
+    ("fp_account_max_usage", "Flow Power Max Demand", "max_usage_kw", "kW", "mdi:flash-alert", "api"),
 ]
 
 # Default Amber comparison markup by region (c/kWh)
