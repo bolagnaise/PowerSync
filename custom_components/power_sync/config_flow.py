@@ -37,6 +37,10 @@ from .history_migration import (
     preview_history_relink,
 )
 from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
+from .settings_metadata import (
+    merge_optimization_section_input,
+    submitted_live_settings,
+)
 from .const import (
     DOMAIN,
     CONF_AMBER_API_TOKEN,
@@ -7038,7 +7042,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             menu_options.append("sigenergy_connection")
         elif battery_system == BATTERY_SYSTEM_SUNGROW:
             menu_options.append("sungrow_connection")
-            menu_options.append("history_relink")
         elif battery_system == BATTERY_SYSTEM_FOXESS:
             menu_options.append("foxess_connection_options")
         elif battery_system == BATTERY_SYSTEM_GOODWE:
@@ -7062,20 +7065,31 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         elif battery_system == BATTERY_SYSTEM_CUSTOM:
             menu_options.append("custom_battery")
 
-        menu_options.extend([
-            "optimization",
+        menu_options.extend(["optimization", "ev_charging", "advanced"])
+
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=menu_options,
+        )
+
+    async def async_step_advanced(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Show optional and specialist settings outside the main path."""
+        menu_options = [
             "network_export",
             "inverter",
             "curtailment",
             "demand_charges",
-            "ev_charging",
             "weather",
             "auto_update",
             "cloud_flow",
-        ])
+        ]
+        if self._effective_battery_system() == BATTERY_SYSTEM_SUNGROW:
+            menu_options.append("history_relink")
 
         return self.async_show_menu(
-            step_id="init",
+            step_id="advanced",
             menu_options=menu_options,
         )
 
@@ -9854,6 +9868,67 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     async def async_step_optimization(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        """Show the Smart Optimization section menu or save the active section."""
+        active_section = getattr(self, "_active_optimization_section", None)
+        if user_input is not None and active_section:
+            submitted = dict(user_input)
+            self._optimization_submitted_fields = set(submitted)
+            # Another client, options flow, or Auto-Apply may have changed a
+            # hidden setting while this section was open. Rebuild the snapshot
+            # from the live config entry immediately before merging so a save
+            # cannot replay the values captured when the form first rendered.
+            await self._async_step_optimization(None)
+            visible_fields = getattr(self, "_optimization_visible_fields", set())
+            return await self._async_step_optimization(
+                merge_optimization_section_input(
+                    getattr(self, "_optimization_form_values", {}),
+                    visible_fields,
+                    submitted,
+                )
+            )
+
+        self._active_optimization_section = None
+        return self.async_show_menu(
+            step_id="optimization",
+            menu_options=[
+                "optimization_core",
+                "optimization_behaviour",
+                "optimization_system",
+                "optimization_advanced",
+            ],
+        )
+
+    async def async_step_optimization_core(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure everyday optimization goals."""
+        self._active_optimization_section = "core"
+        return await self._async_step_optimization(user_input)
+
+    async def async_step_optimization_behaviour(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure occasional optimization behaviour."""
+        self._active_optimization_section = "behaviour"
+        return await self._async_step_optimization(user_input)
+
+    async def async_step_optimization_system(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure battery specifications and site limits."""
+        self._active_optimization_section = "system"
+        return await self._async_step_optimization(user_input)
+
+    async def async_step_optimization_advanced(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure specialist optimization constraints."""
+        self._active_optimization_section = "advanced"
+        return await self._async_step_optimization(user_input)
+
+    async def _async_step_optimization(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Menu handler: optimization provider and backup reserve settings."""
         battery_system = self._effective_battery_system()
         is_tesla = battery_system == BATTERY_SYSTEM_TESLA
@@ -10177,7 +10252,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     self.hass.config_entries.async_reload(self.config_entry.entry_id)
                 )
             elif optimization_provider == OPT_PROVIDER_POWERSYNC:
-                live_settings = {
+                all_live_settings = {
                     "auto_apply_reserve_enabled": auto_apply_reserve_enabled,
                     "backup_reserve": backup_reserve,
                     "hardware_backup_reserve": hardware_backup_reserve,
@@ -10201,6 +10276,49 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     "load_entity": load_entity,
                     "planned_ev_load_entity": planned_ev_load_entity,
                 }
+                live_settings = submitted_live_settings(
+                    all_live_settings,
+                    getattr(
+                        self,
+                        "_optimization_submitted_fields",
+                        set(user_input),
+                    ),
+                    {
+                        "auto_apply_reserve_enabled": (
+                            CONF_OPTIMIZATION_AUTO_APPLY_RESERVE
+                        ),
+                        "backup_reserve": CONF_OPTIMIZATION_BACKUP_RESERVE,
+                        "hardware_backup_reserve": CONF_HARDWARE_BACKUP_RESERVE,
+                        "battery_capacity_wh": CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
+                        "max_charge_w": CONF_OPTIMIZATION_MAX_CHARGE_W,
+                        "max_discharge_w": CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+                        "max_grid_export_w": CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+                        "max_grid_import_w": CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
+                        "max_grid_charge_price": (
+                            CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE
+                        ),
+                        "grid_charge_soc_cap": CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
+                        "allow_grid_charge": CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
+                        "profit_max_enabled": CONF_PROFIT_MAX_ENABLED,
+                        "charge_by_time_enabled": CONF_CHARGE_BY_TIME_ENABLED,
+                        "charge_by_time_target_time": (
+                            CONF_CHARGE_BY_TIME_TARGET_TIME
+                        ),
+                        "charge_by_time_target_soc": CONF_CHARGE_BY_TIME_TARGET_SOC,
+                        "spread_export_enabled": (
+                            CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED
+                        ),
+                        "spread_import_enabled": (
+                            CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED
+                        ),
+                        "disable_idle_enabled": CONF_OPTIMIZATION_DISABLE_IDLE,
+                        "ev_integration": CONF_OPTIMIZATION_EV_INTEGRATION,
+                        "load_entity": CONF_OPTIMIZATION_LOAD_ENTITY,
+                        "planned_ev_load_entity": (
+                            CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY
+                        ),
+                    },
+                )
                 try:
                     await coordinator.set_settings(live_settings)
                 except Exception as err:  # never leave settings half-applied
@@ -10391,6 +10509,68 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
         )
 
+        current_form_values: dict[str, Any] = {
+            CONF_OPTIMIZATION_PROVIDER: current_opt_provider,
+            CONF_OPTIMIZATION_ENABLED: bool(current_optimization_enabled),
+            CONF_OPTIMIZATION_AUTO_APPLY_RESERVE: bool(
+                current_auto_apply_reserve
+            ),
+            CONF_OPTIMIZATION_EV_INTEGRATION: bool(
+                current_ev_integration_enabled
+            ),
+            CONF_MONITORING_MODE: bool(current_monitoring_mode),
+            CONF_OPTIMIZATION_BACKUP_RESERVE: (
+                int(display_backup_reserve * 100)
+                if display_backup_reserve < 1
+                else int(display_backup_reserve)
+            ),
+            CONF_HARDWARE_BACKUP_RESERVE: (
+                int(current_hardware_backup_reserve * 100)
+                if current_hardware_backup_reserve < 1
+                else int(current_hardware_backup_reserve)
+            ),
+            CONF_OPTIMIZATION_BATTERY_CAPACITY_WH: current_capacity_kwh,
+            CONF_OPTIMIZATION_MAX_CHARGE_W: current_charge_kw,
+            CONF_OPTIMIZATION_MAX_DISCHARGE_W: current_discharge_kw,
+            CONF_OPTIMIZATION_MAX_GRID_IMPORT_W: current_max_grid_import_kw,
+            CONF_OPTIMIZATION_ALLOW_GRID_CHARGE: bool(
+                current_allow_grid_charge
+            ),
+            CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE: (
+                current_max_grid_charge_price
+            ),
+            CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP: current_grid_charge_soc_cap,
+            CONF_PROFIT_MAX_ENABLED: bool(current_profit_max_enabled),
+            CONF_CHARGE_BY_TIME_ENABLED: bool(current_charge_by_time_enabled),
+            CONF_CHARGE_BY_TIME_TARGET_TIME: current_charge_by_time_target_time,
+            CONF_CHARGE_BY_TIME_TARGET_SOC: current_charge_by_time_target_soc,
+        }
+        if current_load_entity:
+            current_form_values[CONF_OPTIMIZATION_LOAD_ENTITY] = current_load_entity
+        if current_planned_ev_load_entity:
+            current_form_values[CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY] = (
+                current_planned_ev_load_entity
+            )
+        if current_max_grid_export_kw is not None:
+            current_form_values[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = (
+                current_max_grid_export_kw
+            )
+        if not is_tesla:
+            current_form_values[CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED] = bool(
+                current_spread_export_enabled
+            )
+            current_form_values[CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED] = bool(
+                current_spread_import_enabled
+            )
+        if supports_no_idle_mode:
+            current_form_values[CONF_OPTIMIZATION_DISABLE_IDLE] = bool(
+                current_disable_idle
+            )
+        if battery_system == BATTERY_SYSTEM_NEOVOLT:
+            current_form_values[CONF_NEOVOLT_SURPLUS_BALANCER_MODE] = (
+                current_surplus_balancer_mode
+            )
+
         opt_providers = _optimization_provider_options_for_battery(battery_system)
         schema_fields: dict[Any, Any] = {
             vol.Required(
@@ -10572,9 +10752,54 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             }
         )
 
+        section_fields = {
+            "core": {
+                CONF_OPTIMIZATION_PROVIDER,
+                CONF_OPTIMIZATION_ENABLED,
+                CONF_OPTIMIZATION_BACKUP_RESERVE,
+                CONF_PROFIT_MAX_ENABLED,
+                CONF_CHARGE_BY_TIME_ENABLED,
+                CONF_CHARGE_BY_TIME_TARGET_TIME,
+                CONF_CHARGE_BY_TIME_TARGET_SOC,
+            },
+            "behaviour": {
+                CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
+                CONF_OPTIMIZATION_EV_INTEGRATION,
+                CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
+                CONF_MONITORING_MODE,
+                CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
+            },
+            "system": {
+                CONF_HARDWARE_BACKUP_RESERVE,
+                CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
+                CONF_OPTIMIZATION_MAX_CHARGE_W,
+                CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+                CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
+                CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
+                CONF_OPTIMIZATION_LOAD_ENTITY,
+                CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
+            },
+            "advanced": {
+                CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
+                CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
+                CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
+                CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
+                CONF_OPTIMIZATION_DISABLE_IDLE,
+            },
+        }
+        active_section = getattr(self, "_active_optimization_section", "core")
+        allowed_fields = section_fields.get(active_section, section_fields["core"])
+        visible_schema = {
+            marker: selector
+            for marker, selector in schema_fields.items()
+            if marker.schema in allowed_fields
+        }
+        self._optimization_form_values = current_form_values
+        self._optimization_visible_fields = allowed_fields
+
         return self.async_show_form(
             step_id="optimization",
-            data_schema=vol.Schema(schema_fields),
+            data_schema=vol.Schema(visible_schema),
         )
 
     async def async_step_inverter(

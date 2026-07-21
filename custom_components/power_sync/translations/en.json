@@ -1095,7 +1095,7 @@
     "step": {
       "init": {
         "title": "PowerSync settings",
-        "description": "Choose a section to configure. Changes take effect immediately.",
+        "description": "Settings are grouped for your selected battery, provider, and EV setup. Optional specialist features are under Advanced settings.",
         "menu_options": {
           "pricing": "Electricity pricing & provider",
           "battery_system": "Battery / control method",
@@ -1114,15 +1114,23 @@
           "anker_solix": "Anker Solix connection",
           "custom_battery": "Custom external controller",
           "optimization": "Optimization mode",
+          "ev_charging": "EV charging",
+          "solax_battery_options": "Solax connection",
+          "advanced": "Advanced settings"
+        }
+      },
+      "advanced": {
+        "title": "Advanced settings",
+        "description": "Optional features for specialist tariffs, export controls, extra inverters, forecasting, and maintenance. You can safely leave these alone unless they apply to your setup.",
+        "menu_options": {
           "network_export": "Network export limits / Flexible Exports",
           "inverter": "AC inverter curtailment",
           "curtailment": "Curtailment settings",
           "demand_charges": "Demand charge tracking",
-          "ev_charging": "EV charging",
           "weather": "Weather & solar forecast",
           "auto_update": "PowerSync auto-update",
-          "solax_battery_options": "Solax connection",
-          "cloud_flow": "PowerSync Cloud energy-flow reporter"
+          "cloud_flow": "PowerSync Cloud energy-flow reporter",
+          "history_relink": "Sungrow history relink"
         }
       },
       "battery_system": {
@@ -1435,7 +1443,13 @@
       },
       "optimization": {
         "title": "Smart Optimization settings",
-        "description": "Configure PowerSync's Smart Optimization limits. Advanced optimizer controls change how the solver evaluates grid charging, import/export limits, spreading, idle handling, and forecast reserve.",
+        "description": "Choose the part of Smart Optimization you want to change. Everyday goals stay separate from occasional behaviour, battery specifications, and specialist constraints.",
+        "menu_options": {
+          "optimization_core": "Core goals",
+          "optimization_behaviour": "Behaviour",
+          "optimization_system": "Battery & limits",
+          "optimization_advanced": "Advanced optimizer controls"
+        },
         "data": {
           "optimization_provider": "Optimization mode",
           "optimization_enabled": "Enable Smart Optimization",

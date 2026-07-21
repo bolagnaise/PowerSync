@@ -13,6 +13,11 @@ from typing import Any, Callable, Optional
 
 from homeassistant.util import dt as dt_util
 
+from .settings_metadata import (
+    optimizer_settings_groups,
+    optimizer_settings_schema,
+)
+
 # Module-level state for alert cooldowns (keyed by entry_id)
 _last_discrepancy_alert: dict[str, datetime] = {}
 _discrepancy_alert_count: dict[str, int] = {}
@@ -24,41 +29,7 @@ AEMO_SETTLED_SYNC_DELAY_SECONDS = 5.0
 
 def _optimizer_settings_groups() -> dict[str, Any]:
     """Return mobile metadata for grouped optimizer settings."""
-    return {
-        "optimizer": {
-            "title": "Smart Optimization",
-            "collapsed": False,
-            "fields": [
-                "enabled",
-                "backup_reserve",
-                "hardware_backup_reserve",
-                "profit_max_enabled",
-                "charge_by_time_enabled",
-                "charge_by_time_target_time",
-                "charge_by_time_target_soc",
-                "load_entity",
-                "planned_ev_load_entity",
-                "battery_capacity_wh",
-                "max_charge_w",
-                "max_discharge_w",
-            ],
-        },
-        "advanced_optimizer": {
-            "title": "Advanced optimizer controls",
-            "collapsed": True,
-            "fields": [
-                "allow_grid_charge",
-                "max_grid_charge_price",
-                "grid_charge_soc_cap",
-                "max_grid_import_w",
-                "max_grid_export_w",
-                "spread_import_enabled",
-                "spread_export_enabled",
-                "disable_idle_enabled",
-                "auto_apply_reserve_enabled",
-            ],
-        },
-    }
+    return optimizer_settings_groups()
 
 
 def _entry_percent_int(value: Any) -> int | None:
@@ -37141,6 +37112,7 @@ class OptimizationSettingsView(HomeAssistantView):
                     else "default",
                 },
                 "settings_groups": _optimizer_settings_groups(),
+                "settings_schema": optimizer_settings_schema(),
             })
 
         return web.json_response({
@@ -37157,6 +37129,7 @@ class OptimizationSettingsView(HomeAssistantView):
             "disable_idle_enabled": opt_coordinator.disable_idle_enabled,
             "auto_apply_reserve_enabled": opt_coordinator.auto_apply_reserve_enabled,
             "settings_groups": _optimizer_settings_groups(),
+            "settings_schema": optimizer_settings_schema(),
             "manual_backup_reserve": (
                 round(opt_coordinator.manual_backup_reserve * 100)
                 if opt_coordinator.manual_backup_reserve is not None

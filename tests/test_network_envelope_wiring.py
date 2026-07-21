@@ -95,7 +95,8 @@ def test_network_export_strings_and_translation_remain_in_sync() -> None:
 
     for payload in (strings, english):
         options = payload["options"]
-        assert options["step"]["init"]["menu_options"]["network_export"]
+        assert options["step"]["init"]["menu_options"]["advanced"]
+        assert options["step"]["advanced"]["menu_options"]["network_export"]
         step = options["step"]["network_export"]
         assert "CSIP-AUS" in step["description"]
         assert set(step["data"]) == {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import sys
 import types
@@ -235,7 +236,19 @@ def test_canonical_entity_id_migration_checks_history_relinks():
 
 def test_history_relink_menu_is_sungrow_only():
     source = CONFIG_FLOW_PATH.read_text()
-    sungrow_branch = source.index("elif battery_system == BATTERY_SYSTEM_SUNGROW:")
-    foxess_branch = source.index("elif battery_system == BATTERY_SYSTEM_FOXESS:")
+    tree = ast.parse(source)
+    advanced_source = None
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != "PowerSyncOptionsFlow":
+            continue
+        for item in node.body:
+            if isinstance(item, ast.AsyncFunctionDef) and item.name == "async_step_advanced":
+                advanced_source = ast.get_source_segment(source, item)
+                break
 
-    assert "menu_options.append(\"history_relink\")" in source[sungrow_branch:foxess_branch]
+    assert advanced_source is not None
+    assert (
+        "self._effective_battery_system() == BATTERY_SYSTEM_SUNGROW"
+        in advanced_source
+    )
+    assert "menu_options.append(\"history_relink\")" in advanced_source

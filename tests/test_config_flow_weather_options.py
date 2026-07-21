@@ -101,13 +101,22 @@ def _config_flow_method(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
     raise AssertionError(f"PowerSyncConfigFlow.{name} not found")
 
 
-def _options_flow_method(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+def _options_flow_method(
+    name: str, *, implementation: bool = True
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    # Existing optimizer regression checks target the implementation body; the
+    # public handler is now a four-section menu/dispatcher.
+    lookup_name = (
+        "_async_step_optimization"
+        if implementation and name == "async_step_optimization"
+        else name
+    )
     for node in _module_tree().body:
         if isinstance(node, ast.ClassDef) and node.name == "PowerSyncOptionsFlow":
             for item in node.body:
                 if (
                     isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and item.name == name
+                    and item.name == lookup_name
                 ):
                     return item
     raise AssertionError(f"PowerSyncOptionsFlow.{name} not found")
@@ -1273,6 +1282,26 @@ def test_optimization_settings_api_exposes_planned_ev_load_entity():
     assert "Cleared max_grid_export_w" in post_source
 
 
+def test_optimization_settings_api_treats_omitted_fields_as_unchanged():
+    source = INIT_PATH.read_text()
+    post_method = _init_class_method("OptimizationSettingsView", "post")
+    post_source = ast.get_source_segment(source, post_method)
+
+    assert post_source is not None
+    for key in (
+        "allow_grid_charge",
+        "max_grid_charge_price",
+        "grid_charge_soc_cap",
+        "max_grid_export_w",
+        "spread_export_enabled",
+        "spread_import_enabled",
+        "disable_idle_enabled",
+    ):
+        assert f'if "{key}" in settings:' in post_source
+
+    assert "new_options.update(settings)" not in post_source
+
+
 def test_neovolt_surplus_balancer_selector_is_in_optimization_options():
     source = CONFIG_FLOW_PATH.read_text()
     method = _options_flow_method("async_step_optimization")
@@ -1438,6 +1467,85 @@ def test_options_menu_exposes_editable_battery_system_section():
     assert 'menu_options.append("alphaess_connection")' in method_source
     assert 'menu_options.append("anker_solix")' in method_source
     assert 'menu_options.append("custom_battery")' in method_source
+
+
+def test_options_menu_keeps_specialist_sections_under_advanced():
+    source = CONFIG_FLOW_PATH.read_text()
+    init_source = ast.get_source_segment(
+        source, _options_flow_method("async_step_init")
+    )
+    advanced_source = ast.get_source_segment(
+        source, _options_flow_method("async_step_advanced")
+    )
+
+    assert init_source is not None
+    assert advanced_source is not None
+    assert (
+        'menu_options.extend(["optimization", "ev_charging", "advanced"])'
+        in init_source
+    )
+    for specialist_section in (
+        '"network_export"',
+        '"inverter"',
+        '"curtailment"',
+        '"demand_charges"',
+        '"weather"',
+        '"auto_update"',
+        '"cloud_flow"',
+    ):
+        assert specialist_section not in init_source
+        assert specialist_section in advanced_source
+
+    assert "BATTERY_SYSTEM_SUNGROW" in advanced_source
+    assert 'menu_options.append("history_relink")' in advanced_source
+
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        steps = json.loads(path.read_text())["options"]["step"]
+        assert steps["init"]["menu_options"]["advanced"] == "Advanced settings"
+        assert "network_export" not in steps["init"]["menu_options"]
+        assert "network_export" in steps["advanced"]["menu_options"]
+        assert "safely leave these alone" in steps["advanced"]["description"]
+
+
+def test_optimization_options_are_split_without_resetting_hidden_sections():
+    source = CONFIG_FLOW_PATH.read_text()
+    menu = _options_flow_method("async_step_optimization", implementation=False)
+    implementation = _options_flow_method("_async_step_optimization")
+    menu_source = ast.get_source_segment(source, menu)
+    implementation_source = ast.get_source_segment(source, implementation)
+
+    assert menu_source is not None
+    assert implementation_source is not None
+    for section in (
+        "optimization_core",
+        "optimization_behaviour",
+        "optimization_system",
+        "optimization_advanced",
+    ):
+        assert f'"{section}"' in menu_source
+        assert f"async_step_{section}" in source
+
+    refresh_index = menu_source.index("await self._async_step_optimization(None)")
+    merge_index = menu_source.index("merge_optimization_section_input(")
+    assert refresh_index < merge_index
+    assert "current_form_values: dict[str, Any]" in implementation_source
+    assert '"core": {' in implementation_source
+    assert '"behaviour": {' in implementation_source
+    assert '"system": {' in implementation_source
+    assert '"advanced": {' in implementation_source
+    assert "if marker.schema in allowed_fields" in implementation_source
+    assert "self._optimization_visible_fields = allowed_fields" in implementation_source
+    assert "all_live_settings = {" in implementation_source
+    assert "live_settings = submitted_live_settings(" in implementation_source
+
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        step = json.loads(path.read_text())["options"]["step"]["optimization"]
+        assert step["menu_options"] == {
+            "optimization_core": "Core goals",
+            "optimization_behaviour": "Behaviour",
+            "optimization_system": "Battery & limits",
+            "optimization_advanced": "Advanced optimizer controls",
+        }
 
 
 def test_options_battery_system_selector_persists_and_routes_selection():
@@ -2026,14 +2134,20 @@ def test_sungrow_ac_inverter_models_include_three_phase_sg_rt():
     assert '"sg10rt": "sg10rs"' in inverter_source
 
 
-def test_smart_optimization_setup_and_options_text_match():
+def test_smart_optimization_setup_and_sectioned_options_labels_match():
     for path in (STRINGS_PATH, TRANSLATIONS_PATH):
         data = json.loads(path.read_text())
         config_step = data["config"]["step"]["ml_options"]
         options_step = data["options"]["step"]["optimization"]
 
         assert config_step["title"] == options_step["title"]
-        assert config_step["description"] == options_step["description"]
+        assert "Choose the part" in options_step["description"]
+        assert set(options_step["menu_options"]) == {
+            "optimization_core",
+            "optimization_behaviour",
+            "optimization_system",
+            "optimization_advanced",
+        }
         assert config_step["data"] == options_step["data"]
         assert config_step["data_description"] == options_step["data_description"]
 

@@ -31,6 +31,10 @@ from ..const import (
     supports_no_idle_mode_provider,
 )
 from ..coordinator import normalize_custom_power_kw
+from ..settings_metadata import (
+    optimizer_settings_groups,
+    optimizer_settings_schema,
+)
 from ..flow_power_pricing import (
     FlowPowerPricingContext,
     calculate_flow_power_pea,
@@ -11825,41 +11829,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @staticmethod
     def _settings_groups() -> dict[str, Any]:
         """Return non-breaking mobile metadata for grouped optimizer settings."""
-        return {
-            "optimizer": {
-                "title": "Smart Optimization",
-                "collapsed": False,
-                "fields": [
-                    "enabled",
-                    "backup_reserve",
-                    "hardware_backup_reserve",
-                    "profit_max_enabled",
-                    "charge_by_time_enabled",
-                    "charge_by_time_target_time",
-                    "charge_by_time_target_soc",
-                    "load_entity",
-                    "planned_ev_load_entity",
-                    "battery_capacity_wh",
-                    "max_charge_w",
-                    "max_discharge_w",
-                ],
-            },
-            "advanced_optimizer": {
-                "title": "Advanced optimizer controls",
-                "collapsed": True,
-                "fields": [
-                    "allow_grid_charge",
-                    "max_grid_charge_price",
-                    "grid_charge_soc_cap",
-                    "max_grid_import_w",
-                    "max_grid_export_w",
-                    "spread_import_enabled",
-                    "spread_export_enabled",
-                    "disable_idle_enabled",
-                    "auto_apply_reserve_enabled",
-                ],
-            },
-        }
+        return optimizer_settings_groups()
 
     def get_forecast_data(self) -> dict[str, Any]:
         """Get forecast data for LP forecast sensors.
@@ -12147,6 +12117,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "manual_backup_reserve": self.manual_backup_reserve,
             "backup_reserve": self._config.backup_reserve,
             "settings_groups": self._settings_groups(),
+            "settings_schema": optimizer_settings_schema(),
             "idle_hold_active": (
                 self._last_executed_action == "idle"
                 and self._idle_hold_reserve is not None
