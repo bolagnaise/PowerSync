@@ -3337,6 +3337,61 @@ def test_periodic_slow_solve_defers_new_force_until_next_boundary(opt_module):
         opt_module.dt_util.now = original_now
 
 
+def test_periodic_boundary_solve_can_start_fresh_export_immediately(opt_module):
+    """A fast boundary solve must not lose the new slot to the cached plan."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.97)
+    coordinator.battery_system = "foxess"
+    coordinator._enabled = True
+    coordinator._optimization_lock = asyncio.Lock()
+    coordinator._execute_lock = asyncio.Lock()
+    coordinator._last_executed_action = "charge"
+    boundary = datetime(2026, 7, 21, 18, 5, tzinfo=timezone.utc)
+    now = [boundary]
+    original_now = opt_module.dt_util.now
+    opt_module.dt_util.now = lambda *args, **kwargs: now[0]
+
+    cached_actions = [
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=0,
+            timestamp=boundary,
+        ),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=0,
+            timestamp=boundary + timedelta(minutes=5),
+        ),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=cached_actions)
+
+    try:
+        asyncio.run(coordinator._execute_cached_current_action_if_changed())
+
+        fresh_actions = [
+            SimpleNamespace(action="export", power_w=8000, timestamp=boundary),
+            SimpleNamespace(
+                action="self_consumption",
+                power_w=0,
+                timestamp=boundary + timedelta(minutes=5),
+            ),
+        ]
+        coordinator._current_schedule = SimpleNamespace(actions=fresh_actions)
+        now[0] = boundary + timedelta(seconds=2)
+
+        asyncio.run(
+            coordinator._execute_optimizer_action(
+                fresh_actions[0],
+                execution_trigger="poll",
+            )
+        )
+    finally:
+        opt_module.dt_util.now = original_now
+
+    assert battery.force_discharge_calls == [(5, 5000.0, False, None)]
+    assert coordinator._last_executed_action == "export"
+
+
 def test_price_solve_can_override_non_force_boundary_mid_slot(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.50)

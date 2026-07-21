@@ -102,6 +102,7 @@ EXPORT_ACTIONS = {"discharge", "export"}
 SELF_USE_ACTIONS = {"consume", "self_consumption"}
 CHARGE_ACTIONS = {"charge"}
 FORCED_ACTIONS = CHARGE_ACTIONS | EXPORT_ACTIONS
+BOUNDARY_FRESH_SOLVE_GRACE = timedelta(seconds=30)
 OPTIMIZER_FORCE_CHARGE_MIN_COMMITMENT = timedelta(minutes=20)
 OPTIMIZER_FORCE_DISCHARGE_MIN_COMMITMENT = timedelta(minutes=20)
 SUNGROW_INFERRED_RESTORE_COOLDOWN = timedelta(minutes=5)
@@ -6704,12 +6705,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 except Exception:
                     pass
 
-            # A cached boundary action owns this slot. A periodic solve is
-            # still free to publish a new plan, but it must not introduce a
-            # fresh force mode halfway through a slot that began in a
-            # non-force action. Safety gates above may turn a forced plan into
-            # self-consumption; explicit price/settings/startup/manual runs do
-            # not pass the polling trigger and therefore retain immediate
+            # A cached boundary action owns this slot once the fresh periodic
+            # solve is genuinely late. Normal boundary solves finish a few
+            # seconds after the cached action is applied; suppressing those for
+            # the whole interval can miss a newly-started tariff window. Keep a
+            # short boundary grace, then preserve the cached action for the
+            # rest of the slot. Safety gates above may still turn a forced plan
+            # into self-consumption; explicit price/settings/startup/manual
+            # runs do not pass the polling trigger and retain immediate
             # execution authority.
             boundary_execution = getattr(self, "_boundary_execution", None)
             if (
@@ -6725,6 +6728,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     isinstance(slot_start, datetime)
                     and isinstance(slot_end, datetime)
                     and slot_start <= now < slot_end
+                    and now - slot_start >= BOUNDARY_FRESH_SOLVE_GRACE
                 ):
                     _LOGGER.info(
                         "Optimizer: deferring periodic mid-slot %s after cached %s "
