@@ -404,6 +404,42 @@ def test_monitoring_mode_blocks_automation_but_allows_manual_controls():
     assert '{"duration": duration, "source": "automation"}' in automation_source
 
 
+def test_force_expiry_restores_are_allowed_to_clean_up_in_monitoring_mode():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+
+    for handler_name in ("handle_force_charge", "handle_force_discharge"):
+        handler = _find_function(tree, handler_name)
+        timer_callbacks = [
+            node
+            for node in ast.walk(handler)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name.startswith("auto_restore")
+        ]
+        assert timer_callbacks
+
+        for callback in timer_callbacks:
+            restore_calls = [
+                node
+                for node in ast.walk(callback)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "async_call"
+                and len(node.args) >= 3
+                and isinstance(node.args[1], ast.Name)
+                and node.args[1].id == "SERVICE_RESTORE_NORMAL"
+            ]
+            for call in restore_calls:
+                payload = call.args[2]
+                assert isinstance(payload, ast.Dict), callback.name
+                keys = {
+                    key.value
+                    for key in payload.keys
+                    if isinstance(key, ast.Constant)
+                }
+                assert "_allow_monitoring_restore" in keys, callback.name
+
+
 def test_monitoring_mode_restores_persisted_force_without_replay_after_restart():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

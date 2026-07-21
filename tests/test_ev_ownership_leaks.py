@@ -592,10 +592,11 @@ def test_ocpp_stop_canonicalizes_matching_generic_solar_session(monkeypatch):
     assert ev_ownership.manual_stop_hold_reason(hass, entry, VIN_B) is None
 
 
-def test_solar_surplus_start_respects_matching_manual_stop_hold():
+def test_solar_surplus_start_respects_matching_manual_stop_hold(monkeypatch):
     hass = _Hass()
     entry = _Entry()
     actions._dynamic_ev_state.clear()
+    _install_ev_planner_stub(monkeypatch, plugged_in=True)
     ev_ownership.record_manual_stop_hold(
         hass,
         entry,

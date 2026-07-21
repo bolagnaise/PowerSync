@@ -382,7 +382,12 @@ def test_force_discharge_switch_uses_selected_duration_and_force_power():
     asyncio.run(force_switch.async_turn_on())
 
     assert hass.services.calls == [
-        ("power_sync", "force_discharge", {"duration": 90, "power_w": 5500}, True),
+        (
+            "power_sync",
+            "force_discharge",
+            {"duration": 90, "power_w": 5500, "source": "user"},
+            True,
+        ),
     ]
 
 
@@ -407,7 +412,32 @@ def test_force_charge_switch_uses_selected_duration_and_force_power():
     asyncio.run(force_switch.async_turn_on())
 
     assert hass.services.calls == [
-        ("power_sync", "force_charge", {"duration": 120, "power_w": 4000}, True),
+        (
+            "power_sync",
+            "force_charge",
+            {"duration": 120, "power_w": 4000, "source": "user"},
+            True,
+        ),
+    ]
+
+
+def test_force_switch_stop_is_user_sourced_for_monitoring_mode():
+    hass = _Hass("SystemGridConnected")
+    entry = _entry()
+    force_switch = switch.ForceDischargeSwitch(
+        hass,
+        entry,
+        _SwitchEntityDescription(
+            key="force_discharge",
+            name="Force Discharge",
+            icon="mdi:battery-arrow-up",
+        ),
+    )
+
+    asyncio.run(force_switch.async_turn_off())
+
+    assert hass.services.calls == [
+        ("power_sync", "restore_normal", {"source": "user"}, True),
     ]
 
 

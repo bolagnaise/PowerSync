@@ -6542,6 +6542,14 @@ async def _action_start_ev_charging_dynamic_locked(
     dynamic_mode = params.get("dynamic_mode", "battery_target")
     owner_mode = params.get("owner_mode", dynamic_mode)
     allow_takeover = bool(params.get("allow_ownership_takeover", False))
+    entry_vehicles = _dynamic_ev_state.get(entry_id, {})
+
+    def _same_loadpoint(candidate_id: str) -> bool:
+        return (
+            candidate_id == vehicle_id
+            or candidate_id == DEFAULT_VEHICLE_ID
+            or vehicle_id == DEFAULT_VEHICLE_ID
+        )
 
     from .ev_ownership import (
         can_claim_ev_ownership,
@@ -6573,14 +6581,36 @@ async def _action_start_ev_charging_dynamic_locked(
             )
             return False
 
-    entry_vehicles = _dynamic_ev_state.get(entry_id, {})
+        # The app-level Solar Surplus toggle is evaluated independently of
+        # EV triggers, so it can reach this shared start path while the
+        # selected vehicle is explicitly unplugged. Reject that initial start
+        # before ownership, timers, and session tracking are created. The
+        # periodic two-sample unplug debounce remains for an active session,
+        # where a momentary telemetry flap should not stop real charging.
+        from .ev_charging_planner import is_ev_plugged_in
 
-    def _same_loadpoint(candidate_id: str) -> bool:
-        return (
-            candidate_id == vehicle_id
-            or candidate_id == DEFAULT_VEHICLE_ID
-            or vehicle_id == DEFAULT_VEHICLE_ID
+        active_session_exists = any(
+            v_state.get("active") and _same_loadpoint(candidate_id)
+            for candidate_id, v_state in entry_vehicles.items()
         )
+        if not active_session_exists and not await is_ev_plugged_in(
+            hass, config_entry, vehicle_vin=vehicle_id
+        ):
+            reason = "vehicle is not plugged in"
+            _LOGGER.info(
+                "Solar surplus EV: start blocked for %s because %s",
+                vehicle_id,
+                reason,
+            )
+            record_ev_command(
+                hass,
+                config_entry,
+                vehicle_id,
+                command=f"start_{owner_mode}",
+                success=False,
+                reason=reason,
+            )
+            return False
 
     allowed, _lease_id, _lease, block_reason = can_claim_ev_ownership(
         hass,

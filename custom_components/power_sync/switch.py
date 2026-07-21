@@ -841,7 +841,10 @@ class ForceDischargeSwitch(SwitchEntity):
         duration = _coerce_duration(
             kwargs.get("duration", selected_duration), self._duration_minutes,
         )
-        service_data = {"duration": duration}
+        # This entity is a user-facing manual control. Mark the nested service
+        # call explicitly so Monitoring Mode does not mistake it for an
+        # optimizer/automation command when Home Assistant drops UI context.
+        service_data = {"duration": duration, "source": "user"}
         power_w = _selected_force_power_w(self.hass)
         if power_w > 0:
             service_data["power_w"] = power_w
@@ -875,7 +878,7 @@ class ForceDischargeSwitch(SwitchEntity):
             await self.hass.services.async_call(
                 DOMAIN,
                 "restore_normal",
-                {},
+                {"source": "user"},
                 blocking=True,
             )
 
@@ -1019,7 +1022,10 @@ class ForceChargeSwitch(SwitchEntity):
         duration = _coerce_duration(
             kwargs.get("duration", selected_duration), self._duration_minutes,
         )
-        service_data = {"duration": duration}
+        # This entity is a user-facing manual control. Mark the nested service
+        # call explicitly so Monitoring Mode does not mistake it for an
+        # optimizer/automation command when Home Assistant drops UI context.
+        service_data = {"duration": duration, "source": "user"}
         power_w = _selected_force_power_w(self.hass)
         if power_w > 0:
             service_data["power_w"] = power_w
@@ -1053,7 +1059,7 @@ class ForceChargeSwitch(SwitchEntity):
             await self.hass.services.async_call(
                 DOMAIN,
                 "restore_normal",
-                {},
+                {"source": "user"},
                 blocking=True,
             )
 
