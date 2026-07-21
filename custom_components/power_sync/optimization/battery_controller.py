@@ -117,11 +117,28 @@ class BatteryControllerWrapper:
             service_data = {"duration": duration_minutes, "power_w": power_w, "source": "optimizer"}
             if _extend_hardware:
                 service_data["_extend_hardware"] = True
-            await self.hass.services.async_call(
-                "power_sync", "force_charge",
-                service_data,
-                blocking=True,
-            )
+            if self.battery_system == "tesla":
+                response = await self.hass.services.async_call(
+                    "power_sync",
+                    "force_charge",
+                    service_data,
+                    blocking=True,
+                    return_response=True,
+                )
+                if not isinstance(response, dict) or response.get("success") is not True:
+                    error = response.get("error") if isinstance(response, dict) else None
+                    _LOGGER.warning(
+                        "Optimizer: Tesla force charge was not confirmed%s",
+                        f": {error}" if error else "",
+                    )
+                    return False
+            else:
+                await self.hass.services.async_call(
+                    "power_sync",
+                    "force_charge",
+                    service_data,
+                    blocking=True,
+                )
             return True
 
         except Exception as e:

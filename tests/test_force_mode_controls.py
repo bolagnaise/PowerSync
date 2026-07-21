@@ -26,6 +26,9 @@ NUMBER_PATH = ROOT / "custom_components" / "power_sync" / "number.py"
 SWITCH_PATH = ROOT / "custom_components" / "power_sync" / "switch.py"
 FOXESS_INVERTER_PATH = ROOT / "custom_components" / "power_sync" / "inverters" / "foxess.py"
 SERVICES_PATH = ROOT / "custom_components" / "power_sync" / "services.yaml"
+AUTOMATION_ACTIONS_PATH = (
+    ROOT / "custom_components" / "power_sync" / "automations" / "actions.py"
+)
 
 
 def _find_class_method(
@@ -656,6 +659,205 @@ def test_tesla_tou_upload_waits_for_site_info_readback():
     assert "_tariff_charge_rates(expected, sell=False)" in matcher_source
 
 
+def test_tesla_tou_readback_uses_deadline_safe_eventual_consistency_window():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    confirm = _find_function(tree, "_confirm_tesla_tariff_uploaded")
+    confirm_source = ast.get_source_segment(source, confirm)
+
+    assert confirm_source is not None
+    assert "schedule_seconds: tuple[float, ...]" in confirm_source
+    assert "(0.0, 1.0, 3.0, 7.0, 15.0, 25.0)" in confirm_source
+    assert "deadline = started_at + timeout_seconds" in confirm_source
+    assert "target_time = started_at + offset_seconds" in confirm_source
+    assert "request_timeout = min(5.0, remaining_seconds)" in confirm_source
+    assert "response.status in (401, 403)" in confirm_source
+    assert "elapsed_seconds" in confirm_source
+
+
+def test_tesla_tou_readback_accepts_delayed_match_without_reupload():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    confirm = _find_function(tree, "_confirm_tesla_tariff_uploaded")
+
+    class FakeClock:
+        def __init__(self):
+            self.now = 0.0
+
+        def time(self):
+            return self.now
+
+    class FakeAsyncio:
+        def __init__(self, clock):
+            self.clock = clock
+
+        def get_running_loop(self):
+            return self.clock
+
+        async def sleep(self, seconds):
+            self.clock.now += seconds
+
+    class FakeResponse:
+        def __init__(self, status, observed=None):
+            self.status = status
+            self.observed = observed
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def json(self):
+            return {
+                "response": {"tariff_content_v2": self.observed}
+            }
+
+        async def text(self):
+            return "transient"
+
+    class FakeSession:
+        def __init__(self, responses):
+            self.responses = iter(responses)
+            self.calls = []
+
+        def get(self, url, *, headers, timeout):
+            self.calls.append((url, headers, timeout))
+            return next(self.responses)
+
+    class FakeLogger:
+        def info(self, *_args):
+            pass
+
+        def debug(self, *_args):
+            pass
+
+        def warning(self, *_args):
+            pass
+
+        def error(self, *_args):
+            pass
+
+    clock = FakeClock()
+    namespace = {
+        "aiohttp": SimpleNamespace(
+            ClientSession=object,
+            ClientTimeout=lambda *, total: total,
+        ),
+        "asyncio": FakeAsyncio(clock),
+        "Any": object,
+        "_LOGGER": FakeLogger(),
+        "_tesla_tariff_matches_readback": lambda expected, observed: (
+            expected == observed
+        ),
+    }
+    extracted = ast.Module(
+        body=[
+            ast.ImportFrom(
+                module="__future__",
+                names=[ast.alias(name="annotations")],
+                level=0,
+            ),
+            confirm,
+        ],
+        type_ignores=[],
+    )
+    exec(compile(ast.fix_missing_locations(extracted), str(INIT_PATH), "exec"), namespace)
+
+    tariff = {"code": "CHARGE_30"}
+    session = FakeSession(
+        [
+            FakeResponse(503),
+            FakeResponse(200, {"code": "old"}),
+            FakeResponse(200, {"code": "old"}),
+            FakeResponse(200, {"code": "old"}),
+            FakeResponse(200, {"code": "old"}),
+            FakeResponse(200, tariff),
+        ]
+    )
+
+    confirmed = asyncio.run(
+        namespace["_confirm_tesla_tariff_uploaded"](
+            session,
+            "https://example.invalid",
+            "site",
+            {"Authorization": "redacted"},
+            tariff,
+        )
+    )
+
+    assert confirmed is True
+    assert len(session.calls) == 6
+    assert clock.now == 25.0
+    assert [call[2] for call in session.calls] == [5.0] * 6
+
+
+def test_tesla_force_charge_exposes_optional_optimizer_result():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    handler = _find_function(tree, "handle_force_charge")
+    handler_source = ast.get_source_segment(source, handler)
+
+    assert handler_source is not None
+    assert (
+        "SERVICE_FORCE_CHARGE,\n        handle_force_charge,\n"
+        "        supports_response=SupportsResponse.OPTIONAL"
+    ) in source
+    assert 'return {"success": True, "error": None}' in handler_source
+    assert 'return {"success": False, "error":' in handler_source
+
+
+def test_tesla_grid_charging_service_requires_confirmed_response_for_automation():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    handler = _find_function(tree, "handle_set_grid_charging")
+    handler_source = ast.get_source_segment(source, handler)
+    actions_source = AUTOMATION_ACTIONS_PATH.read_text()
+
+    assert handler_source is not None
+    assert (
+        "SERVICE_SET_GRID_CHARGING,\n        handle_set_grid_charging,\n"
+        "        supports_response=SupportsResponse.OPTIONAL"
+    ) in source
+    assert "await _tesla_force_apply_grid_charging(" in handler_source
+    assert "raise HomeAssistantError(" in handler_source
+    assert 'return {"success": True, "error": None}' in handler_source
+    assert "return_response=True" in actions_source
+    assert 'response.get("success") is True' in actions_source
+
+
+def test_tesla_grid_charging_force_helper_confirms_local_state_then_cloud_falls_back():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    helper = _find_function(tree, "_tesla_force_apply_grid_charging")
+    helper_source = ast.get_source_segment(source, helper)
+
+    assert helper_source is not None
+    assert "await transport.write_config(" in helper_source
+    assert "config = await transport.read_config(din)" in helper_source
+    assert "tesla_grid_charging_enabled_from_site_info(" in helper_source
+    assert "async_set_tesla_grid_charging_confirmed(" in helper_source
+    assert "dispatch_powerwall_write(" in helper_source
+    assert 'result["accepted_sites"].append(site_id)' in helper_source
+
+
+def test_tesla_energy_coordinator_grid_charging_uses_confirmed_uncached_helper():
+    source = COORDINATOR_PATH.read_text()
+    tree = ast.parse(source)
+    method = _find_class_method(
+        tree,
+        "TeslaEnergyCoordinator",
+        "set_grid_charging_enabled",
+    )
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    assert "async_set_tesla_grid_charging_confirmed(" in method_source
+    assert "async_get_site_info(" not in method_source
+    assert "if outcome.applied:" in method_source
+    assert "return False" in method_source
+
+
 def test_tesla_tou_upload_reports_accepted_before_readback_failure():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
@@ -715,7 +917,9 @@ def test_tesla_force_modes_persist_grid_charging_baseline():
     assert '"saved_grid_charging_enabled": force_discharge_state.get("saved_grid_charging_enabled")' in persist
     assert "_tesla_grid_charging_enabled_from_site_info(site_info)" in source
     assert 'site_state["saved_grid_charging_enabled"] = saved_grid_charging_enabled' in source
-    assert '"disallow_charge_from_grid_with_solar_installed": not target_grid_charging_enabled' in restore
+    assert "await _tesla_force_apply_grid_charging(" in restore
+    assert "target_grid_charging_enabled," in restore
+    assert "_mark_tesla_restore_failed(" in restore
     assert "No saved grid charging state" in restore
 
 
@@ -1187,10 +1391,12 @@ def test_tesla_force_discharge_disables_grid_charging_before_tariff_upload():
 
     assert function_source is not None
     grid_disable_index = function_source.index(
-        '"disallow_charge_from_grid_with_solar_installed": True'
+        "grid_result = await _tesla_force_apply_grid_charging("
     )
     tariff_upload_index = function_source.index("send_tariff_to_tesla(")
     assert grid_disable_index < tariff_upload_index
+    assert "if not _tesla_force_result_all_confirmed(grid_result, site_configs):" in function_source
+    assert "raise HomeAssistantError(" in function_source
 
 
 def test_tesla_force_discharge_always_applies_battery_export_before_tariff_upload():
@@ -1202,7 +1408,7 @@ def test_tesla_force_discharge_always_applies_battery_export_before_tariff_uploa
     assert function_source is not None
     export_rule_index = function_source.index('"customer_preferred_export_rule": "battery_ok"')
     grid_disable_index = function_source.index(
-        '"disallow_charge_from_grid_with_solar_installed": True'
+        "grid_result = await _tesla_force_apply_grid_charging("
     )
     tariff_upload_index = function_source.index("send_tariff_to_tesla(")
 
@@ -1476,10 +1682,12 @@ def test_tesla_force_charge_enables_grid_charging_before_tariff_upload():
 
     assert function_source is not None
     grid_enable_index = function_source.index(
-        '"disallow_charge_from_grid_with_solar_installed": False'
+        "grid_result = await _tesla_force_apply_grid_charging("
     )
     tariff_upload_index = function_source.index("send_tariff_to_tesla(")
     assert grid_enable_index < tariff_upload_index
+    assert "if not _tesla_force_result_all_confirmed(grid_result, site_configs):" in function_source
+    assert '"grid charging enable did not verify"' in function_source
 
 
 def test_tesla_charge_kick_reenables_grid_charging_after_force_charge_bounce():
@@ -1490,9 +1698,9 @@ def test_tesla_charge_kick_reenables_grid_charging_after_force_charge_bounce():
 
     assert function_source is not None
     assert 'ensure_grid_charging = reason in {"force_charge", "backup_reserve_100"}' in function_source
-    assert "async def _enable_grid_charging_after_bounce()" in function_source
-    assert '"disallow_charge_from_grid_with_solar_installed": False' in function_source
-    assert function_source.count("await _enable_grid_charging_after_bounce()") >= 2
+    assert "async def _enable_grid_charging_after_bounce() -> bool" in function_source
+    assert "await _tesla_force_apply_grid_charging(" in function_source
+    assert function_source.count("return await _enable_grid_charging_after_bounce()") >= 2
 
 
 def test_optimizer_backup_reserve_writes_do_not_persist_as_user_reserve():

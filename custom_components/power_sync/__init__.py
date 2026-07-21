@@ -9,7 +9,7 @@ import logging
 import pathlib
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from homeassistant.util import dt as dt_util
 
@@ -853,6 +853,11 @@ from .coordinator import (
     AEMOSensorCoordinator,
     OctopusPriceCoordinator,
     LocalvoltsPriceCoordinator,
+)
+from .tesla_grid_control import (
+    TeslaGridWriteStatus,
+    async_set_tesla_grid_charging_confirmed,
+    tesla_grid_charging_enabled_from_site_info,
 )
 from .sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
 import re
@@ -3799,20 +3804,48 @@ async def _confirm_tesla_tariff_uploaded(
     headers: dict[str, str],
     tariff_data: dict[str, Any],
     *,
-    attempts: int = 5,
-    delay_seconds: float = 2.0,
+    schedule_seconds: tuple[float, ...] = (0.0, 1.0, 3.0, 7.0, 15.0, 25.0),
+    timeout_seconds: float = 30.0,
 ) -> bool:
-    """Poll Tesla site_info until the uploaded TOU tariff is visible."""
+    """Poll Tesla site_info within a bounded eventual-consistency window."""
     url = f"{api_base}/api/1/energy_sites/{site_id}/site_info"
-    for attempt in range(1, attempts + 1):
-        if attempt > 1:
-            await asyncio.sleep(delay_seconds)
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    deadline = started_at + timeout_seconds
+    attempts = len(schedule_seconds)
+
+    for attempt, offset_seconds in enumerate(schedule_seconds, start=1):
+        target_time = started_at + offset_seconds
+        now = loop.time()
+        if offset_seconds > 0 and now >= target_time:
+            _LOGGER.debug(
+                "Skipping missed Tesla TOU readback slot %.1fs for site %s",
+                offset_seconds,
+                site_id,
+            )
+            continue
+        if now < target_time:
+            await asyncio.sleep(min(target_time - now, max(0.0, deadline - now)))
+
+        remaining_seconds = deadline - loop.time()
+        if remaining_seconds <= 0:
+            break
+        request_timeout = min(5.0, remaining_seconds)
         try:
             async with session.get(
                 url,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
+                timeout=aiohttp.ClientTimeout(total=request_timeout),
             ) as response:
+                if response.status in (401, 403):
+                    text = await response.text()
+                    _LOGGER.error(
+                        "TOU readback authorization failed for site %s: %s - %s",
+                        site_id,
+                        response.status,
+                        text[:200],
+                    )
+                    return False
                 if response.status != 200:
                     text = await response.text()
                     _LOGGER.warning(
@@ -3826,9 +3859,12 @@ async def _confirm_tesla_tariff_uploaded(
                 site_info = data.get("response", {})
                 observed = site_info.get("tariff_content_v2") or site_info.get("tariff_content")
                 if _tesla_tariff_matches_readback(tariff_data, observed):
+                    elapsed_seconds = loop.time() - started_at
                     _LOGGER.info(
-                        "Confirmed Tesla TOU tariff readback for site %s (attempt %d/%d)",
+                        "Confirmed Tesla TOU tariff readback for site %s "
+                        "after %.1fs (attempt %d/%d)",
                         site_id,
+                        elapsed_seconds,
                         attempt,
                         attempts,
                     )
@@ -20655,24 +20691,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Content-Type": "application/json",
             }
             ensure_grid_charging = reason in {"force_charge", "backup_reserve_100"}
+            kick_generation = _command_generation[0]
 
-            async def _enable_grid_charging_after_bounce() -> None:
+            async def _enable_grid_charging_after_bounce() -> bool:
                 if not ensure_grid_charging:
-                    return
-                async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
-                    headers=headers,
-                    json={"disallow_charge_from_grid_with_solar_installed": False},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    if resp.status == 200:
-                        _LOGGER.info("Charge kick (%s): ensured grid charging is enabled", reason)
-                    else:
-                        text = await resp.text()
-                        _LOGGER.warning(
-                            "Charge kick (%s): could not enable grid charging after bounce %s - %s",
-                            reason, resp.status, text[:200],
-                        )
+                    return True
+                result = await _tesla_force_apply_grid_charging(
+                    [(str(site_id), current_token, current_provider)],
+                    True,
+                    reason=f"charge kick ({reason})",
+                    is_current=lambda: _command_generation[0] == kick_generation,
+                )
+                confirmed = _tesla_force_result_all_confirmed(
+                    result,
+                    [(str(site_id), current_token, current_provider)],
+                )
+                if confirmed:
+                    _LOGGER.info(
+                        "Charge kick (%s): confirmed grid charging is enabled",
+                        reason,
+                    )
+                return confirmed
 
             async def _mode_bounce() -> bool:
                 """Execute self_consumption → 5s → autonomous bounce.
@@ -20729,8 +20768,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 mode = data.get("response", {}).get("default_real_mode")
                                 if mode == "autonomous":
                                     _LOGGER.info("Charge kick (%s): switched back to autonomous", reason)
-                                    await _enable_grid_charging_after_bounce()
-                                    return True
+                                    return await _enable_grid_charging_after_bounce()
                                 _LOGGER.warning(
                                     "Charge kick (%s): mode is '%s' not 'autonomous' (attempt %d/3)",
                                     reason, mode, attempt + 1,
@@ -20741,8 +20779,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                     "Charge kick (%s): couldn't verify mode (status %s), assuming success",
                                     reason, verify_resp.status,
                                 )
-                                await _enable_grid_charging_after_bounce()
-                                return True
+                                return await _enable_grid_charging_after_bounce()
                     except Exception as e:
                         _LOGGER.warning(
                             "Charge kick (%s): autonomous attempt %d/3 error: %s",
@@ -20758,6 +20795,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info("Charge kick (%s): mode bounce starting", reason)
             bounce_ok = await _mode_bounce()
             if not bounce_ok:
+                if _command_generation[0] != kick_generation:
+                    _LOGGER.info(
+                        "Charge kick (%s) superseded during confirmation; skipping stale cleanup",
+                        reason,
+                    )
+                    return
                 _LOGGER.error(
                     "Charge kick (%s): failed to restore autonomous mode after bounce — "
                     "auto-restoring normal operation",
@@ -25504,14 +25547,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     def _tesla_grid_charging_enabled_from_site_info(site_info: dict[str, Any]) -> bool | None:
         """Extract Tesla grid-charging state from site_info."""
-        components = site_info.get("components", {})
-        disallow = components.get("disallow_charge_from_grid_with_solar_installed")
-        if disallow is None:
-            disallow = site_info.get("disallow_charge_from_grid_with_solar_installed")
-        disallow_bool = _optional_bool(disallow)
-        if disallow_bool is None:
-            return None
-        return not disallow_bool
+        return tesla_grid_charging_enabled_from_site_info(site_info)
 
     def _coerce_force_power_w(value: Any) -> int:
         """Normalize service/store force-power values to a non-negative watt value."""
@@ -26405,6 +26441,126 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 mode,
                 reason=reason,
             ):
+                result["confirmed_sites"].append(site_id)
+                if site_id in result["accepted_sites"]:
+                    result["accepted_sites"].remove(site_id)
+            else:
+                result["failed_sites"].append(site_id)
+        return result
+
+    async def _tesla_force_apply_grid_charging(
+        site_configs: list[tuple[str, str, str]],
+        enabled: bool,
+        *,
+        reason: str,
+        prefer_local: bool = True,
+        is_current: Callable[[], bool] | None = None,
+    ) -> dict[str, list[str]]:
+        """Apply Tesla grid charging locally first and require real readback."""
+        from .const import CONF_POWERWALL_LOCAL_DIN
+        from .powerwall_local.dispatch import dispatch_powerwall_write
+
+        result: dict[str, list[str]] = {
+            "confirmed_sites": [],
+            "accepted_sites": [],
+            "failed_sites": [],
+        }
+        remaining = list(site_configs)
+        session = async_get_clientsession(hass)
+
+        async def _cloud_apply(
+            site_id: str,
+            current_token: str,
+            provider: str,
+        ) -> bool:
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = get_tesla_api_base_url(
+                provider,
+                entry.data.get(CONF_FLEET_API_BASE_URL),
+            )
+            outcome = await async_set_tesla_grid_charging_confirmed(
+                session,
+                api_base,
+                site_id,
+                headers,
+                enabled,
+                is_current=is_current,
+            )
+            if outcome.applied:
+                return True
+            if (
+                outcome.status
+                is TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
+                and site_id not in result["accepted_sites"]
+            ):
+                result["accepted_sites"].append(site_id)
+            _LOGGER.warning(
+                "Tesla %s grid charging %s did not verify for site %s (%s%s)",
+                reason,
+                "enable" if enabled else "disable",
+                site_id,
+                outcome.status.value,
+                f": {outcome.detail}" if outcome.detail else "",
+            )
+            return False
+
+        if prefer_local and remaining:
+            site_id, current_token, provider = remaining.pop(0)
+            din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
+
+            async def _local(transport) -> bool:
+                if is_current is not None and not is_current():
+                    return False
+                if not din or not await transport.write_config(
+                    din,
+                    {
+                        "site_info.disallow_charge_from_grid_with_solar_installed": not enabled
+                    },
+                ):
+                    return False
+                if site_id not in result["accepted_sites"]:
+                    result["accepted_sites"].append(site_id)
+                for attempt in range(1, 4):
+                    if is_current is not None and not is_current():
+                        return False
+                    if attempt > 1:
+                        await asyncio.sleep(2)
+                    config = await transport.read_config(din)
+                    site_info = (
+                        ((config or {}).get("site_info") or {})
+                        if isinstance(config, dict)
+                        else {}
+                    )
+                    observed = tesla_grid_charging_enabled_from_site_info(
+                        site_info
+                    )
+                    if observed is enabled:
+                        return True
+                return False
+
+            async def _cloud() -> bool:
+                return await _cloud_apply(site_id, current_token, provider)
+
+            if await dispatch_powerwall_write(
+                hass,
+                entry,
+                local_call=_local,
+                cloud_call=_cloud,
+                label=f"{reason} grid charging",
+                timeout=15.0,
+                retry_local_once=False,
+            ):
+                result["confirmed_sites"].append(site_id)
+                if site_id in result["accepted_sites"]:
+                    result["accepted_sites"].remove(site_id)
+            else:
+                result["failed_sites"].append(site_id)
+
+        for site_id, current_token, provider in remaining:
+            if await _cloud_apply(site_id, current_token, provider):
                 result["confirmed_sites"].append(site_id)
                 if site_id in result["accepted_sites"]:
                     result["accepted_sites"].remove(site_id)
@@ -27934,28 +28090,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         else:
                             _LOGGER.warning("Could not set export rule for site %s: %s", site_id, response.status)
 
-                    # Force discharge is tariff-driven on Tesla. Disallow grid
-                    # charging before uploading the high-export tariff so the
-                    # gateway cannot satisfy the force window by importing from
-                    # the grid and charging the battery.
-                    _LOGGER.info("Disabling grid charging during force discharge for site %s...", site_id)
-                    async with session.post(
-                        f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
-                        headers=headers,
-                        json={"disallow_charge_from_grid_with_solar_installed": True},
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as response:
-                        if response.status == 200:
-                            _LOGGER.info("Disabled grid charging for force discharge on site %s", site_id)
-                        else:
-                            text = await response.text()
-                            _LOGGER.warning(
-                                "Could not disable grid charging for force discharge on site %s: %s - %s",
-                                site_id,
-                                response.status,
-                                text[:200],
-                            )
-
                     saved_states[site_id] = site_state
 
                     # Small delay between gateways to avoid rate limiting
@@ -27971,6 +28105,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_discharge_state["saved_backup_reserve"] = primary_state.get("saved_backup_reserve")
                 force_discharge_state["saved_export_rule"] = primary_state.get("saved_export_rule")
                 force_discharge_state["saved_grid_charging_enabled"] = primary_state.get("saved_grid_charging_enabled")
+
+            # Force discharge is tariff-driven on Tesla. Grid charging must be
+            # confirmed disabled before the high-export tariff is uploaded, or
+            # the gateway could import and charge during the force window.
+            tesla_force_discharge_mutated = True
+            grid_result = await _tesla_force_apply_grid_charging(
+                site_configs,
+                False,
+                reason="force discharge",
+                is_current=lambda: _command_generation[0] == _restore_gen,
+            )
+            if not _tesla_force_result_all_confirmed(grid_result, site_configs):
+                raise HomeAssistantError(
+                    "Could not verify Tesla grid charging was disabled before force discharge"
+                )
 
             # Step 3: Switch to autonomous mode locally first, with cloud
             # fallback per gateway when no paired local transport confirms it.
@@ -28150,6 +28299,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Could not upload discharge tariff to Tesla"))
 
+        except HomeAssistantError as e:
+            _LOGGER.error("Force discharge rejected: %s", e)
+            if _command_generation[0] != _restore_gen:
+                _LOGGER.info(
+                    "Force discharge grid confirmation superseded; skipping stale cleanup"
+                )
+            elif tesla_force_discharge_mutated:
+                await _cleanup_failed_tesla_force_discharge(str(e))
+            else:
+                force_discharge_state["active"] = False
+            raise
         except Exception as e:
             _LOGGER.error(f"Error in force discharge: {e}", exc_info=True)
             if tesla_force_discharge_mutated:
@@ -28331,7 +28491,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         return tariff, actual_expiry
 
-    async def handle_force_charge(call: ServiceCall) -> None:
+    async def handle_force_charge(call: ServiceCall) -> dict[str, Any] | None:
         """Force charge mode - switches to autonomous with free import tariff."""
 
         # Warn if calibration suspected (don't block — user manual command)
@@ -29393,7 +29553,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not site_configs:
                 force_charge_state["active"] = False
                 _LOGGER.error("Missing Tesla site ID or token for force charge")
-                return
+                return {"success": False, "error": "missing Tesla site configuration"}
 
             session = async_get_clientsession(hass)
 
@@ -29600,32 +29760,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "Could not verify Tesla Time-Based Control after retries",
                     )
                 )
-                return
+                return {"success": False, "error": "autonomous mode did not verify"}
 
-            for site_id, current_token, provider in site_configs:
-                headers = {
-                    "Authorization": f"Bearer {current_token}",
-                    "Content-Type": "application/json",
+            grid_result = await _tesla_force_apply_grid_charging(
+                site_configs,
+                True,
+                reason="force charge",
+                is_current=lambda: _command_generation[0] == _restore_gen,
+            )
+            if not _tesla_force_result_all_confirmed(grid_result, site_configs):
+                if _command_generation[0] != _restore_gen:
+                    _LOGGER.info(
+                        "Force charge grid confirmation superseded; skipping stale cleanup"
+                    )
+                    return {
+                        "success": False,
+                        "error": "force charge superseded",
+                    }
+                _LOGGER.error(
+                    "Force charge failed before tariff upload: Tesla grid charging did not verify"
+                )
+                await _cleanup_failed_tesla_force_charge(
+                    "grid charging enable did not verify"
+                )
+                hass.async_create_task(
+                    _notify_api_error(
+                        hass,
+                        "Force Charge Failed",
+                        "Could not verify Tesla grid charging was enabled",
+                    )
+                )
+                return {
+                    "success": False,
+                    "error": "grid charging enable did not verify",
                 }
-                api_base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
-
-                _LOGGER.info("Enabling grid charging for force charge on site %s...", site_id)
-                async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
-                    headers=headers,
-                    json={"disallow_charge_from_grid_with_solar_installed": False},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        _LOGGER.info("Enabled grid charging for force charge on site %s", site_id)
-                    else:
-                        text = await response.text()
-                        _LOGGER.warning(
-                            "Could not enable grid charging for force charge on site %s: %s - %s",
-                            site_id,
-                            response.status,
-                            text[:200],
-                        )
 
             reserve_result = await _tesla_force_apply_backup_reserve(
                 site_configs,
@@ -29644,7 +29812,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "Could not verify Tesla backup reserve after retries",
                     )
                 )
-                return
+                return {"success": False, "error": "backup reserve did not verify"}
 
             # Step 4: Create and upload charge tariff to all gateways
             charge_tariff, actual_expiry = _create_charge_tariff(duration)
@@ -29719,12 +29887,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 # Persist state to survive HA restarts
                 await persist_force_mode_state()
+                return {"success": True, "error": None}
             else:
                 _LOGGER.error("Failed to upload charge tariff to one or more gateways")
                 await _cleanup_failed_tesla_force_charge(
                     "tariff upload failed after prerequisite writes"
                 )
                 hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Could not upload charge tariff to Tesla"))
+                return {"success": False, "error": "tariff upload did not verify"}
 
         except Exception as e:
             _LOGGER.error(f"Error in force charge: {e}", exc_info=True)
@@ -29732,6 +29902,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await _cleanup_failed_tesla_force_charge(str(e))
             else:
                 force_charge_state["active"] = False
+            return {"success": False, "error": str(e)}
 
     def _create_charge_tariff(duration_minutes: int) -> tuple[dict, datetime]:
         """Create a Tesla tariff optimized for charging from grid (force charge).
@@ -31119,40 +31290,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         )
                         continue
 
-                    headers = {
-                        "Authorization": f"Bearer {current_token}",
-                        "Content-Type": "application/json",
-                    }
-                    api_base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
-                    async with session.post(
-                        f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
-                        headers=headers,
-                        json={
-                            "disallow_charge_from_grid_with_solar_installed": not target_grid_charging_enabled
-                        },
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as response:
-                        if response.status == 200:
-                            if not in_peak:
-                                hass.data[DOMAIN][entry.entry_id]["grid_charging_disabled_for_demand"] = False
-                            _LOGGER.info(
-                                "Restored grid charging to %s for site %s",
-                                "enabled" if target_grid_charging_enabled else "disabled",
-                                site_id,
-                            )
-                        else:
-                            text = await response.text()
-                            _LOGGER.warning(
-                                "Failed to restore grid charging for site %s: %s - %s",
-                                site_id,
-                                response.status,
-                                text[:200],
-                            )
-                            _mark_tesla_restore_failed(
-                                f"grid charging restore failed for site {site_id}"
-                            )
+                    restore_grid_result = await _tesla_force_apply_grid_charging(
+                        [(site_id, current_token, provider)],
+                        target_grid_charging_enabled,
+                        reason="restore normal",
+                        prefer_local=(site_id == site_configs[0][0]),
+                        is_current=lambda: (
+                            _command_generation[0] == _restore_generation
+                        ),
+                    )
                     if _restore_superseded("grid charging restore"):
                         return
+                    if _tesla_force_result_all_confirmed(
+                        restore_grid_result,
+                        [(site_id, current_token, provider)],
+                    ):
+                        if not in_peak:
+                            hass.data[DOMAIN][entry.entry_id][
+                                "grid_charging_disabled_for_demand"
+                            ] = False
+                        _LOGGER.info(
+                            "Restored grid charging to %s for site %s",
+                            "enabled" if target_grid_charging_enabled else "disabled",
+                            site_id,
+                        )
+                    else:
+                        _mark_tesla_restore_failed(
+                            f"grid charging restore failed for site {site_id}"
+                        )
 
             if tesla_restore_failed:
                 if _schedule_tesla_restore_retry("one or more Tesla restore writes failed"):
@@ -32919,12 +33084,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"Error clearing manual export override: {e}", exc_info=True)
 
-    async def handle_set_grid_charging(call: ServiceCall) -> None:
+    async def handle_set_grid_charging(
+        call: ServiceCall,
+    ) -> dict[str, Any] | None:
         """Enable or disable grid charging, preferring paired local V1R."""
         enabled = call.data.get("enabled")
         if enabled is None:
-            _LOGGER.error("Missing 'enabled' parameter for set_grid_charging")
-            return
+            raise HomeAssistantError(
+                "Missing 'enabled' parameter for set_grid_charging"
+            )
 
         # Convert to bool (HA may pass True/False or "true"/"false")
         if isinstance(enabled, str):
@@ -32936,98 +33104,49 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "[MONITORING] Would set grid charging to %s — blocked by monitoring mode",
                 "enabled" if enabled else "disabled",
             )
-            return
+            return {"success": False, "error": "blocked by monitoring mode"}
 
         _LOGGER.info(f"🔌 Setting grid charging to {'enabled' if enabled else 'disabled'}")
 
         try:
-            from .const import CONF_POWERWALL_LOCAL_DIN
-            from .powerwall_local.dispatch import dispatch_powerwall_write
-
-            async def _local(transport) -> bool:
-                din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
-                if not din:
-                    return False
-                return await transport.write_config(
-                    din,
-                    {
-                        "site_info.disallow_charge_from_grid_with_solar_installed": not enabled
-                    },
+            site_configs = _get_tesla_site_configs(hass, entry)
+            if not site_configs:
+                raise HomeAssistantError(
+                    "Missing Tesla site ID or token for set_grid_charging"
                 )
-
-            async def _cloud() -> bool:
-                site_configs = _get_tesla_site_configs(hass, entry)
-                if not site_configs:
-                    _LOGGER.error("Missing Tesla site ID or token for set_grid_charging")
-                    return False
-
-                any_ok = False
-                session = async_get_clientsession(hass)
-                for site_id, current_token, provider in site_configs:
-                    headers = {
-                        "Authorization": f"Bearer {current_token}",
-                        "Content-Type": "application/json",
-                    }
-                    api_base = get_tesla_api_base_url(
-                        provider, entry.data.get(CONF_FLEET_API_BASE_URL)
-                    )
-
-                    # Tesla API uses inverted logic: disallow grid charging.
-                    async with session.post(
-                        f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
-                        headers=headers,
-                        json={
-                            "disallow_charge_from_grid_with_solar_installed": not enabled
-                        },
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as response:
-                        if response.status == 200:
-                            _LOGGER.info(
-                                "Grid charging %s for site %s",
-                                "enabled" if enabled else "disabled",
-                                site_id,
-                            )
-                            any_ok = True
-                        else:
-                            text = await response.text()
-                            _LOGGER.error(
-                                "Failed to set grid charging for site %s: %s - %s",
-                                site_id,
-                                response.status,
-                                text,
-                            )
-                return any_ok
-
-            success = await dispatch_powerwall_write(
-                hass,
-                entry,
-                local_call=_local,
-                cloud_call=_cloud,
-                label="set_grid_charging",
+            result = await _tesla_force_apply_grid_charging(
+                site_configs,
+                enabled,
+                reason="set grid charging",
             )
-            if success:
-                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-                local_coord = (entry_data.get("powerwall_local") or {}).get(
-                    "coordinator"
-                )
-                local_snapshot = getattr(local_coord, "data", None)
-                if local_snapshot is not None:
-                    local_snapshot.grid_charging_enabled = enabled
-                tesla_coord = (
-                    hass.data.get(DOMAIN, {})
-                    .get(entry.entry_id, {})
-                    .get("tesla_coordinator")
-                )
-                if tesla_coord is not None:
-                    tesla_coord.invalidate_site_info_cache()
-                hass.async_create_task(
-                    refresh_powerwall_local_after_settings_write(
-                        "set_grid_charging"
-                    )
+            if not _tesla_force_result_all_confirmed(result, site_configs):
+                raise HomeAssistantError(
+                    "Tesla accepted the grid charging command but the setting did not verify"
                 )
 
+            entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            local_coord = (entry_data.get("powerwall_local") or {}).get(
+                "coordinator"
+            )
+            local_snapshot = getattr(local_coord, "data", None)
+            if local_snapshot is not None:
+                local_snapshot.grid_charging_enabled = enabled
+            tesla_coord = entry_data.get("tesla_coordinator")
+            if tesla_coord is not None:
+                tesla_coord.invalidate_site_info_cache()
+            hass.async_create_task(
+                refresh_powerwall_local_after_settings_write(
+                    "set_grid_charging"
+                )
+            )
+            return {"success": True, "error": None}
+        except HomeAssistantError:
+            raise
         except Exception as e:
             _LOGGER.error(f"Error setting grid charging: {e}", exc_info=True)
+            raise HomeAssistantError(
+                f"Could not set Tesla grid charging: {e}"
+            ) from e
 
     def _get_tesla_coordinator_for_service(service_name: str):
         """Return the Tesla energy coordinator for this entry, or None with a log."""
@@ -33360,7 +33479,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Register force discharge, force charge, and restore normal services
     hass.services.async_register(DOMAIN, SERVICE_FORCE_DISCHARGE, handle_force_discharge)
-    hass.services.async_register(DOMAIN, SERVICE_FORCE_CHARGE, handle_force_charge)
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_FORCE_CHARGE,
+        handle_force_charge,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(DOMAIN, SERVICE_HOLD_BATTERY_SOC, handle_hold_battery_soc)
     hass.services.async_register(DOMAIN, SERVICE_RESTORE_NORMAL, handle_restore_normal)
     hass.services.async_register(DOMAIN, "set_self_consumption", handle_set_self_consumption)
@@ -33374,7 +33498,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, SERVICE_SET_BACKUP_RESERVE, handle_set_backup_reserve)
     hass.services.async_register(DOMAIN, SERVICE_SET_OPERATION_MODE, handle_set_operation_mode)
     hass.services.async_register(DOMAIN, SERVICE_SET_GRID_EXPORT, handle_set_grid_export)
-    hass.services.async_register(DOMAIN, SERVICE_SET_GRID_CHARGING, handle_set_grid_charging)
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_GRID_CHARGING,
+        handle_set_grid_charging,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(DOMAIN, "set_grid_export_auto", handle_set_grid_export_auto)
     hass.services.async_register(DOMAIN, "set_storm_watch", handle_set_storm_watch)
     hass.services.async_register(DOMAIN, "set_off_grid_ev_reserve", handle_set_off_grid_ev_reserve)

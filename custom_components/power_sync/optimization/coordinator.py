@@ -6779,6 +6779,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             duration_minutes=charge_duration,
                             power_w=charge_power_w,
                         )
+                        if force_result is False:
+                            _LOGGER.warning(
+                                "Optimizer: force-charge command failed — keeping "
+                                "previous action marker so the next cycle retries"
+                            )
+                            return
                         if force_result is not False and self.battery_system != "tesla":
                             self._set_optimizer_force_state(
                                 "charge",
@@ -6795,6 +6801,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             duration_minutes=charge_duration,
                             power_w=charge_power_w,
                         )
+                        if force_result is False:
+                            _LOGGER.warning(
+                                "Optimizer: force-charge command failed — keeping "
+                                "previous action marker so the next cycle retries"
+                            )
+                            return
                         if force_result is not False and self.battery_system != "tesla":
                             self._set_optimizer_force_state(
                                 "charge",

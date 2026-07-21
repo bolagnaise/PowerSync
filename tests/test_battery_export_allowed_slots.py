@@ -2615,6 +2615,7 @@ class _FakeBattery:
         self,
         hardware_mode: str | None = None,
         backup_reserve: int | None = None,
+        force_charge_result: bool | None = None,
     ) -> None:
         self.hardware_mode = hardware_mode
         self.backup_reserve = backup_reserve
@@ -2622,6 +2623,7 @@ class _FakeBattery:
         self.restore_normal_calls = 0
         self.backup_reserve_calls = []
         self.force_charge_calls = []
+        self.force_charge_result = force_charge_result
         self.force_discharge_calls = []
 
     async def get_tesla_operation_mode(self):
@@ -2641,6 +2643,7 @@ class _FakeBattery:
 
     async def force_charge(self, duration_minutes=60, power_w=5000, _extend_hardware=False):
         self.force_charge_calls.append((duration_minutes, power_w, _extend_hardware))
+        return self.force_charge_result
 
     async def force_discharge(
         self,
@@ -3132,6 +3135,7 @@ def test_coordinator_refresh_executes_cached_charge_at_action_boundary(opt_modul
     coordinator._enabled = True
     coordinator._optimization_lock = SimpleNamespace(locked=lambda: False)
     coordinator.get_api_data = lambda: {"ok": True}
+    coordinator._track_actual_cost = lambda: None
     boundary = datetime(2026, 5, 3, 11, 0, tzinfo=timezone.utc)
     actions = [
         SimpleNamespace(
@@ -3162,6 +3166,43 @@ def test_coordinator_refresh_executes_cached_charge_at_action_boundary(opt_modul
     assert result == {"ok": True}
     assert battery.force_charge_calls == [(5, 5000, False)]
     assert coordinator._last_executed_action == "charge"
+
+
+def test_failed_force_charge_keeps_previous_action_marker_for_retry(opt_module):
+    battery = _FakeBattery(force_charge_result=False)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.25)
+    coordinator._enabled = True
+    coordinator._optimization_lock = SimpleNamespace(locked=lambda: False)
+    coordinator.get_api_data = lambda: {"ok": True}
+    coordinator._track_actual_cost = lambda: None
+    coordinator._last_executed_action = "self_consumption"
+    boundary = datetime(2026, 5, 3, 11, 0, tzinfo=timezone.utc)
+    coordinator._current_schedule = SimpleNamespace(
+        actions=[
+            SimpleNamespace(
+                action="self_consumption",
+                power_w=0,
+                timestamp=boundary - timedelta(minutes=5),
+            ),
+            SimpleNamespace(action="charge", power_w=5000, timestamp=boundary),
+            SimpleNamespace(
+                action="self_consumption",
+                power_w=0,
+                timestamp=boundary + timedelta(minutes=5),
+            ),
+        ]
+    )
+    original_now = opt_module.dt_util.now
+    opt_module.dt_util.now = lambda *args, **kwargs: boundary
+
+    try:
+        result = asyncio.run(coordinator._async_update_data())
+    finally:
+        opt_module.dt_util.now = original_now
+
+    assert result == {"ok": True}
+    assert battery.force_charge_calls == [(5, 5000, False)]
+    assert coordinator._last_executed_action == "self_consumption"
 
 
 def test_cached_force_is_refreshed_once_when_same_action_crosses_boundary(opt_module):

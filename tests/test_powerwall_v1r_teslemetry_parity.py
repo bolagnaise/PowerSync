@@ -278,9 +278,12 @@ def _function_source(name: str) -> str:
 
 def test_grid_charging_service_is_local_first_with_cloud_fallback_and_refresh():
     source = _function_source("handle_set_grid_charging")
-    assert "dispatch_powerwall_write(" in source
-    assert '"site_info.disallow_charge_from_grid_with_solar_installed": not enabled' in source
-    assert 'label="set_grid_charging"' in source
+    helper = _function_source("_tesla_force_apply_grid_charging")
+    assert "await _tesla_force_apply_grid_charging(" in source
+    assert "dispatch_powerwall_write(" in helper
+    assert '"site_info.disallow_charge_from_grid_with_solar_installed": not enabled' in helper
+    assert 'label=f"{reason} grid charging"' in helper
+    assert "config = await transport.read_config(din)" in helper
     assert 'refresh_powerwall_local_after_settings_write(' in source
 
 

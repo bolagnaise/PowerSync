@@ -58,6 +58,7 @@ from .const import (
 )
 from .sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
 from .sigenergy_model import sigenergy_home_load_kw
+from .tesla_grid_control import async_set_tesla_grid_charging_confirmed
 
 _SOLCAST_ESTIMATE_FIELDS = {
     SOLCAST_ESTIMATE: ("pv_estimate", "pv_estimate50"),
@@ -2583,56 +2584,35 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("Tesla site_info cache invalidated — next read will refetch")
 
     async def set_grid_charging_enabled(self, enabled: bool) -> bool:
-        """
-        Enable or disable grid charging (imports) for the Powerwall.
-
-        Args:
-            enabled: True to allow grid charging, False to disallow
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        # Note: The API field is inverted - True means charging is DISALLOWED
-        disallow_value = not enabled
-
-        current_token = self._get_current_token()
-        headers = self._tesla_headers(current_token)
-
+        """Set grid charging and return only after direct readback confirms it."""
+        _LOGGER.info(
+            "Setting grid charging %s for site %s",
+            "enabled" if enabled else "disabled",
+            self.site_id,
+        )
         try:
-            _LOGGER.info(f"Setting grid charging {'enabled' if enabled else 'disabled'} for site {self.site_id}")
-
-            url = f"{self.api_base_url}/api/1/energy_sites/{self.site_id}/grid_import_export"
-            payload = {
-                "disallow_charge_from_grid_with_solar_installed": disallow_value
-            }
-
-            async with self.session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                if response.status not in [200, 201, 202]:
-                    text = await response.text()
-                    _LOGGER.error(f"Failed to set grid charging: {response.status} - {text}")
-                    return False
-
-                data = await response.json()
-                _LOGGER.debug(f"Set grid charging response: {data}")
-
-                # Check for actual success in response body
-                response_data = data.get("response", data)
-                if isinstance(response_data, dict) and "result" in response_data:
-                    if not response_data["result"]:
-                        reason = response_data.get("reason", "Unknown reason")
-                        _LOGGER.error(f"Set grid charging failed: {reason}")
-                        return False
-
-                _LOGGER.info(f"✅ Grid charging {'enabled' if enabled else 'disabled'} successfully for site {self.site_id}")
-                self.invalidate_site_info_cache()
-                return True
-
-        except asyncio.TimeoutError:
-            _LOGGER.error("Timeout setting grid charging")
-            return False
+            outcome = await async_set_tesla_grid_charging_confirmed(
+                self.session,
+                self.api_base_url,
+                str(self.site_id),
+                self._tesla_headers(self._get_current_token()),
+                enabled,
+            )
         except Exception as err:
-            _LOGGER.error(f"Error setting grid charging: {err}")
+            _LOGGER.error("Error setting grid charging: %s", err)
             return False
+        if outcome.applied:
+            self.invalidate_site_info_cache()
+            return True
+
+        _LOGGER.error(
+            "Grid charging %s did not verify for site %s (%s%s)",
+            "enable" if enabled else "disable",
+            self.site_id,
+            outcome.status.value,
+            f": {outcome.detail}" if outcome.detail else "",
+        )
+        return False
 
     # ------------------------------------------------------------------
     # Unified Tesla Energy Site API helper

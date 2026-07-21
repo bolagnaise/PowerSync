@@ -2485,13 +2485,14 @@ async def _action_set_grid_charging(
     enabled = params.get("enabled", True)
 
     try:
-        await hass.services.async_call(
+        response = await hass.services.async_call(
             DOMAIN,
             SERVICE_SET_GRID_CHARGING,
             {"enabled": enabled, "source": "automation"},
             blocking=True,
+            return_response=True,
         )
-        return True
+        return isinstance(response, dict) and response.get("success") is True
     except Exception as e:
         _LOGGER.error(f"Failed to set grid charging: {e}")
         return False
