@@ -4811,11 +4811,13 @@ def _calendar_reconcile_current_day_rows(
 
     # A fresh or unrestored accumulator is normally behind recorder history in
     # every field.  The reset-skew failure has a different signature: at least
-    # one live total has progressed beyond recorder while several recorder
+    # one live total has progressed beyond recorder while one or more recorder
     # totals still carry yesterday's much larger terminal values.  Requiring
     # both directions avoids replacing valid history for a merely incomplete
-    # accumulator or a small statistics-rounding difference.
-    if live_ahead_fields and len(recorded_ahead_fields) >= 2:
+    # accumulator or a small statistics-rounding difference, while also
+    # catching a single stale field (for example yesterday's solar total before
+    # today's first generation).
+    if live_ahead_fields and recorded_ahead_fields:
         _LOGGER.warning(
             "Calendar day recorder/live totals are materially mixed "
             "(live ahead: %s; recorder ahead: %s); using the live snapshot",

@@ -380,6 +380,48 @@ def test_current_day_rows_treat_an_authoritative_zero_as_current():
     assert rows[0]["grid_export"] == 0
 
 
+def test_current_day_rows_drop_single_stale_solar_carryover():
+    """One yesterday-valued field must not survive beside progressed live totals."""
+    namespace = _calendar_namespace()
+    current_entry = {
+        "timestamp": "2026-07-22T06:39:00+10:00",
+        "solar_generation": 0,
+        "battery_discharge": 4_060,
+        "battery_charge": 0,
+        "grid_import": 23,
+        "grid_export": 24,
+        "home_consumption": 4_060,
+    }
+    recorder_rows = [
+        {
+            "timestamp": "2026-07-22T00:00:00+10:00",
+            "solar_generation": 42_600,
+            "battery_discharge": 0,
+            "battery_charge": 0,
+            "grid_import": 0,
+            "grid_export": 0,
+            "home_consumption": 0,
+        }
+    ]
+
+    rows = namespace["_calendar_reconcile_current_day_rows"](
+        recorder_rows,
+        current_entry,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["solar_generation"] == 0
+    assert rows[0]["battery_discharge"] == 4_060
+    assert rows[0]["grid_import"] == 23
+    assert rows[0]["grid_export"] == 24
+    assert rows[0]["home_consumption"] == 4_060
+    assert rows[0]["solar_energy_exported"] == 0
+    assert rows[0]["battery_energy_exported"] == 4_060
+    assert rows[0]["grid_energy_imported"] == 23
+    assert rows[0]["grid_energy_exported"] == 24
+    assert rows[0]["consumer_energy_imported"] == 4_060
+
+
 def test_current_day_rows_keep_recorder_history_for_a_fresh_accumulator():
     namespace = _calendar_namespace()
     current_entry = {
