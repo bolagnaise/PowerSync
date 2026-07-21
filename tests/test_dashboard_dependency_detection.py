@@ -88,6 +88,15 @@ def test_dashboard_uses_tariff_schedule_instead_of_duplicate_price_history():
     assert "title: 'Electricity Prices - 24 Hours'" not in source
 
 
+def test_daily_cost_card_distinguishes_amber_metered_cost_from_estimate():
+    """Today's partial Amber bill data should not replace the live estimate."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "hasE('daily_import_cost') || hasE('amber_usage_today_cost')" in source
+    assert "Amber Metered Cost Today (Partial)" in source
+    assert "Estimated Import Cost Today" in source
+
+
 def test_import_price_gauge_shows_effective_price_source():
     """The live import gauge should identify KWatch and fallback sources."""
     source = STRATEGY_PATH.read_text()

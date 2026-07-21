@@ -1,6 +1,6 @@
 # AlphaESS
 
-PowerSync supports AlphaESS SMILE and Storion hybrid inverter-battery systems via Modbus TCP. An optional Cloud API can supplement telemetry when Modbus is temporarily unreachable.
+PowerSync supports AlphaESS SMILE and Storion hybrid inverter-battery systems via Modbus TCP. The AlphaESS Cloud API can supplement Modbus telemetry or run as a monitoring-only connection when local Modbus is unavailable.
 
 ## Supported models
 
@@ -43,7 +43,12 @@ If you cannot find this setting, contact AlphaESS support or check your firmware
 
 ## Setup in PowerSync
 
-### 1. Modbus TCP connection
+### 1. Choose a connection type
+
+- **Modbus control with optional cloud fallback** is the default and preserves the existing full-control setup.
+- **AlphaESS Cloud monitoring only** needs no inverter IP address. It supplies solar, grid, battery power and battery SOC for PowerSync planning and dashboards, but it cannot execute battery modes or solar curtailment. PowerSync therefore forces monitoring mode for this connection.
+
+### 2. Modbus TCP connection
 
 During initial setup, select **AlphaESS** as your battery system and enter:
 
@@ -59,15 +64,15 @@ During initial setup, select **AlphaESS** as your battery system and enter:
 
 **Export limit:** Optional hard cap in kW. PowerSync will never request more than this amount of export regardless of price. Leave blank for no cap.
 
-### 2. DC curtailment toggle
+### 3. DC curtailment toggle
 
 The **Enable DC curtailment** toggle activates zero-export curtailment. When enabled, PowerSync monitors feed-in prices and writes 0% to the AlphaESS export-limit register (0x0800) when export is uneconomical (feed-in price below 1 c/kWh). It restores normal export when prices recover.
 
 **This toggle has no effect unless Modbus curtailment is enabled in the inverter firmware first** (see [Prerequisites](#prerequisites)).
 
-### 3. Cloud API (optional)
+### 4. Cloud API
 
-The AlphaESS Cloud API provides a secondary telemetry source used as a fallback when Modbus is temporarily unreachable. It does not provide any additional control capability — all force charge, force discharge, and curtailment commands go via Modbus.
+The AlphaESS Cloud API provides either fallback telemetry for a Modbus setup or the only telemetry source in cloud-only mode. It does not provide any control capability — all force charge, force discharge, and curtailment commands require Modbus.
 
 To use it:
 1. Log in at [open.alphaess.com](https://open.alphaess.com)
@@ -75,7 +80,7 @@ To use it:
 3. Enter these in the Cloud API step of PowerSync setup
 4. Enter your inverter's serial number if prompted
 
-Leave the Cloud API fields blank to skip it — Modbus alone is sufficient.
+Cloud credentials are required in cloud-only mode. For a Modbus setup, leave them blank to skip the fallback.
 
 ---
 

@@ -478,6 +478,9 @@ CONF_ALPHAESS_CLOUD_ENABLED = "alphaess_cloud_enabled"
 CONF_ALPHAESS_CLOUD_APP_ID = "alphaess_cloud_app_id"
 CONF_ALPHAESS_CLOUD_APP_SECRET = "alphaess_cloud_app_secret"
 CONF_ALPHAESS_CLOUD_SERIAL = "alphaess_cloud_serial"
+CONF_ALPHAESS_CONNECTION_TYPE = "alphaess_connection_type"
+ALPHAESS_CONNECTION_MODBUS_CLOUD = "modbus_cloud"
+ALPHAESS_CONNECTION_CLOUD_ONLY = "cloud_only"
 ALPHAESS_CLOUD_BASE_URL = "https://openapi.alphaess.com/api"
 
 # ESY Sunhome battery system — bridges via upstream esy_sunhome companion integration
@@ -1559,6 +1562,7 @@ CONF_INVERTER_PORT = "inverter_port"
 CONF_INVERTER_SLAVE_ID = "inverter_slave_id"
 CONF_INVERTER_TOKEN = "inverter_token"  # JWT token for Enphase IQ Gateway (firmware 7.x+)
 CONF_INVERTER_RATED_POWER_W = "inverter_rated_power_w"
+CONF_INVERTER_ENTITY_PREFIX = "inverter_entity_prefix"
 CONF_ENPHASE_USERNAME = "enphase_username"  # Enlighten username/email for auto token refresh
 CONF_ENPHASE_PASSWORD = "enphase_password"  # Enlighten password for auto token refresh
 CONF_ENPHASE_SERIAL = "enphase_serial"  # Envoy serial number (optional, auto-detected)
@@ -1577,6 +1581,7 @@ INVERTER_BRANDS = {
     "sungrow": "Sungrow",
     "fronius": "Fronius",
     "goodwe": "GoodWe",
+    "goodwe_entity": "GoodWe (Home Assistant entities)",
     "huawei": "Huawei",
     "enphase": "Enphase",
     "zeversolar": "Zeversolar",
@@ -1603,6 +1608,10 @@ GOODWE_MODELS = {
     "bh": "BH Series (Hybrid)",
     "es": "ES Series (Hybrid)",
     "em": "EM Series (Hybrid)",
+}
+
+GOODWE_ENTITY_MODELS = {
+    "ms": "MS Series (GoodWe Experimental entities)",
 }
 
 # Huawei SUN2000 series (via Smart Dongle Modbus TCP)
@@ -1828,6 +1837,7 @@ def get_models_for_brand(brand: str, battery_system: str = None) -> dict[str, st
         "sungrow": SUNGROW_MODELS,
         "fronius": FRONIUS_MODELS,
         "goodwe": GOODWE_MODELS,
+        "goodwe_entity": GOODWE_ENTITY_MODELS,
         "huawei": HUAWEI_MODELS,
         "enphase": ENPHASE_MODELS,
         "zeversolar": ZEVERSOLAR_MODELS,
@@ -1851,6 +1861,7 @@ def get_brand_defaults(brand: str) -> dict[str, int]:
         "sungrow": {"port": 502, "slave_id": 1},
         "fronius": {"port": 502, "slave_id": 1},
         "goodwe": {"port": 502, "slave_id": 247},
+        "goodwe_entity": {"port": 0, "slave_id": 1},
         "huawei": {"port": 502, "slave_id": 1},
         "enphase": {"port": 443, "slave_id": 1},
         "zeversolar": {"port": 80, "slave_id": 1},
@@ -2094,6 +2105,7 @@ SENSOR_TYPE_PV_DC_POWER = "pv_dc_power"
 SENSOR_TYPE_PV_AC_POWER = "pv_ac_power"
 
 # Amber Usage API sensors (actual metered cost data)
+SENSOR_TYPE_AMBER_USAGE_TODAY_COST = "amber_usage_today_cost"
 SENSOR_TYPE_AMBER_USAGE_YESTERDAY_COST = "amber_usage_yesterday_cost"
 SENSOR_TYPE_AMBER_USAGE_YESTERDAY_SAVINGS = "amber_usage_yesterday_savings"
 SENSOR_TYPE_AMBER_USAGE_MONTH_COST = "amber_usage_month_cost"
@@ -2209,6 +2221,7 @@ SENSOR_KEY_TO_FAMILY: dict[str, str] = {
     "monthly_supply_charge": SENSOR_FAMILY_PRICING,
     "total_monthly_cost": SENSOR_FAMILY_PRICING,
     "amber_usage_yesterday_cost": SENSOR_FAMILY_PRICING,
+    "amber_usage_today_cost": SENSOR_FAMILY_PRICING,
     "amber_usage_yesterday_savings": SENSOR_FAMILY_PRICING,
     "amber_usage_month_cost": SENSOR_FAMILY_PRICING,
     "amber_usage_month_savings": SENSOR_FAMILY_PRICING,

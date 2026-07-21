@@ -15,6 +15,7 @@ INVERTER_BRANDS = {
     "sungrow": "Sungrow",
     "fronius": "Fronius",
     "goodwe": "GoodWe",
+    "goodwe_entity": "GoodWe (Home Assistant entities)",
     "huawei": "Huawei",
     "enphase": "Enphase",
     "zeversolar": "Zeversolar",
@@ -251,6 +252,7 @@ def get_inverter_controller(
     rated_power_w: Optional[float] = None,
     entity_prefix: Optional[str] = None,
     hass=None,
+    entry_id: str = "",
 ) -> Optional[InverterController]:
     """Factory function to get the appropriate inverter controller.
 
@@ -271,11 +273,26 @@ def get_inverter_controller(
         enphase_is_installer: Whether user has installer-level Enlighten access
         rated_power_w: Rated AC output power for percentage-based controllers
         entity_prefix: Optional HA entity prefix for entity fallback controllers
+        entry_id: PowerSync config entry ID for persisted controller state
 
     Returns:
         InverterController instance or None if brand not supported
     """
     brand_lower = brand.lower() if brand else ""
+
+    if brand_lower == "goodwe_entity":
+        if hass is None or not entity_prefix:
+            _LOGGER.error(
+                "GoodWe HA entity controller requires hass and an entity prefix"
+            )
+            return None
+        from .goodwe_entity import GoodWeEntityInverterController
+
+        return GoodWeEntityInverterController(
+            hass=hass,
+            entity_prefix=entity_prefix,
+            entry_id=entry_id,
+        )
 
     if brand_lower == "sungrow":
         # Determine which controller based on model prefix

@@ -7,8 +7,11 @@ systems can avoid a second direct TCP/502 polling client.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
+
+from .base import InverterController, InverterState, InverterStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -378,3 +381,333 @@ class GoodWeEntityTelemetryController:
         consumption_kw = self._power_kw("grid_consumption") or 0.0
         feed_in_kw = self._power_kw("grid_feed_in") or 0.0
         return consumption_kw - feed_in_kw
+
+
+class GoodWeEntityInverterController(InverterController):
+    """AC-inverter controller backed by GoodWe Experimental HA entities.
+
+    This is deliberately separate from the GoodWe battery telemetry bridge.
+    It represents one standalone PV inverter and controls only the upstream
+    integration's grid-export-limit number and enable switch.
+    """
+
+    _UNAVAILABLE = {"", "unknown", "unavailable", "none"}
+    _STORE_VERSION = 1
+    _VERIFY_ATTEMPTS = 10
+    _VERIFY_DELAY_SECONDS = 0.5
+
+    def __init__(self, hass: Any, entity_prefix: str, entry_id: str = "") -> None:
+        prefix = (entity_prefix or "").strip()
+        super().__init__(host=f"entity:{prefix}", port=0, slave_id=1, model="ms")
+        self.hass = hass
+        self.entity_prefix = prefix
+        self.entry_id = entry_id
+        self._snapshot: dict[str, Any] | None = None
+        self._snapshot_loaded = False
+        self._session_curtailed = False
+        self._store = None
+        if entry_id and prefix:
+            try:
+                from homeassistant.helpers.storage import Store
+
+                safe_prefix = prefix.replace(".", "_")
+                self._store = Store(
+                    hass,
+                    self._STORE_VERSION,
+                    f"power_sync.goodwe_ac_restore.{entry_id}.{safe_prefix}",
+                )
+            except Exception as err:
+                _LOGGER.debug("GoodWe entity restore storage unavailable: %s", err)
+
+    @property
+    def _pv_entity(self) -> str:
+        return f"sensor.{self.entity_prefix}_pv_power"
+
+    @property
+    def _limit_entity(self) -> str:
+        return f"number.{self.entity_prefix}_grid_export_limit"
+
+    @property
+    def _switch_entity(self) -> str:
+        return f"switch.{self.entity_prefix}_grid_export_limit_switch"
+
+    def _state(self, entity_id: str) -> Any | None:
+        return self.hass.states.get(entity_id)
+
+    @classmethod
+    def _available_value(cls, state: Any | None) -> str | None:
+        if state is None:
+            return None
+        value = str(getattr(state, "state", "")).strip()
+        return None if value.lower() in cls._UNAVAILABLE else value
+
+    def _number(self, entity_id: str) -> float | None:
+        value = self._available_value(self._state(entity_id))
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _power_w(self, entity_id: str) -> float | None:
+        value = self._number(entity_id)
+        if value is None:
+            return None
+        state = self._state(entity_id)
+        unit = str((getattr(state, "attributes", {}) or {}).get("unit_of_measurement", "W")).lower()
+        if unit == "kw":
+            return value * 1000.0
+        if unit == "mw":
+            return value * 1_000_000.0
+        return value
+
+    def _energy_kwh(self, entity_id: str) -> float | None:
+        value = self._number(entity_id)
+        if value is None:
+            return None
+        state = self._state(entity_id)
+        unit = str((getattr(state, "attributes", {}) or {}).get("unit_of_measurement", "kWh")).lower()
+        if unit == "wh":
+            return value / 1000.0
+        if unit == "mwh":
+            return value * 1000.0
+        return value
+
+    def _switch_value(self) -> bool | None:
+        value = self._available_value(self._state(self._switch_entity))
+        if value is None:
+            return None
+        lowered = value.lower()
+        if lowered == "on":
+            return True
+        if lowered == "off":
+            return False
+        return None
+
+    def _runtime_marks_curtailed(self) -> bool:
+        if self._session_curtailed:
+            return True
+        if not self.entry_id:
+            return False
+        entry_data = (
+            getattr(self.hass, "data", {})
+            .get("power_sync", {})
+            .get(self.entry_id, {})
+        )
+        return entry_data.get("inverter_last_state") == "curtailed"
+
+    async def _load_snapshot(self) -> None:
+        if self._snapshot_loaded:
+            return
+        self._snapshot_loaded = True
+        if self._store is None:
+            return
+        try:
+            stored = await self._store.async_load()
+            if isinstance(stored, dict) and {
+                "export_limit",
+                "switch_enabled",
+            }.issubset(stored):
+                self._snapshot = stored
+        except Exception as err:
+            _LOGGER.warning("GoodWe entity restore snapshot load failed: %s", err)
+
+    async def _save_snapshot(self, snapshot: dict[str, Any] | None) -> None:
+        self._snapshot = snapshot
+        self._snapshot_loaded = True
+        if self._store is None:
+            return
+        try:
+            await self._store.async_save(snapshot or {})
+        except Exception as err:
+            _LOGGER.warning("GoodWe entity restore snapshot save failed: %s", err)
+
+    def _validate_surface(self) -> tuple[bool, str]:
+        if not self.entity_prefix:
+            return False, "GoodWe entity prefix is required"
+        if self._power_w(self._pv_entity) is None:
+            return False, f"Missing or unavailable numeric PV entity: {self._pv_entity}"
+        if self._number(self._limit_entity) is None:
+            return False, f"Missing or unavailable export limit: {self._limit_entity}"
+        if self._switch_value() is None:
+            return False, f"Missing or unavailable export switch: {self._switch_entity}"
+        return True, ""
+
+    async def connect(self) -> bool:
+        """Validate entities and recover a snapshot left by a prior HA run."""
+        valid, reason = self._validate_surface()
+        if not valid:
+            _LOGGER.warning("GoodWe entity bridge unavailable: %s", reason)
+            self._connected = False
+            return False
+
+        await self._load_snapshot()
+        if self._snapshot and not self._runtime_marks_curtailed():
+            _LOGGER.warning(
+                "GoodWe entity bridge found an interrupted curtailment session; "
+                "restoring the saved export-limit state"
+            )
+            if not await self._restore_snapshot(clear_on_success=True):
+                self._connected = False
+                return False
+
+        self._connected = True
+        return True
+
+    async def disconnect(self) -> None:
+        """Release this stateless HA-entity adapter."""
+        self._connected = False
+
+    async def _call_number(self, value: float) -> bool:
+        try:
+            await self.hass.services.async_call(
+                "number",
+                "set_value",
+                {"entity_id": self._limit_entity, "value": value},
+                blocking=True,
+            )
+            return True
+        except Exception as err:
+            _LOGGER.error("GoodWe entity export-limit write failed: %s", err)
+            return False
+
+    async def _call_switch(self, enabled: bool) -> bool:
+        try:
+            await self.hass.services.async_call(
+                "switch",
+                "turn_on" if enabled else "turn_off",
+                {"entity_id": self._switch_entity},
+                blocking=True,
+            )
+            return True
+        except Exception as err:
+            _LOGGER.error("GoodWe entity export switch write failed: %s", err)
+            return False
+
+    async def _wait_for_number(self, expected: float) -> bool:
+        for _ in range(self._VERIFY_ATTEMPTS):
+            actual = self._number(self._limit_entity)
+            if actual is not None and abs(actual - expected) <= 0.5:
+                return True
+            await asyncio.sleep(self._VERIFY_DELAY_SECONDS)
+        return False
+
+    async def _wait_for_switch(self, expected: bool) -> bool:
+        for _ in range(self._VERIFY_ATTEMPTS):
+            if self._switch_value() is expected:
+                return True
+            await asyncio.sleep(self._VERIFY_DELAY_SECONDS)
+        return False
+
+    async def _apply_state(self, export_limit: float, switch_enabled: bool) -> bool:
+        if not await self._call_number(export_limit):
+            return False
+        if not await self._wait_for_number(export_limit):
+            _LOGGER.error("GoodWe entity export-limit readback did not reach %.1f W", export_limit)
+            return False
+        if not await self._call_switch(switch_enabled):
+            return False
+        if not await self._wait_for_switch(switch_enabled):
+            _LOGGER.error("GoodWe entity export switch readback did not reach %s", switch_enabled)
+            return False
+        return True
+
+    async def _restore_snapshot(self, *, clear_on_success: bool) -> bool:
+        snapshot = self._snapshot
+        if not snapshot:
+            return True
+        success = await self._apply_state(
+            float(snapshot["export_limit"]),
+            bool(snapshot["switch_enabled"]),
+        )
+        if success and clear_on_success:
+            await self._save_snapshot(None)
+            self._session_curtailed = False
+        return success
+
+    async def curtail(
+        self,
+        home_load_w: float | None = None,
+        rated_capacity_w: float | None = None,
+    ) -> bool:
+        """Enable zero-export mode transactionally through HA entities."""
+        if not await self.connect():
+            return False
+
+        await self._load_snapshot()
+        if self._snapshot is None:
+            original_limit = self._number(self._limit_entity)
+            original_switch = self._switch_value()
+            if original_limit is None or original_switch is None:
+                return False
+            await self._save_snapshot(
+                {
+                    "export_limit": original_limit,
+                    "switch_enabled": original_switch,
+                }
+            )
+
+        if await self._apply_state(0.0, True):
+            self._session_curtailed = True
+            _LOGGER.info(
+                "GoodWe entity inverter curtailed via %s and %s",
+                self._limit_entity,
+                self._switch_entity,
+            )
+            return True
+
+        _LOGGER.error("GoodWe entity curtailment was partial; rolling back")
+        self._session_curtailed = False
+        await self._restore_snapshot(clear_on_success=True)
+        return False
+
+    async def restore(self) -> bool:
+        """Restore the exact export-limit number and switch state."""
+        if not self._validate_surface()[0]:
+            return False
+        await self._load_snapshot()
+        if not self._snapshot:
+            _LOGGER.info("GoodWe entity inverter has no saved curtailment state to restore")
+            return True
+        success = await self._restore_snapshot(clear_on_success=True)
+        if success:
+            _LOGGER.info("GoodWe entity inverter export-limit state restored")
+        return success
+
+    async def get_status(self) -> InverterState:
+        """Return normalized PV and export-control telemetry."""
+        if not await self.connect():
+            return InverterState(
+                status=InverterStatus.OFFLINE,
+                is_curtailed=False,
+                error_message="GoodWe entity bridge unavailable",
+                attributes={"entity_prefix": self.entity_prefix},
+            )
+
+        pv_w = self._power_w(self._pv_entity)
+        export_limit = self._number(self._limit_entity)
+        switch_enabled = self._switch_value()
+        is_curtailed = bool(switch_enabled and export_limit is not None and export_limit <= 0.5)
+        attrs: dict[str, Any] = {
+            "entity_prefix": self.entity_prefix,
+            "export_limit_w": export_limit,
+            "export_limit_enabled": switch_enabled,
+            "data_source": "home_assistant_entities",
+        }
+        for index in (1, 2, 3):
+            value = self._power_w(f"sensor.{self.entity_prefix}_pv{index}_power")
+            if value is not None:
+                attrs[f"pv{index}_power"] = value
+        daily = self._energy_kwh(
+            f"sensor.{self.entity_prefix}_today_s_pv_generation"
+        )
+        if daily is not None:
+            attrs["daily_pv_generation"] = round(daily, 3)
+
+        return InverterState(
+            status=InverterStatus.CURTAILED if is_curtailed else InverterStatus.ONLINE,
+            is_curtailed=is_curtailed,
+            power_output_w=pv_w,
+            attributes=attrs,
+        )

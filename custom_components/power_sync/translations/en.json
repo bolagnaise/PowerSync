@@ -943,6 +943,29 @@
         },
         "submit": "Connect"
       },
+      "alphaess_modbus": {
+        "title": "AlphaESS connection type",
+        "description": "Choose full local Modbus control or cloud-only monitoring. Cloud-only mode cannot send battery or inverter commands.",
+        "data": {
+          "alphaess_connection_type": "Connection type",
+          "alphaess_modbus_host": "AlphaESS IP address",
+          "alphaess_modbus_port": "Modbus TCP port",
+          "alphaess_modbus_slave_id": "Slave ID",
+          "alphaess_export_limit_kw": "Export limit",
+          "alphaess_dc_curtailment_enabled": "Enable DC curtailment"
+        },
+        "submit": "Next"
+      },
+      "alphaess_cloud": {
+        "title": "AlphaESS Cloud API",
+        "description": "Cloud credentials are required for cloud-only monitoring and optional for Modbus telemetry fallback.",
+        "data": {
+          "alphaess_cloud_app_id": "Cloud App ID",
+          "alphaess_cloud_app_secret": "Cloud App Secret",
+          "alphaess_cloud_serial": "Cloud serial number"
+        },
+        "submit": "Connect"
+      },
       "solaredge": {
         "title": "SolarEdge battery and curtailment",
         "description": "Connect to your SolarEdge system for Home Battery telemetry, battery dispatch, and active-power curtailment. Battery telemetry and dispatch are bridged through SolarEdge HA entities; curtailment uses Modbus TCP or entity fallback. Enable Modbus TCP and inverter-side power control in SetApp or the LCD menu first. Some firmware or grid profiles may reject third-party power-control writes.",
@@ -1005,6 +1028,9 @@
       "sungrow_host_required": "IP address is required -- enter the local IP of your Sungrow inverter or WiNet-S dongle.",
       "modbus_conflict": "Connected but received invalid data (SOC > 100%). Another integration is likely using Modbus on the same port. Disable other Modbus integrations for this inverter and retry.",
       "sungrow_modbus_conflict": "The AC inverter curtailment path cannot use the same Sungrow Modbus IP, port, and slave ID as the battery system. Disable this option for a hybrid-only setup, or configure a separate AC-coupled/string inverter endpoint.",
+      "alphaess_cloud_required": "AlphaESS Cloud monitoring requires both an App ID and App Secret.",
+      "goodwe_entity_prefix_required": "Enter the GoodWe Experimental entity prefix, for example goodwe.",
+      "goodwe_entity_unavailable": "PowerSync could not validate the GoodWe PV power, grid export limit, and grid export limit switch entities for that prefix.",
       "foxess_host_required": "IP address is required -- enter the local IP of your FoxESS inverter.",
       "foxess_tcp_failed": "Cannot connect via Modbus TCP. Check: (1) IP is correct (H3 Smart shows as 'espressif'), (2) firmware is current, (3) port 502 is reachable from Home Assistant.",
       "foxess_serial_required": "Serial port path is required -- e.g. /dev/ttyUSB0 for a USB-to-RS485 adapter.",
@@ -1072,6 +1098,9 @@
   "options": {
     "error": {
       "cannot_connect": "Cannot reach the provider portal. Check your internet connection and that Home Assistant has outbound HTTPS access.",
+      "alphaess_cloud_required": "AlphaESS Cloud monitoring requires both an App ID and App Secret.",
+      "goodwe_entity_prefix_required": "Enter the GoodWe Experimental entity prefix, for example goodwe.",
+      "goodwe_entity_unavailable": "PowerSync could not validate the GoodWe PV power, grid export limit, and grid export limit switch entities for that prefix.",
       "invalid_globird_auth": "Email or password is incorrect. Check your GloBird portal login credentials.",
       "captcha_required": "GloBird requested captcha verification. Sign in through the GloBird portal in a browser, then try again.",
       "covau_unsupported_plan": "Select one of the supported SolarMax plan IDs or keep the currently cached manual plan.",
@@ -1167,6 +1196,7 @@
         "title": "AlphaESS connection",
         "description": "Update AlphaESS Modbus settings and optional AlphaESS Cloud fallback credentials.",
         "data": {
+          "alphaess_connection_type": "Connection type",
           "alphaess_modbus_host": "AlphaESS IP address",
           "alphaess_modbus_port": "Modbus TCP port",
           "alphaess_modbus_slave_id": "Slave ID",
@@ -1701,11 +1731,13 @@
           "ac_inverter_curtailment_enabled": "Enable separate AC-coupled inverter shutdown",
           "inverter_brand": "Inverter brand",
           "inverter_model": "Inverter model",
+          "inverter_entity_prefix": "GoodWe entity prefix",
           "inverter_host": "IP address / hostname",
           "inverter_port": "Port",
           "inverter_slave_id": "Modbus slave ID"
         },
         "data_description": {
+          "inverter_entity_prefix": "Prefix used by GoodWe Experimental entities. For sensor.goodwe_pv_power, enter goodwe.",
           "update_amber_token": "Paste a new Amber API token to rotate it. Leave blank to keep your current token.",
           "auto_sync_enabled": "When enabled, PowerSync uploads a new TOU tariff schedule to your battery every 5 minutes based on current Amber prices.",
           "amber_forecast_type": "Predicted is balanced. Low assumes cheaper prices (more aggressive charging). High assumes expensive prices (more conservative).",
@@ -2223,6 +2255,7 @@
         "description": "Update your {brand} inverter connection settings. Changes take effect immediately.",
         "data": {
           "inverter_model": "Inverter model",
+          "inverter_entity_prefix": "GoodWe entity prefix",
           "inverter_host": "IP address / hostname",
           "inverter_port": "Port",
           "inverter_slave_id": "Modbus slave ID",
@@ -2237,6 +2270,7 @@
           "fronius_load_following": "Enable load following mode"
         },
         "data_description": {
+          "inverter_entity_prefix": "Prefix used by GoodWe Experimental entities. For sensor.goodwe_pv_power, enter goodwe.",
           "inverter_host": "Local IP address of your inverter or gateway.",
           "inverter_port": "502 for Modbus (Sungrow, Fronius, GoodWe, Huawei), 443 for Enphase.",
           "inverter_slave_id": "Usually 1. GoodWe uses 247 by default.",
@@ -2386,6 +2420,9 @@
       },
       "amber_usage_yesterday_cost": {
         "name": "Yesterday Billed Cost"
+      },
+      "amber_usage_today_cost": {
+        "name": "Today Metered Cost"
       },
       "amber_usage_yesterday_savings": {
         "name": "Yesterday Battery Savings"

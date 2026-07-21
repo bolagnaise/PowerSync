@@ -194,6 +194,9 @@ from .const import (
     CONF_ALPHAESS_CLOUD_APP_ID,
     CONF_ALPHAESS_CLOUD_APP_SECRET,
     CONF_ALPHAESS_CLOUD_SERIAL,
+    CONF_ALPHAESS_CONNECTION_TYPE,
+    ALPHAESS_CONNECTION_MODBUS_CLOUD,
+    ALPHAESS_CONNECTION_CLOUD_ONLY,
     # Sungrow battery system configuration
     CONF_SUNGROW_HOST,
     CONF_SUNGROW_PORT,
@@ -330,6 +333,7 @@ from .const import (
     CONF_INVERTER_BRAND,
     CONF_INVERTER_MODEL,
     CONF_INVERTER_HOST,
+    CONF_INVERTER_ENTITY_PREFIX,
     CONF_INVERTER_PORT,
     CONF_INVERTER_SLAVE_ID,
     CONF_INVERTER_TOKEN,
@@ -3765,6 +3769,17 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            connection_type = user_input.get(
+                CONF_ALPHAESS_CONNECTION_TYPE,
+                ALPHAESS_CONNECTION_MODBUS_CLOUD,
+            )
+            if connection_type == ALPHAESS_CONNECTION_CLOUD_ONLY:
+                self._alphaess_data = {
+                    CONF_ALPHAESS_CONNECTION_TYPE: ALPHAESS_CONNECTION_CLOUD_ONLY,
+                    CONF_ALPHAESS_CLOUD_ENABLED: True,
+                }
+                return await self.async_step_alphaess_cloud()
+
             host = user_input.get(CONF_ALPHAESS_MODBUS_HOST, "").strip()
             port = user_input.get(CONF_ALPHAESS_MODBUS_PORT, DEFAULT_ALPHAESS_MODBUS_PORT)
             slave_id = user_input.get(
@@ -3800,6 +3815,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 if not errors:
                     self._alphaess_data = {
+                        CONF_ALPHAESS_CONNECTION_TYPE: ALPHAESS_CONNECTION_MODBUS_CLOUD,
                         CONF_ALPHAESS_MODBUS_HOST: host,
                         CONF_ALPHAESS_MODBUS_PORT: int(port),
                         CONF_ALPHAESS_MODBUS_SLAVE_ID: int(slave_id),
@@ -3815,7 +3831,25 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="alphaess_modbus",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_ALPHAESS_MODBUS_HOST): TextSelector(
+                    vol.Required(
+                        CONF_ALPHAESS_CONNECTION_TYPE,
+                        default=ALPHAESS_CONNECTION_MODBUS_CLOUD,
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(
+                                    value=ALPHAESS_CONNECTION_MODBUS_CLOUD,
+                                    label="Modbus control with optional cloud fallback",
+                                ),
+                                SelectOptionDict(
+                                    value=ALPHAESS_CONNECTION_CLOUD_ONLY,
+                                    label="AlphaESS Cloud monitoring only",
+                                ),
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Optional(CONF_ALPHAESS_MODBUS_HOST): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.TEXT)
                     ),
                     vol.Optional(
@@ -3879,13 +3913,19 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             app_secret = (user_input.get(CONF_ALPHAESS_CLOUD_APP_SECRET) or "").strip()
             serial = (user_input.get(CONF_ALPHAESS_CLOUD_SERIAL) or "").strip()
 
-            # Both empty = skip cloud entirely
-            if not app_id and not app_secret:
+            cloud_only = self._alphaess_data.get(CONF_ALPHAESS_CONNECTION_TYPE) == (
+                ALPHAESS_CONNECTION_CLOUD_ONLY
+            )
+
+            # Both empty = skip cloud entirely when Modbus remains available.
+            if not app_id and not app_secret and not cloud_only:
                 self._alphaess_data[CONF_ALPHAESS_CLOUD_ENABLED] = False
                 return self._create_final_entry()
 
             if not app_id or not app_secret:
-                errors["base"] = "alphaess_cloud_partial"
+                errors["base"] = (
+                    "alphaess_cloud_required" if cloud_only else "alphaess_cloud_partial"
+                )
             else:
                 from .alphaess_api import AlphaESSCloudClient
                 client = AlphaESSCloudClient(
@@ -3896,6 +3936,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     if not ok:
                         errors["base"] = "alphaess_cloud_invalid"
                         _LOGGER.warning("AlphaESS cloud validation failed: %s", msg)
+                    else:
+                        serial = client.serial
                 finally:
                     try:
                         await client.close()
@@ -3929,9 +3971,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={
                 "alphaess_cloud_help": (
-                    "Optional. Get App ID + App Secret from https://open.alphaess.com. "
-                    "Cloud is a fallback only — Modbus is the primary control path. "
-                    "Leave blank to skip."
+                    "Get App ID + App Secret from https://open.alphaess.com. "
+                    "Cloud-only mode provides telemetry and planning but cannot "
+                    "send battery or inverter control commands. Credentials are "
+                    "optional only when Modbus is configured."
                 ),
             },
         )
@@ -7673,6 +7716,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            connection_type = user_input.get(
+                CONF_ALPHAESS_CONNECTION_TYPE,
+                self._get_option(
+                    CONF_ALPHAESS_CONNECTION_TYPE,
+                    ALPHAESS_CONNECTION_MODBUS_CLOUD,
+                ),
+            )
             host = (user_input.get(CONF_ALPHAESS_MODBUS_HOST) or "").strip()
             port = int(
                 user_input.get(
@@ -7693,9 +7743,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ).strip()
             serial = (user_input.get(CONF_ALPHAESS_CLOUD_SERIAL) or "").strip()
 
-            if not host:
+            if connection_type == ALPHAESS_CONNECTION_MODBUS_CLOUD and not host:
                 errors["base"] = "alphaess_host_required"
-            else:
+            elif connection_type == ALPHAESS_CONNECTION_MODBUS_CLOUD:
                 from .inverters.alphaess import AlphaESSController
 
                 controller = AlphaESSController(
@@ -7721,7 +7771,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     except Exception:
                         pass
 
-            if not errors and (app_id or app_secret):
+            if (
+                not errors
+                and connection_type == ALPHAESS_CONNECTION_CLOUD_ONLY
+                and (not app_id or not app_secret)
+            ):
+                errors["base"] = "alphaess_cloud_required"
+            elif not errors and (app_id or app_secret):
                 if not app_id or not app_secret:
                     errors["base"] = "alphaess_cloud_partial"
                 else:
@@ -7739,6 +7795,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                             _LOGGER.warning(
                                 "AlphaESS cloud validation failed: %s", msg
                             )
+                        else:
+                            serial = client.serial
                     finally:
                         try:
                             await client.close()
@@ -7748,6 +7806,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             if not errors:
                 updates = {
                     CONF_BATTERY_SYSTEM: BATTERY_SYSTEM_ALPHAESS,
+                    CONF_ALPHAESS_CONNECTION_TYPE: connection_type,
                     CONF_ALPHAESS_MODBUS_HOST: host,
                     CONF_ALPHAESS_MODBUS_PORT: port,
                     CONF_ALPHAESS_MODBUS_SLAVE_ID: slave_id,
@@ -7774,6 +7833,27 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             data_schema=vol.Schema(
                 {
                     vol.Required(
+                        CONF_ALPHAESS_CONNECTION_TYPE,
+                        default=self._get_option(
+                            CONF_ALPHAESS_CONNECTION_TYPE,
+                            ALPHAESS_CONNECTION_MODBUS_CLOUD,
+                        ),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(
+                                    value=ALPHAESS_CONNECTION_MODBUS_CLOUD,
+                                    label="Modbus control with optional cloud fallback",
+                                ),
+                                SelectOptionDict(
+                                    value=ALPHAESS_CONNECTION_CLOUD_ONLY,
+                                    label="AlphaESS Cloud monitoring only",
+                                ),
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Optional(
                         CONF_ALPHAESS_MODBUS_HOST,
                         default=self._get_option(CONF_ALPHAESS_MODBUS_HOST, ""),
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
@@ -12484,6 +12564,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_INVERTER_BRAND, "sungrow"
             )
             inverter_host = user_input.get(CONF_INVERTER_HOST, "")
+            inverter_entity_prefix = (
+                user_input.get(CONF_INVERTER_ENTITY_PREFIX, "") or ""
+            ).strip()
             inverter_port = user_input.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT)
             inverter_slave_id = user_input.get(
                 CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID
@@ -12515,6 +12598,34 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 ):
                     errors["base"] = "sungrow_modbus_conflict"
 
+            if inverter_brand == "goodwe_entity":
+                if not inverter_entity_prefix:
+                    errors["base"] = "goodwe_entity_prefix_required"
+                else:
+                    from .inverters import get_inverter_controller
+
+                    controller = get_inverter_controller(
+                        brand=inverter_brand,
+                        host="",
+                        model=inverter_model,
+                        entity_prefix=inverter_entity_prefix,
+                        hass=self.hass,
+                    )
+                    if controller is None:
+                        errors["base"] = "goodwe_entity_unavailable"
+                    else:
+                        try:
+                            connected = await controller.connect()
+                            if not connected:
+                                errors["base"] = "goodwe_entity_unavailable"
+                        except Exception as err:
+                            _LOGGER.warning(
+                                "GoodWe HA entity validation failed: %s", err
+                            )
+                            errors["base"] = "goodwe_entity_unavailable"
+                        finally:
+                            await controller.disconnect()
+
             if not errors:
                 # Combine amber options, curtailment options, and inverter config
                 final_data = {**getattr(self, "_amber_options", {})}
@@ -12525,15 +12636,20 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     final_data[CONF_AC_INVERTER_CURTAILMENT_ENABLED] = True
                 final_data[CONF_INVERTER_BRAND] = inverter_brand
                 final_data[CONF_INVERTER_MODEL] = inverter_model
-                final_data[CONF_INVERTER_HOST] = inverter_host
-                final_data[CONF_INVERTER_PORT] = inverter_port
+                if inverter_brand == "goodwe_entity":
+                    final_data[CONF_INVERTER_ENTITY_PREFIX] = inverter_entity_prefix
+                    final_data[CONF_INVERTER_HOST] = ""
+                    final_data[CONF_INVERTER_PORT] = 0
+                else:
+                    final_data[CONF_INVERTER_HOST] = inverter_host
+                    final_data[CONF_INVERTER_PORT] = inverter_port
                 if inverter_rated_power_w is not None:
                     final_data[CONF_INVERTER_RATED_POWER_W] = float(
                         inverter_rated_power_w
                     )
 
                 # Only include slave ID for Modbus brands (not Enphase/Zeversolar which use HTTP)
-                if inverter_brand not in ("enphase", "zeversolar"):
+                if inverter_brand not in ("enphase", "zeversolar", "goodwe_entity"):
                     final_data[CONF_INVERTER_SLAVE_ID] = inverter_slave_id
                 else:
                     final_data[CONF_INVERTER_SLAVE_ID] = (
@@ -12605,6 +12721,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             current_model = next(iter(models.keys())) if models else ""
 
         current_host = self._get_option(CONF_INVERTER_HOST, "")
+        current_entity_prefix = self._get_option(CONF_INVERTER_ENTITY_PREFIX, "")
         current_port = self._get_option(CONF_INVERTER_PORT, defaults["port"])
         current_slave_id = self._get_option(
             CONF_INVERTER_SLAVE_ID, defaults["slave_id"]
@@ -12622,20 +12739,27 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 ],
                 mode=SelectSelectorMode.DROPDOWN,
             )),
-            vol.Required(
-                CONF_INVERTER_HOST,
-                default=current_host,
-            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-            vol.Required(
-                CONF_INVERTER_PORT,
-                default=current_port,
-            ): NumberSelector(NumberSelectorConfig(
-                min=1, max=65535, step=1, mode=NumberSelectorMode.BOX,
-            )),
         }
 
+        if brand == "goodwe_entity":
+            schema_dict[
+                vol.Required(
+                    CONF_INVERTER_ENTITY_PREFIX,
+                    default=current_entity_prefix,
+                )
+            ] = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
+        else:
+            schema_dict[
+                vol.Required(CONF_INVERTER_HOST, default=current_host)
+            ] = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
+            schema_dict[
+                vol.Required(CONF_INVERTER_PORT, default=current_port)
+            ] = NumberSelector(NumberSelectorConfig(
+                min=1, max=65535, step=1, mode=NumberSelectorMode.BOX,
+            ))
+
         # Only show Slave ID for Modbus brands (not Enphase/Zeversolar which use HTTP)
-        if brand not in ("enphase", "zeversolar"):
+        if brand not in ("enphase", "zeversolar", "goodwe_entity"):
             schema_dict[
                 vol.Required(
                     CONF_INVERTER_SLAVE_ID,

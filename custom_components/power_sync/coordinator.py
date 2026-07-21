@@ -1396,6 +1396,14 @@ class AmberUsageCoordinator:
         """Return the last fetch time as ISO string."""
         return self._last_fetch.isoformat() if self._last_fetch else None
 
+    def is_fresh(self, max_age: timedelta = timedelta(hours=6)) -> bool:
+        """Return whether the usage snapshot is recent enough for live display."""
+        if self._last_fetch is None:
+            return False
+        return (dt_util.now().timestamp() - self._last_fetch.timestamp()) <= (
+            max_age.total_seconds()
+        )
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -1524,6 +1532,7 @@ class AmberUsageCoordinator:
 
         # Amber Usage API allows max 7-day range per request — batch accordingly
         total_updated = 0
+        successful_chunks = 0
         chunk_start = start_date
         url = f"{AMBER_API_BASE_URL}/sites/{self._site_id}/usage"
 
@@ -1544,6 +1553,7 @@ class AmberUsageCoordinator:
                     timeout_seconds=30,
                     params=params,
                 )
+                successful_chunks += 1
                 updated = self._process_intervals(intervals)
                 total_updated += updated
                 _LOGGER.debug(
@@ -1557,10 +1567,18 @@ class AmberUsageCoordinator:
 
             chunk_start = chunk_end + timedelta(days=1)
 
-        self._last_fetch = now
+        if successful_chunks:
+            self._last_fetch = now
         self._prune_old_days()
         self._save_store()
-        _LOGGER.info("Amber usage fetched: %d days updated (range %s to %s)", total_updated, start_date, end_date)
+        _LOGGER.info(
+            "Amber usage fetched: %d days updated across %d successful chunks "
+            "(range %s to %s)",
+            total_updated,
+            successful_chunks,
+            start_date,
+            end_date,
+        )
 
     def _process_intervals(self, intervals: list[dict]) -> int:
         """Aggregate 30-min intervals into daily DayUsage records.
@@ -1630,7 +1648,8 @@ class AmberUsageCoordinator:
 
             # Only overwrite if new data is same or better quality
             existing = self._days.get(day_key)
-            if existing:
+            is_partial_today = day_key == dt_util.now().date().isoformat()
+            if existing and not is_partial_today:
                 existing_rank = _QUALITY_RANK.get(existing.quality, 0)
                 new_rank = _QUALITY_RANK.get(quality, 0)
                 if new_rank < existing_rank:
@@ -1669,7 +1688,8 @@ class AmberUsageCoordinator:
     def get_summary(self, period: str) -> dict[str, Any]:
         """Get aggregated usage for a period.
 
-        period: 'yesterday', 'week' (last 7 complete days), 'month' (calendar month to yesterday), 'last_month'
+        period: 'today' (partial), 'yesterday', 'week' (last 7 complete days),
+        'month' (calendar month to yesterday), or 'last_month'.
         """
         days = self._get_days_for_period(period)
         return self._aggregate(days)
@@ -1718,6 +1738,9 @@ class AmberUsageCoordinator:
         today = dt_util.now().date()
         yesterday = today - timedelta(days=1)
 
+        if period == "today":
+            du = self._days.get(today.isoformat())
+            return [du] if du else []
         if period == "yesterday":
             key = yesterday.isoformat()
             du = self._days.get(key)
@@ -4190,12 +4213,11 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
 
 
 class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
-    """Coordinator to fetch AlphaESS energy data via Modbus (primary) with
-    optional AlphaESS Cloud API fallback.
+    """Fetch AlphaESS data via Modbus/cloud fallback or cloud-only monitoring.
 
     AlphaESS hybrid inverter-battery systems (SMILE / Storion) expose a rich
-    Modbus TCP register map (slave ID 0x55 by default). Cloud is used only
-    when Modbus is unreachable.
+    Modbus TCP register map (slave ID 0x55 by default). Cloud can be a fallback
+    when Modbus is unreachable or the sole read-only telemetry source.
 
     Sign conventions (unlike Sigenergy):
       - Battery power (reg 0126H): NEGATIVE = charging, POSITIVE = discharging
@@ -4213,6 +4235,7 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
         entry_id: str = "",
         max_export_limit_kw: Optional[float] = None,
         cloud_client: Optional[Any] = None,
+        connection_type: str = "modbus_cloud",
     ) -> None:
         """Initialize the coordinator.
 
@@ -4224,16 +4247,21 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
             entry_id: Config entry ID for price lookups.
             max_export_limit_kw: User-configured DNSP export safety cap.
             cloud_client: Optional AlphaESSCloudClient for telemetry fallback.
+            connection_type: ``modbus_cloud`` or monitoring-only ``cloud_only``.
         """
-        from .inverters.alphaess import AlphaESSController
-
         self.host = host
         self.port = port
         self.slave_id = slave_id
         self._entry_id = entry_id
-        self._controller = AlphaESSController(
-            host, port, slave_id, max_export_limit_kw=max_export_limit_kw
-        )
+        self.connection_type = connection_type
+        self.supports_dispatch = connection_type != "cloud_only" and bool(host)
+        self._controller = None
+        if self.supports_dispatch:
+            from .inverters.alphaess import AlphaESSController
+
+            self._controller = AlphaESSController(
+                host, port, slave_id, max_export_limit_kw=max_export_limit_kw
+            )
         self._energy_acc = EnergyAccumulator(hass, "alphaess")
         self._cloud = cloud_client
         self._modbus_failures = 0  # Consecutive failures → cloud fallback
@@ -4252,45 +4280,63 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
 
         attrs: dict[str, Any] = {}
         is_curtailed = False
-        source = "modbus"
+        source = "modbus" if self._controller is not None else "cloud"
 
-        try:
-            status = await self._controller.get_status()
-            attrs = status.attributes or {}
-            is_curtailed = status.is_curtailed
+        if self._controller is None:
+            if self._cloud is None:
+                raise UpdateFailed("AlphaESS cloud-only mode has no cloud client")
+            try:
+                attrs = _normalize_alphaess_cloud_data(
+                    await self._cloud.get_last_power_data()
+                )
+                if "battery_soc" not in attrs:
+                    raise UpdateFailed("AlphaESS cloud returned no battery data")
+            except Exception as cloud_err:
+                if self.data:
+                    return self.data
+                raise UpdateFailed(
+                    f"AlphaESS cloud telemetry failed: {cloud_err}"
+                ) from cloud_err
+        else:
+            try:
+                status = await self._controller.get_status()
+                attrs = status.attributes or {}
+                is_curtailed = status.is_curtailed
 
-            if "battery_soc" not in attrs:
-                raise UpdateFailed("AlphaESS Modbus returned no battery data")
+                if "battery_soc" not in attrs:
+                    raise UpdateFailed("AlphaESS Modbus returned no battery data")
 
-            self._modbus_failures = 0
+                self._modbus_failures = 0
 
-        except Exception as modbus_err:
-            self._modbus_failures += 1
-            _LOGGER.warning(
-                "AlphaESS Modbus read failed (%d consecutive): %s",
-                self._modbus_failures,
-                modbus_err,
-            )
+            except Exception as modbus_err:
+                self._modbus_failures += 1
+                _LOGGER.warning(
+                    "AlphaESS Modbus read failed (%d consecutive): %s",
+                    self._modbus_failures,
+                    modbus_err,
+                )
 
-            # Try cloud fallback if configured
-            if self._cloud is not None:
-                try:
-                    cloud_data = await self._cloud.get_last_power_data()
-                    attrs = _normalize_alphaess_cloud_data(cloud_data)
-                    source = "cloud"
-                    _LOGGER.info("AlphaESS fell back to cloud telemetry")
-                except Exception as cloud_err:
-                    _LOGGER.error("AlphaESS cloud fallback also failed: %s", cloud_err)
+                # Try cloud fallback if configured
+                if self._cloud is not None:
+                    try:
+                        cloud_data = await self._cloud.get_last_power_data()
+                        attrs = _normalize_alphaess_cloud_data(cloud_data)
+                        source = "cloud"
+                        _LOGGER.info("AlphaESS fell back to cloud telemetry")
+                    except Exception as cloud_err:
+                        _LOGGER.error("AlphaESS cloud fallback also failed: %s", cloud_err)
+                        if self.data:
+                            return self.data
+                        raise UpdateFailed(
+                            f"AlphaESS Modbus and cloud both failed: "
+                            f"modbus={modbus_err}; cloud={cloud_err}"
+                        ) from modbus_err
+                else:
                     if self.data:
                         return self.data
                     raise UpdateFailed(
-                        f"AlphaESS Modbus and cloud both failed: "
-                        f"modbus={modbus_err}; cloud={cloud_err}"
+                        f"AlphaESS Modbus failed: {modbus_err}"
                     ) from modbus_err
-            else:
-                if self.data:
-                    return self.data
-                raise UpdateFailed(f"AlphaESS Modbus failed: {modbus_err}") from modbus_err
 
         solar_kw = attrs.get("pv_power_kw", 0) or 0
         grid_kw = attrs.get("grid_power_kw", 0) or 0  # + import, − export
@@ -4326,6 +4372,8 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
             "is_curtailed": is_curtailed,
             "work_mode_raw": attrs.get("work_mode_raw"),
             "data_source": source,
+            "connection_type": self.connection_type,
+            "supports_dispatch": self.supports_dispatch,
             "last_update": dt_util.utcnow(),
             "energy_summary": self._energy_acc.as_dict(),
         }
@@ -4345,11 +4393,15 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
 
     async def set_backup_mode(self) -> bool:
         """IDLE hold — release dispatch but write zero-power dispatch if needed."""
+        if not self.supports_dispatch or self._controller is None:
+            return False
         async with self._controller:
             return await self._controller.set_standby_mode()
 
     async def restore_work_mode_from_idle(self) -> bool:
         """Restore self-consumption after IDLE hold."""
+        if not self.supports_dispatch or self._controller is None:
+            return False
         async with self._controller:
             return await self._controller.restore_from_standby()
 
@@ -4403,6 +4455,8 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
                 to the BMS-reported max charge power, then to a 5 kW safety
                 default if the BMS reading isn't available yet.
         """
+        if not self.supports_dispatch or self._controller is None:
+            return False
         power_w = self._resolve_force_power_w(power_w, "charge")
         duration_seconds = max(60, int(duration_min) * 60)
         _LOGGER.info(
@@ -4420,6 +4474,8 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
 
         Same fallback chain as force_charge — see its docstring.
         """
+        if not self.supports_dispatch or self._controller is None:
+            return False
         power_w = self._resolve_force_power_w(power_w, "discharge")
         duration_seconds = max(60, int(duration_min) * 60)
         _LOGGER.info(
@@ -4434,6 +4490,8 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
 
     async def restore_normal(self) -> bool:
         """Release dispatch and restore export limit to normal."""
+        if not self.supports_dispatch or self._controller is None:
+            return False
         _LOGGER.info("AlphaESS coordinator: restore_normal")
         async with self._controller:
             return await self._controller.restore_normal()
@@ -4446,11 +4504,12 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
         connection (disconnect itself is intentionally pure — see the
         controller's disconnect() docstring for why).
         """
-        try:
-            await self._controller.release_dispatch()
-        except Exception as e:
-            _LOGGER.warning("AlphaESS release_dispatch on shutdown failed: %s", e)
-        await self._controller.disconnect()
+        if self._controller is not None:
+            try:
+                await self._controller.release_dispatch()
+            except Exception as e:
+                _LOGGER.warning("AlphaESS release_dispatch on shutdown failed: %s", e)
+            await self._controller.disconnect()
         if self._cloud is not None:
             try:
                 await self._cloud.close()

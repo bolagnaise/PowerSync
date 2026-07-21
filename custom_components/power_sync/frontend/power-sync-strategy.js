@@ -5617,10 +5617,14 @@ class PowerSyncStrategy {
     }
 
     // --- Center Column: Daily Cost Tracking ---
-    if (hasE('daily_import_cost')) {
-      const costEntities = [
-        { entity: e('daily_import_cost'), name: 'Import Cost Today', icon: 'mdi:cash-minus' },
-      ];
+    if (hasE('daily_import_cost') || hasE('amber_usage_today_cost')) {
+      const costEntities = [];
+      if (hasE('amber_usage_today_cost')) {
+        costEntities.push({ entity: e('amber_usage_today_cost'), name: 'Amber Metered Cost Today (Partial)', icon: 'mdi:cash-check' });
+      }
+      if (hasE('daily_import_cost')) {
+        costEntities.push({ entity: e('daily_import_cost'), name: 'Estimated Import Cost Today', icon: 'mdi:cash-minus' });
+      }
       if (hasE('daily_export_earnings')) {
         costEntities.push({ entity: e('daily_export_earnings'), name: 'Export Earnings Today', icon: 'mdi:cash-plus' });
       }

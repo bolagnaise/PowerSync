@@ -510,6 +510,7 @@ from .const import (
     CONF_INVERTER_BRAND,
     CONF_INVERTER_MODEL,
     CONF_INVERTER_HOST,
+    CONF_INVERTER_ENTITY_PREFIX,
     CONF_INVERTER_PORT,
     CONF_INVERTER_SLAVE_ID,
     CONF_INVERTER_TOKEN,
@@ -555,6 +556,9 @@ from .const import (
     CONF_ALPHAESS_CLOUD_APP_ID,
     CONF_ALPHAESS_CLOUD_APP_SECRET,
     CONF_ALPHAESS_CLOUD_SERIAL,
+    CONF_ALPHAESS_CONNECTION_TYPE,
+    ALPHAESS_CONNECTION_MODBUS_CLOUD,
+    ALPHAESS_CONNECTION_CLOUD_ONLY,
     DEFAULT_ALPHAESS_MODBUS_PORT,
     DEFAULT_ALPHAESS_MODBUS_SLAVE_ID,
     BATTERY_SYSTEM_ALPHAESS,
@@ -7193,7 +7197,7 @@ class InverterStatusView(HomeAssistantView):
             entry.data.get(CONF_ENPHASE_IS_INSTALLER, False)
         )
 
-        if not inverter_host:
+        if not inverter_host and inverter_brand != "goodwe_entity":
             return web.json_response({
                 "success": True,
                 "enabled": True,
@@ -7218,7 +7222,12 @@ class InverterStatusView(HomeAssistantView):
                 enphase_is_installer=enphase_is_installer,
                 max_export_limit_kw=entry.data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW),
                 rated_power_w=inverter_rated_power_w,
+                entity_prefix=entry.options.get(
+                    CONF_INVERTER_ENTITY_PREFIX,
+                    entry.data.get(CONF_INVERTER_ENTITY_PREFIX, ""),
+                ),
                 hass=self._hass,
+                entry_id=entry.entry_id,
             )
 
             if not controller:
@@ -8788,7 +8797,7 @@ class AEMOSpikeView(HomeAssistantView):
 class AmberUsageView(HomeAssistantView):
     """HTTP view for actual metered usage and cost data from Amber.
 
-    GET ?period=yesterday|week|month|last_month — aggregated summary with savings
+    GET ?period=today|yesterday|week|month|last_month — aggregated summary with savings
     GET ?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD — custom range with daily breakdown
     """
 
@@ -8840,7 +8849,7 @@ class AmberUsageView(HomeAssistantView):
             if not period:
                 period = "yesterday"
 
-            if period not in ("yesterday", "week", "month", "last_month"):
+            if period not in ("today", "yesterday", "week", "month", "last_month"):
                 return web.json_response(
                     {"success": False, "error": f"Invalid period: {period}"},
                     status=400,
@@ -18430,6 +18439,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     def _is_monitoring_mode() -> bool:
         """Check if monitoring mode is active (blocks all control commands)."""
+        if (
+            alphaess_coordinator is not None
+            and not alphaess_coordinator.supports_dispatch
+        ):
+            return True
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         if isinstance(entry_data, dict) and entry_data.get(
             "_monitoring_handoff_active", False
@@ -18993,7 +19007,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         alphaess_host = entry.options.get(
             CONF_ALPHAESS_MODBUS_HOST, entry.data.get(CONF_ALPHAESS_MODBUS_HOST)
-        )
+        ) or ""
         alphaess_port = entry.options.get(
             CONF_ALPHAESS_MODBUS_PORT,
             entry.data.get(CONF_ALPHAESS_MODBUS_PORT, DEFAULT_ALPHAESS_MODBUS_PORT),
@@ -19003,6 +19017,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_ALPHAESS_MODBUS_SLAVE_ID, DEFAULT_ALPHAESS_MODBUS_SLAVE_ID),
         )
         alphaess_export_limit_kw = entry.data.get(CONF_ALPHAESS_EXPORT_LIMIT_KW)
+        alphaess_connection_type = entry.options.get(
+            CONF_ALPHAESS_CONNECTION_TYPE,
+            entry.data.get(
+                CONF_ALPHAESS_CONNECTION_TYPE,
+                ALPHAESS_CONNECTION_MODBUS_CLOUD,
+            ),
+        )
 
         # Optional cloud client for fallback telemetry when Modbus is unreachable
         alphaess_cloud_client = None
@@ -19019,10 +19040,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.warning("Failed to init AlphaESS cloud client: %s", e)
                 alphaess_cloud_client = None
 
-        _LOGGER.info(
-            "Initializing AlphaESS Modbus coordinator: %s:%s (slave %s)",
-            alphaess_host, alphaess_port, alphaess_slave_id,
-        )
+        if alphaess_connection_type == ALPHAESS_CONNECTION_CLOUD_ONLY:
+            _LOGGER.info(
+                "Initializing AlphaESS cloud-only coordinator (monitoring only)"
+            )
+        else:
+            _LOGGER.info(
+                "Initializing AlphaESS Modbus coordinator: %s:%s (slave %s)",
+                alphaess_host, alphaess_port, alphaess_slave_id,
+            )
         alphaess_coordinator = AlphaESSEnergyCoordinator(
             hass,
             alphaess_host,
@@ -19031,6 +19057,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry_id=entry.entry_id,
             max_export_limit_kw=alphaess_export_limit_kw,
             cloud_client=alphaess_cloud_client,
+            connection_type=alphaess_connection_type,
         )
     elif is_esy_sunhome:
         _LOGGER.info("Running in ESY Sunhome mode — bridging via esy_sunhome companion integration")
@@ -21229,7 +21256,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_ENPHASE_IS_INSTALLER, False)
         )
 
-        if not inverter_host:
+        if not inverter_host and inverter_brand != "goodwe_entity":
             _LOGGER.warning("Inverter curtailment enabled but no host configured")
             return False
 
@@ -21250,7 +21277,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 enphase_is_installer=enphase_is_installer,
                 max_export_limit_kw=entry.data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW),
                 rated_power_w=inverter_rated_power_w,
+                entity_prefix=entry.options.get(
+                    CONF_INVERTER_ENTITY_PREFIX,
+                    entry.data.get(CONF_INVERTER_ENTITY_PREFIX, ""),
+                ),
                 hass=hass,
+                entry_id=entry.entry_id,
             )
 
             if not controller:
@@ -27296,7 +27328,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
 
         # Check if this is an AlphaESS system
-        is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
+        is_alphaess = entry.options.get(
+            CONF_BATTERY_SYSTEM,
+            entry.data.get(CONF_BATTERY_SYSTEM),
+        ) == BATTERY_SYSTEM_ALPHAESS
         if is_alphaess:
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -28917,7 +28952,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
 
         # Check if this is an AlphaESS system
-        is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
+        is_alphaess = entry.options.get(
+            CONF_BATTERY_SYSTEM,
+            entry.data.get(CONF_BATTERY_SYSTEM),
+        ) == BATTERY_SYSTEM_ALPHAESS
         if is_alphaess:
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -30496,7 +30534,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
 
         # Check if this is an AlphaESS system
-        is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
+        is_alphaess = entry.options.get(
+            CONF_BATTERY_SYSTEM,
+            entry.data.get(CONF_BATTERY_SYSTEM),
+        ) == BATTERY_SYSTEM_ALPHAESS
         if is_alphaess:
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -31835,7 +31876,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ) from e
 
         # Check if this is an AlphaESS system
-        is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
+        is_alphaess = entry.options.get(
+            CONF_BATTERY_SYSTEM,
+            entry.data.get(CONF_BATTERY_SYSTEM),
+        ) == BATTERY_SYSTEM_ALPHAESS
         if is_alphaess:
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -32111,7 +32155,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
         is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
-        is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
+        is_alphaess = entry.options.get(
+            CONF_BATTERY_SYSTEM,
+            entry.data.get(CONF_BATTERY_SYSTEM),
+        ) == BATTERY_SYSTEM_ALPHAESS
         is_esy_sunhome_auto = bool(entry.data.get(CONF_ESY_CONFIG_ENTRY_ID))
         is_saj_h2_auto = bool(entry.data.get(CONF_SAJ_CONFIG_ENTRY_ID))
         is_fronius_reserva_auto = bool(entry.data.get(CONF_FRONIUS_RESERVA_CONFIG_ENTRY_ID))
@@ -33604,7 +33651,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_ENPHASE_IS_INSTALLER, False)
         )
 
-        if not inverter_host:
+        if not inverter_host and inverter_brand != "goodwe_entity":
             _LOGGER.warning("No inverter host configured")
             return
 
@@ -33625,7 +33672,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 enphase_is_installer=enphase_is_installer,
                 max_export_limit_kw=entry.data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW),
                 rated_power_w=inverter_rated_power_w,
+                entity_prefix=entry.options.get(
+                    CONF_INVERTER_ENTITY_PREFIX,
+                    entry.data.get(CONF_INVERTER_ENTITY_PREFIX, ""),
+                ),
                 hass=hass,
+                entry_id=entry.entry_id,
             )
 
             home_load_w = None
@@ -33749,7 +33801,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_ENPHASE_IS_INSTALLER, False)
         )
 
-        if not inverter_host:
+        if not inverter_host and inverter_brand != "goodwe_entity":
             _LOGGER.warning("No inverter host configured")
             return
 
@@ -33770,7 +33822,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 enphase_is_installer=enphase_is_installer,
                 max_export_limit_kw=entry.data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW),
                 rated_power_w=inverter_rated_power_w,
+                entity_prefix=entry.options.get(
+                    CONF_INVERTER_ENTITY_PREFIX,
+                    entry.data.get(CONF_INVERTER_ENTITY_PREFIX, ""),
+                ),
                 hass=hass,
+                entry_id=entry.entry_id,
             )
 
             _LOGGER.info(f"🟢 Restoring {inverter_brand} inverter at {inverter_host}")

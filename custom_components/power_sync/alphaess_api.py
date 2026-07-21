@@ -1,8 +1,7 @@
 """AlphaESS Cloud API client (openapi.alphaess.com).
 
-Used as a telemetry / control fallback when Modbus TCP is unreachable
-(remote-only users, LAN outage). Modbus is always authoritative when
-available — this client is the secondary path.
+Used as a telemetry fallback when Modbus TCP is unreachable, or as a
+monitoring-only source for remote users. Modbus remains the only control path.
 
 Auth:
   - App ID and App Secret issued from https://open.alphaess.com
@@ -248,13 +247,24 @@ class AlphaESSCloudClient:
             if not systems:
                 return False, "Connected but no ESS systems found on the account"
 
+            sns = [
+                s.get("sysSn")
+                for s in systems
+                if isinstance(s, dict) and s.get("sysSn")
+            ]
             if self.serial:
-                sns = [s.get("sysSn") for s in systems if isinstance(s, dict)]
                 if self.serial not in sns:
                     return False, (
                         f"Serial '{self.serial}' not found. "
                         f"Available: {', '.join(s for s in sns if s)}"
                     )
+            elif len(sns) == 1:
+                self.serial = sns[0]
+            else:
+                return False, (
+                    "Enter the AlphaESS system serial number. "
+                    f"Available: {', '.join(sns)}"
+                )
 
             return True, f"Connected. Found {len(systems)} system(s)."
 

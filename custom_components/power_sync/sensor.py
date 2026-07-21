@@ -126,6 +126,7 @@ from .const import (
     SENSOR_TYPE_LP_EXPORT_PRICE_FORECAST,
     SENSOR_TYPE_LOAD_FORECAST_TODAY_REMAINING,
     SENSOR_TYPE_LOAD_FORECAST_TOMORROW,
+    SENSOR_TYPE_AMBER_USAGE_TODAY_COST,
     SENSOR_TYPE_AMBER_USAGE_YESTERDAY_COST,
     SENSOR_TYPE_AMBER_USAGE_YESTERDAY_SAVINGS,
     SENSOR_TYPE_AMBER_USAGE_MONTH_COST,
@@ -153,6 +154,7 @@ from .const import (
     CONF_INVERTER_BRAND,
     CONF_INVERTER_MODEL,
     CONF_INVERTER_HOST,
+    CONF_INVERTER_ENTITY_PREFIX,
     CONF_INVERTER_PORT,
     CONF_INVERTER_SLAVE_ID,
     CONF_INVERTER_TOKEN,
@@ -1996,6 +1998,7 @@ async def async_setup_entry(
     if amber_usage_coordinator:
         _LOGGER.info("Amber usage tracking active - adding metered cost sensors")
         sensor_names = {
+            SENSOR_TYPE_AMBER_USAGE_TODAY_COST: "Today Metered Cost",
             SENSOR_TYPE_AMBER_USAGE_YESTERDAY_COST: "Yesterday Billed Cost",
             SENSOR_TYPE_AMBER_USAGE_YESTERDAY_SAVINGS: "Yesterday Battery Savings",
             SENSOR_TYPE_AMBER_USAGE_MONTH_COST: "Month To Date Billed Cost",
@@ -3616,6 +3619,7 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
 
 # Amber Usage sensors — actual metered cost data from NEM
 AMBER_USAGE_SENSORS = (
+    (SENSOR_TYPE_AMBER_USAGE_TODAY_COST, "today", "net_cost"),
     (SENSOR_TYPE_AMBER_USAGE_YESTERDAY_COST, "yesterday", "net_cost"),
     (SENSOR_TYPE_AMBER_USAGE_YESTERDAY_SAVINGS, "yesterday", "savings"),
     (SENSOR_TYPE_AMBER_USAGE_MONTH_COST, "month", "net_cost"),
@@ -4474,6 +4478,9 @@ class InverterStatusSensor(SensorEntity):
 
         inverter_brand = self._get_config_value(CONF_INVERTER_BRAND, "sungrow")
         inverter_host = self._get_config_value(CONF_INVERTER_HOST, "")
+        inverter_entity_prefix = self._get_config_value(
+            CONF_INVERTER_ENTITY_PREFIX, ""
+        )
         inverter_port = self._get_config_value(CONF_INVERTER_PORT, 502)
         inverter_slave_id = self._get_config_value(CONF_INVERTER_SLAVE_ID, 1)
         inverter_model = self._get_config_value(CONF_INVERTER_MODEL)
@@ -4488,17 +4495,18 @@ class InverterStatusSensor(SensorEntity):
         enphase_normal_profile = self._get_config_value(CONF_ENPHASE_NORMAL_PROFILE)
         enphase_zero_export_profile = self._get_config_value(CONF_ENPHASE_ZERO_EXPORT_PROFILE)
 
-        if not inverter_host:
+        if not inverter_host and inverter_brand != "goodwe_entity":
             _LOGGER.debug("Inverter host not configured - skipping poll")
             self._cached_state = "not_configured"
             self.async_write_ha_state()
             return
 
-        _LOGGER.debug(f"Polling inverter: {inverter_brand} at {inverter_host}:{inverter_port}")
+        target = inverter_host or f"entity:{inverter_entity_prefix}"
+        _LOGGER.debug(f"Polling inverter: {inverter_brand} at {target}:{inverter_port}")
 
         try:
             # Reuse cached controller if config matches (preserves JWT token state for Enphase)
-            controller_key = f"{inverter_brand}:{inverter_host}:{inverter_port}"
+            controller_key = f"{inverter_brand}:{target}:{inverter_port}"
             if self._controller and getattr(self._controller, '_cache_key', None) == controller_key:
                 controller = self._controller
                 _LOGGER.debug("Reusing cached inverter controller")
@@ -4523,6 +4531,9 @@ class InverterStatusSensor(SensorEntity):
                     enphase_normal_profile=enphase_normal_profile,
                     enphase_zero_export_profile=enphase_zero_export_profile,
                     enphase_is_installer=enphase_is_installer,
+                    entity_prefix=inverter_entity_prefix,
+                    hass=self.hass,
+                    entry_id=self._entry.entry_id,
                 )
                 if controller:
                     controller._cache_key = controller_key
@@ -6197,7 +6208,11 @@ class AmberUsageSensor(PowerSyncCurrencyMixin, SensorEntity):
         coord = self._get_usage_coordinator()
         if not coord:
             return None
+        if self._period == "today" and not coord.is_fresh():
+            return None
         summary = coord.get_savings_summary(self._period)
+        if self._period == "today" and summary.get("days_count", 0) == 0:
+            return None
         val = summary.get(self._value_key)
         if val is None:
             return None
@@ -6219,6 +6234,9 @@ class AmberUsageSensor(PowerSyncCurrencyMixin, SensorEntity):
             "source": "amber_usage_api",
             "last_fetch": coord.last_fetch_iso,
         }
+        if self._period == "today":
+            attrs["partial_day"] = True
+            attrs["fresh"] = coord.is_fresh()
         if self._value_key == "savings":
             attrs["baseline_cost"] = summary.get("baseline_cost")
             attrs["net_cost"] = summary.get("net_cost")

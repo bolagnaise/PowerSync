@@ -33,7 +33,7 @@
 | **Solax Hybrid** (X1/X3, Gen4/Gen5/Gen6, AC Retro-Fit) | Via [Solax Modbus](https://github.com/wills106/homeassistant-solax-modbus) integration (HACS) | LP optimizer, force charge/discharge, backup reserve, export control |
 | **GoodWe** (ET, EH, BT, BH, ES, EM, BP) | UDP direct control, TCP local, or TCP/502 with HA GoodWe entity mode for LAN/Kit-20 | Force charge/discharge, backup reserve, export limit. LAN/Kit-20 force modes require entity mode; see [GoodWe notes](docs/wiki/GoodWe.md) |
 | **Sungrow SH-series** | Modbus TCP | Force charge/discharge, rate limiting, export control, dual inverter |
-| **AlphaESS** (SMILE5, SMILE-Hi5/Hi10, SMILE-B3, SMILE-T10, SMILE-G3, Storion-T30) | Modbus TCP + optional Cloud API | Force charge/discharge, dispatch SOC targeting, DC solar curtailment |
+| **AlphaESS** (SMILE5, SMILE-Hi5/Hi10, SMILE-B3, SMILE-T10, SMILE-G3, Storion-T30) | Modbus TCP + optional Cloud API, or Cloud-only monitoring | Force charge/discharge, dispatch SOC targeting, and DC solar curtailment over Modbus; telemetry/planning only in Cloud-only mode |
 | **ESY Sunhome** (HM series) | Via [ESY Sunhome](https://github.com/branko-lazarevic/esysunhome) companion integration (HACS) | LP optimizer, AEMO spike export, Saving Sessions (mode-only control) |
 | **SAJ H2 / HS2** | Via [SAJ H2 Modbus](https://github.com/stanus74/home-assistant-saj-h2-modbus) companion integration (HACS) | LP optimizer, force charge/discharge, AEMO spike export (no backup reserve write) |
 | **Fronius GEN24 storage** (BYD Battery-Box / Reserva) | Via [Fronius Modbus](https://github.com/callifo/fronius_modbus) companion integration (HACS) | LP optimizer, force charge/discharge, hold SOC, restore normal, backup reserve |
@@ -54,7 +54,7 @@ Solar inverters that bypass the battery can be curtailed during negative feed-in
 | **Enphase** | IQ Gateway REST API | DPEL/DER export limit |
 | **FoxESS** | Modbus TCP | Remote active power |
 | **Huawei** | Smart Dongle Modbus | Feed grid power limit |
-| **GoodWe** | Modbus TCP | Export limit register |
+| **GoodWe** | Modbus TCP, or GoodWe Experimental HA entities for standalone MS | Export limit register/entity with verified restore |
 | **Zeversolar** | HTTP API | Power limit percentage |
 | **Solax** | Modbus TCP or HA entity | Export control user limit (reg 0x42) |
 | **Sigenergy** | Modbus TCP | Grid export limit / DC curtailment |
@@ -64,7 +64,7 @@ Solar inverters that bypass the battery can be curtailed during negative feed-in
 
 | Provider | Country | Pricing |
 |----------|---------|---------|
-| **Amber Electric** | Australia | Dynamic 5-min & 30-min (API token required) |
+| **Amber Electric** | Australia | Dynamic 5-min & 30-min pricing plus partial-day metered cost (API token required) |
 | **Localvolts** | Australia | Real-time 5-min wholesale pricing (API key + Partner ID) |
 | **Flow Power / AEMO** | Australia | Official Flow Power Web Data API or AEMO wholesale pricing |
 | **Globird / AEMO VPP** | Australia | Retail tariff schedule + AEMO spike detection |
