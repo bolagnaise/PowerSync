@@ -12558,6 +12558,24 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         current_generic_capacity = self._get_option(
             CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH, None
         )
+        current_generic_switch_entity = _normalize_optional_entity(
+            self._get_option(CONF_GENERIC_CHARGER_SWITCH_ENTITY)
+        )
+        current_generic_amps_entity = _normalize_optional_entity(
+            self._get_option(CONF_GENERIC_CHARGER_AMPS_ENTITY)
+        )
+        current_generic_status_entity = _normalize_optional_entity(
+            self._get_option(CONF_GENERIC_CHARGER_STATUS_ENTITY)
+        )
+        current_generic_power_entity = _normalize_optional_entity(
+            self._get_option(CONF_GENERIC_CHARGER_POWER_ENTITY)
+        )
+        current_generic_soc_entity = _normalize_optional_entity(
+            self._get_option(CONF_GENERIC_CHARGER_SOC_ENTITY)
+        )
+        current_generic_soc_entity_2 = _normalize_optional_entity(
+            self._get_option(CONF_GENERIC_CHARGER_SOC_ENTITY_2)
+        )
 
         schema_dict: dict[vol.Marker, Any] = {
             # EV Charging settings
@@ -12613,27 +12631,51 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ): BooleanSelector(),
             vol.Optional(
                 CONF_GENERIC_CHARGER_SWITCH_ENTITY,
-                default=self._get_option(CONF_GENERIC_CHARGER_SWITCH_ENTITY, ""),
+                description=(
+                    {"suggested_value": current_generic_switch_entity}
+                    if current_generic_switch_entity
+                    else None
+                ),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_GENERIC_CHARGER_AMPS_ENTITY,
-                default=self._get_option(CONF_GENERIC_CHARGER_AMPS_ENTITY, ""),
+                description=(
+                    {"suggested_value": current_generic_amps_entity}
+                    if current_generic_amps_entity
+                    else None
+                ),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_GENERIC_CHARGER_STATUS_ENTITY,
-                default=self._get_option(CONF_GENERIC_CHARGER_STATUS_ENTITY, ""),
+                description=(
+                    {"suggested_value": current_generic_status_entity}
+                    if current_generic_status_entity
+                    else None
+                ),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_GENERIC_CHARGER_POWER_ENTITY,
-                default=self._get_option(CONF_GENERIC_CHARGER_POWER_ENTITY, ""),
+                description=(
+                    {"suggested_value": current_generic_power_entity}
+                    if current_generic_power_entity
+                    else None
+                ),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_GENERIC_CHARGER_SOC_ENTITY,
-                default=self._get_option(CONF_GENERIC_CHARGER_SOC_ENTITY, ""),
+                description=(
+                    {"suggested_value": current_generic_soc_entity}
+                    if current_generic_soc_entity
+                    else None
+                ),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_GENERIC_CHARGER_SOC_ENTITY_2,
-                default=self._get_option(CONF_GENERIC_CHARGER_SOC_ENTITY_2, ""),
+                description=(
+                    {"suggested_value": current_generic_soc_entity_2}
+                    if current_generic_soc_entity_2
+                    else None
+                ),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH,

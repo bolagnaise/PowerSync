@@ -423,6 +423,39 @@ def test_ev_charging_save_allows_clearing_generic_charger_entities():
         assert stale_guard not in method_source
 
 
+def test_ev_charging_generic_entity_fields_are_clearable_in_form_schema():
+    """Saved optional entities must be suggestions, not injected defaults."""
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_ev_charging")
+    entity_keys = {
+        "CONF_GENERIC_CHARGER_SWITCH_ENTITY",
+        "CONF_GENERIC_CHARGER_AMPS_ENTITY",
+        "CONF_GENERIC_CHARGER_STATUS_ENTITY",
+        "CONF_GENERIC_CHARGER_POWER_ENTITY",
+        "CONF_GENERIC_CHARGER_SOC_ENTITY",
+        "CONF_GENERIC_CHARGER_SOC_ENTITY_2",
+    }
+    markers = {
+        node.args[0].id: node
+        for node in ast.walk(method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "vol"
+        and node.func.attr == "Optional"
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id in entity_keys
+    }
+
+    assert markers.keys() == entity_keys
+    for key, marker in markers.items():
+        assert all(keyword.arg != "default" for keyword in marker.keywords), key
+        marker_source = ast.get_source_segment(source, marker)
+        assert marker_source is not None
+        assert '"suggested_value"' in marker_source, key
+
+
 def test_ev_charging_fallback_generic_soc_sensor_is_translated():
     for path in (STRINGS_PATH, TRANSLATIONS_PATH):
         data = json.loads(path.read_text())
