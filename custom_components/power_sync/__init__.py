@@ -9672,7 +9672,11 @@ class ProviderConfigView(HomeAssistantView):
                 entry.data.get(CONF_PRICE_SPIKE_EXPORT_THRESHOLD, DEFAULT_PRICE_SPIKE_EXPORT_THRESHOLD)
             )
 
-            # Add monitoring mode flag (applies to all providers)
+            # Add common control flags (apply to all providers)
+            config["auto_sync"] = entry.options.get(
+                CONF_AUTO_SYNC_ENABLED,
+                entry.data.get(CONF_AUTO_SYNC_ENABLED, True)
+            )
             config["monitoring_mode"] = entry.options.get(
                 CONF_MONITORING_MODE,
                 entry.data.get(CONF_MONITORING_MODE, False)
