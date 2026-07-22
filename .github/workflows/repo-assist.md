@@ -11,6 +11,7 @@ description: |
   - Nudges stale PRs waiting for author response
   - Takes the repository forward with proactive improvements
   - Maintains a persistent memory of work done and what remains
+  Authentication uses the per-run GitHub token through the `copilot-requests: write` permission; no Copilot PAT is required.
   Always polite, constructive, and mindful of the project's goals.
 
 on:
@@ -29,6 +30,7 @@ on:
     pull-requests: read
   steps:
     - id: check
+      continue-on-error: true
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
@@ -42,7 +44,18 @@ if: needs.pre_activation.outputs.check_result == 'success'
 
 timeout-minutes: 60
 
-permissions: read-all
+permissions:
+  actions: read
+  checks: read
+  contents: read
+  deployments: read
+  discussions: read
+  issues: read
+  packages: read
+  pull-requests: read
+  security-events: read
+  statuses: read
+  copilot-requests: write
 
 network:
   allowed:
