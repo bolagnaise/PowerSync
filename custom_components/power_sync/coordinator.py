@@ -7373,6 +7373,14 @@ class SolaxBatteryEnergyCoordinator(DataUpdateCoordinator):
     async def restore_normal(self) -> bool:
         return await self._controller.restore_normal()
 
+    def get_force_restore_state(self) -> dict[str, str]:
+        """Return SolaX pre-force values for integration-state persistence."""
+        return self._controller.get_force_restore_state()
+
+    def set_force_restore_state(self, state: dict[str, Any] | None) -> None:
+        """Restore SolaX pre-force values before a post-restart reissue."""
+        self._controller.set_force_restore_state(state)
+
     async def set_backup_reserve(self, percent: int) -> bool:
         return await self._controller.set_backup_reserve(percent)
 

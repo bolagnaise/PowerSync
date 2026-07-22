@@ -27,6 +27,16 @@ DISCREPANCY_ALERT_DAILY_MAX = 4
 AEMO_SETTLED_SYNC_DELAY_SECONDS = 5.0
 
 
+async def _run_optional_write_guard(
+    writer: Callable[[], Any],
+    guard_write: Callable[[Callable[[], Any]], Any] | None = None,
+) -> bool:
+    """Run one actuator attempt through its immediate write guard, if any."""
+    if guard_write is None:
+        return bool(await writer())
+    return bool(await guard_write(writer))
+
+
 def _optimizer_settings_groups() -> dict[str, Any]:
     """Return mobile metadata for grouped optimizer settings."""
     return optimizer_settings_groups()
@@ -25777,6 +25787,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "source": "user",
             }
 
+        if state_to_save and state_to_save.get("mode") in ("charge", "discharge"):
+            solax_coord = (
+                hass.data.get(DOMAIN, {})
+                .get(entry.entry_id, {})
+                .get("solax_coordinator")
+            )
+            get_restore_state = getattr(
+                solax_coord,
+                "get_force_restore_state",
+                None,
+            )
+            if callable(get_restore_state):
+                solax_restore_state = get_restore_state()
+                if solax_restore_state:
+                    state_to_save["solax_restore_state"] = solax_restore_state
+
         stored_data["force_mode_state"] = state_to_save
         await store.async_save(stored_data)
         if state_to_save:
@@ -25799,6 +25825,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if persisted_force_state.get("source") == "optimizer":
                 hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = False
             return
+
+        if mode in ("charge", "discharge"):
+            solax_coord = (
+                hass.data.get(DOMAIN, {})
+                .get(entry.entry_id, {})
+                .get("solax_coordinator")
+            )
+            set_restore_state = getattr(
+                solax_coord,
+                "set_force_restore_state",
+                None,
+            )
+            if callable(set_restore_state):
+                set_restore_state(persisted_force_state.get("solax_restore_state"))
 
         try:
             expires_at = datetime.fromisoformat(expires_at_str)
@@ -26364,6 +26404,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         *,
         reason: str,
         max_attempts: int = 3,
+        guard_write: Callable[[Callable[[], Any]], Any] | None = None,
     ) -> bool:
         from .coordinator import _parse_retry_after
 
@@ -26371,11 +26412,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         last_status: int | None = None
         last_text = ""
 
+        async def _authorize_operation_mode_attempt() -> bool:
+            return True
+
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
                 wait_time = retry_after_delay or (2 ** (attempt - 1))
                 retry_after_delay = None
                 await asyncio.sleep(wait_time)
+
+            if not await _run_optional_write_guard(
+                _authorize_operation_mode_attempt,
+                guard_write,
+            ):
+                _LOGGER.warning(
+                    "Tesla %s operation mode attempt %d/%d blocked by control guard for site %s",
+                    reason,
+                    attempt,
+                    max_attempts,
+                    site_id,
+                )
+                return False
 
             try:
                 async with session.post(
@@ -26492,6 +26549,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         *,
         reason: str,
         prefer_local: bool = True,
+        guard_write: Callable[[Callable[[], Any]], Any] | None = None,
     ) -> dict[str, list[str]]:
         """Apply Tesla operation mode locally first, then cloud-fallback per site."""
         from .const import CONF_POWERWALL_LOCAL_DIN
@@ -26544,12 +26602,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     headers,
                     mode,
                     reason=reason,
+                    guard_write=guard_write,
+                )
+
+            async def _guarded_local(transport) -> bool:
+                return await _run_optional_write_guard(
+                    lambda: _local(transport),
+                    guard_write,
                 )
 
             if await dispatch_powerwall_write(
                 hass,
                 entry,
-                local_call=_local,
+                local_call=_guarded_local,
                 cloud_call=_cloud,
                 label=f"{reason} operation mode",
                 timeout=15.0,
@@ -26570,14 +26635,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 provider,
                 entry.data.get(CONF_FLEET_API_BASE_URL),
             )
-            if await _tesla_force_set_operation_mode(
-                session,
-                api_base,
-                site_id,
-                headers,
-                mode,
-                reason=reason,
-            ):
+            async def _cloud_site() -> bool:
+                return await _tesla_force_set_operation_mode(
+                    session,
+                    api_base,
+                    site_id,
+                    headers,
+                    mode,
+                    reason=reason,
+                    guard_write=guard_write,
+                )
+
+            if await _cloud_site():
                 result["confirmed_sites"].append(site_id)
                 if site_id in result["accepted_sites"]:
                     result["accepted_sites"].remove(site_id)
@@ -32227,41 +32296,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error("Missing Tesla site ID or token for self-consumption mode")
                 return
 
-            session = async_get_clientsession(hass)
-            any_ok = False
-            for site_id, current_token, provider in site_configs:
-                headers = {
-                    "Authorization": f"Bearer {current_token}",
-                    "Content-Type": "application/json",
-                }
-                api_base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
+            async def _write_tesla_self_consumption() -> bool:
+                result = await _tesla_force_apply_operation_mode(
+                    site_configs,
+                    "self_consumption",
+                    reason="self-consumption",
+                    guard_write=_guarded_self_consumption_write,
+                )
+                return bool(result["confirmed_sites"])
 
-                async def _write_tesla_self_consumption() -> bool:
-                    async with session.post(
-                        f"{api_base}/api/1/energy_sites/{site_id}/operation",
-                        headers=headers,
-                        json={"default_real_mode": "self_consumption"},
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as response:
-                        if response.status == 200:
-                            _LOGGER.info(
-                                "Tesla site %s set to self_consumption mode",
-                                site_id,
-                            )
-                            return True
-                        text = await response.text()
-                        _LOGGER.warning(
-                            "Could not set self_consumption mode for site %s: %s - %s",
-                            site_id,
-                            response.status,
-                            text,
-                        )
-                        return False
-
-                if await _guarded_self_consumption_write(
-                    _write_tesla_self_consumption
-                ):
-                    any_ok = True
+            any_ok = await _write_tesla_self_consumption()
 
             if any_ok:
                 self_entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})

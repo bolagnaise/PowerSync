@@ -107,6 +107,51 @@ def test_force_mode_persistence_uses_setup_store_reference():
     assert "await store.async_load()" in function_source
 
 
+def test_solax_force_current_baseline_is_persisted_before_restart_reissue():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    persist_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "persist_force_mode_state"),
+    )
+    restore_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "restore_force_mode_from_persistence"),
+    )
+
+    assert persist_source is not None
+    assert restore_source is not None
+    assert "get_force_restore_state" in persist_source
+    assert 'state_to_save["solax_restore_state"]' in persist_source
+    assert "set_force_restore_state" in restore_source
+    assert 'persisted_force_state.get("solax_restore_state")' in restore_source
+    assert restore_source.index("set_force_restore_state") < restore_source.index(
+        "SERVICE_FORCE_DISCHARGE"
+    )
+    coordinator_source = COORDINATOR_PATH.read_text()
+    coordinator_tree = ast.parse(coordinator_source)
+    get_bridge = ast.get_source_segment(
+        coordinator_source,
+        _find_class_method(
+            coordinator_tree,
+            "SolaxBatteryEnergyCoordinator",
+            "get_force_restore_state",
+        ),
+    )
+    set_bridge = ast.get_source_segment(
+        coordinator_source,
+        _find_class_method(
+            coordinator_tree,
+            "SolaxBatteryEnergyCoordinator",
+            "set_force_restore_state",
+        ),
+    )
+    assert get_bridge is not None
+    assert set_bridge is not None
+    assert "self._controller.get_force_restore_state()" in get_bridge
+    assert "self._controller.set_force_restore_state(state)" in set_bridge
+
+
 def test_disabled_optimizer_self_heals_stale_idle_reserve_for_supported_batteries():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
@@ -966,9 +1011,82 @@ def test_tesla_self_consumption_clears_force_toggle_state():
     function_source = ast.get_source_segment(source, function)
 
     assert function_source is not None
-    assert 'json={"default_real_mode": "self_consumption"}' in function_source
+    assert "_tesla_force_apply_operation_mode(" in function_source
     assert 'pop("last_force_toggle_time", None)' in function_source
     assert 'pop("retoggle_attempted", None)' in function_source
+
+
+def test_tesla_self_consumption_uses_local_first_confirmed_mode_write():
+    """An accepted cloud write must not mask a Powerwall that stays exporting."""
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_set_self_consumption"),
+    )
+
+    assert function_source is not None
+    assert "_tesla_force_apply_operation_mode(" in function_source
+    assert '"self_consumption"' in function_source
+    assert 'reason="self-consumption"' in function_source
+    assert "guard_write=_guarded_self_consumption_write" in function_source
+    assert "confirmed_sites" in function_source
+    assert "session.post(" not in function_source
+
+
+def test_optional_write_guard_rechecks_before_cloud_fallback_attempt():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    helper_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "_run_optional_write_guard"),
+    )
+    apply_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "_tesla_force_apply_operation_mode"),
+    )
+    set_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "_tesla_force_set_operation_mode"),
+    )
+
+    assert helper_source is not None
+    assert apply_source is not None
+    assert set_source is not None
+    namespace: dict[str, object] = {}
+    exec(helper_source, namespace)
+    run_guarded = namespace["_run_optional_write_guard"]
+
+    async def scenario():
+        writes: list[str] = []
+        faulted = False
+
+        async def guard(writer):
+            if faulted:
+                return False
+            return await writer()
+
+        async def cloud_attempt_one():
+            nonlocal faulted
+            writes.append("cloud-1")
+            faulted = True
+            return False
+
+        async def cloud_attempt_two():
+            writes.append("cloud-2")
+            return True
+
+        assert not await run_guarded(cloud_attempt_one, guard)
+        assert not await run_guarded(cloud_attempt_two, guard)
+        return writes
+
+    assert asyncio.run(scenario()) == ["cloud-1"]
+    assert "local_call=_guarded_local" in apply_source
+    assert "cloud_call=_cloud" in apply_source
+    assert "guard_write=guard_write" in apply_source
+    guard_index = set_source.index("_run_optional_write_guard(")
+    post_index = set_source.index("async with session.post(")
+    assert set_source.index("for attempt in range(") < guard_index < post_index
 
 
 def test_self_consumption_service_is_timed_and_persisted():

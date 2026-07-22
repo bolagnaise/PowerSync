@@ -527,6 +527,7 @@ class SolaxBatteryController:
             )
             return True
 
+        self._save_force_time_states(("charge_current",))
         await self._set_number("charge_current", amps)
         await self._set_select("charger_use_mode", _MODE_MANUAL)
         await self._set_select("manual_mode_select", _MANUAL_CHARGE)
@@ -568,6 +569,7 @@ class SolaxBatteryController:
             )
             return True
 
+        self._save_force_time_states(("discharge_current",))
         await self._set_number("discharge_current", amps)
         await self._set_select("charger_use_mode", _MODE_MANUAL)
         await self._set_select("manual_mode_select", _MANUAL_DISCHARGE)
@@ -596,6 +598,7 @@ class SolaxBatteryController:
 
         await self._set_select("manual_mode_select", _MANUAL_STOP)
         await self._set_manual_mode_control(_MANUAL_CONTROL_OFF)
+        await self._restore_force_time_states()
         await self._set_select("charger_use_mode", _MODE_SELF_USE)
         _LOGGER.info("Solax restored to Self Use mode")
         return True
@@ -1071,7 +1074,29 @@ class SolaxBatteryController:
             state = self.hass.states.get(entity_id) if entity_id else None
             if state and state.state not in ("unknown", "unavailable", ""):
                 saved[key] = state.state
+            elif key == "charge_current":
+                saved[key] = str(self._max_charge_a)
+            elif key == "discharge_current":
+                saved[key] = str(self._max_discharge_a)
         self._saved_force_time_states = saved
+
+    def get_force_restore_state(self) -> dict[str, str]:
+        """Return the captured pre-force values for restart persistence."""
+        return dict(self._saved_force_time_states or {})
+
+    def set_force_restore_state(self, state: dict[str, Any] | None) -> None:
+        """Restore a validated pre-force snapshot before a restart reissue."""
+        if not isinstance(state, dict):
+            return
+        restored = {
+            key: str(value)
+            for key, value in state.items()
+            if key in _WRITE_ENTITIES
+            and isinstance(value, (str, int, float))
+            and str(value) not in ("", "unknown", "unavailable")
+        }
+        if restored:
+            self._saved_force_time_states = restored
 
     async def _restore_force_time_states(self) -> None:
         saved = self._saved_force_time_states or {}
