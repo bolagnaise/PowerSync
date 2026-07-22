@@ -1722,8 +1722,91 @@ def test_tesla_force_charge_enables_grid_charging_before_tariff_upload():
     )
     tariff_upload_index = function_source.index("send_tariff_to_tesla(")
     assert grid_enable_index < tariff_upload_index
-    assert "if not _tesla_force_result_all_confirmed(grid_result, site_configs):" in function_source
+    assert "grid_confirmed = _tesla_force_result_all_confirmed(" in function_source
+    assert 'source == "optimizer"' in function_source
+    assert "_tesla_force_result_all_optimizer_charge_safe(" in function_source
+    assert "if not grid_confirmed:" in function_source
     assert '"grid charging enable did not verify"' in function_source
+
+
+def test_tesla_manual_force_charge_and_force_discharge_keep_strict_verification():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    charge_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_charge"),
+    )
+    discharge_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_discharge"),
+    )
+
+    assert charge_source is not None
+    assert discharge_source is not None
+    assert (
+        'source == "optimizer"\n'
+        "                and _tesla_force_result_all_optimizer_charge_safe("
+        in charge_source
+    )
+    assert "_tesla_force_result_all_optimizer_charge_safe(" not in discharge_source
+    assert (
+        "if not _tesla_force_result_all_confirmed(grid_result, site_configs):"
+        in discharge_source
+    )
+
+
+def test_tesla_optimizer_charge_compatibility_requires_full_nonfailed_coverage():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(
+        tree,
+        "_tesla_force_result_all_optimizer_charge_safe",
+    )
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert 'result.get("confirmed_sites", [])' in function_source
+    assert 'result.get("field_absent_sites", [])' in function_source
+    assert 'result.get("failed_sites", [])' in function_source
+    assert "not expected.intersection(failed)" in function_source
+    assert "expected.issubset(confirmed.union(field_absent))" in function_source
+
+    namespace: dict[str, object] = {}
+    exec(textwrap.dedent(function_source), namespace)
+    compatibility_safe = namespace[
+        "_tesla_force_result_all_optimizer_charge_safe"
+    ]
+    sites = [("site-a", "token", "fleet"), ("site-b", "token", "fleet")]
+
+    assert compatibility_safe(
+        {
+            "confirmed_sites": ["site-a"],
+            "field_absent_sites": ["site-b"],
+            "failed_sites": [],
+        },
+        sites,
+    )
+    assert not compatibility_safe(
+        {
+            "confirmed_sites": ["site-a"],
+            "field_absent_sites": ["site-b"],
+            "failed_sites": ["site-b"],
+        },
+        sites,
+    )
+    assert not compatibility_safe(
+        {
+            "confirmed_sites": ["site-a"],
+            "field_absent_sites": [],
+            "failed_sites": [],
+        },
+        sites,
+    )
+
+    apply_function = _find_function(tree, "_tesla_force_apply_grid_charging")
+    apply_source = ast.get_source_segment(source, apply_function)
+    assert apply_source is not None
+    assert '"field_absent_sites": []' in apply_source
 
 
 def test_tesla_charge_kick_reenables_grid_charging_after_force_charge_bounce():
@@ -1736,6 +1819,8 @@ def test_tesla_charge_kick_reenables_grid_charging_after_force_charge_bounce():
     assert 'ensure_grid_charging = reason in {"force_charge", "backup_reserve_100"}' in function_source
     assert "async def _enable_grid_charging_after_bounce() -> bool" in function_source
     assert "await _tesla_force_apply_grid_charging(" in function_source
+    assert "and allow_optimizer_grid_field_absent" in function_source
+    assert 'and reason == "force_charge"' in function_source
     assert function_source.count("return await _enable_grid_charging_after_bounce()") >= 2
 
 

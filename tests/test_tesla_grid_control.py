@@ -97,6 +97,20 @@ def _site_info(enabled: bool) -> _Response:
     )
 
 
+def _site_info_without_grid_charging_field() -> _Response:
+    return _Response(
+        200,
+        {
+            "response": {
+                "components": {
+                    "grid_status": "SystemGridConnected",
+                },
+                "default_real_mode": "autonomous",
+            }
+        },
+    )
+
+
 async def _set(
     session: _Session,
     clock: _Clock,
@@ -149,6 +163,115 @@ def test_accepted_write_that_never_applies_is_not_reported_successful():
         is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
     )
     assert len(session.post_calls) == 1
+
+
+def test_accepted_write_with_repeated_field_absence_is_classified_separately():
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[_site_info_without_grid_charging_field() for _ in range(4)],
+    )
+
+    outcome = asyncio.run(_set(session, clock))
+
+    assert (
+        outcome.status
+        is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_FIELD_ABSENT
+    )
+    assert not outcome.applied
+    assert len(session.get_calls) == 4
+
+
+def test_field_absence_followed_by_desired_readback_is_applied():
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[_site_info_without_grid_charging_field(), _site_info(True)],
+    )
+
+    outcome = asyncio.run(_set(session, clock))
+
+    assert outcome.status is tesla_grid_control.TeslaGridWriteStatus.APPLIED
+
+
+def test_field_absence_followed_by_opposite_readback_stays_unconfirmed():
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[
+            _site_info_without_grid_charging_field(),
+            _site_info(False),
+            _site_info(False),
+            _site_info(False),
+        ],
+    )
+
+    outcome = asyncio.run(_set(session, clock))
+
+    assert (
+        outcome.status
+        is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
+    )
+
+
+def test_present_but_invalid_field_stays_unconfirmed():
+    clock = _Clock()
+    invalid = _Response(
+        200,
+        {
+            "response": {
+                "components": {
+                    "disallow_charge_from_grid_with_solar_installed": None
+                }
+            }
+        },
+    )
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[invalid, invalid, invalid, invalid],
+    )
+
+    outcome = asyncio.run(_set(session, clock))
+
+    assert (
+        outcome.status
+        is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
+    )
+
+
+def test_no_parseable_site_info_stays_unconfirmed():
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[_Response(200) for _ in range(4)],
+    )
+
+    outcome = asyncio.run(_set(session, clock))
+
+    assert (
+        outcome.status
+        is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
+    )
+
+
+def test_single_field_absent_read_amid_transport_failures_stays_unconfirmed():
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[
+            _site_info_without_grid_charging_field(),
+            _Response(503),
+            _Response(503),
+            _Response(503),
+        ],
+    )
+
+    outcome = asyncio.run(_set(session, clock))
+
+    assert (
+        outcome.status
+        is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
+    )
 
 
 def test_transient_post_is_retried_but_accepted_post_is_not_duplicated():
@@ -248,6 +371,42 @@ def test_generation_change_aborts_confirmation_without_another_write():
     assert len(session.get_calls) == 1
 
 
+def test_generation_change_after_field_absence_is_not_compatibility_success():
+    clock = _Clock()
+    current = True
+
+    async def sleep_and_supersede(seconds: float) -> None:
+        nonlocal current
+        await clock.sleep(seconds)
+        current = False
+
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[_site_info_without_grid_charging_field()],
+    )
+
+    outcome = asyncio.run(
+        tesla_grid_control.async_set_tesla_grid_charging_confirmed(
+            session,
+            "https://fleet-api.prd.na.vn.cloud.tesla.com",
+            "site-1",
+            {"Authorization": "Bearer token"},
+            True,
+            confirmation_deadline=4.0,
+            poll_offsets=(0.0, 1.0, 2.0),
+            sleep=sleep_and_supersede,
+            monotonic=clock.monotonic,
+            is_current=lambda: current,
+        )
+    )
+
+    assert (
+        outcome.status
+        is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
+    )
+    assert outcome.detail == "superseded"
+
+
 def test_grid_charging_state_extraction_accepts_nested_and_top_level_shapes():
     extract = tesla_grid_control.tesla_grid_charging_enabled_from_site_info
 
@@ -260,3 +419,19 @@ def test_grid_charging_state_extraction_accepts_nested_and_top_level_shapes():
     ) is True
     assert extract({"disallow_charge_from_grid_with_solar_installed": True}) is False
     assert extract({}) is None
+
+
+def test_grid_charging_field_presence_distinguishes_absent_from_invalid():
+    present = tesla_grid_control.tesla_grid_charging_field_present
+
+    assert present(
+        {
+            "components": {
+                "disallow_charge_from_grid_with_solar_installed": None
+            }
+        }
+    )
+    assert present(
+        {"disallow_charge_from_grid_with_solar_installed": "unsupported"}
+    )
+    assert not present({"components": {"grid_status": "SystemGridConnected"}})

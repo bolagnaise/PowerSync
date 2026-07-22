@@ -20645,7 +20645,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         return None
 
-    async def _tesla_charge_kick(reason: str) -> None:
+    async def _tesla_charge_kick(
+        reason: str,
+        *,
+        allow_optimizer_grid_field_absent: bool = False,
+    ) -> None:
         """Mode-bounce PW3 to force it to act on backup_reserve=100%.
 
         PW3 firmware can delay up to ~2 hours before acting on a
@@ -20706,6 +20710,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     result,
                     [(str(site_id), current_token, current_provider)],
                 )
+                if (
+                    not confirmed
+                    and allow_optimizer_grid_field_absent
+                    and reason == "force_charge"
+                ):
+                    confirmed = _tesla_force_result_all_optimizer_charge_safe(
+                        result,
+                        [(str(site_id), current_token, current_provider)],
+                    )
                 if confirmed:
                     _LOGGER.info(
                         "Charge kick (%s): confirmed grid charging is enabled",
@@ -26354,6 +26367,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         expected = {site_id for site_id, _token, _provider in site_configs}
         return bool(expected) and expected.issubset(set(result["confirmed_sites"]))
 
+    def _tesla_force_result_all_optimizer_charge_safe(
+        result: dict[str, list[str]],
+        site_configs: list[tuple[str, str, str]],
+    ) -> bool:
+        """Allow optimizer charge when Tesla omits only the readback field."""
+        expected = {site_id for site_id, _token, _provider in site_configs}
+        confirmed = set(result.get("confirmed_sites", []))
+        field_absent = set(result.get("field_absent_sites", []))
+        failed = set(result.get("failed_sites", []))
+        return (
+            bool(expected)
+            and not expected.intersection(failed)
+            and expected.issubset(confirmed.union(field_absent))
+        )
+
     async def _tesla_force_apply_operation_mode(
         site_configs: list[tuple[str, str, str]],
         mode: str,
@@ -26468,6 +26496,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         result: dict[str, list[str]] = {
             "confirmed_sites": [],
             "accepted_sites": [],
+            "field_absent_sites": [],
             "failed_sites": [],
         }
         remaining = list(site_configs)
@@ -26496,6 +26525,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             if outcome.applied:
                 return True
+            if (
+                outcome.status
+                is TeslaGridWriteStatus.ACCEPTED_FIELD_ABSENT
+            ):
+                if site_id not in result["accepted_sites"]:
+                    result["accepted_sites"].append(site_id)
+                if site_id not in result["field_absent_sites"]:
+                    result["field_absent_sites"].append(site_id)
             if (
                 outcome.status
                 is TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
@@ -26562,7 +26599,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if site_id in result["accepted_sites"]:
                     result["accepted_sites"].remove(site_id)
             else:
-                result["failed_sites"].append(site_id)
+                if site_id not in result["field_absent_sites"]:
+                    result["failed_sites"].append(site_id)
 
         for site_id, current_token, provider in remaining:
             if await _cloud_apply(site_id, current_token, provider):
@@ -26570,7 +26608,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if site_id in result["accepted_sites"]:
                     result["accepted_sites"].remove(site_id)
             else:
-                result["failed_sites"].append(site_id)
+                if site_id not in result["field_absent_sites"]:
+                    result["failed_sites"].append(site_id)
         return result
 
     async def _tesla_force_set_backup_reserve_cloud(
@@ -29785,7 +29824,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 reason="force charge",
                 is_current=lambda: _command_generation[0] == _restore_gen,
             )
-            if not _tesla_force_result_all_confirmed(grid_result, site_configs):
+            grid_confirmed = _tesla_force_result_all_confirmed(
+                grid_result,
+                site_configs,
+            )
+            if (
+                not grid_confirmed
+                and source == "optimizer"
+                and _tesla_force_result_all_optimizer_charge_safe(
+                    grid_result,
+                    site_configs,
+                )
+            ):
+                _LOGGER.warning(
+                    "Optimizer force charge proceeding because Tesla accepted "
+                    "grid charging but site_info omitted its readback field"
+                )
+                grid_confirmed = True
+            if not grid_confirmed:
                 if _command_generation[0] != _restore_gen:
                     _LOGGER.info(
                         "Force charge grid confirmation superseded; skipping stale cleanup"
@@ -29867,7 +29923,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
 
                 # Kick PW3 to ensure it starts charging immediately
-                hass.async_create_task(_tesla_charge_kick("force_charge"))
+                hass.async_create_task(
+                    _tesla_charge_kick(
+                        "force_charge",
+                        allow_optimizer_grid_field_absent=source == "optimizer",
+                    )
+                )
 
                 # Dispatch event for UI
                 async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {

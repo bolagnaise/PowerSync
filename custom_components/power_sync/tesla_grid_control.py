@@ -21,6 +21,7 @@ class TeslaGridWriteStatus(str, Enum):
     """Result of a Tesla grid-charging write and direct readback."""
 
     APPLIED = "applied"
+    ACCEPTED_FIELD_ABSENT = "accepted_field_absent"
     ACCEPTED_UNCONFIRMED = "accepted_unconfirmed"
     REJECTED = "rejected"
     TRANSPORT_ERROR = "transport_error"
@@ -71,6 +72,18 @@ def tesla_grid_charging_enabled_from_site_info(
         )
     parsed = _optional_bool(disallow)
     return None if parsed is None else not parsed
+
+
+def tesla_grid_charging_field_present(
+    site_info: dict[str, Any],
+) -> bool:
+    """Return whether site_info includes Tesla's grid-charging field."""
+    field = "disallow_charge_from_grid_with_solar_installed"
+    components = site_info.get("components")
+    return (
+        isinstance(components, dict)
+        and field in components
+    ) or field in site_info
 
 
 async def _response_json(response: Any) -> dict[str, Any] | None:
@@ -194,6 +207,9 @@ async def async_set_tesla_grid_charging_confirmed(
     accepted_at = monotonic()
     deadline_at = accepted_at + max(0.0, confirmation_deadline)
     read_attempts = 0
+    valid_site_info_reads = 0
+    field_absent_reads = 0
+    invalid_site_info_read = False
     for offset in poll_offsets:
         if is_current is not None and not is_current():
             return TeslaGridWriteOutcome(
@@ -240,6 +256,12 @@ async def async_set_tesla_grid_charging_confirmed(
                         if isinstance(site_info, dict)
                         else None
                     )
+                    if isinstance(site_info, dict):
+                        valid_site_info_reads += 1
+                        if not tesla_grid_charging_field_present(site_info):
+                            field_absent_reads += 1
+                    else:
+                        invalid_site_info_read = True
                     if observed is bool(enabled):
                         latency = monotonic() - accepted_at
                         _LOGGER.info(
@@ -264,6 +286,31 @@ async def async_set_tesla_grid_charging_confirmed(
                     )
         except (asyncio.TimeoutError, aiohttp.ClientError):
             continue
+
+    if is_current is not None and not is_current():
+        return TeslaGridWriteOutcome(
+            TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED,
+            last_status,
+            "superseded",
+        )
+
+    if (
+        valid_site_info_reads >= 2
+        and field_absent_reads == valid_site_info_reads
+        and not invalid_site_info_read
+    ):
+        _LOGGER.warning(
+            "Tesla accepted grid charging %s for site %s but %d direct site_info "
+            "readback(s) omitted the grid-charging field",
+            "enable" if enabled else "disable",
+            site_id,
+            valid_site_info_reads,
+        )
+        return TeslaGridWriteOutcome(
+            TeslaGridWriteStatus.ACCEPTED_FIELD_ABSENT,
+            last_status,
+            "direct site_info readback omitted the grid-charging field",
+        )
 
     _LOGGER.warning(
         "Tesla accepted grid charging %s for site %s but direct readback did not confirm within %.1fs",
