@@ -93,18 +93,29 @@ safe-outputs:
     draft: true
     title-prefix: "chore(repo-assist): "
     labels: [automation, repo-assist]
-    protected-files: fallback-to-issue
+    protected-files:
+      policy: fallback-to-issue
+      exclude:
+      - CHANGELOG.md
     max: 4
   push-to-pull-request-branch:
     target: "*"
     required-title-prefix: "chore(repo-assist): "
     required-labels: [repo-assist]
     max: 4
-    protected-files: fallback-to-issue
+    protected-files:
+      policy: fallback-to-issue
+      exclude:
+      - CHANGELOG.md
   create-issue:
     title-prefix: "[repo-assist] "
     labels: [automation, repo-assist]
     max: 4
+  close-issue:
+    target: "*"
+    required-title-prefix: "[repo-assist] "
+    required-labels: [automation, repo-assist]
+    max: 1
   update-issue:
     target: "*"
     required-title-prefix: "[repo-assist] "
