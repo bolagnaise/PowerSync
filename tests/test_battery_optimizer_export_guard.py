@@ -255,6 +255,236 @@ def test_grid_charge_soc_cap_caps_unreachable_deadline_without_solar(
     assert result.grid_import_w[3] == pytest.approx(3000.0)
 
 
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_charge_by_time_deadline_stays_active_when_starting_at_target(
+    battery_optimizer_module, monkeypatch, backend
+):
+    """Starting at the target must not allow SOC to drain below it by deadline."""
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=0.65,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.0
+    optimizer.pre_window_slot = 2
+
+    if backend == "highs":
+        if not battery_optimizer_module.HIGHS_AVAILABLE:
+            pytest.skip("requires HiGHS LP solver")
+    else:
+        monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
+
+    result = optimizer.optimize(
+        import_prices=[1.00, 0.05, 0.10],
+        export_prices=[0.0] * 3,
+        solar_forecast=[0.0] * 3,
+        load_forecast=[1.0, 0.0, 1.0],
+        current_soc=1.0,
+        allow_battery_export=[False] * 3,
+        block_battery_charge=[False] * 3,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 3,
+    )
+
+    assert result.feasible is True
+    assert result.solver_used == backend
+    assert result.schedule.actions[1].soc >= 0.995 - 1e-4
+    assert result.schedule.actions[2].soc < result.schedule.actions[1].soc
+
+
+def test_greedy_charge_by_time_preserves_rolling_target_margin(
+    battery_optimizer_module, monkeypatch
+):
+    """A rolling fallback solve just below target must not drop the deadline."""
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=0.65,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.0
+    optimizer.pre_window_slot = 2
+
+    result = optimizer.optimize(
+        import_prices=[1.00, 0.05, 0.10],
+        export_prices=[0.0] * 3,
+        solar_forecast=[0.0] * 3,
+        load_forecast=[1.0, 0.0, 1.0],
+        current_soc=0.999,
+        allow_battery_export=[False] * 3,
+        block_battery_charge=[False] * 3,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 3,
+    )
+
+    assert result.solver_used == "greedy"
+    assert result.schedule.actions[1].soc >= 0.9988
+    assert result.schedule.actions[0].battery_discharge_w == pytest.approx(0.0)
+
+
+def test_greedy_charge_by_time_allows_solar_refill_before_deadline(
+    battery_optimizer_module, monkeypatch
+):
+    """The fallback may self-consume when planned solar restores the target."""
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=1.0,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.0
+    optimizer.pre_window_slot = 2
+
+    result = optimizer.optimize(
+        import_prices=[0.50] * 3,
+        export_prices=[0.0] * 3,
+        solar_forecast=[0.0, 1.0, 0.0],
+        load_forecast=[1.0, 0.0, 1.0],
+        current_soc=1.0,
+        allow_battery_export=[False] * 3,
+        block_battery_charge=[False] * 3,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 3,
+    )
+
+    assert result.solver_used == "greedy"
+    assert result.schedule.actions[0].action == "self_consumption"
+    assert result.schedule.actions[0].soc == pytest.approx(0.9)
+    assert result.schedule.actions[1].soc >= 0.995 - 1e-4
+
+
+def test_greedy_deadline_solar_projection_respects_charge_rate(
+    battery_optimizer_module, monkeypatch
+):
+    """Forecast solar cannot refill faster than the battery charge limit."""
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=1000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=1.0,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.0
+    optimizer.pre_window_slot = 2
+
+    result = optimizer.optimize(
+        import_prices=[0.50] * 3,
+        export_prices=[0.0] * 3,
+        solar_forecast=[0.0, 10.0, 0.0],
+        load_forecast=[5.0, 0.0, 0.0],
+        current_soc=1.0,
+        allow_battery_export=[False] * 3,
+        block_battery_charge=[False] * 3,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 3,
+    )
+
+    assert result.solver_used == "greedy"
+    assert result.schedule.actions[1].soc >= 0.995 - 1e-4
+
+
+def test_greedy_deadline_solar_ignores_disallowed_export_price(
+    battery_optimizer_module, monkeypatch
+):
+    """A high FiT cannot suppress refill when battery export is disabled."""
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=1.0,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.0
+    optimizer.pre_window_slot = 2
+
+    result = optimizer.optimize(
+        import_prices=[0.50] * 3,
+        export_prices=[0.0, 1.0, 0.0],
+        solar_forecast=[0.0, 1.0, 0.0],
+        load_forecast=[1.0, 0.0, 1.0],
+        current_soc=1.0,
+        allow_battery_export=[False] * 3,
+        block_battery_charge=[False] * 3,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 3,
+    )
+
+    assert result.solver_used == "greedy"
+    assert result.schedule.actions[0].action == "self_consumption"
+    assert result.schedule.actions[1].soc >= 0.995 - 1e-4
+
+
+def test_greedy_deadline_clamp_keeps_idle_flows_consistent(
+    battery_optimizer_module, monkeypatch
+):
+    """A clipped export must not leave discharge flow attached to IDLE."""
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=0.65,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_soc_target = 1.0
+    optimizer.pre_window_slot = 2
+
+    result = optimizer.optimize(
+        import_prices=[0.30] * 3,
+        export_prices=[1.00, 0.0, 0.0],
+        solar_forecast=[0.0] * 3,
+        load_forecast=[1.0, 0.0, 1.0],
+        current_soc=1.0,
+        allow_battery_export=[True, False, False],
+        block_battery_charge=[False] * 3,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 3,
+    )
+
+    assert result.solver_used == "greedy"
+    assert result.schedule.actions[0].action == "idle"
+    assert result.schedule.actions[0].battery_discharge_w == pytest.approx(0.0)
+    assert result.grid_import_w[0] == pytest.approx(1000.0)
+
+
 def test_grid_charge_soc_cap_reopens_after_export_before_charge_by_time_deadline(
     battery_optimizer_module,
 ):

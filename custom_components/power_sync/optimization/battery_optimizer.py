@@ -2650,7 +2650,7 @@ class BatteryOptimizer:
         if pre_window_boundary is not None and pre_window_boundary > 0:
             if (
                 pre_window_effective_target is not None
-                and pre_window_effective_target > soc_0
+                and pre_window_effective_target > 0.0
             ):
                 A_ub[len(b_ub), energy_var(pre_window_boundary)] = -1.0
                 b_ub.append(-pre_window_effective_target * cap)
@@ -2665,7 +2665,7 @@ class BatteryOptimizer:
                 )
             else:
                 # Keep A_ub row count aligned with b_ub when the pre-window
-                # request is already satisfied by current SOC.
+                # request has no positive effective deadline target.
                 b_ub.append(0.0)
 
         solar_prefill_ceilings = self._pre_window_solar_prefill_ceilings(
@@ -4398,6 +4398,111 @@ class BatteryOptimizer:
         # physically available now so the emitted schedule — and the grid flows
         # / predicted cost derived from it — cannot overcharge a full battery
         # or discharge energy that is not there.
+        pre_window_deadline = None
+        pre_window_effective_target = None
+        if (
+            allow_grid_charge
+            and self.pre_window_slot is not None
+            and 0 < self.pre_window_slot <= n
+            and self.pre_window_soc_target > 0.0
+        ):
+            pre_window_deadline = self.pre_window_slot
+
+            def _deadline_charge_soc(
+                start_idx: int,
+                start_soc: float,
+                *,
+                planned_only: bool,
+            ) -> float:
+                """Project physically available or already planned deadline charge."""
+                projected_soc = start_soc
+                for future_idx in range(start_idx, pre_window_deadline):
+                    priority_export_slot = _priority_export_slot(future_idx)
+                    export_profitable_slot = (
+                        allow_battery_export[future_idx]
+                        and not below_optimizer_reserve
+                        and _economic_export_slot(future_idx)
+                    )
+                    future_self_consumption_value = (
+                        self._has_future_self_consumption_value(
+                            future_idx,
+                            n,
+                            import_prices,
+                            solar,
+                            load,
+                        )
+                    )
+                    if (
+                        block_battery_charge[future_idx]
+                        or priority_export_slot
+                        or (
+                            export_profitable_slot
+                            and not future_self_consumption_value
+                        )
+                    ):
+                        continue
+
+                    solar_surplus_kw = max(
+                        0.0,
+                        solar[future_idx] - load[future_idx],
+                    )
+                    if planned_only:
+                        planned_charge_kw, planned_discharge_kw = actions.get(
+                            future_idx,
+                            (0.0, 0.0),
+                        )
+                        charge_limit_kw = (
+                            0.0
+                            if planned_discharge_kw > 0.0
+                            else min(
+                                self.max_charge_kw,
+                                max(planned_charge_kw, solar_surplus_kw),
+                            )
+                        )
+                    else:
+                        charge_limit_kw = self._charge_limit_kw(
+                            load[future_idx],
+                            solar[future_idx],
+                            allow_grid_charge
+                            and grid_charge_allowed[future_idx],
+                        )
+
+                    charge_limit_kw = min(
+                        charge_limit_kw,
+                        max(
+                            0.0,
+                            (1.0 - projected_soc) * cap / (eff * dt),
+                        ),
+                    )
+                    solar_charge_kw = min(charge_limit_kw, solar_surplus_kw)
+                    grid_charge_kw = max(
+                        0.0,
+                        charge_limit_kw - solar_charge_kw,
+                    )
+                    if grid_charge_cap_active:
+                        grid_charge_kw = min(
+                            grid_charge_kw,
+                            max(0.0, grid_charge_soc_cap - projected_soc)
+                            * cap
+                            / max(eff * dt, 1e-9),
+                        )
+                    projected_soc += (
+                        solar_charge_kw + grid_charge_kw
+                    ) * eff * dt / cap
+                    projected_soc = min(1.0, projected_soc)
+                return projected_soc
+
+            max_reachable = _deadline_charge_soc(0, soc_0, planned_only=False)
+            reachability_margin = (
+                PRE_WINDOW_REACHABLE_TARGET_MARGIN_SOC
+                if self.pre_window_soc_target <= max_reachable + 1e-9
+                else PRE_WINDOW_REACHABILITY_MARGIN_SOC
+            )
+            pre_window_effective_target = min(
+                self.pre_window_soc_target,
+                max_reachable - reachability_margin,
+            )
+
         soc = soc_0
         for t in range(n):
             max_grid_export_kw = _max_grid_export_kw(t)
@@ -4426,10 +4531,44 @@ class BatteryOptimizer:
                         optimizer_reserve,
                         self._configured_export_reserve_floor_for_range(t, t + 1),
                     )
+            original_discharge_kw = discharge_kw
+            if (
+                pre_window_effective_target is not None
+                and pre_window_deadline is not None
+                and t < pre_window_deadline
+            ):
+                soc_after_charge = min(
+                    1.0,
+                    soc + charge_kw * eff * dt / cap,
+                )
+                low_soc = discharge_floor
+                high_soc = soc_after_charge
+                for _ in range(24):
+                    candidate_soc = (low_soc + high_soc) / 2.0
+                    if (
+                        _deadline_charge_soc(
+                            t + 1,
+                            candidate_soc,
+                            planned_only=True,
+                        )
+                        >= pre_window_effective_target
+                    ):
+                        high_soc = candidate_soc
+                    else:
+                        low_soc = candidate_soc
+                discharge_floor = max(discharge_floor, high_soc)
             max_discharge_room_kw = max(
                 0.0, (soc - discharge_floor) * cap * eff / dt
             )
             discharge_kw = min(discharge_kw, max_discharge_room_kw)
+            if (
+                discharge_kw + 1e-6 < original_discharge_kw
+                and discharge_kw
+                <= max(0.0, net_load) + ACTION_THRESHOLD_W / 1000.0
+            ):
+                # A clipped natural-use discharge is not an executable partial
+                # mode; emit a zero-discharge idle candidate instead.
+                discharge_kw = 0.0
 
             battery_charge[t] = charge_kw
             battery_discharge[t] = discharge_kw
