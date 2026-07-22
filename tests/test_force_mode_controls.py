@@ -1724,7 +1724,7 @@ def test_tesla_force_charge_enables_grid_charging_before_tariff_upload():
     assert grid_enable_index < tariff_upload_index
     assert "grid_confirmed = _tesla_force_result_all_confirmed(" in function_source
     assert 'source == "optimizer"' in function_source
-    assert "_tesla_force_result_all_optimizer_charge_safe(" in function_source
+    assert "_tesla_force_result_all_grid_field_absent_safe(" in function_source
     assert "if not grid_confirmed:" in function_source
     assert '"grid charging enable did not verify"' in function_source
 
@@ -1745,22 +1745,22 @@ def test_tesla_manual_force_charge_and_force_discharge_keep_strict_verification(
     assert discharge_source is not None
     assert (
         'source == "optimizer"\n'
-        "                and _tesla_force_result_all_optimizer_charge_safe("
+        "                and _tesla_force_result_all_grid_field_absent_safe("
         in charge_source
     )
-    assert "_tesla_force_result_all_optimizer_charge_safe(" not in discharge_source
+    assert "_tesla_force_result_all_grid_field_absent_safe(" not in discharge_source
     assert (
         "if not _tesla_force_result_all_confirmed(grid_result, site_configs):"
         in discharge_source
     )
 
 
-def test_tesla_optimizer_charge_compatibility_requires_full_nonfailed_coverage():
+def test_tesla_charge_compatibility_requires_full_nonfailed_coverage():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
     function = _find_function(
         tree,
-        "_tesla_force_result_all_optimizer_charge_safe",
+        "_tesla_force_result_all_grid_field_absent_safe",
     )
     function_source = ast.get_source_segment(source, function)
 
@@ -1774,7 +1774,7 @@ def test_tesla_optimizer_charge_compatibility_requires_full_nonfailed_coverage()
     namespace: dict[str, object] = {}
     exec(textwrap.dedent(function_source), namespace)
     compatibility_safe = namespace[
-        "_tesla_force_result_all_optimizer_charge_safe"
+        "_tesla_force_result_all_grid_field_absent_safe"
     ]
     sites = [("site-a", "token", "fleet"), ("site-b", "token", "fleet")]
 
@@ -1782,6 +1782,14 @@ def test_tesla_optimizer_charge_compatibility_requires_full_nonfailed_coverage()
         {
             "confirmed_sites": ["site-a"],
             "field_absent_sites": ["site-b"],
+            "failed_sites": [],
+        },
+        sites,
+    )
+    assert compatibility_safe(
+        {
+            "confirmed_sites": [],
+            "field_absent_sites": ["site-a", "site-b"],
             "failed_sites": [],
         },
         sites,
@@ -1809,6 +1817,93 @@ def test_tesla_optimizer_charge_compatibility_requires_full_nonfailed_coverage()
     assert '"field_absent_sites": []' in apply_source
 
 
+def test_tesla_backup_reserve_charge_kick_explicitly_opts_in_without_relaxing_manual_force_charge():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    reserve_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_set_backup_reserve"),
+    )
+    charge_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_charge"),
+    )
+
+    assert reserve_source is not None
+    assert charge_source is not None
+    reserve_100_branch = reserve_source.split("if percent == 100:", 1)[1]
+    reserve_100_branch = reserve_100_branch.split("except Exception", 1)[0]
+    assert '"backup_reserve_100"' in reserve_100_branch
+    assert "allow_grid_field_absent_compatibility=True" in reserve_100_branch
+    assert (
+        'allow_grid_field_absent_compatibility=source == "optimizer"'
+        in charge_source
+    )
+
+
+def test_tesla_charge_kick_retry_is_generation_guarded_and_direct_controls_supersede_it():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    kick_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "_tesla_charge_kick"),
+    )
+
+    assert kick_source is not None
+    assert "def _charge_kick_is_current() -> bool:" in kick_source
+    assert kick_source.count("if not _charge_kick_is_current():") >= 4
+    assert "def _charge_kick_mode_owner_is_current() -> bool:" in kick_source
+    assert kick_source.count(
+        "if not _charge_kick_mode_owner_is_current():"
+    ) >= 4
+    assert "_schedule_tesla_charge_kick(" in source
+
+    for handler_name in (
+        "handle_set_backup_reserve",
+        "handle_set_operation_mode",
+        "handle_set_grid_charging",
+    ):
+        handler_source = ast.get_source_segment(
+            source,
+            _find_function(tree, handler_name),
+        )
+        assert handler_source is not None
+        supersede_index = handler_source.index("_supersede_tesla_charge_kick(")
+        first_await_index = handler_source.index("await ")
+        assert supersede_index < first_await_index
+
+    operation_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_set_operation_mode"),
+    )
+    assert operation_source is not None
+    assert "owns_operation_mode=True" in operation_source
+
+
+def test_tesla_backup_reserve_kick_cannot_adopt_a_newer_force_generation():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    reserve_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_set_backup_reserve"),
+    )
+
+    assert reserve_source is not None
+    capture_index = reserve_source.index(
+        "backup_reserve_command_generation = _command_generation[0]"
+    )
+    first_await_index = reserve_source.index("await ")
+    schedule_index = reserve_source.index('_schedule_tesla_charge_kick(')
+    assert capture_index < first_await_index < schedule_index
+    reserve_100_branch = reserve_source.split("if percent == 100:", 1)[1]
+    reserve_100_branch = reserve_100_branch.split("except Exception", 1)[0]
+    assert (
+        "and _command_generation[0]\n"
+        "                            == backup_reserve_command_generation"
+        in reserve_100_branch
+    )
+
+
 def test_tesla_charge_kick_reenables_grid_charging_after_force_charge_bounce():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
@@ -1819,8 +1914,8 @@ def test_tesla_charge_kick_reenables_grid_charging_after_force_charge_bounce():
     assert 'ensure_grid_charging = reason in {"force_charge", "backup_reserve_100"}' in function_source
     assert "async def _enable_grid_charging_after_bounce() -> bool" in function_source
     assert "await _tesla_force_apply_grid_charging(" in function_source
-    assert "and allow_optimizer_grid_field_absent" in function_source
-    assert 'and reason == "force_charge"' in function_source
+    assert "and allow_grid_field_absent_compatibility" in function_source
+    assert 'and reason in {"force_charge", "backup_reserve_100"}' in function_source
     assert function_source.count("return await _enable_grid_charging_after_bounce()") >= 2
 
 

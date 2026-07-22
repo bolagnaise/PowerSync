@@ -20648,7 +20648,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _tesla_charge_kick(
         reason: str,
         *,
-        allow_optimizer_grid_field_absent: bool = False,
+        allow_grid_field_absent_compatibility: bool = False,
+        kick_generation: int,
+        command_generation: int,
+        operation_generation: int,
     ) -> None:
         """Mode-bounce PW3 to force it to act on backup_reserve=100%.
 
@@ -20660,6 +20663,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         Args:
             reason: Short label for log messages (e.g. "force_charge", "backup_reserve_100").
         """
+        def _charge_kick_is_current() -> bool:
+            return (
+                _tesla_charge_kick_generation[0] == kick_generation
+                and _command_generation[0] == command_generation
+                and _tesla_operation_generation[0] == operation_generation
+            )
+
+        def _charge_kick_mode_owner_is_current() -> bool:
+            """Keep restoring autonomous unless a newer mode owner took over."""
+            return (
+                _command_generation[0] == command_generation
+                and _tesla_operation_generation[0] == operation_generation
+            )
+
+        if not _charge_kick_is_current():
+            _LOGGER.debug("Skipping superseded charge kick (%s)", reason)
+            return
+
         # Skip charge kick during suspected calibration
         _ck_entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         if _ck_entry_data.get("calibration_suspected"):
@@ -20669,6 +20690,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             # --- Pre-check: already charging? ---
             status = await get_live_status()
+            if not _charge_kick_is_current():
+                return
             if status and status.get("battery_power") is not None:
                 bp = status["battery_power"]
                 if bp < -200:
@@ -20695,31 +20718,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Content-Type": "application/json",
             }
             ensure_grid_charging = reason in {"force_charge", "backup_reserve_100"}
-            kick_generation = _command_generation[0]
 
             async def _enable_grid_charging_after_bounce() -> bool:
+                if not _charge_kick_is_current():
+                    return False
                 if not ensure_grid_charging:
                     return True
                 result = await _tesla_force_apply_grid_charging(
                     [(str(site_id), current_token, current_provider)],
                     True,
                     reason=f"charge kick ({reason})",
-                    is_current=lambda: _command_generation[0] == kick_generation,
+                    is_current=_charge_kick_is_current,
                 )
                 confirmed = _tesla_force_result_all_confirmed(
                     result,
                     [(str(site_id), current_token, current_provider)],
                 )
+                field_absent_compatibility = False
                 if (
                     not confirmed
-                    and allow_optimizer_grid_field_absent
-                    and reason == "force_charge"
+                    and allow_grid_field_absent_compatibility
+                    and reason in {"force_charge", "backup_reserve_100"}
                 ):
-                    confirmed = _tesla_force_result_all_optimizer_charge_safe(
-                        result,
-                        [(str(site_id), current_token, current_provider)],
+                    field_absent_compatibility = (
+                        _tesla_force_result_all_grid_field_absent_safe(
+                            result,
+                            [(str(site_id), current_token, current_provider)],
+                        )
                     )
-                if confirmed:
+                    confirmed = field_absent_compatibility
+                if field_absent_compatibility:
+                    _LOGGER.warning(
+                        "Charge kick (%s): Tesla accepted grid charging but "
+                        "the readback field is unavailable; continuing to "
+                        "charging verification",
+                        reason,
+                    )
+                elif confirmed:
                     _LOGGER.info(
                         "Charge kick (%s): confirmed grid charging is enabled",
                         reason,
@@ -20731,6 +20766,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 Returns True if autonomous mode was verified.
                 """
+                if not _charge_kick_is_current():
+                    return False
                 # Switch to self_consumption
                 async with session.post(
                     f"{api_base}/api/1/energy_sites/{site_id}/operation",
@@ -20748,11 +20785,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         )
                         return False
 
+                if not _charge_kick_mode_owner_is_current():
+                    return False
                 await asyncio.sleep(5)
+                if not _charge_kick_mode_owner_is_current():
+                    return False
 
                 # Switch back to autonomous (3 retries with verification)
                 for attempt in range(3):
                     try:
+                        if not _charge_kick_mode_owner_is_current():
+                            return False
                         async with session.post(
                             f"{api_base}/api/1/energy_sites/{site_id}/operation",
                             headers=headers,
@@ -20771,6 +20814,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                         # Verify mode actually changed
                         await asyncio.sleep(2)
+                        if not _charge_kick_mode_owner_is_current():
+                            return False
                         async with session.get(
                             f"{api_base}/api/1/energy_sites/{site_id}/site_info",
                             headers=headers,
@@ -20801,6 +20846,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                     if attempt < 2:
                         await asyncio.sleep(3)
+                        if not _charge_kick_mode_owner_is_current():
+                            return False
 
                 return False
 
@@ -20808,7 +20855,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info("Charge kick (%s): mode bounce starting", reason)
             bounce_ok = await _mode_bounce()
             if not bounce_ok:
-                if _command_generation[0] != kick_generation:
+                if not _charge_kick_is_current():
                     _LOGGER.info(
                         "Charge kick (%s) superseded during confirmation; skipping stale cleanup",
                         reason,
@@ -20843,6 +20890,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 retry_bounce_done = False
                 for poll in range(5):
                     await asyncio.sleep(60)
+                    if not _charge_kick_is_current():
+                        _LOGGER.debug(
+                            "Charge kick verification (%s) superseded", reason
+                        )
+                        return
                     try:
                         poll_status = await get_live_status()
                         if poll_status and poll_status.get("battery_power") is not None:
@@ -20871,10 +20923,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             )
                             retry_bounce_done = True
                             await _mode_bounce()
+                            if not _charge_kick_is_current():
+                                return
 
                     except Exception as e:
                         _LOGGER.debug("Charge kick verification poll error: %s", e)
 
+                if not _charge_kick_is_current():
+                    return
                 _LOGGER.error(
                     "Charge kick verification (%s): battery did NOT start charging within 5 minutes",
                     reason,
@@ -25448,6 +25504,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Together they close a race where a previous command's expiry timer is
     # already dequeued in asyncio by the time cancel() is called.
     _command_generation = [0]  # mutable list so inner functions share one counter
+    _tesla_charge_kick_generation = [0]
+    _tesla_operation_generation = [0]
+
+    def _supersede_tesla_charge_kick(
+        reason: str = "",
+        *,
+        owns_operation_mode: bool = False,
+    ) -> int:
+        """Invalidate pending Tesla charge-kick work before a newer command."""
+        _tesla_charge_kick_generation[0] += 1
+        if owns_operation_mode:
+            _tesla_operation_generation[0] += 1
+        if reason:
+            _LOGGER.debug("Superseding pending Tesla charge kick: %s", reason)
+        return _tesla_charge_kick_generation[0]
+
+    def _schedule_tesla_charge_kick(
+        reason: str,
+        *,
+        allow_grid_field_absent_compatibility: bool = False,
+    ) -> None:
+        """Schedule a charge kick with synchronously captured command tokens."""
+        kick_generation = _supersede_tesla_charge_kick(f"schedule {reason}")
+        command_generation = _command_generation[0]
+        operation_generation = _tesla_operation_generation[0]
+        hass.async_create_task(
+            _tesla_charge_kick(
+                reason,
+                allow_grid_field_absent_compatibility=(
+                    allow_grid_field_absent_compatibility
+                ),
+                kick_generation=kick_generation,
+                command_generation=command_generation,
+                operation_generation=operation_generation,
+            )
+        )
 
     def _cancel_all_force_timers(reason: str = "") -> None:
         """Cancel all pending force-mode expiry timers.
@@ -26367,11 +26459,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         expected = {site_id for site_id, _token, _provider in site_configs}
         return bool(expected) and expected.issubset(set(result["confirmed_sites"]))
 
-    def _tesla_force_result_all_optimizer_charge_safe(
+    def _tesla_force_result_all_grid_field_absent_safe(
         result: dict[str, list[str]],
         site_configs: list[tuple[str, str, str]],
     ) -> bool:
-        """Allow optimizer charge when Tesla omits only the readback field."""
+        """Allow opted-in charge paths when Tesla omits only the readback field."""
         expected = {site_id for site_id, _token, _provider in site_configs}
         confirmed = set(result.get("confirmed_sites", []))
         field_absent = set(result.get("field_absent_sites", []))
@@ -29831,7 +29923,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if (
                 not grid_confirmed
                 and source == "optimizer"
-                and _tesla_force_result_all_optimizer_charge_safe(
+                and _tesla_force_result_all_grid_field_absent_safe(
                     grid_result,
                     site_configs,
                 )
@@ -29923,11 +30015,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
 
                 # Kick PW3 to ensure it starts charging immediately
-                hass.async_create_task(
-                    _tesla_charge_kick(
-                        "force_charge",
-                        allow_optimizer_grid_field_absent=source == "optimizer",
-                    )
+                _schedule_tesla_charge_kick(
+                    "force_charge",
+                    allow_grid_field_absent_compatibility=source == "optimizer",
                 )
 
                 # Dispatch event for UI
@@ -32309,6 +32399,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return
 
+        backup_reserve_kick_generation = _supersede_tesla_charge_kick(
+            "set backup reserve"
+        )
+        backup_reserve_command_generation = _command_generation[0]
         _LOGGER.info(f"🔋 Setting backup reserve to {percent}%")
 
         # Check if this is a SigEnergy system
@@ -32663,7 +32757,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _tesla_coord_for_cache.invalidate_site_info_cache()
                     await refresh_powerwall_local_after_settings_write("set_backup_reserve")
                     if percent == 100:
-                        hass.async_create_task(_tesla_charge_kick("backup_reserve_100"))
+                        if (
+                            _tesla_charge_kick_generation[0]
+                            == backup_reserve_kick_generation
+                            and _command_generation[0]
+                            == backup_reserve_command_generation
+                        ):
+                            _schedule_tesla_charge_kick(
+                                "backup_reserve_100",
+                                allow_grid_field_absent_compatibility=True,
+                            )
 
             except Exception as e:
                 _LOGGER.error(f"Error setting Tesla backup reserve: {e}", exc_info=True)
@@ -32724,6 +32827,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return
 
+        _supersede_tesla_charge_kick(
+            "set operation mode",
+            owns_operation_mode=True,
+        )
         _LOGGER.info(f"⚙️ Setting operation mode to {mode}")
 
         from .const import CONF_POWERWALL_LOCAL_DIN
@@ -33193,6 +33300,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return {"success": False, "error": "blocked by monitoring mode"}
 
+        _supersede_tesla_charge_kick("set grid charging")
         _LOGGER.info(f"🔌 Setting grid charging to {'enabled' if enabled else 'disabled'}")
 
         try:

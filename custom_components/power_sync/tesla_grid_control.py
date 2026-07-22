@@ -86,6 +86,37 @@ def tesla_grid_charging_field_present(
     ) or field in site_info
 
 
+def tesla_site_info_has_structure(site_info: dict[str, Any]) -> bool:
+    """Return whether a payload resembles Tesla's site_info response.
+
+    An empty or unrelated HTTP-200 object is not evidence that a particular
+    field is unavailable.  Require another stable site_info marker before the
+    field-absence compatibility outcome can be used.
+    """
+    components = site_info.get("components")
+    component_markers = {
+        "battery",
+        "grid_status",
+        "load_meter",
+        "site_meter",
+        "solar",
+        "disallow_charge_from_grid_with_solar_installed",
+    }
+    return (
+        isinstance(components, dict)
+        and bool(component_markers.intersection(components))
+    ) or any(
+        field in site_info
+        for field in (
+            "default_real_mode",
+            "backup_reserve_percent",
+            "site_name",
+            "timezone",
+            "site_id",
+        )
+    )
+
+
 async def _response_json(response: Any) -> dict[str, Any] | None:
     try:
         payload = await response.json()
@@ -256,7 +287,10 @@ async def async_set_tesla_grid_charging_confirmed(
                         if isinstance(site_info, dict)
                         else None
                     )
-                    if isinstance(site_info, dict):
+                    if (
+                        isinstance(site_info, dict)
+                        and tesla_site_info_has_structure(site_info)
+                    ):
                         valid_site_info_reads += 1
                         if not tesla_grid_charging_field_present(site_info):
                             field_absent_reads += 1

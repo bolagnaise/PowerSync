@@ -182,6 +182,26 @@ def test_accepted_write_with_repeated_field_absence_is_classified_separately():
     assert len(session.get_calls) == 4
 
 
+def test_empty_or_non_site_info_does_not_become_field_absent_compatibility():
+    for payload in (
+        {"response": {}},
+        {"response": {"unrelated": True}},
+        {"response": {"components": {"unrelated": True}}},
+    ):
+        clock = _Clock()
+        session = _Session(
+            posts=[_Response(200, {"response": {"result": True}})],
+            gets=[_Response(200, payload) for _ in range(4)],
+        )
+
+        outcome = asyncio.run(_set(session, clock))
+
+        assert (
+            outcome.status
+            is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
+        )
+
+
 def test_field_absence_followed_by_desired_readback_is_applied():
     clock = _Clock()
     session = _Session(
