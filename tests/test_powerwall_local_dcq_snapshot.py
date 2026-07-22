@@ -294,6 +294,65 @@ def test_coordinator_restamps_freshness_when_no_fallback_pending():
     assert coord._last_success_monotonic is not None
 
 
+def test_v1r_diagnostics_refresh_publishes_without_replacing_snapshot():
+    class _DiagnosticsClient:
+        async def get_v1r_diagnostics(self):
+            return {
+                "system_info": {"firmware_version": "24.44.0"},
+                "networking": {"wifi": {"active_route": True}},
+                "internet": {"wifi": {"connectivity": {"internet": True}}},
+            }
+
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord._client = _DiagnosticsClient()
+    coord._v1r_diagnostics = {
+        "available": False,
+        "last_success_ts": None,
+        "system_info": None,
+        "networking": None,
+        "internet": None,
+    }
+    coord.data = object()
+    listener_calls = []
+    coord.async_update_listeners = lambda: listener_calls.append(True)
+
+    asyncio.run(coord._async_refresh_v1r_diagnostics())
+
+    assert coord.data is not None
+    assert coord._v1r_diagnostics["available"] is True
+    assert coord._v1r_diagnostics["system_info"]["firmware_version"] == "24.44.0"
+    assert coord._v1r_diagnostics["error"] is None
+    assert listener_calls == [True]
+
+
+def test_v1r_diagnostics_failure_retains_last_read_but_marks_unavailable():
+    class _FailingDiagnosticsClient:
+        async def get_v1r_diagnostics(self):
+            raise RuntimeError("gateway busy")
+
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord._client = _FailingDiagnosticsClient()
+    coord._v1r_diagnostics = {
+        "available": True,
+        "last_success_ts": 123.0,
+        "system_info": {"firmware_version": "24.44.0"},
+        "networking": None,
+        "internet": None,
+    }
+    coord.async_update_listeners = lambda: None
+
+    asyncio.run(coord._async_refresh_v1r_diagnostics())
+
+    assert coord._v1r_diagnostics["available"] is False
+    assert coord._v1r_diagnostics["last_success_ts"] == 123.0
+    assert coord._v1r_diagnostics["system_info"]["firmware_version"] == "24.44.0"
+    assert coord._v1r_diagnostics["error"] == "gateway busy"
+
+
 def test_coordinator_detects_hidden_reserve_offset_from_cloud_site_info():
     entry_data = {
         "tesla_coordinator": SimpleNamespace(

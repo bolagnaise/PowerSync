@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import logging
 import math
@@ -52,6 +53,49 @@ def _enum_suffix(enum_type: Any, value: int, prefix: str) -> str:
     except ValueError:
         return str(value)
     return name.removeprefix(prefix)
+
+
+def _ipv4(value: int) -> str | None:
+    """Render Tesla's fixed32 IPv4 value without leaking raw binary data."""
+    if not value:
+        return None
+    try:
+        return str(ipaddress.IPv4Address(value))
+    except ipaddress.AddressValueError:
+        return None
+
+
+def _network_interface_payload(interface: Any) -> dict[str, Any]:
+    """Return the useful, credential-free subset of a network interface."""
+    connectivity = interface.connectivity_status
+    rssi = connectivity.rssi
+    ipv4 = interface.ipv4_config
+    return {
+        "enabled": bool(interface.enabled),
+        "active_route": bool(interface.active_route),
+        "ipv4": {
+            "dhcp_enabled": bool(ipv4.dhcp_enabled),
+            "address": _ipv4(ipv4.address),
+            "subnet_mask": _ipv4(ipv4.subnet_mask),
+            "gateway": _ipv4(ipv4.gateway),
+            "dns": [address for value in ipv4.dns if (address := _ipv4(value))],
+        },
+        "connectivity": {
+            "physical": bool(connectivity.connected_physical),
+            "internet": bool(connectivity.connected_internet),
+            "tesla": bool(connectivity.connected_tesla),
+            "rssi_dbm": rssi.value if connectivity.HasField("rssi") else None,
+            "signal_strength_percent": (
+                rssi.signal_strength_percent.value
+                if connectivity.HasField("rssi")
+                and rssi.HasField("signal_strength_percent")
+                else None
+            ),
+            "snr_db": (
+                connectivity.snr.value if connectivity.HasField("snr") else None
+            ),
+        },
+    }
 
 
 def _build_insecure_ssl_context() -> ssl.SSLContext:
@@ -641,6 +685,90 @@ class TEDAPIv1rTransport:
         except Exception as err:
             _LOGGER.debug("get_backup_events parse error: %s", err)
             return None
+
+    async def _read_common(
+        self,
+        din: str,
+        request_field: str,
+        response_field: str,
+    ) -> Any | None:
+        """Send a read-only Common API request and return its typed response."""
+        env = combined_pb2.MessageEnvelope()
+        env.deliveryChannel = combined_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        env.sender.authorizedClient = 1
+        env.recipient.din = din
+        getattr(env.common, request_field).SetInParent()
+
+        resp = await self.post_v1r(env.SerializeToString(), din)
+        if not resp.ok or not resp.inner_bytes:
+            return None
+        try:
+            reply = combined_pb2.MessageEnvelope()
+            reply.ParseFromString(resp.inner_bytes)
+            if not reply.HasField("common") or not reply.common.HasField(
+                response_field
+            ):
+                return None
+            return getattr(reply.common, response_field)
+        except Exception as err:
+            _LOGGER.debug("%s parse error: %s", response_field, err)
+            return None
+
+    async def get_system_info(self, din: str) -> dict[str, Any] | None:
+        """Read gateway identity, model class, and firmware from Common API."""
+        response = await self._read_common(
+            din,
+            "get_system_info_request",
+            "get_system_info_response",
+        )
+        if response is None:
+            return None
+        return {
+            "part_number": response.device_id.part_number or None,
+            "serial_number": response.device_id.serial_number or None,
+            "din": response.din.value or None,
+            "firmware_version": response.firmare_version.version or None,
+            "firmware_githash": (
+                response.firmare_version.githash.hex()
+                if response.firmare_version.githash
+                else None
+            ),
+            "device_type": _enum_suffix(
+                combined_pb2.DeviceType,
+                response.device_type,
+                "DEVICE_TYPE_",
+            ),
+        }
+
+    async def get_networking_status(self, din: str) -> dict[str, Any] | None:
+        """Read credential-free interface state from Common API field 22/23."""
+        response = await self._read_common(
+            din,
+            "get_networking_status_request",
+            "get_networking_status_response",
+        )
+        if response is None:
+            return None
+        return {
+            name: _network_interface_payload(getattr(response, name))
+            for name in ("wifi", "eth", "gsm")
+            if response.HasField(name)
+        }
+
+    async def check_internet(self, din: str) -> dict[str, Any] | None:
+        """Read live internet/Tesla reachability for each gateway interface."""
+        response = await self._read_common(
+            din,
+            "check_internet_request",
+            "check_internet_response",
+        )
+        if response is None:
+            return None
+        return {
+            name: _network_interface_payload(getattr(response, name))
+            for name in ("wifi", "eth", "gsm")
+            if response.HasField(name)
+        }
 
     async def list_authorized_clients(self, din: str) -> dict[str, Any] | None:
         """Read paired authorized clients directly from the gateway over LAN."""

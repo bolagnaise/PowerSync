@@ -2209,6 +2209,10 @@ async def async_setup_entry(
                 PowerwallSystemIslandStateSensor(local_coord, entry),
                 PowerwallCountSensor(local_coord, entry),
                 PowerwallActiveAlertsSensor(local_coord, entry),
+                PowerwallV1rDeviceSensor(local_coord, entry),
+                PowerwallV1rFirmwareSensor(local_coord, entry),
+                PowerwallV1rNetworkSensor(local_coord, entry),
+                PowerwallV1rInternetSensor(local_coord, entry),
             ])
     # Pack-level sensors come from the richer BMS health scan because
     # batteryBlocks only contains shallow block identity/count data on PW3 sites.
@@ -2838,6 +2842,115 @@ class _PowerwallLocalSensorBase(CoordinatorEntity, SensorEntity):
     @property
     def _snap(self):
         return self.coordinator.data
+
+    @property
+    def _v1r_diagnostics(self) -> dict[str, Any]:
+        diagnostics = getattr(self.coordinator, "_v1r_diagnostics", None)
+        return diagnostics if isinstance(diagnostics, dict) else {}
+
+
+class PowerwallV1rDeviceSensor(_PowerwallLocalSensorBase):
+    """Gateway device identity from the read-only v1r Common API."""
+
+    _attr_icon = "mdi:developer-board"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "pw_v1r_device", "v1r Device")
+
+    @property
+    def native_value(self) -> Any:
+        info = self._v1r_diagnostics.get("system_info") or {}
+        return info.get("device_type") or None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        info = self._v1r_diagnostics.get("system_info") or {}
+        return {
+            key: info.get(key)
+            for key in ("part_number", "serial_number", "din")
+            if info.get(key) is not None
+        }
+
+
+class PowerwallV1rFirmwareSensor(_PowerwallLocalSensorBase):
+    """Gateway firmware reported by the v1r Common API."""
+
+    _attr_icon = "mdi:chip"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "pw_v1r_firmware", "v1r Firmware")
+
+    @property
+    def native_value(self) -> Any:
+        info = self._v1r_diagnostics.get("system_info") or {}
+        return info.get("firmware_version") or None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        info = self._v1r_diagnostics.get("system_info") or {}
+        githash = info.get("firmware_githash")
+        return {"githash": githash} if githash else {}
+
+
+class PowerwallV1rNetworkSensor(_PowerwallLocalSensorBase):
+    """Active gateway route with credential-free interface diagnostics."""
+
+    _attr_icon = "mdi:router-network"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "pw_v1r_network", "v1r Network")
+
+    @property
+    def native_value(self) -> Any:
+        interfaces = self._v1r_diagnostics.get("networking")
+        if not isinstance(interfaces, dict):
+            return None
+        for name, details in interfaces.items():
+            if isinstance(details, dict) and details.get("active_route"):
+                return name
+        return "offline"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        diagnostics = self._v1r_diagnostics
+        interfaces = diagnostics.get("networking")
+        attrs: dict[str, Any] = {}
+        if isinstance(interfaces, dict):
+            attrs["interfaces"] = interfaces
+        if diagnostics.get("last_success_ts") is not None:
+            attrs["last_success_ts"] = diagnostics["last_success_ts"]
+        if diagnostics.get("error"):
+            attrs["error"] = diagnostics["error"]
+        return attrs
+
+
+class PowerwallV1rInternetSensor(_PowerwallLocalSensorBase):
+    """Live gateway internet reachability from Common API field 30/31."""
+
+    _attr_icon = "mdi:web-check"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "pw_v1r_internet", "v1r Internet")
+
+    @property
+    def native_value(self) -> Any:
+        interfaces = self._v1r_diagnostics.get("internet")
+        if not isinstance(interfaces, dict):
+            return None
+        return (
+            "connected"
+            if any(
+                isinstance(details, dict)
+                and (details.get("connectivity") or {}).get("internet")
+                for details in interfaces.values()
+            )
+            else "disconnected"
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        interfaces = self._v1r_diagnostics.get("internet")
+        return {"interfaces": interfaces} if isinstance(interfaces, dict) else {}
 
 
 class PowerwallSystemIslandStateSensor(_PowerwallLocalSensorBase):

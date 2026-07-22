@@ -377,6 +377,19 @@ class PowerwallLocalClient:
         """Read local manual and scheduled backup events."""
         return await self._transport.get_backup_events(self._din)
 
+    async def get_v1r_diagnostics(self) -> dict[str, Any]:
+        """Read the safe Common API diagnostics published by the gateway."""
+        system_info, networking, internet = await asyncio.gather(
+            self._transport.get_system_info(self._din),
+            self._transport.get_networking_status(self._din),
+            self._transport.check_internet(self._din),
+        )
+        return {
+            "system_info": system_info,
+            "networking": networking,
+            "internet": internet,
+        }
+
     async def list_authorized_clients(self) -> dict[str, Any] | None:
         """Read authorized clients directly from the local gateway."""
         return await self._transport.list_authorized_clients(self._din)

@@ -7417,6 +7417,34 @@ function _powerwallLocalControl(e, hasE) {
       icon: 'mdi:alert-circle',
     });
   }
+  if (hasE && hasE('pw_v1r_device')) {
+    statusEntities.push({
+      entity: e('pw_v1r_device'),
+      name: 'v1r Device',
+      icon: 'mdi:developer-board',
+    });
+  }
+  if (hasE && hasE('pw_v1r_firmware')) {
+    statusEntities.push({
+      entity: e('pw_v1r_firmware'),
+      name: 'v1r Firmware',
+      icon: 'mdi:chip',
+    });
+  }
+  if (hasE && hasE('pw_v1r_network')) {
+    statusEntities.push({
+      entity: e('pw_v1r_network'),
+      name: 'v1r Network',
+      icon: 'mdi:router-network',
+    });
+  }
+  if (hasE && hasE('pw_v1r_internet')) {
+    statusEntities.push({
+      entity: e('pw_v1r_internet'),
+      name: 'v1r Internet',
+      icon: 'mdi:web-check',
+    });
+  }
   if (hasE && hasE('pw_critical_alert')) {
     statusEntities.push({
       entity: e('pw_critical_alert'),

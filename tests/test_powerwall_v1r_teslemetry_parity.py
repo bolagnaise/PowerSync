@@ -181,6 +181,115 @@ def test_existing_gateway_host_is_migrated_on_client_build(
         assert "powerwall_local_ip" not in entry.data
     else:
         assert entry.data["powerwall_local_ip"] == expected_host
+def test_common_api_schema_uses_published_field_numbers_without_wifi_config():
+    common_fields = combined_pb2.CommonMessages.DESCRIPTOR.fields_by_name
+    assert common_fields["get_system_info_request"].number == 2
+    assert common_fields["get_system_info_response"].number == 3
+    assert common_fields["get_networking_status_request"].number == 22
+    assert common_fields["get_networking_status_response"].number == 23
+    assert common_fields["check_internet_request"].number == 30
+    assert common_fields["check_internet_response"].number == 31
+
+    networking_fields = (
+        combined_pb2.CommonAPIGetNetworkingStatusResponse.DESCRIPTOR.fields_by_name
+    )
+    assert set(networking_fields) == {"wifi", "eth", "gsm"}
+    assert 1 not in {
+        field.number
+        for field in networking_fields.values()
+    }, "upstream WifiConfig field must remain structurally unavailable"
+
+
+@async_test
+async def test_common_api_diagnostics_are_read_only_and_credential_free():
+    transport = _transport_without_key()
+    observed_requests: list[str] = []
+
+    async def post_v1r(envelope_bytes: bytes, din: str):
+        assert din == "DIN--1"
+        request = combined_pb2.MessageEnvelope()
+        request.ParseFromString(envelope_bytes)
+        assert request.deliveryChannel == combined_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        assert request.sender.authorizedClient == 1
+        assert request.recipient.din == "DIN--1"
+        request_name = request.common.WhichOneof("message")
+        observed_requests.append(request_name)
+
+        reply = combined_pb2.MessageEnvelope()
+        if request_name == "get_system_info_request":
+            response = reply.common.get_system_info_response
+            response.device_id.part_number = "1234567-00-A"
+            response.device_id.serial_number = "TG123456789"
+            response.din.value = "DIN--1"
+            response.firmare_version.version = "24.44.0"
+            response.firmare_version.githash = b"\xaa\xbb"
+            response.device_type = combined_pb2.DEVICE_TYPE_SITECONTROLLER
+        elif request_name == "get_networking_status_request":
+            wifi = reply.common.get_networking_status_response.wifi
+            wifi.enabled = True
+            wifi.active_route = True
+            wifi.ipv4_config.dhcp_enabled = True
+            wifi.ipv4_config.address = 0xC0A80132
+            wifi.ipv4_config.subnet_mask = 0xFFFFFF00
+            wifi.ipv4_config.gateway = 0xC0A80101
+            wifi.connectivity_status.connected_physical = True
+            wifi.connectivity_status.connected_internet = True
+            wifi.connectivity_status.connected_tesla = True
+            wifi.connectivity_status.rssi.value = -57
+            wifi.connectivity_status.rssi.signal_strength_percent.value = 78
+            wifi.connectivity_status.snr.value = 31
+        elif request_name == "check_internet_request":
+            eth = reply.common.check_internet_response.eth
+            eth.enabled = True
+            eth.connectivity_status.connected_physical = True
+            eth.connectivity_status.connected_internet = True
+        else:
+            pytest.fail(f"unexpected Common API request: {request_name}")
+        return transport_mod.TEDAPIResponse(True, reply.SerializeToString())
+
+    transport.post_v1r = post_v1r
+
+    system = await transport.get_system_info("DIN--1")
+    networking = await transport.get_networking_status("DIN--1")
+    internet = await transport.check_internet("DIN--1")
+
+    assert observed_requests == [
+        "get_system_info_request",
+        "get_networking_status_request",
+        "check_internet_request",
+    ]
+    assert system == {
+        "part_number": "1234567-00-A",
+        "serial_number": "TG123456789",
+        "din": "DIN--1",
+        "firmware_version": "24.44.0",
+        "firmware_githash": "aabb",
+        "device_type": "SITECONTROLLER",
+    }
+    assert networking == {
+        "wifi": {
+            "enabled": True,
+            "active_route": True,
+            "ipv4": {
+                "dhcp_enabled": True,
+                "address": "192.168.1.50",
+                "subnet_mask": "255.255.255.0",
+                "gateway": "192.168.1.1",
+                "dns": [],
+            },
+            "connectivity": {
+                "physical": True,
+                "internet": True,
+                "tesla": True,
+                "rssi_dbm": -57,
+                "signal_strength_percent": 78,
+                "snr_db": 31,
+            },
+        }
+    }
+    assert internet["eth"]["connectivity"]["internet"] is True
+    assert "ssid" not in repr(networking).lower()
+    assert "password" not in repr(networking).lower()
 
 
 @async_test
