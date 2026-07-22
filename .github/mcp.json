@@ -9,6 +9,8 @@
       ],
       "tools": [
         "compile",
+        "fix",
+        "upgrade",
         "audit",
         "logs",
         "inspect",
