@@ -20,6 +20,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from ..const import CONF_POWERWALL_LOCAL_IP, CONF_POWERWALL_LOCAL_PAIRED, DOMAIN
+from ..powerwall_host import normalize_powerwall_gateway_host
 from .exceptions import (
     PowerwallAuthError,
     PowerwallLocalError,
@@ -59,7 +60,14 @@ def is_local_preferred(entry: ConfigEntry) -> bool:
 
 def has_local_gateway_ip(entry: ConfigEntry) -> bool:
     """True when the entry has a non-empty gateway LAN address configured."""
-    return bool(str(entry.data.get(CONF_POWERWALL_LOCAL_IP) or "").strip())
+    try:
+        return bool(
+            normalize_powerwall_gateway_host(
+                entry.data.get(CONF_POWERWALL_LOCAL_IP)
+            )
+        )
+    except ValueError:
+        return False
 
 
 def get_local_transport(

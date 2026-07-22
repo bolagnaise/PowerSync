@@ -78,6 +78,7 @@ sys.modules["power_sync.powerwall_local.transport"] = _tr_mod
 
 from power_sync.powerwall_local.dispatch import (  # noqa: E402
     dispatch_powerwall_write,
+    has_local_gateway_ip,
     is_local_preferred,
 )
 
@@ -104,6 +105,15 @@ def _unpaired():
 
 
 # ----- Tests -----
+def test_scheme_gateway_host_is_valid_but_ambiguous_host_is_not():
+    assert has_local_gateway_ip(
+        _FakeConfigEntry(data={"powerwall_local_ip": "http://192.168.1.50/"})
+    )
+    assert not has_local_gateway_ip(
+        _FakeConfigEntry(data={"powerwall_local_ip": "ftp://192.168.1.50/"})
+    )
+
+
 async def _test_unpaired_skips_local():
     local = AsyncMock()
     cloud = AsyncMock(return_value="cloud-ok")

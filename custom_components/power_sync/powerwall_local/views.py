@@ -51,6 +51,7 @@ from .client import PowerwallLocalClient, PowerwallVersion
 from .coordinator import PowerwallLocalCoordinator
 from .curtailment_fallback import get_fallback as _get_curtailment_fallback
 from .exceptions import PowerwallLocalError, PowerwallPairingError
+from ..powerwall_host import normalize_powerwall_gateway_host
 from .pairing import PowerwallPairingManager
 from .transport import get_insecure_ssl_context
 
@@ -62,14 +63,26 @@ _LOGGER = logging.getLogger(__name__)
 _RUNTIME_KEY = "powerwall_local"
 
 
+def _normalized_gateway_host(entry: ConfigEntry) -> str:
+    """Return a valid configured gateway host, or empty for legacy bad data."""
+    try:
+        return normalize_powerwall_gateway_host(
+            entry.data.get(CONF_POWERWALL_LOCAL_IP)
+        )
+    except ValueError:
+        return ""
+
+
 def _has_gateway_ip(entry: ConfigEntry) -> bool:
     """True when a real gateway LAN address is configured for local TEDAPI."""
-    return bool(str(entry.data.get(CONF_POWERWALL_LOCAL_IP) or "").strip())
+    return bool(_normalized_gateway_host(entry))
 
 
 def _desired_gateway_host(entry: ConfigEntry) -> str:
     """Configured gateway host, or loopback for cloud-only signing."""
-    return str(entry.data.get(CONF_POWERWALL_LOCAL_IP) or "").strip() or "127.0.0.1"
+    return (
+        _normalized_gateway_host(entry) or "127.0.0.1"
+    )
 
 
 def _client_matches_entry(entry: ConfigEntry, client: PowerwallLocalClient) -> bool:
@@ -102,7 +115,7 @@ def _local_access_status(
 ) -> dict[str, Any]:
     """Return app-facing local LAN availability without probing the gateway."""
     paired = bool(entry.data.get(CONF_POWERWALL_LOCAL_PAIRED))
-    gateway_ip = str(entry.data.get(CONF_POWERWALL_LOCAL_IP) or "").strip()
+    gateway_ip = _normalized_gateway_host(entry)
     configured = bool(gateway_ip)
 
     mode = "unpaired"
@@ -199,7 +212,27 @@ async def _build_client(
     loopback host for transport construction. LAN calls are gated elsewhere
     while the cloud signing path stays usable.
     """
-    host = str(entry.data.get(CONF_POWERWALL_LOCAL_IP) or "").strip()
+    raw_host_value = entry.data.get(CONF_POWERWALL_LOCAL_IP)
+    try:
+        host = normalize_powerwall_gateway_host(raw_host_value)
+    except ValueError:
+        host = ""
+        new_data = dict(entry.data)
+        new_data.pop(CONF_POWERWALL_LOCAL_IP, None)
+        hass.config_entries.async_update_entry(entry, data=new_data)
+        _LOGGER.warning(
+            "Removed invalid saved Powerwall gateway address; local access is disabled"
+        )
+    else:
+        raw_host = raw_host_value.strip() if isinstance(raw_host_value, str) else ""
+        if raw_host and host != raw_host:
+            new_data = dict(entry.data)
+            new_data[CONF_POWERWALL_LOCAL_IP] = host
+            hass.config_entries.async_update_entry(entry, data=new_data)
+            _LOGGER.info(
+                "Normalized saved Powerwall gateway address to %r",
+                host,
+            )
     version_str = entry.data.get(CONF_POWERWALL_LOCAL_VERSION, "pw3")
     private_key_pem = entry.data.get(CONF_POWERWALL_LOCAL_PRIVATE_KEY)
     din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
@@ -361,7 +394,15 @@ class PowerwallPairStartView(HomeAssistantView):
         # toggle verification). No gateway IP is needed for the handshake itself.
         # If the app provides one, store it for local LAN access; otherwise
         # preserve any IP already in the config entry.
-        gateway_ip = payload.get("gateway_ip") or payload.get("ip")
+        try:
+            gateway_ip = normalize_powerwall_gateway_host(
+                payload.get("gateway_ip") or payload.get("ip")
+            )
+        except ValueError:
+            return web.json_response(
+                {"success": False, "error": "Invalid Powerwall gateway address"},
+                status=400,
+            )
         version_str = (payload.get("version") or "pw3").lower()
 
         try:
@@ -588,7 +629,13 @@ class PowerwallSetGatewayIpView(HomeAssistantView):
             return web.json_response(
                 {"success": False, "error": "gateway_ip must be a string"}, status=400
             )
-        gateway_ip = gateway_ip_raw.strip()
+        try:
+            gateway_ip = normalize_powerwall_gateway_host(gateway_ip_raw)
+        except ValueError:
+            return web.json_response(
+                {"success": False, "error": "Invalid Powerwall gateway address"},
+                status=400,
+            )
 
         new_data = {**entry.data}
         if gateway_ip:
@@ -737,7 +784,14 @@ class PowerwallDebugProbeView(HomeAssistantView):
         if entry is None:
             return web.json_response({"error": "not configured"}, status=503)
 
-        host = entry.data.get(CONF_POWERWALL_LOCAL_IP)
+        try:
+            host = normalize_powerwall_gateway_host(
+                entry.data.get(CONF_POWERWALL_LOCAL_IP)
+            )
+        except ValueError:
+            return web.json_response(
+                {"error": "invalid gateway IP configuration"}, status=400
+            )
         if not host:
             return web.json_response({"error": "no gateway IP"}, status=400)
 

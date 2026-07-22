@@ -15,6 +15,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 
 ROOT = (
@@ -28,13 +30,19 @@ LOCAL_ROOT = ROOT / "powerwall_local"
 # test never executes the integration's 34k-line __init__.py or requires HA.
 _PKG = "ps_v1r_parity"
 pkg = types.ModuleType(_PKG)
-pkg.__path__ = [str(LOCAL_ROOT)]
+pkg.__path__ = [str(ROOT)]
 sys.modules.setdefault(_PKG, pkg)
 
-transport_mod = importlib.import_module(f"{_PKG}.transport")
-client_mod = importlib.import_module(f"{_PKG}.client")
-combined_pb2 = importlib.import_module(f"{_PKG}.tedapi_combined_pb2")
-tesla_pb2 = importlib.import_module(f"{_PKG}.tesla_local_pb2")
+_LOCAL_PKG = f"{_PKG}.powerwall_local"
+local_pkg = types.ModuleType(_LOCAL_PKG)
+local_pkg.__path__ = [str(LOCAL_ROOT)]
+sys.modules.setdefault(_LOCAL_PKG, local_pkg)
+
+transport_mod = importlib.import_module(f"{_LOCAL_PKG}.transport")
+client_mod = importlib.import_module(f"{_LOCAL_PKG}.client")
+host_mod = importlib.import_module(f"{_PKG}.powerwall_host")
+combined_pb2 = importlib.import_module(f"{_LOCAL_PKG}.tedapi_combined_pb2")
+tesla_pb2 = importlib.import_module(f"{_LOCAL_PKG}.tesla_local_pb2")
 
 
 def async_test(function):
@@ -50,6 +58,129 @@ def _transport_without_key():
     return transport_mod.TEDAPIv1rTransport.__new__(
         transport_mod.TEDAPIv1rTransport
     )
+
+
+def _private_key_pem() -> bytes:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+
+def test_scheme_bearing_gateway_host_is_normalized_before_local_transport_use():
+    key_pem = _private_key_pem()
+
+    transport = transport_mod.TEDAPIv1rTransport(
+        "http://192.168.1.108/",
+        key_pem,
+        din="DIN--1",
+    )
+    client = client_mod.PowerwallLocalClient(
+        "https://192.168.1.108/",
+        version=client_mod.PowerwallVersion.PW3,
+        private_key_pem=key_pem,
+        din="DIN--1",
+    )
+
+    assert transport._host == "192.168.1.108"
+    assert client.host == "192.168.1.108"
+    assert client._transport._host == "192.168.1.108"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("192.168.1.108", "192.168.1.108"),
+        (" http://192.168.1.108/ ", "192.168.1.108"),
+        ("https://powerwall.local/", "powerwall.local"),
+        ("powerwall.local:8443", "powerwall.local:8443"),
+        ("https://[fe80::1]/", "[fe80::1]"),
+        ("fe80::1", "[fe80::1]"),
+        ("", ""),
+    ],
+)
+def test_gateway_host_normalization(value, expected):
+    assert host_mod.normalize_powerwall_gateway_host(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ftp://192.168.1.108",
+        "http://user:password@192.168.1.108/",
+        "https://192.168.1.108/status",
+        "192.168.1.108/status",
+        "https://192.168.1.108/?token=value",
+        "https://192.168.1.108/#status",
+        "http://powerwall.local:not-a-port",
+        "http://powerwall.local:70000",
+        "powerwall.local:0",
+        "http://",
+        "power wall",
+        "https://power wall/",
+        "powerwall.local\ninvalid",
+        123,
+    ],
+)
+def test_gateway_host_normalization_rejects_ambiguous_authorities(value):
+    with pytest.raises(ValueError):
+        host_mod.normalize_powerwall_gateway_host(value)
+
+
+@pytest.mark.parametrize(
+    ("saved_host", "expected_host"),
+    [
+        ("http://192.168.1.108/", "192.168.1.108"),
+        ("ftp://192.168.1.108/", None),
+        (123, None),
+    ],
+)
+def test_existing_gateway_host_is_migrated_on_client_build(
+    saved_host, expected_host
+):
+    source = (LOCAL_ROOT / "views.py").read_text()
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_build_client"
+    )
+    function_source = ast.get_source_segment(source, function)
+    assert function_source is not None
+
+    class _ConfigEntries:
+        @staticmethod
+        def async_update_entry(entry, *, data):
+            entry.data = data
+
+    entry = SimpleNamespace(data={"powerwall_local_ip": saved_host})
+    hass = SimpleNamespace(config_entries=_ConfigEntries())
+    namespace = {
+        "Any": object,
+        "ConfigEntry": object,
+        "HomeAssistant": object,
+        "PowerwallLocalClient": object,
+        "CONF_POWERWALL_LOCAL_IP": "powerwall_local_ip",
+        "CONF_POWERWALL_LOCAL_VERSION": "powerwall_local_version",
+        "CONF_POWERWALL_LOCAL_PRIVATE_KEY": "powerwall_local_private_key_pem",
+        "CONF_POWERWALL_LOCAL_DIN": "powerwall_local_din",
+        "normalize_powerwall_gateway_host": (
+            host_mod.normalize_powerwall_gateway_host
+        ),
+        "_LOGGER": SimpleNamespace(
+            info=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+        ),
+    }
+    exec(function_source, namespace)
+
+    assert asyncio.run(namespace["_build_client"](hass, entry)) is None
+    if expected_host is None:
+        assert "powerwall_local_ip" not in entry.data
+    else:
+        assert entry.data["powerwall_local_ip"] == expected_host
 
 
 @async_test

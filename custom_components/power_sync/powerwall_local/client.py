@@ -25,6 +25,7 @@ from .fleet_api_bms import (
     build_device_controller_query_envelope,
     parse_device_controller_response,
 )
+from ..powerwall_host import normalize_powerwall_gateway_host
 from .normalization import (
     normalize_local_backup_reserve_percent,
     normalize_local_soc_percent,
@@ -137,7 +138,7 @@ class PowerwallLocalClient:
                 "PowerwallLocalClient requires the gateway DIN from cloud pairing"
             )
 
-        self._host = host
+        self._host = normalize_powerwall_gateway_host(host)
         self._version = version
         self._din = din
         self._fleet_api_base = fleet_api_base
@@ -153,7 +154,7 @@ class PowerwallLocalClient:
         self._curtailment_active = False
 
         self._transport: TEDAPIv1rTransport = TEDAPIv1rTransport(
-            host, private_key_pem, din=din,
+            self._host, private_key_pem, din=din,
         )
 
     @property

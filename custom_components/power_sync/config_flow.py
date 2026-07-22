@@ -37,6 +37,7 @@ from .history_migration import (
     preview_history_relink,
 )
 from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
+from .powerwall_host import normalize_powerwall_gateway_host
 from .settings_metadata import (
     merge_optimization_section_input,
     submitted_live_settings,
@@ -6477,62 +6478,72 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
         if user_input is not None:
-            gateway_ip = (user_input.get(CONF_POWERWALL_LOCAL_IP) or "").strip()
-            # Handle Amber site selection (only if we have Amber sites)
-            amber_site_id = None
-            if has_amber_sites:
-                amber_site_id = user_input.get(CONF_AMBER_SITE_ID)
-                if not amber_site_id:
-                    # Auto-select: prefer active site, or fall back to first site
-                    active_sites = [
-                        s for s in self._amber_sites if s.get("status") == "active"
-                    ]
-                    if len(active_sites) == 1:
-                        amber_site_id = active_sites[0]["id"]
-                        _LOGGER.info(
-                            f"Auto-selected single active Amber site: {amber_site_id}"
-                        )
-                    elif len(self._amber_sites) == 1:
-                        amber_site_id = self._amber_sites[0]["id"]
-                        _LOGGER.info(
-                            f"Auto-selected single Amber site: {amber_site_id}"
-                        )
-
-            # Store site selection data
-            self._site_data = {
-                CONF_TESLA_ENERGY_SITE_ID: user_input[CONF_TESLA_ENERGY_SITE_ID],
-            }
-
-            if gateway_ip:
-                self._site_data[CONF_POWERWALL_LOCAL_IP] = gateway_ip
-
-            # Add Amber site if we have one
-            if amber_site_id:
-                self._site_data[CONF_AMBER_SITE_ID] = amber_site_id
-
-            # For Amber provider (not Flow Power), get settings from this form
-            if show_amber_options:
-                self._site_data[CONF_AUTO_SYNC_ENABLED] = user_input.get(
-                    CONF_AUTO_SYNC_ENABLED, True
+            try:
+                gateway_ip = normalize_powerwall_gateway_host(
+                    user_input.get(CONF_POWERWALL_LOCAL_IP)
                 )
-                self._site_data[CONF_AMBER_FORECAST_TYPE] = user_input.get(
-                    CONF_AMBER_FORECAST_TYPE, "predicted"
-                )
-                self._site_data[CONF_BATTERY_CURTAILMENT_ENABLED] = user_input.get(
-                    CONF_BATTERY_CURTAILMENT_ENABLED, False
-                )
-            elif self._aemo_only_mode:
-                # AEMO-only mode doesn't use Amber sync
-                self._site_data[CONF_AUTO_SYNC_ENABLED] = False
-            # For Flow Power, these settings are already in _flow_power_data
+            except ValueError:
+                errors[CONF_POWERWALL_LOCAL_IP] = "powerwall_gateway_invalid"
+            else:
+                # Handle Amber site selection (only if we have Amber sites)
+                amber_site_id = None
+                if has_amber_sites:
+                    amber_site_id = user_input.get(CONF_AMBER_SITE_ID)
+                    if not amber_site_id:
+                        # Auto-select: prefer active site, or fall back to first site
+                        active_sites = [
+                            s
+                            for s in self._amber_sites
+                            if s.get("status") == "active"
+                        ]
+                        if len(active_sites) == 1:
+                            amber_site_id = active_sites[0]["id"]
+                            _LOGGER.info(
+                                f"Auto-selected single active Amber site: {amber_site_id}"
+                            )
+                        elif len(self._amber_sites) == 1:
+                            amber_site_id = self._amber_sites[0]["id"]
+                            _LOGGER.info(
+                                f"Auto-selected single Amber site: {amber_site_id}"
+                            )
 
-            # If the user picked Teslemetry as the EV provider but Teslemetry
-            # isn't installed in HA, prompt for an API token before finalising.
-            if getattr(self, "_tesla_ev_needs_teslemetry_token", False):
-                return await self.async_step_tesla_ev_teslemetry_token()
+                # Store site selection data
+                self._site_data = {
+                    CONF_TESLA_ENERGY_SITE_ID: user_input[
+                        CONF_TESLA_ENERGY_SITE_ID
+                    ],
+                }
 
-            # Go directly to creating the entry (skip curtailment/weather/demand/EV steps)
-            return self._create_final_entry()
+                if gateway_ip:
+                    self._site_data[CONF_POWERWALL_LOCAL_IP] = gateway_ip
+
+                # Add Amber site if we have one
+                if amber_site_id:
+                    self._site_data[CONF_AMBER_SITE_ID] = amber_site_id
+
+                # For Amber provider (not Flow Power), get settings from this form
+                if show_amber_options:
+                    self._site_data[CONF_AUTO_SYNC_ENABLED] = user_input.get(
+                        CONF_AUTO_SYNC_ENABLED, True
+                    )
+                    self._site_data[CONF_AMBER_FORECAST_TYPE] = user_input.get(
+                        CONF_AMBER_FORECAST_TYPE, "predicted"
+                    )
+                    self._site_data[CONF_BATTERY_CURTAILMENT_ENABLED] = (
+                        user_input.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
+                    )
+                elif self._aemo_only_mode:
+                    # AEMO-only mode doesn't use Amber sync
+                    self._site_data[CONF_AUTO_SYNC_ENABLED] = False
+                # For Flow Power, these settings are already in _flow_power_data
+
+                # If the user picked Teslemetry as the EV provider but Teslemetry
+                # isn't installed in HA, prompt for an API token before finalising.
+                if getattr(self, "_tesla_ev_needs_teslemetry_token", False):
+                    return await self.async_step_tesla_ev_teslemetry_token()
+
+                # Go directly to creating the entry (skip later setup steps).
+                return self._create_final_entry()
 
         data_schema_dict: dict[vol.Marker, Any] = {}
 
@@ -8556,7 +8567,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             # (back to cloud-only mode); a non-empty IP requires the gateway
             # customer password.
             gateway_ip_raw = user_input.get(CONF_POWERWALL_LOCAL_IP, "")
-            gateway_ip = (gateway_ip_raw or "").strip()
+            try:
+                gateway_ip = normalize_powerwall_gateway_host(gateway_ip_raw)
+            except ValueError:
+                gateway_ip = ""
+                errors[CONF_POWERWALL_LOCAL_IP] = "powerwall_gateway_invalid"
 
             # Validate EV provider
             detected = _detect_tesla_ev_integrations(self.hass)
@@ -8566,7 +8581,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ):
                 errors[CONF_TESLA_EV_API_PROVIDER] = "tesla_fleet_not_installed"
             elif (
-                ev_choice == TESLA_EV_API_PROVIDER_TESLEMETRY
+                not errors
+                and ev_choice == TESLA_EV_API_PROVIDER_TESLEMETRY
                 and not detected["teslemetry"]
                 and not self.config_entry.data.get(CONF_TESLA_EV_TELEMETRY_TOKEN)
             ):

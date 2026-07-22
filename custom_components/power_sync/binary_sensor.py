@@ -370,14 +370,21 @@ class PowerwallLocalIPMissingBinarySensor(_TeslaBinarySensorBase):
     @property
     def is_on(self) -> bool | None:
         from .const import CONF_POWERWALL_LOCAL_IP
+        from .powerwall_host import normalize_powerwall_gateway_host
+
         paired = bool(self._entry.data.get(CONF_POWERWALL_LOCAL_PAIRED, False))
         if not paired:
             # Not paired at all — this banner doesn't apply. Returning False
             # (not None) so it shows as "OK" rather than "unknown" in the
             # device's diagnostic panel.
             return False
-        ip = self._entry.data.get(CONF_POWERWALL_LOCAL_IP)
-        return not ip
+        try:
+            host = normalize_powerwall_gateway_host(
+                self._entry.data.get(CONF_POWERWALL_LOCAL_IP)
+            )
+        except ValueError:
+            host = ""
+        return not host
 
 
 class PowerwallLocalIslandedBinarySensor(_TeslaBinarySensorBase):

@@ -35,6 +35,7 @@ from .exceptions import (
     PowerwallSignatureError,
     PowerwallUnreachableError,
 )
+from ..powerwall_host import normalize_powerwall_gateway_host
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -129,7 +130,7 @@ class TEDAPIv1rTransport:
         din: str | None = None,
         timeout: float = 8.0,
     ) -> None:
-        self._host = host
+        self._host = normalize_powerwall_gateway_host(host)
         # Bound the socket connect explicitly (not just the request total): a
         # connect to an unreachable gateway otherwise runs to the OS TCP timeout
         # (~100s) rather than the intended budget.

@@ -6350,6 +6350,7 @@ class BatteryHealthView(HomeAssistantView):
             trim_excess_pw3_follower_placeholders,
         )
         from .powerwall_local.client import is_loopback_host
+        from .powerwall_host import normalize_powerwall_gateway_host
 
         private_key_pem = entry.data.get(CONF_POWERWALL_LOCAL_PRIVATE_KEY)
         din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
@@ -6378,7 +6379,12 @@ class BatteryHealthView(HomeAssistantView):
         # gateway is unreachable (e.g. user is away from home).
         data = None
         source = "ha_local_tedapi"
-        local_ip = str(entry.data.get(CONF_POWERWALL_LOCAL_IP) or "").strip()
+        try:
+            local_ip = normalize_powerwall_gateway_host(
+                entry.data.get(CONF_POWERWALL_LOCAL_IP)
+            )
+        except ValueError:
+            local_ip = ""
         if local_ip and not is_loopback_host(local_ip):
             try:
                 from .powerwall_local.transport import get_insecure_ssl_context
@@ -6746,6 +6752,7 @@ class BatteryHealthView(HomeAssistantView):
             CONF_POWERWALL_LOCAL_IP,
         )
         from .powerwall_local.views import _get_fleet_api_context
+        from .powerwall_host import normalize_powerwall_gateway_host
         from .powerwall_local.fleet_api_bms import (
             build_device_controller_query_envelope,
             build_pw3_components_query_envelope,
@@ -6775,7 +6782,12 @@ class BatteryHealthView(HomeAssistantView):
                 _LOGGER.debug("fleet_api_solar_strings: %s signing failed: %s", log_label, err)
                 return None, None
 
-            local_ip = entry.data.get(CONF_POWERWALL_LOCAL_IP)
+            try:
+                local_ip = normalize_powerwall_gateway_host(
+                    entry.data.get(CONF_POWERWALL_LOCAL_IP)
+                )
+            except ValueError:
+                local_ip = ""
             if local_ip:
                 try:
                     from .powerwall_local.transport import get_insecure_ssl_context
