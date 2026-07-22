@@ -1,0 +1,4 @@
+{
+  "name": "PowerSync source review",
+  "install": "python3 -m compileall -q custom_components"
+}

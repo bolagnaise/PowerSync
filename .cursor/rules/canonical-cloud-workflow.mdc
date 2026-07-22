@@ -1,0 +1,32 @@
+---
+description: Canonical GitHub, validation, and pull-request workflow for Cursor agents
+alwaysApply: true
+---
+
+# Canonical workflow
+
+- Read the root `AGENTS.md` before changing the repository.
+- GitHub Issues are canonical for planned, multi-session, or backlog work.
+- Small fixes that fit in one focused pull request do not require an issue.
+- For a multi-phase build, create the fewest independently deliverable GitHub
+  issues and obtain approval for the breakdown before writing code.
+- Use one issue per tracked feature branch and pull request.
+  Include the issue number in the branch name and `Fixes #123` in the
+  pull-request body.
+- Keep the user-level `Development` Project at `Todo` before work,
+  `In Progress` during implementation or review, and `Done` only after
+  closure or merge.
+- Update issue checklists only for verified work; they are not merge gates.
+- Never commit directly to the default branch.
+- Run the repository's required validation before every push.
+- Scan the staged diff before every commit with:
+
+  ```sh
+  git diff --staged \
+    | grep -iE 'k[e]y|s[e]cret|t[o]ken|p[a]ssword'
+  ```
+
+  Stop when the command returns output.
+- Do not broaden scope or perform unrelated external or production writes
+  without explicit authorization.
+
