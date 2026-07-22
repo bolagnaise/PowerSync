@@ -3129,6 +3129,27 @@ def test_solar_forecast_warning_waits_for_forecast_attempt(opt_module):
     assert coordinator._get_warnings() == []
 
 
+def test_zero_forecast_from_confirmed_provider_does_not_warn(opt_module):
+    coordinator = _coordinator(opt_module, "octopus")
+    coordinator._solar_forecaster = SimpleNamespace(last_forecast_source="solcast")
+
+    coordinator._record_solar_forecast_availability([0.0, 0.0])
+
+    assert coordinator._has_solar_forecast is True
+    assert coordinator._get_warnings() == []
+
+
+def test_zero_forecast_without_provider_keeps_unavailable_warning(opt_module):
+    coordinator = _coordinator(opt_module, "octopus")
+    coordinator._solar_forecaster = SimpleNamespace(last_forecast_source=None)
+
+    coordinator._record_solar_forecast_availability([0.0, 0.0])
+
+    assert coordinator._has_solar_forecast is False
+    warnings = coordinator._get_warnings()
+    assert [warning["type"] for warning in warnings] == ["no_solar_forecast"]
+
+
 def test_coordinator_refresh_executes_cached_charge_at_action_boundary(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.25)

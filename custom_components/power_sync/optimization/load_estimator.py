@@ -2042,11 +2042,13 @@ class SolcastForecaster:
                     # Check for raw forecast periods (preferred - full 48h data)
                     forecasts = coordinator_data.get("forecasts")
                     if forecasts and isinstance(forecasts, list) and len(forecasts) > 0:
-                        return self._parse_solcast_data(
+                        parsed = self._parse_solcast_data(
                             forecasts,
                             start_time,
                             n_intervals,
                         )
+                        if parsed:
+                            return parsed
 
                     # Fallback to hourly_forecast (processed format from Solcast HA integration)
                     hourly = coordinator_data.get("hourly_forecast")
@@ -2062,11 +2064,13 @@ class SolcastForecaster:
                 if solcast_data:
                     forecasts = solcast_data.get("forecasts")
                     if forecasts and isinstance(forecasts, list) and len(forecasts) > 0:
-                        return self._parse_solcast_data(
+                        parsed = self._parse_solcast_data(
                             forecasts,
                             start_time,
                             n_intervals,
                         )
+                        if parsed:
+                            return parsed
 
             return None
 
@@ -2192,6 +2196,18 @@ class SolcastForecaster:
         result: list[float] = []
         current_time = start_time
         sorted_periods = sorted(forecast_periods, key=lambda p: p[0])
+        horizon_end = start_time + timedelta(
+            minutes=n_intervals * self.interval_minutes
+        )
+        if not any(
+            period_start < horizon_end and period_end > start_time
+            for period_start, period_end, _ in sorted_periods
+        ):
+            _LOGGER.debug(
+                "Ignoring Solcast sensor forecast with no periods in the "
+                "requested horizon"
+            )
+            return None
 
         for _ in range(n_intervals):
             power_w = 0.0
@@ -2241,7 +2257,7 @@ class SolcastForecaster:
                 parsed = self._parse_detailed_forecast(
                     list(cached), start_time, n_intervals
                 )
-                return parsed if parsed and any(v > 0 for v in parsed) else None
+                return parsed if parsed else None
 
             # The integration may store a coordinator or direct data
             # Try common data structures used by solcast_solar integration
@@ -2286,7 +2302,7 @@ class SolcastForecaster:
                                     parsed = self._parse_detailed_forecast(
                                         forecast_list, start_time, n_intervals
                                     )
-                                    if parsed and any(v > 0 for v in parsed):
+                                    if parsed:
                                         return parsed
                             except Exception:
                                 pass
@@ -2297,7 +2313,7 @@ class SolcastForecaster:
                                 parsed = self._parse_detailed_forecast(
                                     detailed, start_time, n_intervals
                                 )
-                                if parsed and any(v > 0 for v in parsed):
+                                if parsed:
                                     return parsed
                     if hasattr(value, 'data') and value.data:
                         result = self._try_extract_forecast(value.data, start_time, n_intervals)
@@ -2336,14 +2352,14 @@ class SolcastForecaster:
         detailed = data.get('detailedForecast')
         if detailed and isinstance(detailed, list) and len(detailed) > 0:
             parsed = self._parse_detailed_forecast(detailed, start_time, n_intervals)
-            if parsed and any(v > 0 for v in parsed):
+            if parsed:
                 return parsed
 
         # Format 2: forecasts (raw API response format)
         forecasts = data.get('forecasts')
         if forecasts and isinstance(forecasts, list) and len(forecasts) > 0:
             parsed = self._parse_solcast_data(forecasts, start_time, n_intervals)
-            if parsed and any(v > 0 for v in parsed):
+            if parsed:
                 return parsed
 
         # Format 3: forecast_today / forecast_tomorrow
@@ -2352,14 +2368,14 @@ class SolcastForecaster:
         combined = (forecast_today or []) + (forecast_tomorrow or [])
         if combined:
             parsed = self._parse_solcast_data(combined, start_time, n_intervals)
-            if parsed and any(v > 0 for v in parsed):
+            if parsed:
                 return parsed
 
         # Format 4: hourly_forecast (processed Solcast HA format)
         hourly = data.get('hourly_forecast')
         if hourly and isinstance(hourly, list) and len(hourly) > 0:
             parsed = self._parse_hourly_forecast(hourly, start_time, n_intervals)
-            if parsed and any(v > 0 for v in parsed):
+            if parsed:
                 return parsed
 
         return None
@@ -2458,6 +2474,14 @@ class SolcastForecaster:
         result = []
         current_time = start_time
         sorted_periods = sorted(forecast_periods, key=lambda p: p[0])
+        horizon_end = start_time + timedelta(
+            minutes=n_intervals * self.interval_minutes
+        )
+        if not any(
+            period_start < horizon_end and period_end > start_time
+            for period_start, period_end, _ in sorted_periods
+        ):
+            return []
 
         for _ in range(n_intervals):
             power_w = 0.0

@@ -4487,8 +4487,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._last_update_time = dt_util.now()
             self._set_active_export_reserve_floor_slots(None, None)
 
-            # Store forecast data for LP forecast sensors
-            self._has_solar_forecast = solar_forecast is not None and any(v > 0 for v in (solar_forecast or []))
+            # Store forecast data for LP forecast sensors. A current provider
+            # can legitimately forecast zero generation throughout the
+            # requested horizon, so availability must follow the selected
+            # source rather than positive wattage.
+            self._record_solar_forecast_availability(solar_forecast)
             self._last_solar_forecast = solar_forecast
             self._last_load_forecast = load_forecast
 
@@ -10200,10 +10203,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if getattr(self, "_has_solar_forecast", None) is False:
             warnings.append({
                 "type": "no_solar_forecast",
-                "title": "No Solar Forecast",
-                "message": "No supported solar forecast provider is configured. The optimizer is making decisions based on price only, without knowing when solar will be available. Install Solcast Solar or Open-Meteo Solar Forecast for optimal scheduling.",
+                "title": "Solar Forecast Unavailable",
+                "message": "No usable current solar forecast data is available. The optimizer is making decisions based on price only, without knowing when solar will be available. Check that the selected Solcast or Open-Meteo provider is loaded and exposing current forecast periods.",
             })
         return warnings
+
+    def _record_solar_forecast_availability(
+        self, solar_forecast: list[float] | None
+    ) -> None:
+        """Record whether the latest forecast came from a supported provider."""
+        source = getattr(
+            getattr(self, "_solar_forecaster", None),
+            "last_forecast_source",
+            None,
+        )
+        self._has_solar_forecast = solar_forecast is not None and source is not None
 
     async def _get_solar_forecast(self) -> list[float] | None:
         """Get solar forecast for optimizer."""

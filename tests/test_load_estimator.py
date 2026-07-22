@@ -938,6 +938,168 @@ def test_solcast_sensor_scan_uses_renamed_detailed_forecast_entities(monkeypatch
     assert forecaster.last_forecast_source == "solcast"
 
 
+def test_solcast_in_window_zero_sensor_remains_a_valid_provider(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 5, 9, 10, 0, tzinfo=timezone.utc)
+    solcast_state = SimpleNamespace(
+        entity_id="sensor.solcast_pv_forecast_forecast_today",
+        state="0",
+        attributes={
+            "detailedForecast": [
+                {"period_start": start.isoformat(), "pv_estimate": 0.0},
+            ],
+        },
+    )
+    hass = SimpleNamespace(
+        data={},
+        states=_FakeStates(
+            [solcast_state],
+            {solcast_state.entity_id: solcast_state},
+        ),
+    )
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+
+    forecast = _run(forecaster.get_forecast(horizon_hours=1, start_time=start))
+
+    assert forecast == [0.0, 0.0]
+    assert forecaster.last_forecast_source == "solcast"
+
+
+def test_solcast_stale_sensor_periods_are_not_reported_as_available(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 5, 9, 10, 0, tzinfo=timezone.utc)
+    stale_start = start - timedelta(days=1)
+    solcast_state = SimpleNamespace(
+        entity_id="sensor.solcast_pv_forecast_forecast_today",
+        state="0",
+        attributes={
+            "detailedForecast": [
+                {"period_start": stale_start.isoformat(), "pv_estimate": 2.0},
+            ],
+        },
+    )
+    hass = SimpleNamespace(
+        data={},
+        states=_FakeStates(
+            [solcast_state],
+            {solcast_state.entity_id: solcast_state},
+        ),
+    )
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+
+    forecast = _run(forecaster.get_forecast(horizon_hours=1, start_time=start))
+
+    assert forecast == [0.0, 0.0]
+    assert forecaster.last_forecast_source is None
+
+
+def test_solcast_external_zero_forecast_remains_a_valid_provider(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 5, 9, 10, 0, tzinfo=timezone.utc)
+    hass = SimpleNamespace(
+        data={
+            "solcast_solar": {
+                "entry-1": SimpleNamespace(
+                    data_forecasts=[
+                        {"period_start": start.isoformat(), "pv_estimate": 0.0},
+                    ],
+                ),
+            },
+        },
+        states=_FakeStates(),
+    )
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+
+    forecast = _run(forecaster.get_forecast(horizon_hours=1, start_time=start))
+
+    assert forecast == [0.0, 0.0]
+    assert forecaster.last_forecast_source == "solcast"
+
+
+def test_solcast_builtin_stale_periods_are_not_reported_as_available(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 5, 9, 10, 0, tzinfo=timezone.utc)
+    stale_start = start - timedelta(days=1)
+    hass = SimpleNamespace(
+        data={
+            "power_sync": {
+                "entry-1": {
+                    "solcast_coordinator": SimpleNamespace(
+                        data={
+                            "forecasts": [
+                                {
+                                    "period_start": stale_start.isoformat(),
+                                    "pv_estimate": 2.0,
+                                },
+                            ],
+                        },
+                    ),
+                },
+            },
+        },
+        states=_FakeStates(),
+    )
+    forecaster = module.SolcastForecaster(hass, interval_minutes=30)
+
+    forecast = _run(forecaster.get_forecast(horizon_hours=1, start_time=start))
+
+    assert forecast == [0.0, 0.0]
+    assert forecaster.last_forecast_source is None
+
+
+def test_solcast_horizon_coverage_uses_half_open_boundaries(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    start = datetime(2026, 5, 9, 10, 0, tzinfo=timezone.utc)
+    forecaster = module.SolcastForecaster(
+        SimpleNamespace(data={}, states=_FakeStates()),
+        interval_minutes=30,
+    )
+
+    ending_at_start = forecaster._parse_solcast_data(
+        [{"period_end": start.isoformat(), "pv_estimate": 1.0}],
+        start,
+        2,
+    )
+    starting_at_end = forecaster._parse_solcast_data(
+        [
+            {
+                "period_start": (start + timedelta(hours=1)).isoformat(),
+                "pv_estimate": 1.0,
+            },
+        ],
+        start,
+        2,
+    )
+
+    assert ending_at_start == []
+    assert starting_at_end == []
+
+
+def test_solcast_horizon_coverage_normalizes_non_utc_offsets(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    local_tz = timezone(timedelta(hours=10))
+    start = datetime(2026, 5, 9, 10, 0, tzinfo=local_tz)
+    forecaster = module.SolcastForecaster(
+        SimpleNamespace(data={}, states=_FakeStates()),
+        interval_minutes=30,
+    )
+
+    forecast = forecaster._parse_solcast_data(
+        [
+            {
+                "period_start": datetime(
+                    2026, 5, 9, 0, 0, tzinfo=timezone.utc
+                ).isoformat(),
+                "pv_estimate": 1.0,
+            },
+        ],
+        start,
+        2,
+    )
+
+    assert forecast == [1000.0, 0.0]
+
+
 def test_solcast_external_async_forecast_list_is_awaited(monkeypatch):
     module = _load_estimator_module(monkeypatch)
     start = datetime(2026, 5, 9, 10, 0, tzinfo=timezone.utc)
