@@ -214,6 +214,49 @@ def test_tesla_preserve_charge_fails_without_home_battery_soc():
     assert hass.services.calls == []
 
 
+def test_tesla_grid_export_supports_legacy_entry_without_battery_system():
+    """Pre-multi-brand Tesla entries implicitly use the Tesla battery system."""
+    hass = _Hass([])
+    legacy_entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+
+    result = asyncio.run(
+        actions._action_set_grid_export(
+            hass,
+            legacy_entry,
+            {"rule": "pv_only"},
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        (
+            "power_sync",
+            "set_grid_export",
+            {"rule": "pv_only", "source": "automation"},
+        )
+    ]
+
+
+def test_tesla_grid_export_respects_explicit_non_tesla_option():
+    hass = _Hass([])
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"battery_system": "sungrow"},
+    )
+
+    result = asyncio.run(
+        actions._action_set_grid_export(
+            hass,
+            entry,
+            {"rule": "pv_only"},
+        )
+    )
+
+    assert result is None
+    assert hass.services.calls == []
+
+
 def test_tesla_stop_accepts_numbered_teslemetry_charge_switch(monkeypatch):
     vin = "LRWYHCEKXTC687964"
     device = SimpleNamespace(

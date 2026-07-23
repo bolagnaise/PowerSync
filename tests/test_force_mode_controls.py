@@ -1030,7 +1030,7 @@ def test_tesla_self_consumption_uses_local_first_confirmed_mode_write():
     assert '"self_consumption"' in function_source
     assert 'reason="self-consumption"' in function_source
     assert "guard_write=_guarded_self_consumption_write" in function_source
-    assert "confirmed_sites" in function_source
+    assert "_tesla_force_result_all_confirmed(" in function_source
     assert "session.post(" not in function_source
 
 
@@ -1253,26 +1253,154 @@ def test_tesla_force_discharge_nudge_uses_local_first_backup_reserve_primitive()
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
     force_discharge = _find_function(tree, "handle_force_discharge")
-    reserve_helper = _find_function(tree, "_tesla_force_apply_backup_reserve")
+    reserve_helper = _find_function(
+        tree, "_tesla_force_apply_backup_reserve_unlocked"
+    )
+    pulse_helper = _find_function(tree, "_tesla_force_pulse_backup_reserve")
     reserve_cloud_helper = _find_function(
         tree, "_tesla_force_set_backup_reserve_cloud"
     )
     force_discharge_source = ast.get_source_segment(source, force_discharge)
     reserve_helper_source = ast.get_source_segment(source, reserve_helper)
+    pulse_helper_source = ast.get_source_segment(source, pulse_helper)
     reserve_cloud_helper_source = ast.get_source_segment(source, reserve_cloud_helper)
 
     assert force_discharge_source is not None
     assert reserve_helper_source is not None
+    assert pulse_helper_source is not None
     assert reserve_cloud_helper_source is not None
-    assert "_tesla_force_apply_backup_reserve(" in force_discharge_source
-    assert "force discharge apply nudge" in force_discharge_source
-    assert "force discharge final apply" in force_discharge_source
+    assert "_tesla_force_pulse_backup_reserve(" in force_discharge_source
+    assert "force discharge final reserve pulse" in force_discharge_source
     assert 'f"{api_base}/api/1/energy_sites/{site_id}/backup"' not in force_discharge_source
     assert "dispatch_powerwall_write(" in reserve_helper_source
     assert "local_backup_reserve_write_percent(" in reserve_helper_source
     assert "normalize_local_backup_reserve_percent(" in reserve_helper_source
     assert "hass.services.async_call" not in reserve_helper_source
+    assert "_tesla_reserve_write_lock" in pulse_helper_source
+    assert "finally:" in pulse_helper_source
+    assert "reserve pulse superseded after exact restore" in pulse_helper_source
     assert 'f"{api_base}/api/1/energy_sites/{site_id}/backup"' in reserve_cloud_helper_source
+
+
+def test_tesla_mode_actions_finish_with_reserve_pulse():
+    """Tesla can acknowledge a mode write yet remain latched until reserve changes."""
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    pulse_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "_tesla_force_pulse_backup_reserve"),
+    )
+    charge_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_charge"),
+    )
+    discharge_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_discharge"),
+    )
+    self_consumption_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_set_self_consumption"),
+    )
+
+    assert pulse_source is not None
+    assert charge_source is not None
+    assert discharge_source is not None
+    assert self_consumption_source is not None
+    assert "_tesla_backup_reserve_pulse_percent(target_percent)" in pulse_source
+    assert pulse_source.count("_tesla_force_apply_backup_reserve_unlocked(") == 2
+    assert "await asyncio.sleep(3)" in pulse_source
+    assert charge_source.index("send_tariff_to_tesla(") < charge_source.index(
+        '"force charge final reserve pulse"'
+    )
+    assert '"force discharge final reserve pulse"' in discharge_source
+    assert '"self-consumption final reserve pulse"' in self_consumption_source
+    assert charge_source.index('"force charge final reserve pulse"') < charge_source.rindex(
+        "FORCE CHARGE ACTIVE"
+    )
+    assert "initial_delay_seconds=60" in charge_source
+    assert "Tesla self-consumption reserve transition did not verify" in (
+        self_consumption_source
+    )
+
+
+def test_tesla_reserve_pulse_mapping_uses_a_distinct_valid_value():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    mapper_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "_tesla_backup_reserve_pulse_percent"),
+    )
+    assert mapper_source is not None
+
+    namespace: dict[str, object] = {}
+    exec(mapper_source, namespace)
+    mapper = namespace["_tesla_backup_reserve_pulse_percent"]
+
+    assert {target: mapper(target) for target in (0, 20, 80, 100)} == {
+        0: 20,
+        20: 0,
+        80: 20,
+        100: 20,
+    }
+
+
+def test_tesla_restore_and_discharge_fail_safe_around_reserve_pulse():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    restore_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_restore_normal"),
+    )
+    discharge_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_discharge"),
+    )
+
+    assert restore_source is not None
+    assert discharge_source is not None
+    assert restore_source.index(
+        "_tesla_force_apply_grid_charging("
+    ) < restore_source.index('"restore normal final reserve pulse"')
+    assert "_schedule_tesla_restore_retry(" in restore_source
+    assert "_tesla_reserve_generation[0]" in restore_source
+    assert "_cleanup_failed_tesla_force_discharge(" in discharge_source
+    assert "Tesla reserve transition did not verify" in discharge_source
+
+
+def test_tesla_reserve_only_supersession_cleans_force_tariff_without_clobbering_reserve():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    charge_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_charge"),
+    )
+    discharge_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_discharge"),
+    )
+    restore_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_restore_normal"),
+    )
+
+    assert charge_source is not None
+    assert discharge_source is not None
+    assert restore_source is not None
+    for handler_source in (charge_source, discharge_source):
+        assert "reserve pulse superseded after tariff upload" in handler_source
+        assert "preserve_newer_reserve=True" in handler_source
+        assert '"_skip_backup_reserve_restore": preserve_newer_reserve' in (
+            handler_source
+        )
+    assert 'call.data.get("_skip_backup_reserve_restore")' in restore_source
+    assert "preserving a newer backup reserve command" in restore_source
+    assert "restore_reserve_targets = []" in restore_source
+    assert (
+        '"_skip_backup_reserve_restore": (\n'
+        "                            skip_backup_reserve_restore"
+    ) in restore_source
+    assert 'persisted_force_state.get("_skip_backup_reserve_restore")' in source
 
 
 def test_tesla_force_restore_reuses_local_first_primitives_and_bounds_retry():
@@ -1292,7 +1420,7 @@ def test_tesla_force_restore_reuses_local_first_primitives_and_bounds_retry():
     assert discharge_source is not None
     assert retry_source is not None
     assert "_tesla_force_apply_operation_mode(" in restore_source
-    assert "_tesla_force_apply_backup_reserve(" in restore_source
+    assert "_tesla_force_pulse_backup_reserve(" in restore_source
     assert "_tesla_force_retry_expiry(" in discharge_source
     assert 'state["apply_retry_count"]' in retry_source
     assert "min(120 * (2 ** (retry_count - 1)), 900)" in retry_source
@@ -1619,17 +1747,11 @@ def test_tesla_force_discharge_applies_backup_reserve_after_tariff_upload():
     assert function_source is not None
     tariff_upload_index = function_source.index("send_tariff_to_tesla(")
     reserve_payload_index = function_source.index(
-        "reserve_result = await _tesla_force_apply_backup_reserve("
+        "reserve_result = await _tesla_force_pulse_backup_reserve("
     )
-    reserve_nudge_index = function_source.index('"force discharge apply nudge"')
-    reserve_final_index = function_source.index('"force discharge final apply"')
 
-    assert 'site_state["force_discharge_start_reserve"] = api_reserve' in function_source
-    assert '"force_discharge_start_reserve"' in function_source
-    assert "saved_states.get(config[0], {})" in function_source
-    assert "await asyncio.sleep(3)" in function_source
     assert tariff_upload_index < reserve_payload_index
-    assert reserve_nudge_index < reserve_final_index
+    assert '"force discharge final reserve pulse"' in function_source
 
 
 def test_tesla_force_discharge_arms_cleanup_for_unconfirmed_accepted_upload():
@@ -1871,6 +1993,24 @@ def test_tesla_manual_force_charge_and_force_discharge_keep_strict_verification(
         "if not _tesla_force_result_all_confirmed(grid_result, site_configs):"
         in discharge_source
     )
+
+
+def test_tesla_automation_grid_charging_allows_field_absent_compatibility():
+    """Background automations must not report a false failure for Tesla's
+    accepted-but-omitted grid-charging readback, while direct controls remain
+    strict.
+    """
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    handler_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_set_grid_charging"),
+    )
+
+    assert handler_source is not None
+    assert 'source == "automation"' in handler_source
+    assert "_tesla_force_result_all_grid_field_absent_safe(" in handler_source
+    assert "_tesla_force_result_all_confirmed(" in handler_source
 
 
 def test_tesla_charge_compatibility_requires_full_nonfailed_coverage():

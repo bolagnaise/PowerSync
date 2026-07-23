@@ -290,6 +290,21 @@ def _is_sigenergy(config_entry: ConfigEntry) -> bool:
     return bool(config_entry.data.get(CONF_SIGENERGY_STATION_ID))
 
 
+def _is_tesla_battery(config_entry: ConfigEntry) -> bool:
+    """Return whether the home battery is Tesla, including legacy entries."""
+    from ..const import CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA
+
+    data = getattr(config_entry, "data", {}) or {}
+    options = getattr(config_entry, "options", {}) or {}
+    return (
+        options.get(
+            CONF_BATTERY_SYSTEM,
+            data.get(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA),
+        )
+        == BATTERY_SYSTEM_TESLA
+    )
+
+
 def _sigenergy_native_control_active(config_entry: ConfigEntry) -> bool:
     """Return True when Sigenergy native/VPP control should own dispatch."""
     from ..const import (
@@ -2078,8 +2093,8 @@ async def _action_preserve_charge(
         finally:
             await controller.disconnect()
 
-    from ..const import CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA, DOMAIN, SERVICE_SET_BACKUP_RESERVE
-    if config_entry.data.get(CONF_BATTERY_SYSTEM) != BATTERY_SYSTEM_TESLA:
+    from ..const import DOMAIN, SERVICE_SET_BACKUP_RESERVE
+    if not _is_tesla_battery(config_entry):
         _LOGGER.debug("preserve_charge not supported for this non-Tesla system")
         return None
 
@@ -2441,8 +2456,8 @@ async def _action_set_grid_export(
     params: Dict[str, Any]
 ) -> bool:
     """Set grid export rule (Tesla only)."""
-    from ..const import CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA, DOMAIN, SERVICE_SET_GRID_EXPORT
-    if config_entry.data.get(CONF_BATTERY_SYSTEM) != BATTERY_SYSTEM_TESLA:
+    from ..const import DOMAIN, SERVICE_SET_GRID_EXPORT
+    if not _is_tesla_battery(config_entry):
         _LOGGER.debug("set_grid_export not supported for non-Tesla systems")
         return None
 
