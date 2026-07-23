@@ -74,6 +74,24 @@ def sigenergy_module():
         asyncio.set_event_loop(None)
 
 
+def _stub_force_discharge_reads(controller, *, rated_discharge_w=19200):
+    async def read_holding(address, count, slave_id=None):
+        values = {
+            controller.REG_REMOTE_EMS_ENABLE: [1],
+            controller.REG_REMOTE_EMS_CONTROL_MODE: [controller.REMOTE_EMS_MODE_SELF_CONSUMPTION],
+            controller.REG_ESS_MAX_DISCHARGE_LIMIT: controller._from_unsigned32(19200),
+            controller.REG_GRID_EXPORT_LIMIT: controller._from_unsigned32(16800),
+        }
+        return values[address]
+
+    async def read_input(address, count, slave_id=None):
+        assert address == controller.REG_ESS_RATED_DISCHARGE_POWER
+        return controller._from_unsigned32(rated_discharge_w)
+
+    controller._read_holding_registers = read_holding
+    controller._read_input_registers = read_input
+
+
 def test_force_charge_applies_requested_charge_limit_before_mode(sigenergy_module):
     controller = sigenergy_module.SigenergyController(host="127.0.0.1")
     writes: list[tuple[int, list[int]]] = []
@@ -152,6 +170,7 @@ def test_force_charge_does_not_exceed_configured_charge_cap(sigenergy_module):
 
 def test_force_discharge_uses_pv_first_mode_when_solar_can_cover_target(sigenergy_module):
     controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    _stub_force_discharge_reads(controller)
     writes: list[tuple[int, list[int]]] = []
 
     async def connect():
@@ -171,27 +190,22 @@ def test_force_discharge_uses_pv_first_mode_when_solar_can_cover_target(sigenerg
     assert asyncio.run(controller.force_discharge(power_kw=5.0))
 
     assert writes == [
-        (controller.REG_REMOTE_EMS_ENABLE, [1]),
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(5000)),
         (
-            controller.REG_REMOTE_EMS_CONTROL_MODE,
-            [controller.REMOTE_EMS_MODE_DISCHARGE_PV],
-        ),
-        (
-            controller.REG_ACTIVE_POWER_FIXED_TARGET,
-            controller._from_signed32(-5000),
-        ),
-        (
-            controller.REG_GRID_EXPORT_LIMIT,
+            controller.REG_ESS_MAX_DISCHARGE_LIMIT,
             controller._from_unsigned32(5000),
         ),
+        (controller.REG_REMOTE_EMS_ENABLE, [1]),
+        (controller.REG_REMOTE_EMS_CONTROL_MODE, [controller.REMOTE_EMS_MODE_DISCHARGE_PV]),
     ]
 
 
-def test_force_discharge_does_not_exceed_configured_discharge_cap(sigenergy_module):
+def test_force_discharge_caps_ess_without_reducing_grid_export_ceiling(sigenergy_module):
     controller = sigenergy_module.SigenergyController(
         host="127.0.0.1",
         configured_discharge_rate_limit_kw=3.0,
     )
+    _stub_force_discharge_reads(controller)
     writes: list[tuple[int, list[int]]] = []
 
     async def connect():
@@ -209,20 +223,20 @@ def test_force_discharge_does_not_exceed_configured_discharge_cap(sigenergy_modu
     controller._write_holding_registers = write
 
     assert asyncio.run(controller.force_discharge(power_kw=10.0))
-    assert writes[-2:] == [
+    assert writes == [
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(10000)),
         (
-            controller.REG_ACTIVE_POWER_FIXED_TARGET,
-            controller._from_signed32(-3000),
-        ),
-        (
-            controller.REG_GRID_EXPORT_LIMIT,
+            controller.REG_ESS_MAX_DISCHARGE_LIMIT,
             controller._from_unsigned32(3000),
         ),
+        (controller.REG_REMOTE_EMS_ENABLE, [1]),
+        (controller.REG_REMOTE_EMS_CONTROL_MODE, [controller.REMOTE_EMS_MODE_DISCHARGE_ESS]),
     ]
 
 
 def test_force_discharge_uses_ess_first_mode_when_target_needs_battery(sigenergy_module):
     controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    _stub_force_discharge_reads(controller)
     writes: list[tuple[int, list[int]]] = []
 
     async def connect():
@@ -247,24 +261,19 @@ def test_force_discharge_uses_ess_first_mode_when_target_needs_battery(sigenergy
     assert asyncio.run(controller.force_discharge(power_kw=5.0))
 
     assert writes == [
-        (controller.REG_REMOTE_EMS_ENABLE, [1]),
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(5000)),
         (
-            controller.REG_REMOTE_EMS_CONTROL_MODE,
-            [controller.REMOTE_EMS_MODE_DISCHARGE_ESS],
-        ),
-        (
-            controller.REG_ACTIVE_POWER_FIXED_TARGET,
-            controller._from_signed32(-5000),
-        ),
-        (
-            controller.REG_GRID_EXPORT_LIMIT,
+            controller.REG_ESS_MAX_DISCHARGE_LIMIT,
             controller._from_unsigned32(5000),
         ),
+        (controller.REG_REMOTE_EMS_ENABLE, [1]),
+        (controller.REG_REMOTE_EMS_CONTROL_MODE, [controller.REMOTE_EMS_MODE_DISCHARGE_ESS]),
     ]
 
 
-def test_force_discharge_leaves_ess_limit_unchanged_with_site_load(sigenergy_module):
+def test_force_discharge_does_not_misread_battery_charging_as_site_load(sigenergy_module):
     controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    _stub_force_discharge_reads(controller)
     writes: list[tuple[int, list[int]]] = []
 
     async def connect():
@@ -290,19 +299,13 @@ def test_force_discharge_leaves_ess_limit_unchanged_with_site_load(sigenergy_mod
     assert asyncio.run(controller.force_discharge(power_kw=0.1))
 
     assert writes == [
-        (controller.REG_REMOTE_EMS_ENABLE, [1]),
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(100)),
         (
-            controller.REG_REMOTE_EMS_CONTROL_MODE,
-            [controller.REMOTE_EMS_MODE_DISCHARGE_ESS],
-        ),
-        (
-            controller.REG_ACTIVE_POWER_FIXED_TARGET,
-            controller._from_signed32(-100),
-        ),
-        (
-            controller.REG_GRID_EXPORT_LIMIT,
+            controller.REG_ESS_MAX_DISCHARGE_LIMIT,
             controller._from_unsigned32(100),
         ),
+        (controller.REG_REMOTE_EMS_ENABLE, [1]),
+        (controller.REG_REMOTE_EMS_CONTROL_MODE, [controller.REMOTE_EMS_MODE_DISCHARGE_ESS]),
     ]
 
 
@@ -311,6 +314,7 @@ def test_force_discharge_mode_selection_uses_configured_export_cap(sigenergy_mod
         host="127.0.0.1",
         max_export_limit_kw=5.0,
     )
+    _stub_force_discharge_reads(controller)
     writes: list[tuple[int, list[int]]] = []
 
     async def connect():
@@ -330,24 +334,57 @@ def test_force_discharge_mode_selection_uses_configured_export_cap(sigenergy_mod
     assert asyncio.run(controller.force_discharge(power_kw=24.0))
 
     assert writes == [
-        (controller.REG_REMOTE_EMS_ENABLE, [1]),
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(5000)),
         (
-            controller.REG_REMOTE_EMS_CONTROL_MODE,
-            [controller.REMOTE_EMS_MODE_DISCHARGE_PV],
-        ),
-        (
-            controller.REG_ACTIVE_POWER_FIXED_TARGET,
-            controller._from_signed32(-5000),
-        ),
-        (
-            controller.REG_GRID_EXPORT_LIMIT,
+            controller.REG_ESS_MAX_DISCHARGE_LIMIT,
             controller._from_unsigned32(5000),
         ),
+        (controller.REG_REMOTE_EMS_ENABLE, [1]),
+        (controller.REG_REMOTE_EMS_CONTROL_MODE, [controller.REMOTE_EMS_MODE_DISCHARGE_PV]),
     ]
 
 
-def test_force_discharge_continues_when_active_power_target_write_fails(sigenergy_module):
+def test_force_discharge_uses_documented_ess_limit_for_modes_five_and_six(sigenergy_module):
     controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    _stub_force_discharge_reads(controller)
+    writes: list[tuple[int, list[int]]] = []
+
+    async def connect():
+        return True
+
+    async def get_status():
+        return types.SimpleNamespace(
+            attributes={
+                "pv_power_kw": 0.7,
+                "grid_power_kw": -4.4,
+                "battery_power_kw": -5.0,
+            }
+        )
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, list(values)))
+        return True
+
+    controller.connect = connect
+    controller.get_status = get_status
+    controller._write_holding_registers = write
+
+    assert asyncio.run(controller.force_discharge(power_kw=5.0))
+
+    assert writes == [
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(5000)),
+        (
+            controller.REG_ESS_MAX_DISCHARGE_LIMIT,
+            controller._from_unsigned32(6550),
+        ),
+        (controller.REG_REMOTE_EMS_ENABLE, [1]),
+        (controller.REG_REMOTE_EMS_CONTROL_MODE, [controller.REMOTE_EMS_MODE_DISCHARGE_ESS]),
+    ]
+
+
+def test_force_discharge_fails_when_ess_discharge_limit_write_fails(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    _stub_force_discharge_reads(controller)
     writes: list[tuple[int, list[int]]] = []
 
     async def connect():
@@ -358,28 +395,114 @@ def test_force_discharge_continues_when_active_power_target_write_fails(sigenerg
 
     async def write(address, values, slave_id=None):
         writes.append((address, list(values)))
-        return address != controller.REG_ACTIVE_POWER_FIXED_TARGET
+        return address != controller.REG_ESS_MAX_DISCHARGE_LIMIT
+
+    controller.connect = connect
+    controller.get_status = get_status
+    controller._write_holding_registers = write
+
+    assert not asyncio.run(controller.force_discharge(power_kw=5.0))
+    assert writes[:2] == [
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(5000)),
+        (controller.REG_ESS_MAX_DISCHARGE_LIMIT, controller._from_unsigned32(5000)),
+    ]
+    assert writes[-4:] == [
+        (controller.REG_REMOTE_EMS_CONTROL_MODE, [controller.REMOTE_EMS_MODE_SELF_CONSUMPTION]),
+        (controller.REG_REMOTE_EMS_ENABLE, [1]),
+        (controller.REG_ESS_MAX_DISCHARGE_LIMIT, controller._from_unsigned32(19200)),
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(16800)),
+    ]
+
+
+def test_force_discharge_clamps_ess_limit_to_hardware_rating(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    _stub_force_discharge_reads(controller, rated_discharge_w=5000)
+    writes: list[tuple[int, list[int]]] = []
+
+    async def connect():
+        return True
+
+    async def get_status():
+        return types.SimpleNamespace(
+            attributes={
+                "pv_power_kw": 0.7,
+                "grid_power_kw": -4.4,
+                "battery_power_kw": -5.0,
+            }
+        )
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, list(values)))
+        return True
 
     controller.connect = connect
     controller.get_status = get_status
     controller._write_holding_registers = write
 
     assert asyncio.run(controller.force_discharge(power_kw=5.0))
+    assert writes[0] == (
+        controller.REG_GRID_EXPORT_LIMIT,
+        controller._from_unsigned32(5000),
+    )
+    assert writes[1] == (
+        controller.REG_ESS_MAX_DISCHARGE_LIMIT,
+        controller._from_unsigned32(5000),
+    )
 
-    assert writes == [
+
+def test_force_discharge_fails_closed_when_rated_power_is_unavailable(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    _stub_force_discharge_reads(controller)
+    writes: list[tuple[int, list[int]]] = []
+
+    async def connect():
+        return True
+
+    async def read_input(address, count, slave_id=None):
+        return None
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, list(values)))
+        return True
+
+    controller.connect = connect
+    controller._read_input_registers = read_input
+    controller._write_holding_registers = write
+
+    assert not asyncio.run(controller.force_discharge(power_kw=5.0))
+    assert writes == []
+
+
+def test_force_discharge_rolls_back_when_mode_write_fails(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    _stub_force_discharge_reads(controller)
+    writes: list[tuple[int, list[int]]] = []
+    mode_attempted = False
+
+    async def connect():
+        return True
+
+    async def get_status():
+        return types.SimpleNamespace(attributes={"pv_power_kw": 0.0})
+
+    async def write(address, values, slave_id=None):
+        nonlocal mode_attempted
+        writes.append((address, list(values)))
+        if address == controller.REG_REMOTE_EMS_CONTROL_MODE and not mode_attempted:
+            mode_attempted = True
+            return False
+        return True
+
+    controller.connect = connect
+    controller.get_status = get_status
+    controller._write_holding_registers = write
+
+    assert not asyncio.run(controller.force_discharge(power_kw=5.0))
+    assert writes[-4:] == [
+        (controller.REG_REMOTE_EMS_CONTROL_MODE, [controller.REMOTE_EMS_MODE_SELF_CONSUMPTION]),
         (controller.REG_REMOTE_EMS_ENABLE, [1]),
-        (
-            controller.REG_REMOTE_EMS_CONTROL_MODE,
-            [controller.REMOTE_EMS_MODE_DISCHARGE_ESS],
-        ),
-        (
-            controller.REG_ACTIVE_POWER_FIXED_TARGET,
-            controller._from_signed32(-5000),
-        ),
-        (
-            controller.REG_GRID_EXPORT_LIMIT,
-            controller._from_unsigned32(5000),
-        ),
+        (controller.REG_ESS_MAX_DISCHARGE_LIMIT, controller._from_unsigned32(19200)),
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(16800)),
     ]
 
 
