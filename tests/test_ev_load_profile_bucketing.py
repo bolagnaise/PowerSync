@@ -11,7 +11,9 @@ built in local time too.
 from __future__ import annotations
 
 import asyncio
+import ast
 import importlib
+import math
 import sys
 import textwrap
 import types
@@ -121,6 +123,10 @@ _ha_recorder.history = _ha_recorder_history
 _ps = types.ModuleType("power_sync")
 _ps.__path__ = [str(ROOT)]
 sys.modules["power_sync"] = _ps
+
+_optimization = types.ModuleType("power_sync.optimization")
+_optimization.__path__ = [str(ROOT / "optimization")]
+sys.modules["power_sync.optimization"] = _optimization
 
 _automations = types.ModuleType("power_sync.automations")
 _automations.__path__ = [str(ROOT / "automations")]
@@ -323,3 +329,104 @@ def test_ev_overlay_both_configured_does_not_double_count_ev_demand():
     # Only the external overlay should be applied (2000 + 1000 = 3000).
     # Pre-fix this stacks both overlays: 2000 + 1000 + 500 = 3500.
     assert result == [3000.0, 3000.0, 3000.0, 3000.0]
+
+
+def _extract_coordinator_method(name: str):
+    tree = ast.parse(COORDINATOR_PATH.read_text())
+    method = next(
+        node
+        for class_node in tree.body
+        if isinstance(class_node, ast.ClassDef)
+        and class_node.name == "OptimizationCoordinator"
+        for node in class_node.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    namespace = {
+        "__name__": "power_sync.optimization._ev_plan_test",
+        "__package__": "power_sync.optimization",
+        "datetime": datetime,
+        "timedelta": timedelta,
+        "dt_util": _ha_dt,
+        "math": math,
+        "_LOGGER": SimpleNamespace(debug=lambda *args, **kwargs: None),
+    }
+    ast.fix_missing_locations(method)
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(COORDINATOR_PATH), "exec"), namespace)
+    return namespace[name]
+
+
+def test_internal_ev_forecast_prorates_trimmed_time_critical_window():
+    """Optimizer demand must start at the trimmed boundary and conserve energy."""
+    brisbane_tz = timezone(timedelta(hours=10))
+    now = datetime(2026, 7, 24, 2, 0, tzinfo=brisbane_tz)
+    old_now = _ha_dt.now
+    old_executor = ev_planner.get_auto_schedule_executor()
+    _ha_dt.now = lambda: now
+
+    plan = ev_planner.ChargingPlan(
+        vehicle_id="ev",
+        current_soc=57,
+        target_soc=80,
+        target_time="2026-07-24T05:00:00",
+        energy_needed_kwh=19.1666666667,
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time="2026-07-24T02:23:45",
+                end_time="2026-07-24T03:00:00",
+                source="grid_offpeak",
+                estimated_power_kw=7.36,
+                estimated_energy_kwh=4.4466666667,
+                price_cents_kwh=50.0,
+                reason="target_deadline",
+            ),
+            ev_planner.PlannedChargingWindow(
+                start_time="2026-07-24T03:00:00",
+                end_time="2026-07-24T04:00:00",
+                source="grid_offpeak",
+                estimated_power_kw=7.36,
+                estimated_energy_kwh=7.36,
+                price_cents_kwh=50.0,
+                reason="target_deadline",
+            ),
+            ev_planner.PlannedChargingWindow(
+                start_time="2026-07-24T04:00:00",
+                end_time="2026-07-24T05:00:00",
+                source="grid_offpeak",
+                estimated_power_kw=7.36,
+                estimated_energy_kwh=7.36,
+                price_cents_kwh=50.0,
+                reason="target_deadline",
+            ),
+        ],
+    )
+    settings = SimpleNamespace(
+        max_charge_amps=32,
+        voltage=230,
+        phases=1,
+    )
+    executor = SimpleNamespace(
+        _state={"ev": SimpleNamespace(current_plan=plan)},
+        _settings={"ev": settings},
+        _sync_charger_params_from_vehicle_configs=lambda *_args: None,
+    )
+    ev_planner.set_auto_schedule_executor(executor)
+
+    try:
+        coordinator = SimpleNamespace(
+            _config=SimpleNamespace(interval_minutes=5),
+        )
+        ev_load = _extract_coordinator_method("_get_ev_planned_load")(
+            coordinator,
+            36,
+        )
+    finally:
+        _ha_dt.now = old_now
+        ev_planner.set_auto_schedule_executor(old_executor)
+
+    assert ev_load is not None
+    assert ev_load[:4] == [0.0, 0.0, 0.0, 0.0]
+    assert ev_load[4] == pytest.approx(1840.0)
+    assert max(ev_load) == pytest.approx(7360.0)
+    assert sum(ev_load) / 1000 * (5 / 60) == pytest.approx(
+        plan.energy_needed_kwh
+    )

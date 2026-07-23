@@ -85,6 +85,10 @@ _ps = types.ModuleType("power_sync")
 _ps.__path__ = [str(ROOT)]
 sys.modules["power_sync"] = _ps
 
+_optimization = types.ModuleType("power_sync.optimization")
+_optimization.__path__ = [str(ROOT / "optimization")]
+sys.modules["power_sync.optimization"] = _optimization
+
 _automations = types.ModuleType("power_sync.automations")
 _automations.__path__ = [str(ROOT / "automations")]
 sys.modules["power_sync.automations"] = _automations
@@ -449,12 +453,179 @@ def test_time_critical_keeps_priced_grid_hours_when_solar_horizon_is_short(
     )
 
     assert [window.start_time for window in plan.windows] == [
-        "2026-07-16T18:00:00",
+        "2026-07-16T18:02:56.086957",
         "2026-07-16T19:00:00",
     ]
     assert plan.estimated_grid_kwh == pytest.approx(7.0)
     assert plan.estimated_solar_kwh == pytest.approx(3.0)
     assert plan.can_meet_target is True
+
+
+def _live_time_critical_plan(monkeypatch):
+    """Build the reported 75 kWh / 57% -> 80% deadline scenario."""
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 7, 24, 1, 0, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    planner.surplus_forecaster.forecast_surplus = AsyncMock(return_value=[])
+    planner.price_forecaster.get_price_forecast = AsyncMock(
+        return_value=[
+            ev_planner.PriceForecast(
+                hour=f"2026-07-24T{hour:02d}:00:00",
+                import_cents=50.0,
+                export_cents=0.0,
+                period="offpeak",
+            )
+            for hour in (2, 3, 4)
+        ]
+    )
+
+    plan = asyncio.run(
+        planner.plan_charging(
+            vehicle_id=VIN,
+            current_soc=57,
+            target_soc=80,
+            target_time=datetime(2026, 7, 24, 5, 0),
+            resolved_capacity=ev_planner.resolve_ev_battery_capacity(
+                manual_capacity_kwh=75
+            ),
+            charger_power_kw=7.36,
+            priority=ev_planner.ChargingPriority.TIME_CRITICAL,
+        )
+    )
+    return planner, plan, brisbane_tz
+
+
+def test_time_critical_trims_partial_first_window_for_live_75kwh_case(
+    monkeypatch,
+):
+    _planner, plan, _brisbane_tz = _live_time_critical_plan(monkeypatch)
+
+    assert plan.energy_needed_kwh == pytest.approx(19.1666666667)
+    assert [(window.start_time, window.end_time) for window in plan.windows] == [
+        ("2026-07-24T02:23:45", "2026-07-24T03:00:00"),
+        ("2026-07-24T03:00:00", "2026-07-24T04:00:00"),
+        ("2026-07-24T04:00:00", "2026-07-24T05:00:00"),
+    ]
+    assert sum(window.estimated_energy_kwh for window in plan.windows) == (
+        pytest.approx(plan.energy_needed_kwh)
+    )
+    for window in plan.windows:
+        start = datetime.fromisoformat(window.start_time)
+        end = datetime.fromisoformat(window.end_time)
+        duration_hours = (end - start).total_seconds() / 3600
+        assert window.estimated_energy_kwh == pytest.approx(
+            window.estimated_power_kw * duration_hours
+        )
+    assert (
+        plan.to_dict()["planned_windows"][0]["start_time"]
+        == "2026-07-24T02:23:45"
+    )
+
+
+@pytest.mark.parametrize(
+    ("current_time", "expected_should_charge"),
+    (
+        (datetime(2026, 7, 24, 1, 57), False),
+        (datetime(2026, 7, 24, 2, 23, 44), False),
+        (datetime(2026, 7, 24, 2, 23, 45), True),
+        (datetime(2026, 7, 24, 2, 23, 46), True),
+    ),
+)
+def test_time_critical_execution_uses_trimmed_window_boundary(
+    monkeypatch,
+    current_time,
+    expected_should_charge,
+):
+    planner, plan, brisbane_tz = _live_time_critical_plan(monkeypatch)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: current_time.replace(tzinfo=brisbane_tz),
+    )
+
+    should_charge, _reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=0.0,
+            current_price_cents=50.0,
+            battery_soc=80.0,
+            is_time_critical=True,
+        )
+    )
+
+    assert should_charge is expected_should_charge
+    assert source == ("grid_offpeak" if expected_should_charge else "waiting")
+
+
+@pytest.mark.parametrize(
+    ("demand_blocked", "expected_should_charge"),
+    ((False, True), (True, False)),
+)
+def test_time_critical_impossible_plan_only_charges_in_permitted_current_window(
+    monkeypatch,
+    demand_blocked,
+    expected_should_charge,
+):
+    brisbane_tz = timezone(timedelta(hours=10))
+    now = datetime(2026, 7, 24, 4, 0, tzinfo=brisbane_tz)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    monkeypatch.setattr(
+        planner,
+        "_is_grid_charging_blocked_at",
+        lambda _when: demand_blocked,
+    )
+    plan = asyncio.run(
+        planner._plan_time_critical(
+            vehicle_id=VIN,
+            current_soc=20,
+            target_soc=80,
+            target_time=datetime(2026, 7, 24, 5, 0),
+            energy_needed_kwh=20.0,
+            charger_power_kw=7.36,
+            surplus_forecast=[],
+            price_forecast=[
+                ev_planner.PriceForecast(
+                    hour="2026-07-24T04:00:00",
+                    import_cents=50.0,
+                    export_cents=0.0,
+                    period="offpeak",
+                )
+            ],
+        )
+    )
+
+    should_charge, _reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=0.0,
+            current_price_cents=50.0,
+            battery_soc=80.0,
+            is_time_critical=True,
+        )
+    )
+
+    assert plan.can_meet_target is False
+    assert should_charge is expected_should_charge
+    assert source == ("grid_offpeak" if expected_should_charge else "waiting")
 
 
 def test_forecast_hour_key_preserves_repeated_dst_hours():
@@ -571,12 +742,14 @@ def test_ev_planners_keep_repeated_dst_hours_distinct(monkeypatch):
         )
     )
 
-    expected_starts = [
+    assert [window.start_time for window in cheapest.windows] == [
         "2026-11-01T01:00:00-04:00",
         "2026-11-01T01:00:00-05:00",
     ]
-    assert [window.start_time for window in cheapest.windows] == expected_starts
-    assert [window.start_time for window in deadline.windows] == expected_starts
+    assert [window.start_time for window in deadline.windows] == [
+        "2026-11-01T01:38:28.695652-04:00",
+        "2026-11-01T01:00:00-05:00",
+    ]
     assert cheapest.can_meet_target is True
     assert deadline.can_meet_target is True
 

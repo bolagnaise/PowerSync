@@ -58,6 +58,10 @@ _ps = types.ModuleType("power_sync")
 _ps.__path__ = [str(ROOT)]
 sys.modules["power_sync"] = _ps
 
+_optimization = types.ModuleType("power_sync.optimization")
+_optimization.__path__ = [str(ROOT / "optimization")]
+sys.modules["power_sync.optimization"] = _optimization
+
 _automations = types.ModuleType("power_sync.automations")
 _automations.__path__ = [str(ROOT / "automations")]
 sys.modules["power_sync.automations"] = _automations

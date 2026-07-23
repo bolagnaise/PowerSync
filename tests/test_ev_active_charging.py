@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_syn
 sys.modules.setdefault("aiohttp", types.ModuleType("aiohttp"))
 
 _ha_root = sys.modules.setdefault("homeassistant", types.ModuleType("homeassistant"))
+_ha_core = sys.modules.setdefault("homeassistant.core", types.ModuleType("homeassistant.core"))
 _ha_util = sys.modules.setdefault("homeassistant.util", types.ModuleType("homeassistant.util"))
 _ha_dt = sys.modules.setdefault("homeassistant.util.dt", types.ModuleType("homeassistant.util.dt"))
 _ha_helpers = sys.modules.setdefault("homeassistant.helpers", types.ModuleType("homeassistant.helpers"))
@@ -28,6 +29,7 @@ _ha_dr = sys.modules.setdefault(
 )
 
 _ha_dt.now = getattr(_ha_dt, "now", lambda *args, **kwargs: None)
+_ha_core.HomeAssistant = type("HomeAssistant", (), {})
 _ha_er.async_get = lambda hass: hass.entity_registry
 _ha_dr.async_get = lambda hass: hass.device_registry
 _ha_helpers.entity_registry = _ha_er
@@ -39,6 +41,10 @@ _ha_root.util = _ha_util
 _ps = types.ModuleType("power_sync")
 _ps.__path__ = [str(ROOT)]
 sys.modules["power_sync"] = _ps
+
+_optimization = types.ModuleType("power_sync.optimization")
+_optimization.__path__ = [str(ROOT / "optimization")]
+sys.modules["power_sync.optimization"] = _optimization
 
 _automations = types.ModuleType("power_sync.automations")
 _automations.__path__ = [str(ROOT / "automations")]

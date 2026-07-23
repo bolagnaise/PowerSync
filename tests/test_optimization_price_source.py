@@ -6,6 +6,7 @@ import asyncio
 import ast
 import importlib
 import inspect
+import math
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,7 @@ _STUB_MODULE_NAMES = (
     "homeassistant.util.dt",
     "power_sync",
     "power_sync.const",
+    "power_sync.coordinator",
     "power_sync.flow_power_pricing",
     "power_sync.optimization",
     "power_sync.optimization.battery_optimizer",
@@ -154,6 +156,27 @@ def _install_power_sync_stubs() -> None:
     const_module.FLOW_POWER_MARKET_AVG = 8.0
     const_module.NETWORK_API_NAME = {"Ausgrid": "ausgrid"}
     sys.modules["power_sync.const"] = const_module
+
+    coordinator_module = types.ModuleType("power_sync.coordinator")
+
+    def _normalize_custom_power_kw(value, unit=""):
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(normalized):
+            return None
+        normalized_unit = str(unit or "").strip().lower()
+        if normalized_unit in {"w", "watt", "watts"}:
+            return normalized / 1000.0
+        if normalized_unit in {"mw", "megawatt", "megawatts"}:
+            return normalized * 1000.0
+        if normalized_unit in {"kw", "kilowatt", "kilowatts"}:
+            return normalized
+        return normalized / 1000.0 if abs(normalized) > 100 else normalized
+
+    coordinator_module.normalize_custom_power_kw = _normalize_custom_power_kw
+    sys.modules["power_sync.coordinator"] = coordinator_module
 
     ev_module = types.ModuleType("power_sync.optimization.ev_coordinator")
     ev_module.EVCoordinator = type("EVCoordinator", (), {})

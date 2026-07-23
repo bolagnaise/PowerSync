@@ -10649,15 +10649,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 start_offset_min = (w_start - now).total_seconds() / 60
                 end_offset_min = (w_end - now).total_seconds() / 60
 
-                idx_start = int(start_offset_min / interval_minutes)
-                idx_end = int(end_offset_min / interval_minutes)
+                idx_start = math.floor(start_offset_min / interval_minutes)
+                idx_end = math.ceil(end_offset_min / interval_minutes)
 
                 # Clamp to valid range
                 idx_start = max(0, idx_start)
                 idx_end = min(n_intervals, idx_end)
 
                 for i in range(idx_start, idx_end):
-                    ev_load[i] += power_w
+                    interval_start = now + timedelta(
+                        minutes=i * interval_minutes
+                    )
+                    interval_end = interval_start + timedelta(
+                        minutes=interval_minutes
+                    )
+                    overlap_start = max(w_start, interval_start)
+                    overlap_end = min(w_end, interval_end)
+                    overlap_seconds = (
+                        overlap_end - overlap_start
+                    ).total_seconds()
+                    if overlap_seconds <= 0:
+                        continue
+                    overlap_fraction = overlap_seconds / (
+                        interval_minutes * 60
+                    )
+                    ev_load[i] += power_w * overlap_fraction
                     has_any_windows = True
 
         if not has_any_windows:

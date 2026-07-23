@@ -196,28 +196,31 @@ def _forecast_window_display_bounds(
     value: str,
     end_dt: datetime,
     *,
+    start_dt: Optional[datetime] = None,
     preserve_offset: bool = False,
 ) -> tuple[str, str]:
     """Return local display bounds while preserving repeated-hour offsets."""
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (TypeError, ValueError):
-        start_dt = _parse_forecast_hour_local_naive(value)
-        if start_dt is None:
+        fallback_start = start_dt or _parse_forecast_hour_local_naive(value)
+        if fallback_start is None:
             return value, end_dt.isoformat()
-        return start_dt.isoformat(), end_dt.isoformat()
+        return fallback_start.isoformat(), end_dt.isoformat()
 
     local_start_naive = _as_ha_local_naive(parsed)
+    display_start_naive = start_dt or local_start_naive
     if parsed.tzinfo is None or not preserve_offset:
-        return local_start_naive.isoformat(), end_dt.isoformat()
+        return display_start_naive.isoformat(), end_dt.isoformat()
 
-    duration = max(timedelta(0), end_dt - local_start_naive)
+    start_offset = max(timedelta(0), display_start_naive - local_start_naive)
+    end_offset = max(timedelta(0), end_dt - local_start_naive)
     try:
-        local_start = dt_util.as_local(parsed)
-        local_end = dt_util.as_local(parsed + duration)
+        local_start = dt_util.as_local(parsed + start_offset)
+        local_end = dt_util.as_local(parsed + end_offset)
     except Exception:
-        local_start = parsed.astimezone()
-        local_end = (parsed + duration).astimezone()
+        local_start = (parsed + start_offset).astimezone()
+        local_end = (parsed + end_offset).astimezone()
     return local_start.isoformat(), local_end.isoformat()
 
 
@@ -3122,22 +3125,25 @@ class ChargingPlanner:
             if target_time_local and hour_dt >= target_time_local:
                 continue  # Skip hours that start at or after deadline
 
-            # Calculate usable fraction of this hour (clamp end to departure)
-            end_dt = hour_dt + timedelta(hours=1)
-            if target_time_local and end_dt > target_time_local:
-                end_dt = target_time_local
-            usable_fraction = (end_dt - max(hour_dt, now)).total_seconds() / 3600
-            usable_fraction = max(0.0, min(1.0, usable_fraction))
-            if usable_fraction < 0.1:
+            # Bound this candidate by the planning instant and departure.
+            bounded_start = max(hour_dt, now)
+            bounded_end = hour_dt + timedelta(hours=1)
+            if target_time_local and bounded_end > target_time_local:
+                bounded_end = target_time_local
+            usable_hours = (
+                bounded_end - bounded_start
+            ).total_seconds() / 3600
+            usable_hours = max(0.0, min(1.0, usable_hours))
+            if usable_hours < 0.1:
                 continue  # Less than 6 minutes usable — skip
 
-            # Use whatever is available, scaled by usable fraction of the hour
+            # Use one consistent power for capacity, timestamps, publication,
+            # and downstream optimizer demand.
             if surplus is not None and surplus.surplus_kw >= 1.0:
                 # Prefer solar
-                energy_this_hour = min(surplus.surplus_kw, charger_power_kw) * usable_fraction
+                window_power_kw = min(surplus.surplus_kw, charger_power_kw)
                 source = "solar_surplus"
                 cost = 0
-                solar_energy += min(energy_this_hour, energy_needed_kwh - energy_allocated)
             else:
                 # Skip grid hours that fall inside a demand window (unless override set).
                 # If this leaves the deadline unmet, the warning/can_meet_target fields
@@ -3145,15 +3151,28 @@ class ChargingPlanner:
                 if self._is_grid_charging_blocked_at(hour_dt):
                     continue
                 # Use grid
-                energy_this_hour = charger_power_kw * usable_fraction
+                window_power_kw = charger_power_kw
                 source = f"grid_{price.period}"
                 cost = price.import_cents
-                grid_energy += min(energy_this_hour, energy_needed_kwh - energy_allocated)
 
-            energy_this_hour = min(energy_this_hour, energy_needed_kwh - energy_allocated)
+            available_kwh = window_power_kw * usable_hours
+            remaining_kwh = energy_needed_kwh - energy_allocated
+            energy_this_hour = min(available_kwh, remaining_kwh)
+            if energy_this_hour <= 0:
+                continue
+
+            if energy_this_hour + 1e-9 < available_kwh:
+                planned_start = bounded_end - timedelta(
+                    hours=energy_this_hour / window_power_kw
+                )
+                planned_start = max(planned_start, bounded_start)
+            else:
+                planned_start = bounded_start
+
             display_start, display_end = _forecast_window_display_bounds(
                 price.hour,
-                end_dt,
+                bounded_end,
+                start_dt=planned_start,
                 preserve_offset=(
                     hour_dt.replace(
                         minute=0,
@@ -3168,17 +3187,23 @@ class ChargingPlanner:
                 start_time=display_start,
                 end_time=display_end,
                 source=source,
-                estimated_power_kw=charger_power_kw,
+                estimated_power_kw=window_power_kw,
                 estimated_energy_kwh=energy_this_hour,
                 price_cents_kwh=cost,
                 reason="target_deadline",
             ))
 
             energy_allocated += energy_this_hour
+            if source == "solar_surplus":
+                solar_energy += energy_this_hour
+            else:
+                grid_energy += energy_this_hour
             total_cost += energy_this_hour * cost
 
-        # Sort chronologically
-        windows.sort(key=lambda w: w.start_time)
+        # Candidates are traversed backwards from the deadline. Reverse the
+        # selected list rather than sorting ISO strings, which misorders the
+        # two offset-bearing occurrences of a repeated DST hour.
+        windows.reverse()
 
         plan = ChargingPlan(
             vehicle_id=vehicle_id,
@@ -3232,27 +3257,6 @@ class ChargingPlanner:
         """
         now = _ha_local_now_naive()
 
-        # For time_critical mode with a deadline, check if we need to charge NOW to meet target
-        if is_time_critical and plan.target_time and not plan.can_meet_target:
-            # We're behind schedule - charge immediately regardless of price/battery
-            return True, f"Must charge to meet deadline (behind schedule)", "grid_deadline"
-
-        if is_time_critical and plan.target_time:
-            # Check if we're in a critical window where we MUST charge to meet deadline
-            try:
-                target_dt = datetime.fromisoformat(plan.target_time)
-                if target_dt.tzinfo is not None:
-                    target_dt = _as_ha_local_naive(target_dt)
-
-                hours_remaining = (target_dt - now).total_seconds() / 3600
-                hours_needed = plan.energy_needed_kwh / 7.0  # Assume ~7kW charger
-
-                # If we need to charge continuously to meet target, do it now
-                if hours_remaining <= hours_needed * 1.2:  # 20% buffer
-                    return True, f"Critical: {hours_remaining:.1f}h left, need {hours_needed:.1f}h", "grid_deadline"
-            except Exception as e:
-                _LOGGER.debug(f"Error checking time_critical deadline: {e}")
-
         # Note: min_battery_soc is used to prevent battery DISCHARGE during surplus
         # calculation, but does NOT block charging from solar/grid.
         # The Powerwall's own backup reserve handles discharge protection.
@@ -3277,6 +3281,42 @@ class ChargingPlanner:
             except Exception as e:
                 _LOGGER.debug(f"Error parsing window time: {e}")
                 continue
+
+        # A fresh time-critical plan already exhausts every permitted interval
+        # when the deadline is infeasible. Do not bypass its timestamps,
+        # demand-window exclusions, or configured power with a second duration
+        # calculation or opportunistic start.
+        if is_time_critical and plan.target_time:
+            for window in plan.windows:
+                try:
+                    window_start, _window_end, comparison_now = (
+                        _schedule_window_for_comparison(
+                            window.start_time,
+                            window.end_time,
+                            now,
+                        )
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if window_start > comparison_now:
+                    hours_until = (
+                        window_start - comparison_now
+                    ).total_seconds() / 3600
+                    return (
+                        False,
+                        f"Waiting for planned deadline window at "
+                        f"{window_start.strftime('%H:%M')} "
+                        f"({hours_until:.1f}h)",
+                        "waiting",
+                    )
+
+            if not plan.can_meet_target:
+                return (
+                    False,
+                    "Behind schedule; no permitted planned charging window now",
+                    "waiting",
+                )
+            return False, "No current deadline charging window", "waiting"
 
         # Check for opportunistic solar (always take free power)
         if current_surplus_kw >= 1.5:
