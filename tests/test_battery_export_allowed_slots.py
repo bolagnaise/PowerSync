@@ -2662,6 +2662,7 @@ class _FakeEnergyCoordinator:
         self.restore_work_mode_from_idle_calls = 0
         self.no_discharge_calls = 0
         self.restore_no_discharge_calls = 0
+        self.restore_no_discharge_result = True
         self.discharge_blocked_after_restore = False
 
     async def restore_work_mode_from_idle(self):
@@ -2673,7 +2674,7 @@ class _FakeEnergyCoordinator:
 
     async def restore_no_discharge_mode(self):
         self.restore_no_discharge_calls += 1
-        return True
+        return self.restore_no_discharge_result
 
     def _discharge_appears_blocked_after_restore(self):
         return self.discharge_blocked_after_restore
@@ -5605,6 +5606,148 @@ def test_flow_power_no_idle_executor_preserves_solver_exempt_idle(opt_module):
     assert battery.backup_reserve_calls == [80]
     assert coordinator._idle_hold_reserve == 80
     assert coordinator._last_executed_action == "idle"
+
+
+def test_sigenergy_no_idle_exempt_hold_allows_solar_charge_and_restores(opt_module):
+    """A retained No Idle hold must cap discharge without entering standby."""
+    battery = _FakeBattery(backup_reserve=20)
+    energy_coordinator = _FakeEnergyCoordinator()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.37)
+    coordinator._entry.options["electricity_provider"] = "flow_power"
+    coordinator._config.disable_idle_enabled = True
+    coordinator.battery_system = "sigenergy"
+    coordinator.energy_coordinator = energy_coordinator
+    coordinator._last_executed_action = "self_consumption"
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+
+    assert energy_coordinator.no_discharge_calls == 1
+    assert battery.backup_reserve_calls == []
+    assert coordinator._last_executed_action == "idle"
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert energy_coordinator.restore_no_discharge_calls == 1
+    assert energy_coordinator.restore_work_mode_from_idle_calls == 0
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_sigenergy_no_idle_exempt_hold_retries_failed_restore(opt_module):
+    """A failed no-discharge release must keep the IDLE marker for retry."""
+    battery = _FakeBattery(backup_reserve=20)
+    energy_coordinator = _FakeEnergyCoordinator()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.37)
+    coordinator._entry.options["electricity_provider"] = "flow_power"
+    coordinator._config.disable_idle_enabled = True
+    coordinator.battery_system = "sigenergy"
+    coordinator.energy_coordinator = energy_coordinator
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+    energy_coordinator.restore_no_discharge_result = False
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert energy_coordinator.restore_no_discharge_calls == 1
+    assert coordinator._idle_no_discharge_active is True
+    assert coordinator._last_executed_action == "idle"
+    assert battery.self_consumption_calls == 0
+
+    energy_coordinator.restore_no_discharge_result = True
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert energy_coordinator.restore_no_discharge_calls == 2
+    assert coordinator._idle_no_discharge_active is False
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_sigenergy_failed_disable_cleanup_retries_before_enable(opt_module):
+    """A failed disable cleanup must be retried before a new optimizer run."""
+
+    async def _run():
+        battery = _FakeBattery(backup_reserve=20)
+        energy_coordinator = _FakeEnergyCoordinator()
+        coordinator = _execution_coordinator(opt_module, battery, soc=0.37)
+        coordinator.battery_system = "sigenergy"
+        coordinator.energy_coordinator = energy_coordinator
+        coordinator._idle_no_discharge_active = True
+        coordinator._last_executed_action = "idle"
+        coordinator._enabled = True
+        coordinator._polling_task = None
+        coordinator._initial_opt_task = None
+        coordinator._deferred_restore_task = None
+        coordinator._settings_reoptimize_task = None
+        coordinator._price_reoptimize_task = None
+        coordinator._price_listener_unsub = None
+        coordinator._octopus_gate_listener_unsub = None
+        coordinator._ev_coordinator = None
+        coordinator._ev_configs = []
+        coordinator._cost_store = SimpleNamespace(
+            async_save=lambda *_args: asyncio.sleep(0)
+        )
+        coordinator._cost_data_to_save = lambda: {}
+
+        async def _stop(*, restore_normal=True):
+            return None
+
+        async def _start(*, use_periodic_timer=False):
+            return True
+
+        coordinator._executor = SimpleNamespace(
+            battery_controller=battery,
+            stop=_stop,
+            start=_start,
+            set_config=lambda _config: None,
+        )
+        coordinator._optimizer = object()
+        coordinator._setup_price_listener = lambda: asyncio.sleep(0)
+
+        background_tasks = []
+
+        def _background_task(coro, name):
+            coro.close()
+            background_tasks.append(name)
+            return None
+
+        coordinator.hass.async_create_background_task = _background_task
+
+        energy_coordinator.restore_no_discharge_result = False
+        await coordinator.disable()
+
+        assert coordinator._enabled is False
+        assert coordinator._idle_no_discharge_active is True
+        assert energy_coordinator.restore_no_discharge_calls == 1
+
+        energy_coordinator.restore_no_discharge_result = True
+        assert await coordinator.enable() is True
+        assert coordinator._idle_no_discharge_active is False
+        assert energy_coordinator.restore_no_discharge_calls == 2
+        assert background_tasks == [
+            "powersync_enable_restore",
+            "powersync_initial_optimization",
+            "powersync_schedule_polling",
+        ]
+
+    asyncio.run(_run())
 
 
 def test_flow_power_no_idle_monitoring_reports_solver_exempt_idle(opt_module, caplog):

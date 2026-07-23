@@ -509,6 +509,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # hardware reserve with the optimizer's LP floor.
         self._pre_idle_backup_reserve: int | None = None
         self._idle_hold_reserve: int | None = None
+        self._idle_no_discharge_active = False
         self._scheduled_ev_no_discharge_active = False
         # User's real backup reserve captured ONCE on startup, before any
         # IDLE modifies it. Used as the authoritative restore value.
@@ -720,6 +721,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "Optimizer: IDLE — Sungrow discharge-cap hold at %d%% SOC "
                 "(backup reserve unchanged)",
                 soc_pct,
+            )
+            return True
+
+        if (
+            preserve_charge
+            and self.energy_coordinator
+            and hasattr(self.energy_coordinator, "set_no_discharge_mode")
+        ):
+            if getattr(self, "_idle_no_discharge_active", False):
+                return True
+            if await self.energy_coordinator.set_no_discharge_mode() is False:
+                return False
+            self._idle_no_discharge_active = True
+            self._idle_hold_reserve = None
+            _LOGGER.info(
+                "Optimizer: IDLE — discharge blocked while charging remains allowed"
             )
             return True
 
@@ -3586,6 +3603,26 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._enabled:
             return True
 
+        # A previous disable may have failed to release the temporary
+        # no-discharge cap used by a charge-preserving IDLE hold.  Retry that
+        # hardware cleanup before starting the executor or scheduling a new
+        # solve; otherwise the next optimizer session can inherit a stale
+        # zero-discharge limit even though its first action is not IDLE.
+        if getattr(self, "_idle_no_discharge_active", False):
+            if self._monitoring_mode_active():
+                _LOGGER.info(
+                    "Optimizer enable: monitoring mode active — retaining pending "
+                    "IDLE no-discharge cleanup without hardware writes"
+                )
+            elif not await self._restore_idle_no_discharge_mode(
+                "optimizer enable retry"
+            ):
+                _LOGGER.error(
+                    "Cannot enable optimization - pending IDLE no-discharge "
+                    "cleanup still failed"
+                )
+                return False
+
         if not self._optimizer:
             _LOGGER.error("Cannot enable optimization - optimizer not initialized")
             return False
@@ -3894,7 +3931,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # _release_scheduled_ev_no_discharge_mode below, and widening this
         # gate would double-fire restore_work_mode_from_idle.
         if not monitoring_mode and self._last_executed_action == "idle":
-            if (
+            if getattr(self, "_idle_no_discharge_active", False):
+                await self._restore_idle_no_discharge_mode("optimizer disable")
+            elif (
                 self.energy_coordinator
                 and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
             ):
@@ -3959,6 +3998,33 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._cost_store.async_save(self._cost_data_to_save())
 
         _LOGGER.info("Optimization disabled")
+
+    async def _restore_idle_no_discharge_mode(self, context: str) -> bool:
+        """Release a temporary IDLE discharge cap, preserving retry state."""
+        if not getattr(self, "_idle_no_discharge_active", False):
+            return True
+        coordinator = self.energy_coordinator
+        if not coordinator or not hasattr(coordinator, "restore_no_discharge_mode"):
+            _LOGGER.warning(
+                "%s: cannot release IDLE no-discharge mode; coordinator unavailable",
+                context,
+            )
+            return False
+        try:
+            restored = await coordinator.restore_no_discharge_mode()
+        except Exception as e:
+            _LOGGER.warning(
+                "%s: failed to release IDLE no-discharge mode: %s",
+                context,
+                e,
+            )
+            return False
+        if restored is False:
+            _LOGGER.warning("%s: failed to release IDLE no-discharge mode", context)
+            return False
+        self._idle_no_discharge_active = False
+        _LOGGER.info("%s: released IDLE no-discharge mode", context)
+        return True
 
     async def _run_optimization(
         self,
@@ -6647,7 +6713,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # executing the new LP action.
             prev = self._last_executed_action
             if prev == "idle" and effective_action != "idle":
-                if (
+                if getattr(self, "_idle_no_discharge_active", False):
+                    if not await self._restore_idle_no_discharge_mode(
+                        "optimizer action transition"
+                    ):
+                        _LOGGER.warning(
+                            "Optimizer: Failed to release IDLE no-discharge mode "
+                            "(will retry next cycle)"
+                        )
+                        return
+                elif (
                     self.energy_coordinator
                     and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
                 ):
@@ -6863,7 +6938,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     getattr(action, "action", "scheduled_ev_preserve"),
                 )
             elif effective_action == "idle":
-                if await self._set_idle_hold_mode(battery) is False:
+                if await self._set_idle_hold_mode(
+                    battery,
+                    preserve_charge=self._should_disable_idle_schedule(),
+                ) is False:
                     _LOGGER.warning(
                         "Optimizer: IDLE command failed — keeping previous action "
                         "marker so the next cycle retries"
