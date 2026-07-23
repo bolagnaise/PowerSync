@@ -216,6 +216,68 @@ class AutomationStore:
             groups.add("Default Group")
         return sorted(list(groups))
 
+    async def async_rename_group(
+        self,
+        old_group_name: str,
+        new_group_name: str,
+    ) -> int:
+        """Rename every automation in a group and persist the change atomically.
+
+        The source name is matched exactly so similarly named groups are not
+        changed. The target name is trimmed, and may already exist; in that case
+        the source automations are merged into the existing group.
+        """
+        if not isinstance(old_group_name, str) or not old_group_name.strip():
+            raise ValueError("old_name must be a non-empty string")
+        if not isinstance(new_group_name, str):
+            raise ValueError("new_name must be a non-empty string")
+
+        normalized_new_name = new_group_name.strip()
+        if not normalized_new_name:
+            raise ValueError("new_name must be a non-empty string")
+        if normalized_new_name == old_group_name:
+            raise ValueError("new_name must be different from old_name")
+
+        matching_automations = [
+            automation
+            for automation in self._data.get("automations", [])
+            if automation.get("group_name") == old_group_name
+        ]
+        if not matching_automations:
+            return 0
+
+        missing = object()
+        original_values = [
+            (
+                automation,
+                automation.get("group_name", missing),
+                automation.get("updated_at", missing),
+            )
+            for automation in matching_automations
+        ]
+        updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+        for automation in matching_automations:
+            automation["group_name"] = normalized_new_name
+            automation["updated_at"] = updated_at
+
+        try:
+            await self.async_save()
+        except Exception:
+            for automation, original_group_name, original_updated_at in original_values:
+                if original_group_name is missing:
+                    automation.pop("group_name", None)
+                else:
+                    automation["group_name"] = original_group_name
+
+                if original_updated_at is missing:
+                    automation.pop("updated_at", None)
+                else:
+                    automation["updated_at"] = original_updated_at
+            raise
+
+        return len(matching_automations)
+
     # Push token management (persisted to disk)
     def register_push_token(self, push_token: str, platform: str, device_name: str) -> None:
         """Register a push notification token."""

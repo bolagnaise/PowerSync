@@ -11213,6 +11213,76 @@ class AutomationGroupsView(HomeAssistantView):
             })
 
 
+class AutomationGroupRenameView(HomeAssistantView):
+    """HTTP view to rename an automation group."""
+
+    url = "/api/power_sync/automations/groups/rename"
+    name = "api:power_sync:automation_group_rename"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    def _get_store(self):
+        """Get the automation store from hass.data."""
+        if DOMAIN not in self._hass.data:
+            return None
+        return self._hass.data[DOMAIN].get("automation_store")
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Rename all automations whose group exactly matches old_name."""
+        store = self._get_store()
+        if not store:
+            return web.json_response(
+                {"success": False, "error": "Automation store not initialized"},
+                status=503,
+            )
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response(
+                {"success": False, "error": "Request body must be valid JSON"},
+                status=400,
+            )
+
+        if not isinstance(data, dict):
+            return web.json_response(
+                {"success": False, "error": "Request body must be a JSON object"},
+                status=400,
+            )
+
+        old_name = data.get("old_name")
+        new_name = data.get("new_name")
+        try:
+            updated_count = await store.async_rename_group(old_name, new_name)
+        except ValueError as err:
+            return web.json_response(
+                {"success": False, "error": str(err)},
+                status=400,
+            )
+        except Exception as err:
+            _LOGGER.error("Error renaming automation group: %s", err, exc_info=True)
+            return web.json_response(
+                {"success": False, "error": "Failed to rename automation group"},
+                status=500,
+            )
+
+        if updated_count == 0:
+            return web.json_response(
+                {"success": False, "error": "Automation group not found"},
+                status=404,
+            )
+
+        return web.json_response({
+            "success": True,
+            "old_name": old_name,
+            "new_name": new_name.strip(),
+            "updated_count": updated_count,
+        })
+
+
 class CustomTariffView(HomeAssistantView):
     """HTTP view to manage custom tariff for non-Amber users.
 
@@ -34462,6 +34532,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(AutomationPauseView(hass))
     hass.http.register_view(AutomationResumeView(hass))
     hass.http.register_view(AutomationGroupsView(hass))
+    hass.http.register_view(AutomationGroupRenameView(hass))
     _LOGGER.info("⚡ Automations HTTP endpoints registered at /api/power_sync/automations")
 
     # Register HTTP endpoints for Custom Tariff (for non-Amber users)
