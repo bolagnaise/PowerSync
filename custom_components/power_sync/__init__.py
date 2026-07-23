@@ -455,7 +455,7 @@ from .const import (
     CONF_AEMO_SENSOR_30MIN,
     AEMO_SENSOR_5MIN_PATTERN,
     AEMO_SENSOR_30MIN_PATTERN,
-    supports_no_idle_mode_provider,
+    LEGACY_NO_IDLE_MODE_PROVIDERS_V8,
     # Network Tariff configuration
     CONF_NETWORK_DISTRIBUTOR,
     CONF_NETWORK_TARIFF_CODE,
@@ -3516,6 +3516,36 @@ class GenericSavingSessionManager:
         }
 
 
+def _migrate_no_idle_provider_scope_v8(
+    data: dict[str, Any],
+    options: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """Clear hidden v8 No Idle values before support becomes universal."""
+    new_data = dict(data)
+    new_options = dict(options)
+    provider = new_options.get(
+        CONF_ELECTRICITY_PROVIDER,
+        new_data.get(CONF_ELECTRICITY_PROVIDER),
+    )
+    provider_key = str(provider or "").strip().lower()
+    raw_enabled = new_options.get(
+        CONF_OPTIMIZATION_DISABLE_IDLE,
+        new_data.get(CONF_OPTIMIZATION_DISABLE_IDLE, False),
+    )
+
+    clear_stored_value = (
+        raw_enabled is True
+        and provider_key not in LEGACY_NO_IDLE_MODE_PROVIDERS_V8
+    )
+    normalize_invalid_value = not isinstance(raw_enabled, bool)
+    if clear_stored_value or normalize_invalid_value:
+        for values in (new_data, new_options):
+            if CONF_OPTIMIZATION_DISABLE_IDLE in values:
+                values[CONF_OPTIMIZATION_DISABLE_IDLE] = False
+
+    return new_data, new_options, clear_stored_value
+
+
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
     """Migrate old entry to new format."""
     _LOGGER.info("Migrating PowerSync config entry from version %s", config_entry.version)
@@ -3711,6 +3741,27 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
 
         _LOGGER.info(
             "Migration to version 8 complete: removed legacy Flow Power portal access"
+        )
+
+    if config_entry.version == 8:
+        new_data, new_options, cleared_hidden_no_idle = (
+            _migrate_no_idle_provider_scope_v8(
+                config_entry.data,
+                config_entry.options,
+            )
+        )
+        hass.config_entries.async_update_entry(
+            config_entry,
+            data=new_data,
+            options=new_options,
+            version=9,
+        )
+        if cleared_hidden_no_idle:
+            _LOGGER.info(
+                "Migration v8→v9: disabled a previously hidden No Idle value"
+            )
+        _LOGGER.info(
+            "Migration to version 9 complete (universal No Idle availability)"
         )
 
     # Within-version migration: foxess_cloud_password → foxess_cloud_api_key
@@ -37248,17 +37299,10 @@ class OptimizationSettingsView(HomeAssistantView):
                 except (TypeError, ValueError):
                     manual_reserve = None
 
-                electricity_provider = config_entry.options.get(
-                    CONF_ELECTRICITY_PROVIDER,
-                    config_entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
-                )
-                disable_idle_enabled = (
-                    supports_no_idle_mode_provider(electricity_provider)
-                    and bool(
-                        config_entry.options.get(
-                            CONF_OPTIMIZATION_DISABLE_IDLE,
-                            config_entry.data.get(CONF_OPTIMIZATION_DISABLE_IDLE, False),
-                        )
+                disable_idle_enabled = bool(
+                    config_entry.options.get(
+                        CONF_OPTIMIZATION_DISABLE_IDLE,
+                        config_entry.data.get(CONF_OPTIMIZATION_DISABLE_IDLE, False),
                     )
                 )
             else:
@@ -37637,14 +37681,7 @@ class OptimizationSettingsView(HomeAssistantView):
                 changes.append(f"Set spread import to {settings['spread_import_enabled']}")
 
             if "disable_idle_enabled" in settings:
-                electricity_provider = new_options.get(
-                    CONF_ELECTRICITY_PROVIDER,
-                    new_data.get(CONF_ELECTRICITY_PROVIDER, ""),
-                )
-                disable_idle = (
-                    bool(settings["disable_idle_enabled"])
-                    and supports_no_idle_mode_provider(electricity_provider)
-                )
+                disable_idle = bool(settings["disable_idle_enabled"])
                 new_data[CONF_OPTIMIZATION_DISABLE_IDLE] = disable_idle
                 new_options[CONF_OPTIMIZATION_DISABLE_IDLE] = disable_idle
                 changes.append(f"Set No Idle mode to {disable_idle}")

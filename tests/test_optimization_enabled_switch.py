@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
+from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -78,7 +80,7 @@ def test_spread_export_switch_is_registered_and_capability_gated():
     assert "await _reoptimize_if_enabled(self._coordinator, changed)" in switch_source
 
 
-def test_disable_idle_switch_is_registered_for_supported_providers():
+def test_disable_idle_switch_is_registered_for_every_provider():
     const_source = CONST_PATH.read_text()
     switch_source = SWITCH_PATH.read_text()
     coordinator_source = COORDINATOR_PATH.read_text()
@@ -86,11 +88,9 @@ def test_disable_idle_switch_is_registered_for_supported_providers():
 
     assert 'CONF_OPTIMIZATION_DISABLE_IDLE = "optimization_disable_idle"' in const_source
     assert 'SWITCH_TYPE_OPTIMIZATION_DISABLE_IDLE = "optimization_disable_idle"' in const_source
-    assert "NO_IDLE_MODE_PROVIDERS = frozenset({" in const_source
-    for provider in ("flow_power", "globird", "aemo_vpp", "other", "tou_only", "nz"):
-        assert f'"{provider}"' in const_source
-    assert "def supports_no_idle_mode_provider(provider: str | None) -> bool:" in const_source
-    assert "supports_no_idle_mode_provider(electricity_provider)" in switch_source
+    assert "LEGACY_NO_IDLE_MODE_PROVIDERS_V8 = frozenset({" in const_source
+    assert "def supports_no_idle_mode_provider" not in const_source
+    assert "supports_no_idle_mode_provider" not in switch_source
     assert 'hass.data[DOMAIN][entry.entry_id]["switch_add_disable_idle"]' in switch_source
     assert "DisableIdleModeSwitch(" in switch_source
     assert "class DisableIdleModeSwitch(SwitchEntity):" in switch_source
@@ -98,11 +98,12 @@ def test_disable_idle_switch_is_registered_for_supported_providers():
     assert "set_disable_idle_enabled(True)" in switch_source
     assert "set_disable_idle_enabled(False)" in switch_source
     assert "def set_disable_idle_enabled(self, enabled: bool) -> bool:" in coordinator_source
-    assert "supports_no_idle_mode_provider(self._provider_key())" in coordinator_source
+    assert "supports_no_idle_mode_provider" not in coordinator_source
+    assert "def _supports_disable_idle_mode" not in coordinator_source
     assert '"disable_idle_enabled": self.disable_idle_enabled' in coordinator_source
     assert '"disable_idle_enabled": opt_coordinator.disable_idle_enabled' in init_source
     assert "CONF_OPTIMIZATION_DISABLE_IDLE" in init_source
-    assert "supports_no_idle_mode_provider(electricity_provider)" in init_source
+    assert "supports_no_idle_mode_provider" not in init_source
     assert "await _reoptimize_if_enabled(self._coordinator, changed)" in switch_source
 
 
@@ -161,13 +162,97 @@ def test_charge_by_time_config_migration_preserves_legacy_profit_max_targets():
     init_source = INIT_PATH.read_text()
     config_flow_source = (ROOT / "custom_components" / "power_sync" / "config_flow.py").read_text()
 
-    assert "VERSION = 8" in config_flow_source
+    assert "VERSION = 9" in config_flow_source
     assert "if config_entry.version == 6:" in init_source
     assert "CONF_CHARGE_BY_TIME_ENABLED" in init_source
     assert "_read_legacy(CONF_PROFIT_MAX_ENABLED, False)" in init_source
     assert "CONF_CHARGE_BY_TIME_TARGET_TIME" in init_source
     assert "CONF_CHARGE_BY_TIME_TARGET_SOC" in init_source
     assert "version=7" in init_source
+
+
+def _no_idle_v8_migration():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_migrate_no_idle_provider_scope_v8"
+    )
+    namespace: dict[str, Any] = {
+        "Any": Any,
+        "CONF_ELECTRICITY_PROVIDER": "electricity_provider",
+        "CONF_OPTIMIZATION_DISABLE_IDLE": "optimization_disable_idle",
+        "LEGACY_NO_IDLE_MODE_PROVIDERS_V8": frozenset(
+            {
+                "flow_power",
+                "globird",
+                "covau",
+                "aemo_vpp",
+                "other",
+                "tou_only",
+                "nz",
+            }
+        ),
+    }
+    exec(
+        compile(ast.Module(body=[function], type_ignores=[]), INIT_PATH, "exec"),
+        namespace,
+    )
+    return namespace["_migrate_no_idle_provider_scope_v8"]
+
+
+def test_no_idle_v8_migration_preserves_visible_values():
+    migrate = _no_idle_v8_migration()
+
+    for enabled in (True, False):
+        data, options, cleared = migrate(
+            {"electricity_provider": "flow_power"},
+            {"optimization_disable_idle": enabled},
+        )
+
+        assert data == {"electricity_provider": "flow_power"}
+        assert options["optimization_disable_idle"] is enabled
+        assert cleared is False
+
+
+def test_no_idle_v8_migration_clears_hidden_and_unknown_provider_values():
+    migrate = _no_idle_v8_migration()
+
+    for provider in ("amber", "octopus", "epex", "localvolts", "future_tariff", None):
+        data, options, cleared = migrate(
+            {
+                "electricity_provider": provider,
+                "optimization_disable_idle": True,
+            },
+            {"optimization_disable_idle": True},
+        )
+
+        assert data["optimization_disable_idle"] is False
+        assert options["optimization_disable_idle"] is False
+        assert cleared is True
+
+
+def test_no_idle_v8_migration_normalizes_malformed_boolean_without_activating():
+    migrate = _no_idle_v8_migration()
+
+    data, options, cleared = migrate(
+        {"electricity_provider": "flow_power"},
+        {"optimization_disable_idle": "false"},
+    )
+
+    assert data == {"electricity_provider": "flow_power"}
+    assert options["optimization_disable_idle"] is False
+    assert cleared is False
+
+
+def test_no_idle_v8_to_v9_migration_is_version_scoped():
+    init_source = INIT_PATH.read_text()
+
+    assert "if config_entry.version == 8:" in init_source
+    assert "_migrate_no_idle_provider_scope_v8(" in init_source
+    assert "version=9" in init_source
 
 
 def test_auto_apply_reserve_setting_is_exposed_through_api_and_coordinator():

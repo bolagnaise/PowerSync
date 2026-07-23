@@ -505,7 +505,6 @@ from .const import (
     DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
     BATTERY_CAPACITY_DEFAULTS,
     BATTERY_POWER_DEFAULTS,
-    supports_no_idle_mode_provider,
     # Optimization provider selection
     CONF_OPTIMIZATION_PROVIDER,
     OPT_PROVIDER_NATIVE,
@@ -1768,7 +1767,7 @@ def resolve_goodwe_port(protocol: str, port: int | None) -> int:
 class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for PowerSync."""
 
-    VERSION = 8
+    VERSION = 9
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -3163,9 +3162,6 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Configure Smart Optimization options."""
         battery_system = self._selected_battery_system or BATTERY_SYSTEM_TESLA
         is_tesla = battery_system == BATTERY_SYSTEM_TESLA
-        supports_no_idle_mode = supports_no_idle_mode_provider(
-            self._selected_electricity_provider
-        )
         default_capacity_wh, default_charge_w, default_discharge_w = (
             _default_optimizer_specs_for(battery_system)
         )
@@ -3202,10 +3198,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 auto_apply_reserve_enabled = bool(
                     user_input.get(CONF_OPTIMIZATION_AUTO_APPLY_RESERVE, False)
                 )
-                disable_idle = (
-                    bool(user_input.get(CONF_OPTIMIZATION_DISABLE_IDLE, False))
-                    if supports_no_idle_mode
-                    else False
+                disable_idle = bool(
+                    user_input.get(CONF_OPTIMIZATION_DISABLE_IDLE, False)
                 )
                 backup_reserve = (
                     user_input.get(
@@ -3462,13 +3456,12 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     default=False,
                 ): BooleanSelector(),
             })
-        if supports_no_idle_mode:
-            schema_fields[
-                vol.Required(
-                    CONF_OPTIMIZATION_DISABLE_IDLE,
-                    default=False,
-                )
-            ] = BooleanSelector()
+        schema_fields[
+            vol.Required(
+                CONF_OPTIMIZATION_DISABLE_IDLE,
+                default=False,
+            )
+        ] = BooleanSelector()
         schema_fields.update({
             vol.Required(
                 CONF_PROFIT_MAX_ENABLED,
@@ -10029,11 +10022,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         battery_system = self._effective_battery_system()
         is_tesla = battery_system == BATTERY_SYSTEM_TESLA
         is_custom = battery_system == BATTERY_SYSTEM_CUSTOM
-        current_provider = self._get_option(
-            CONF_ELECTRICITY_PROVIDER,
-            self.config_entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber"),
-        )
-        supports_no_idle_mode = supports_no_idle_mode_provider(current_provider)
         if user_input is not None:
             optimization_provider = user_input.get(
                 CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
@@ -10182,10 +10170,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     user_input.get(CONF_CHARGE_BY_TIME_TARGET_SOC),
                     DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
                 )
-                disable_idle = (
-                    bool(user_input.get(CONF_OPTIMIZATION_DISABLE_IDLE, False))
-                    if supports_no_idle_mode
-                    else False
+                disable_idle = bool(
+                    user_input.get(CONF_OPTIMIZATION_DISABLE_IDLE, False)
                 )
                 new_data[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
                 new_options[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
@@ -10658,10 +10644,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             current_form_values[CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED] = bool(
                 current_spread_import_enabled
             )
-        if supports_no_idle_mode:
-            current_form_values[CONF_OPTIMIZATION_DISABLE_IDLE] = bool(
-                current_disable_idle
-            )
+        current_form_values[CONF_OPTIMIZATION_DISABLE_IDLE] = bool(
+            current_disable_idle
+        )
         if battery_system == BATTERY_SYSTEM_NEOVOLT:
             current_form_values[CONF_NEOVOLT_SURPLUS_BALANCER_MODE] = (
                 current_surplus_balancer_mode
@@ -10817,13 +10802,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     default=bool(current_spread_import_enabled),
                 ): BooleanSelector(),
             })
-        if supports_no_idle_mode:
-            schema_fields[
-                vol.Required(
-                    CONF_OPTIMIZATION_DISABLE_IDLE,
-                    default=bool(current_disable_idle),
-                )
-            ] = BooleanSelector()
+        schema_fields[
+            vol.Required(
+                CONF_OPTIMIZATION_DISABLE_IDLE,
+                default=bool(current_disable_idle),
+            )
+        ] = BooleanSelector()
         schema_fields.update(
             {
                 vol.Required(

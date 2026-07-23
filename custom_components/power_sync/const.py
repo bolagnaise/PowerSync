@@ -648,7 +648,9 @@ ELECTRICITY_PROVIDERS = {
     "other": "Other / Custom TOU — enter your own rates manually",
 }
 
-NO_IDLE_MODE_PROVIDERS = frozenset({
+# Historical availability only. Runtime No Idle support is provider-independent;
+# this set exists solely to prevent hidden v8 values activating during migration.
+LEGACY_NO_IDLE_MODE_PROVIDERS_V8 = frozenset({
     "flow_power",
     "globird",
     "covau",
@@ -657,11 +659,6 @@ NO_IDLE_MODE_PROVIDERS = frozenset({
     "tou_only",
     "nz",
 })
-
-
-def supports_no_idle_mode_provider(provider: str | None) -> bool:
-    """Return whether a provider can replace optimizer idle holds."""
-    return str(provider or "") in NO_IDLE_MODE_PROVIDERS
 
 
 # GloBird ZeroHero plan configuration

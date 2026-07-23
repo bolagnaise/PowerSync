@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import importlib
 import logging
@@ -19,6 +20,21 @@ ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
 
 _SENTINEL = object()
+
+
+def _registered_electricity_providers() -> list[str]:
+    tree = ast.parse((COMPONENT_ROOT / "const.py").read_text())
+    assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "ELECTRICITY_PROVIDERS"
+            for target in node.targets
+        )
+    )
+    providers = ast.literal_eval(assignment.value)
+    return [*providers, "future_tariff"]
 
 _STUB_MODULE_NAMES = (
     "homeassistant",
@@ -5504,25 +5520,35 @@ def test_flow_power_no_idle_schedule_uses_hardware_floor_for_home_load(opt_modul
 
 @pytest.mark.parametrize(
     "provider",
-    ["flow_power", "globird", "aemo_vpp", "other", "tou_only", "nz"],
+    _registered_electricity_providers(),
 )
-def test_no_idle_schedule_guard_supports_tou_providers(opt_module, provider):
+def test_no_idle_schedule_guard_supports_every_provider(opt_module, provider):
     coordinator = _coordinator(opt_module, provider)
     coordinator._config.disable_idle_enabled = True
 
     assert coordinator._should_disable_idle_schedule() is True
 
 
-@pytest.mark.parametrize("provider", ["amber", "octopus", "epex", "localvolts"])
-def test_no_idle_schedule_guard_blocks_unsupported_providers(opt_module, provider):
-    coordinator = _coordinator(opt_module, provider)
-    coordinator._config.disable_idle_enabled = True
-
-    assert coordinator._should_disable_idle_schedule() is False
-
-
-def test_no_idle_setting_coerces_unsupported_provider_false(opt_module):
+def test_no_idle_setting_accepts_formerly_unsupported_provider(opt_module):
     coordinator = _coordinator(opt_module, "amber")
+    updates, run_calls, background_tasks = _prepare_enabled_settings_coordinator(
+        coordinator
+    )
+
+    result = asyncio.run(coordinator.set_settings({"disable_idle_enabled": True}))
+
+    assert result["success"] is True
+    assert result["changes"] == ["disable_idle_enabled: True"]
+    assert coordinator._config.disable_idle_enabled is True
+    assert coordinator.disable_idle_enabled is True
+    assert updates[-1]["options"]["optimization_disable_idle"] is True
+    assert run_calls == []
+    assert background_tasks == ["powersync_settings_reoptimize"]
+
+
+def test_no_idle_setting_noop_preserves_formerly_unsupported_provider_value(opt_module):
+    coordinator = _coordinator(opt_module, "amber")
+    coordinator._config.disable_idle_enabled = True
     updates, run_calls, background_tasks = _prepare_enabled_settings_coordinator(
         coordinator
     )
@@ -5531,28 +5557,11 @@ def test_no_idle_setting_coerces_unsupported_provider_false(opt_module):
 
     assert result["success"] is True
     assert result["changes"] == []
-    assert coordinator._config.disable_idle_enabled is False
-    assert coordinator.disable_idle_enabled is False
+    assert coordinator._config.disable_idle_enabled is True
+    assert coordinator.disable_idle_enabled is True
     assert updates == []
     assert run_calls == []
     assert background_tasks == []
-
-
-def test_no_idle_setting_clears_stale_unsupported_provider_value(opt_module):
-    coordinator = _coordinator(opt_module, "amber")
-    coordinator._config.disable_idle_enabled = True
-    updates, run_calls, background_tasks = _prepare_enabled_settings_coordinator(
-        coordinator
-    )
-
-    result = asyncio.run(coordinator.set_settings({"disable_idle_enabled": True}))
-
-    assert result["success"] is True
-    assert result["changes"] == ["disable_idle_enabled: False"]
-    assert coordinator._config.disable_idle_enabled is False
-    assert updates[-1]["options"]["optimization_disable_idle"] is False
-    assert run_calls == []
-    assert background_tasks == ["powersync_settings_reoptimize"]
 
 
 def test_no_idle_setting_reconciles_stale_runtime_without_stuck_reload_flag(

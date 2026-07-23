@@ -28,7 +28,6 @@ from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode
 from ..const import (
     CONF_GENERIC_CHARGER_POWER_ENTITY,
     DEFAULT_OPTIMIZATION_INTERVAL,
-    supports_no_idle_mode_provider,
 )
 from ..coordinator import normalize_custom_power_kw
 from ..settings_metadata import (
@@ -1104,7 +1103,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def set_disable_idle_enabled(self, enabled: bool) -> bool:
         """Enable or disable no-idle mode."""
-        enabled = bool(enabled) and self._supports_disable_idle_mode()
+        enabled = bool(enabled)
         if self._config.disable_idle_enabled == enabled:
             return False
         self._config.disable_idle_enabled = enabled
@@ -3129,9 +3128,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self._entry.data.get(CONF_OPTIMIZATION_DISABLE_IDLE, False),
                 )
             )
-            self._config.disable_idle_enabled = (
-                raw_disable_idle and self._supports_disable_idle_mode()
-            )
+            self._config.disable_idle_enabled = raw_disable_idle
             if self._should_disable_idle_schedule():
                 _LOGGER.info("No Idle mode: ENABLED")
 
@@ -4930,15 +4927,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return int(max(1, requested))
 
-    def _supports_disable_idle_mode(self) -> bool:
-        """Return True when this provider can disable optimizer IDLE."""
-        return supports_no_idle_mode_provider(self._provider_key())
-
     def _should_disable_idle_schedule(self) -> bool:
         """Return True when no-idle mode should replace optimizer IDLE."""
-        return self._supports_disable_idle_mode() and bool(
-            self._config.disable_idle_enabled
-        )
+        return bool(self._config.disable_idle_enabled)
 
     def _effective_runtime_action(
         self,

@@ -1098,8 +1098,7 @@ def test_optimization_options_exposes_enabled_toggle():
     assert "new_options[CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED] = spread_import_enabled" in method_source
     assert "CONF_OPTIMIZATION_DISABLE_IDLE" in method_source
     assert "new_options[CONF_OPTIMIZATION_DISABLE_IDLE] = disable_idle" in method_source
-    assert "supports_no_idle_mode_provider(current_provider)" in method_source
-    assert "if supports_no_idle_mode:" in method_source
+    assert "supports_no_idle_mode_provider" not in method_source
     assert "CONF_PROFIT_MAX_ENABLED" in method_source
     assert "new_options[CONF_PROFIT_MAX_ENABLED] = profit_max_enabled" in method_source
     assert "new_options[CONF_CHARGE_BY_TIME_ENABLED] = charge_by_time_enabled" in method_source
@@ -1120,7 +1119,7 @@ def test_optimization_options_exposes_enabled_toggle():
             "data_description"
         ]["optimization_auto_apply_reserve"]
         assert step["data"]["optimization_disable_idle"] == "Disable idle mode"
-        assert "supported TOU plans" in step["data_description"][
+        assert "any electricity provider" in step["data_description"][
             "optimization_disable_idle"
         ]
 
@@ -1357,8 +1356,7 @@ def test_initial_smart_optimization_configuration_exposes_enabled_toggle():
     assert "user_input.get(CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED" in method_source
     assert "CONF_OPTIMIZATION_DISABLE_IDLE" in method_source
     assert "user_input.get(CONF_OPTIMIZATION_DISABLE_IDLE, False)" in method_source
-    assert "supports_no_idle_mode_provider(" in method_source
-    assert "if supports_no_idle_mode:" in method_source
+    assert "supports_no_idle_mode_provider" not in method_source
     assert "CONF_PROFIT_MAX_ENABLED" in method_source
     assert "user_input.get(CONF_PROFIT_MAX_ENABLED, False)" in method_source
     assert "CONF_CHARGE_BY_TIME_ENABLED" in method_source
@@ -1379,7 +1377,7 @@ def test_initial_smart_optimization_configuration_exposes_enabled_toggle():
             "data_description"
         ]["optimization_auto_apply_reserve"]
         assert step["data"]["optimization_disable_idle"] == "Disable idle mode"
-        assert "supported TOU plans" in step["data_description"][
+        assert "any electricity provider" in step["data_description"][
             "optimization_disable_idle"
         ]
 
@@ -1402,7 +1400,7 @@ def test_initial_smart_optimization_saves_charge_by_time_aliases_to_ml_options()
     ) in method_source
 
 
-def test_no_idle_option_is_provider_scoped():
+def test_no_idle_option_is_available_for_every_provider():
     source = CONFIG_FLOW_PATH.read_text()
     initial_method = _config_flow_method("async_step_ml_options")
     initial_source = ast.get_source_segment(source, initial_method)
@@ -1411,13 +1409,11 @@ def test_no_idle_option_is_provider_scoped():
 
     assert initial_source is not None
     assert options_source is not None
-    assert "supports_no_idle_mode_provider(" in initial_source
-    assert "supports_no_idle_mode_provider(current_provider)" in options_source
-
     for method_source in (initial_source, options_source):
         assert "CONF_OPTIMIZATION_DISABLE_IDLE" in method_source
-        assert "if supports_no_idle_mode:" in method_source
-        assert "else False" in method_source
+        assert "supports_no_idle_mode_provider" not in method_source
+        assert "if supports_no_idle_mode:" not in method_source
+        assert "BooleanSelector()" in method_source
 
 
 def test_powerwall_smart_optimization_hides_spread_options():

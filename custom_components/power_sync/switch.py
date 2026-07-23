@@ -66,7 +66,6 @@ from .const import (
     TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
     TESLA_CAPABILITY_WAIT_SECONDS,
     POWERWALL_LOCAL_POLL_INTERVAL,
-    supports_no_idle_mode_provider,
 )
 from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
 
@@ -319,15 +318,14 @@ async def async_setup_entry(
 
     hass.data[DOMAIN][entry.entry_id]["switch_add_charge_by_time"] = _add_charge_by_time_switch
 
-    if supports_no_idle_mode_provider(electricity_provider):
-        def _add_disable_idle_switch(coordinator: Any) -> None:
-            async_add_entities([
-                DisableIdleModeSwitch(hass=hass, entry=entry, coordinator=coordinator)
-            ])
+    def _add_disable_idle_switch(coordinator: Any) -> None:
+        async_add_entities([
+            DisableIdleModeSwitch(hass=hass, entry=entry, coordinator=coordinator)
+        ])
 
-        hass.data[DOMAIN][entry.entry_id]["switch_add_disable_idle"] = (
-            _add_disable_idle_switch
-        )
+    hass.data[DOMAIN][entry.entry_id]["switch_add_disable_idle"] = (
+        _add_disable_idle_switch
+    )
 
     if battery_system in TARGET_EXPORT_POWER_BATTERY_SYSTEMS:
         def _add_spread_export_switch(coordinator: Any) -> None:
