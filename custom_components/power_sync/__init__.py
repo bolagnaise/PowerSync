@@ -5853,7 +5853,21 @@ class PowerwallSettingsView(HomeAssistantView):
             components = site_info.get("components", {})
             # Try components first, then site_info
             api_export_rule = components.get("customer_preferred_export_rule") or site_info.get("customer_preferred_export_rule")
-            disallow_charge = components.get("disallow_charge_from_grid_with_solar_installed", False)
+            grid_charging_enabled = tesla_grid_charging_enabled_from_site_info(site_info)
+            entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            if grid_charging_enabled is None:
+                remembered_preferences = entry_data.get(
+                    "tesla_grid_charging_preferences", {}
+                )
+                if isinstance(remembered_preferences, dict):
+                    remembered = remembered_preferences.get(str(site_id))
+                    if isinstance(remembered, bool):
+                        grid_charging_enabled = remembered
+            grid_charging_state_known = grid_charging_enabled is not None
+            if grid_charging_enabled is None:
+                # Older mobile clients interpret null as enabled. Fail closed
+                # for that API while exposing whether the value was observed.
+                grid_charging_enabled = False
 
             # For VPP users, the API doesn't return customer_preferred_export_rule
             # Use non_export_configured to derive the value, or default to battery_ok
@@ -5881,7 +5895,6 @@ class PowerwallSettingsView(HomeAssistantView):
                 grid_export_rule = api_export_rule
 
             # Check if manual export override is active
-            entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             manual_export_override = entry_data.get("manual_export_override", False)
 
             # Include capability flags and current state for new energy-site
@@ -5900,7 +5913,8 @@ class PowerwallSettingsView(HomeAssistantView):
                 "backup_reserve": backup_reserve,
                 "operation_mode": operation_mode,
                 "grid_export_rule": grid_export_rule,
-                "grid_charging_enabled": not disallow_charge,
+                "grid_charging_enabled": grid_charging_enabled,
+                "grid_charging_state_known": grid_charging_state_known,
                 "solar_curtailment_enabled": solar_curtailment_enabled,
                 "manual_export_override": manual_export_override,
                 "capabilities": {
@@ -20316,6 +20330,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # (like Teslemetry's RestoreEntity pattern for export rule state)
     store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry.entry_id}")
     stored_data = await store.async_load() or {}
+    stored_grid_charging_preferences = stored_data.get(
+        "tesla_grid_charging_preferences",
+        {},
+    )
+    tesla_grid_charging_preferences = {
+        str(site_id): value
+        for site_id, value in (
+            stored_grid_charging_preferences.items()
+            if isinstance(stored_grid_charging_preferences, dict)
+            else ()
+        )
+        if isinstance(value, bool)
+    }
+    hass.data[DOMAIN][entry.entry_id][
+        "tesla_grid_charging_preferences"
+    ] = tesla_grid_charging_preferences
     cached_export_rule = stored_data.get("cached_export_rule")
     if cached_export_rule:
         _LOGGER.info(f"Restored cached_export_rule='{cached_export_rule}' from persistent storage")
@@ -25875,6 +25905,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Extract Tesla grid-charging state from site_info."""
         return tesla_grid_charging_enabled_from_site_info(site_info)
 
+    def _remember_tesla_grid_charging_preference(
+        site_id: str,
+        enabled: bool | None,
+    ) -> bool | None:
+        """Remember an observed or explicitly requested persistent preference."""
+        if enabled is None:
+            return tesla_grid_charging_preferences.get(str(site_id))
+        tesla_grid_charging_preferences[str(site_id)] = bool(enabled)
+        return bool(enabled)
+
+    async def _persist_tesla_grid_charging_preference(
+        site_configs: list[tuple[str, str, str]],
+        enabled: bool,
+        *,
+        source: str,
+    ) -> None:
+        """Persist a confirmed or narrowly accepted user preference."""
+        for site_id, _token, _provider in site_configs:
+            _remember_tesla_grid_charging_preference(site_id, enabled)
+        try:
+            data = await store.async_load() or {}
+            data["tesla_grid_charging_preferences"] = dict(
+                tesla_grid_charging_preferences
+            )
+            await store.async_save(data)
+        except Exception as store_err:
+            _LOGGER.warning(
+                "Could not persist Tesla grid charging preference from %s: %s",
+                source,
+                store_err,
+            )
+
     def _coerce_force_power_w(value: Any) -> int:
         """Normalize service/store force-power values to a non-negative watt value."""
         try:
@@ -26004,6 +26066,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     state_to_save["solax_restore_state"] = solax_restore_state
 
         stored_data["force_mode_state"] = state_to_save
+        stored_data["tesla_grid_charging_preferences"] = dict(
+            tesla_grid_charging_preferences
+        )
         await store.async_save(stored_data)
         if state_to_save:
             _LOGGER.debug(f"Persisted force mode state: {state_to_save['mode']} expires {state_to_save['expires_at']}")
@@ -28567,7 +28632,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             site_state["saved_export_rule"] = saved_export_rule
                             _LOGGER.info("Site %s: saved export rule: %s", site_id, saved_export_rule)
 
-                            saved_grid_charging_enabled = _tesla_grid_charging_enabled_from_site_info(site_info)
+                            saved_grid_charging_enabled = (
+                                _tesla_grid_charging_enabled_from_site_info(site_info)
+                            )
+                            saved_grid_charging_enabled = (
+                                _remember_tesla_grid_charging_preference(
+                                    site_id,
+                                    saved_grid_charging_enabled,
+                                )
+                            )
                             site_state["saved_grid_charging_enabled"] = saved_grid_charging_enabled
                             _LOGGER.info(
                                 "Site %s: saved grid charging: %s",
@@ -30256,7 +30329,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                          site_id, site_state["saved_operation_mode"],
                                          site_state["saved_backup_reserve"], api_reserve, pre_idle, startup_reserve)
 
-                            saved_grid_charging_enabled = _tesla_grid_charging_enabled_from_site_info(site_info)
+                            saved_grid_charging_enabled = (
+                                _tesla_grid_charging_enabled_from_site_info(site_info)
+                            )
+                            saved_grid_charging_enabled = (
+                                _remember_tesla_grid_charging_preference(
+                                    site_id,
+                                    saved_grid_charging_enabled,
+                                )
+                            )
                             site_state["saved_grid_charging_enabled"] = saved_grid_charging_enabled
                             _LOGGER.info(
                                 "Site %s: saved grid charging: %s",
@@ -31890,76 +31971,97 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # demand peak period requires it to stay disabled.
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             dc_coordinator = entry_data.get("demand_charge_coordinator")
-            if optimizer_owned_restore:
-                _LOGGER.info(
-                    "Optimizer restore: leaving Tesla grid charging unchanged after tariff handoff; "
-                    "the next optimizer charge action will re-enable it if needed"
+            in_peak = False
+            if dc_coordinator and not entry_data.get("demand_allow_grid_charging", False):
+                in_peak = dc_coordinator._is_in_peak_period(dt_util.now())
+
+            discharge_saved = force_discharge_state.get("saved_states") or {}
+            charge_saved = force_charge_state.get("saved_states") or {}
+            for site_id, current_token, provider in site_configs:
+                target_grid_charging_enabled = _optional_bool(
+                    discharge_saved.get(site_id, {}).get("saved_grid_charging_enabled")
                 )
-            else:
-                in_peak = False
-                if dc_coordinator and not entry_data.get("demand_allow_grid_charging", False):
-                    in_peak = dc_coordinator._is_in_peak_period(dt_util.now())
-
-                discharge_saved = force_discharge_state.get("saved_states") or {}
-                charge_saved = force_charge_state.get("saved_states") or {}
-                for site_id, current_token, provider in site_configs:
+                if target_grid_charging_enabled is None:
                     target_grid_charging_enabled = _optional_bool(
-                        discharge_saved.get(site_id, {}).get("saved_grid_charging_enabled")
+                        charge_saved.get(site_id, {}).get("saved_grid_charging_enabled")
                     )
-                    if target_grid_charging_enabled is None:
-                        target_grid_charging_enabled = _optional_bool(
-                            charge_saved.get(site_id, {}).get("saved_grid_charging_enabled")
-                        )
-                    if target_grid_charging_enabled is None:
-                        target_grid_charging_enabled = _optional_bool(
-                            force_discharge_state.get("saved_grid_charging_enabled")
-                        )
-                    if target_grid_charging_enabled is None:
-                        target_grid_charging_enabled = _optional_bool(
-                            force_charge_state.get("saved_grid_charging_enabled")
-                        )
-
-                    if in_peak:
-                        _LOGGER.info(
-                            "Restore normal: still in demand peak period — keeping grid charging disabled"
-                        )
-                        target_grid_charging_enabled = False
-                        hass.data[DOMAIN][entry.entry_id]["grid_charging_disabled_for_demand"] = True
-                    elif target_grid_charging_enabled is None:
-                        _LOGGER.warning(
-                            "No saved grid charging state for site %s - leaving current Tesla setting unchanged",
-                            site_id,
-                        )
-                        continue
-
-                    restore_grid_result = await _tesla_force_apply_grid_charging(
-                        [(site_id, current_token, provider)],
-                        target_grid_charging_enabled,
-                        reason="restore normal",
-                        prefer_local=(site_id == site_configs[0][0]),
-                        is_current=lambda: (
-                            _command_generation[0] == _restore_generation
-                        ),
+                if target_grid_charging_enabled is None:
+                    target_grid_charging_enabled = _optional_bool(
+                        force_discharge_state.get("saved_grid_charging_enabled")
                     )
-                    if _restore_superseded("grid charging restore"):
-                        return
-                    if _tesla_force_result_all_confirmed(
+                if target_grid_charging_enabled is None:
+                    target_grid_charging_enabled = _optional_bool(
+                        force_charge_state.get("saved_grid_charging_enabled")
+                    )
+                if target_grid_charging_enabled is None:
+                    target_grid_charging_enabled = (
+                        _remember_tesla_grid_charging_preference(site_id, None)
+                    )
+
+                used_safe_grid_charging_fallback = False
+                if in_peak:
+                    _LOGGER.info(
+                        "Restore normal: still in demand peak period — keeping grid charging disabled"
+                    )
+                    target_grid_charging_enabled = False
+                    hass.data[DOMAIN][entry.entry_id]["grid_charging_disabled_for_demand"] = True
+                elif target_grid_charging_enabled is None:
+                    _LOGGER.warning(
+                        "No observable or remembered grid charging preference for "
+                        "site %s; restoring disabled as the safe fallback",
+                        site_id,
+                    )
+                    target_grid_charging_enabled = False
+                    used_safe_grid_charging_fallback = True
+
+                restore_grid_result = await _tesla_force_apply_grid_charging(
+                    [(site_id, current_token, provider)],
+                    target_grid_charging_enabled,
+                    reason="restore normal",
+                    prefer_local=(site_id == site_configs[0][0]),
+                    is_current=lambda: (
+                        _command_generation[0] == _restore_generation
+                    ),
+                )
+                if _restore_superseded("grid charging restore"):
+                    return
+                restore_grid_confirmed = _tesla_force_result_all_confirmed(
+                    restore_grid_result,
+                    [(site_id, current_token, provider)],
+                )
+                if (
+                    not restore_grid_confirmed
+                    and _tesla_force_result_all_grid_field_absent_safe(
                         restore_grid_result,
                         [(site_id, current_token, provider)],
-                    ):
-                        if not in_peak:
-                            hass.data[DOMAIN][entry.entry_id][
-                                "grid_charging_disabled_for_demand"
-                            ] = False
-                        _LOGGER.info(
-                            "Restored grid charging to %s for site %s",
-                            "enabled" if target_grid_charging_enabled else "disabled",
-                            site_id,
+                    )
+                ):
+                    restore_grid_confirmed = True
+                    _LOGGER.warning(
+                        "Tesla accepted grid charging restore for site %s and "
+                        "every valid site_info readback omitted the field",
+                        site_id,
+                    )
+                if restore_grid_confirmed:
+                    if not in_peak:
+                        hass.data[DOMAIN][entry.entry_id][
+                            "grid_charging_disabled_for_demand"
+                        ] = False
+                    _LOGGER.info(
+                        "Restored grid charging to %s for site %s",
+                        "enabled" if target_grid_charging_enabled else "disabled",
+                        site_id,
+                    )
+                    if used_safe_grid_charging_fallback:
+                        await _persist_tesla_grid_charging_preference(
+                            [(site_id, current_token, provider)],
+                            False,
+                            source="safe force restore fallback",
                         )
-                    else:
-                        _mark_tesla_restore_failed(
-                            f"grid charging restore failed for site {site_id}"
-                        )
+                else:
+                    _mark_tesla_restore_failed(
+                        f"grid charging restore failed for site {site_id}"
+                    )
 
             if skip_backup_reserve_restore and restore_reserve_targets:
                 _LOGGER.info(
@@ -33907,22 +34009,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             if (
                 not grid_confirmed
-                and source == "automation"
                 and _tesla_force_result_all_grid_field_absent_safe(
                     result,
                     site_configs,
                 )
             ):
                 grid_confirmed = True
-                _LOGGER.info(
-                    "Tesla automation grid charging accepted with field-absent "
-                    "readback; treating the accepted automation write as successful"
+                _LOGGER.warning(
+                    "Tesla %s grid charging command accepted and every valid "
+                    "site_info readback omitted the field",
+                    source,
                 )
             if not grid_confirmed:
                 raise HomeAssistantError(
                     "Tesla accepted the grid charging command but the setting did not verify"
                 )
 
+            await _persist_tesla_grid_charging_preference(
+                site_configs,
+                enabled,
+                source=f"{source} set_grid_charging",
+            )
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             local_coord = (entry_data.get("powerwall_local") or {}).get(
                 "coordinator"

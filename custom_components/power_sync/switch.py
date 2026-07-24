@@ -68,6 +68,7 @@ from .const import (
     POWERWALL_LOCAL_POLL_INTERVAL,
 )
 from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
+from .tesla_grid_control import tesla_grid_charging_enabled_from_site_info
 
 # Providers that use TOU schedule syncing (Amber, Octopus, Flow Power)
 # GloBird and AEMO VPP use spike detection only — no TOU sync
@@ -1645,12 +1646,16 @@ class GridChargingSwitch(_TeslaSiteSwitchBase):
         site_info = getattr(coord, "_site_info_cache", None) if coord else None
         if not site_info:
             return self._attr_is_on
-        components = site_info.get("components", {}) or {}
-        disallow = components.get(
-            "disallow_charge_from_grid_with_solar_installed",
-            site_info.get("disallow_charge_from_grid_with_solar_installed", False),
+        observed = tesla_grid_charging_enabled_from_site_info(site_info)
+        if observed is not None:
+            return observed
+        remembered = (
+            self.hass.data.get(DOMAIN, {})
+            .get(self._entry.entry_id, {})
+            .get("tesla_grid_charging_preferences", {})
+            .get(str(self._entry.data.get(CONF_TESLA_ENERGY_SITE_ID, "")))
         )
-        return not bool(disallow)
+        return remembered if isinstance(remembered, bool) else self._attr_is_on
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self.hass.services.async_call(

@@ -966,18 +966,42 @@ def test_optimizer_restore_keeps_tesla_self_consumption_during_handoff():
     assert "instead of restoring saved mode" in function_source
 
 
-def test_optimizer_restore_does_not_reenable_grid_charging_during_handoff():
+def test_optimizer_restore_restores_saved_grid_charging_after_handoff():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
     function = _find_function(tree, "handle_restore_normal")
     function_source = ast.get_source_segment(source, function)
 
     assert function_source is not None
-    skip_index = function_source.index("if optimizer_owned_restore:")
-    restore_index = function_source.index('"grid charging restore"')
-    assert skip_index < restore_index
-    assert "set_grid_charging_enabled(True)" not in function_source
-    assert "the next optimizer charge action will re-enable it if needed" in function_source
+    grid_section = function_source.split(
+        "# Restore grid charging to the user's pre-force setting",
+        1,
+    )[1].split(
+        "if skip_backup_reserve_restore and restore_reserve_targets:",
+        1,
+    )[0]
+
+    assert "if optimizer_owned_restore:" not in grid_section
+    assert "the next optimizer charge action will re-enable it if needed" not in grid_section
+    assert "target_grid_charging_enabled = _optional_bool(" in grid_section
+    assert "target_grid_charging_enabled," in grid_section
+    assert "set_grid_charging_enabled(True)" not in grid_section
+
+    assert "if in_peak:" in grid_section
+    assert "target_grid_charging_enabled = False" in grid_section
+
+    assert "await _tesla_force_apply_grid_charging(" in grid_section
+    assert 'reason="restore normal"' in grid_section
+    assert "is_current=lambda:" in grid_section
+    assert '_restore_superseded("grid charging restore")' in grid_section
+    assert "_tesla_force_result_all_confirmed(" in grid_section
+    assert "grid charging restore failed for site" in grid_section
+
+    assert (
+        'elif optimizer_owned_restore and restore_mode != "self_consumption":'
+        in function_source
+    )
+    assert 'restore_mode = "self_consumption"' in function_source
 
 
 def test_tesla_force_modes_persist_grid_charging_baseline():
@@ -996,12 +1020,17 @@ def test_tesla_force_modes_persist_grid_charging_baseline():
     assert restore is not None
     assert '"saved_grid_charging_enabled": force_charge_state.get("saved_grid_charging_enabled")' in persist
     assert '"saved_grid_charging_enabled": force_discharge_state.get("saved_grid_charging_enabled")' in persist
+    assert '"tesla_grid_charging_preferences"' in persist
     assert "_tesla_grid_charging_enabled_from_site_info(site_info)" in source
+    assert "_remember_tesla_grid_charging_preference(" in source
     assert 'site_state["saved_grid_charging_enabled"] = saved_grid_charging_enabled' in source
     assert "await _tesla_force_apply_grid_charging(" in restore
     assert "target_grid_charging_enabled," in restore
     assert "_mark_tesla_restore_failed(" in restore
-    assert "No saved grid charging state" in restore
+    assert "No observable or remembered grid charging preference" in restore
+    assert "target_grid_charging_enabled = False" in restore
+    assert "_tesla_force_result_all_grid_field_absent_safe(" in restore
+    assert "_persist_tesla_grid_charging_preference(" in restore
 
 
 def test_tesla_self_consumption_clears_force_toggle_state():
@@ -1189,6 +1218,27 @@ def test_powerwall_settings_view_rejects_neovolt_systems():
     assert 'if is_neovolt_pw:' in method_source
     assert '"reason": "neovolt_not_supported"' in method_source
     assert '"battery_system": BATTERY_SYSTEM_NEOVOLT' in method_source
+
+
+def test_powerwall_settings_view_preserves_unknown_grid_charging_state():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    method = _find_class_method(tree, "PowerwallSettingsView", "get")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    assert (
+        "grid_charging_enabled = "
+        "tesla_grid_charging_enabled_from_site_info(site_info)"
+    ) in method_source
+    assert '"tesla_grid_charging_preferences"' in method_source
+    assert '"grid_charging_enabled": grid_charging_enabled' in method_source
+    assert '"grid_charging_state_known": grid_charging_state_known' in method_source
+    assert "grid_charging_enabled = False" in method_source
+    assert (
+        'components.get("disallow_charge_from_grid_with_solar_installed", False)'
+        not in method_source
+    )
 
 
 def test_neovolt_force_discharge_hardware_extension_preserves_restore_modes():
@@ -2007,11 +2057,8 @@ def test_tesla_field_absence_compatibility_is_scoped_to_force_charge():
     )
 
 
-def test_tesla_automation_grid_charging_allows_field_absent_compatibility():
-    """Background automations must not report a false failure for Tesla's
-    accepted-but-omitted grid-charging readback, while direct controls remain
-    strict.
-    """
+def test_tesla_grid_charging_controls_persist_field_absent_preference():
+    """An accepted field-absent command records the user's intended setting."""
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
     handler_source = ast.get_source_segment(
@@ -2020,9 +2067,17 @@ def test_tesla_automation_grid_charging_allows_field_absent_compatibility():
     )
 
     assert handler_source is not None
-    assert 'source == "automation"' in handler_source
     assert "_tesla_force_result_all_grid_field_absent_safe(" in handler_source
     assert "_tesla_force_result_all_confirmed(" in handler_source
+    assert (
+        "and source == \"automation\"\n"
+        "                and _tesla_force_result_all_grid_field_absent_safe("
+        not in handler_source
+    )
+    assert "await _persist_tesla_grid_charging_preference(" in handler_source
+    assert handler_source.index(
+        "await _persist_tesla_grid_charging_preference("
+    ) < handler_source.index("local_snapshot.grid_charging_enabled = enabled")
 
 
 def test_tesla_charge_compatibility_requires_full_nonfailed_coverage():

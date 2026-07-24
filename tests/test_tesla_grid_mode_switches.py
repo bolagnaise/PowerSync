@@ -267,6 +267,53 @@ def test_grid_charging_switch_prefers_fresh_local_readback():
     assert entity.is_on is False
 
 
+def test_grid_charging_switch_uses_remembered_preference_when_field_is_absent():
+    hass = _Hass("SystemGridConnected")
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = types.SimpleNamespace(
+        _site_info_cache={
+            "components": {"battery": True},
+            "default_real_mode": "self_consumption",
+        }
+    )
+    hass.data["power_sync"]["entry-1"]["tesla_grid_charging_preferences"] = {
+        "site-1": False,
+    }
+    entry = types.SimpleNamespace(
+        entry_id="entry-1",
+        data={
+            "powerwall_local_paired": False,
+            "tesla_energy_site_id": "site-1",
+        },
+        options={},
+    )
+
+    entity = switch.GridChargingSwitch(hass, entry)
+
+    assert entity.is_on is False
+
+
+def test_grid_charging_switch_keeps_unknown_when_field_and_preference_are_absent():
+    hass = _Hass("SystemGridConnected")
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = types.SimpleNamespace(
+        _site_info_cache={
+            "components": {"battery": True},
+            "default_real_mode": "self_consumption",
+        }
+    )
+    entry = types.SimpleNamespace(
+        entry_id="entry-1",
+        data={
+            "powerwall_local_paired": False,
+            "tesla_energy_site_id": "site-1",
+        },
+        options={},
+    )
+
+    entity = switch.GridChargingSwitch(hass, entry)
+
+    assert entity.is_on is None
+
+
 def test_force_switches_are_added_for_non_tesla_batteries():
     hass = _Hass("SystemGridConnected")
     entry = types.SimpleNamespace(
