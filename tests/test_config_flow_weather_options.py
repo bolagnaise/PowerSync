@@ -1989,6 +1989,49 @@ def test_custom_tariff_export_rates_allow_negative_values():
     assert "Use a negative value when you pay to export" in TRANSLATIONS_PATH.read_text()
 
 
+def test_custom_tariff_options_preserve_saved_explicit_periods_on_reopen():
+    source = CONFIG_FLOW_PATH.read_text()
+    options_method = _options_flow_method("async_step_custom_tariff_options")
+    helper_method = _options_flow_method("_custom_tariff_periods")
+    options_source = ast.get_source_segment(source, options_method)
+    helper_source = ast.get_source_segment(source, helper_method)
+
+    assert options_source is not None
+    assert helper_source is not None
+    assert "self._tariff_periods = self._custom_tariff_periods(" in options_source
+    assert "self._tariff_periods = []" not in options_source
+
+    namespace: dict[str, object] = {}
+    exec(textwrap.dedent(helper_source).replace("@staticmethod\n", ""), namespace)
+    recover = namespace["_custom_tariff_periods"]
+    recovered = recover(
+        {
+            "seasons": {
+                "All Year": {
+                    "tou_periods": {
+                        "PEAK_1": [
+                            {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 16, "toHour": 17}
+                        ],
+                        "PEAK_2": [
+                            {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 17, "toHour": 20}
+                        ],
+                        "OFF_PEAK": [
+                            {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 16}
+                        ],
+                    }
+                }
+            },
+            "energy_charges": {"All Year": {"PEAK_1": 0.4, "PEAK_2": 0.5, "OFF_PEAK": 0.2}},
+            "sell_tariff": {"energy_charges": {"All Year": {"PEAK_1": 0.1, "PEAK_2": 0.1, "OFF_PEAK": 0.05}}},
+        }
+    )
+
+    assert recovered == [
+        {"name": "PEAK", "start": 16, "end": 17, "days": "weekdays", "import_rate": 0.4, "export_rate": 0.1},
+        {"name": "PEAK", "start": 17, "end": 20, "days": "weekdays", "import_rate": 0.5, "export_rate": 0.1},
+    ]
+
+
 def test_tesla_curtailment_options_expose_powerwall_offgrid_fallback():
     source = CONFIG_FLOW_PATH.read_text()
     method = _options_flow_method("async_step_curtailment_options")

@@ -14509,8 +14509,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 await self._save_custom_tariff(custom_tariff)
                 return await self.async_step_demand_charge_options()
 
-            # TOU — start the period builder
-            self._tariff_periods = []
+            # TOU — retain existing explicit periods.  Starting from an empty
+            # list here meant reopening the editor and saving another period
+            # silently replaced the whole tariff with that one period.
+            self._tariff_periods = self._custom_tariff_periods(
+                getattr(self, "_custom_tariff_for_options", None)
+            )
             return await self.async_step_tariff_period_options()
 
         # Get current custom tariff defaults
@@ -14541,6 +14545,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     if isinstance(v, (int, float)):
                         default_fit = round(v * 100, 1)
                         break
+        self._custom_tariff_for_options = current_tariff
 
         tariff_type_options = {
             "flat": "Flat Rate (single rate all day)",
@@ -14551,7 +14556,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             step_id="custom_tariff_options",
             data_schema=vol.Schema(
                 {
-                    vol.Optional("plan_name", default=""): TextSelector(
+                    vol.Optional(
+                        "plan_name",
+                        default=(current_tariff or {}).get("name", ""),
+                    ): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.TEXT)
                     ),
                     vol.Required("tariff_type", default="tou"): SelectSelector(
@@ -14588,6 +14596,65 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 "info": f"Configure your electricity tariff. All rates in {self._selector_unit()}.\nFor TOU, you'll add time periods in the next step.",
             },
         )
+
+    @staticmethod
+    def _custom_tariff_periods(custom_tariff: dict | None) -> list[dict]:
+        """Recover explicit TOU periods from a saved custom tariff.
+
+        The tariff format does not retain the original form fields, but every
+        explicit period is represented losslessly as a named TOU range.  The
+        only generated ranges are OFF_PEAK (or OFF_PEAK_AUTO when an explicit
+        OFF_PEAK period exists), which must not be re-added as user periods.
+        """
+        if not isinstance(custom_tariff, dict):
+            return []
+
+        season = custom_tariff.get("seasons", {}).get("All Year", {})
+        tou_periods = season.get("tou_periods", {})
+        import_rates = custom_tariff.get("energy_charges", {}).get("All Year", {})
+        export_rates = (
+            custom_tariff.get("sell_tariff", {})
+            .get("energy_charges", {})
+            .get("All Year", {})
+        )
+        if not isinstance(tou_periods, dict):
+            return []
+
+        periods: list[dict] = []
+        for internal_name, ranges in tou_periods.items():
+            if internal_name == "OFF_PEAK_AUTO":
+                continue
+            if internal_name == "OFF_PEAK" and "OFF_PEAK_AUTO" not in tou_periods:
+                # A generated off-peak gap has no companion AUTO key.
+                continue
+            if not isinstance(ranges, list):
+                continue
+            base_name = internal_name.rsplit("_", 1)[0]
+            if base_name not in {"PEAK", "SHOULDER", "OFF_PEAK", "SUPER_OFF_PEAK"}:
+                base_name = internal_name
+            for item in ranges:
+                if not isinstance(item, dict):
+                    continue
+                day_range = (item.get("fromDayOfWeek"), item.get("toDayOfWeek"))
+                days = {
+                    (1, 5): "weekdays",
+                    (0, 6): "all_days",
+                    (0, 0): "weekends",
+                    (6, 6): "weekends",
+                }.get(day_range)
+                if days is None:
+                    continue
+                periods.append(
+                    {
+                        "name": base_name,
+                        "start": int(item.get("fromHour", 0)),
+                        "end": int(item.get("toHour", 24)),
+                        "days": days,
+                        "import_rate": float(import_rates.get(internal_name, 0)),
+                        "export_rate": float(export_rates.get(internal_name, 0)),
+                    }
+                )
+        return periods
 
     async def async_step_tariff_period_options(
         self, user_input: dict[str, Any] | None = None
