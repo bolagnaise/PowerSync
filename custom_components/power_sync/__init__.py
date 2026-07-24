@@ -20384,9 +20384,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         if isinstance(value, bool)
     }
-    hass.data[DOMAIN][entry.entry_id][
-        "tesla_grid_charging_preferences"
-    ] = tesla_grid_charging_preferences
     cached_export_rule = stored_data.get("cached_export_rule")
     if cached_export_rule:
         _LOGGER.info(f"Restored cached_export_rule='{cached_export_rule}' from persistent storage")
@@ -20432,6 +20429,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "tesla_coordinator": tesla_coordinator,
         "tesla_capabilities": tesla_capabilities or {},
         "tesla_site_country": tesla_site_country,
+        "tesla_grid_charging_preferences": tesla_grid_charging_preferences,
         "sigenergy_coordinator": sigenergy_coordinator,  # For Sigenergy Modbus energy data
         "sungrow_coordinator": sungrow_coordinator,  # For Sungrow Modbus energy/battery data
         "foxess_coordinator": foxess_coordinator,  # For FoxESS Modbus energy/battery data
@@ -25760,6 +25758,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "expires_at": None,
         "cancel_expiry_timer": None,
         "locked_soc": None,  # SoC at the moment Hold was engaged, for diagnostics
+        "brand": None,
+        "pending": False,
     }
 
     # Self-consumption override: duration-based like force charge/discharge.
@@ -25876,6 +25876,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hold_soc_state["active"] = False
         hold_soc_state["expires_at"] = None
         hold_soc_state["cancel_expiry_timer"] = None
+        hold_soc_state["brand"] = None
+        hold_soc_state["pending"] = False
         async_dispatcher_send(hass, f"{DOMAIN}_hold_soc_state", {
             "active": False,
         })
@@ -26080,6 +26082,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "locked_soc": hold_soc_state.get("locked_soc"),
                 "saved_operation_mode": hold_soc_state.get("saved_operation_mode"),
                 "saved_backup_reserve": hold_soc_state.get("saved_backup_reserve"),
+                "brand": hold_soc_state.get("brand"),
             }
         elif self_consumption_state["active"]:
             state_to_save = {
@@ -26264,6 +26267,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     hold_soc_state["locked_soc"] = locked_soc
                     hold_soc_state["saved_operation_mode"] = saved_operation_mode
                     hold_soc_state["saved_backup_reserve"] = saved_backup_reserve
+                    hold_soc_state["brand"] = persisted_force_state.get("brand")
 
                     try:
                         await hass.services.async_call(
@@ -26304,6 +26308,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     hold_soc_state["locked_soc"] = locked_soc
                     hold_soc_state["saved_operation_mode"] = saved_operation_mode
                     hold_soc_state["saved_backup_reserve"] = saved_backup_reserve
+                    hold_soc_state["brand"] = persisted_force_state.get("brand")
 
                     # OB-7: async_unload_entry now cancels this timer on every
                     # unload/reload, so re-arming it here can never collide
@@ -26696,6 +26701,111 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 site_id,
                 observed_mode,
                 expected_mode,
+                attempt,
+                attempts,
+            )
+        return False
+
+    async def _tesla_force_read_backup_reserve(
+        session,
+        api_base: str,
+        site_id: str,
+        headers: dict[str, str],
+    ) -> float | None:
+        """Read one Tesla site's effective backup reserve from site_info."""
+        try:
+            async with session.get(
+                f"{api_base}/api/1/energy_sites/{site_id}/site_info",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    _LOGGER.warning(
+                        "Tesla backup-reserve readback failed for site %s: %s - %s",
+                        site_id,
+                        response.status,
+                        text[:200],
+                    )
+                    return None
+                data = await response.json()
+                observed = data.get("response", {}).get(
+                    "backup_reserve_percent"
+                )
+                if isinstance(observed, bool):
+                    return None
+                try:
+                    return float(observed)
+                except (TypeError, ValueError):
+                    return None
+        except Exception as err:
+            _LOGGER.warning(
+                "Tesla backup-reserve readback error for site %s: %s",
+                site_id,
+                err,
+            )
+            return None
+
+    async def _tesla_force_confirm_backup_reserve(
+        session,
+        api_base: str,
+        site_id: str,
+        headers: dict[str, str],
+        expected_percent: int,
+        *,
+        attempts: int = 4,
+        delay_seconds: float = 2.0,
+        is_current: Callable[[], bool] | None = None,
+    ) -> bool:
+        """Confirm an accepted Tesla reserve write reached site_info."""
+        for attempt in range(1, attempts + 1):
+            if is_current is not None and not is_current():
+                _LOGGER.info(
+                    "Tesla backup-reserve readback for site %s was superseded",
+                    site_id,
+                )
+                return False
+            if attempt > 1:
+                await asyncio.sleep(delay_seconds)
+                if is_current is not None and not is_current():
+                    _LOGGER.info(
+                        "Tesla backup-reserve readback for site %s was "
+                        "superseded while waiting",
+                        site_id,
+                    )
+                    return False
+            observed = await _tesla_force_read_backup_reserve(
+                session,
+                api_base,
+                site_id,
+                headers,
+            )
+            if (
+                observed is not None
+                and abs(observed - expected_percent) <= 0.5
+            ):
+                if is_current is not None and not is_current():
+                    _LOGGER.info(
+                        "Tesla backup-reserve readback match for site %s was "
+                        "superseded",
+                        site_id,
+                    )
+                    return False
+                _LOGGER.info(
+                    "Confirmed Tesla backup reserve %.1f%% for site %s "
+                    "(attempt %d/%d)",
+                    observed,
+                    site_id,
+                    attempt,
+                    attempts,
+                )
+                return True
+            _LOGGER.warning(
+                "Tesla backup-reserve readback for site %s is %s, expected %d%% "
+                "(attempt %d/%d)",
+                site_id,
+                observed,
+                expected_percent,
                 attempt,
                 attempts,
             )
@@ -30861,6 +30971,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         restore_was_force_charging = bool(force_charge_state.get("active"))
         restore_was_hold_soc = bool(hold_soc_state.get("active"))
         is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
+        is_tesla = bool(
+            hass.data.get(DOMAIN, {})
+            .get(entry.entry_id, {})
+            .get("tesla_coordinator")
+            or hold_soc_state.get("brand") == "tesla"
+        )
         force_mode_cleanup_restore = restore_was_force_discharging or restore_was_force_charging
         sigenergy_native_control = _sigenergy_restore_native_control(call)
         allow_monitoring_restore = bool(
@@ -30893,7 +31009,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _clear_self_consumption_state()
             # GoodWe entity restore can report False without raising. Keep its
             # Hold state visible and persisted until EMS auto succeeds.
-            if hold_soc_state.get("active") and not is_goodwe:
+            if (
+                hold_soc_state.get("active")
+                and not is_goodwe
+                and not is_tesla
+            ):
                 _clear_hold_soc_state()
 
         # No cooldown: a Stop Charge / Stop Discharge press is a one-shot
@@ -31000,6 +31120,73 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             _LOGGER.warning(
                 "Tesla restore_normal incomplete; retry %d scheduled in 60 seconds (%s)",
+                next_retry,
+                reason,
+            )
+            return True
+
+        def _schedule_tesla_hold_restore_retry(reason: str) -> bool:
+            """Keep Hold tracking until its saved reserve verifies restored."""
+            if restore_retry_count >= 3:
+                _LOGGER.error(
+                    "Tesla Hold SoC cleanup still failing after %d retries; "
+                    "leaving Hold state active for manual restore (%s)",
+                    restore_retry_count,
+                    reason,
+                )
+                return False
+
+            retry_at = dt_util.utcnow() + timedelta(seconds=60)
+            next_retry = restore_retry_count + 1
+            retry_command_generation = _command_generation[0]
+            retry_reserve_generation = _tesla_reserve_generation[0]
+
+            async def _retry_tesla_hold_restore(_now):
+                if not hold_soc_state.get("active"):
+                    return
+                if (
+                    _command_generation[0] != retry_command_generation
+                    or _tesla_reserve_generation[0]
+                    != retry_reserve_generation
+                ):
+                    _LOGGER.info(
+                        "Tesla Hold SoC cleanup retry superseded by a newer "
+                        "command; clearing stale Hold tracking"
+                    )
+                    _clear_hold_soc_state()
+                    await persist_force_mode_state()
+                    return
+                _LOGGER.warning(
+                    "Retrying Tesla Hold SoC cleanup (%s, attempt %d)",
+                    reason,
+                    next_retry,
+                )
+                await hass.services.async_call(
+                    DOMAIN,
+                    SERVICE_RESTORE_NORMAL,
+                    {
+                        "source": "hold_soc_cleanup",
+                        "_force_restore": True,
+                        "_restore_retry": next_retry,
+                    },
+                    blocking=True,
+                )
+
+            if hold_soc_state.get("cancel_expiry_timer"):
+                hold_soc_state["cancel_expiry_timer"]()
+            hold_soc_state["active"] = True
+            hold_soc_state["pending"] = True
+            hold_soc_state["expires_at"] = retry_at
+            hold_soc_state["cancel_expiry_timer"] = (
+                async_track_point_in_utc_time(
+                    hass,
+                    _retry_tesla_hold_restore,
+                    retry_at,
+                )
+            )
+            _LOGGER.warning(
+                "Tesla Hold SoC cleanup incomplete; retry %d scheduled in "
+                "60 seconds (%s)",
                 next_retry,
                 reason,
             )
@@ -31707,6 +31894,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 and not force_charge_state.get("saved_operation_mode")
                 and saved_grid_charging_enabled is None
             )
+            site_configs = _get_tesla_site_configs(hass, entry)
             if hold_only_restore:
                 saved_backup_reserve = _saved_hold_soc_backup_reserve()
                 if saved_backup_reserve is None:
@@ -31714,25 +31902,104 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "Restore normal: Hold SoC had no saved backup reserve; "
                         "will not change current Tesla reserve"
                     )
-                else:
+                    _schedule_tesla_hold_restore_retry(
+                        "saved backup reserve unavailable"
+                    )
+                    await persist_force_mode_state()
+                    return
+                if not site_configs:
+                    _LOGGER.error(
+                        "Missing Tesla site ID or token for Hold SoC cleanup"
+                    )
+                    _schedule_tesla_hold_restore_retry(
+                        "Tesla site configuration unavailable"
+                    )
+                    await persist_force_mode_state()
+                    return
+
+                normalized_saved_reserve = (
+                    _normalize_tesla_backup_reserve_percent(
+                        saved_backup_reserve
+                    )
+                )
+                session = async_get_clientsession(hass)
+
+                def _hold_restore_still_current() -> bool:
+                    return (
+                        _command_generation[0] == _restore_generation
+                        and _tesla_reserve_generation[0]
+                        == _restore_reserve_generation
+                    )
+
+                cleanup_verified = True
+                for site_id, current_token, provider in site_configs:
+                    site_config = (site_id, current_token, provider)
                     _LOGGER.info(
-                        "Restore normal: restoring Hold SoC backup reserve to %d%% via local-first reserve service",
-                        saved_backup_reserve,
+                        "Restore normal: restoring Hold SoC backup reserve "
+                        "to %d%% for site %s",
+                        normalized_saved_reserve,
+                        site_id,
                     )
-                    await hass.services.async_call(
-                        DOMAIN,
-                        SERVICE_SET_BACKUP_RESERVE,
-                        {
-                            "percent": saved_backup_reserve,
-                            "source": "hold_soc_restore",
-                        },
-                        blocking=True,
+                    reserve_result = (
+                        await _tesla_force_pulse_backup_reserve(
+                            [site_config],
+                            normalized_saved_reserve,
+                            reason="Hold SoC cleanup reserve pulse",
+                            prefer_local=(
+                                site_id == site_configs[0][0]
+                            ),
+                            is_current=_hold_restore_still_current,
+                        )
                     )
+                    if not _tesla_force_result_all_confirmed(
+                        reserve_result,
+                        [site_config],
+                    ):
+                        cleanup_verified = False
+                        break
+                    headers = {
+                        "Authorization": f"Bearer {current_token}",
+                        "Content-Type": "application/json",
+                    }
+                    api_base = get_tesla_api_base_url(
+                        provider,
+                        entry.data.get(CONF_FLEET_API_BASE_URL),
+                    )
+                    if not await _tesla_force_confirm_backup_reserve(
+                        session,
+                        api_base,
+                        site_id,
+                        headers,
+                        normalized_saved_reserve,
+                        is_current=_hold_restore_still_current,
+                    ):
+                        cleanup_verified = False
+                        break
+
+                if not _hold_restore_still_current():
+                    _LOGGER.info(
+                        "Tesla Hold SoC cleanup was superseded; preserving "
+                        "the newer command"
+                    )
+                    _clear_hold_soc_state()
+                    await persist_force_mode_state()
+                    return
+                if not cleanup_verified:
+                    _schedule_tesla_hold_restore_retry(
+                        "saved reserve did not verify"
+                    )
+                    await persist_force_mode_state()
+                    return
+
+                _clear_hold_soc_state()
                 await persist_force_mode_state()
+                _LOGGER.info(
+                    "Tesla Hold SoC cleanup verified at %d%%",
+                    normalized_saved_reserve,
+                )
                 return
 
             # Get Tesla gateway config
-            site_configs = _get_tesla_site_configs(hass, entry)
             if not site_configs:
                 _LOGGER.error("Missing Tesla site ID or token for restore normal")
                 return
@@ -32287,6 +32554,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         },
     }
 
+    _hold_soc_transition_token = object()
+
     async def handle_hold_battery_soc(call: ServiceCall) -> None:
         """Hold current battery SoC for a duration.
 
@@ -32348,6 +32617,61 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if source != "optimizer" and self_consumption_state.get("active"):
             _clear_self_consumption_state()
 
+        async def _arm_hold_soc_tracking(
+            locked_soc: float | None,
+            expires_at: datetime,
+            *,
+            pending: bool,
+        ) -> None:
+            """Persist a crash-safe Hold state and arm its cleanup timer."""
+            if hold_soc_state.get("cancel_expiry_timer"):
+                try:
+                    hold_soc_state["cancel_expiry_timer"]()
+                except Exception:
+                    pass
+
+            hold_soc_state["active"] = True
+            hold_soc_state["expires_at"] = expires_at
+            hold_soc_state["locked_soc"] = locked_soc
+            hold_soc_state["brand"] = brand
+            hold_soc_state["pending"] = pending
+            restore_generation = _command_generation[0]
+            restore_reserve_generation = _tesla_reserve_generation[0]
+
+            async def auto_restore_hold_soc(_now):
+                if (
+                    _command_generation[0] != restore_generation
+                    or _tesla_reserve_generation[0]
+                    != restore_reserve_generation
+                ):
+                    _LOGGER.debug(
+                        "Hold SoC timer superseded — clearing stale tracking"
+                    )
+                    _clear_hold_soc_state()
+                    await persist_force_mode_state()
+                    return
+                if hold_soc_state["active"]:
+                    _LOGGER.info("⏰ Hold SoC expired, auto-restoring")
+                    await hass.services.async_call(
+                        DOMAIN,
+                        SERVICE_RESTORE_NORMAL,
+                        {"source": "hold_soc_cleanup", "_force_restore": True},
+                        blocking=True,
+                    )
+
+            hold_soc_state["cancel_expiry_timer"] = (
+                async_track_point_in_utc_time(
+                    hass,
+                    auto_restore_hold_soc,
+                    expires_at,
+                )
+            )
+            await persist_force_mode_state()
+
+        tracking_armed = False
+        hold_command_generation: int | None = None
+        hold_reserve_generation: int | None = None
+
         # Tesla does not have a single 'set_backup_mode' coordinator
         # primitive — it doesn't expose any way to strictly lock SoC.
         # Closest equivalent is: set backup_reserve = current SoC (capped
@@ -32372,20 +32696,85 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Hold SoC (Tesla): setting backup_reserve=%d%% (current SoC=%.1f%%) + self_consumption mode; saved reserve=%s%% from %s",
                 target_reserve, current_soc, saved_backup_reserve, reserve_source,
             )
+            if source != "optimizer":
+                await _arm_hold_soc_tracking(
+                    current_soc,
+                    dt_util.utcnow() + timedelta(seconds=60),
+                    pending=True,
+                )
+                tracking_armed = True
+
+            hold_command_generation = _command_generation[0]
+            reserve_generation_before = _tesla_reserve_generation[0]
+            hold_reserve_generation = reserve_generation_before + 1
             try:
                 await hass.services.async_call(
                     DOMAIN, SERVICE_SET_BACKUP_RESERVE,
                     {"percent": target_reserve, "source": "hold_soc"},
                     blocking=True,
                 )
+                if (
+                    _command_generation[0] != hold_command_generation
+                    or _tesla_reserve_generation[0]
+                    != hold_reserve_generation
+                ):
+                    _LOGGER.info(
+                        "Hold SoC reserve command was superseded before mode "
+                        "transition; preserving the newer command"
+                    )
+                    if tracking_armed:
+                        _clear_hold_soc_state()
+                        await persist_force_mode_state()
+                    return
                 await hass.services.async_call(
                     DOMAIN, "set_self_consumption",
-                    {"source": "hold_soc"},
+                    {
+                        "source": "hold_soc",
+                        "_reserve_restore_target": target_reserve,
+                        "_hold_soc_transition_token": (
+                            _hold_soc_transition_token
+                        ),
+                    },
                     blocking=True,
                 )
+                if (
+                    _command_generation[0] != hold_command_generation
+                    or _tesla_reserve_generation[0]
+                    != hold_reserve_generation
+                ):
+                    _LOGGER.info(
+                        "Hold SoC transition was superseded; preserving the "
+                        "newer command"
+                    )
+                    if tracking_armed:
+                        _clear_hold_soc_state()
+                        await persist_force_mode_state()
+                    return
                 result = True
             except Exception as e:
                 _LOGGER.error("Hold SoC failed on Tesla: %s", e, exc_info=True)
+                if tracking_armed:
+                    still_current = (
+                        _command_generation[0] == hold_command_generation
+                        and (
+                            hold_reserve_generation is None
+                            or _tesla_reserve_generation[0]
+                            == hold_reserve_generation
+                        )
+                    )
+                    if still_current:
+                        _LOGGER.warning(
+                            "Hold SoC hardware state is unverified; cleanup "
+                            "remains armed for 60 seconds"
+                        )
+                        await _arm_hold_soc_tracking(
+                            current_soc,
+                            dt_util.utcnow() + timedelta(seconds=60),
+                            pending=True,
+                        )
+                    else:
+                        _clear_hold_soc_state()
+                        await persist_force_mode_state()
                 return
         else:
             # Modbus brands all expose set_backup_mode on their coordinator
@@ -32417,34 +32806,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if coord and getattr(coord, "data", None):
             soc = coord.data.get("battery_level")
 
-        # Cancel any previous expiry timer before starting a new one
-        if hold_soc_state.get("cancel_expiry_timer"):
-            try:
-                hold_soc_state["cancel_expiry_timer"]()
-            except Exception:
-                pass
+        if (
+            brand == "tesla"
+            and (
+                _command_generation[0] != hold_command_generation
+                or _tesla_reserve_generation[0]
+                != hold_reserve_generation
+            )
+        ):
+            _LOGGER.info(
+                "Hold SoC was superseded before activation; preserving the "
+                "newer command"
+            )
+            if tracking_armed:
+                _clear_hold_soc_state()
+                await persist_force_mode_state()
+            return
 
-        hold_soc_state["active"] = True
-        hold_soc_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
-        hold_soc_state["locked_soc"] = soc
-
-        _restore_gen = _command_generation[0]
-
-        async def auto_restore_hold_soc(_now):
-            if _command_generation[0] != _restore_gen:
-                _LOGGER.debug("Hold SoC timer superseded — skipping restore")
-                return
-            if hold_soc_state["active"]:
-                _LOGGER.info("⏰ Hold SoC expired, auto-restoring")
-                await hass.services.async_call(
-                    DOMAIN,
-                    SERVICE_RESTORE_NORMAL,
-                    {"source": "hold_soc_cleanup", "_force_restore": True},
-                    blocking=True,
-                )
-
-        hold_soc_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
-            hass, auto_restore_hold_soc, hold_soc_state["expires_at"],
+        await _arm_hold_soc_tracking(
+            soc,
+            dt_util.utcnow() + timedelta(minutes=duration),
+            pending=False,
         )
 
         # Dispatch mobile-side state event so the Controls screen can show
@@ -32456,8 +32838,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "locked_soc": soc,
             "warning": HOLD_SOC_CAPS.get(brand, {}).get("warning"),
         })
-
-        await persist_force_mode_state()
 
         _LOGGER.info(
             "✅ Hold SoC ACTIVE for %d min on %s (locked_soc=%s)",
@@ -32514,6 +32894,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 source,
             )
             return
+
+        internal_hold_soc_transition = (
+            source == "hold_soc"
+            and call.data.get("_hold_soc_transition_token")
+            is _hold_soc_transition_token
+        )
+        if source == "hold_soc" and not internal_hold_soc_transition:
+            raise HomeAssistantError(
+                "Hold SoC self-consumption transition is internal only"
+            )
+
+        hold_soc_reserve_target = None
+        if internal_hold_soc_transition:
+            raw_hold_target = call.data.get("_reserve_restore_target")
+            try:
+                if isinstance(raw_hold_target, bool):
+                    raise ValueError
+                hold_soc_reserve_target = (
+                    _normalize_tesla_backup_reserve_percent(
+                        int(round(float(raw_hold_target)))
+                    )
+                )
+            except (TypeError, ValueError):
+                raise HomeAssistantError(
+                    "Hold SoC reserve target is missing or invalid"
+                )
         self_consumption_reserve_generation = _tesla_reserve_generation[0]
 
         # A self-consumption transition can release a previous zero-export or
@@ -32526,6 +32932,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if _sc_guard is not None and _sc_guard.manager.snapshot.mode != "off":
             _sc_snapshot = _sc_guard.manager.snapshot
             if _sc_snapshot.mode == "monitoring":
+                if internal_hold_soc_transition:
+                    raise HomeAssistantError(
+                        "Hold SoC self-consumption transition blocked by "
+                        "network envelope monitoring"
+                    )
                 _LOGGER.warning(
                     "Self-consumption transition blocked by network envelope monitoring mode"
                 )
@@ -32533,6 +32944,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await _sc_guard.clamp_requested_export_w(0.0)
             _sc_snapshot = _sc_guard.manager.snapshot
             if not _sc_snapshot.active_export_permitted or _sc_snapshot.fault:
+                if internal_hold_soc_transition:
+                    raise HomeAssistantError(
+                        "Hold SoC self-consumption transition blocked by "
+                        "network envelope"
+                    )
                 _LOGGER.warning(
                     "Self-consumption transition blocked by network envelope (%s)",
                     _sc_snapshot.fault or _sc_snapshot.reason or _sc_snapshot.mode,
@@ -32901,9 +33317,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             site_configs = _get_tesla_site_configs(hass, entry)
             if not site_configs:
+                if internal_hold_soc_transition:
+                    raise HomeAssistantError(
+                        "Tesla site configuration unavailable for Hold SoC"
+                    )
                 _LOGGER.error("Missing Tesla site ID or token for self-consumption mode")
                 return
             self_consumption_generation = _command_generation[0]
+
+            def _self_consumption_still_current() -> bool:
+                return (
+                    _command_generation[0] == self_consumption_generation
+                    and _tesla_reserve_generation[0]
+                    == self_consumption_reserve_generation
+                )
 
             async def _write_tesla_self_consumption() -> dict[str, list[str]]:
                 result = await _tesla_force_apply_operation_mode(
@@ -32921,24 +33348,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
 
             if mode_ok:
-                target_reserve = None
-                target_source = "configured reserve fallback"
+                target_reserve = hold_soc_reserve_target
+                target_source = "Hold SoC target"
                 self_entry_data = (
                     hass.data.setdefault(DOMAIN, {})
                     .setdefault(entry.entry_id, {})
                 )
-                opt_coord = self_entry_data.get("optimization_coordinator")
-                if opt_coord is not None and hasattr(
-                    opt_coord,
-                    "resolve_restore_target",
-                ):
-                    target_reserve = await opt_coord.resolve_restore_target()
-                    if target_reserve is not None:
-                        target_source = "optimizer restore target"
                 if target_reserve is None:
-                    target_reserve, target_source = (
-                        _disabled_optimizer_backup_reserve_target(entry)
-                    )
+                    target_source = "configured reserve fallback"
+                    opt_coord = self_entry_data.get("optimization_coordinator")
+                    if opt_coord is not None and hasattr(
+                        opt_coord,
+                        "resolve_restore_target",
+                    ):
+                        target_reserve = await opt_coord.resolve_restore_target()
+                        if target_reserve is not None:
+                            target_source = "optimizer restore target"
+                    if target_reserve is None:
+                        target_reserve, target_source = (
+                            _disabled_optimizer_backup_reserve_target(entry)
+                        )
                 if target_reserve is not None:
                     target_reserve = _normalize_tesla_backup_reserve_percent(
                         target_reserve
@@ -32953,11 +33382,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         site_configs,
                         target_reserve,
                         reason="self-consumption final reserve pulse",
-                        is_current=lambda: (
-                            _command_generation[0] == self_consumption_generation
-                            and _tesla_reserve_generation[0]
-                            == self_consumption_reserve_generation
-                        ),
+                        is_current=_self_consumption_still_current,
                     )
                     if not _tesla_force_result_all_confirmed(
                         reserve_result,
@@ -32970,6 +33395,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         raise HomeAssistantError(
                             "Tesla self-consumption reserve transition did not verify"
                         )
+                    if internal_hold_soc_transition:
+                        session = async_get_clientsession(hass)
+                        for site_id, current_token, provider in site_configs:
+                            headers = {
+                                "Authorization": f"Bearer {current_token}",
+                                "Content-Type": "application/json",
+                            }
+                            api_base = get_tesla_api_base_url(
+                                provider,
+                                entry.data.get(CONF_FLEET_API_BASE_URL),
+                            )
+                            if not await _tesla_force_confirm_backup_reserve(
+                                session,
+                                api_base,
+                                site_id,
+                                headers,
+                                target_reserve,
+                                is_current=_self_consumption_still_current,
+                            ):
+                                raise HomeAssistantError(
+                                    "Tesla Hold SoC reserve did not verify"
+                                )
                 self_entry_data.pop("last_force_toggle_time", None)
                 self_entry_data.pop("retoggle_attempted", None)
                 tesla_coord_for_cache = self_entry_data.get("tesla_coordinator")

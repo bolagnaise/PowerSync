@@ -171,6 +171,31 @@ def test_setup_preserves_early_tesla_capability_results():
     assert '"tesla_site_country": tesla_site_country' in source
 
 
+def test_setup_initializes_grid_charging_preferences_in_canonical_entry_data():
+    """Persistent preferences must not write through hass.data before setup owns it."""
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    setup_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "async_setup_entry"),
+    )
+
+    assert setup_source is not None
+    canonical_marker = (
+        "existing_entry_data = "
+        "hass.data.setdefault(DOMAIN, {}).get(entry.entry_id, {})"
+    )
+    before_canonical, after_canonical = setup_source.split(canonical_marker, 1)
+    assert (
+        'hass.data[DOMAIN][entry.entry_id]["tesla_grid_charging_preferences"]'
+        not in before_canonical
+    )
+    assert (
+        '"tesla_grid_charging_preferences": tesla_grid_charging_preferences'
+        in after_canonical
+    )
+
+
 def test_amber_websocket_start_is_timeout_bounded():
     """Amber WebSocket startup must fall back instead of blocking setup indefinitely."""
     source = INIT_PATH.read_text()

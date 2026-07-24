@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import textwrap
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -301,7 +302,7 @@ def test_restore_normal_hold_soc_counts_as_restorable_state():
     assert has_saved_index < hold_state_index < guard_index
 
 
-def test_restore_normal_hold_soc_uses_local_first_reserve_service():
+def test_restore_normal_hold_soc_uses_local_first_verified_reserve_primitive():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
     function = _find_function(tree, "handle_restore_normal")
@@ -310,17 +311,22 @@ def test_restore_normal_hold_soc_uses_local_first_reserve_service():
     assert function_source is not None
     hold_only_index = function_source.index("hold_only_restore = (")
     site_configs_index = function_source.index("site_configs = _get_tesla_site_configs")
-    service_call_index = function_source.index(
-        "SERVICE_SET_BACKUP_RESERVE",
+    pulse_index = function_source.index(
+        "_tesla_force_pulse_backup_reserve(",
         hold_only_index,
+    )
+    verify_index = function_source.index(
+        "_tesla_force_confirm_backup_reserve(",
+        pulse_index,
     )
     persist_index = function_source.index(
         "await persist_force_mode_state()",
-        service_call_index,
+        verify_index,
     )
 
-    assert hold_only_index < service_call_index < persist_index < site_configs_index
-    assert '"source": "hold_soc_restore"' in function_source[hold_only_index:site_configs_index]
+    assert hold_only_index < site_configs_index < pulse_index < verify_index
+    assert verify_index < persist_index
+    assert '"Hold SoC cleanup reserve pulse"' in function_source
 
 
 def test_monitoring_mode_optimizer_shutdown_skips_hardware_restore():
@@ -1061,6 +1067,398 @@ def test_tesla_self_consumption_uses_local_first_confirmed_mode_write():
     assert "guard_write=_guarded_self_consumption_write" in function_source
     assert "_tesla_force_result_all_confirmed(" in function_source
     assert "session.post(" not in function_source
+
+
+def test_tesla_hold_soc_preserves_target_through_required_reserve_pulse():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    hold_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_hold_battery_soc"),
+    )
+    self_consumption_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_set_self_consumption"),
+    )
+
+    assert hold_source is not None
+    assert self_consumption_source is not None
+    assert '"_reserve_restore_target": target_reserve' in hold_source
+    assert '"_hold_soc_transition_token": (' in hold_source
+    assert "is _hold_soc_transition_token" in self_consumption_source
+    assert (
+        "if source == \"hold_soc\" and not internal_hold_soc_transition:"
+        in self_consumption_source
+    )
+    assert 'call.data.get("_reserve_restore_target")' in self_consumption_source
+    assert '"Hold SoC target"' in self_consumption_source
+    assert self_consumption_source.index(
+        "target_reserve = hold_soc_reserve_target"
+    ) < self_consumption_source.index("resolve_restore_target")
+    assert "_tesla_force_pulse_backup_reserve(" in self_consumption_source
+    assert "_tesla_force_confirm_backup_reserve(" in self_consumption_source
+    assert "Tesla Hold SoC reserve did not verify" in self_consumption_source
+    assert "is_current=_self_consumption_still_current" in (
+        self_consumption_source
+    )
+
+
+def test_tesla_hold_soc_missing_internal_target_fails_closed():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    self_consumption_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_set_self_consumption"),
+    )
+
+    assert self_consumption_source is not None
+    validation_index = self_consumption_source.index(
+        "Hold SoC reserve target is missing or invalid"
+    )
+    mode_write_index = self_consumption_source.index(
+        "_tesla_force_apply_operation_mode("
+    )
+    assert validation_index < mode_write_index
+    assert "except (TypeError, ValueError):" in self_consumption_source
+
+
+def test_tesla_hold_soc_tracks_failed_transition_and_preserves_supersession():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    handler = _find_function(tree, "handle_hold_battery_soc")
+
+    class HomeAssistantError(Exception):
+        pass
+
+    class FakeLogger:
+        def __init__(self):
+            self.messages = []
+
+        def _record(self, message, *args, **_kwargs):
+            self.messages.append(message % args if args else message)
+
+        debug = _record
+        error = _record
+        info = _record
+        warning = _record
+
+    class FakeServices:
+        def __init__(self, reserve_generation, *, supersede):
+            self.reserve_generation = reserve_generation
+            self.supersede = supersede
+
+        async def async_call(
+            self,
+            _domain,
+            service,
+            _data,
+            *,
+            blocking,
+        ):
+            assert blocking
+            if service == "set_backup_reserve":
+                self.reserve_generation[0] += 1
+                return
+            if service == "set_self_consumption":
+                if self.supersede:
+                    self.reserve_generation[0] += 1
+                raise HomeAssistantError("reserve readback did not verify")
+            raise AssertionError(service)
+
+    class FakeDtUtil:
+        @staticmethod
+        def utcnow():
+            return datetime(2026, 7, 24, tzinfo=timezone.utc)
+
+    def run_scenario(*, supersede):
+        reserve_generation = [0]
+        command_generation = [0]
+        hold_state = {
+            "active": False,
+            "expires_at": None,
+            "locked_soc": None,
+            "saved_backup_reserve": None,
+            "cancel_expiry_timer": None,
+            "pending": False,
+        }
+        self_consumption_state = {"active": False}
+        persisted = []
+        dispatches = []
+        timers = []
+        logger = FakeLogger()
+        services = FakeServices(
+            reserve_generation,
+            supersede=supersede,
+        )
+        coordinator = SimpleNamespace(data={"battery_level": 83.9})
+        entry = SimpleNamespace(entry_id="entry", data={}, options={})
+        hass = SimpleNamespace(
+            data={
+                "power_sync": {
+                    "entry": {"tesla_coordinator": coordinator}
+                }
+            },
+            services=services,
+        )
+
+        async def persist_force_mode_state():
+            persisted.append(dict(hold_state))
+
+        def async_track_point_in_utc_time(_hass, callback, expires_at):
+            timers.append((callback, expires_at))
+            return lambda: None
+
+        def async_dispatcher_send(_hass, signal, payload):
+            dispatches.append((signal, payload))
+
+        namespace = {
+            "ServiceCall": object,
+            "HomeAssistantError": HomeAssistantError,
+            "DEFAULT_DISCHARGE_DURATION": 60,
+            "DISCHARGE_DURATIONS": (30, 60, 120),
+            "DOMAIN": "power_sync",
+            "SERVICE_SET_BACKUP_RESERVE": "set_backup_reserve",
+            "SERVICE_RESTORE_NORMAL": "restore_normal",
+            "HOLD_SOC_CAPS": {"tesla": {"warning": "warning"}},
+            "_LOGGER": logger,
+            "_control_call_source": lambda _call: "user",
+            "_monitoring_mode_should_block_control": lambda _call: False,
+            "_disabled_optimizer_backup_reserve_target": (
+                lambda _entry: (5, "configured reserve")
+            ),
+            "_clear_self_consumption_state": lambda: None,
+            "_clear_hold_soc_state": lambda: (
+                hold_state.update(
+                    {
+                        "active": False,
+                        "expires_at": None,
+                        "pending": False,
+                    }
+                )
+            ),
+            "_command_generation": command_generation,
+            "_tesla_reserve_generation": reserve_generation,
+            "_hold_soc_transition_token": object(),
+            "hold_soc_state": hold_state,
+            "self_consumption_state": self_consumption_state,
+            "entry": entry,
+            "hass": hass,
+            "dt_util": FakeDtUtil,
+            "timedelta": timedelta,
+            "persist_force_mode_state": persist_force_mode_state,
+            "async_track_point_in_utc_time": async_track_point_in_utc_time,
+            "async_dispatcher_send": async_dispatcher_send,
+        }
+        extracted = ast.Module(
+            body=[
+                ast.ImportFrom(
+                    module="__future__",
+                    names=[ast.alias(name="annotations")],
+                    level=0,
+                ),
+                handler,
+            ],
+            type_ignores=[],
+        )
+        exec(
+            compile(
+                ast.fix_missing_locations(extracted),
+                str(INIT_PATH),
+                "exec",
+            ),
+            namespace,
+        )
+        call = SimpleNamespace(data={"duration": 60})
+        asyncio.run(namespace["handle_hold_battery_soc"](call))
+        return (
+            hold_state,
+            persisted,
+            dispatches,
+            timers,
+            logger.messages,
+            reserve_generation,
+        )
+
+    (
+        pending,
+        persisted,
+        dispatches,
+        timers,
+        messages,
+        reserve_generation,
+    ) = run_scenario(supersede=False)
+    assert pending["active"] is True
+    assert pending["pending"] is True
+    assert len(timers) == 2
+    assert persisted[-1]["pending"] is True
+    assert not any(payload.get("active") for _signal, payload in dispatches)
+    assert not any("Hold SoC ACTIVE" in message for message in messages)
+
+    reserve_generation[0] += 1
+    asyncio.run(timers[-1][0](None))
+    assert pending["active"] is False
+    assert persisted[-1]["active"] is False
+
+    (
+        superseded,
+        persisted,
+        dispatches,
+        _timers,
+        messages,
+        _reserve_generation,
+    ) = run_scenario(supersede=True)
+    assert superseded["active"] is False
+    assert superseded["pending"] is False
+    assert persisted[-1]["active"] is False
+    assert not any(payload.get("active") for _signal, payload in dispatches)
+    assert not any("Hold SoC ACTIVE" in message for message in messages)
+
+
+def test_tesla_hold_soc_reserve_readback_waits_for_exact_target():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    read_helper = _find_function(tree, "_tesla_force_read_backup_reserve")
+    confirm_helper = _find_function(tree, "_tesla_force_confirm_backup_reserve")
+
+    class FakeResponse:
+        def __init__(self, observed):
+            self.status = 200
+            self.observed = observed
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def json(self):
+            return {"response": {"backup_reserve_percent": self.observed}}
+
+        async def text(self):
+            return ""
+
+    class FakeSession:
+        def __init__(self, observed):
+            self.observed = iter(observed)
+
+        def get(self, *_args, **_kwargs):
+            return FakeResponse(next(self.observed))
+
+    class FakeLogger:
+        def info(self, *_args):
+            pass
+
+        def warning(self, *_args):
+            pass
+
+    namespace = {
+        "aiohttp": SimpleNamespace(
+            ClientTimeout=lambda *, total: total,
+        ),
+        "asyncio": asyncio,
+        "_LOGGER": FakeLogger(),
+    }
+    extracted = ast.Module(
+        body=[
+            ast.ImportFrom(
+                module="__future__",
+                names=[ast.alias(name="annotations")],
+                level=0,
+            ),
+            read_helper,
+            confirm_helper,
+        ],
+        type_ignores=[],
+    )
+    exec(
+        compile(ast.fix_missing_locations(extracted), str(INIT_PATH), "exec"),
+        namespace,
+    )
+    confirm = namespace["_tesla_force_confirm_backup_reserve"]
+
+    assert asyncio.run(
+        confirm(
+            FakeSession([5, 80]),
+            "https://example.invalid",
+            "site",
+            {"Authorization": "redacted"},
+            80,
+            attempts=2,
+            delay_seconds=0,
+        )
+    )
+    assert not asyncio.run(
+        confirm(
+            FakeSession([None]),
+            "https://example.invalid",
+            "site",
+            {"Authorization": "redacted"},
+            80,
+            attempts=1,
+            delay_seconds=0,
+        )
+    )
+
+    current = [True]
+
+    class SupersedingResponse(FakeResponse):
+        async def json(self):
+            current[0] = False
+            return await super().json()
+
+    class SupersedingSession:
+        def get(self, *_args, **_kwargs):
+            return SupersedingResponse(80)
+
+    assert not asyncio.run(
+        confirm(
+            SupersedingSession(),
+            "https://example.invalid",
+            "site",
+            {"Authorization": "redacted"},
+            80,
+            attempts=1,
+            delay_seconds=0,
+            is_current=lambda: current[0],
+        )
+    )
+
+
+def test_tesla_hold_soc_cleanup_retains_state_until_reserve_verifies():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    restore_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_restore_normal"),
+    )
+
+    assert restore_source is not None
+    hold_cleanup = restore_source.split("if hold_only_restore:", 1)[1].split(
+        "# Get Tesla gateway config",
+        1,
+    )[0]
+    assert "_tesla_force_pulse_backup_reserve(" in hold_cleanup
+    assert "_tesla_force_confirm_backup_reserve(" in hold_cleanup
+    assert "_schedule_tesla_hold_restore_retry(" in hold_cleanup
+    assert "if not cleanup_verified:" in hold_cleanup
+    assert hold_cleanup.index("if not cleanup_verified:") < (
+        hold_cleanup.rindex("_clear_hold_soc_state()")
+    )
+    assert "is_current=_hold_restore_still_current" in hold_cleanup
+    assert (
+        "and not is_tesla"
+        in restore_source.split("# No cooldown:", 1)[0]
+    )
+    retry_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "_schedule_tesla_hold_restore_retry"),
+    )
+    assert retry_source is not None
+    assert "_tesla_reserve_generation[0]" in retry_source
+    assert 'hold_soc_state["active"] = True' in retry_source
+    assert "_clear_hold_soc_state()" in retry_source
+    assert "await persist_force_mode_state()" in retry_source
+    assert 'hold_soc_state.get("brand") == "tesla"' in restore_source
 
 
 def test_optional_write_guard_rechecks_before_cloud_fallback_attempt():

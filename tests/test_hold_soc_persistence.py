@@ -93,12 +93,14 @@ def test_persist_force_mode_state_hold_soc_round_trip_writes_expected_blob():
         "store": _FakeStore(),
         "force_charge_state": {"active": False},
         "force_discharge_state": {"active": False},
+        "tesla_grid_charging_preferences": {},
         "hold_soc_state": {
             "active": True,
             "expires_at": expires_at,
             "locked_soc": 61.5,
             "saved_operation_mode": "autonomous",
             "saved_backup_reserve": 15,
+            "brand": "tesla",
         },
     }
     exec(source, namespace)
@@ -114,6 +116,7 @@ def test_persist_force_mode_state_hold_soc_round_trip_writes_expected_blob():
     assert blob["locked_soc"] == 61.5
     assert blob["saved_operation_mode"] == "autonomous"
     assert blob["saved_backup_reserve"] == 15
+    assert blob["brand"] == "tesla"
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +137,7 @@ def test_restore_force_mode_from_persistence_handles_hold_soc_mode():
     # own — see AGENTS.md per-brand notes on Sigenergy STANDBY / FoxESS
     # Backup / Sungrow cap-0 / GoodWe ECO).
     assert 'hold_soc_state["active"] = True' in hold_section
+    assert 'hold_soc_state["brand"] = persisted_force_state.get("brand")' in hold_section
     assert 'hold_soc_state["cancel_expiry_timer"] = async_track_point_in_utc_time(' in hold_section
     assert 'async_dispatcher_send(hass, f"{DOMAIN}_hold_soc_state"' in hold_section
 
