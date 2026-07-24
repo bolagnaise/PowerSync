@@ -96,6 +96,8 @@ MIN_CHARGING_POWER_KW = 1.4
 FULL_EV_SOC = 100
 EXTERNAL_SCHEDULED_STOP_SUPPRESS_SECONDS = 15 * 60
 EXTERNAL_SMART_SCHEDULE_STOP_SUPPRESS_SECONDS = 15 * 60
+AUTO_SCHEDULE_START_RETRY_BASE_SECONDS = 30
+AUTO_SCHEDULE_START_RETRY_MAX_SECONDS = 15 * 60
 
 
 def _format_price_log_value(price_cents: Optional[float]) -> str:
@@ -3861,6 +3863,7 @@ class AutoScheduleExecutor:
         self._last_external_smart_schedule_stops: Dict[
             str, Tuple[str, float]
         ] = {}
+        self._start_failure_state: Dict[str, Tuple[int, float]] = {}
 
     def _resolve_vehicle_vin(self, vehicle_id: str) -> Optional[str]:
         """Resolve sequential vehicle_id to actual VIN or BLE identifier.
@@ -4095,10 +4098,21 @@ class AutoScheduleExecutor:
             if not stored_data:
                 stored_data = {}
 
+            storage_changed = _normalize_stored_auto_schedule_ids(
+                self.hass,
+                self.config_entry,
+                stored_data,
+            )
             auto_schedule_data = stored_data.get("auto_schedule_settings", {})
 
             for vehicle_id, settings_dict in auto_schedule_data.items():
-                self._settings[vehicle_id] = AutoScheduleSettings.from_dict(settings_dict)
+                normalized_settings = {
+                    **settings_dict,
+                    "vehicle_id": vehicle_id,
+                }
+                self._settings[vehicle_id] = AutoScheduleSettings.from_dict(
+                    normalized_settings
+                )
                 self._state[vehicle_id] = AutoScheduleState(vehicle_id=vehicle_id)
 
             # Physical charger settings are stored in AutomationStore by the app,
@@ -4136,8 +4150,8 @@ class AutoScheduleExecutor:
                 vid for vid in self._settings
                 if not vid.isdigit() and vid != "_default"
             ]
+            needs_save = storage_changed
             if vin_entries:
-                needs_save = False
                 for vid in list(self._settings):
                     if vid.isdigit() and self._settings[vid].enabled:
                         _LOGGER.info(
@@ -4147,8 +4161,8 @@ class AutoScheduleExecutor:
                         )
                         self._settings[vid].enabled = False
                         needs_save = True
-                if needs_save:
-                    await self.save_settings(store)
+            if needs_save:
+                await self.save_settings(store)
 
             _LOGGER.debug(f"Loaded auto-schedule settings for {len(self._settings)} vehicles")
         except Exception as e:
@@ -4180,6 +4194,11 @@ class AutoScheduleExecutor:
 
     def get_settings(self, vehicle_id: str) -> AutoScheduleSettings:
         """Get settings for a vehicle, creating defaults if needed."""
+        vehicle_id = _canonical_auto_schedule_vehicle_id(
+            getattr(self, "hass", None),
+            getattr(self, "config_entry", None),
+            vehicle_id,
+        )
         if vehicle_id not in self._settings:
             self._settings[vehicle_id] = AutoScheduleSettings(vehicle_id=vehicle_id)
             self._state[vehicle_id] = AutoScheduleState(vehicle_id=vehicle_id)
@@ -4189,6 +4208,11 @@ class AutoScheduleExecutor:
 
     def update_settings(self, vehicle_id: str, updates: dict) -> AutoScheduleSettings:
         """Update settings for a vehicle."""
+        vehicle_id = _canonical_auto_schedule_vehicle_id(
+            getattr(self, "hass", None),
+            getattr(self, "config_entry", None),
+            vehicle_id,
+        )
         settings = self.get_settings(vehicle_id)
 
         for key, value in updates.items():
@@ -4249,6 +4273,11 @@ class AutoScheduleExecutor:
 
     def get_state(self, vehicle_id: str) -> AutoScheduleState:
         """Get current state for a vehicle."""
+        vehicle_id = _canonical_auto_schedule_vehicle_id(
+            getattr(self, "hass", None),
+            getattr(self, "config_entry", None),
+            vehicle_id,
+        )
         if vehicle_id not in self._state:
             self._state[vehicle_id] = AutoScheduleState(vehicle_id=vehicle_id)
         return self._state[vehicle_id]
@@ -4682,6 +4711,7 @@ class AutoScheduleExecutor:
         """
         for vehicle_id, settings in self._settings.items():
             if not settings.enabled:
+                self._clear_start_failure(vehicle_id)
                 # Restore curtailment if modified and auto-schedule is now disabled
                 state = self._state.get(vehicle_id)
                 if state:
@@ -4742,6 +4772,16 @@ class AutoScheduleExecutor:
                 for vc in stored_data.get("vehicle_charging_configs", []):
                     if _vehicle_config_matches(vehicle_id, vc.get("vehicle_id")):
                         settings.apply_charger_config(vc)
+                        opts = {
+                            **getattr(self.config_entry, "data", {}),
+                            **getattr(self.config_entry, "options", {}),
+                        }
+                        settings.charger_type = (
+                            _effective_auto_schedule_charger_type(
+                                settings,
+                                opts,
+                            )
+                        )
                         return
         except Exception:
             pass
@@ -4942,7 +4982,24 @@ class AutoScheduleExecutor:
 
                 if not state.is_charging:
                     # Start charging
-                    await self._start_charging(vehicle_id, settings, state, source)
+                    started = await self._start_charging(
+                        vehicle_id,
+                        settings,
+                        state,
+                        source,
+                    )
+                    if started is False or not state.is_charging:
+                        state.last_decision = "waiting"
+                        state.last_decision_reason = (
+                            f"{reason}; start retry scheduled"
+                        )
+                        self._sync_active_charging_preserve_intent(
+                            vehicle_id,
+                            effective_preserve_home_battery,
+                            state,
+                            state.last_decision_reason,
+                        )
+                        return
                     state.last_decision = "started"
                     state.last_decision_reason = reason
                     _LOGGER.info(f"🤖 ML EV Charging: Starting charge for {vehicle_id} at {power_w/1000:.1f}kW ({target_amps}A)")
@@ -4960,6 +5017,7 @@ class AutoScheduleExecutor:
                 )
 
             else:
+                self._clear_start_failure(vehicle_id)
                 if next_start:
                     reason = f"Smart Optimization: next window {next_start.strftime('%H:%M')} - {next_end.strftime('%H:%M')}"
                 else:
@@ -5211,7 +5269,7 @@ class AutoScheduleExecutor:
 
         # Take action
         if should_charge and not state.is_charging:
-            await self._start_charging(
+            started = await self._start_charging(
                 vehicle_id,
                 settings,
                 state,
@@ -5222,9 +5280,15 @@ class AutoScheduleExecutor:
                     and not effective_limit_grid
                 ),
             )
-            state.last_decision = "started"
-            state.last_decision_reason = reason
+            if started is not False and state.is_charging:
+                state.last_decision = "started"
+                state.last_decision_reason = reason
+            else:
+                state.last_decision = "waiting"
+                reason = f"{reason}; start retry scheduled"
+                state.last_decision_reason = reason
         elif not should_charge:
+            self._clear_start_failure(vehicle_id)
             if state.is_charging:
                 # Restore backup reserve when stopping - we'll set it again when next window starts
                 await self._stop_charging(vehicle_id, settings, state)
@@ -6130,6 +6194,26 @@ class AutoScheduleExecutor:
         state.curtailment_override_active = False
         state.original_export_rule = None
 
+    def _clear_start_failure(self, vehicle_id: str) -> None:
+        """Clear any pending failed-start cooldown for one vehicle."""
+        getattr(self, "_start_failure_state", {}).pop(vehicle_id, None)
+
+    def _record_start_failure(self, vehicle_id: str) -> tuple[int, int]:
+        """Record a failed start and return its count and bounded retry delay."""
+        failures = getattr(self, "_start_failure_state", None)
+        if failures is None:
+            failures = {}
+            self._start_failure_state = failures
+        previous_count = failures.get(vehicle_id, (0, 0.0))[0]
+        count = previous_count + 1
+        delay = min(
+            AUTO_SCHEDULE_START_RETRY_BASE_SECONDS
+            * (2 ** min(previous_count, 5)),
+            AUTO_SCHEDULE_START_RETRY_MAX_SECONDS,
+        )
+        failures[vehicle_id] = (count, time.monotonic() + delay)
+        return count, delay
+
     async def _start_charging(
         self,
         vehicle_id: str,
@@ -6137,12 +6221,24 @@ class AutoScheduleExecutor:
         state: AutoScheduleState,
         source: str,
         force_max_rate: bool = False,
-    ) -> None:
+    ) -> bool:
         """Start dynamic charging for the vehicle."""
         from .actions import (
             _action_start_ev_charging_dynamic,
             _resolve_max_grid_import_kw,
         )
+
+        failure = getattr(self, "_start_failure_state", {}).get(vehicle_id)
+        if failure:
+            _count, retry_at = failure
+            retry_in = retry_at - time.monotonic()
+            if retry_in > 0:
+                _LOGGER.debug(
+                    "Auto-schedule: Start retry for %s deferred for %.0fs",
+                    vehicle_id,
+                    retry_in,
+                )
+                return False
 
         # Determine mode based on source
         control_battery_target = (
@@ -6236,16 +6332,35 @@ class AutoScheduleExecutor:
             )
 
             if success:
+                self._clear_start_failure(vehicle_id)
                 state.is_charging = True
                 state.started_at = datetime.now()
                 stop_key = vehicle_vin or vehicle_id
                 self._last_external_smart_schedule_stops.pop(stop_key, None)
                 _LOGGER.info(f"Auto-schedule: Started {dynamic_mode} charging for {vehicle_id}")
                 # Note: Notifications are sent by _action_start_ev_charging_dynamic
+                return True
             else:
-                _LOGGER.warning(f"Auto-schedule: Failed to start charging for {vehicle_id}")
+                count, delay = self._record_start_failure(vehicle_id)
+                _LOGGER.warning(
+                    "Auto-schedule: Failed to start charging for %s "
+                    "(attempt %d; retry in %ds)",
+                    vehicle_id,
+                    count,
+                    delay,
+                )
+                return False
         except Exception as e:
-            _LOGGER.error(f"Auto-schedule: Error starting charging for {vehicle_id}: {e}")
+            count, delay = self._record_start_failure(vehicle_id)
+            _LOGGER.error(
+                "Auto-schedule: Error starting charging for %s "
+                "(attempt %d; retry in %ds): %s",
+                vehicle_id,
+                count,
+                delay,
+                e,
+            )
+            return False
 
     def _external_smart_schedule_stop_recent(
         self,
@@ -6545,10 +6660,121 @@ def _effective_auto_schedule_charger_type(
     opts: Mapping[str, Any],
 ) -> str:
     """Return the physical charger backend for Smart Schedule actions."""
+    configured_charger_type = _configured_charger_type(opts)
+    vehicle_id = str(settings.vehicle_id or "_default").lower()
+    configured_synthetic_ids = {
+        "generic": {"_default", "ev", "generic_ev"},
+        "ocpp": {"_default", "ocpp_charger"},
+        "sigenergy": {"_default", "sigenergy_charger"},
+        "zaptec": {"_default", "zaptec_standalone"},
+    }
+    if (
+        configured_charger_type != "tesla"
+        and (
+            vehicle_id in configured_synthetic_ids.get(
+                configured_charger_type,
+                set(),
+            )
+            or (
+                configured_charger_type == "ocpp"
+                and vehicle_id.startswith("ocpp_")
+            )
+        )
+    ):
+        return configured_charger_type
+
     charger_type = str(settings.charger_type or "").lower()
     if not charger_type or charger_type == "tesla":
-        return _configured_charger_type(opts)
+        return configured_charger_type
     return charger_type
+
+
+def _canonical_auto_schedule_vehicle_id(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+    vehicle_id: str | None,
+) -> str:
+    """Map legacy default IDs onto the configured shared charger loadpoint."""
+    normalized = str(vehicle_id or "_default")
+    if normalized != "_default":
+        return normalized
+
+    opts = {
+        **getattr(config_entry, "data", {}),
+        **getattr(config_entry, "options", {}),
+    }
+    charger_type = _configured_charger_type(opts)
+    if charger_type == "generic":
+        return "generic_ev"
+    if charger_type == "zaptec":
+        return "zaptec_standalone"
+    if charger_type == "sigenergy":
+        return "sigenergy_charger"
+    if charger_type == "ocpp":
+        charger_id = _resolve_ocpp_charger_id(
+            hass,
+            opts.get("ocpp_charger_id"),
+        )
+        return (
+            charger_id
+            if charger_id.startswith("ocpp_")
+            else f"ocpp_{charger_id}"
+        )
+    return "_default"
+
+
+def _normalize_stored_auto_schedule_ids(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+    stored_data: dict[str, Any],
+) -> bool:
+    """Migrate legacy non-Tesla default settings to one canonical loadpoint."""
+    canonical_id = _canonical_auto_schedule_vehicle_id(
+        hass,
+        config_entry,
+        "_default",
+    )
+    if canonical_id == "_default":
+        return False
+
+    changed = False
+    auto_schedule_data = dict(stored_data.get("auto_schedule_settings", {}) or {})
+    if "_default" in auto_schedule_data:
+        default_settings = auto_schedule_data.pop("_default")
+        if canonical_id not in auto_schedule_data:
+            auto_schedule_data[canonical_id] = {
+                **default_settings,
+                "vehicle_id": canonical_id,
+            }
+        changed = True
+    configured_charger_type = _configured_charger_type(
+        {
+            **getattr(config_entry, "data", {}),
+            **getattr(config_entry, "options", {}),
+        }
+    )
+    canonical_settings = auto_schedule_data.get(canonical_id)
+    if isinstance(canonical_settings, Mapping):
+        normalized_settings = {
+            **canonical_settings,
+            "vehicle_id": canonical_id,
+            "charger_type": configured_charger_type,
+        }
+        if normalized_settings != canonical_settings:
+            auto_schedule_data[canonical_id] = normalized_settings
+            changed = True
+    if changed:
+        stored_data["auto_schedule_settings"] = auto_schedule_data
+
+    cached_soc = dict(stored_data.get("cached_vehicle_soc", {}) or {})
+    if "_default" in cached_soc:
+        default_soc = cached_soc.pop("_default")
+        if canonical_id not in cached_soc:
+            cached_soc[canonical_id] = default_soc
+        stored_data["cached_vehicle_soc"] = cached_soc
+        changed = True
+
+    return changed
 
 
 def _resolve_dynamic_loadpoint_id(

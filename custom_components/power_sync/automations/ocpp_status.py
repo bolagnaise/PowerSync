@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Any, Iterable, Optional
 
 
 OCPP_CHARGING_STATES = {"charging"}
@@ -71,6 +71,33 @@ def extract_hacs_ocpp_prefix(entity_id: str) -> Optional[str]:
         if object_id.endswith(suffix):
             return object_id[: -len(suffix)]
     return None
+
+
+def claimed_hacs_ocpp_prefixes(
+    configured_entity_ids: Iterable[str | None],
+    registry_entries: Iterable[Any],
+) -> set[str]:
+    """Return HACS OCPP prefixes already claimed by generic charger config."""
+    configured = {
+        str(entity_id).strip().lower()
+        for entity_id in configured_entity_ids
+        if entity_id
+    }
+    if not configured:
+        return set()
+
+    prefixes: set[str] = set()
+    for entry in registry_entries:
+        entity_id = str(getattr(entry, "entity_id", "") or "").lower()
+        if (
+            entity_id not in configured
+            or getattr(entry, "platform", None) != "ocpp"
+        ):
+            continue
+        prefix = extract_hacs_ocpp_prefix(entity_id)
+        if prefix:
+            prefixes.add(prefix)
+    return prefixes
 
 
 def split_hacs_ocpp_connector_prefix(prefix: str) -> tuple[str, int | None]:

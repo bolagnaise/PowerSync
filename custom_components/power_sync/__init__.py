@@ -16843,7 +16843,14 @@ class EVLoadpointStatusView(HomeAssistantView):
             )
             from .solar_surplus_config import get_stored_solar_surplus_config
             from .const import (
+                CONF_GENERIC_CHARGER_AMPS_ENTITY,
                 CONF_GENERIC_CHARGER_ENABLED,
+                CONF_GENERIC_CHARGER_POWER_ENTITY,
+                CONF_GENERIC_CHARGER_SOC_ENTITY,
+                CONF_GENERIC_CHARGER_SOC_ENTITY_2,
+                CONF_GENERIC_CHARGER_STATUS_ENTITY,
+                CONF_GENERIC_CHARGER_SWITCH_ENTITY,
+                CONF_OCPP_ENABLED,
             )
 
             entry_id = self._config_entry.entry_id
@@ -16858,14 +16865,6 @@ class EVLoadpointStatusView(HomeAssistantView):
                 "battery_soc": site["battery_soc"],
             }
             solar_config = get_stored_solar_surplus_config(entry_data)
-            site["surplus_kw"] = round(
-                _calculate_solar_surplus(
-                    live_status,
-                    0,
-                    solar_config,
-                ),
-                2,
-            )
 
             observed_vehicles = []
             for vehicle in _get_ev_vehicles_status(self._hass, self._config_entry):
@@ -16956,6 +16955,7 @@ class EVLoadpointStatusView(HomeAssistantView):
             try:
                 from homeassistant.helpers import entity_registry as er_local
                 from .automations.ocpp_status import (
+                    claimed_hacs_ocpp_prefixes,
                     extract_hacs_ocpp_prefix,
                     is_hacs_ocpp_power_entity,
                     is_hacs_ocpp_status_entity,
@@ -16965,8 +16965,26 @@ class EVLoadpointStatusView(HomeAssistantView):
                 )
 
                 ent_reg = er_local.async_get(self._hass)
+                registry_entries = (
+                    tuple(ent_reg.entities.values())
+                    if opts.get(CONF_OCPP_ENABLED)
+                    else ()
+                )
+                claimed_prefixes = claimed_hacs_ocpp_prefixes(
+                    (
+                        opts.get(CONF_GENERIC_CHARGER_SWITCH_ENTITY),
+                        opts.get(CONF_GENERIC_CHARGER_AMPS_ENTITY),
+                        opts.get(CONF_GENERIC_CHARGER_STATUS_ENTITY),
+                        opts.get(CONF_GENERIC_CHARGER_POWER_ENTITY),
+                        opts.get(CONF_GENERIC_CHARGER_SOC_ENTITY),
+                        opts.get(CONF_GENERIC_CHARGER_SOC_ENTITY_2),
+                    )
+                    if opts.get(CONF_GENERIC_CHARGER_ENABLED)
+                    else (),
+                    registry_entries,
+                )
                 ocpp_chargers = {}
-                for entity in ent_reg.entities.values():
+                for entity in registry_entries:
                     if entity.platform != "ocpp":
                         continue
                     state = self._hass.states.get(entity.entity_id)
@@ -16974,7 +16992,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                         continue
                     entity_id = entity.entity_id.lower()
                     prefix = extract_hacs_ocpp_prefix(entity_id)
-                    if not prefix:
+                    if not prefix or prefix in claimed_prefixes:
                         continue
                     charger = ocpp_chargers.setdefault(prefix, {
                         "status": None,
@@ -17010,6 +17028,29 @@ class EVLoadpointStatusView(HomeAssistantView):
                     })
             except Exception as err:
                 _LOGGER.debug("Error checking HACS OCPP integration for loadpoints: %s", err)
+
+            # Normalize first so bridge/alias observations are counted once,
+            # then calculate site surplus with the actual aggregate EV draw.
+            preliminary_loadpoints = build_loadpoint_status(
+                _dynamic_ev_state.get(entry_id, {}),
+                observed_vehicles,
+                site,
+                get_ev_ownerships(self._hass, self._config_entry),
+                get_ev_last_commands(self._hass, self._config_entry),
+            )
+            total_ev_power_kw = sum(
+                max(0.0, float(loadpoint.get("current_power_kw") or 0))
+                for loadpoint in preliminary_loadpoints
+            )
+            site["ev_power_kw"] = round(total_ev_power_kw, 2)
+            site["surplus_kw"] = round(
+                _calculate_solar_surplus(
+                    live_status,
+                    total_ev_power_kw,
+                    solar_config,
+                ),
+                2,
+            )
 
             loadpoints = build_loadpoint_status(
                 _dynamic_ev_state.get(entry_id, {}),

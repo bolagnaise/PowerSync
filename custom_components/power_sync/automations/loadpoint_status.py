@@ -265,6 +265,52 @@ def _merge_duplicate_physical_tesla_observations(
     return merged
 
 
+def _merge_duplicate_generic_observations(
+    observations: list[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Collapse duplicate telemetry rows for the one configured generic charger."""
+    merged: list[Mapping[str, Any]] = []
+    generic_indexes: dict[str, int] = {}
+
+    for observation in observations:
+        if not _is_generic_observation(observation):
+            merged.append(observation)
+            continue
+
+        key = _normal_key(
+            observation.get("vehicle_id")
+            or observation.get("charger_id")
+            or observation.get("vehicle_name")
+            or observation.get("name")
+        )
+        if key in DEFAULT_LOADPOINT_KEYS:
+            key = "generic_default"
+        if not key or key not in generic_indexes:
+            if key:
+                generic_indexes[key] = len(merged)
+            merged.append(observation)
+            continue
+
+        generic_index = generic_indexes[key]
+        target = dict(merged[generic_index])
+        _merge_observation_status(target, observation)
+        target["charger_type"] = "generic"
+        for field in (
+            "vehicle_id",
+            "charger_id",
+            "vehicle_name",
+            "name",
+            "current_amps",
+            "target_amps",
+            "blocking_reason",
+        ):
+            if observation.get(field) not in (None, ""):
+                target[field] = observation[field]
+        merged[generic_index] = target
+
+    return merged
+
+
 def _merge_single_bridge_loadpoint(
     observations: list[Mapping[str, Any]],
 ) -> list[Mapping[str, Any]]:
@@ -325,7 +371,9 @@ def coalesce_vehicle_observations(
     prefix is a source for that vehicle rather than a second loadpoint.
     """
     observations = _merge_duplicate_physical_tesla_observations(
-        list(observed_vehicles or [])
+        _merge_duplicate_generic_observations(
+            list(observed_vehicles or [])
+        )
     )
     ble_indexes = [
         index for index, observation in enumerate(observations)
@@ -369,13 +417,17 @@ def _status_source(
     power_kw: float,
     surplus_kw: float,
     allocated_surplus_kw: float | None = None,
+    total_ev_power_kw: float | None = None,
 ) -> str:
     if power_kw <= ACTIVE_POWER_THRESHOLD_KW:
         return "idle"
-    solar_kw = surplus_kw
-    if allocated_surplus_kw is not None:
-        solar_kw = max(solar_kw, allocated_surplus_kw)
-    return "solar" if solar_kw >= power_kw * 0.8 else "grid"
+    if (
+        allocated_surplus_kw is not None
+        and allocated_surplus_kw >= power_kw * 0.8
+    ):
+        return "solar"
+    demand_kw = max(power_kw, total_ev_power_kw or 0.0)
+    return "solar" if surplus_kw >= demand_kw * 0.8 else "grid"
 
 
 def _loadpoint_source(
@@ -383,13 +435,19 @@ def _loadpoint_source(
     surplus_kw: float,
     owner_mode: Any = None,
     allocated_surplus_kw: float | None = None,
+    total_ev_power_kw: float | None = None,
 ) -> str:
     if (
         power_kw > ACTIVE_POWER_THRESHOLD_KW
         and is_solar_surplus_owner_mode(owner_mode)
     ):
         return "solar"
-    return _status_source(power_kw, surplus_kw, allocated_surplus_kw)
+    return _status_source(
+        power_kw,
+        surplus_kw,
+        allocated_surplus_kw,
+        total_ev_power_kw,
+    )
 
 
 def charging_state_plugged_status(value: Any) -> bool | None:
@@ -940,6 +998,17 @@ def build_loadpoint_status(
                         observation.get("vin"),
                     ),
                 )
+            )
+
+    total_ev_power_kw = _float_value((site or {}).get("ev_power_kw"), 0.0)
+    if total_ev_power_kw > 0:
+        for loadpoint in loadpoints:
+            loadpoint["source"] = _loadpoint_source(
+                _float_value(loadpoint.get("current_power_kw"), 0.0),
+                site_surplus_kw,
+                loadpoint.get("owner_mode"),
+                _float_value(loadpoint.get("allocated_surplus_kw"), 0.0),
+                total_ev_power_kw,
             )
 
     return loadpoints

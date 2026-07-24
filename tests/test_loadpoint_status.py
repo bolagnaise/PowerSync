@@ -763,6 +763,74 @@ def test_smart_schedule_solar_surplus_session_reports_solar_source_after_consumi
     assert loadpoints[0]["current_amps"] == 0
 
 
+def test_observed_loadpoints_use_total_ev_demand_for_source_classification():
+    observations = [
+        {
+            "vehicle_id": "ev-one",
+            "vehicle_name": "EV One",
+            "charger_type": "generic",
+            "ev_power_kw": 5.0,
+            "is_connected": True,
+            "is_charging": True,
+        },
+        {
+            "vehicle_id": "ev-two",
+            "vehicle_name": "EV Two",
+            "charger_type": "generic",
+            "ev_power_kw": 5.0,
+            "is_connected": True,
+            "is_charging": True,
+        },
+    ]
+
+    loadpoints = build_loadpoint_status(
+        {},
+        observations,
+        site={"surplus_kw": 6.0, "ev_power_kw": 10.0},
+    )
+
+    assert [loadpoint["source"] for loadpoint in loadpoints] == ["grid", "grid"]
+
+    loadpoints = build_loadpoint_status(
+        {},
+        observations,
+        site={"surplus_kw": 8.0, "ev_power_kw": 10.0},
+    )
+
+    assert [loadpoint["source"] for loadpoint in loadpoints] == ["solar", "solar"]
+
+
+def test_duplicate_generic_observations_merge_without_losing_amps():
+    loadpoints = build_loadpoint_status(
+        {},
+        [
+            {
+                "vehicle_id": "generic_ev",
+                "vehicle_name": "EV",
+                "charger_type": "tesla",
+                "ev_power_kw": 6.9,
+                "is_connected": True,
+                "is_charging": True,
+            },
+            {
+                "vehicle_id": "generic_ev",
+                "vehicle_name": "EV",
+                "charger_type": "generic",
+                "ev_power_kw": 6.9,
+                "current_amps": 30,
+                "is_connected": True,
+                "is_charging": True,
+            },
+        ],
+    )
+
+    assert len(loadpoints) == 1
+    assert loadpoints[0]["loadpoint_id"] == "generic_ev"
+    assert loadpoints[0]["charger_type"] == "generic"
+    assert loadpoints[0]["current_power_kw"] == 6.9
+    assert loadpoints[0]["current_amps"] == 30
+
+
 def test_dynamic_session_prefers_observed_current_amps_when_command_state_is_zero():
     loadpoints = build_loadpoint_status(
         {
