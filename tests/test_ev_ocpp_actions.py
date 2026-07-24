@@ -1586,6 +1586,189 @@ def test_direct_ev_start_action_records_manual_ownership(monkeypatch):
     assert lease["last_command"]["command"] == "start"
 
 
+def test_direct_manual_start_preempts_solar_surplus_ownership(monkeypatch):
+    from power_sync.automations import ev_ownership
+
+    async def fake_start(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    hass = _Hass([])
+    cancelled = []
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        "generic_ev": {
+            "active": True,
+            "params": {
+                "dynamic_mode": "solar_surplus",
+                "owner_mode": "solar_surplus",
+                "charger_type": "generic",
+                "notify_on_complete": False,
+            },
+            "cancel_timer": lambda: cancelled.append(True),
+            "session_id": None,
+        }
+    }
+    ev_ownership.claim_ev_ownership(
+        hass,
+        _Entry(),
+        "generic_ev",
+        owner_mode="solar_surplus",
+    )
+
+    result = asyncio.run(
+        actions._execute_single_action(
+            hass,
+            _Entry(),
+            "start_ev_charging",
+            {
+                "vehicle_id": "generic_ev",
+                "charger_type": "generic",
+                "charger_switch_entity": "switch.garage_ev",
+            },
+        )
+    )
+
+    assert result is True
+    assert cancelled == [True]
+    state = actions._dynamic_ev_state["entry-1"]["generic_ev"]
+    assert state["params"]["owner_mode"] == "manual"
+    lease = hass.data["power_sync"]["entry-1"]["ev_ownership"]["generic_ev"]
+    assert lease["owner_mode"] == "manual"
+
+
+def test_solar_surplus_disable_cannot_release_concurrent_manual_takeover(
+    monkeypatch,
+):
+    from power_sync.automations import ev_ownership
+
+    async def run_race():
+        hass = _Hass([])
+        actions._dynamic_ev_state.clear()
+        actions._dynamic_ev_state["entry-1"] = {
+            "generic_ev": {
+                "active": True,
+                "params": {
+                    "dynamic_mode": "solar_surplus",
+                    "owner_mode": "solar_surplus",
+                    "charger_type": "generic",
+                    "notify_on_complete": False,
+                },
+                "cancel_timer": lambda: None,
+                "session_id": None,
+            }
+        }
+        ev_ownership.claim_ev_ownership(
+            hass,
+            _Entry(),
+            "generic_ev",
+            owner_mode="solar_surplus",
+        )
+
+        start_entered = asyncio.Event()
+        allow_start = asyncio.Event()
+
+        async def delayed_start(*args, **kwargs):
+            start_entered.set()
+            await allow_start.wait()
+            return True
+
+        monkeypatch.setattr(
+            actions,
+            "_action_start_ev_charging",
+            delayed_start,
+        )
+
+        manual_task = asyncio.create_task(
+            actions._execute_single_action(
+                hass,
+                _Entry(),
+                "start_ev_charging",
+                {
+                    "vehicle_id": "generic_ev",
+                    "charger_type": "generic",
+                    "charger_switch_entity": "switch.garage_ev",
+                },
+            )
+        )
+        await start_entered.wait()
+        disable_task = asyncio.create_task(
+            actions.stop_solar_surplus_ev_charging(hass, _Entry())
+        )
+        await asyncio.sleep(0)
+        assert not disable_task.done()
+
+        allow_start.set()
+        assert await manual_task is True
+        assert await disable_task is True
+        return hass
+
+    hass = asyncio.run(run_race())
+
+    state = actions._dynamic_ev_state["entry-1"]["generic_ev"]
+    assert state["params"]["owner_mode"] == "manual"
+    lease = hass.data["power_sync"]["entry-1"]["ev_ownership"]["generic_ev"]
+    assert lease["owner_mode"] == "manual"
+
+
+def test_solar_surplus_disable_preserves_manual_solar_policy(monkeypatch):
+    from power_sync.automations import ev_ownership
+
+    hass = _Hass([])
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        "automatic_ev": {
+            "active": True,
+            "params": {
+                "dynamic_mode": "solar_surplus",
+                "owner_mode": "solar_surplus",
+            },
+        },
+        "manual_ev": {
+            "active": True,
+            "params": {
+                "dynamic_mode": "solar_surplus",
+                "owner_mode": "manual_solar_surplus",
+            },
+        },
+    }
+    for vehicle_id, owner_mode in (
+        ("automatic_ev", "solar_surplus"),
+        ("manual_ev", "manual_solar_surplus"),
+    ):
+        ev_ownership.claim_ev_ownership(
+            hass,
+            _Entry(),
+            vehicle_id,
+            owner_mode=owner_mode,
+        )
+
+    stopped = []
+
+    async def fake_stop(hass, entry, params):
+        vehicle_id = params["vehicle_id"]
+        stopped.append(vehicle_id)
+        actions._dynamic_ev_state["entry-1"].pop(vehicle_id)
+        ev_ownership.release_ev_ownership(hass, entry, vehicle_id)
+        return True
+
+    monkeypatch.setattr(
+        actions,
+        "_action_stop_ev_charging_dynamic",
+        fake_stop,
+    )
+
+    result = asyncio.run(
+        actions.stop_solar_surplus_ev_charging(hass, _Entry())
+    )
+
+    assert result is True
+    assert stopped == ["automatic_ev"]
+    assert set(actions._dynamic_ev_state["entry-1"]) == {"manual_ev"}
+    lease = hass.data["power_sync"]["entry-1"]["ev_ownership"]["manual_ev"]
+    assert lease["owner_mode"] == "manual_solar_surplus"
+
+
 def test_direct_ev_start_action_can_skip_ownership(monkeypatch):
     async def fake_start(*args, **kwargs):
         return True
@@ -1744,6 +1927,34 @@ def test_solar_surplus_dynamic_start_uses_home_power_max_over_idle_tesla_cap(mon
     assert params["max_charge_amps"] == 30
     assert params["max_charge_amps_source"] == "home_power"
     assert params["allow_stale_entity_max_override"] is True
+
+
+def test_app_solar_surplus_start_rechecks_disabled_persisted_toggle():
+    hass = _Hass([])
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
+        _data={"solar_surplus_config": {"enabled": False}}
+    )
+    actions._dynamic_ev_state.clear()
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_vin": "VIN123",
+                "dynamic_mode": "solar_surplus",
+                "owner_mode": "solar_surplus",
+                "charger_type": "tesla",
+            },
+            context=None,
+        )
+    )
+
+    assert result is False
+    assert actions._dynamic_ev_state == {}
+    command = hass.data["power_sync"]["entry-1"]["ev_last_command"]["VIN123"]
+    assert command["success"] is False
+    assert "disabled before the session started" in command["reason"]
 
 
 def test_solar_surplus_dynamic_start_blocks_full_ev(monkeypatch):

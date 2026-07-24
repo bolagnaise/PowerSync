@@ -44,6 +44,44 @@ def test_start_policy_charging_uses_mapping_and_owner_guard():
     assert "\"Manual EV policy start from HA dashboard\"" in method_source
 
 
+def test_manual_owner_guard_uses_manual_takeover_policy():
+    source = INIT_PATH.read_text()
+    method_start = source.index(
+        "    def _active_non_manual_owner_message("
+    )
+    method_source = source[
+        method_start:source.index(
+            "    async def _loadpoint_ready_for_manual_start(",
+            method_start,
+        )
+    ]
+
+    assert "can_claim_ev_ownership(" in method_source
+    assert 'owner_mode="manual"' in method_source
+    assert "return None if allowed else reason" in method_source
+    assert "owner_family(" not in method_source
+
+
+def test_disabling_solar_surplus_awaits_immediate_runtime_teardown():
+    source = INIT_PATH.read_text()
+    view_start = source.index("class SolarSurplusConfigView")
+    view_source = source[
+        view_start:source.index("class ChargingSessionsView", view_start)
+    ]
+
+    assert "current_enabled = normalize_solar_surplus_config(" in view_source
+    assert (
+        'if current_enabled and not updated_config.get("enabled", False):'
+        in view_source
+    )
+    assert "await stop_solar_surplus_ev_charging(" in view_source
+    save_index = view_source.index("await store.async_save()")
+    teardown_index = view_source.index(
+        "await stop_solar_surplus_ev_charging("
+    )
+    assert save_index < teardown_index
+
+
 def test_policy_quick_stop_does_not_replace_dynamic_controller_timer():
     source = INIT_PATH.read_text()
     method_start = source.index("    def _schedule_policy_quick_stop(")

@@ -13637,22 +13637,21 @@ class EVVehicleCommandView(HomeAssistantView):
         return _ev_action_loadpoint_id(self._manual_action_params(vehicle_vin))
 
     def _active_non_manual_owner_message(self, vehicle_vin: str | None) -> str | None:
-        """Return a blocking ownership message for non-manual active sessions."""
+        """Return a blocking message only when manual takeover is disallowed."""
         entry = self._get_powersync_entry()
         if not entry:
             return None
 
-        from .automations.ev_ownership import get_ev_ownership, owner_family
+        from .automations.ev_ownership import can_claim_ev_ownership
 
         loadpoint_id = self._manual_loadpoint_id(vehicle_vin)
-        _lease_id, lease = get_ev_ownership(self._hass, entry, loadpoint_id)
-        if not lease:
-            return None
-
-        owner_mode = str(lease.get("owner_mode") or "dynamic")
-        if owner_family(owner_mode) == "manual":
-            return None
-        return f"{owner_mode} already owns this loadpoint"
+        allowed, _lease_id, _lease, reason = can_claim_ev_ownership(
+            self._hass,
+            entry,
+            loadpoint_id,
+            owner_mode="manual",
+        )
+        return None if allowed else reason
 
     async def _loadpoint_ready_for_manual_start(
         self,
@@ -14911,6 +14910,16 @@ class SolarSurplusConfigView(HomeAssistantView):
                 return entry_data["automation_store"]
         return None
 
+    def _get_entry_for_store(self, store) -> ConfigEntry | None:
+        """Return the config entry that owns an automation store."""
+        for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
+            if (
+                isinstance(entry_data, dict)
+                and entry_data.get("automation_store") is store
+            ):
+                return self._hass.config_entries.async_get_entry(entry_id)
+        return None
+
     async def get(self, request: web.Request) -> web.Response:
         """Handle GET request - get solar surplus config."""
         try:
@@ -14962,6 +14971,9 @@ class SolarSurplusConfigView(HomeAssistantView):
             # Get existing config (use _data directly)
             stored_data = getattr(store, '_data', {}) or {}
             current_config = stored_data.get("solar_surplus_config", {})
+            current_enabled = normalize_solar_surplus_config(
+                current_config
+            ).get("enabled", False)
             updated_config = {**current_config, **data}
 
             # Validate config values
@@ -14989,6 +15001,25 @@ class SolarSurplusConfigView(HomeAssistantView):
             if hasattr(store, '_data') and hasattr(store, 'async_save'):
                 store._data["solar_surplus_config"] = updated_config
                 await store.async_save()
+
+            if current_enabled and not updated_config.get("enabled", False):
+                from .automations.actions import stop_solar_surplus_ev_charging
+
+                entry = self._get_entry_for_store(store)
+                if entry:
+                    stopped = await stop_solar_surplus_ev_charging(
+                        self._hass,
+                        entry,
+                    )
+                    if not stopped:
+                        _LOGGER.warning(
+                            "Solar Surplus was disabled and ownership released, "
+                            "but one or more charger stop commands failed"
+                        )
+                else:
+                    _LOGGER.warning(
+                        "Solar Surplus was disabled but its config entry was not found"
+                    )
 
             return web.json_response({
                 "success": True,
@@ -36434,8 +36465,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 from .automations.actions import (
                     _action_start_ev_charging_dynamic,
-                    _action_stop_ev_charging_dynamic,
                     _dynamic_ev_state,
+                    stop_solar_surplus_ev_charging,
                 )
                 from .solar_surplus_config import (
                     get_solar_surplus_min_battery_soc,
@@ -36588,7 +36619,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                     elif not surplus_enabled and surplus_session_active:
                         _LOGGER.info("☀️ Solar surplus charging disabled in app — stopping dynamic solar surplus session")
-                        await _action_stop_ev_charging_dynamic(hass, entry, {})
+                        await stop_solar_surplus_ev_charging(hass, entry)
 
             except Exception as e:
                 _LOGGER.debug(f"Solar surplus evaluation error: {e}")

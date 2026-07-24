@@ -1949,16 +1949,19 @@ async def _execute_single_action(
         return await _action_set_export_limit(hass, config_entry, params)
     # EV Charging Actions (pass context for time window support)
     elif action_type == "start_ev_charging":
-        success = await _action_start_ev_charging(hass, config_entry, params, context)
-        if success and not params.get("skip_ownership"):
-            await record_manual_ev_charging_session(
+        if params.get("skip_ownership"):
+            return await _action_start_ev_charging(
                 hass,
                 config_entry,
-                _ev_action_loadpoint_id(params),
                 params,
-                reason=params.get("reason", "Manual automation start"),
+                context,
             )
-        return success
+        return await _start_manual_ev_charging(
+            hass,
+            config_entry,
+            params,
+            context,
+        )
     elif action_type == "stop_ev_charging":
         success = await _action_stop_ev_charging(hass, config_entry, params)
         if success and not params.get("skip_ownership"):
@@ -4359,6 +4362,122 @@ async def clear_tracked_ev_charging_session(
     )
 
 
+async def _start_manual_ev_charging(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Start a manual session while serializing ownership handoff."""
+    from .ev_ownership import (
+        can_claim_ev_ownership,
+        record_ev_command,
+    )
+
+    loadpoint_id = _ev_action_loadpoint_id(params)
+    async with _start_dynamic_lock:
+        allowed, _lease_id, _lease, block_reason = can_claim_ev_ownership(
+            hass,
+            config_entry,
+            loadpoint_id,
+            owner_mode="manual",
+        )
+        if not allowed:
+            record_ev_command(
+                hass,
+                config_entry,
+                loadpoint_id,
+                command="start_manual",
+                success=False,
+                reason=block_reason or "another EV mode owns this loadpoint",
+            )
+            return False
+
+        success = await _action_start_ev_charging(
+            hass,
+            config_entry,
+            params,
+            context,
+        )
+        if success:
+            await record_manual_ev_charging_session(
+                hass,
+                config_entry,
+                loadpoint_id,
+                params,
+                reason=params.get("reason", "Manual automation start"),
+            )
+        return success
+
+
+async def stop_solar_surplus_ev_charging(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    *,
+    reason: str = "Solar surplus disabled",
+) -> bool:
+    """Stop only Solar Surplus sessions and release any orphaned leases."""
+    from .ev_ownership import (
+        get_ev_ownerships,
+        owner_family,
+        release_ev_ownership,
+    )
+
+    entry_id = config_entry.entry_id
+    all_stopped = True
+    async with _start_dynamic_lock:
+        vehicles = _dynamic_ev_state.get(entry_id, {})
+        solar_vehicle_ids = [
+            vehicle_id
+            for vehicle_id, state in list(vehicles.items())
+            if state.get("active")
+            and owner_family(
+                (state.get("params") or {}).get("owner_mode")
+                or (state.get("params") or {}).get("dynamic_mode")
+            )
+            == "solar_surplus"
+        ]
+        for vehicle_id in solar_vehicle_ids:
+            state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
+            state_params = (state or {}).get("params") or {}
+            if (
+                not state
+                or owner_family(
+                    state_params.get("owner_mode")
+                    or state_params.get("dynamic_mode")
+                )
+                != "solar_surplus"
+            ):
+                continue
+            stopped = await _action_stop_ev_charging_dynamic(
+                hass,
+                config_entry,
+                {
+                    "vehicle_id": vehicle_id,
+                    "stop_charging": True,
+                    "stop_reason": reason,
+                },
+            )
+            all_stopped = bool(stopped) and all_stopped
+
+        # A prior interrupted teardown can leave a lease after its runtime
+        # session has disappeared. Clear only Solar Surplus leases; a manual
+        # takeover that won the transition lock must remain untouched.
+        for vehicle_id, lease in list(
+            get_ev_ownerships(hass, config_entry).items()
+        ):
+            if owner_family(lease.get("owner_mode")) == "solar_surplus":
+                release_ev_ownership(
+                    hass,
+                    config_entry,
+                    vehicle_id,
+                    reason=reason,
+                    command="release",
+                )
+
+    return all_stopped
+
+
 def _parallel_battery_reserve_kw(
     live_status: dict,
     config: dict,
@@ -6571,8 +6690,40 @@ async def _action_start_ev_charging_dynamic_locked(
         can_take_over_ev_ownership,
         claim_ev_ownership,
         manual_stop_hold_reason,
+        owner_family,
         record_ev_command,
     )
+
+    if owner_family(owner_mode) == "solar_surplus":
+        entry_data = hass.data.get(DOMAIN, {}).get(entry_id, {})
+        automation_store = (
+            entry_data.get("automation_store")
+            if isinstance(entry_data, dict)
+            else None
+        )
+        stored_data = getattr(automation_store, "_data", {}) or {}
+        stored_solar_config = stored_data.get("solar_surplus_config")
+        if (
+            isinstance(stored_solar_config, dict)
+            and not normalize_solar_surplus_config(
+                stored_solar_config
+            ).get("enabled", False)
+        ):
+            reason = "Solar Surplus was disabled before the session started"
+            record_ev_command(
+                hass,
+                config_entry,
+                vehicle_id,
+                command=f"start_{owner_mode}",
+                success=False,
+                reason=reason,
+            )
+            _LOGGER.info(
+                "Solar surplus EV: stale start blocked for %s because the "
+                "persisted toggle is disabled",
+                vehicle_id,
+            )
+            return False
 
     if dynamic_mode == "solar_surplus":
         hold_reason = manual_stop_hold_reason(
