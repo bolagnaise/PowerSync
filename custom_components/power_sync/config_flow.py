@@ -6196,6 +6196,52 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
+    @staticmethod
+    def _pop_tariff_period(
+        periods: list[dict], selection: object
+    ) -> dict | None:
+        """Remove one explicitly selected tariff period, failing closed."""
+        try:
+            index = int(str(selection))
+        except (TypeError, ValueError):
+            return None
+        if index < 0 or index >= len(periods):
+            return None
+        return periods.pop(index)
+
+    @staticmethod
+    def _tariff_period_remove_options(
+        periods: list[dict],
+    ) -> list[SelectOptionDict]:
+        """Build unambiguous selector options for removing a tariff period."""
+        day_labels = {
+            "weekdays": "Mon-Fri",
+            "weekends": "Sat-Sun",
+            "all_days": "Mon-Sun",
+        }
+        options = [
+            SelectOptionDict(value="none", label="Keep all added periods")
+        ]
+        for index, period in enumerate(periods):
+            label = {
+                "PEAK": "Peak",
+                "SHOULDER": "Shoulder",
+                "OFF_PEAK": "Off-Peak",
+                "SUPER_OFF_PEAK": "Super Off-Peak",
+            }.get(period.get("name"), str(period.get("name", "Period")))
+            options.append(
+                SelectOptionDict(
+                    value=str(index),
+                    label=(
+                        f"Remove {index + 1}. {label} "
+                        f"{int(period.get('start', 0)):02d}:00-"
+                        f"{int(period.get('end', 24)):02d}:00 "
+                        f"{day_labels.get(period.get('days'), 'Mon-Sun')}"
+                    ),
+                )
+            )
+        return options
+
     async def async_step_tariff_period(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -6204,6 +6250,11 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         is_agl = self._selected_electricity_provider == "agl"
 
         if user_input is not None:
+            remove_period = user_input.get("remove_period", "none")
+            if remove_period != "none":
+                self._pop_tariff_period(self._tariff_periods, remove_period)
+                return await self.async_step_tariff_period()
+
             try:
                 start_hour = int(user_input.get("period_start", "15:00").split(":")[0])
                 end_hour = int(user_input.get("period_end", "21:00").split(":")[0])
@@ -6321,6 +6372,19 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             vol.Optional("add_another", default=False): BooleanSelector(),
         }
+        if count > 0:
+            remove_field = vol.Optional("remove_period", default="none")
+            schema_fields = {
+                remove_field: SelectSelector(
+                    SelectSelectorConfig(
+                        options=self._tariff_period_remove_options(
+                            self._tariff_periods
+                        ),
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                **schema_fields,
+            }
         if not is_agl:
             schema_fields[
                 vol.Required("export_rate", default=5)
@@ -14925,6 +14989,18 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         is_agl = provider == "agl"
 
         if user_input is not None:
+            remove_period = user_input.get("remove_period", "none")
+            if remove_period != "none":
+                removed = PowerSyncConfigFlow._pop_tariff_period(
+                    self._tariff_periods, remove_period
+                )
+                if removed is not None:
+                    custom_tariff = self._build_tariff_from_periods_compat(
+                        self._tariff_periods,
+                    )
+                    await self._save_custom_tariff(custom_tariff)
+                return await self.async_step_tariff_period_options()
+
             try:
                 start_hour = int(user_input.get("period_start", "15:00").split(":")[0])
                 end_hour = int(user_input.get("period_end", "21:00").split(":")[0])
@@ -15055,6 +15131,19 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ),
             vol.Optional("add_another", default=False): BooleanSelector(),
         }
+        if count > 0:
+            remove_field = vol.Optional("remove_period", default="none")
+            schema_fields = {
+                remove_field: SelectSelector(
+                    SelectSelectorConfig(
+                        options=PowerSyncConfigFlow._tariff_period_remove_options(
+                            self._tariff_periods
+                        ),
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                **schema_fields,
+            }
         if not is_agl:
             schema_fields[
                 vol.Required("export_rate", default=5)

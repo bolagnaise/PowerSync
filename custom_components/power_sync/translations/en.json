@@ -313,6 +313,7 @@
           "period_days": "Applies to",
           "import_rate": "Import rate",
           "export_rate": "Export/feed-in rate",
+          "remove_period": "Remove a period",
           "add_another": "Add another period"
         },
         "data_description": {
@@ -322,6 +323,7 @@
           "period_days": "Which days this period applies to (weekdays, weekends, or all).",
           "import_rate": "What you pay per kWh to import during this period.",
           "export_rate": "What you earn per kWh for exporting during this period. Use a negative value when you pay to export.",
+          "remove_period": "Choose a period and continue to remove it. Leave this as Keep all added periods when adding a new period.",
           "add_another": "Uncheck when done. Remaining hours become off-peak."
         },
         "submit": "Next"
@@ -2069,6 +2071,7 @@
           "period_days": "Applies to",
           "import_rate": "Import rate",
           "export_rate": "Export/feed-in rate",
+          "remove_period": "Remove a period",
           "add_another": "Add another period"
         },
         "data_description": {
@@ -2077,6 +2080,7 @@
           "period_end": "End time in 24-hour format (e.g. 22:00).",
           "import_rate": "What you pay per kWh to import during this period.",
           "export_rate": "What you earn per kWh for exporting during this period. Use a negative value when you pay to export.",
+          "remove_period": "Choose a period and continue to remove it. Leave this as Keep all added periods when adding a new period.",
           "add_another": "Uncheck when done. Remaining hours become off-peak."
         },
         "submit": "Save"

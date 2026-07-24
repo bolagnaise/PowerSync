@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import textwrap
 from pathlib import Path
@@ -2031,6 +2032,131 @@ def test_custom_tariff_options_preserve_saved_explicit_periods_on_reopen():
         {"name": "PEAK", "start": 16, "end": 17, "days": "weekdays", "import_rate": 0.4, "export_rate": 0.1},
         {"name": "PEAK", "start": 17, "end": 20, "days": "weekdays", "import_rate": 0.5, "export_rate": 0.1},
     ]
+
+
+def test_custom_tariff_periods_can_remove_one_selected_saved_period():
+    source = CONFIG_FLOW_PATH.read_text()
+    helper_method = _config_flow_method("_pop_tariff_period")
+    initial_method = _config_flow_method("async_step_tariff_period")
+    options_method = _options_flow_method("async_step_tariff_period_options")
+    helper_source = ast.get_source_segment(source, helper_method)
+    initial_source = ast.get_source_segment(source, initial_method)
+    options_source = ast.get_source_segment(source, options_method)
+
+    assert helper_source is not None
+    assert initial_source is not None
+    assert options_source is not None
+
+    namespace: dict[str, object] = {}
+    exec(textwrap.dedent(helper_source).replace("@staticmethod\n", ""), namespace)
+    remove = namespace["_pop_tariff_period"]
+    periods = [
+        {"name": "PEAK", "start": 16, "end": 17},
+        {"name": "PEAK", "start": 16, "end": 20},
+        {"name": "PEAK", "start": 17, "end": 21},
+    ]
+
+    assert remove(periods, "1") == {"name": "PEAK", "start": 16, "end": 20}
+    assert periods == [
+        {"name": "PEAK", "start": 16, "end": 17},
+        {"name": "PEAK", "start": 17, "end": 21},
+    ]
+    assert remove(periods, "invalid") is None
+    assert remove(periods, "-1") is None
+    assert remove(periods, "2") is None
+    assert periods == [
+        {"name": "PEAK", "start": 16, "end": 17},
+        {"name": "PEAK", "start": 17, "end": 21},
+    ]
+
+    assert 'vol.Optional("remove_period", default="none")' in initial_source
+    assert "self._pop_tariff_period(" in initial_source
+    assert 'vol.Optional("remove_period", default="none")' in options_source
+    assert "PowerSyncConfigFlow._pop_tariff_period(" in options_source
+    removal_start = options_source.index('if remove_period != "none":')
+    removal_branch = options_source[
+        removal_start : options_source.index("try:", removal_start)
+    ]
+    assert "await self._save_custom_tariff(custom_tariff)" in removal_branch
+
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        content = json.loads(path.read_text())
+        assert (
+            content["config"]["step"]["tariff_period"]["data"]["remove_period"]
+            == "Remove a period"
+        )
+        assert (
+            content["options"]["step"]["tariff_period_options"]["data"][
+                "remove_period"
+            ]
+            == "Remove a period"
+        )
+
+
+def test_custom_tariff_options_removal_persists_without_adding_default_period():
+    source = CONFIG_FLOW_PATH.read_text()
+    options_method = _options_flow_method("async_step_tariff_period_options")
+    options_source = ast.get_source_segment(source, options_method)
+
+    assert options_source is not None
+    namespace = {
+        "Any": object,
+        "CONF_ELECTRICITY_PROVIDER": "electricity_provider",
+        "FlowResult": dict,
+        "PowerSyncConfigFlow": type(
+            "PowerSyncConfigFlow",
+            (),
+            {
+                "_pop_tariff_period": staticmethod(
+                    lambda periods, selection: periods.pop(int(selection))
+                    if str(selection).isdigit()
+                    and 0 <= int(selection) < len(periods)
+                    else None
+                )
+            },
+        ),
+    }
+    executable_source = textwrap.dedent(options_source).replace(
+        "        from .const import DOMAIN\n",
+        '        DOMAIN = "power_sync"\n',
+    )
+    exec(executable_source, namespace)
+    remove_period = namespace["async_step_tariff_period_options"]
+
+    class FakeOptionsFlow:
+        _provider = "other"
+        _tariff_periods = [
+            {
+                "name": "PEAK",
+                "start": 16,
+                "end": 20,
+                "days": "all_days",
+                "import_rate": 0.42,
+                "export_rate": 0.05,
+            }
+        ]
+
+        def __init__(self) -> None:
+            self.saved_periods: list[list[dict]] = []
+
+        def _get_option(self, key: str, default: object) -> object:
+            return default
+
+        def _build_tariff_from_periods_compat(self, periods: list[dict]) -> dict:
+            return {"periods": [dict(period) for period in periods]}
+
+        async def _save_custom_tariff(self, tariff: dict) -> None:
+            self.saved_periods.append(tariff["periods"])
+
+        async def async_step_tariff_period_options(self) -> dict:
+            return {"type": "form"}
+
+    flow = FakeOptionsFlow()
+    result = asyncio.run(remove_period(flow, {"remove_period": "0"}))
+
+    assert result == {"type": "form"}
+    assert flow._tariff_periods == []
+    assert flow.saved_periods == [[]]
 
 
 def test_tesla_curtailment_options_expose_powerwall_offgrid_fallback():
