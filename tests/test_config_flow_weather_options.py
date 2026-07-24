@@ -58,6 +58,7 @@ CONFIG_OPTION_TEXT_STEP_PAIRS = (
     ("flow_power_setup", "flow_power_options"),
     ("flow_power_site", "flow_power_site_options"),
     ("flow_power_tariff", "flow_power_options"),
+    ("agl", "agl_options"),
     ("amber", "flow_power_amber_token"),
     ("localvolts", "localvolts_options"),
     ("epex", "epex_options"),

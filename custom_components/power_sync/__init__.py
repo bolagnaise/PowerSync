@@ -459,6 +459,10 @@ from .const import (
     AMBER_WEBSOCKET_START_TIMEOUT_SECONDS,
     # Flow Power configuration
     CONF_ELECTRICITY_PROVIDER,
+    CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+    CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+    DEFAULT_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+    DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
     CONF_FLOW_POWER_STATE,
     CONF_FLOW_POWER_PRICE_SOURCE,
     CONF_FLOWPOWER_API_KEY,
@@ -9594,6 +9598,26 @@ class ProviderConfigView(HomeAssistantView):
                     ),
                 }
 
+            elif electricity_provider == "agl":
+                config = {
+                    "agl_battery_rewards_peak_export_rate": entry.options.get(
+                        CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                        entry.data.get(
+                            CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                            DEFAULT_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                        ),
+                    ),
+                    "agl_battery_rewards_offpeak_export_rate": entry.options.get(
+                        CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                        entry.data.get(
+                            CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                            DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                        ),
+                    ),
+                    "reward_window_start": "17:00",
+                    "reward_window_end": "21:00",
+                }
+
             elif electricity_provider in ("globird", "aemo_vpp", "other", "tou_only"):
                 # Custom TOU / AEMO-style settings
                 config = {
@@ -9889,6 +9913,13 @@ class ProviderConfigView(HomeAssistantView):
                 "demand_charge_end_time": CONF_DEMAND_CHARGE_END_TIME,
                 "demand_charge_days": CONF_DEMAND_CHARGE_DAYS,
                 "demand_charge_billing_day": CONF_DEMAND_CHARGE_BILLING_DAY,
+                # AGL Battery Rewards
+                "agl_battery_rewards_peak_export_rate": (
+                    CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE
+                ),
+                "agl_battery_rewards_offpeak_export_rate": (
+                    CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE
+                ),
                 # Globird / AEMO VPP
                 "aemo_region": CONF_AEMO_REGION,
                 "aemo_spike_threshold": CONF_AEMO_SPIKE_THRESHOLD,
@@ -9912,6 +9943,43 @@ class ProviderConfigView(HomeAssistantView):
             for key, value in data.items():
                 if key in key_mapping:
                     new_options[key_mapping[key]] = value
+
+            active_provider = new_options.get(
+                CONF_ELECTRICITY_PROVIDER,
+                entry.data.get(CONF_ELECTRICITY_PROVIDER),
+            )
+            if active_provider == "agl":
+                for option_key in (
+                    CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                    CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                ):
+                    try:
+                        rate = float(
+                            new_options.get(
+                                option_key,
+                                DEFAULT_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE
+                                if option_key
+                                == CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE
+                                else DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        return web.json_response(
+                            {
+                                "success": False,
+                                "error": f"{option_key} must be numeric",
+                            },
+                            status=400,
+                        )
+                    if not 0 <= rate <= 200:
+                        return web.json_response(
+                            {
+                                "success": False,
+                                "error": f"{option_key} must be between 0 and 200 c/kWh",
+                            },
+                            status=400,
+                        )
+                    new_options[option_key] = rate
 
             if (
                 data.get("globird_plan")
@@ -9962,6 +10030,47 @@ class ProviderConfigView(HomeAssistantView):
             finally:
                 if monitoring_handoff:
                     finish_monitoring_handoff(self._hass, entry)
+            if (
+                active_provider == "agl"
+                and {
+                    "agl_battery_rewards_peak_export_rate",
+                    "agl_battery_rewards_offpeak_export_rate",
+                }.intersection(data)
+            ):
+                automation_store = entry_data.get("automation_store")
+                current_tariff = (
+                    automation_store.get_custom_tariff()
+                    if automation_store is not None
+                    else None
+                )
+                if current_tariff:
+                    from .agl import apply_battery_rewards_export_rates
+
+                    updated_tariff = apply_battery_rewards_export_rates(
+                        current_tariff,
+                        peak_export_rate=float(
+                            new_options.get(
+                                CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                                DEFAULT_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                            )
+                        )
+                        / 100,
+                        offpeak_export_rate=float(
+                            new_options.get(
+                                CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                                DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                            )
+                        )
+                        / 100,
+                    )
+                    automation_store.set_custom_tariff(updated_tariff)
+                    await automation_store.async_save()
+                    entry_data["tariff_schedule"] = (
+                        convert_custom_tariff_to_schedule(
+                            updated_tariff,
+                            currency=currency_for_entry(entry, self._hass),
+                        )
+                    )
             if "monitoring_mode" in data:
                 async_dispatcher_send(
                     self._hass,
@@ -17248,8 +17357,8 @@ class PriceRecommendationView(HomeAssistantView):
                 except Exception as e:
                     _LOGGER.debug(f"Could not read coordinator prices: {e}")
 
-            elif electricity_provider in ("globird", "aemo_vpp", "nz"):
-                # Globird/AEMO VPP/NZ: Read from Tesla/custom tariff with real-time TOU
+            elif electricity_provider in ("agl", "globird", "aemo_vpp", "nz"):
+                # Static providers: read the custom tariff with real-time TOU.
                 try:
                     tariff_prices = await self._fetch_tariff_prices()
                     if tariff_prices:
@@ -18591,6 +18700,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         expected_title = "PowerSync Globird"
     elif electricity_provider == "flow_power":
         expected_title = "PowerSync Flow Power"
+    elif electricity_provider == "agl":
+        expected_title = "PowerSync AGL Battery Rewards"
     elif electricity_provider == "localvolts":
         expected_title = "PowerSync Localvolts"
     elif electricity_provider == "octopus":
@@ -18674,6 +18785,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # These don't need a real-time pricing API — they use a TOU schedule from config
     # (synced to Tesla if Tesla, or used directly for Sungrow/FoxESS/etc.)
     has_custom_tariff_provider = electricity_provider in (
+        "agl",
         "globird",
         "aemo_vpp",
         "tou_only",
@@ -20772,7 +20884,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Early initialization of tariff_schedule for non-Amber providers
     # This ensures price sensors can be created during platform setup
     # The full automation_store loading happens later and will update this
-    if electricity_provider in ("globird", "aemo_vpp", "other", "tou_only", "nz"):
+    if electricity_provider in ("agl", "globird", "aemo_vpp", "other", "tou_only", "nz"):
         initial_custom_tariff = entry.data.get("initial_custom_tariff")
         if initial_custom_tariff:
             tariff_schedule = convert_custom_tariff_to_schedule(
@@ -32105,7 +32217,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.info(
                         "Restore normal: force restore requested without saved tariff; leaving current tariff unchanged"
                     )
-                elif electricity_provider in ("globird", "aemo_vpp"):
+                elif electricity_provider in ("agl", "globird", "aemo_vpp"):
                     _LOGGER.warning(
                         "No saved tariff to restore for %s user - tariff may need manual reconfiguration",
                         electricity_provider,
@@ -36132,7 +36244,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_ELECTRICITY_PROVIDER,
             entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber"),
         )
-        if provider in ("octopus", "globird", "aemo_vpp", "other", "tou_only", "nz", "epex"):
+        if provider in ("octopus", "agl", "globird", "aemo_vpp", "other", "tou_only", "nz", "epex"):
             return False
 
         if not entry.options.get(
@@ -36888,7 +37000,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_ELECTRICITY_PROVIDER,
         entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
     )
-    if electricity_provider in ("globird", "aemo_vpp", "other", "tou_only", "nz"):
+    if electricity_provider in ("agl", "globird", "aemo_vpp", "other", "tou_only", "nz"):
         # Only apply custom tariff if Tesla tariff wasn't already fetched
         existing_tariff = hass.data[DOMAIN][entry.entry_id].get("tariff_schedule")
         if existing_tariff and existing_tariff.get("tou_periods"):

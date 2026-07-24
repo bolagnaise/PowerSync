@@ -31,6 +31,7 @@ def _hass(currency: str | None):
 def test_provider_currency_defaults():
     assert currency_for_provider("amber", _hass("GBP")) == "AUD"
     assert currency_for_provider("flow_power", _hass("GBP")) == "AUD"
+    assert currency_for_provider("agl", _hass("GBP")) == "AUD"
     assert currency_for_provider("octopus", _hass("AUD")) == "GBP"
     assert currency_for_provider("epex", _hass("AUD")) == "EUR"
     assert currency_for_provider("nz", _hass("AUD")) == "NZD"

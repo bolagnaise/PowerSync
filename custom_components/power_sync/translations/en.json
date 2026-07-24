@@ -17,6 +17,19 @@
         },
         "submit": "Next"
       },
+      "agl": {
+        "title": "AGL Battery Rewards",
+        "description": "PowerSync models AGL as a static retail tariff. Enter the total feed-in rates from your current offer; the evening rate applies every day from 17:00 to 21:00. AGL VPP events are separate and are not controlled by this supplier integration.",
+        "data": {
+          "agl_battery_rewards_peak_export_rate": "17:00-21:00 feed-in tariff",
+          "agl_battery_rewards_offpeak_export_rate": "Off-peak feed-in tariff"
+        },
+        "data_description": {
+          "agl_battery_rewards_peak_export_rate": "Total export rate, not a bonus added to the off-peak rate. AGL currently advertises 28c/kWh; confirm your offer.",
+          "agl_battery_rewards_offpeak_export_rate": "Export rate outside 17:00-21:00. AGL currently advertises 3c/kWh; confirm your offer."
+        },
+        "submit": "Next"
+      },
       "covau_postcode": {
         "title": "CovaU SolarMax service area",
         "description": "Enter the supply postcode to filter the current fixture-backed SolarMax plans. You will confirm the distributor and exact AER plan next.",
@@ -1281,6 +1294,19 @@
         },
         "data_description": {
           "electricity_provider": "If your retailer is not listed, choose Other / Custom TOU to enter rates manually."
+        },
+        "submit": "Next"
+      },
+      "agl_options": {
+        "title": "AGL Battery Rewards",
+        "description": "Update the total AGL feed-in rates from your current offer. PowerSync applies the evening rate every day from 17:00 to 21:00, then opens your address-specific import tariff for review.",
+        "data": {
+          "agl_battery_rewards_peak_export_rate": "17:00-21:00 feed-in tariff",
+          "agl_battery_rewards_offpeak_export_rate": "Off-peak feed-in tariff"
+        },
+        "data_description": {
+          "agl_battery_rewards_peak_export_rate": "Total export rate, not a bonus added to the off-peak rate. AGL currently advertises 28c/kWh; confirm your offer.",
+          "agl_battery_rewards_offpeak_export_rate": "Export rate outside 17:00-21:00. AGL currently advertises 3c/kWh; confirm your offer."
         },
         "submit": "Next"
       },

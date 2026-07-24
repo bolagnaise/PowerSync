@@ -14,7 +14,7 @@
 
 </div>
 
-> **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, AlphaESS, ESY Sunhome, Solax, SAJ, Fronius, SolarEdge, Neovolt, Bytewatt, Anker, Amber Electric, Localvolts, Flow Power, GloBird, CovaU, SA Power Networks, Octopus Energy, EPEX/ENTSO-E, or AEMO. Use at your own risk.
+> **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, AlphaESS, ESY Sunhome, Solax, SAJ, Fronius, SolarEdge, Neovolt, Bytewatt, Anker, Amber Electric, Localvolts, Flow Power, AGL, GloBird, CovaU, SA Power Networks, Octopus Energy, EPEX/ENTSO-E, or AEMO. Use at your own risk.
 
 > [!WARNING]
 > **The built-in optimizer is actively under development.** You should expect occasional bugs and schedules that don't behave as expected — particularly on unusual tariffs, battery configurations, or edge cases. If you see something odd, please report it on [Discord](https://discord.gg/eaWDWxEWE3) with your tariff details and the action plan it generated.
@@ -67,6 +67,7 @@ Solar inverters that bypass the battery can be curtailed during negative feed-in
 | **Amber Electric** | Australia | Dynamic 5-min & 30-min pricing plus partial-day metered cost (API token required) |
 | **Localvolts** | Australia | Real-time 5-min wholesale pricing (API key + Partner ID) |
 | **Flow Power / AEMO** | Australia | Official Flow Power Web Data API or AEMO wholesale pricing |
+| **AGL Battery Rewards** | Australia | Address-specific import tariff with configurable daily 5pm-9pm evening and off-peak feed-in rates |
 | **Globird / AEMO VPP** | Australia | Retail tariff schedule + AEMO spike detection |
 | **CovaU SolarMax** | Australia | Fixture-backed NSW, Queensland and South Australia stepped tariffs with measured daily free-import and premium-export quotas |
 | **Octopus Energy** | UK | Dynamic 30-min (Agile, Go, Intelligent Go, Flux, Tracker). Reads from [BottlecapDave's integration](https://github.com/BottlecapDave/HomeAssistant-OctopusEnergy) when installed |

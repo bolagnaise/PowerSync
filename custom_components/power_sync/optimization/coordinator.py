@@ -3475,6 +3475,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         TOU users without a retailer integration.
         """
         return self._electricity_provider() in (
+            "agl",
             "globird",
             "aemo_vpp",
             "other",

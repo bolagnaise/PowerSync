@@ -12,6 +12,7 @@ PROVIDER_CURRENCIES: dict[str, str] = {
     "amber": AU_PROVIDER_CURRENCY,
     "localvolts": AU_PROVIDER_CURRENCY,
     "flow_power": AU_PROVIDER_CURRENCY,
+    "agl": AU_PROVIDER_CURRENCY,
     "globird": AU_PROVIDER_CURRENCY,
     "aemo_vpp": AU_PROVIDER_CURRENCY,
     "octopus": "GBP",

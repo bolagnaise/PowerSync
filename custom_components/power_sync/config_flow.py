@@ -239,6 +239,10 @@ from .const import (
     AEMO_REGIONS,
     # Flow Power configuration
     CONF_ELECTRICITY_PROVIDER,
+    CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+    CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+    DEFAULT_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+    DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
     CONF_FLOW_POWER_STATE,
     CONF_FLOW_POWER_PRICE_SOURCE,
     CONF_FLOWPOWER_API_KEY,
@@ -574,7 +578,7 @@ from .currency import (
 
 # Combined network tariff key for config flow
 CONF_NETWORK_TARIFF_COMBINED = "network_tariff_combined"
-CUSTOM_TOU_PROVIDER_OPTIONS = ("globird", "aemo_vpp", "other", "tou_only")
+CUSTOM_TOU_PROVIDER_OPTIONS = ("agl", "globird", "aemo_vpp", "other", "tou_only")
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1792,6 +1796,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._solaredge_data: dict[str, Any] = {}  # SolarEdge curtailment configuration
         self._aemo_only_mode: bool = False  # True if using AEMO spike only (no Amber)
         self._aemo_data: dict[str, Any] = {}
+        self._agl_data: dict[str, Any] = {}
         self._globird_data: dict[str, Any] = {}
         self._covau_data: dict[str, Any] = {}
         self._flow_power_data: dict[str, Any] = {}
@@ -1975,6 +1980,13 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Flow Power: Configure region and price source first
                 self._aemo_only_mode = False
                 return await self.async_step_flow_power_setup()
+            elif provider == "agl":
+                # AGL Battery Rewards: address-specific import tariff plus a
+                # fixed daily evening export window.
+                self._aemo_only_mode = False
+                self._amber_data = {}
+                self._aemo_data = {CONF_AEMO_SPIKE_ENABLED: False}
+                return await self.async_step_agl()
             elif provider in ("globird", "aemo_vpp"):
                 # Globird/AEMO VPP: AEMO spike only mode (static tariff)
                 self._aemo_only_mode = True
@@ -2467,6 +2479,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **self._teslemetry_data,
             **self._site_data,
             **self._aemo_data,
+            **self._agl_data,
             **self._globird_data,
             **self._covau_data,
             **self._flow_power_data,
@@ -2539,6 +2552,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             title = "PowerSync Globird"
         elif self._selected_electricity_provider == "flow_power":
             title = "PowerSync Flow Power"
+        elif self._selected_electricity_provider == "agl":
+            title = "PowerSync AGL Battery Rewards"
         elif self._selected_electricity_provider == "covau":
             title = "PowerSync CovaU SolarMax"
         elif self._selected_electricity_provider == "localvolts":
@@ -5999,21 +6014,88 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
+    async def async_step_agl(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure the AGL Battery Rewards export tariff."""
+        if user_input is not None:
+            peak_rate = float(
+                user_input.get(
+                    CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                    DEFAULT_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                )
+            )
+            offpeak_rate = float(
+                user_input.get(
+                    CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                    DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                )
+            )
+            self._agl_data = {
+                CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE: peak_rate,
+                CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE: offpeak_rate,
+            }
+            self._agl_peak_export_rate = peak_rate
+            self._agl_offpeak_export_rate = offpeak_rate
+            return await self.async_step_custom_tariff()
+
+        return self.async_show_form(
+            step_id="agl",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                        default=DEFAULT_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=200,
+                            step=0.1,
+                            unit_of_measurement=self._selector_unit(),
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                        default=DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=200,
+                            step=0.1,
+                            unit_of_measurement=self._selector_unit(),
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                }
+            ),
+        )
+
     async def async_step_custom_tariff(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Configure a custom tariff during initial setup."""
         errors: dict[str, str] = {}
+        is_agl = self._selected_electricity_provider == "agl"
 
         if user_input is not None:
-            if user_input.get("skip_tariff", False):
+            if user_input.get("skip_tariff", False) and not is_agl:
                 self._custom_tariff_data = {}
                 return await self.async_step_battery_system()
 
             tariff_type = user_input.get("tariff_type", "tou")
             self._tariff_plan_name = user_input.get("plan_name", "")
             self._tariff_offpeak_rate = user_input.get("offpeak_rate", 15) / 100
-            self._tariff_fit_rate = user_input.get("fit_rate", 5) / 100
+            self._tariff_fit_rate = (
+                getattr(
+                    self,
+                    "_agl_offpeak_export_rate",
+                    DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                )
+                / 100
+                if is_agl
+                else user_input.get("fit_rate", 5) / 100
+            )
 
             if tariff_type == "flat":
                 flat_rate = user_input.get("flat_rate", 30) / 100
@@ -6039,60 +6121,78 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             "tou": "Time of Use (multiple periods)",
         }
 
+        schema_fields: dict[Any, Any] = {
+            vol.Optional(
+                "plan_name",
+                default="AGL Battery Rewards" if is_agl else "",
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Required("tariff_type", default="tou"): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=k, label=v)
+                        for k, v in tariff_type_options.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional("flat_rate", default=30): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=200,
+                    step=0.1,
+                    unit_of_measurement=self._selector_unit(),
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required("offpeak_rate", default=15): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=200,
+                    step=0.1,
+                    unit_of_measurement=self._selector_unit(),
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+        }
+        if not is_agl:
+            schema_fields[
+                vol.Optional("skip_tariff", default=False)
+            ] = BooleanSelector()
+        if not is_agl:
+            schema_fields[
+                vol.Required("fit_rate", default=5)
+            ] = NumberSelector(
+                NumberSelectorConfig(
+                    min=-100,
+                    max=100,
+                    step=0.1,
+                    unit_of_measurement=self._selector_unit(),
+                    mode=NumberSelectorMode.BOX,
+                )
+            )
+
         return self.async_show_form(
             step_id="custom_tariff",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional("skip_tariff", default=False): BooleanSelector(),
-                    vol.Optional("plan_name", default=""): TextSelector(
-                        TextSelectorConfig(type=TextSelectorType.TEXT)
-                    ),
-                    vol.Required("tariff_type", default="tou"): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[
-                                SelectOptionDict(value=k, label=v)
-                                for k, v in tariff_type_options.items()
-                            ],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Optional("flat_rate", default=30): NumberSelector(
-                        NumberSelectorConfig(
-                            min=0,
-                            max=200,
-                            step=0.1,
-                            unit_of_measurement=self._selector_unit(),
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                    vol.Required("offpeak_rate", default=15): NumberSelector(
-                        NumberSelectorConfig(
-                            min=0,
-                            max=200,
-                            step=0.1,
-                            unit_of_measurement=self._selector_unit(),
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                    vol.Required("fit_rate", default=5): NumberSelector(
-                        NumberSelectorConfig(
-                            min=-100,
-                            max=100,
-                            step=0.1,
-                            unit_of_measurement=self._selector_unit(),
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                }
-            ),
+            data_schema=vol.Schema(schema_fields),
             errors=errors,
             description_placeholders={
                 "info": (
                     f"Configure your electricity tariff. All rates in "
                     f"{self._selector_unit()}. For TOU, you'll add time periods "
                     "in the next step."
+                    + (
+                        " AGL's 17:00-21:00 and off-peak export rates are "
+                        "applied automatically."
+                        if is_agl
+                        else ""
+                    )
                 ),
-                "skip_hint": "You can skip this and configure rates later.",
+                "skip_hint": (
+                    "Enter the import rates from your current AGL Energy Price "
+                    "Fact Sheet."
+                    if is_agl
+                    else "You can skip this and configure rates later."
+                ),
             },
         )
 
@@ -6101,6 +6201,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Add a custom tariff period during initial setup."""
         errors: dict[str, str] = {}
+        is_agl = self._selected_electricity_provider == "agl"
 
         if user_input is not None:
             try:
@@ -6117,7 +6218,16 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "end": end_hour,
                     "days": user_input.get("period_days", "weekdays"),
                     "import_rate": user_input.get("import_rate", 45) / 100,
-                    "export_rate": user_input.get("export_rate", 5) / 100,
+                    "export_rate": (
+                        getattr(
+                            self,
+                            "_agl_offpeak_export_rate",
+                            DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                        )
+                        / 100
+                        if is_agl
+                        else user_input.get("export_rate", 5) / 100
+                    ),
                 }
             )
 
@@ -6156,70 +6266,77 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "all_days": "Mon-Sun",
             }
             for idx, period in enumerate(self._tariff_periods, 1):
-                lines.append(
+                line = (
                     f"{idx}. {period['name']} {period['start']:02d}:00-"
                     f"{period['end']:02d}:00 "
                     f"{day_labels.get(period.get('days'), 'Mon-Sun')}, import "
-                    f"{period['import_rate'] * 100:.1f}{minor_unit}, export "
-                    f"{period['export_rate'] * 100:.1f}{minor_unit}"
+                    f"{period['import_rate'] * 100:.1f}{minor_unit}"
                 )
+                if not is_agl:
+                    line += (
+                        f", export {period['export_rate'] * 100:.1f}{minor_unit}"
+                    )
+                lines.append(line)
             added_desc = "Added periods:\n" + "\n".join(lines) + "\n\n"
+
+        schema_fields: dict[Any, Any] = {
+            vol.Required("period_type", default="PEAK"): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=k, label=v)
+                        for k, v in period_types.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required("period_start", default="15:00"): SelectSelector(
+                SelectSelectorConfig(
+                    options=tariff_hour_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required("period_end", default="21:00"): SelectSelector(
+                SelectSelectorConfig(
+                    options=tariff_hour_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required("period_days", default="weekdays"): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=k, label=v)
+                        for k, v in day_options.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required("import_rate", default=45): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=200,
+                    step=0.1,
+                    unit_of_measurement=self._selector_unit(),
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional("add_another", default=False): BooleanSelector(),
+        }
+        if not is_agl:
+            schema_fields[
+                vol.Required("export_rate", default=5)
+            ] = NumberSelector(
+                NumberSelectorConfig(
+                    min=-100,
+                    max=200,
+                    step=0.1,
+                    unit_of_measurement=self._selector_unit(),
+                    mode=NumberSelectorMode.BOX,
+                )
+            )
 
         return self.async_show_form(
             step_id="tariff_period",
-            data_schema=vol.Schema(
-                {
-                    vol.Required("period_type", default="PEAK"): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[
-                                SelectOptionDict(value=k, label=v)
-                                for k, v in period_types.items()
-                            ],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Required("period_start", default="15:00"): SelectSelector(
-                        SelectSelectorConfig(
-                            options=tariff_hour_options,
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Required("period_end", default="21:00"): SelectSelector(
-                        SelectSelectorConfig(
-                            options=tariff_hour_options,
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Required("period_days", default="weekdays"): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[
-                                SelectOptionDict(value=k, label=v)
-                                for k, v in day_options.items()
-                            ],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Required("import_rate", default=45): NumberSelector(
-                        NumberSelectorConfig(
-                            min=0,
-                            max=200,
-                            step=0.1,
-                            unit_of_measurement=self._selector_unit(),
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                    vol.Required("export_rate", default=5): NumberSelector(
-                        NumberSelectorConfig(
-                            min=-100,
-                            max=200,
-                            step=0.1,
-                            unit_of_measurement=self._selector_unit(),
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                    vol.Optional("add_another", default=False): BooleanSelector(),
-                }
-            ),
+            data_schema=vol.Schema(schema_fields),
             errors=errors,
             description_placeholders={
                 "period_info": added_desc
@@ -6377,6 +6494,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             sell_charges[op_name] = fit_rate
 
         provider_name = {
+            "agl": "AGL",
             "globird": "Globird Energy",
             "aemo_vpp": "VPP Provider",
             "nz": "NZ Provider",
@@ -6392,7 +6510,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
         )
 
-        return {
+        tariff = {
             "name": plan_name,
             "utility": provider_name,
             "currency": tariff_currency,
@@ -6412,6 +6530,35 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             },
         }
+        if getattr(self, "_selected_electricity_provider", "other") == "agl":
+            from .agl import apply_battery_rewards_export_rates
+
+            peak_rate = (
+                float(
+                    getattr(
+                        self,
+                        "_agl_peak_export_rate",
+                        DEFAULT_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                    )
+                )
+                / 100
+            )
+            offpeak_rate = (
+                float(
+                    getattr(
+                        self,
+                        "_agl_offpeak_export_rate",
+                        DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                    )
+                )
+                / 100
+            )
+            tariff = apply_battery_rewards_export_rates(
+                tariff,
+                peak_export_rate=peak_rate,
+                offpeak_export_rate=offpeak_rate,
+            )
+        return tariff
 
     async def async_step_nz_retailer(
         self, user_input: dict[str, Any] | None = None
@@ -11716,8 +11863,74 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             errors=errors,
         )
 
+    async def async_step_agl_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Update AGL Battery Rewards rates before editing import periods."""
+        if user_input is not None:
+            peak_rate = float(
+                user_input.get(
+                    CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                    DEFAULT_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                )
+            )
+            offpeak_rate = float(
+                user_input.get(
+                    CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                    DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                )
+            )
+            self._agl_peak_export_rate = peak_rate
+            self._agl_offpeak_export_rate = offpeak_rate
+            self._amber_options = {
+                CONF_ELECTRICITY_PROVIDER: "agl",
+                CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE: peak_rate,
+                CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE: offpeak_rate,
+            }
+            return await self.async_step_custom_tariff_options()
+
+        return self.async_show_form(
+            step_id="agl_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                        default=self._get_option(
+                            CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                            DEFAULT_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                        ),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=200,
+                            step=0.1,
+                            unit_of_measurement=self._selector_unit(),
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                        default=self._get_option(
+                            CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                            DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                        ),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=200,
+                            step=0.1,
+                            unit_of_measurement=self._selector_unit(),
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                }
+            ),
+        )
+
     async def _async_route_custom_tou_options(self, provider: str) -> FlowResult:
         """Route custom/static TOU providers to their relevant options step."""
+        if provider == "agl":
+            return await self.async_step_agl_options()
         if provider in ("other", "tou_only"):
             return await self.async_step_custom_tariff_options()
         return await self.async_step_globird_options()
@@ -14485,12 +14698,30 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         from .const import DOMAIN
 
         errors: dict[str, str] = {}
+        provider = getattr(self, "_provider", None) or self._get_option(
+            CONF_ELECTRICITY_PROVIDER, "other"
+        )
+        is_agl = provider == "agl"
 
         if user_input is not None:
             tariff_type = user_input.get("tariff_type", "tou")
             self._tariff_plan_name = user_input.get("plan_name", "")
             self._tariff_offpeak_rate = user_input.get("offpeak_rate", 15) / 100
-            self._tariff_fit_rate = user_input.get("fit_rate", 5) / 100
+            self._tariff_fit_rate = (
+                float(
+                    getattr(
+                        self,
+                        "_agl_offpeak_export_rate",
+                        self._get_option(
+                            CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                            DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                        ),
+                    )
+                )
+                / 100
+                if is_agl
+                else user_input.get("fit_rate", 5) / 100
+            )
 
             if tariff_type == "flat":
                 flat_rate = user_input.get("flat_rate", 30) / 100
@@ -14545,6 +14776,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     if isinstance(v, (int, float)):
                         default_fit = round(v * 100, 1)
                         break
+        if is_agl and isinstance(current_tariff, dict):
+            current_tariff = current_tariff.get("agl_base_tariff", current_tariff)
         self._custom_tariff_for_options = current_tariff
 
         tariff_type_options = {
@@ -14552,48 +14785,71 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             "tou": "Time of Use (multiple periods)",
         }
 
+        schema_fields: dict[Any, Any] = {
+            vol.Optional(
+                "plan_name",
+                default=(current_tariff or {}).get(
+                    "name",
+                    "AGL Battery Rewards" if is_agl else "",
+                ),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Required("tariff_type", default="tou"): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=k, label=v)
+                        for k, v in tariff_type_options.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional("flat_rate", default=30): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=200,
+                    step=0.1,
+                    unit_of_measurement=self._selector_unit(),
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(
+                "offpeak_rate", default=default_offpeak
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=200,
+                    step=0.1,
+                    unit_of_measurement=self._selector_unit(),
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+        }
+        if not is_agl:
+            schema_fields[
+                vol.Required("fit_rate", default=default_fit)
+            ] = NumberSelector(
+                NumberSelectorConfig(
+                    min=-100, max=100, step=0.1,
+                    unit_of_measurement=self._selector_unit(),
+                    mode=NumberSelectorMode.BOX,
+                )
+            )
+
         return self.async_show_form(
             step_id="custom_tariff_options",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        "plan_name",
-                        default=(current_tariff or {}).get("name", ""),
-                    ): TextSelector(
-                        TextSelectorConfig(type=TextSelectorType.TEXT)
-                    ),
-                    vol.Required("tariff_type", default="tou"): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[
-                                SelectOptionDict(value=k, label=v)
-                                for k, v in tariff_type_options.items()
-                            ],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Optional("flat_rate", default=30): NumberSelector(
-                        NumberSelectorConfig(
-                            min=0, max=200, step=0.1, unit_of_measurement=self._selector_unit(),
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                    vol.Required("offpeak_rate", default=default_offpeak): NumberSelector(
-                        NumberSelectorConfig(
-                            min=0, max=200, step=0.1, unit_of_measurement=self._selector_unit(),
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                    vol.Required("fit_rate", default=default_fit): NumberSelector(
-                        NumberSelectorConfig(
-                            min=-100, max=100, step=0.1, unit_of_measurement=self._selector_unit(),
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                }
-            ),
+            data_schema=vol.Schema(schema_fields),
             errors=errors,
             description_placeholders={
-                "info": f"Configure your electricity tariff. All rates in {self._selector_unit()}.\nFor TOU, you'll add time periods in the next step.",
+                "info": (
+                    f"Configure your electricity tariff. All rates in "
+                    f"{self._selector_unit()}.\nFor TOU, you'll add time periods "
+                    "in the next step."
+                    + (
+                        " AGL's 17:00-21:00 and off-peak export rates are "
+                        "applied automatically."
+                        if is_agl
+                        else ""
+                    )
+                ),
             },
         )
 
@@ -14663,6 +14919,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         from .const import DOMAIN
 
         errors: dict[str, str] = {}
+        provider = getattr(self, "_provider", None) or self._get_option(
+            CONF_ELECTRICITY_PROVIDER, "other"
+        )
+        is_agl = provider == "agl"
 
         if user_input is not None:
             try:
@@ -14678,7 +14938,21 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 "end": end_hour,
                 "days": user_input.get("period_days", "weekdays"),
                 "import_rate": user_input.get("import_rate", 45) / 100,
-                "export_rate": user_input.get("export_rate", 5) / 100,
+                "export_rate": (
+                    float(
+                        getattr(
+                            self,
+                            "_agl_offpeak_export_rate",
+                            self._get_option(
+                                CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                                DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                            ),
+                        )
+                    )
+                    / 100
+                    if is_agl
+                    else user_input.get("export_rate", 5) / 100
+                ),
             }
             self._tariff_periods.append(period)
 
@@ -14725,63 +14999,76 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     "OFF_PEAK": "Off-Peak",
                     "SUPER_OFF_PEAK": "Super Off-Peak",
                 }.get(p["name"], p["name"])
+                rate_summary = (
+                    f"{p['import_rate'] * 100:.0f}{minor_unit} import"
+                )
+                if not is_agl:
+                    rate_summary += (
+                        f", {p['export_rate'] * 100:.0f}{minor_unit} export"
+                    )
                 lines.append(
                     f"{i}. {label} {p['start']:02d}:00-{p['end']:02d}:00 "
                     f"{day_labels.get(p.get('days'), 'Mon-Sun')} "
-                    f"({p['import_rate'] * 100:.0f}{minor_unit} import, "
-                    f"{p['export_rate'] * 100:.0f}{minor_unit} export)"
+                    f"({rate_summary})"
                 )
             added_desc = "Periods added:\n" + "\n".join(lines)
 
+        schema_fields: dict[Any, Any] = {
+            vol.Required("period_type", default="PEAK"): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=k, label=v)
+                        for k, v in period_types.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required("period_start", default="15:00"): SelectSelector(
+                SelectSelectorConfig(
+                    options=tariff_hour_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required("period_end", default="21:00"): SelectSelector(
+                SelectSelectorConfig(
+                    options=tariff_hour_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional("period_days", default="all_days"): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=k, label=v)
+                        for k, v in day_options.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required("import_rate", default=45): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=200,
+                    step=0.1,
+                    unit_of_measurement=self._selector_unit(),
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional("add_another", default=False): BooleanSelector(),
+        }
+        if not is_agl:
+            schema_fields[
+                vol.Required("export_rate", default=5)
+            ] = NumberSelector(
+                NumberSelectorConfig(
+                    min=-100, max=200, step=0.1,
+                    unit_of_measurement=self._selector_unit(),
+                    mode=NumberSelectorMode.BOX,
+                )
+            )
+
         return self.async_show_form(
             step_id="tariff_period_options",
-            data_schema=vol.Schema(
-                {
-                    vol.Required("period_type", default="PEAK"): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[
-                                SelectOptionDict(value=k, label=v)
-                                for k, v in period_types.items()
-                            ],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Required("period_start", default="15:00"): SelectSelector(
-                        SelectSelectorConfig(
-                            options=tariff_hour_options,
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Required("period_end", default="21:00"): SelectSelector(
-                        SelectSelectorConfig(
-                            options=tariff_hour_options,
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Optional("period_days", default="all_days"): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[
-                                SelectOptionDict(value=k, label=v)
-                                for k, v in day_options.items()
-                            ],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                    vol.Required("import_rate", default=45): NumberSelector(
-                        NumberSelectorConfig(
-                            min=0, max=200, step=0.1, unit_of_measurement=self._selector_unit(),
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                    vol.Required("export_rate", default=5): NumberSelector(
-                        NumberSelectorConfig(
-                            min=-100, max=200, step=0.1, unit_of_measurement=self._selector_unit(),
-                            mode=NumberSelectorMode.BOX,
-                        )
-                    ),
-                    vol.Optional("add_another", default=False): BooleanSelector(),
-                }
-            ),
+            data_schema=vol.Schema(schema_fields),
             errors=errors,
             description_placeholders={
                 "period_info": added_desc
@@ -14801,8 +15088,26 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         ctx._tariff_offpeak_rate = getattr(self, "_tariff_offpeak_rate", 0.15)
         ctx._tariff_fit_rate = getattr(self, "_tariff_fit_rate", 0.05)
         ctx._tariff_plan_name = getattr(self, "_tariff_plan_name", "")
-        ctx._selected_electricity_provider = self.config_entry.data.get(
-            CONF_ELECTRICITY_PROVIDER, "other"
+        ctx._selected_electricity_provider = getattr(
+            self,
+            "_provider",
+            self._get_option(CONF_ELECTRICITY_PROVIDER, "other"),
+        )
+        ctx._agl_peak_export_rate = getattr(
+            self,
+            "_agl_peak_export_rate",
+            self._get_option(
+                CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                DEFAULT_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+            ),
+        )
+        ctx._agl_offpeak_export_rate = getattr(
+            self,
+            "_agl_offpeak_export_rate",
+            self._get_option(
+                CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+            ),
         )
         ctx._tariff_currency = self._currency()
         ctx.hass = self.hass

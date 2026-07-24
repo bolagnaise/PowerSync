@@ -639,6 +639,7 @@ ELECTRICITY_PROVIDERS = {
     "amber": "Amber Electric — real-time wholesale pricing (AU)",
     "localvolts": "Localvolts — 5-minute NEM wholesale pricing (AU)",
     "flow_power": "Flow Power — wholesale with Happy Hour exports (AU)",
+    "agl": "AGL Battery Rewards — evening peak feed-in tariff (AU)",
     "globird": "Globird — static tariff with AEMO spike export (AU)",
     "covau": "CovaU SolarMax — quota-aware free import and premium export (AU)",
     "aemo_vpp": "AEMO VPP — spike detection for VPP plans (AGL, Engie, etc.)",
@@ -647,6 +648,20 @@ ELECTRICITY_PROVIDERS = {
     "nz": "New Zealand TOU — Octopus NZ, Electric Kiwi, Contact, etc.",
     "other": "Other / Custom TOU — enter your own rates manually",
 }
+
+# AGL Battery Rewards configuration. Rates are total feed-in tariffs in c/kWh,
+# not bonuses added to another FiT. AGL publishes a 5pm-9pm daily peak window;
+# rates remain editable because the retail offer is variable.
+CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE = (
+    "agl_battery_rewards_peak_export_rate"
+)
+CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE = (
+    "agl_battery_rewards_offpeak_export_rate"
+)
+DEFAULT_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE = 28.0
+DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE = 3.0
+AGL_BATTERY_REWARDS_START_HOUR = 17
+AGL_BATTERY_REWARDS_END_HOUR = 21
 
 # Historical availability only. Runtime No Idle support is provider-independent;
 # this set exists solely to prevent hidden v8 values activating during migration.

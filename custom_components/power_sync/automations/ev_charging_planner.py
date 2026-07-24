@@ -1763,7 +1763,7 @@ class PriceForecaster:
 
         # Globird/AEMO VPP: use the user's tariff schedule for normal prices.
         # AEMO VPP adds spike detection on top; it is not an AEMO spot-price feed.
-        elif electricity_provider in ("globird", "aemo_vpp"):
+        elif electricity_provider in ("agl", "globird", "aemo_vpp"):
             tariff_forecast = await self._get_tariff_forecast(hours)
             if tariff_forecast:
                 return tariff_forecast
@@ -5687,8 +5687,8 @@ class AutoScheduleExecutor:
                             # perKwh is in cents for Amber
                             return price.get("perKwh", 30.0)
 
-            elif electricity_provider in ("globird", "aemo_vpp"):
-                # Globird/AEMO VPP: use real-time calculation from tariff schedule.
+            elif electricity_provider in ("agl", "globird", "aemo_vpp"):
+                # Static providers: use real-time calculation from tariff schedule.
                 tariff_schedule = entry_data.get("tariff_schedule", {})
                 if tariff_schedule:
                     # Use real-time TOU calculation if TOU periods are defined

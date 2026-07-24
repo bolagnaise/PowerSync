@@ -1674,6 +1674,7 @@ async def async_setup_entry(
         # the tariff is fetched later during setup). This avoids a race condition
         # where sensors were skipped because tariff_schedule hadn't been fetched yet.
         tou_providers = (
+            "agl",
             "globird",
             "covau",
             "aemo_vpp",
