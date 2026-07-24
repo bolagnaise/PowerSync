@@ -30350,15 +30350,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             if (
                 not grid_confirmed
-                and source == "optimizer"
                 and _tesla_force_result_all_grid_field_absent_safe(
                     grid_result,
                     site_configs,
                 )
             ):
                 _LOGGER.warning(
-                    "Optimizer force charge proceeding because Tesla accepted "
-                    "grid charging but site_info omitted its readback field"
+                    "Force charge proceeding because Tesla accepted grid charging "
+                    "and every valid site_info readback omitted the field"
                 )
                 grid_confirmed = True
             if not grid_confirmed:
@@ -30492,7 +30491,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Kick PW3 to ensure it starts charging immediately
                 _schedule_tesla_charge_kick(
                     "force_charge",
-                    allow_grid_field_absent_compatibility=source == "optimizer",
+                    allow_grid_field_absent_compatibility=True,
                     initial_delay_seconds=60,
                 )
 

@@ -1963,13 +1963,21 @@ def test_tesla_force_charge_enables_grid_charging_before_tariff_upload():
     tariff_upload_index = function_source.index("send_tariff_to_tesla(")
     assert grid_enable_index < tariff_upload_index
     assert "grid_confirmed = _tesla_force_result_all_confirmed(" in function_source
-    assert 'source == "optimizer"' in function_source
     assert "_tesla_force_result_all_grid_field_absent_safe(" in function_source
+    assert (
+        "and source == \"optimizer\"\n"
+        "                and _tesla_force_result_all_grid_field_absent_safe("
+        not in function_source
+    )
+    assert (
+        "every valid site_info readback omitted the field"
+        in function_source
+    )
     assert "if not grid_confirmed:" in function_source
     assert '"grid charging enable did not verify"' in function_source
 
 
-def test_tesla_manual_force_charge_and_force_discharge_keep_strict_verification():
+def test_tesla_field_absence_compatibility_is_scoped_to_force_charge():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
     charge_source = ast.get_source_segment(
@@ -1984,9 +1992,13 @@ def test_tesla_manual_force_charge_and_force_discharge_keep_strict_verification(
     assert charge_source is not None
     assert discharge_source is not None
     assert (
-        'source == "optimizer"\n'
-        "                and _tesla_force_result_all_grid_field_absent_safe("
+        "and _tesla_force_result_all_grid_field_absent_safe("
         in charge_source
+    )
+    assert (
+        "and source == \"optimizer\"\n"
+        "                and _tesla_force_result_all_grid_field_absent_safe("
+        not in charge_source
     )
     assert "_tesla_force_result_all_grid_field_absent_safe(" not in discharge_source
     assert (
@@ -2075,7 +2087,7 @@ def test_tesla_charge_compatibility_requires_full_nonfailed_coverage():
     assert '"field_absent_sites": []' in apply_source
 
 
-def test_tesla_backup_reserve_charge_kick_explicitly_opts_in_without_relaxing_manual_force_charge():
+def test_tesla_charge_kicks_opt_in_without_relaxing_force_discharge():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
     reserve_source = ast.get_source_segment(
@@ -2094,9 +2106,15 @@ def test_tesla_backup_reserve_charge_kick_explicitly_opts_in_without_relaxing_ma
     assert '"backup_reserve_100"' in reserve_100_branch
     assert "allow_grid_field_absent_compatibility=True" in reserve_100_branch
     assert (
-        'allow_grid_field_absent_compatibility=source == "optimizer"'
+        'allow_grid_field_absent_compatibility=True'
         in charge_source
     )
+    discharge_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_discharge"),
+    )
+    assert discharge_source is not None
+    assert "_tesla_force_result_all_grid_field_absent_safe(" not in discharge_source
 
 
 def test_tesla_charge_kick_retry_is_generation_guarded_and_direct_controls_supersede_it():
