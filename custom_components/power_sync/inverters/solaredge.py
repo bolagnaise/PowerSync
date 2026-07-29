@@ -615,6 +615,9 @@ class SolarEdgeController(InverterController):
 class SolarEdgeEnergyController:
     """Bridge SolarEdge Home battery telemetry and control through HA entities."""
 
+    WRITE_CONFIRM_TIMEOUT_SECONDS = 3.0
+    WRITE_CONFIRM_INTERVAL_SECONDS = 0.25
+
     def __init__(
         self,
         hass: Any,
@@ -889,7 +892,11 @@ class SolarEdgeEnergyController:
             ok &= await self._set_select_by_alias("storage_control_mode", _REMOTE_CONTROL_OPTIONS)
             ok &= await self._set_number_if_mapped("command_timeout", duration_seconds)
             if command == "charge":
-                ok &= await self._set_optional_grid_charge(True)
+                if not await self._set_optional_grid_charge(True):
+                    _LOGGER.warning(
+                        "SolarEdge AC charge policy write failed; continuing with "
+                        "the explicit storage grid-charge command"
+                    )
                 ok &= await self._set_number_if_mapped("discharge_power_limit", 0)
                 ok &= await self._set_number_if_mapped("charge_power_limit", target_power)
                 ok &= await self._set_select_by_alias("storage_command_mode", _CHARGE_OPTIONS)
@@ -955,31 +962,39 @@ class SolarEdgeEnergyController:
         legacy_prefix: str | None,
         key: str,
     ) -> str | None:
+        matches: dict[str, int] = {}
         if legacy_prefix:
-            for suffix in suffixes:
+            for suffix_index, suffix in enumerate(suffixes):
                 candidate = f"{domain}.{legacy_prefix}_{suffix}"
                 if self.hass.states.get(candidate) is not None:
-                    return candidate
+                    matches[candidate] = suffix_index
 
         domain_prefix = f"{domain}."
-        matches: list[str] = []
-        for suffix in suffixes:
+        for suffix_index, suffix in enumerate(suffixes):
             candidate = f"{domain}.{suffix}"
             if candidate in entity_ids and self.hass.states.get(candidate) is not None:
-                matches.append(candidate)
+                matches[candidate] = min(matches.get(candidate, suffix_index), suffix_index)
 
             tail = f"_{suffix}"
-            matches.extend(
-                entity_id
-                for entity_id in entity_ids
-                if entity_id.startswith(domain_prefix) and entity_id.endswith(tail)
-            )
+            for entity_id in entity_ids:
+                if entity_id.startswith(domain_prefix) and entity_id.endswith(tail):
+                    matches[entity_id] = min(
+                        matches.get(entity_id, suffix_index),
+                        suffix_index,
+                    )
 
-        valid_matches = [
-            entity_id
-            for entity_id in dict.fromkeys(matches)
-            if self.hass.states.get(entity_id) is not None
-        ]
+        valid_matches = []
+        for entity_id in matches:
+            rejection = self._control_candidate_rejection(entity_id, key)
+            if rejection:
+                _LOGGER.debug(
+                    "SolarEdge rejected %s candidate %s: %s",
+                    key,
+                    entity_id,
+                    rejection,
+                )
+                continue
+            valid_matches.append(entity_id)
         if key.startswith("solar") or key.startswith("pv"):
             valid_matches = [
                 entity_id
@@ -988,7 +1003,58 @@ class SolarEdgeEnergyController:
             ]
         if not valid_matches:
             return None
-        return sorted(valid_matches, key=lambda entity_id: self._match_score(entity_id, key))[0]
+        return min(
+            valid_matches,
+            key=lambda entity_id: (
+                matches[entity_id],
+                *self._match_score(entity_id, key),
+            ),
+        )
+
+    def _control_candidate_rejection(self, entity_id: str, key: str) -> str | None:
+        """Return why a writable entity cannot safely fulfil a control role."""
+        if key not in _CONTROL_ENTITIES:
+            return None
+
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return "entity has no state"
+
+        domain = entity_id.split(".", 1)[0]
+        if key == "storage_control_mode":
+            body = entity_id.split(".", 1)[-1].lower()
+            if "_limit_control_mode" in body:
+                return "Limit Control Mode controls export or production, not storage"
+            options = (getattr(state, "attributes", {}) or {}).get("options") or []
+            recognised = {
+                _normalize_option(alias)
+                for alias in (*_REMOTE_CONTROL_OPTIONS, *_SELF_USE_OPTIONS)
+            }
+            if not any(
+                _normalize_option(str(option)) in recognised for option in options
+            ):
+                return "selector has no recognised storage-control options"
+
+        if domain == "number":
+            if str(state.state) in _UNAVAILABLE:
+                return f"state is {state.state!r}"
+            attrs = getattr(state, "attributes", {}) or {}
+            try:
+                minimum = float(attrs.get("min", attrs.get("native_min_value", 0)))
+                maximum_value = attrs.get("max", attrs.get("native_max_value"))
+                maximum = (
+                    float(maximum_value) if maximum_value is not None else None
+                )
+            except (TypeError, ValueError):
+                return "numeric range is invalid"
+            if not math.isfinite(minimum) or (
+                maximum is not None and not math.isfinite(maximum)
+            ):
+                return "numeric range is not finite"
+            if maximum is not None and (maximum == 0 or maximum <= minimum):
+                return f"numeric range is unusable ({minimum} to {maximum})"
+
+        return None
 
     @staticmethod
     def _is_non_solar_power_entity(entity_id: str) -> bool:
@@ -1093,6 +1159,14 @@ class SolarEdgeEnergyController:
             )
             return True
         except Exception as err:
+            if await self._wait_for_reflected_state(entity_id, numeric):
+                _LOGGER.warning(
+                    "SolarEdge number write for %s raised %s, but the requested "
+                    "state was subsequently reflected",
+                    entity_id,
+                    err,
+                )
+                return True
             _LOGGER.error("SolarEdge number write failed for %s: %s", entity_id, err)
             return False
 
@@ -1146,6 +1220,15 @@ class SolarEdgeEnergyController:
             )
             return True
         except Exception as err:
+            if await self._wait_for_reflected_state(entity_id, option):
+                _LOGGER.warning(
+                    "SolarEdge select write for %s=%s raised %s, but the requested "
+                    "state was subsequently reflected",
+                    entity_id,
+                    option,
+                    err,
+                )
+                return True
             _LOGGER.error("SolarEdge select write failed for %s=%s: %s", entity_id, option, err)
             return False
 
@@ -1181,8 +1264,57 @@ class SolarEdgeEnergyController:
             )
             return True
         except Exception as err:
+            expected = "on" if enabled else "off"
+            if await self._wait_for_reflected_state(entity_id, expected):
+                _LOGGER.warning(
+                    "SolarEdge switch write for %s=%s raised %s, but the requested "
+                    "state was subsequently reflected",
+                    entity_id,
+                    expected,
+                    err,
+                )
+                return True
             _LOGGER.error("SolarEdge switch write failed for %s: %s", entity_id, err)
             return False
+
+    async def _wait_for_reflected_state(
+        self,
+        entity_id: str,
+        expected: Any,
+    ) -> bool:
+        """Confirm an ambiguous service-call outcome from the HA state machine."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.WRITE_CONFIRM_TIMEOUT_SECONDS
+        while True:
+            state = self.hass.states.get(entity_id)
+            current = getattr(state, "state", None)
+            if self._control_values_match(entity_id, current, expected):
+                return True
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(self.WRITE_CONFIRM_INTERVAL_SECONDS, remaining))
+
+    @staticmethod
+    def _control_values_match(
+        entity_id: str,
+        current: Any,
+        expected: Any,
+    ) -> bool:
+        if current is None or str(current) in _UNAVAILABLE:
+            return False
+        domain = entity_id.split(".", 1)[0]
+        if domain == "number":
+            try:
+                return math.isclose(
+                    float(current),
+                    float(expected),
+                    rel_tol=1e-6,
+                    abs_tol=1e-6,
+                )
+            except (TypeError, ValueError):
+                return False
+        return _normalize_option(str(current)) == _normalize_option(str(expected))
 
     def _expected_entity_hint(self, key: str) -> str:
         suffixes = _ENERGY_READ_ENTITIES.get(key) or ()
