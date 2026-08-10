@@ -168,6 +168,42 @@ def test_force_charge_does_not_exceed_configured_charge_cap(sigenergy_module):
     )
 
 
+def test_solar_export_hold_reads_finite_export_and_charge_limits(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+
+    async def connect():
+        return True
+
+    async def read_holding(address, count, slave_id=None):
+        values = {
+            controller.REG_GRID_EXPORT_LIMIT: controller._from_unsigned32(5000),
+            controller.REG_ESS_MAX_CHARGE_LIMIT: controller._from_unsigned32(0),
+        }
+        return values[address]
+
+    controller.connect = connect
+    controller._read_holding_registers = read_holding
+
+    assert asyncio.run(controller.get_grid_export_limit_kw()) == 5.0
+    assert asyncio.run(controller.get_charge_rate_limit_kw()) == 0.0
+
+
+def test_solar_export_hold_rejects_unlimited_export_limit(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+
+    async def connect():
+        return True
+
+    async def read_holding(address, count, slave_id=None):
+        assert address == controller.REG_GRID_EXPORT_LIMIT
+        return controller._from_unsigned32(controller.EXPORT_LIMIT_UNLIMITED)
+
+    controller.connect = connect
+    controller._read_holding_registers = read_holding
+
+    assert asyncio.run(controller.get_grid_export_limit_kw()) is None
+
+
 def test_force_discharge_uses_pv_first_mode_when_solar_can_cover_target(sigenergy_module):
     controller = sigenergy_module.SigenergyController(host="127.0.0.1")
     _stub_force_discharge_reads(controller)

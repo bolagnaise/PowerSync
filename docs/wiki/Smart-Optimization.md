@@ -173,6 +173,17 @@ Provider priority is permission, not a synthetic subsidy: export below the
 modeled acquisition cost is allowed only when an actual, reachable quantity of
 cheaper future recharge is paired with it.
 
+On supported Sigenergy systems, Profit Max can also defer solar charging during
+a high feed-in-price interval and export that solar directly, then replenish the
+battery from a cheaper, reachable solar or grid-charge interval later in the
+48-hour plan. This is an intrinsic Profit Max decision, not a separate switch or
+target SOC. PowerSync applies a temporary zero-charge hold only when it can read
+and verify a finite hardware export limit; unsupported systems, monitoring mode,
+unknown export limits, and failed verification all fall back to normal
+self-consumption. Provider charge blocks remain independent, and Charge By Time
+still wins: a solar-export hold is not planned unless its replacement energy is
+reachable before the configured deadline.
+
 For Flow Power users, Profit Max still unlocks the Flow Power Happy Hour export
 window behavior: battery export is allowed during the configured Happy Hour
 export period when the plan is profitable. Other providers rely on their export

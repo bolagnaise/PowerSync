@@ -1040,6 +1040,39 @@ class SigenergyController(InverterController):
         finally:
             await transaction.__aexit__(None, None, None)
 
+    async def get_charge_rate_limit_kw(self) -> Optional[float]:
+        """Read the active ESS maximum charge limit in kW."""
+        transaction = self._modbus_transaction()
+        await transaction.__aenter__()
+        try:
+            if not await self.connect():
+                return None
+            registers = await self._read_holding_registers(
+                self.REG_ESS_MAX_CHARGE_LIMIT, 2
+            )
+            if not registers or len(registers) < 2:
+                return None
+            raw = self._to_unsigned32(registers[0], registers[1])
+            if raw >= 0xFFFFFFFE:
+                return None
+            return raw / self.GAIN_POWER
+        finally:
+            await transaction.__aexit__(None, None, None)
+
+    async def get_grid_export_limit_kw(self) -> Optional[float]:
+        """Read a finite, enforced grid export limit in kW."""
+        transaction = self._modbus_transaction()
+        await transaction.__aenter__()
+        try:
+            if not await self.connect():
+                return None
+            raw = await self._get_current_export_limit()
+            if raw is None or raw <= 0 or raw >= self.EXPORT_LIMIT_UNLIMITED:
+                return None
+            return raw / self.GAIN_POWER
+        finally:
+            await transaction.__aexit__(None, None, None)
+
     async def set_discharge_rate_limit(self, limit_kw: float) -> bool:
         """Set the maximum battery discharge rate.
 

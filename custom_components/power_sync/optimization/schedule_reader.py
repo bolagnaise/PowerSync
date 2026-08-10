@@ -15,20 +15,28 @@ from typing import Any
 class ScheduleAction:
     """Single action in the optimization schedule."""
     timestamp: datetime
-    action: str  # "idle", "charge", "discharge", "consume", "export", "self_consumption", "off_grid"
+    action: str  # Includes internal "solar_export" alongside legacy actions.
     power_w: float
     soc: float | None = None
     battery_charge_w: float = 0.0
     battery_discharge_w: float = 0.0
+    reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for API response."""
-        return {
+        legacy_action = (
+            "self_consumption" if self.action == "solar_export" else self.action
+        )
+        payload = {
             "timestamp": self.timestamp.isoformat(),
-            "action": self.action,
+            "action": legacy_action,
             "power_w": self.power_w,
             "soc": self.soc,
         }
+        if self.action == "solar_export":
+            payload["action_detail"] = "solar_export"
+            payload["action_reason"] = self.reason or "profit_max_solar_export"
+        return payload
 
 
 @dataclass

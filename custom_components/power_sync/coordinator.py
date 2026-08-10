@@ -4720,6 +4720,53 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
         async with self._controller:
             return await self._controller.restore_from_standby()
 
+    def solar_export_hold_capability(self) -> dict[str, Any]:
+        """Describe whether direct-solar export can be enforced safely."""
+        raw_limit = (self.data or {}).get("export_limit_kw")
+        try:
+            limit_kw = float(raw_limit)
+        except (TypeError, ValueError):
+            return {"supported": False, "reason": "finite_export_limit_unknown"}
+        if not math.isfinite(limit_kw) or limit_kw <= 0:
+            return {"supported": False, "reason": "finite_export_limit_required"}
+        return {
+            "supported": True,
+            "reason": "supported",
+            "adapter": "sigenergy",
+            "export_limit_kw": limit_kw,
+        }
+
+    async def enter_solar_export_hold(self, owner_id: str) -> bool:
+        """Hold charging at zero after verifying a live finite export cap."""
+        del owner_id
+        async with self._controller:
+            export_limit_kw = await self._controller.get_grid_export_limit_kw()
+            if export_limit_kw is None:
+                _LOGGER.warning(
+                    "Sigenergy solar-export hold refused: no live finite export limit"
+                )
+                return False
+            if not await self._controller.set_charge_rate_limit(0.0):
+                return False
+            active_limit_kw = await self._controller.get_charge_rate_limit_kw()
+            return active_limit_kw is not None and active_limit_kw <= 0.001
+
+    async def exit_solar_export_hold(self, owner_id: str | None = None) -> bool:
+        """Restore normal Sigenergy operation after a solar-export hold."""
+        del owner_id
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
+        preserve_export_limit = (
+            entry_data.get("sigenergy_curtailment_state") == "curtailed"
+        )
+        async with self._controller:
+            restored = await self._controller.restore_normal(
+                preserve_export_limit=preserve_export_limit,
+            )
+            if not restored:
+                return False
+            active_limit_kw = await self._controller.get_charge_rate_limit_kw()
+            return active_limit_kw is not None and active_limit_kw > 0.001
+
     async def async_shutdown(self) -> None:
         """Disconnect from Sigenergy system on shutdown."""
         await self._controller.disconnect()

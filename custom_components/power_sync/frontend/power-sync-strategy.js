@@ -2381,9 +2381,9 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const chips = [];
     const status = data.monitoring_mode ? 'Monitoring' : data.enabled === false ? 'Disabled' : data.status || 'Active';
     chips.push(['Mode', this._title(status)]);
-    chips.push(['Now', this._actionLabel(data.current_action || 'idle')]);
+    chips.push(['Now', this._actionLabel(data.current_action_detail || data.current_action || 'idle')]);
     if (data.next_action && data.next_action_time) {
-      chips.push(['Next', `${this._actionLabel(data.next_action)} ${this._formatPlanTime(data.next_action_time)}`]);
+      chips.push(['Next', `${this._actionLabel(data.next_action_detail || data.next_action)} ${this._formatPlanTime(data.next_action_time)}`]);
     }
     if (data.last_optimization) {
       chips.push(['Optimized', this._formatTime(data.last_optimization)]);
@@ -2738,7 +2738,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
 
   _priceStatsForSegments(segments, action, model) {
     if (!Array.isArray(segments) || !segments.length || !model?.points?.length) return null;
-    const useExport = action === 'discharge' || action === 'export';
+    const useExport = action === 'discharge' || action === 'export' || action === 'solar_export';
     const key = useExport ? 'exportPrice' : 'importPrice';
     const values = [];
     for (const segment of segments) {
@@ -2830,7 +2830,10 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const actions = Array.isArray(this._data?.next_actions) ? this._data.next_actions : [];
     return actions
       .filter(action => action?.timestamp)
-      .map(action => ({ ...action }));
+      .map(action => ({
+        ...action,
+        action: action.action_detail || action.action,
+      }));
   }
 
   _fallbackActionRanges() {
@@ -3081,6 +3084,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       discharge: { label: 'Discharging', shortLabel: 'Discharge', color: '#FF9800' },
       consume: { label: 'Powering Home', shortLabel: 'Home', color: '#FF9800' },
       export: { label: 'Exporting', shortLabel: 'Export', color: '#FFD54F' },
+      solar_export: { label: 'Solar Export', shortLabel: 'Solar', color: '#26C6DA' },
       self_consumption: { label: 'Self Consumption', shortLabel: 'Self', color: '#42A5F5' },
     };
     return map[action] || map.idle;
@@ -3121,7 +3125,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
   _priceAvgColor(value, action) {
     const n = Number(value);
     if (!Number.isFinite(n)) return 'var(--secondary-text-color, #888)';
-    if (action === 'discharge' || action === 'export') {
+    if (action === 'discharge' || action === 'export' || action === 'solar_export') {
       if (n >= 20) return '#4CAF50';
       if (n >= 10) return '#FBC02D';
       if (n >= 0) return '#FF9800';

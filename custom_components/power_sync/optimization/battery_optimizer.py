@@ -590,6 +590,7 @@ class BatteryOptimizer:
         cost_neutral_forecast_import_cost: float = 0.0,
         cost_neutral_fixed_cost_allowance: float | None = None,
         cost_neutral_plan: CostNeutralPlan | None = None,
+        profit_max_solar_export_slots: bool | list[bool] | None = None,
     ) -> OptimizerResult:
         """
         Run the LP optimization.
@@ -673,6 +674,9 @@ class BatteryOptimizer:
         )
         block_battery_charge = self._normalize_battery_charge_blocks(
             block_battery_charge, n_steps
+        )
+        profit_max_solar_export_slots = self._normalize_battery_charge_blocks(
+            profit_max_solar_export_slots or False, n_steps
         )
         grid_charge_allowed = self._normalize_grid_charge_allowed(
             grid_charge_allowed, n_steps
@@ -832,6 +836,7 @@ class BatteryOptimizer:
                             cost_neutral_fixed_cost_allowance,
                             account_for_planned_imports,
                             plan,
+                            profit_max_solar_export_slots,
                         )
 
                     seeded_plan = cost_neutral_plan
@@ -977,6 +982,7 @@ class BatteryOptimizer:
                 cost_neutral_forecast_import_cost,
                 cost_neutral_fixed_cost_allowance,
                 cost_neutral_plan,
+                profit_max_solar_export_slots,
             )
             result.solve_time_s = time.monotonic() - start_time
             result.modeled_backup_reserve = modeled_backup_reserve
@@ -1890,6 +1896,7 @@ class BatteryOptimizer:
         cost_neutral_fixed_cost_allowance: float | None = None,
         cost_neutral_account_for_planned_imports: bool | dict[str, bool] = True,
         cost_neutral_plan: CostNeutralPlan | None = None,
+        profit_max_solar_export_slots: list[bool] | None = None,
     ) -> OptimizerResult:
         """
         Solve the LP formulation using the HiGHS solver (highspy).
@@ -1983,6 +1990,7 @@ class BatteryOptimizer:
                         cost_neutral_account_for_planned_imports
                     ),
                     cost_neutral_plan=cost_neutral_plan,
+                    profit_max_solar_export_slots=profit_max_solar_export_slots,
                 )
                 result.lp_stats["mode_iterations"] = iteration + 1
                 if result.solver_used != "highs":
@@ -2052,6 +2060,7 @@ class BatteryOptimizer:
                     cost_neutral_forecast_import_cost,
                     cost_neutral_fixed_cost_allowance,
                     cost_neutral_plan,
+                    profit_max_solar_export_slots,
                 )
             last_result.lp_stats = {
                 **last_result.lp_stats,
@@ -2227,6 +2236,7 @@ class BatteryOptimizer:
         cost_neutral_fixed_cost_allowance: float | None = None,
         cost_neutral_account_for_planned_imports: bool | dict[str, bool] = True,
         cost_neutral_plan: CostNeutralPlan | None = None,
+        profit_max_solar_export_slots: list[bool] | None = None,
     ) -> OptimizerResult:
         """Inner LP solver (separated for SOC-below-reserve guard in _solve_lp)."""
         formulation_start = time.monotonic()
@@ -2246,6 +2256,9 @@ class BatteryOptimizer:
         import_bonus_prices = import_bonus_prices or [0.0] * n
         priority_export_slots = priority_export_slots or [False] * n
         cost_neutral_slots = cost_neutral_slots or [False] * n
+        profit_max_solar_export_slots = (
+            profit_max_solar_export_slots or [False] * n
+        )
         if cost_neutral_plan is None:
             cost_neutral_plan = CostNeutralPlan.from_legacy(
                 length=n,
@@ -3768,6 +3781,7 @@ class BatteryOptimizer:
                 cost_neutral_forecast_import_cost,
                 cost_neutral_fixed_cost_allowance,
                 cost_neutral_plan,
+                profit_max_solar_export_slots,
             )
             greedy.lp_stats = {**lp_stats, "fallback_reason": "solver_failed"}
             return greedy
@@ -3816,6 +3830,7 @@ class BatteryOptimizer:
             priority_export_slots,
             disable_idle,
             free_import_command_slots,
+            profit_max_solar_export_slots,
         )
 
         provisional_grid_import, _ = self._grid_flows_from_schedule(
@@ -4341,6 +4356,7 @@ class BatteryOptimizer:
         cost_neutral_forecast_import_cost: float = 0.0,
         cost_neutral_fixed_cost_allowance: float | None = None,
         cost_neutral_plan: CostNeutralPlan | None = None,
+        profit_max_solar_export_slots: list[bool] | None = None,
     ) -> OptimizerResult:
         """
         Greedy fallback optimizer.
@@ -4357,6 +4373,9 @@ class BatteryOptimizer:
         export_bonus_prices = export_bonus_prices or [0.0] * n
         import_bonus_prices = import_bonus_prices or [0.0] * n
         cost_neutral_slots = cost_neutral_slots or [False] * n
+        profit_max_solar_export_slots = (
+            profit_max_solar_export_slots or [False] * n
+        )
         if cost_neutral_plan is None:
             cost_neutral_plan = CostNeutralPlan.from_legacy(
                 length=n,
@@ -5597,6 +5616,7 @@ class BatteryOptimizer:
             priority_export_slots,
             disable_idle,
             free_import_command_slots,
+            profit_max_solar_export_slots,
         )
 
         candidate_schedule = schedule
@@ -5858,6 +5878,7 @@ class BatteryOptimizer:
         priority_export_slots: list[bool] | None = None,
         disable_idle: bool = False,
         free_import_command_slots: list[bool] | None = None,
+        profit_max_solar_export_slots: list[bool] | None = None,
     ) -> OptimizationSchedule:
         """
         Map LP solution to battery actions.
@@ -5893,6 +5914,9 @@ class BatteryOptimizer:
         grid_charge_allowed = grid_charge_allowed or [True] * n
         priority_export_slots = priority_export_slots or [False] * n
         free_import_command_slots = free_import_command_slots or []
+        profit_max_solar_export_slots = (
+            profit_max_solar_export_slots or [False] * n
+        )
         actions = []
         soc = soc_0
         optimizer_reserve = max(0.0, min(1.0, self.backup_reserve))
@@ -6167,6 +6191,18 @@ class BatteryOptimizer:
                 action = "export"
                 power_w = export_kw * 1000
             elif (
+                t < len(profit_max_solar_export_slots)
+                and profit_max_solar_export_slots[t]
+                and export_kw > threshold_kw
+                and discharge_kw <= threshold_kw
+                and charge_kw <= threshold_kw
+                and import_kw <= threshold_kw
+            ):
+                # Profit Max deliberately preserves direct solar export by
+                # holding battery charge at zero. This is not battery export.
+                action = "solar_export"
+                power_w = export_kw * 1000
+            elif (
                 charge_kw < threshold_kw
                 and discharge_kw < threshold_kw
                 and import_kw > threshold_kw
@@ -6383,6 +6419,11 @@ class BatteryOptimizer:
                 soc=round(soc, 4),
                 battery_charge_w=round(reported_charge_w, 1),
                 battery_discharge_w=round(reported_discharge_w, 1),
+                reason=(
+                    "profit_max_solar_export"
+                    if action == "solar_export"
+                    else None
+                ),
             ))
 
         return OptimizationSchedule(

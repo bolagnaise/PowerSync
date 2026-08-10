@@ -35,6 +35,7 @@ from .schedule_reader import OptimizationSchedule, ScheduleAction
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
 from .solar_forecast_learning import SolarForecastLearner
+from .solar_export import SolarExportHoldController
 from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode
 from ..const import (
     CONF_GENERIC_CHARGER_POWER_ENTITY,
@@ -119,6 +120,7 @@ SOLAR_FORECAST_LEARNING_STORE_VERSION = 1
 SOLAR_FORECAST_LEARNING_STORE_SAVE_DELAY = 300
 BATTERY_EFFICIENCY_LEARNING_STORE_VERSION = 1
 BATTERY_EFFICIENCY_LEARNING_STORE_SAVE_DELAY = 300
+SOLAR_EXPORT_HOLD_STORE_VERSION = 1
 INITIAL_OPTIMIZATION_DELAY_SECONDS = 90.0
 FIXED_OPTIMIZATION_INTERVAL_MINUTES = DEFAULT_OPTIMIZATION_INTERVAL
 FLOW_POWER_NEM_TZ = timezone(timedelta(hours=10))
@@ -543,6 +545,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             BATTERY_EFFICIENCY_LEARNING_STORE_VERSION,
             f"power_sync.battery_efficiency_learning.{entry_id}",
         )
+        self._solar_export_hold = SolarExportHoldController(
+            Store(
+                hass,
+                SOLAR_EXPORT_HOLD_STORE_VERSION,
+                f"power_sync.solar_export_hold.{entry_id}",
+            ),
+            energy_coordinator,
+        )
+        self._last_profit_max_solar_export_slots: list[bool] = []
+        self._solar_export_capability_status: dict[str, Any] = {
+            "supported": False,
+            "reason": "not_evaluated",
+        }
 
         # Saving sessions coordinator (set from __init__.py when configured)
         self._saving_session_coordinator = None
@@ -3929,6 +3944,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Set up the optimization coordinator with built-in LP optimizer."""
         _LOGGER.info("Setting up optimization coordinator (built-in LP)")
 
+        # A zero-charge hold is persistent hardware state. Clear anything left
+        # by a restart before a new solve or command can take ownership.
+        if not await self._solar_export_hold.async_reconcile_startup():
+            _LOGGER.error(
+                "Profit Max: stale solar-export hold could not be cleared; "
+                "solar-export scheduling will remain disabled"
+            )
+
         # Auto-detect battery specs from Tesla site_info if available
         await self._auto_detect_battery_specs()
         self._config.max_grid_export_w = self._resolve_max_grid_export_w()
@@ -4894,6 +4917,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def disable(self) -> None:
         """Disable optimization."""
+        solar_export_hold = getattr(self, "_solar_export_hold", None)
+        if solar_export_hold and solar_export_hold.active:
+            if not await solar_export_hold.clear("optimizer_disable"):
+                _LOGGER.error(
+                    "Profit Max: solar-export hold restore failed during disable; "
+                    "persisted cleanup will retry on startup"
+                )
         if not self._enabled:
             return
 
@@ -5432,6 +5462,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             battery_charge_blocked = self._battery_charge_blocked_slots(
                 len(import_prices),
             )
+            hard_battery_charge_blocked = list(battery_charge_blocked)
             grid_charge_cap_import_prices = self._grid_charge_cap_import_prices(
                 import_prices
             )
@@ -5506,6 +5537,46 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     grid_export_limits_w = [0.0] * len(import_prices)
                     published_grid_export_limits_w = grid_export_limits_w
             self._last_grid_export_limits_w = published_grid_export_limits_w
+            profit_max_solar_export_slots = self._profit_max_solar_export_slots(
+                import_prices,
+                export_prices,
+                solar_forecast,
+                load_forecast,
+                soc,
+                hard_battery_charge_blocked,
+                grid_charge_allowed,
+                grid_export_limits_w,
+            )
+            # Preserve provider-owned blocks as the hard mask and add Profit
+            # Max holds as a distinct reason mask. Hard blocks are never
+            # relabelled as solar-export intent.
+            profit_max_solar_export_slots = [
+                bool(profit) and not bool(hard)
+                for profit, hard in zip(
+                    profit_max_solar_export_slots,
+                    hard_battery_charge_blocked,
+                    strict=False,
+                )
+            ]
+            battery_charge_blocked = [
+                bool(hard) or bool(profit)
+                for hard, profit in zip(
+                    hard_battery_charge_blocked,
+                    profit_max_solar_export_slots,
+                    strict=False,
+                )
+            ]
+            self._last_profit_max_solar_export_slots = list(
+                profit_max_solar_export_slots
+            )
+            spread_import_blocked = [
+                bool(blocked) or not bool(allowed)
+                for blocked, allowed in zip(
+                    battery_charge_blocked,
+                    grid_charge_allowed,
+                    strict=False,
+                )
+            ]
             priority_export_slots = self._priority_export_slots_for_run(
                 len(import_prices),
                 export_prices,
@@ -5612,6 +5683,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             async def _run_optimizer_once(
                 reserve_floor: float | None = None,
                 export_reserve_floor: float | list[float] | None = None,
+                charge_blocked_slots: list[bool] | None = None,
+                solar_export_slots: list[bool] | None = None,
             ) -> OptimizerResult:
                 if reserve_floor is not None:
                     self._optimizer.update_config(backup_reserve=reserve_floor)
@@ -5626,7 +5699,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         self._cost_function.value,
                         acq_cost,
                         battery_export_allowed,
-                        battery_charge_blocked,
+                        charge_blocked_slots or battery_charge_blocked,
                         self._config.allow_grid_charge,
                         grid_charge_allowed,
                         self._last_zerohero_bonus_prices,
@@ -5648,6 +5721,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         cost_neutral_forecast_import_cost,
                         cost_neutral_fixed_cost_allowance,
                         cost_neutral_plan,
+                        solar_export_slots or profit_max_solar_export_slots,
                     )
                 finally:
                     if reserve_floor is not None:
@@ -5659,6 +5733,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             result: OptimizerResult = await _run_optimizer_once(
                 solve_reserve_override
             )
+            if not result.feasible and any(profit_max_solar_export_slots):
+                _LOGGER.warning(
+                    "Profit Max solar-export hold made the solve infeasible; "
+                    "retrying with provider charge blocks only"
+                )
+                profit_max_solar_export_slots = [False] * len(import_prices)
+                battery_charge_blocked = list(hard_battery_charge_blocked)
+                self._last_profit_max_solar_export_slots = list(
+                    profit_max_solar_export_slots
+                )
+                result = await _run_optimizer_once(
+                    solve_reserve_override,
+                    charge_blocked_slots=hard_battery_charge_blocked,
+                    solar_export_slots=[False] * len(import_prices),
+                )
             used_reference_override = solve_reserve_override is not None
 
             schedule = result.schedule
@@ -7823,6 +7912,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             getattr(action, "action", None),
         )
 
+        solar_export_hold = getattr(self, "_solar_export_hold", None)
+        if (
+            solar_export_hold
+            and solar_export_hold.active
+            and (
+                runtime_action != "solar_export"
+                or self._monitoring_mode_active()
+            )
+        ):
+            if not await solar_export_hold.clear(
+                f"transition_to_{runtime_action or 'unknown'}"
+            ):
+                _LOGGER.error(
+                    "Profit Max: could not clear solar-export hold; blocking "
+                    "the next optimizer action until cleanup succeeds"
+                )
+                return
+
         # Monitoring mode — log what would happen but don't execute
         if self._monitoring_mode_active():
             _LOGGER.info(
@@ -8868,6 +8975,36 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 charge_power_w,
                             )
                         _LOGGER.info("Optimizer: Charging at %.0fW", charge_power_w)
+            elif effective_action == "solar_export":
+                if solar_export_hold is None:
+                    _LOGGER.error(
+                        "Profit Max: solar-export hold controller unavailable; "
+                        "using self-consumption"
+                    )
+                    effective_action = "self_consumption"
+                else:
+                    timestamp = getattr(action, "timestamp", None)
+                    generation = (
+                        timestamp.isoformat()
+                        if isinstance(timestamp, datetime)
+                        else str(timestamp or "current")
+                    )
+                    applied = await solar_export_hold.apply(
+                        self.entry_id,
+                        generation,
+                    )
+                    if not applied:
+                        _LOGGER.error(
+                            "Profit Max: solar-export hold failed verification; "
+                            "using self-consumption and retrying on the next solve"
+                        )
+                        effective_action = "self_consumption"
+                    else:
+                        _LOGGER.info(
+                            "Profit Max: holding battery charge at zero for "
+                            "direct solar export (%.0fW planned)",
+                            float(getattr(action, "power_w", 0.0) or 0.0),
+                        )
             elif effective_action in ("discharge", "export"):
                 if hasattr(battery, "force_discharge"):
                     discharge_power = self._export_command_power_w(action)
@@ -10016,6 +10153,175 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 n,
             )
         return blocked
+
+    def _solar_export_capability(self) -> dict[str, Any]:
+        """Resolve the fail-closed hardware contract for solar-only export."""
+        hold = getattr(self, "_solar_export_hold", None)
+        if hold is not None and hold.active:
+            status = {"supported": False, "reason": "cleanup_pending"}
+        elif str(getattr(self, "battery_system", "")).lower() != "sigenergy":
+            status = {"supported": False, "reason": "unsupported_battery_system"}
+        elif self._monitoring_mode_active():
+            status = {"supported": False, "reason": "monitoring_mode"}
+        else:
+            resolver = getattr(
+                getattr(self, "energy_coordinator", None),
+                "solar_export_hold_capability",
+                None,
+            )
+            if not callable(resolver):
+                status = {"supported": False, "reason": "adapter_unavailable"}
+            else:
+                try:
+                    status = dict(resolver() or {})
+                except Exception as err:
+                    status = {
+                        "supported": False,
+                        "reason": "capability_check_failed",
+                        "last_error": str(err),
+                    }
+        self._solar_export_capability_status = status
+        return status
+
+    def _profit_max_solar_export_slots(
+        self,
+        import_prices: list[float],
+        export_prices: list[float],
+        solar: list[float],
+        load: list[float],
+        current_soc: float,
+        hard_charge_blocks: list[bool],
+        grid_charge_allowed: list[bool],
+        grid_export_limits_w: list[float | None] | None = None,
+    ) -> list[bool]:
+        """Select profitable solar deferrals with explicitly funded recharge."""
+        n = min(len(import_prices), len(export_prices), len(solar), len(load))
+        selected = [False] * n
+        if n <= 1 or not self.profit_max_mode:
+            self._solar_export_capability_status = {
+                "supported": False,
+                "reason": "profit_max_disabled",
+            }
+            return selected
+        capability = self._solar_export_capability()
+        if not capability.get("supported"):
+            return selected
+
+        interval_hours = max(1, int(self._config.interval_minutes or 5)) / 60.0
+        max_charge_kw = max(0.0, float(self._config.max_charge_w or 0.0) / 1000.0)
+        capacity_kwh = max(
+            0.0, float(self._config.battery_capacity_wh or 0.0) / 1000.0
+        )
+        efficiency = float(
+            getattr(getattr(self, "_optimizer", None), "efficiency", 0.92) or 0.92
+        )
+        efficiency = max(0.01, min(1.0, efficiency))
+        if max_charge_kw <= 0 or capacity_kwh <= 0:
+            self._solar_export_capability_status = {
+                **capability,
+                "supported": False,
+                "reason": "battery_limits_unknown",
+            }
+            return selected
+
+        deadline_slot = None
+        optimizer = getattr(self, "_optimizer", None)
+        if self.charge_by_time_enabled and optimizer is not None:
+            raw_deadline = getattr(optimizer, "pre_window_slot", None)
+            if isinstance(raw_deadline, int) and raw_deadline > 0:
+                deadline_slot = min(n, raw_deadline)
+
+        # Each future slot contributes a finite amount of stored-energy
+        # repayment. Consuming this budget prevents multiple high-FIT slots
+        # from claiming the same later recharge opportunity.
+        future_capacity_kwh = [0.0] * n
+        future_cost_per_input_kwh = [math.inf] * n
+        for idx in range(n):
+            if idx < len(hard_charge_blocks) and hard_charge_blocks[idx]:
+                continue
+            solar_surplus_kw = max(0.0, solar[idx] - load[idx])
+            solar_charge_kw = min(max_charge_kw, solar_surplus_kw)
+            best_charge_kw = solar_charge_kw
+            if (
+                self._config.allow_grid_charge
+                and idx < len(grid_charge_allowed)
+                and grid_charge_allowed[idx]
+                and (
+                    import_prices[idx] <= 0.001
+                    or (deadline_slot is not None and idx < deadline_slot)
+                )
+            ):
+                grid_headroom_kw = max_charge_kw
+                max_grid_import_w = self._config.max_grid_import_w
+                if max_grid_import_w is not None:
+                    net_load_kw = max(0.0, load[idx] - solar[idx])
+                    grid_headroom_kw = min(
+                        max_charge_kw,
+                        max(0.0, float(max_grid_import_w) / 1000.0 - net_load_kw),
+                    )
+                if grid_headroom_kw > best_charge_kw:
+                    best_charge_kw = grid_headroom_kw
+                    future_cost_per_input_kwh[idx] = import_prices[idx] / efficiency
+            if solar_charge_kw > 0:
+                future_cost_per_input_kwh[idx] = min(
+                    future_cost_per_input_kwh[idx], export_prices[idx]
+                )
+            future_capacity_kwh[idx] = best_charge_kw * interval_hours * efficiency
+
+        remaining_headroom_kwh = capacity_kwh * max(
+            0.0, 1.0 - max(0.0, min(1.0, current_soc))
+        )
+        margin = 0.001  # Internal 0.1c/kWh anti-churn margin; not user config.
+        for idx in range(n - 1):
+            if remaining_headroom_kwh <= 1e-9:
+                break
+            if idx < len(hard_charge_blocks) and hard_charge_blocks[idx]:
+                continue
+            if (
+                grid_export_limits_w is not None
+                and idx < len(grid_export_limits_w)
+                and grid_export_limits_w[idx] is not None
+                and float(grid_export_limits_w[idx]) <= 100.0
+            ):
+                continue
+            surplus_kw = min(max_charge_kw, max(0.0, solar[idx] - load[idx]))
+            if surplus_kw <= 0.1 or export_prices[idx] <= margin:
+                continue
+            deferred_kwh = min(
+                remaining_headroom_kwh,
+                surplus_kw * interval_hours * efficiency,
+            )
+            repayment_end = (
+                deadline_slot
+                if deadline_slot is not None and idx < deadline_slot
+                else n
+            )
+            candidates = [
+                future_idx
+                for future_idx in range(idx + 1, repayment_end)
+                if future_capacity_kwh[future_idx] > 1e-9
+                and future_cost_per_input_kwh[future_idx] + margin
+                < export_prices[idx]
+            ]
+            candidates.sort(key=lambda future_idx: future_cost_per_input_kwh[future_idx])
+            available = sum(future_capacity_kwh[future_idx] for future_idx in candidates)
+            if available + 1e-9 < deferred_kwh:
+                continue
+            remaining = deferred_kwh
+            for future_idx in candidates:
+                used = min(remaining, future_capacity_kwh[future_idx])
+                future_capacity_kwh[future_idx] -= used
+                remaining -= used
+                if remaining <= 1e-9:
+                    break
+            selected[idx] = True
+            remaining_headroom_kwh -= deferred_kwh
+
+        self._solar_export_capability_status = {
+            **capability,
+            "selected_slots": sum(selected),
+        }
+        return selected
 
     def _time_window_slots(
         self,
@@ -15224,6 +15530,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                     break
 
+        def _legacy_action(action_name: str | None) -> str | None:
+            return (
+                "self_consumption"
+                if action_name == "solar_export"
+                else action_name
+            )
+
+        planned_current_action_detail = (
+            planned_current_action
+            if planned_current_action == "solar_export"
+            else None
+        )
+        effective_current_action_detail = (
+            effective_current_action
+            if effective_current_action == "solar_export"
+            else None
+        )
+        current_action_detail = (
+            current_action if current_action == "solar_export" else None
+        )
+        next_action_detail = next_action if next_action == "solar_export" else None
+        current_action = _legacy_action(current_action)
+        planned_current_action = _legacy_action(planned_current_action)
+        effective_current_action = _legacy_action(effective_current_action)
+        next_action = _legacy_action(next_action)
+
         # LP-specific stats
         lp_stats = {}
         if self._last_optimizer_result:
@@ -15315,13 +15647,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ),
             "schedule_age_s": schedule_age_s,
             "current_action": current_action,
+            "current_action_detail": current_action_detail,
             "current_power_w": current_power_w,
             "planned_current_action": planned_current_action,
+            "planned_current_action_detail": planned_current_action_detail,
             "planned_current_power_w": planned_current_power_w,
             "effective_current_action": effective_current_action,
+            "effective_current_action_detail": effective_current_action_detail,
             "actual_battery_power_w": actual_battery_power_w,
             "current_action_end_time": current_action_end_time,
             "next_action": next_action,
+            "next_action_detail": next_action_detail,
             "next_action_time": next_action_time,
             "next_action_power_w": next_action_power_w,
             "last_optimization": self._last_update_time.isoformat() if self._last_update_time else None,
@@ -15329,6 +15665,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "predicted_savings": self._get_daily_savings(),
             "lp_stats": lp_stats,
             "reserve_recommendation": reserve_recommendation,
+            "profit_max_solar_export": {
+                "capability": dict(
+                    getattr(self, "_solar_export_capability_status", {}) or {}
+                ),
+                "planned_slots": sum(
+                    bool(slot)
+                    for slot in getattr(
+                        self, "_last_profit_max_solar_export_slots", []
+                    )
+                ),
+                "hold": (
+                    getattr(self, "_solar_export_hold", None).status
+                    if getattr(self, "_solar_export_hold", None)
+                    else {}
+                ),
+            },
             "config": {
                 "battery_capacity_wh": self._config.battery_capacity_wh,
                 "max_charge_w": self._config.max_charge_w,
@@ -15617,6 +15969,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if (
                     action_ranges
                     and action_ranges[-1]["action"] == ad["action"]
+                    and action_ranges[-1].get("action_detail")
+                    == ad.get("action_detail")
                 ):
                     # Extend the current range — update end SOC
                     action_ranges[-1]["end_time"] = interval_end
@@ -15634,6 +15988,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         start_soc = action_ranges[-1]["soc"]
                     action_ranges.append({
                         "action": ad["action"],
+                        **(
+                            {"action_detail": ad["action_detail"]}
+                            if ad.get("action_detail")
+                            else {}
+                        ),
+                        **(
+                            {"action_reason": ad["action_reason"]}
+                            if ad.get("action_reason")
+                            else {}
+                        ),
                         **(
                             {"planned_action": ad["planned_action"]}
                             if ad.get("planned_action")

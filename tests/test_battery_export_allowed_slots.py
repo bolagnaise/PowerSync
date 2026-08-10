@@ -58,6 +58,7 @@ _STUB_MODULE_NAMES = (
     "power_sync.optimization.executor",
     "power_sync.optimization.load_estimator",
     "power_sync.optimization.schedule_reader",
+    "power_sync.optimization.solar_export",
 )
 
 
@@ -349,7 +350,112 @@ def _coordinator(
     coordinator._idle_hold_reserve = None
     coordinator._optimizer = None
     coordinator.energy_coordinator = None
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator.entry_id = "entry-1"
+    coordinator._tariff_schedule = None
+    coordinator._last_solar_forecast = None
+    coordinator._last_load_forecast = None
     return coordinator
+
+
+def _sigenergy_profit_max_coordinator(opt_module, *, export_limit_kw=5.0):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator.battery_system = "sigenergy"
+    coordinator._entry = SimpleNamespace(
+        options={"monitoring_mode": False}, data={}
+    )
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator.entry_id = "entry-1"
+    coordinator._config = opt_module.OptimizationConfig(
+        interval_minutes=60,
+        horizon_hours=4,
+        battery_capacity_wh=10000,
+        max_charge_w=5000,
+        max_grid_import_w=10000,
+        allow_grid_charge=True,
+        profit_max_enabled=True,
+    )
+    coordinator._optimizer = SimpleNamespace(
+        efficiency=0.92,
+        pre_window_slot=None,
+    )
+    coordinator.energy_coordinator = SimpleNamespace(
+        solar_export_hold_capability=lambda: {
+            "supported": export_limit_kw is not None,
+            "reason": "supported" if export_limit_kw is not None else "unknown",
+            "adapter": "sigenergy",
+            "export_limit_kw": export_limit_kw,
+        }
+    )
+    return coordinator
+
+
+def test_profit_max_solar_export_requires_cheaper_reachable_recharge(opt_module):
+    coordinator = _sigenergy_profit_max_coordinator(opt_module)
+
+    slots = coordinator._profit_max_solar_export_slots(
+        import_prices=[0.40, 0.40, 0.00, 0.40],
+        export_prices=[0.50, 0.20, 0.05, 0.20],
+        solar=[5.0, 0.0, 0.0, 0.0],
+        load=[1.0, 1.0, 1.0, 1.0],
+        current_soc=0.5,
+        hard_charge_blocks=[False] * 4,
+        grid_charge_allowed=[True] * 4,
+    )
+
+    assert slots == [True, False, False, False]
+
+
+def test_profit_max_solar_export_fails_closed_without_capability(opt_module):
+    coordinator = _sigenergy_profit_max_coordinator(
+        opt_module, export_limit_kw=None
+    )
+
+    slots = coordinator._profit_max_solar_export_slots(
+        [0.40, 0.05],
+        [0.50, 0.05],
+        [5.0, 0.0],
+        [1.0, 1.0],
+        0.5,
+        [False, False],
+        [True, True],
+    )
+
+    assert slots == [False, False]
+
+
+def test_charge_by_time_requires_repayment_before_deadline(opt_module):
+    coordinator = _sigenergy_profit_max_coordinator(opt_module)
+    coordinator._config.charge_by_time_enabled = True
+    coordinator._optimizer.pre_window_slot = 2
+
+    slots = coordinator._profit_max_solar_export_slots(
+        import_prices=[0.40, 0.40, 0.05],
+        export_prices=[0.50, 0.20, 0.05],
+        solar=[5.0, 0.0, 0.0],
+        load=[1.0, 1.0, 1.0],
+        current_soc=0.5,
+        hard_charge_blocks=[False] * 3,
+        grid_charge_allowed=[False, False, True],
+    )
+
+    assert slots == [False, False, False]
+
+
+def test_provider_charge_block_is_never_relabeled_as_profit_max(opt_module):
+    coordinator = _sigenergy_profit_max_coordinator(opt_module)
+
+    slots = coordinator._profit_max_solar_export_slots(
+        [0.40, 0.00],
+        [0.50, 0.00],
+        [5.0, 0.0],
+        [1.0, 1.0],
+        0.5,
+        [True, False],
+        [False, True],
+    )
+
+    assert slots == [False, False]
 
 
 def test_initial_optimization_task_handle_clears_after_startup_pass(opt_module):
@@ -4335,6 +4441,67 @@ def _execution_coordinator(opt_module, battery: _FakeBattery, soc: float):
 
     coordinator._get_battery_state = _battery_state
     return coordinator
+
+
+class _FakeSolarExportHold:
+    def __init__(self, apply_result=True, clear_result=True):
+        self.apply_result = apply_result
+        self.clear_result = clear_result
+        self.active = False
+        self.applied = []
+        self.cleared = []
+        self.status = {}
+
+    async def apply(self, owner, generation):
+        self.applied.append((owner, generation))
+        self.active = self.apply_result
+        return self.apply_result
+
+    async def clear(self, reason):
+        self.cleared.append(reason)
+        if self.clear_result:
+            self.active = False
+        return self.clear_result
+
+
+def test_solar_export_action_records_effective_only_after_hold_confirmation(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator.battery_system = "sigenergy"
+    hold = _FakeSolarExportHold()
+    coordinator._solar_export_hold = hold
+    action = SimpleNamespace(
+        action="solar_export",
+        power_w=4000,
+        timestamp=datetime(2026, 7, 30, 7, 30, tzinfo=timezone.utc),
+    )
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert hold.applied == [("entry-1", action.timestamp.isoformat())]
+    assert coordinator._last_executed_planned_action == "solar_export"
+    assert coordinator._last_executed_action == "solar_export"
+    assert battery.force_charge_calls == []
+    assert battery.force_discharge_calls == []
+
+
+def test_transition_clears_solar_export_hold_before_next_action(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator.battery_system = "sigenergy"
+    hold = _FakeSolarExportHold()
+    hold.active = True
+    coordinator._solar_export_hold = hold
+    action = SimpleNamespace(
+        action="self_consumption",
+        power_w=0,
+        timestamp=datetime(2026, 7, 30, 7, 35, tzinfo=timezone.utc),
+    )
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert hold.cleared == ["transition_to_self_consumption"]
+    assert coordinator._last_executed_action == "self_consumption"
 
 
 def test_optimizer_waits_for_startup_hardware_restore_task(opt_module):

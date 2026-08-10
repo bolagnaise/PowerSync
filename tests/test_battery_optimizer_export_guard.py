@@ -164,6 +164,107 @@ def test_grid_import_limit_caps_grid_sourced_charge(battery_optimizer_module):
     )
 
 
+def test_profit_max_direct_solar_export_has_distinct_internal_action(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.05,
+        interval_minutes=60,
+        horizon_hours=1,
+    )
+
+    schedule = optimizer._build_schedule(
+        1,
+        grid_import=[0.0],
+        grid_export=[4.0],
+        battery_charge=[0.0],
+        battery_discharge=[0.0],
+        solar=[5.0],
+        load=[1.0],
+        soc_0=0.5,
+        block_battery_charge=[True],
+        profit_max_solar_export_slots=[True],
+    )
+
+    action = schedule.actions[0]
+    assert action.action == "solar_export"
+    assert action.reason == "profit_max_solar_export"
+    assert action.battery_charge_w == 0
+    assert action.battery_discharge_w == 0
+    assert action.to_dict() == {
+        "timestamp": action.timestamp.isoformat(),
+        "action": "self_consumption",
+        "action_detail": "solar_export",
+        "action_reason": "profit_max_solar_export",
+        "power_w": 4000.0,
+        "soc": 0.5,
+    }
+
+
+def test_natural_solar_export_without_profit_reason_stays_self_consumption(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.05,
+        interval_minutes=60,
+        horizon_hours=1,
+    )
+
+    schedule = optimizer._build_schedule(
+        1,
+        grid_import=[0.0],
+        grid_export=[4.0],
+        battery_charge=[0.0],
+        battery_discharge=[0.0],
+        solar=[5.0],
+        load=[1.0],
+        soc_0=1.0,
+        profit_max_solar_export_slots=[False],
+    )
+
+    assert schedule.actions[0].action == "self_consumption"
+    assert "action_detail" not in schedule.actions[0].to_dict()
+
+
+def test_profit_max_reason_threads_through_lp_and_recharges_later(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        max_grid_import_w=6000,
+        backup_reserve=0.05,
+        interval_minutes=60,
+        horizon_hours=2,
+        terminal_weight=0.3,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.40, 0.40],
+        export_prices=[0.50, 0.01],
+        solar_forecast=[5.0, 5.0],
+        load_forecast=[1.0, 1.0],
+        current_soc=0.5,
+        block_battery_charge=[True, False],
+        allow_grid_charge=True,
+        grid_charge_allowed=[False, False],
+        profit_max_solar_export_slots=[True, False],
+    )
+
+    assert result.feasible
+    assert result.schedule.actions[0].action == "solar_export"
+    assert result.schedule.actions[0].battery_discharge_w == 0
+    assert result.schedule.actions[1].action == "self_consumption"
+    assert result.schedule.actions[1].battery_charge_w > 100
+
+
 def test_grid_import_limit_still_allows_solar_assisted_full_charge(
     battery_optimizer_module,
 ):
