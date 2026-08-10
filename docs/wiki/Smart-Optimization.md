@@ -173,16 +173,31 @@ Provider priority is permission, not a synthetic subsidy: export below the
 modeled acquisition cost is allowed only when an actual, reachable quantity of
 cheaper future recharge is paired with it.
 
-On supported Sigenergy systems, Profit Max can also defer solar charging during
-a high feed-in-price interval and export that solar directly, then replenish the
-battery from a cheaper, reachable solar or grid-charge interval later in the
-48-hour plan. This is an intrinsic Profit Max decision, not a separate switch or
-target SOC. PowerSync applies a temporary zero-charge hold only when it can read
-and verify a finite hardware export limit; unsupported systems, monitoring mode,
-unknown export limits, and failed verification all fall back to normal
-self-consumption. Provider charge blocks remain independent, and Charge By Time
-still wins: a solar-export hold is not planned unless its replacement energy is
-reachable before the configured deadline.
+On systems with a reversible, readable charge-only control, Profit Max can also
+defer solar charging during a high feed-in-price interval and export that solar
+directly, then replenish the battery from a cheaper, reachable solar or
+grid-charge interval later in the 48-hour plan. This is an intrinsic Profit Max
+decision, not a separate switch or target SOC.
+
+The supported control paths are Sigenergy Modbus, Sungrow SH Modbus (including
+dual-inverter systems), FoxESS Modbus/entity/cloud variants with authoritative
+charge-limit readback, SolaX Modbus entities, Fronius Reserva/GEN24 Block
+Charging, and Neovolt No Battery Charge. Availability is checked for the actual
+configured variant on every plan and again before control. A supported family
+therefore remains on normal control when its required entity, device, current
+normal value, or verification readback is unavailable.
+
+PowerSync persists the exact control path, every target, and each target's normal
+value before changing hardware. It verifies all targets before reporting Solar
+Export. Any preparation, write, verification, or restoration failure immediately
+issues normal restoration and executes ordinary self-consumption; incomplete
+cleanup is retried after reload and prevents another hold. Tesla, GoodWe,
+AlphaESS, ESY Sunhome, SAJ H2, SolarEdge, Anker Solix, and Custom systems remain
+on normal control because their current PowerSync control surfaces do not prove
+an independently reversible charge-only hold. Monitoring mode also stays
+write-free after cleaning an older hold. Provider charge blocks remain
+independent, and Charge By Time still wins: a solar-export hold is not planned
+unless its replacement energy is reachable before the configured deadline.
 
 For Flow Power users, Profit Max still unlocks the Flow Power Happy Hour export
 window behavior: battery export is allowed during the configured Happy Hour

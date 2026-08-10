@@ -379,11 +379,12 @@ def _sigenergy_profit_max_coordinator(opt_module, *, export_limit_kw=5.0):
         efficiency=0.92,
         pre_window_slot=None,
     )
-    coordinator.energy_coordinator = SimpleNamespace(
-        solar_export_hold_capability=lambda: {
+    coordinator.energy_coordinator = None
+    coordinator._solar_export_hold = SimpleNamespace(
+        capability=lambda: {
             "supported": export_limit_kw is not None,
             "reason": "supported" if export_limit_kw is not None else "unknown",
-            "adapter": "sigenergy",
+            "adapter": "sigenergy.modbus.charge_limit.v1",
             "export_limit_kw": export_limit_kw,
         }
     )
@@ -4485,6 +4486,25 @@ def test_solar_export_action_records_effective_only_after_hold_confirmation(opt_
     assert battery.force_discharge_calls == []
 
 
+def test_solar_export_apply_failure_executes_normal_control_fallback(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator.battery_system = "sungrow"
+    hold = _FakeSolarExportHold(apply_result=False)
+    coordinator._solar_export_hold = hold
+    action = SimpleNamespace(
+        action="solar_export",
+        power_w=4000,
+        timestamp=datetime(2026, 7, 30, 7, 30, tzinfo=timezone.utc),
+    )
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.self_consumption_calls == 1
+    assert coordinator._last_executed_planned_action == "solar_export"
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_transition_clears_solar_export_hold_before_next_action(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
@@ -4501,6 +4521,29 @@ def test_transition_clears_solar_export_hold_before_next_action(opt_module):
     asyncio.run(coordinator._execute_optimizer_action(action))
 
     assert hold.cleared == ["transition_to_self_consumption"]
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_failed_hold_cleanup_suppresses_next_force_action_and_uses_normal_control(
+    opt_module,
+):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator.battery_system = "neovolt"
+    hold = _FakeSolarExportHold(clear_result=False)
+    hold.active = True
+    coordinator._solar_export_hold = hold
+    action = SimpleNamespace(
+        action="charge",
+        power_w=3000,
+        timestamp=datetime(2026, 7, 30, 7, 35, tzinfo=timezone.utc),
+    )
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert hold.cleared == ["transition_to_charge"]
+    assert battery.force_charge_calls == []
+    assert battery.self_consumption_calls == 1
     assert coordinator._last_executed_action == "self_consumption"
 
 

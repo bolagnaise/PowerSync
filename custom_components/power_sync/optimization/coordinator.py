@@ -35,7 +35,7 @@ from .schedule_reader import OptimizationSchedule, ScheduleAction
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
 from .solar_forecast_learning import SolarForecastLearner
-from .solar_export import SolarExportHoldController
+from .solar_export import SolarExportHoldController, resolve_solar_export_adapter
 from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode
 from ..const import (
     CONF_GENERIC_CHARGER_POWER_ENTITY,
@@ -551,7 +551,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 SOLAR_EXPORT_HOLD_STORE_VERSION,
                 f"power_sync.solar_export_hold.{entry_id}",
             ),
-            energy_coordinator,
+            resolve_solar_export_adapter(battery_system, energy_coordinator),
         )
         self._last_profit_max_solar_export_slots: list[bool] = []
         self._solar_export_capability_status: dict[str, Any] = {
@@ -7913,6 +7913,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         solar_export_hold = getattr(self, "_solar_export_hold", None)
+        solar_export_cleanup_failed = False
         if (
             solar_export_hold
             and solar_export_hold.active
@@ -7925,10 +7926,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"transition_to_{runtime_action or 'unknown'}"
             ):
                 _LOGGER.error(
-                    "Profit Max: could not clear solar-export hold; blocking "
-                    "the next optimizer action until cleanup succeeds"
+                    "Profit Max: solar-export hold cleanup remains pending; "
+                    "falling back to ordinary self-consumption"
                 )
-                return
+                runtime_action = "self_consumption"
+                solar_export_cleanup_failed = True
 
         # Monitoring mode — log what would happen but don't execute
         if self._monitoring_mode_active():
@@ -7939,6 +7941,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         battery = self._executor.battery_controller
+        if solar_export_cleanup_failed:
+            try:
+                if hasattr(battery, "set_self_consumption_mode"):
+                    await battery.set_self_consumption_mode()
+                elif hasattr(battery, "restore_normal"):
+                    await battery.restore_normal()
+            except Exception:
+                _LOGGER.exception(
+                    "Profit Max: ordinary self-consumption fallback command failed"
+                )
 
         # Check if force charge/discharge is active.
         # User-triggered force modes own the battery state — don't override.
@@ -8996,9 +9008,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if not applied:
                         _LOGGER.error(
                             "Profit Max: solar-export hold failed verification; "
-                            "using self-consumption and retrying on the next solve"
+                            "restoring ordinary self-consumption"
                         )
                         effective_action = "self_consumption"
+                        if hasattr(battery, "set_self_consumption_mode"):
+                            await battery.set_self_consumption_mode()
+                        elif hasattr(battery, "restore_normal"):
+                            await battery.restore_normal()
                     else:
                         _LOGGER.info(
                             "Profit Max: holding battery charge at zero for "
@@ -10157,29 +10173,33 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _solar_export_capability(self) -> dict[str, Any]:
         """Resolve the fail-closed hardware contract for solar-only export."""
         hold = getattr(self, "_solar_export_hold", None)
-        if hold is not None and hold.active:
-            status = {"supported": False, "reason": "cleanup_pending"}
-        elif str(getattr(self, "battery_system", "")).lower() != "sigenergy":
-            status = {"supported": False, "reason": "unsupported_battery_system"}
-        elif self._monitoring_mode_active():
+        if self._monitoring_mode_active():
             status = {"supported": False, "reason": "monitoring_mode"}
+        elif hold is None:
+            status = {"supported": False, "reason": "adapter_unavailable"}
         else:
-            resolver = getattr(
-                getattr(self, "energy_coordinator", None),
-                "solar_export_hold_capability",
-                None,
-            )
-            if not callable(resolver):
-                status = {"supported": False, "reason": "adapter_unavailable"}
+            try:
+                status = dict(hold.capability() or {})
+            except Exception as err:
+                status = {
+                    "supported": False,
+                    "reason": "capability_check_failed",
+                    "last_error": str(err),
+                }
+        if status.get("supported") and not status.get("export_limit_kw"):
+            limit_w = getattr(getattr(self, "_config", None), "max_grid_export_w", None)
+            try:
+                limit_kw = float(limit_w) / 1000.0
+            except (TypeError, ValueError):
+                limit_kw = 0.0
+            if not math.isfinite(limit_kw) or limit_kw <= 0:
+                status = {
+                    **status,
+                    "supported": False,
+                    "reason": "finite_export_limit_required",
+                }
             else:
-                try:
-                    status = dict(resolver() or {})
-                except Exception as err:
-                    status = {
-                        "supported": False,
-                        "reason": "capability_check_failed",
-                        "last_error": str(err),
-                    }
+                status["export_limit_kw"] = limit_kw
         self._solar_export_capability_status = status
         return status
 
