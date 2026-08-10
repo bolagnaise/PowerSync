@@ -389,6 +389,68 @@ def test_regeneration_passes_resolved_capacity_and_serializes_settings(monkeypat
     assert settings.to_dict()["battery_capacity_source"] == CAPACITY_SOURCE_MANUAL
 
 
+def test_regeneration_uses_active_ten_amp_charger_not_stored_vehicle_max(monkeypatch):
+    executor = _executor_with_options()
+    settings = AutoScheduleSettings(
+        vehicle_id="5YJTEST00000000B2",
+        target_soc=80,
+        battery_capacity_kwh=86,
+        max_charge_amps=32,
+        voltage=240,
+        phases=1,
+    )
+    state = SimpleNamespace(current_plan=None, last_plan_update=None)
+
+    async def active_charger(_vehicle_id, _settings):
+        return {
+            "association_known": True,
+            "capability_known": True,
+            "max_charge_amps": 10,
+            "max_charge_amps_source": "active_charger",
+            "voltage": 240,
+            "phases": 1,
+        }
+
+    monkeypatch.setattr(
+        executor,
+        "_resolve_effective_charger_capability",
+        active_charger,
+    )
+
+    asyncio.run(
+        executor._regenerate_plan(
+            settings.vehicle_id,
+            settings,
+            state,
+            current_soc=69,
+        )
+    )
+
+    call = executor.planner.calls[0]
+    assert call["charger_power_kw"] == pytest.approx(2.4)
+    assert call["resolved_capacity"].effective_battery_capacity_kwh == 86
+    assert state.current_plan.energy_needed_kwh == pytest.approx(10.511111, rel=1e-5)
+
+
+def test_ble_only_planning_keeps_existing_entity_bound_limits():
+    executor = _executor_with_options()
+    settings = AutoScheduleSettings(
+        vehicle_id="ble_tesla_bridge",
+        max_charge_amps=16,
+        voltage=230,
+        phases=1,
+    )
+
+    capability = asyncio.run(
+        executor._resolve_effective_charger_capability(
+            settings.vehicle_id,
+            settings,
+        )
+    )
+
+    assert capability is None
+
+
 def test_anonymous_generic_uses_shared_charger_fallback_not_manual():
     executor = _executor_with_options(
         {"generic_charger_battery_capacity_kwh": 44.4}

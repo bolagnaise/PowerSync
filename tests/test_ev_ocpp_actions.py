@@ -153,6 +153,206 @@ class _Entry:
     options = {}
 
 
+def _tesla_capability_hass(
+    *,
+    first_max: int = 32,
+    second_max: int = 10,
+    first_cable: str = "on",
+    second_cable: str = "on",
+):
+    vin_a = "5YJTEST00000000A1"
+    vin_b = "5YJTEST00000000B2"
+    states = [
+        _State("binary_sensor.car_a_charge_cable", first_cable),
+        _State(
+            "number.car_a_charge_current",
+            str(first_max),
+            {"min": 0, "max": first_max},
+        ),
+        _State("sensor.car_a_charger_voltage", "240", {"unit_of_measurement": "V"}),
+        _State("sensor.car_a_charger_phases", "3"),
+        _State("binary_sensor.car_b_charge_cable", second_cable),
+        _State(
+            "number.car_b_charge_current",
+            str(second_max),
+            {"min": 0, "max": second_max},
+        ),
+        _State("sensor.car_b_charger_voltage", "230", {"unit_of_measurement": "V"}),
+        _State("sensor.car_b_charger_phases", "1"),
+    ]
+    registry_entities = {
+        state.entity_id: SimpleNamespace(
+            entity_id=state.entity_id,
+            device_id="car-a" if "car_a" in state.entity_id else "car-b",
+        )
+        for state in states
+    }
+    registry_devices = {
+        "car-a": SimpleNamespace(
+            id="car-a",
+            identifiers={("tesla_fleet", vin_a)},
+        ),
+        "car-b": SimpleNamespace(
+            id="car-b",
+            identifiers={("tesla_fleet", vin_b)},
+        ),
+    }
+    return _Hass(states, registry_entities, registry_devices), vin_a, vin_b
+
+
+def test_tesla_active_charger_capability_is_vin_scoped_and_follows_swap():
+    hass, vin_a, vin_b = _tesla_capability_hass()
+
+    first = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+        )
+    )
+    second = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_b,
+        )
+    )
+
+    assert first == {
+        "association_known": True,
+        "capability_known": True,
+        "max_charge_amps": 32,
+        "max_charge_amps_source": "active_charger",
+        "voltage": 240,
+        "phases": 3,
+    }
+    assert second["max_charge_amps"] == 10
+    assert second["voltage"] == 230
+    assert second["phases"] == 1
+
+    hass.states.get("number.car_a_charge_current").attributes["max"] = 10
+    hass.states.get("number.car_b_charge_current").attributes["max"] = 32
+    swapped_first = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+        )
+    )
+    swapped_second = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_b,
+        )
+    )
+
+    assert swapped_first["max_charge_amps"] == 10
+    assert swapped_second["max_charge_amps"] == 32
+
+
+def test_tesla_active_charger_capability_applies_lower_site_limit():
+    hass, vin_a, _vin_b = _tesla_capability_hass(first_max=32)
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
+        _data={
+            "home_power_settings": {
+                "max_charge_speed_enabled": True,
+                "max_amps_per_phase": 20,
+            }
+        }
+    )
+
+    capability = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+        )
+    )
+
+    assert capability["max_charge_amps"] == 20
+    assert capability["max_charge_amps_source"] == "active_charger_and_site_limit"
+
+
+def test_tesla_active_charger_capability_fails_closed_when_unplugged_or_unavailable():
+    hass, vin_a, _vin_b = _tesla_capability_hass(first_cable="off")
+    unplugged = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+        )
+    )
+    assert unplugged["association_known"] is False
+    assert unplugged["max_charge_amps"] == 5
+    assert unplugged["max_charge_amps_source"] == "safe_unplugged"
+
+    hass.states.get("binary_sensor.car_a_charge_cable").state = "on"
+    hass.states.get("number.car_a_charge_current").state = "unavailable"
+    unavailable = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+        )
+    )
+    assert unavailable["association_known"] is True
+    assert unavailable["capability_known"] is False
+    assert unavailable["max_charge_amps"] == 5
+    assert unavailable["max_charge_amps_source"] == (
+        "safe_unavailable_charger_capability"
+    )
+
+
+def test_tesla_active_charger_capability_rejects_conflicting_sources_and_unknown_vin():
+    hass, vin_a, _vin_b = _tesla_capability_hass()
+    hass.device_registry.devices["car-a-stale"] = SimpleNamespace(
+        id="car-a-stale",
+        identifiers={("teslemetry", vin_a)},
+    )
+    hass.entity_registry.entities["binary_sensor.car_a_stale_charge_cable"] = (
+        SimpleNamespace(
+            entity_id="binary_sensor.car_a_stale_charge_cable",
+            device_id="car-a-stale",
+        )
+    )
+    hass.entity_registry.entities["number.car_a_stale_charge_current"] = (
+        SimpleNamespace(
+            entity_id="number.car_a_stale_charge_current",
+            device_id="car-a-stale",
+        )
+    )
+    hass.states._states["binary_sensor.car_a_stale_charge_cable"] = _State(
+        "binary_sensor.car_a_stale_charge_cable",
+        "off",
+    )
+    hass.states._states["number.car_a_stale_charge_current"] = _State(
+        "number.car_a_stale_charge_current",
+        "10",
+        {"min": 0, "max": 10},
+    )
+
+    ambiguous = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+        )
+    )
+    unknown = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            "5YJTEST00000000C3",
+        )
+    )
+
+    assert ambiguous["max_charge_amps"] == 5
+    assert ambiguous["max_charge_amps_source"] == "safe_ambiguous_charger"
+    assert unknown["association_known"] is False
+    assert unknown["max_charge_amps"] == 5
+
+
 def _tesla_entry():
     return SimpleNamespace(
         entry_id="entry-1",
@@ -893,6 +1093,16 @@ def test_solar_surplus_active_tesla_uses_positive_measured_power_under_curtailme
         set_amps_calls.append((vehicle_id, amps))
         return True
 
+    async def active_charger(*args, **kwargs):
+        return {
+            "association_known": True,
+            "capability_known": True,
+            "max_charge_amps": 32,
+            "max_charge_amps_source": "active_charger",
+            "voltage": 240,
+            "phases": 1,
+        }
+
     ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
     ev_planner.get_ev_location = home_location
 
@@ -908,6 +1118,11 @@ def test_solar_surplus_active_tesla_uses_positive_measured_power_under_curtailme
     monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
     monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(
+        actions,
+        "_resolve_tesla_active_charger_capability",
+        active_charger,
+    )
 
     actions._dynamic_ev_state.clear()
     actions._dynamic_ev_state["entry-1"] = {
@@ -1425,6 +1640,107 @@ def test_dynamic_multi_tesla_site_headroom_is_not_granted_to_both(monkeypatch):
     assert start_calls == [("ble_tesla_yf88", 7)]
     assert actions._dynamic_ev_state["entry-1"]["ble_tesla_flinn"]["current_amps"] == 7
     assert actions._dynamic_ev_state["entry-1"]["ble_tesla_yf88"]["current_amps"] == 7
+
+
+def test_dynamic_multi_tesla_caps_follow_each_vehicle_when_chargers_swap(monkeypatch):
+    """Each VIN must retain its own active EVSE cap across a physical swap."""
+    vehicle_ids = ("5YJTEST00000000D4", "5YJTEST00000000E5")
+    caps = {vehicle_ids[0]: 32, vehicle_ids[1]: 10}
+    set_amps_calls: list[tuple[str, int]] = []
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_power": 0,
+            "grid_power": 0,
+            "solar_power": 0,
+            "ev_power": 0,
+            "battery_soc": 100,
+        }
+
+    async def active_charger(hass, config_entry, vehicle_vin, **kwargs):
+        return {
+            "association_known": True,
+            "capability_known": True,
+            "max_charge_amps": caps[vehicle_vin],
+            "max_charge_amps_source": "active_charger",
+            "voltage": 240,
+            "phases": 1,
+        }
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append((vehicle_id, amps))
+        return True
+
+    async def fake_start_charging(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(
+        actions,
+        "_resolve_tesla_active_charger_capability",
+        active_charger,
+    )
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start_charging)
+
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_id: {
+            "active": True,
+            "current_amps": 0,
+            "target_amps": 0,
+            "priority": 1,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_id,
+                "target_battery_charge_kw": 0,
+                "max_grid_import_kw": 12.5,
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+                "voltage": 240,
+                "phases": 1,
+            },
+        }
+        for vehicle_id in vehicle_ids
+    }
+
+    asyncio.run(
+        actions._dynamic_ev_update(
+            _Hass([]),
+            _Entry(),
+            "entry-1",
+            vehicle_ids[0],
+        )
+    )
+
+    assert set_amps_calls == [(vehicle_ids[0], 32), (vehicle_ids[1], 10)]
+    assert [
+        actions._dynamic_ev_state["entry-1"][vehicle_id]["current_amps"]
+        for vehicle_id in vehicle_ids
+    ] == [32, 10]
+
+    set_amps_calls.clear()
+    caps.update({vehicle_ids[0]: 10, vehicle_ids[1]: 32})
+    asyncio.run(
+        actions._dynamic_ev_update(
+            _Hass([]),
+            _Entry(),
+            "entry-1",
+            vehicle_ids[0],
+        )
+    )
+
+    assert set_amps_calls == [(vehicle_ids[0], 10), (vehicle_ids[1], 32)]
+    assert [
+        actions._dynamic_ev_state["entry-1"][vehicle_id]["current_amps"]
+        for vehicle_id in vehicle_ids
+    ] == [10, 32]
 
 
 def test_dynamic_multi_tesla_failed_decrease_withholds_other_increase(monkeypatch):
@@ -3881,7 +4197,8 @@ def test_dynamic_start_prefers_tesla_site_meter_limit_over_home_power(monkeypatc
     assert params["max_grid_import_kw"] == 16.1
 
 
-def test_dynamic_deadline_start_uses_configured_max_over_idle_tesla_cap(monkeypatch):
+def test_dynamic_deadline_start_never_overrides_unknown_tesla_charger_cap(monkeypatch):
+    vehicle_vin = "5YJTEST00000000C3"
     async def fake_get_tesla_ev_entity(*args, **kwargs):
         return "number.car_charging_amps"
 
@@ -3907,7 +4224,7 @@ def test_dynamic_deadline_start_uses_configured_max_over_idle_tesla_cap(monkeypa
             hass,
             _Entry(),
             {
-                "vehicle_vin": "VIN123",
+                "vehicle_vin": vehicle_vin,
                 "dynamic_mode": "battery_target",
                 "owner_mode": "smart_schedule",
                 "charger_type": "tesla",
@@ -3920,11 +4237,170 @@ def test_dynamic_deadline_start_uses_configured_max_over_idle_tesla_cap(monkeypa
     )
 
     assert result is True
-    state = actions._dynamic_ev_state["entry-1"]["VIN123"]
+    state = actions._dynamic_ev_state["entry-1"][vehicle_vin]
+    assert state["current_amps"] == 5
+    assert state["target_amps"] == 5
+    assert state["params"]["max_charge_amps"] == 5
+    assert state["params"]["allow_stale_entity_max_override"] is False
+    assert set_amps_calls == [5]
+
+
+def test_dynamic_deadline_start_uses_live_active_charger_cap(monkeypatch):
+    vehicle_vin = "5YJTEST00000000C3"
+    set_amps_calls: list[int] = []
+
+    async def active_charger(*args, **kwargs):
+        return {
+            "association_known": True,
+            "capability_known": True,
+            "max_charge_amps": 10,
+            "max_charge_amps_source": "active_charger",
+            "voltage": 240,
+            "phases": 1,
+        }
+
+    async def fake_start(*args, **kwargs):
+        return True
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    monkeypatch.setattr(
+        actions,
+        "_resolve_tesla_active_charger_capability",
+        active_charger,
+    )
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    actions._dynamic_ev_state.clear()
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            _Hass([]),
+            _Entry(),
+            {
+                "vehicle_vin": vehicle_vin,
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "max_charge_amps": 32,
+                "fixed_charge_amps": 32,
+            },
+            context=None,
+        )
+    )
+
+    state = actions._dynamic_ev_state["entry-1"][vehicle_vin]
+    assert result is True
+    assert set_amps_calls == [10]
+    assert state["params"]["max_charge_amps"] == 10
+    assert state["params"]["max_charge_amps_source"] == "active_charger"
+    assert state["params"]["fixed_charge_amps"] == 10
+
+
+def test_dynamic_session_follows_active_charger_cap_changes(monkeypatch):
+    vehicle_vin = "5YJTEST00000000C3"
+    set_amps_calls: list[int] = []
+    charger_caps = iter((10, 32))
+
+    async def active_charger(*args, **kwargs):
+        max_charge_amps = next(charger_caps)
+        return {
+            "association_known": True,
+            "capability_known": True,
+            "max_charge_amps": max_charge_amps,
+            "max_charge_amps_source": "active_charger",
+            "voltage": 240,
+            "phases": 1,
+        }
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    async def not_full(*args, **kwargs):
+        return None
+
+    async def no_live_status(*args, **kwargs):
+        return None
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    async def home_location(*args, **kwargs):
+        return "home"
+
+    ev_planner.get_ev_location = home_location
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_planner",
+        ev_planner,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_resolve_tesla_active_charger_capability",
+        active_charger,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_clear_ble_dynamic_session_if_unplugged",
+        not_unplugged,
+    )
+    monkeypatch.setattr(actions, "_dynamic_ev_full_soc_reason", not_full)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", no_live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_vin: {
+            "active": True,
+            "current_amps": 32,
+            "target_amps": 32,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_vin,
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+                "fixed_charge_amps": 32,
+                "voltage": 240,
+                "phases": 1,
+            },
+        }
+    }
+
+    asyncio.run(
+        actions._dynamic_ev_update(
+            _Hass([]),
+            _Entry(),
+            "entry-1",
+            vehicle_vin,
+        )
+    )
+
+    state = actions._dynamic_ev_state["entry-1"][vehicle_vin]
+    assert set_amps_calls == [10]
+    assert state["current_amps"] == 10
+    assert state["target_amps"] == 10
+    assert state["params"]["fixed_charge_amps"] == 10
+    assert state["params"]["requested_fixed_charge_amps"] == 32
+
+    asyncio.run(
+        actions._dynamic_ev_update(
+            _Hass([]),
+            _Entry(),
+            "entry-1",
+            vehicle_vin,
+        )
+    )
+
+    assert set_amps_calls == [10, 32]
     assert state["current_amps"] == 32
     assert state["target_amps"] == 32
-    assert state["params"]["max_charge_amps"] == 32
-    assert set_amps_calls == [32]
+    assert state["params"]["fixed_charge_amps"] == 32
 
 
 def test_dynamic_sigenergy_start_uses_charger_abstraction(monkeypatch):

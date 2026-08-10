@@ -4321,7 +4321,7 @@ def test_auto_schedule_deadline_uses_vehicle_max_amps(monkeypatch, fake_actions)
     assert params["max_charge_amps"] == 24
     assert params["start_amps"] == 24
     assert params["fixed_charge_amps"] == 24
-    assert params["allow_stale_entity_max_override"] is True
+    assert params["allow_stale_entity_max_override"] is False
 
 
 def test_price_level_stop_uses_vehicle_charger_config(fake_actions):

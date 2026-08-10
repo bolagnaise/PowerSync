@@ -29,6 +29,7 @@ EV Actions (Tesla Fleet/Teslemetry, Tesla BLE, OCPP, generic HA, Zaptec, or HA-n
 import logging
 import asyncio
 import math
+import re
 from collections.abc import Mapping
 from typing import List, Dict, Any, Optional, Callable
 
@@ -79,6 +80,7 @@ PRE_CHARGE_WAKE_ENTITY_KEYS = (
     "wake_entity",
 )
 OCPP_MIN_CHARGE_AMPS = 6
+TESLA_UNKNOWN_CHARGER_SAFE_AMPS = 5
 FULL_EV_SOC = 100
 SIGENERGY_EVDC_DEFAULT_POWER_LIMIT_KW = 25.0
 PRE_CHARGE_WAKE_DURATION_KEYS = (
@@ -6477,6 +6479,21 @@ async def _update_smart_schedule_battery_target_group(
         )
         return
 
+    # Refresh each VIN independently after the shared lifecycle/ownership
+    # boundary. This lets two simultaneous vehicles follow different active
+    # charging sources without allowing a stale group plan to write either car.
+    for vehicle_id, state in sessions:
+        if not await _refresh_dynamic_tesla_charger_capability(
+            hass,
+            config_entry,
+            entry_id,
+            vehicle_id,
+            state,
+        ):
+            return
+        if not _plan_is_current():
+            return
+
     max_grid_limits = []
     for _vehicle_id, state in sessions:
         params = state.get("params") or {}
@@ -6732,6 +6749,99 @@ def _refresh_solar_surplus_runtime_params(
     return params
 
 
+def _is_explicit_tesla_vin(vehicle_id: Any) -> bool:
+    """Return whether an identifier can safely scope Tesla telemetry/commands."""
+    return bool(re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", str(vehicle_id or "").upper()))
+
+
+async def _refresh_dynamic_tesla_charger_capability(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    entry_id: str,
+    vehicle_id: str,
+    state: dict,
+) -> bool:
+    """Refresh one active VIN's EVSE limit and immediately enforce a lower cap."""
+    params = state.get("params") or {}
+    if (
+        params.get("charger_type") != "tesla"
+        or not _is_explicit_tesla_vin(vehicle_id)
+    ):
+        return True
+
+    active_charger = await _resolve_tesla_active_charger_capability(
+        hass,
+        config_entry,
+        vehicle_id,
+        configured_voltage=_coerce_positive_int(
+            params.get("voltage"),
+            240,
+        )
+        or 240,
+        configured_phases=(
+            params.get("phases") if params.get("phases") in (1, 3) else 1
+        ),
+    )
+    current_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
+    if current_state is not state or not current_state.get("active"):
+        return False
+
+    old_max = _coerce_positive_int(params.get("max_charge_amps"), 32) or 32
+    new_max = active_charger["max_charge_amps"]
+    params.update(
+        {
+            "max_charge_amps": new_max,
+            "max_charge_amps_source": active_charger[
+                "max_charge_amps_source"
+            ],
+            "voltage": active_charger["voltage"],
+            "phases": active_charger["phases"],
+            "active_charger_association_known": active_charger[
+                "association_known"
+            ],
+            "active_charger_capability_known": active_charger[
+                "capability_known"
+            ],
+            "allow_stale_entity_max_override": False,
+        }
+    )
+    requested_fixed_amps = _coerce_positive_int(
+        params.get("requested_fixed_charge_amps", params.get("fixed_charge_amps"))
+    )
+    if requested_fixed_amps is not None:
+        params["requested_fixed_charge_amps"] = requested_fixed_amps
+        params["fixed_charge_amps"] = min(new_max, requested_fixed_amps)
+    if new_max != old_max:
+        _LOGGER.info(
+            "Dynamic EV: active charger cap changed %dA -> %dA (%s)",
+            old_max,
+            new_max,
+            active_charger["max_charge_amps_source"],
+        )
+
+    current_amps = _coerce_positive_int(state.get("current_amps"), 0) or 0
+    if current_amps > new_max:
+        success = await _set_vehicle_amps(
+            hass,
+            config_entry,
+            vehicle_id,
+            new_max,
+            params,
+        )
+        current_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
+        if current_state is not state or not current_state.get("active"):
+            return False
+        if success:
+            state["current_amps"] = new_max
+            state["target_amps"] = min(
+                _coerce_positive_int(state.get("target_amps"), new_max) or new_max,
+                new_max,
+            )
+
+    state["entity_max_rechecked"] = True
+    return True
+
+
 async def _dynamic_ev_update_surplus(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -6848,56 +6958,26 @@ async def _dynamic_ev_update_surplus(
         state["low_surplus_start"] = None
         return
 
-    # Re-check Tesla entity max after charging starts (Tesla reports real max only when active)
-    # The entity needs a few seconds to update after the car starts drawing power,
-    # so we do this on the first update cycle after charging_started=True (10-30s later).
-    if (state.get("charging_started") and not state.get("entity_max_rechecked")
-            and params.get("charger_type") == "tesla"
-            and vehicle_id != DEFAULT_VEHICLE_ID):
-        entity = None
-        try:
-            entity = await _get_tesla_ev_entity(
-                hass,
-                r"number\..*(charging_amps|charge_current)(?:_\d+)?$",
-                vehicle_id,
-            )
-        except Exception:
-            pass
-        if _session_was_replaced("charge-limit entity lookup"):
-            return
-        if entity:
-            entity_state = hass.states.get(entity)
-            if entity_state:
-                new_max = int(entity_state.attributes.get("max", 0))
-                old_max = params.get("max_charge_amps", 32)
-                if (
-                    new_max > 0
-                    and new_max < old_max
-                    and params.get("allow_stale_entity_max_override")
-                ):
-                    _LOGGER.debug(
-                        "Solar surplus EV: ignoring Tesla entity max %dA below configured %dA",
-                        new_max,
-                        old_max,
-                    )
-                elif (
-                    new_max > 0
-                    and new_max != old_max
-                    and not params.get("allow_stale_entity_max_override")
-                ):
-                    _LOGGER.info(
-                        f"⚡ Solar surplus EV: Updated max_charge_amps {old_max}A -> {new_max}A "
-                        f"(entity limit after charging started)"
-                    )
-                    params["max_charge_amps"] = new_max
-        state["entity_max_rechecked"] = True
-
     # Get live status
     live_status = await _get_tesla_live_status(hass, config_entry)
     if _session_was_replaced("live-status lookup"):
         return
     if not live_status:
         _LOGGER.debug("Solar surplus EV: Could not get live status")
+        return
+
+    # Re-resolve the VIN-scoped EVSE capability every cycle. This follows the
+    # vehicle when it moves between charging sources and enforces a lower pilot
+    # or site limit before surplus-control calculations can issue another rate.
+    # The live read above is an intentional lifecycle boundary: cleanup during
+    # that await makes this callback command-neutral.
+    if not await _refresh_dynamic_tesla_charger_capability(
+        hass,
+        config_entry,
+        entry_id,
+        vehicle_id,
+        state,
+    ):
         return
 
     if (
@@ -7588,6 +7668,247 @@ def _resolve_dynamic_max_charge_amps(
     return default, "default"
 
 
+def _tesla_source_connection_state(
+    hass: HomeAssistant,
+    entity_ids: list[str],
+) -> Optional[bool]:
+    """Return a definitive Tesla plug state for one telemetry source."""
+    observations: set[bool] = set()
+    for entity_id in entity_ids:
+        state = hass.states.get(entity_id)
+        if state is None or state.state in ("unknown", "unavailable", None):
+            continue
+        entity_id_lower = entity_id.lower()
+        state_value = str(state.state).strip().lower()
+        if entity_id.startswith("binary_sensor.") and (
+            "charge_cable" in entity_id_lower
+            or "charge_flap" in entity_id_lower
+        ):
+            if state_value in ("on", "off"):
+                observations.add(state_value == "on")
+            continue
+        if entity_id.startswith("sensor.") and re.search(
+            r"_(?:charging|charging_state|charge_state)(?:_\d+)?$",
+            entity_id_lower,
+        ):
+            if state_value in ("charging", "complete", "stopped", "full_charge"):
+                observations.add(True)
+            elif state_value in ("disconnected", "not_connected"):
+                observations.add(False)
+
+    if len(observations) == 1:
+        return observations.pop()
+    return None
+
+
+def _tesla_source_capability(
+    hass: HomeAssistant,
+    entity_ids: list[str],
+) -> dict[str, Any]:
+    """Read current, voltage, and phase capability from one Tesla source."""
+    caps: list[int] = []
+    voltages: list[int] = []
+    phases: list[int] = []
+    measured_current: Optional[float] = None
+    measured_power_kw: Optional[float] = None
+
+    for entity_id in entity_ids:
+        state = hass.states.get(entity_id)
+        if state is None or state.state in ("unknown", "unavailable", None):
+            continue
+        entity_id_lower = entity_id.lower()
+        if entity_id.startswith("number.") and re.search(
+            r"_(?:charging_amps|charge_current)(?:_\d+)?$",
+            entity_id_lower,
+        ):
+            cap = _coerce_positive_int(state.attributes.get("max"))
+            if cap is not None:
+                caps.append(cap)
+            continue
+        if entity_id.startswith("sensor.") and re.search(
+            r"_charge_current_request_max(?:_\d+)?$",
+            entity_id_lower,
+        ):
+            cap = _coerce_positive_int(state.state)
+            if cap is not None:
+                caps.append(cap)
+            continue
+        if entity_id.startswith("sensor.") and re.search(
+            r"_(?:charger_voltage|charge_voltage)(?:_\d+)?$",
+            entity_id_lower,
+        ):
+            voltage = _coerce_positive_int(state.state)
+            if voltage is not None and 100 <= voltage <= 500:
+                voltages.append(voltage)
+            continue
+        if entity_id.startswith("sensor.") and re.search(
+            r"_(?:charger_phases|charge_phases)(?:_\d+)?$",
+            entity_id_lower,
+        ):
+            phase_count = _coerce_positive_int(state.state)
+            if phase_count in (1, 3):
+                phases.append(phase_count)
+            continue
+        if entity_id.startswith("sensor.") and re.search(
+            r"_(?:charger_current|charge_current)(?:_\d+)?$",
+            entity_id_lower,
+        ):
+            measured_current = _coerce_positive_float(state.state)
+            continue
+        if entity_id.startswith("sensor.") and re.search(
+            r"_(?:charger_power|charge_power|charging_power)(?:_\d+)?$",
+            entity_id_lower,
+        ):
+            measured_power_kw = _coerce_positive_float(state.state)
+            unit = str(state.attributes.get("unit_of_measurement") or "").lower()
+            if measured_power_kw is not None and unit in ("w", "watts"):
+                measured_power_kw /= 1000.0
+
+    if not phases and measured_current and measured_power_kw and voltages:
+        inferred = measured_power_kw * 1000.0 / (measured_current * voltages[0])
+        if 0.6 <= inferred <= 1.4:
+            phases.append(1)
+        elif 2.2 <= inferred <= 3.8:
+            phases.append(3)
+
+    return {
+        "max_amps": min(caps) if caps else None,
+        "voltage": min(voltages) if voltages else None,
+        "phases": phases[0] if phases and len(set(phases)) == 1 else None,
+    }
+
+
+async def _resolve_tesla_active_charger_capability(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_vin: Optional[str],
+    *,
+    configured_voltage: int = 240,
+    configured_phases: int = 1,
+) -> dict[str, Any]:
+    """Resolve the charger currently attached to one VIN without guessing.
+
+    Tesla's VIN-scoped charge-current entity exposes the live EVSE pilot limit.
+    An explicitly paired BLE bridge is the only non-VIN source accepted. Direct
+    charger devices are deliberately ignored because they do not identify the
+    connected vehicle. Unknown, unavailable, or conflicting associations use a
+    conservative planning cap and never authorize an entity-range override.
+    """
+    site_max = _get_home_power_max_charge_amps(hass, config_entry)
+    fallback_max = TESLA_UNKNOWN_CHARGER_SAFE_AMPS
+    if site_max is not None:
+        fallback_max = min(fallback_max, site_max)
+    result = {
+        "association_known": False,
+        "capability_known": False,
+        "max_charge_amps": fallback_max,
+        "max_charge_amps_source": "safe_unknown_charger",
+        "voltage": configured_voltage if configured_voltage > 0 else 240,
+        "phases": configured_phases if configured_phases in (1, 3) else 1,
+    }
+    if not (
+        vehicle_vin
+        and len(vehicle_vin) == 17
+        and vehicle_vin.isalnum()
+    ):
+        return result
+
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+    source_entity_ids: list[list[str]] = []
+    normalized_vin = vehicle_vin.upper()
+    for device in device_registry.devices.values():
+        matches_vin = any(
+            len(identifier) >= 2
+            and identifier[0] in TESLA_EV_INTEGRATIONS
+            and str(identifier[1]).upper() == normalized_vin
+            for identifier in device.identifiers
+        )
+        if not matches_vin:
+            continue
+        source_entity_ids.append([
+            entity.entity_id
+            for entity in entity_registry.entities.values()
+            if entity.device_id == device.id
+        ])
+
+    paired_prefix = _resolve_ble_prefix_for_vehicle(
+        hass,
+        config_entry,
+        vehicle_vin,
+    )
+    if paired_prefix:
+        source_entity_ids.append([
+            f"binary_sensor.{paired_prefix}_charge_flap",
+            f"sensor.{paired_prefix}_charging_state",
+            f"number.{paired_prefix}_charging_amps",
+            f"sensor.{paired_prefix}_charge_current_request_max",
+            f"sensor.{paired_prefix}_charge_voltage",
+            f"sensor.{paired_prefix}_charger_voltage",
+            f"sensor.{paired_prefix}_charger_phases",
+            f"sensor.{paired_prefix}_charge_current",
+            f"sensor.{paired_prefix}_charge_power",
+            f"sensor.{paired_prefix}_charger_power",
+        ])
+
+    connection_states: list[bool] = []
+    plugged_capabilities: list[dict[str, Any]] = []
+    for entity_ids in source_entity_ids:
+        connection_state = _tesla_source_connection_state(hass, entity_ids)
+        if connection_state is None:
+            continue
+        connection_states.append(connection_state)
+        if connection_state:
+            plugged_capabilities.append(
+                _tesla_source_capability(hass, entity_ids)
+            )
+
+    if not connection_states or len(set(connection_states)) != 1:
+        if connection_states:
+            result["max_charge_amps_source"] = "safe_ambiguous_charger"
+        return result
+    if connection_states[0] is False:
+        result["max_charge_amps_source"] = "safe_unplugged"
+        return result
+
+    result["association_known"] = True
+    live_caps = [
+        capability["max_amps"]
+        for capability in plugged_capabilities
+        if capability.get("max_amps") is not None
+    ]
+    if not live_caps:
+        result["max_charge_amps_source"] = "safe_unavailable_charger_capability"
+        return result
+
+    effective_max = min(live_caps)
+    source = "active_charger"
+    if site_max is not None and site_max < effective_max:
+        effective_max = site_max
+        source = "active_charger_and_site_limit"
+    result.update({
+        "capability_known": True,
+        "max_charge_amps": effective_max,
+        "max_charge_amps_source": source,
+    })
+
+    live_voltages = [
+        capability["voltage"]
+        for capability in plugged_capabilities
+        if capability.get("voltage") is not None
+    ]
+    if live_voltages and max(live_voltages) - min(live_voltages) <= 10:
+        result["voltage"] = min(live_voltages)
+    live_phases = [
+        capability["phases"]
+        for capability in plugged_capabilities
+        if capability.get("phases") is not None
+    ]
+    if live_phases and len(set(live_phases)) == 1:
+        result["phases"] = live_phases[0]
+    return result
+
+
 def _get_phases_from_config(hass, config_entry, params):
     """Get charging phases: from params, or fall back to home_power_settings."""
     if "phases" in params and params["phases"] in (1, 3):
@@ -7773,6 +8094,31 @@ async def _dynamic_ev_update(
             )
         return
 
+    # Read live state before any single-vehicle rate write. Group sessions do
+    # their own shared telemetry read and ownership validation above. This await
+    # is a lifecycle boundary: cleanup or takeover makes the callback exit
+    # without issuing a stale charger command.
+    live_status = await _get_tesla_live_status(hass, config_entry)
+    if not _session_is_current():
+        _LOGGER.debug(
+            "Dynamic EV: Session changed while reading live status for %s; "
+            "skipping stale rate update",
+            vehicle_id,
+        )
+        return
+
+    # Battery-target and Smart Schedule sessions need the same live EVSE cap
+    # refresh as solar-surplus sessions.
+    if not await _refresh_dynamic_tesla_charger_capability(
+        hass,
+        config_entry,
+        entry_id,
+        vehicle_id,
+        state,
+    ):
+        return
+    params = state.get("params") or {}
+
     # target_battery_charge_kw: How much we want the battery to charge (positive = charging into battery)
     # e.g., 5.0 means we want 5kW going INTO the battery
     target_battery_charge_kw = params.get("target_battery_charge_kw", 5.0)
@@ -7858,15 +8204,6 @@ async def _dynamic_ev_update(
                 _LOGGER.warning(f"Dynamic EV: Failed to set fixed amps to {fixed_amps}A")
         return
 
-    # Get live status
-    live_status = await _get_tesla_live_status(hass, config_entry)
-    if not _session_still_owns_vehicle():
-        _LOGGER.debug(
-            "Dynamic EV: Session changed while reading live status for %s; "
-            "skipping stale rate update",
-            vehicle_id,
-        )
-        return
     if not live_status:
         _LOGGER.debug("Dynamic EV: Could not get live status, keeping current amps")
         return
@@ -8228,6 +8565,41 @@ async def _action_start_ev_charging_dynamic_locked(
                 "integer current is valid for the configured/entity bounds"
             )
             return False
+    elif (
+        params.get("charger_type", "tesla") == "tesla"
+        and len(str(vehicle_id)) == 17
+        and str(vehicle_id).isalnum()
+    ):
+        active_charger = await _resolve_tesla_active_charger_capability(
+            hass,
+            config_entry,
+            vehicle_id,
+            configured_voltage=_coerce_positive_int(
+                params.get("voltage"),
+                240,
+            ) or 240,
+            configured_phases=(
+                params.get("phases")
+                if params.get("phases") in (1, 3)
+                else 1
+            ),
+        )
+        params = {
+            **params,
+            "max_charge_amps": active_charger["max_charge_amps"],
+            "max_charge_amps_source": active_charger[
+                "max_charge_amps_source"
+            ],
+            "voltage": active_charger["voltage"],
+            "phases": active_charger["phases"],
+            "active_charger_association_known": active_charger[
+                "association_known"
+            ],
+            "active_charger_capability_known": active_charger[
+                "capability_known"
+            ],
+            "allow_stale_entity_max_override": False,
+        }
 
     def _same_loadpoint(candidate_id: str) -> bool:
         return (
@@ -8573,9 +8945,26 @@ async def _action_start_ev_charging_dynamic_locked(
             "no_grid_import": no_grid_import,
             "grid_import_tolerance_kw": params.get("grid_import_tolerance_kw", 0.1),
             "max_inverter_kw": params.get("max_inverter_kw", 10.0),
-            "fixed_charge_amps": params.get("fixed_charge_amps"),
+            "fixed_charge_amps": (
+                min(
+                    max_charge_amps,
+                    _coerce_positive_int(params.get("fixed_charge_amps"))
+                    or max_charge_amps,
+                )
+                if params.get("fixed_charge_amps") is not None
+                else None
+            ),
+            "requested_fixed_charge_amps": (
+                _coerce_positive_int(params.get("fixed_charge_amps"))
+                if params.get("fixed_charge_amps") is not None
+                else None
+            ),
         }
-        start_amps = params.get("start_amps", max_charge_amps)
+        start_amps = min(
+            max_charge_amps,
+            _coerce_positive_int(params.get("start_amps"), max_charge_amps)
+            or max_charge_amps,
+        )
         if no_grid_import:
             inverter_max_amps = int((mode_params["max_inverter_kw"] * 1000) / (voltage * resolved_phases))
             start_amps = min(start_amps, inverter_max_amps)

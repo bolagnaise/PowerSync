@@ -4041,6 +4041,9 @@ class AutoScheduleExecutor:
         # Variable charge rate tracking (per vehicle)
         self._current_charge_amps: Dict[str, int] = {}  # {vehicle_id: current_amps}
         self._charge_rate_change_threshold = 2  # Only change rate if diff >= 2 amps
+        self._charger_capability_signatures: Dict[
+            str, Tuple[bool, bool, int, int, int, str]
+        ] = {}
 
         # Tracks when Smart Schedule is asking the battery optimiser to preserve
         # energy for a vehicle that is not currently available to charge.
@@ -4252,8 +4255,32 @@ class AutoScheduleExecutor:
         """
         from .actions import _set_vehicle_amps
 
-        # Convert power to amps (use per-vehicle max from settings)
-        target_amps = self._power_to_amps_for_settings(power_w, settings)
+        active_charger = await self._resolve_effective_charger_capability(
+            vehicle_id,
+            settings,
+        )
+        effective_max_amps = (
+            active_charger["max_charge_amps"]
+            if active_charger is not None
+            else settings.max_charge_amps
+        )
+        effective_voltage = (
+            active_charger["voltage"]
+            if active_charger is not None
+            else settings.voltage
+        )
+        effective_phases = (
+            active_charger["phases"]
+            if active_charger is not None
+            else settings.phases
+        )
+        target_amps = self._power_to_amps(
+            power_w,
+            effective_voltage,
+            effective_phases,
+            effective_max_amps,
+            settings.min_charge_amps,
+        )
 
         if target_amps == 0:
             return False
@@ -4273,6 +4300,16 @@ class AutoScheduleExecutor:
         params = {
             "vehicle_vin": vehicle_vin,
             "amps": target_amps,
+            "min_charge_amps": settings.min_charge_amps,
+            "max_charge_amps": effective_max_amps,
+            "max_charge_amps_source": (
+                active_charger["max_charge_amps_source"]
+                if active_charger is not None
+                else "configured_charger"
+            ),
+            "voltage": effective_voltage,
+            "phases": effective_phases,
+            "allow_stale_entity_max_override": False,
             "charger_type": charger_type,
             "charger_switch_entity": settings.charger_switch_entity,
             "charger_amps_entity": settings.charger_amps_entity,
@@ -5018,6 +5055,56 @@ class AutoScheduleExecutor:
         except Exception:
             pass
 
+    async def _resolve_effective_charger_capability(
+        self,
+        vehicle_id: str,
+        settings: AutoScheduleSettings,
+    ) -> Optional[dict]:
+        """Return live Tesla EVSE limits; keep other charger models unchanged."""
+        opts = {
+            **getattr(self.config_entry, "data", {}),
+            **getattr(self.config_entry, "options", {}),
+        }
+        if _effective_auto_schedule_charger_type(settings, opts) != "tesla":
+            return None
+
+        try:
+            vehicle_vin = (
+                self._resolve_vehicle_vin(vehicle_id)
+                if vehicle_id != "_default"
+                else None
+            )
+        except (AttributeError, KeyError, TypeError):
+            # Minimal test/runtime adapters and non-Tesla synthetic loadpoints
+            # may not expose device registries. Preserve their configured path.
+            vehicle_vin = None
+        if vehicle_vin is None and len(str(vehicle_id)) == 17 and str(vehicle_id).isalnum():
+            vehicle_vin = str(vehicle_id)
+
+        # BLE-only and synthetic loadpoint IDs retain their existing
+        # entity/config-bound limits. The live charger resolver is intentionally
+        # VIN-scoped so it cannot associate one car's pilot with another car.
+        if not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", str(vehicle_vin or "").upper()):
+            return None
+
+        from . import actions as actions_module
+
+        resolver = getattr(
+            actions_module,
+            "_resolve_tesla_active_charger_capability",
+            None,
+        )
+        if resolver is None or not hasattr(self.hass, "states"):
+            return None
+
+        return await resolver(
+            self.hass,
+            self.config_entry,
+            vehicle_vin,
+            configured_voltage=settings.voltage,
+            configured_phases=settings.phases,
+        )
+
     @staticmethod
     def _is_anonymous_loadpoint(
         vehicle_id: str,
@@ -5104,6 +5191,37 @@ class AutoScheduleExecutor:
         # Resolve sequential vehicle_id to actual VIN/BLE identifier
         # so per-vehicle checks work correctly for multi-vehicle setups
         vehicle_vin = self._resolve_vehicle_vin(vehicle_id)
+        charger_capability = await self._resolve_effective_charger_capability(
+            vehicle_id,
+            settings,
+        )
+        if charger_capability is not None:
+            signature = (
+                bool(charger_capability["association_known"]),
+                bool(charger_capability["capability_known"]),
+                int(charger_capability["max_charge_amps"]),
+                int(charger_capability["voltage"]),
+                int(charger_capability["phases"]),
+                str(charger_capability["max_charge_amps_source"]),
+            )
+            signatures = getattr(
+                self,
+                "_charger_capability_signatures",
+                None,
+            )
+            if signatures is None:
+                signatures = {}
+                self._charger_capability_signatures = signatures
+            previous_signature = signatures.get(vehicle_id)
+            signatures[vehicle_id] = signature
+            if previous_signature is not None and previous_signature != signature:
+                state.current_plan = None
+                state.current_window = None
+                _LOGGER.info(
+                    "Auto-schedule: active charger capability changed for %s; "
+                    "regenerating the plan",
+                    vehicle_id,
+                )
 
         # Keep the plan fresh before checking availability.
         ev_soc = await self._get_vehicle_soc(vehicle_id)
@@ -5128,7 +5246,13 @@ class AutoScheduleExecutor:
                 _ha_local_now_naive() - state.last_plan_update > self._plan_update_interval
             )
         ):
-            await self._regenerate_plan(vehicle_id, settings, state, current_soc=ev_soc)
+            await self._regenerate_plan(
+                vehicle_id,
+                settings,
+                state,
+                current_soc=ev_soc,
+                charger_capability=charger_capability,
+            )
 
         location = await get_ev_location(self.hass, self.config_entry, vehicle_vin)
         if location not in ("home", "unknown"):
@@ -5651,6 +5775,7 @@ class AutoScheduleExecutor:
         settings: AutoScheduleSettings,
         state: AutoScheduleState,
         current_soc: Optional[int] = None,
+        charger_capability: Optional[dict] = None,
     ) -> None:
         """Regenerate the charging plan based on current forecasts."""
         # HA-local, not OS-local: on UTC-container installs with a non-UTC HA
@@ -5702,6 +5827,21 @@ class AutoScheduleExecutor:
 
         try:
             resolved_capacity = self.resolve_vehicle_capacity(vehicle_id, settings)
+            if charger_capability is None:
+                charger_capability = (
+                    await self._resolve_effective_charger_capability(
+                        vehicle_id,
+                        settings,
+                    )
+                )
+            charger_power_kw = settings.get_max_charge_power_kw()
+            if charger_capability is not None:
+                charger_power_kw = (
+                    charger_capability["max_charge_amps"]
+                    * charger_capability["voltage"]
+                    * charger_capability["phases"]
+                    / 1000.0
+                )
             # Use per-day priority based on the target departure day
             effective_priority = settings.get_effective_priority(
                 target_time.weekday() if target_time else now.weekday()
@@ -5713,7 +5853,7 @@ class AutoScheduleExecutor:
                 target_time=target_time,
                 resolved_capacity=resolved_capacity,
                 priority=effective_priority,
-                charger_power_kw=settings.get_max_charge_power_kw(),
+                charger_power_kw=charger_power_kw,
             )
 
             state.current_plan = plan
@@ -6596,6 +6736,30 @@ class AutoScheduleExecutor:
                 )
                 return False
 
+        active_charger = None
+        if charger_type == "tesla" and re.fullmatch(
+            r"[A-HJ-NPR-Z0-9]{17}", str(vehicle_vin or "").upper()
+        ):
+            active_charger = await self._resolve_effective_charger_capability(
+                vehicle_vin,
+                settings,
+            )
+        effective_max_amps = (
+            active_charger["max_charge_amps"]
+            if active_charger is not None
+            else settings.max_charge_amps
+        )
+        effective_voltage = (
+            active_charger["voltage"]
+            if active_charger is not None
+            else settings.voltage
+        )
+        effective_phases = (
+            active_charger["phases"]
+            if active_charger is not None
+            else settings.phases
+        )
+
         # Determine mode based on source
         control_battery_target = (
             source.startswith("grid")
@@ -6630,9 +6794,14 @@ class AutoScheduleExecutor:
             "owner_mode": "smart_schedule_solar_surplus" if source == "solar_surplus" else "smart_schedule",
             "allow_ownership_takeover": True,
             "min_charge_amps": settings.min_charge_amps,
-            "max_charge_amps": settings.max_charge_amps,
-            "voltage": settings.voltage,
-            "phases": settings.phases,
+            "max_charge_amps": effective_max_amps,
+            "max_charge_amps_source": (
+                active_charger["max_charge_amps_source"]
+                if active_charger is not None
+                else "configured_charger"
+            ),
+            "voltage": effective_voltage,
+            "phases": effective_phases,
             "charger_type": charger_type,
             "min_battery_soc": settings.get_effective_min_battery_to_start(dt_util.now().weekday()),
             "pause_below_soc": (
@@ -6670,10 +6839,10 @@ class AutoScheduleExecutor:
             params["vehicle_vin"] = loadpoint_id
         if force_max_rate:
             params.update({
-                "start_amps": settings.max_charge_amps,
-                "fixed_charge_amps": settings.max_charge_amps,
+                "start_amps": effective_max_amps,
+                "fixed_charge_amps": effective_max_amps,
                 "target_battery_charge_kw": 0,
-                "allow_stale_entity_max_override": True,
+                "allow_stale_entity_max_override": False,
             })
 
         try:
