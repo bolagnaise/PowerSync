@@ -155,8 +155,8 @@ class SolarExportChargeHoldAdapter:
             controller = getattr(self.coordinator, "_controller", None)
             checker = getattr(controller, "_ensure_command_entities", None)
             if callable(checker) and not checker(
-                ("battery_api_mode", "storage_control_mode"),
-                available_required=("battery_api_mode", "storage_control_mode"),
+                ("storage_control_mode",),
+                available_required=("storage_control_mode",),
             ):
                 return SolarExportCapability(
                     False, "charge_block_entities_unavailable", adapter=self.key

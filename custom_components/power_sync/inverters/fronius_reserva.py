@@ -412,11 +412,10 @@ class FroniusReservaBatteryController:
     async def block_charging(self) -> bool:
         """Block battery charging."""
         if not self._ensure_command_entities(
-            ("battery_api_mode", "storage_control_mode"),
-            available_required=("battery_api_mode", "storage_control_mode"),
+            ("storage_control_mode",),
+            available_required=("storage_control_mode",),
         ):
             return False
-        await self._set_select("battery_api_mode", _MODE_MANUAL)
         await self._set_select("storage_control_mode", _MODE_BLOCK_CHARGING)
         return True
 

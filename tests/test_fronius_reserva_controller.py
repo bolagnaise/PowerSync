@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import sys
 import types
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
@@ -419,6 +421,30 @@ def test_idle_zeroes_pv_charge_and_discharge_limits():
             "set_value",
             {"entity_id": "number.reserva_discharge_limit_2", "value": 0},
         ),
+    ]
+
+
+@pytest.mark.parametrize("initial_api_mode", ["Auto", "Manual"])
+def test_block_charging_only_sets_storage_control_mode(initial_api_mode):
+    states = _reserva_states()
+    for state in states:
+        if state.entity_id == "select.reserva_battery_api_mode":
+            state.state = initial_api_mode
+    hass = _FakeHass(states)
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.block_charging())
+    assert hass.states.get("select.reserva_battery_api_mode").state == initial_api_mode
+    assert hass.states.get("select.reserva_storage_control_mode_2").state == "Block Charging"
+    assert hass.services.calls == [
+        (
+            "select",
+            "select_option",
+            {
+                "entity_id": "select.reserva_storage_control_mode_2",
+                "option": "Block Charging",
+            },
+        )
     ]
 
 

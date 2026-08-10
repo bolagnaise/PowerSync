@@ -80,6 +80,33 @@ class _NeovoltChild:
         return True
 
 
+class _FroniusController:
+    def __init__(self, api_mode):
+        self.api_mode = api_mode
+        self.storage_mode = "Auto"
+        self.ensure_calls = []
+        self.mode_writes = []
+        # The solar-export hold must not depend on this entity being present.
+        self._entity_map = {"storage_control_mode": "select.storage_control_mode"}
+
+    def _ensure_command_entities(self, required, *, available_required=()):
+        self.ensure_calls.append((required, available_required))
+        return all(key in self._entity_map for key in required)
+
+    def get_status(self):
+        return {"mode": self.storage_mode}
+
+    async def block_charging(self):
+        self.mode_writes.append("Block Charging")
+        self.storage_mode = "Block Charging"
+        return True
+
+    async def restore_normal(self):
+        self.mode_writes.append("Auto")
+        self.storage_mode = "Auto"
+        return True
+
+
 def test_solax_limit_adapter_captures_applies_verifies_and_restores_exact_value():
     controller = _SolaxController()
     coordinator = SimpleNamespace(
@@ -127,6 +154,34 @@ def test_multi_neovolt_partial_apply_compensates_every_stack():
     assert first.restore_calls == ["Normal", "Normal"]
     assert second.restore_calls == ["Normal", "Normal"]
     assert store.data == {}
+
+
+def test_fronius_solar_export_hold_preserves_battery_api_mode_through_lifecycle():
+    for initial_api_mode in ("Auto", "Manual"):
+        controller = _FroniusController(initial_api_mode)
+        coordinator = SimpleNamespace(
+            _controller=controller,
+            data={},
+            restore_normal=controller.restore_normal,
+        )
+        adapter = resolve_solar_export_adapter("fronius_reserva", coordinator)
+        lifecycle = SolarExportHoldController(_Store(), adapter)
+
+        capability = adapter.capability()
+        assert capability.supported
+        assert controller.ensure_calls[-1] == (
+            ("storage_control_mode",),
+            ("storage_control_mode",),
+        )
+        assert asyncio.run(lifecycle.apply("entry", "slot-1"))
+        assert lifecycle.status["phase"] == "active"
+        assert controller.storage_mode == "Block Charging"
+        assert controller.api_mode == initial_api_mode
+
+        assert asyncio.run(lifecycle.clear("transition"))
+        assert controller.storage_mode == "Auto"
+        assert controller.api_mode == initial_api_mode
+        assert controller.mode_writes == ["Block Charging", "Auto", "Auto"]
 
 
 def test_consecutive_solar_export_slots_keep_original_restore_baseline():
