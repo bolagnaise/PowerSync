@@ -54,12 +54,17 @@ from .const import (
     TESLA_SITE_INFO_CACHE_TTL_SECONDS,
     CONF_SIGENERGY_CHARGER_ENABLED,
     CONF_SIGENERGY_CHARGER_TYPE,
+    CONF_TESLA_BLE_VEHICLE_MAPPING,
     SIGENERGY_CHARGER_EVAC,
     SIGENERGY_CHARGER_EVDC,
 )
 from .sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
 from .sigenergy_model import sigenergy_home_load_kw
 from .tesla_grid_control import async_set_tesla_grid_charging_confirmed
+from .tesla_ble_mapping import (
+    TeslaBleMappingError,
+    parse_tesla_ble_vehicle_mapping,
+)
 from .teslemetry_sse import TeslemetryEnergySSEClient
 
 _SOLCAST_ESTIMATE_FIELDS = {
@@ -109,6 +114,81 @@ def _grid_status_is_off_grid(value: Any) -> bool | None:
     if status is None:
         return None
     return status in {"Inactive", "Islanded", "Off-Grid", "SystemIslandedActive"}
+
+
+def _mapped_tesla_other_charger_power_kw(
+    entry: Any,
+    vehicles: list[dict[str, Any]],
+    connector_vehicle_ids: set[str] | None = None,
+) -> float:
+    """Return power for a mapped Tesla proven separate from an idle connector.
+
+    A zero from Tesla's native Wall Connector telemetry is authoritative for
+    that connector, but not for a second vehicle charging through a UMC.  In
+    the common payload where the connector has no VIN, require two explicitly
+    mapped vehicles: one actively charging and a different one connected but
+    idle.  If the connector does identify its VIN, any other mapped charging
+    vehicle is independently attributable.
+    """
+    config = {
+        **getattr(entry, "data", {}),
+        **getattr(entry, "options", {}),
+    }
+    try:
+        mapping = parse_tesla_ble_vehicle_mapping(
+            config.get(CONF_TESLA_BLE_VEHICLE_MAPPING)
+        )
+    except TeslaBleMappingError:
+        return 0.0
+    if len(mapping) < 2:
+        return 0.0
+
+    connector_ids = {
+        str(vehicle_id).strip().upper()
+        for vehicle_id in (connector_vehicle_ids or set())
+        if vehicle_id
+    }
+    active_power_by_vin: dict[str, float] = {}
+    connected_idle_vins: set[str] = set()
+    for vehicle in vehicles:
+        vehicle_id = ""
+        for candidate_id in (
+            vehicle.get("vehicle_id"),
+            vehicle.get("bridge_vehicle_id"),
+        ):
+            normalized_id = str(candidate_id or "").strip().upper()
+            if normalized_id in mapping:
+                vehicle_id = normalized_id
+                break
+        if vehicle_id not in mapping:
+            continue
+        try:
+            power_kw = max(0.0, float(vehicle.get("ev_power_kw") or 0.0))
+        except (TypeError, ValueError):
+            continue
+        if vehicle.get("is_charging") and power_kw > 0.05:
+            active_power_by_vin[vehicle_id] = max(
+                active_power_by_vin.get(vehicle_id, 0.0),
+                power_kw,
+            )
+        elif vehicle.get("is_connected"):
+            connected_idle_vins.add(vehicle_id)
+
+    distinct_active_power = sum(
+        power_kw
+        for vehicle_id, power_kw in active_power_by_vin.items()
+        if vehicle_id not in connector_ids
+    )
+    if distinct_active_power <= 0.05:
+        return 0.0
+    if connector_ids:
+        return distinct_active_power
+
+    # An unidentified idle connector is only separable when another explicitly
+    # mapped Tesla is simultaneously observed connected-but-idle.
+    if connected_idle_vins - set(active_power_by_vin):
+        return distinct_active_power
+    return 0.0
 
 
 def normalize_custom_power_kw(value: Any, unit: str = "") -> float | None:
@@ -2611,6 +2691,8 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             # Extract EV charging power from Tesla Wall Connectors
             ev_power_kw = 0.0
             wall_connector_power_reported = False
+            idle_wall_connector_reported = False
+            idle_wall_connector_vehicle_ids: set[str] = set()
             wall_connectors_raw = live_status.get("wall_connectors")
             if wall_connectors_raw:
                 try:
@@ -2640,6 +2722,20 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                         wall_connector_power_reported = True
                         if wc_power > 0:
                             ev_power_kw += wc_power / 1000
+                        elif _finite_float(wc.get("wall_connector_state")) in (
+                            4,
+                            6,
+                            7,
+                            11,
+                        ):
+                            idle_wall_connector_reported = True
+                            connector_vehicle_id = (
+                                wc.get("vin") or wc.get("vehicle_vin")
+                            )
+                            if connector_vehicle_id:
+                                idle_wall_connector_vehicle_ids.add(
+                                    str(connector_vehicle_id).strip().upper()
+                                )
                 except Exception:
                     pass
 
@@ -2653,6 +2749,22 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                         from . import _get_ev_vehicle_status
                         ev_status = _get_ev_vehicle_status(self.hass, entry)
                         ev_power_kw = ev_status.get("ev_power_kw", 0) or 0
+                except Exception:
+                    pass
+            elif ev_power_kw <= 0 and idle_wall_connector_reported:
+                # A site may also have a UMC or another non-native charger. An
+                # idle Wall Connector's zero must not suppress independently
+                # identified power from a different, explicitly mapped Tesla.
+                try:
+                    entry = self.hass.config_entries.async_get_entry(self._entry_id)
+                    if entry:
+                        from . import _get_ev_vehicles_status
+
+                        ev_power_kw = _mapped_tesla_other_charger_power_kw(
+                            entry,
+                            _get_ev_vehicles_status(self.hass, entry),
+                            idle_wall_connector_vehicle_ids,
+                        )
                 except Exception:
                     pass
 

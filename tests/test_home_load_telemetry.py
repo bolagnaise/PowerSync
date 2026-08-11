@@ -116,7 +116,11 @@ def _install_coordinator_stubs() -> None:
 _install_coordinator_stubs()
 sys.modules.pop("power_sync.coordinator", None)
 
-from power_sync.coordinator import DOMAIN, TeslaEnergyCoordinator  # noqa: E402
+from power_sync.coordinator import (  # noqa: E402
+    DOMAIN,
+    TeslaEnergyCoordinator,
+    _mapped_tesla_other_charger_power_kw,
+)
 from power_sync.const import (  # noqa: E402
     POWERSYNC_AUTH_START_URL,
     powersync_auth_start_url,
@@ -714,6 +718,118 @@ def test_tesla_explicit_zero_wall_connector_power_suppresses_vehicle_fallback(
     assert fallback_calls == []
     assert result["ev_power"] == pytest.approx(0.0)
     assert result["load_power"] == pytest.approx(3.077)
+
+
+def test_tesla_idle_wall_connector_keeps_distinct_mapped_umc_power(monkeypatch):
+    """An idle Wall Connector must not hide another mapped Tesla's UMC draw."""
+    coordinator = _new_stream_tesla_coordinator()
+
+    async def _request_refresh() -> None:
+        return None
+
+    coordinator.async_request_refresh = _request_refresh
+    tessy_vin = "5YJTEST0000000001"
+    umc_vin = "5YJTEST0000000002"
+    entry = types.SimpleNamespace(
+        entry_id="stream-entry",
+        data={},
+        options={
+            "tesla_ble_vehicle_mapping": (
+                f"{tessy_vin}=garage_ble,{umc_vin}=tesla_ble_second_car"
+            )
+        },
+    )
+    coordinator.hass.config_entries.async_get_entry = (
+        lambda entry_id: entry if entry_id == "stream-entry" else None
+    )
+    vehicle_calls = []
+
+    def _vehicle_statuses(hass, config_entry):
+        vehicle_calls.append((hass, config_entry))
+        return [
+            {
+                "vehicle_id": tessy_vin,
+                "ev_power_kw": 0.0,
+                "is_connected": True,
+                "is_charging": False,
+            },
+            {
+                "vehicle_id": umc_vin,
+                "ev_power_kw": 2.0,
+                "is_connected": True,
+                "is_charging": True,
+            },
+        ]
+
+    monkeypatch.setattr(
+        sys.modules["power_sync"],
+        "_get_ev_vehicles_status",
+        _vehicle_statuses,
+        raising=False,
+    )
+    event = {
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "site_id": "12345",
+        "live_status": {
+            "solar_power": 0,
+            "grid_power": 0,
+            "battery_power": 4113,
+            "load_power": 4113,
+            "percentage_charged": 47,
+            "grid_status": "Active",
+            "wall_connectors": [
+                {
+                    "wall_connector_state": 4,
+                    "wall_connector_power": 0,
+                }
+            ],
+        },
+    }
+
+    asyncio.run(coordinator._async_handle_teslemetry_stream_event(event))
+    result = asyncio.run(coordinator._async_update_data())
+
+    assert len(vehicle_calls) == 1
+    assert result["ev_power"] == pytest.approx(2.0)
+    assert result["load_power"] == pytest.approx(2.113)
+
+
+def test_tesla_idle_connector_override_fails_closed_when_identity_is_ambiguous():
+    """Configured multiplicity alone must not revive stale vehicle power."""
+    first_vin = "5YJTEST0000000001"
+    second_vin = "5YJTEST0000000002"
+    entry = types.SimpleNamespace(
+        data={},
+        options={
+            "tesla_ble_vehicle_mapping": (
+                f"{first_vin}=garage_ble,{second_vin}=tesla_ble_second_car"
+            )
+        },
+    )
+    active_vehicle = {
+        "vehicle_id": second_vin,
+        "ev_power_kw": 2.0,
+        "is_connected": True,
+        "is_charging": True,
+    }
+
+    assert _mapped_tesla_other_charger_power_kw(
+        entry,
+        [active_vehicle],
+    ) == pytest.approx(0.0)
+    assert _mapped_tesla_other_charger_power_kw(
+        entry,
+        [
+            {
+                "vehicle_id": first_vin,
+                "ev_power_kw": 0.0,
+                "is_connected": True,
+                "is_charging": False,
+            },
+            active_vehicle,
+        ],
+        {second_vin},
+    ) == pytest.approx(0.0)
 
 
 def test_tesla_missing_wall_connector_power_preserves_vehicle_fallback(monkeypatch):
