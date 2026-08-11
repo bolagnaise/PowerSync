@@ -252,6 +252,7 @@ def test_h3_pro_smart_skips_work_mode_change_but_still_guards_baseline(foxess_mo
 
     asyncio.run(controller.force_discharge(duration_minutes=5, power_w=3000, min_timeout_seconds=60))
     assert controller._original_work_mode == reg.work_mode_self_use
+
     # H3-Pro/Smart must NOT change the work_mode register during force.
     assert holding[reg.work_mode] == reg.work_mode_self_use
 
@@ -262,3 +263,145 @@ def test_h3_pro_smart_skips_work_mode_change_but_still_guards_baseline(foxess_mo
 
     asyncio.run(controller.force_discharge(duration_minutes=5, power_w=3000, min_timeout_seconds=60))
     assert controller._original_work_mode == reg.work_mode_self_use
+
+
+@pytest.mark.parametrize("model_family", ["H3", "H3-Smart"])
+def test_set_work_mode_fails_when_remote_control_clear_fails(foxess_module, model_family):
+    """A failed remote-control clear must prevent a mode-change success."""
+    family = {
+        "H3": foxess_module.FoxESSModelFamily.H3,
+        "H3-Smart": foxess_module.FoxESSModelFamily.H3_SMART,
+    }[model_family]
+    reg = foxess_module.REGISTER_MAPS[family]
+    holding = {reg.work_mode: reg.work_mode_self_use}
+    controller = _make_controller(foxess_module, holding, model_family=model_family)
+    calls: list[tuple[int, int]] = []
+
+    async def fail_remote_clear(address: int, value: int):
+        calls.append((address, value))
+        return address != reg.remote_enable
+
+    controller._write_holding_register = fail_remote_clear
+
+    assert asyncio.run(controller.set_work_mode(reg.work_mode_feed_in)) is False
+    assert calls == [(reg.remote_enable, 0)]
+    assert holding[reg.work_mode] == reg.work_mode_self_use
+
+
+def test_set_backup_mode_clears_remote_once_before_work_mode(foxess_module):
+    """Backup mode must clear remote control once, then write the mode."""
+    reg = foxess_module.REGISTER_MAPS[foxess_module.FoxESSModelFamily.H3]
+    holding = {
+        reg.work_mode: reg.work_mode_self_use,
+        reg.min_soc: 20,
+    }
+    controller = _make_controller(foxess_module, holding)
+    calls: list[tuple[int, int]] = []
+
+    async def record_write(address: int, value: int):
+        calls.append((address, value))
+        holding[address] = value
+        return True
+
+    controller._write_holding_register = record_write
+
+    assert asyncio.run(controller.set_backup_mode()) is True
+    assert calls == [
+        (reg.remote_enable, 0),
+        (reg.work_mode, reg.work_mode_backup),
+    ]
+    assert controller._original_work_mode == reg.work_mode_self_use
+    assert controller._original_min_soc == 20
+
+
+def test_set_backup_mode_propagates_remote_clear_failure_without_baseline_capture(
+    foxess_module,
+):
+    """A failed initial clear must skip mode writes and snapshot capture."""
+    reg = foxess_module.REGISTER_MAPS[foxess_module.FoxESSModelFamily.H3]
+    holding = {
+        reg.work_mode: reg.work_mode_self_use,
+        reg.min_soc: 20,
+    }
+    controller = _make_controller(foxess_module, holding)
+    calls: list[tuple[int, int]] = []
+
+    async def fail_remote_clear(address: int, value: int):
+        calls.append((address, value))
+        return False
+
+    controller._write_holding_register = fail_remote_clear
+
+    assert asyncio.run(controller.set_backup_mode()) is False
+    assert calls == [(reg.remote_enable, 0)]
+    assert holding[reg.work_mode] == reg.work_mode_self_use
+    assert controller._original_work_mode is None
+    assert controller._original_min_soc is None
+
+
+def test_restore_propagates_remote_control_clear_failure(foxess_module):
+    """Solar restore must not report success when remote control remains active."""
+    reg = foxess_module.REGISTER_MAPS[foxess_module.FoxESSModelFamily.H3]
+    holding = {reg.work_mode: reg.work_mode_feed_in}
+    controller = _make_controller(foxess_module, holding)
+
+    async def fail_remote_clear(address: int, value: int):
+        return address != reg.remote_enable
+
+    controller._write_holding_register = fail_remote_clear
+
+    assert asyncio.run(controller.restore()) is False
+
+
+def test_restore_normal_propagates_remote_clear_failure_and_keeps_baseline(foxess_module):
+    """A failed restore step must retain snapshots for a later retry."""
+    reg = foxess_module.REGISTER_MAPS[foxess_module.FoxESSModelFamily.H3]
+    holding = {
+        reg.work_mode: reg.work_mode_feed_in,
+        reg.min_soc: 20,
+    }
+    controller = _make_controller(foxess_module, holding)
+    controller._original_work_mode = reg.work_mode_self_use
+    controller._original_min_soc = 20
+
+    async def fail_remote_clear(address: int, value: int):
+        return address != reg.remote_enable
+
+    controller._write_holding_register = fail_remote_clear
+
+    assert asyncio.run(controller.restore_normal()) is False
+    assert controller._original_work_mode == reg.work_mode_self_use
+    assert controller._original_min_soc == 20
+
+
+def test_restore_normal_propagates_min_soc_failure_and_retries(foxess_module):
+    """Min-SOC restore failures are reported and leave the baseline retryable."""
+    reg = foxess_module.REGISTER_MAPS[foxess_module.FoxESSModelFamily.H3]
+    holding = {
+        reg.work_mode: reg.work_mode_feed_in,
+        reg.min_soc: 50,
+    }
+    controller = _make_controller(foxess_module, holding)
+    controller._original_work_mode = reg.work_mode_self_use
+    controller._original_min_soc = 20
+    fail_min_soc = True
+
+    async def fail_once_min_soc(address: int, value: int):
+        nonlocal fail_min_soc
+        if address == reg.min_soc and fail_min_soc:
+            fail_min_soc = False
+            return False
+        holding[address] = value
+        return True
+
+    controller._write_holding_register = fail_once_min_soc
+
+    assert asyncio.run(controller.restore_normal()) is False
+    assert controller._original_work_mode == reg.work_mode_self_use
+    assert controller._original_min_soc == 20
+
+    assert asyncio.run(controller.restore_normal()) is True
+    assert holding[reg.work_mode] == reg.work_mode_self_use
+    assert holding[reg.min_soc] == 20
+    assert controller._original_work_mode is None
+    assert controller._original_min_soc is None

@@ -924,7 +924,14 @@ class FoxESSController(InverterController):
         # effect. Without this, force charge/discharge continues until the
         # remote timeout even after the user changes mode.
         if not _from_force and self._register_map.remote_enable:
-            await self._write_holding_register(self._register_map.remote_enable, 0)
+            remote_cleared = await self._write_holding_register(
+                self._register_map.remote_enable, 0
+            )
+            if not remote_cleared:
+                _LOGGER.error(
+                    "FoxESS failed to disable remote control before setting work mode"
+                )
+                return False
 
         return await self._write_holding_register(self._register_map.work_mode, mode)
 
@@ -1138,17 +1145,21 @@ class FoxESSController(InverterController):
 
         # Restore original min_soc if saved
         if self._original_min_soc is not None and self._register_map.min_soc:
-            await self._write_holding_register(self._register_map.min_soc, self._original_min_soc)
-            self._original_min_soc = None
-
-        # Disable remote control override
-        if self._register_map.remote_enable:
-            await self._write_holding_register(self._register_map.remote_enable, 0)
-
-        self._original_work_mode = None
+            min_soc_restored = await self._write_holding_register(
+                self._register_map.min_soc, self._original_min_soc
+            )
+            if not min_soc_restored:
+                _LOGGER.error("FoxESS failed to restore original min SOC")
+                success = False
 
         if success:
+            self._original_work_mode = None
+            self._original_min_soc = None
             _LOGGER.info("FoxESS restored to normal operation (mode %d)", target_mode)
+        else:
+            _LOGGER.error(
+                "FoxESS restore to normal operation failed; saved baseline retained for retry"
+            )
 
         return success
 
@@ -1173,7 +1184,10 @@ class FoxESSController(InverterController):
         # reject work_mode and min_soc writes while remote control is active.
         # Matches nathanmarlor/foxess_modbus: _disable_remote_control(BACK_UP).
         if reg.remote_enable:
-            await self._write_holding_register(reg.remote_enable, 0)
+            remote_cleared = await self._write_holding_register(reg.remote_enable, 0)
+            if not remote_cleared:
+                _LOGGER.error("FoxESS failed to disable remote control before Backup mode")
+                return False
 
         # Save current work mode for restore (only on first call, not re-entry)
         if self._original_work_mode is None and reg.work_mode and reg.supports_work_mode_rw:
@@ -1187,7 +1201,9 @@ class FoxESSController(InverterController):
             if ms_raw:
                 self._original_min_soc = ms_raw[0]
 
-        success = await self.set_work_mode(reg.work_mode_backup)
+        # Remote control was already cleared above; avoid issuing a duplicate
+        # clear that could fail after the first write succeeded.
+        success = await self.set_work_mode(reg.work_mode_backup, _from_force=True)
         if success:
             _LOGGER.info("FoxESS set to Backup mode (IDLE hold, remote control disabled)")
         return success
@@ -1209,12 +1225,15 @@ class FoxESSController(InverterController):
         )
         success = await self.set_work_mode(target_mode)
 
-        # Clear saved state
-        self._original_work_mode = None
-        self._original_min_soc = None
-
         if success:
+            # Clear saved state only after the complete restore succeeds.
+            self._original_work_mode = None
+            self._original_min_soc = None
             _LOGGER.info("FoxESS restored from IDLE Backup mode (mode %d)", target_mode)
+        else:
+            _LOGGER.error(
+                "FoxESS restore from IDLE Backup mode failed; saved baseline retained for retry"
+            )
         return success
 
     async def set_backup_reserve(self, percent: int) -> bool:
@@ -1309,7 +1328,12 @@ class FoxESSController(InverterController):
 
         # Disable remote control — inverter returns to normal autonomous operation
         if self._register_map.remote_enable:
-            await self._write_holding_register(self._register_map.remote_enable, 0)
+            success = await self._write_holding_register(
+                self._register_map.remote_enable, 0
+            )
+            if not success:
+                _LOGGER.error("FoxESS solar export restore failed to disable remote control")
+                return False
 
         _LOGGER.info("FoxESS solar export restored (remote control disabled)")
         return True
