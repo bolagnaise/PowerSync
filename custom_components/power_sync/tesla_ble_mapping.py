@@ -173,3 +173,109 @@ def ble_prefix_vehicle_pairs(
         if prefix:
             pairs[prefix] = vin
     return pairs
+
+
+def canonical_tesla_vehicle_id(
+    config: Mapping[str, Any],
+    vehicle_id: str | None,
+    fleet_vins: Sequence[str] = (),
+    resolved_prefixes: Sequence[str] | None = None,
+) -> str:
+    """Return the physical VIN for a paired BLE alias when it is known.
+
+    Standalone BLE vehicles deliberately retain their ``ble_*`` identifier.
+    Explicit mappings can resolve an alias even before Fleet discovery has
+    populated a vehicle list; single-vehicle inference still requires the
+    caller to supply the unambiguous Fleet VIN.
+    """
+    normalized_id = str(vehicle_id or "")
+    if not normalized_id.startswith("ble_"):
+        return normalized_id
+
+    prefix = normalized_id[4:]
+    configured_prefixes = configured_ble_prefixes(config)
+    try:
+        explicit_mapping = parse_tesla_ble_vehicle_mapping(
+            config.get(CONF_TESLA_BLE_VEHICLE_MAPPING)
+        )
+    except TeslaBleMappingError:
+        explicit_mapping = {}
+
+    explicit_vins = [
+        vin
+        for vin, mapped_prefix in explicit_mapping.items()
+        if mapped_prefix == prefix and prefix in configured_prefixes
+    ]
+    if len(explicit_vins) == 1:
+        return explicit_vins[0]
+
+    paired_vin = ble_prefix_vehicle_pairs(
+        config,
+        fleet_vins,
+        resolved_prefixes,
+    ).get(prefix)
+    return str(paired_vin or normalized_id)
+
+
+def coalesce_paired_vehicle_configs(
+    config: Mapping[str, Any],
+    vehicle_configs: Sequence[Mapping[str, Any]],
+    resolved_prefixes: Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Remove stored BLE profiles that duplicate a canonical Fleet vehicle.
+
+    A VIN-backed profile is authoritative when both identities exist. This is
+    intentionally conservative: stale BLE profiles commonly contain default
+    limits and priorities, so merging those values into a configured VIN could
+    silently change charging behaviour. A paired alias without an existing VIN
+    profile is migrated to the VIN so it remains configurable.
+    """
+    copied_configs = [
+        dict(vehicle_config)
+        for vehicle_config in vehicle_configs
+        if isinstance(vehicle_config, Mapping)
+    ]
+    fleet_vins = [
+        vehicle_id
+        for vehicle_config in copied_configs
+        if (
+            (vehicle_id := str(vehicle_config.get("vehicle_id") or ""))
+            and len(vehicle_id) == 17
+            and vehicle_id.isalnum()
+            and not vehicle_id.isdigit()
+        )
+    ]
+
+    canonical_configs: list[dict[str, Any]] = []
+    canonical_indexes: dict[str, int] = {}
+
+    # Establish every non-BLE profile first so its settings win even when a
+    # legacy alias happened to appear earlier in persisted storage.
+    for vehicle_config in copied_configs:
+        vehicle_id = str(vehicle_config.get("vehicle_id") or "")
+        if vehicle_id.startswith("ble_"):
+            continue
+        canonical_indexes[vehicle_id.casefold()] = len(canonical_configs)
+        canonical_configs.append(vehicle_config)
+
+    for vehicle_config in copied_configs:
+        vehicle_id = str(vehicle_config.get("vehicle_id") or "")
+        if not vehicle_id.startswith("ble_"):
+            continue
+        canonical_id = canonical_tesla_vehicle_id(
+            config,
+            vehicle_id,
+            fleet_vins,
+            resolved_prefixes,
+        )
+        canonical_key = canonical_id.casefold()
+        if canonical_key in canonical_indexes:
+            continue
+        migrated_config = {
+            **vehicle_config,
+            "vehicle_id": canonical_id,
+        }
+        canonical_indexes[canonical_key] = len(canonical_configs)
+        canonical_configs.append(migrated_config)
+
+    return canonical_configs

@@ -63,7 +63,11 @@ from ..solar_surplus_config import (
     get_solar_surplus_min_battery_soc,
     normalize_solar_surplus_config,
 )
-from ..tesla_ble_mapping import resolve_ble_prefixes, vehicle_ble_prefix
+from ..tesla_ble_mapping import (
+    canonical_tesla_vehicle_id,
+    resolve_ble_prefixes,
+    vehicle_ble_prefix,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1277,6 +1281,56 @@ def _resolve_ble_prefix_for_vehicle(
         vehicle_vin,
         resolved_prefixes=resolved_prefixes,
     ) or DEFAULT_TESLA_BLE_ENTITY_PREFIX
+
+
+def _canonical_dynamic_tesla_vehicle_id(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str | None,
+) -> str:
+    """Collapse a paired BLE alias onto its physical VIN for runtime state."""
+    normalized_id = str(vehicle_id or "")
+    if not normalized_id.startswith("ble_"):
+        return normalized_id
+
+    config = {
+        **getattr(config_entry, "data", {}),
+        **getattr(config_entry, "options", {}),
+    }
+    explicitly_canonical_id = canonical_tesla_vehicle_id(config, normalized_id)
+    if explicitly_canonical_id != normalized_id:
+        return explicitly_canonical_id
+    try:
+        device_registry = dr.async_get(hass)
+        fleet_vins: list[str] = []
+        seen_vins: set[str] = set()
+        for device in device_registry.devices.values():
+            for identifier in device.identifiers:
+                if len(identifier) < 2 or identifier[0] not in TESLA_EV_INTEGRATIONS:
+                    continue
+                candidate = str(identifier[1])
+                candidate_key = candidate.strip().lower()
+                if (
+                    len(candidate) == 17
+                    and not candidate.isdigit()
+                    and candidate_key not in seen_vins
+                ):
+                    seen_vins.add(candidate_key)
+                    fleet_vins.append(candidate)
+                break
+        return canonical_tesla_vehicle_id(
+            config,
+            normalized_id,
+            fleet_vins,
+            resolve_ble_prefixes(hass, config),
+        )
+    except Exception as err:
+        _LOGGER.debug(
+            "Could not canonicalize dynamic Tesla vehicle %s: %s",
+            normalized_id,
+            err,
+        )
+        return normalized_id
 
 
 def _is_ble_available(hass: HomeAssistant, ble_prefix: str) -> bool:
@@ -8544,6 +8598,24 @@ async def _action_start_ev_charging_dynamic_locked(
     entry_id = config_entry.entry_id
     vehicle_id = params.get("vehicle_vin") or params.get("vehicle_id") or DEFAULT_VEHICLE_ID
 
+    if params.get("charger_type", "tesla") == "tesla":
+        canonical_vehicle_id = _canonical_dynamic_tesla_vehicle_id(
+            hass,
+            config_entry,
+            vehicle_id,
+        )
+        if canonical_vehicle_id and canonical_vehicle_id != vehicle_id:
+            _LOGGER.info(
+                "Dynamic EV: paired BLE alias %s resolved to its physical VIN",
+                vehicle_id,
+            )
+            params = {
+                **params,
+                "vehicle_id": canonical_vehicle_id,
+                "vehicle_vin": canonical_vehicle_id,
+            }
+            vehicle_id = canonical_vehicle_id
+
     # Anonymous Tesla starts must resolve to exactly one physical loadpoint
     # before any ownership claim, timer, or dynamic-session state is created.
     # Keep the planner import local to avoid the actions ↔ planner import cycle.
@@ -9340,6 +9412,19 @@ async def _action_stop_ev_charging_dynamic(
     entry_id = config_entry.entry_id
     stop_charging = params.get("stop_charging", True)
     vehicle_id = params.get("vehicle_id") or params.get("vehicle_vin")
+    if vehicle_id:
+        canonical_vehicle_id = _canonical_dynamic_tesla_vehicle_id(
+            hass,
+            config_entry,
+            vehicle_id,
+        )
+        if canonical_vehicle_id and canonical_vehicle_id != vehicle_id:
+            params = {
+                **params,
+                "vehicle_id": canonical_vehicle_id,
+                "vehicle_vin": canonical_vehicle_id,
+            }
+            vehicle_id = canonical_vehicle_id
 
     vehicles = _dynamic_ev_state.get(entry_id, {})
 

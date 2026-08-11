@@ -5487,6 +5487,61 @@ def test_solar_surplus_skips_unplugged_priority_vehicle(monkeypatch):
     assert [config["vehicle_id"] for config in selected] == [plugged_vin]
 
 
+def test_solar_surplus_configs_honor_enabled_toggle_and_coalesce_paired_ble():
+    second_vin = "5YJTEST0000000002"
+
+    class PairedEntry(_FakeConfigEntry):
+        options = {
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "bridge_alpha,bridge_beta",
+            "tesla_ble_vehicle_mapping": (
+                f"{VIN}=bridge_alpha,{second_vin}=bridge_beta"
+            ),
+        }
+
+    configs = ev_planner.get_solar_surplus_vehicle_configs(
+        _FakeHass(),
+        PairedEntry(),
+        {
+            "vehicle_charging_configs": [
+                {
+                    "vehicle_id": VIN,
+                    "display_name": "Primary EV",
+                    "solar_charging_enabled": False,
+                    "priority": 1,
+                },
+                {
+                    "vehicle_id": second_vin,
+                    "display_name": "Secondary EV",
+                    "solar_charging_enabled": True,
+                    "priority": 2,
+                },
+                {
+                    "vehicle_id": "ble_bridge_alpha",
+                    "display_name": "Primary bridge",
+                    "solar_charging_enabled": True,
+                    "priority": 3,
+                },
+                {
+                    "vehicle_id": "ble_bridge_beta",
+                    "display_name": "Secondary bridge",
+                    "solar_charging_enabled": True,
+                    "priority": 4,
+                },
+            ],
+        },
+    )
+
+    assert configs == [
+        {
+            "vehicle_id": second_vin,
+            "display_name": "Secondary EV",
+            "solar_charging_enabled": True,
+            "priority": 2,
+        }
+    ]
+
+
 def test_solar_surplus_parallel_selects_only_available_inactive_vehicles(
     monkeypatch,
 ):

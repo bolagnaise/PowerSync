@@ -550,6 +550,73 @@ def test_explicit_ble_mapping_is_independent_of_registry_and_prefix_order():
     assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_B) == "bridge_alpha"
 
 
+def test_dynamic_paired_ble_alias_uses_one_physical_vin_lease(monkeypatch):
+    hass = _two_fleet_vehicle_hass()
+    entry = _both_provider_entry(
+        "bridge_alpha,bridge_beta",
+        f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
+    )
+    _install_ev_planner_stub(monkeypatch, plugged_in=True)
+    monkeypatch.setattr(
+        actions,
+        "_resolve_tesla_active_charger_capability",
+        AsyncMock(return_value={
+            "max_charge_amps": 32,
+            "max_charge_amps_source": "configured",
+            "voltage": 240,
+            "phases": 1,
+            "association_known": True,
+            "capability_known": True,
+        }),
+    )
+    actions._dynamic_ev_state.clear()
+
+    alias_result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            entry,
+            {
+                "dynamic_mode": "solar_surplus",
+                "owner_mode": "solar_surplus",
+                "vehicle_vin": "ble_bridge_beta",
+                "charger_type": "tesla",
+            },
+        )
+    )
+    vin_result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            entry,
+            {
+                "dynamic_mode": "solar_surplus",
+                "owner_mode": "solar_surplus",
+                "vehicle_vin": VIN_A,
+                "charger_type": "tesla",
+            },
+        )
+    )
+
+    assert alias_result is True
+    assert vin_result is True
+    assert set(actions._dynamic_ev_state["entry-1"]) == {VIN_A}
+    assert set(ev_ownership.get_ev_ownerships(hass, entry)) == {VIN_A}
+
+    stopped = asyncio.run(
+        actions._action_stop_ev_charging_dynamic(
+            hass,
+            entry,
+            {
+                "vehicle_id": "ble_bridge_beta",
+                "stop_charging": False,
+            },
+        )
+    )
+
+    assert stopped is True
+    assert actions._dynamic_ev_state == {}
+    assert ev_ownership.get_ev_ownerships(hass, entry) == {}
+
+
 def test_ev_action_config_merges_legacy_data_with_options():
     entry = SimpleNamespace(
         data={

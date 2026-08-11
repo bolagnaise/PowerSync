@@ -15232,6 +15232,52 @@ class VehicleChargingConfigView(HomeAssistantView):
                 return entry_data["automation_store"]
         return None
 
+    def _get_powersync_config(self) -> dict:
+        """Return merged PowerSync entry data/options for identity mapping."""
+        entries = self._hass.config_entries.async_entries(DOMAIN)
+        if not entries:
+            return {}
+        return {**entries[0].data, **entries[0].options}
+
+    def _canonicalize_vehicle_configs(self, configs: list[dict]) -> list[dict]:
+        """Coalesce stored Fleet/BLE aliases onto physical vehicle profiles."""
+        from .tesla_ble_mapping import (
+            coalesce_paired_vehicle_configs,
+            resolve_ble_prefixes,
+        )
+
+        config = self._get_powersync_config()
+        return coalesce_paired_vehicle_configs(
+            config,
+            configs,
+            resolve_ble_prefixes(self._hass, config),
+        )
+
+    def _canonical_vehicle_id(self, vehicle_id: str, configs: list[dict]) -> str:
+        """Resolve a paired BLE config ID to its physical VIN."""
+        from .tesla_ble_mapping import (
+            canonical_tesla_vehicle_id,
+            resolve_ble_prefixes,
+        )
+
+        config = self._get_powersync_config()
+        fleet_vins = [
+            candidate
+            for item in configs
+            if (
+                (candidate := str(item.get("vehicle_id") or ""))
+                and len(candidate) == 17
+                and candidate.isalnum()
+                and not candidate.isdigit()
+            )
+        ]
+        return canonical_tesla_vehicle_id(
+            config,
+            vehicle_id,
+            fleet_vins,
+            resolve_ble_prefixes(self._hass, config),
+        )
+
     def _generic_capacity_fallback(self) -> float | None:
         """Return the optional shared capacity for anonymous charger profiles."""
         from .const import CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH
@@ -15363,7 +15409,9 @@ class VehicleChargingConfigView(HomeAssistantView):
 
             # Get stored vehicle configs (use _data directly, it's already loaded)
             data = getattr(store, '_data', {}) or {}
-            vehicle_configs = data.get("vehicle_charging_configs", [])
+            vehicle_configs = self._canonicalize_vehicle_configs(
+                data.get("vehicle_charging_configs", [])
+            )
             resolved_configs = [
                 {**config, **self._capacity_contract(config)}
                 for config in vehicle_configs
@@ -15403,6 +15451,8 @@ class VehicleChargingConfigView(HomeAssistantView):
             # Get existing configs (use _data directly, it's already loaded at startup)
             stored_data = getattr(store, '_data', {}) or {}
             vehicle_configs = stored_data.get("vehicle_charging_configs", [])
+            vehicle_id = self._canonical_vehicle_id(vehicle_id, vehicle_configs)
+            data = {**data, "vehicle_id": vehicle_id}
 
             from .automations.ev_vehicle_capacity import (
                 validate_ev_battery_capacity,
@@ -15511,6 +15561,7 @@ class VehicleChargingConfigView(HomeAssistantView):
                 vehicle_configs.append(new_config)
 
             # Save updated configs (update key in existing _data, don't overwrite)
+            vehicle_configs = self._canonicalize_vehicle_configs(vehicle_configs)
             if hasattr(store, '_data') and hasattr(store, 'async_save'):
                 store._data["vehicle_charging_configs"] = vehicle_configs
                 await store.async_save()
@@ -19476,6 +19527,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     automation_store = AutomationStore(hass)
     await automation_store.async_load()
+    stored_automation_data = getattr(automation_store, "_data", {}) or {}
+    stored_vehicle_configs = stored_automation_data.get(
+        "vehicle_charging_configs",
+        [],
+    )
+    if stored_vehicle_configs:
+        from .tesla_ble_mapping import (
+            coalesce_paired_vehicle_configs,
+            resolve_ble_prefixes,
+        )
+
+        ev_config = {**entry.data, **entry.options}
+        canonical_vehicle_configs = coalesce_paired_vehicle_configs(
+            ev_config,
+            stored_vehicle_configs,
+            resolve_ble_prefixes(hass, ev_config),
+        )
+        if canonical_vehicle_configs != stored_vehicle_configs:
+            automation_store._data["vehicle_charging_configs"] = (
+                canonical_vehicle_configs
+            )
+            await automation_store.async_save()
+            _LOGGER.info(
+                "Canonicalized paired Tesla BLE vehicle profiles (%d -> %d)",
+                len(stored_vehicle_configs),
+                len(canonical_vehicle_configs),
+            )
     persisted_tokens = automation_store.get_push_tokens()
     if persisted_tokens:
         domain_data = hass.data.setdefault(DOMAIN, {})

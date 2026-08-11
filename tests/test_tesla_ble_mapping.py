@@ -17,6 +17,8 @@ package.__path__ = [str(ROOT)]
 from power_sync.tesla_ble_mapping import (  # noqa: E402
     TeslaBleMappingError,
     ble_prefix_vehicle_pairs,
+    canonical_tesla_vehicle_id,
+    coalesce_paired_vehicle_configs,
     parse_tesla_ble_vehicle_mapping,
     resolve_ble_prefixes,
     vehicle_ble_prefix,
@@ -133,3 +135,77 @@ def test_ambiguous_autodetection_keeps_configured_prefix():
         ),
         config,
     ) == ["tesla_ble"]
+
+
+def test_paired_ble_alias_resolves_to_canonical_vin():
+    config = _both_config(
+        "bridge_alpha,bridge_beta",
+        f"{VIN_A}=bridge_alpha,{VIN_B}=bridge_beta",
+    )
+
+    assert canonical_tesla_vehicle_id(config, "ble_bridge_alpha") == VIN_A
+    assert canonical_tesla_vehicle_id(config, "ble_bridge_beta") == VIN_B
+
+
+def test_standalone_ble_alias_remains_independent():
+    config = _both_config("bridge_alpha,standalone_bridge", f"{VIN_A}=bridge_alpha")
+
+    assert (
+        canonical_tesla_vehicle_id(
+            config,
+            "ble_standalone_bridge",
+            [VIN_A],
+        )
+        == "ble_standalone_bridge"
+    )
+
+
+def test_vehicle_configs_drop_paired_aliases_and_preserve_vin_settings():
+    config = _both_config(
+        "bridge_alpha,bridge_beta",
+        f"{VIN_A}=bridge_alpha,{VIN_B}=bridge_beta",
+    )
+    configs = [
+        {
+            "vehicle_id": "ble_bridge_alpha",
+            "display_name": "Tesla BLE (bridge_alpha)",
+            "priority": 3,
+            "max_amps": 32,
+            "solar_charging_enabled": True,
+        },
+        {
+            "vehicle_id": VIN_A,
+            "display_name": "Primary EV",
+            "priority": 1,
+            "max_amps": 10,
+            "solar_charging_enabled": False,
+        },
+        {
+            "vehicle_id": VIN_B,
+            "display_name": "Secondary EV",
+            "priority": 2,
+            "max_amps": 16,
+            "solar_charging_enabled": True,
+        },
+        {
+            "vehicle_id": "ble_bridge_beta",
+            "display_name": "Tesla BLE (bridge_beta)",
+            "priority": 4,
+            "max_amps": 32,
+            "solar_charging_enabled": True,
+        },
+    ]
+
+    assert coalesce_paired_vehicle_configs(config, configs) == [
+        configs[1],
+        configs[2],
+    ]
+
+
+def test_alias_only_config_migrates_to_explicit_vin():
+    config = _both_config("bridge_alpha", f"{VIN_A}=bridge_alpha")
+
+    assert coalesce_paired_vehicle_configs(
+        config,
+        [{"vehicle_id": "ble_bridge_alpha", "priority": 1}],
+    ) == [{"vehicle_id": VIN_A, "priority": 1}]

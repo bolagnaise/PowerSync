@@ -40,6 +40,7 @@ from ..solar_surplus_config import (
     normalize_solar_surplus_config,
 )
 from ..tesla_ble_mapping import (
+    coalesce_paired_vehicle_configs,
     configured_ble_prefixes,
     resolve_ble_prefixes,
     vehicle_ble_prefix,
@@ -7634,7 +7635,19 @@ def get_solar_surplus_vehicle_configs(
         if isinstance(config, Mapping)
     ]
     if configs:
-        return configs
+        opts = {
+            **getattr(config_entry, "data", {}),
+            **getattr(config_entry, "options", {}),
+        }
+        return [
+            config
+            for config in coalesce_paired_vehicle_configs(
+                opts,
+                configs,
+                _configured_ble_prefixes(config_entry, None, hass=hass),
+            )
+            if config.get("solar_charging_enabled", True) is not False
+        ]
 
     opts = {**getattr(config_entry, "data", {}), **getattr(config_entry, "options", {})}
     charger_type = _configured_charger_type(opts)
