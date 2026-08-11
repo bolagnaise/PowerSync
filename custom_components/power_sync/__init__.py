@@ -19357,6 +19357,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Read config entry options with data fallback."""
         return entry.options.get(key, entry.data.get(key, default))
 
+    # Every setup gets a private generation token.  Dispatch callbacks can be
+    # queued from another thread, so entry_id alone is not enough to tell an
+    # old callback from one belonging to a freshly reloaded entry.
+    aemo_dispatch_generation = object()
+
     # Register the parent (hub) device.
     dev_reg = dr.async_get(hass)
     dev_reg.async_get_or_create(
@@ -19554,6 +19559,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     def _demand_grid_charging_protection_active(
         now: datetime | None = None,
+        *,
+        entry_data: dict[str, Any] | None = None,
     ) -> bool:
         """Return whether Tesla grid charging must remain disabled now.
 
@@ -19561,7 +19568,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         This control-only policy additionally pre-arms one minute before the
         next demand boundary so slow Tesla writes cannot cross into peak.
         """
-        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        if entry_data is None:
+            entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         if not isinstance(entry_data, dict):
             return False
         if entry_data.get("demand_allow_grid_charging", False):
@@ -19593,20 +19601,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         Returns ``(success, protection_active)`` for the stable state.
         """
         async with demand_grid_charging_control_lock:
-            latest_protection_active = (
-                _demand_grid_charging_protection_active()
+            current_entry_data = _aemo_dispatch_entry_data()
+            if current_entry_data is None:
+                return False, False
+            latest_protection_active = _demand_grid_charging_protection_active(
+                entry_data=current_entry_data,
             )
             for attempt in range(3):
                 protection_active = latest_protection_active
+                if _aemo_dispatch_entry_data() is not current_entry_data:
+                    return False, latest_protection_active
                 success = await ts_coordinator.set_grid_charging_enabled(
                     not protection_active
                 )
-                latest_protection_active = (
-                    _demand_grid_charging_protection_active()
+                current_entry_data = _aemo_dispatch_entry_data()
+                if current_entry_data is None:
+                    return False, latest_protection_active
+                latest_protection_active = _demand_grid_charging_protection_active(
+                    entry_data=current_entry_data,
                 )
                 if latest_protection_active == protection_active:
                     if success:
-                        hass.data[DOMAIN][entry.entry_id][
+                        current_entry_data[
                             "grid_charging_disabled_for_demand"
                         ] = protection_active
                     return success, protection_active
@@ -21522,6 +21538,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "epex_coordinator": epex_coordinator,  # For EPEX Day-Ahead EU pricing
         "ws_client": ws_client,  # Store for cleanup on unload
         "entry": entry,
+        "aemo_dispatch_generation": aemo_dispatch_generation,
+        "aemo_dispatch_stopping": False,
+        "aemo_dispatch_tasks": set(),
+        "aemo_dispatch_started_unsub": None,
         "aemo_dispatch_unsub": None,  # Will store the AEMO dispatch listener unsubscriber
         "octopus_sync_cancel": None,  # Will store the Octopus :00/:30 cron cancel function
         "aemo_spike_cancel": None,  # Will store the AEMO spike check cancel function
@@ -22828,9 +22848,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Register services
+    def _aemo_dispatch_entry_data() -> dict[str, Any] | None:
+        """Return this setup generation's live entry data, or ``None``.
+
+        A dispatch callback may outlive an unload and see a new dictionary for
+        the same entry_id after reload.  Check both the dictionary's generation
+        token and its stopping flag immediately before any callback-owned
+        mutation so an old generation cannot recreate or modify entry state.
+        """
+        current = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if not isinstance(current, dict):
+            return None
+        if current.get("aemo_dispatch_generation") is not aemo_dispatch_generation:
+            return None
+        if current.get("aemo_dispatch_stopping", False):
+            return None
+        return current
+
     def _static_tou_tariff_schedule_for_sync() -> dict | None:
         """Return a stored static TOU schedule usable for battery tariff sync."""
-        entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+        entry_data = _aemo_dispatch_entry_data()
+        if entry_data is None:
+            return None
         tariff_schedule = entry_data.get("tariff_schedule")
         if isinstance(tariff_schedule, dict) and (
             tariff_schedule.get("tou_periods") or tariff_schedule.get("buy_prices")
@@ -22866,7 +22905,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ``tariff_schedule`` is intentionally a lossy display/planner shape;
         the raw custom tariff retains every season and AGL reward period.
         """
-        entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+        entry_data = _aemo_dispatch_entry_data()
+        if entry_data is None:
+            return None
         automation_store_ref = (
             entry_data.get("automation_store")
             or hass.data.get(DOMAIN, {}).get("automation_store")
@@ -22921,8 +22962,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         Caches the result in hass.data to avoid repeated API calls.
         """
         # Check cache first
-        domain_data = hass.data.get(DOMAIN, {})
-        entry_domain_data = domain_data.get(entry.entry_id, {})
+        entry_domain_data = _aemo_dispatch_entry_data()
+        if entry_domain_data is None:
+            return None
         cached_region = entry_domain_data.get("amber_nem_region")
         if cached_region:
             return cached_region
@@ -23001,8 +23043,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return None
 
             _LOGGER.info(f"Auto-detected NEM region: {nem_region} (network: {network})")
-            if entry.entry_id in domain_data:
-                entry_domain_data["amber_nem_region"] = nem_region
+            current_entry_data = _aemo_dispatch_entry_data()
+            if current_entry_data is not None:
+                current_entry_data["amber_nem_region"] = nem_region
             return nem_region
 
         except Exception as e:
@@ -23021,11 +23064,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             price = float(wholesale_cents)
         except (ValueError, TypeError):
             return
-        fp_tracker = (
-            hass.data.get(DOMAIN, {})
-            .get(entry.entry_id, {})
-            .get("flow_power_twap_tracker")
-        )
+        entry_data = _aemo_dispatch_entry_data()
+        if entry_data is None:
+            return
+        fp_tracker = entry_data.get("flow_power_twap_tracker")
         if fp_tracker:
             fp_tracker.record_price(price)
 
@@ -23034,7 +23076,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         forecast_data: list,
         electricity_provider: str,
         current_actual_interval: dict | None = None,
-    ) -> dict:
+    ) -> dict | None:
         """Apply provider-specific rate adjustments to a raw wholesale tariff.
 
         Called from battery-system early-return paths (FoxESS, Sungrow) that build
@@ -23086,7 +23128,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 forecast_data,
                 current_actual_interval=current_actual_interval,
             )
-            domain_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            domain_data = _aemo_dispatch_entry_data()
+            if domain_data is None:
+                return None
             pricing = resolve_flow_power_pricing_context(
                 entry.options,
                 entry.data,
@@ -23320,6 +23364,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     provider_for_tz,
                     current_actual_interval=current_actual_interval,
                 )
+                if canonical_tariff is None:
+                    return
 
             buy_prices = []
             sell_prices = []
@@ -23339,9 +23385,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 buy_prices = convert_tariff_rates_to_sigenergy(canonical_buy_rates)
                 sell_prices = convert_tariff_rates_to_sigenergy(canonical_sell_rates)
                 if buy_prices:
-                    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(
-                        entry.entry_id, {}
-                    )
+                    entry_data = _aemo_dispatch_entry_data()
+                    if entry_data is None:
+                        _LOGGER.debug(
+                            "Skipping Sigenergy tariff schedule write for stale AEMO dispatch"
+                        )
+                        return
                     entry_data["tariff_schedule"] = {
                         "buy_prices": canonical_buy_rates,
                         "sell_prices": canonical_sell_rates,
@@ -23369,9 +23418,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 payload_source = "static_tou_tariff_schedule"
                 if buy_prices:
-                    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(
-                        entry.entry_id, {}
-                    )
+                    entry_data = _aemo_dispatch_entry_data()
+                    if entry_data is None:
+                        _LOGGER.debug(
+                            "Skipping Sigenergy static tariff write for stale AEMO dispatch"
+                        )
+                        return
                     entry_data["tariff_schedule"] = static_tou_tariff
                     async_dispatcher_send(
                         hass, f"power_sync_tariff_updated_{entry.entry_id}"
@@ -23479,9 +23531,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     new_data[CONF_SIGENERGY_TOKEN_EXPIRES_AT] = token_info.get("expires_at")
                     if new_data == entry.data:
                         return
-                    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(
-                        entry.entry_id, {}
-                    )
+                    entry_data = _aemo_dispatch_entry_data()
+                    if entry_data is None:
+                        return
                     entry_data["_skip_reload"] = True
                     try:
                         hass.config_entries.async_update_entry(entry, data=new_data)
@@ -23542,6 +23594,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         configured_station_id
                     )
                     if new_data != entry.data:
+                        if _aemo_dispatch_entry_data() is None:
+                            return
                         hass.config_entries.async_update_entry(entry, data=new_data)
                         _LOGGER.info(
                             "Cached Sigenergy tariff station ID for uploads: %s "
@@ -23563,9 +23617,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if result.get("success"):
                     _LOGGER.info(f"✅ Sigenergy tariff synced successfully ({sync_mode})")
                     # Store tariff data for mobile app API
-                    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(
-                        entry.entry_id, {}
-                    )
+                    entry_data = _aemo_dispatch_entry_data()
+                    if entry_data is None:
+                        return
                     entry_data["sigenergy_tariff"] = {
                         "buy_prices": buy_prices,
                         "sell_prices": sell_prices if sell_prices else buy_prices,
@@ -23680,7 +23734,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info(f"FoxESS schedule synced successfully ({sync_mode}, {len(groups)} groups)")
 
                 # Store schedule in hass.data for dashboard
-                hass.data[DOMAIN][entry.entry_id]["foxess_schedule"] = {
+                entry_data = _aemo_dispatch_entry_data()
+                if entry_data is None:
+                    _LOGGER.debug(
+                        "Skipping FoxESS schedule write for stale AEMO dispatch"
+                    )
+                    return
+                entry_data["foxess_schedule"] = {
                     "groups": groups,
                     "buy_prices": buy_prices,
                     "sell_prices": sell_prices if sell_prices else buy_prices,
@@ -24124,7 +24184,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             # Dedup: only send one notification per spike period.
             # Reset the set each new day so tomorrow's spikes can notify.
-            entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            entry_data = _aemo_dispatch_entry_data()
+            if entry_data is None:
+                return
             notified_spikes: set = entry_data.setdefault("_notified_spikes", set())
             from homeassistant.util import dt as _dt_util
             today_str = _dt_util.now().strftime("%Y-%m-%d")
@@ -24155,6 +24217,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 "High Import Price",
                                 body,
                             )
+                            if _aemo_dispatch_entry_data() is not entry_data:
+                                return
                             notified_spikes.add(notif_key)
                 except Exception as notify_err:
                     _LOGGER.debug(f"Could not send import spike notification: {notify_err}")
@@ -24182,6 +24246,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 "High Export Price",
                                 body,
                             )
+                            if _aemo_dispatch_entry_data() is not entry_data:
+                                return
                             notified_spikes.add(notif_key)
                 except Exception as notify_err:
                     _LOGGER.debug(f"Could not send export spike notification: {notify_err}")
@@ -24336,10 +24402,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     electricity_provider,
                     current_actual_interval=current_actual_interval,
                 )
+                if tariff is None:
+                    return
                 from homeassistant.helpers.dispatcher import async_dispatcher_send
                 buy_prices = tariff.get("energy_charges", {}).get("Summer", {}).get("rates", {})
                 sell_prices = tariff.get("sell_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
-                hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
+                entry_data = _aemo_dispatch_entry_data()
+                if entry_data is None:
+                    _LOGGER.debug(
+                        "Skipping FoxESS tariff schedule write for stale AEMO dispatch"
+                    )
+                    return
+                entry_data["tariff_schedule"] = {
                     "buy_prices": buy_prices,
                     "sell_prices": sell_prices,
                     **currency_metadata(tariff.get("currency")),
@@ -24385,10 +24459,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     electricity_provider,
                     current_actual_interval=current_actual_interval,
                 )
+                if tariff is None:
+                    return
                 from homeassistant.helpers.dispatcher import async_dispatcher_send
                 buy_prices = tariff.get("energy_charges", {}).get("Summer", {}).get("rates", {})
                 sell_prices = tariff.get("sell_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
-                hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
+                entry_data = _aemo_dispatch_entry_data()
+                if entry_data is None:
+                    _LOGGER.debug(
+                        "Skipping Sungrow tariff schedule write for stale AEMO dispatch"
+                    )
+                    return
+                entry_data["tariff_schedule"] = {
                     "buy_prices": buy_prices,
                     "sell_prices": sell_prices,
                     **currency_metadata(tariff.get("currency")),
@@ -24481,7 +24563,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     forecast_data,
                     current_actual_interval=None,
                 )
-                domain_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                domain_data = _aemo_dispatch_entry_data()
+                if domain_data is None:
+                    return
                 pricing = resolve_flow_power_pricing_context(
                     entry.options,
                     entry.data,
@@ -24648,7 +24732,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             buy_prices = tariff.get("energy_charges", {}).get("Summer", {}).get("rates", {})
             sell_prices = tariff.get("sell_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
 
-            hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
+            entry_data = _aemo_dispatch_entry_data()
+            if entry_data is None:
+                _LOGGER.debug(
+                    "Skipping tariff schedule write for stale AEMO dispatch"
+                )
+                return
+            entry_data["tariff_schedule"] = {
                 "buy_prices": buy_prices,
                 "sell_prices": sell_prices,
                 **currency_metadata(tariff.get("currency")),
@@ -24696,9 +24786,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Blocked in monitoring mode — tariff_schedule already stored above for display.
         # Exception: optimizer shutdown may need one final sync to replace an
         # already-uploaded force tariff before monitoring mode takes ownership.
-        _monitoring_sync_override = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).pop(
-            "_allow_monitoring_tou_sync_once",
-            None,
+        current_entry_data = _aemo_dispatch_entry_data()
+        if current_entry_data is None:
+            return
+        _monitoring_sync_override = current_entry_data.pop(
+            "_allow_monitoring_tou_sync_once", None
         )
         if _is_monitoring_mode() and not _monitoring_sync_override:
             _LOGGER.info("[MONITORING] Tariff schedule updated for display; Tesla sync blocked by monitoring mode")
@@ -24736,12 +24828,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 success = False
 
         if success:
+            if _aemo_dispatch_entry_data() is None:
+                return
             _LOGGER.info(f"TOU schedule synced to Tesla gateway ({sync_mode})")
 
             # --- Calibration detection helper ---
             def _record_mode_stick_failure(hass, entry_id):
                 """Record a mode-verification failure and check for calibration pattern."""
-                entry_data = hass.data.get(DOMAIN, {}).get(entry_id, {})
+                entry_data = _aemo_dispatch_entry_data()
+                if entry_data is None:
+                    return False
                 failures = entry_data.get("_mode_stick_failures", [])
                 now = dt_util.utcnow()
                 failures.append(now)
@@ -24767,7 +24863,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 CONF_FORCE_TARIFF_MODE_TOGGLE,
                 entry.data.get(CONF_FORCE_TARIFF_MODE_TOGGLE, False)
             )
-            _toggle_entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            _toggle_entry_data = _aemo_dispatch_entry_data()
+            if _toggle_entry_data is None:
+                return
             if _is_monitoring_mode() and _monitoring_sync_override:
                 _LOGGER.info(
                     "Skipping force mode toggle - monitoring restore cleanup must not re-enter TOU mode"
@@ -24817,8 +24915,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         # Check if we recently toggled - if so, Tesla might have reverted the mode
                         # Only re-toggle once after the initial toggle to avoid infinite loops
                         # (if self_consumption persists after our re-toggle, it's the user's choice)
-                        last_toggle_time = hass.data[DOMAIN].get(entry.entry_id, {}).get("last_force_toggle_time")
-                        retoggle_attempted = hass.data[DOMAIN].get(entry.entry_id, {}).get("retoggle_attempted", False)
+                        if _aemo_dispatch_entry_data() is not _toggle_entry_data:
+                            return
+                        last_toggle_time = _toggle_entry_data.get(
+                            "last_force_toggle_time"
+                        )
+                        retoggle_attempted = _toggle_entry_data.get(
+                            "retoggle_attempted", False
+                        )
                         now = dt_util.utcnow()
 
                         if last_toggle_time and (now - last_toggle_time).total_seconds() < 600 and not retoggle_attempted:
@@ -24867,11 +24971,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             if force_retoggle:
                                 _LOGGER.info("Re-toggling to autonomous (Tesla reverted mode)")
                                 # Mark that we've attempted a re-toggle — won't try again if it reverts
-                                hass.data[DOMAIN][entry.entry_id]["retoggle_attempted"] = True
+                                current_entry_data = _aemo_dispatch_entry_data()
+                                if current_entry_data is None:
+                                    return
+                                current_entry_data["retoggle_attempted"] = True
                             else:
                                 _LOGGER.info(f"Force mode toggle - grid: {grid_power:.0f}W, battery: {battery_power:.0f}W")
                                 # Fresh toggle — clear the re-toggle flag
-                                hass.data[DOMAIN][entry.entry_id]["retoggle_attempted"] = False
+                                current_entry_data = _aemo_dispatch_entry_data()
+                                if current_entry_data is None:
+                                    return
+                                current_entry_data["retoggle_attempted"] = False
 
                                 # Switch to self_consumption first (only if not already in self_consumption)
                                 async with session.post(
@@ -24919,9 +25029,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                                 # Only update toggle time on fresh toggles, not re-toggles
                                                 # This prevents the re-toggle window from refreshing indefinitely
                                                 if not force_retoggle:
-                                                    if entry.entry_id not in hass.data[DOMAIN]:
-                                                        hass.data[DOMAIN][entry.entry_id] = {}
-                                                    hass.data[DOMAIN][entry.entry_id]["last_force_toggle_time"] = dt_util.utcnow()
+                                                    current_entry_data = _aemo_dispatch_entry_data()
+                                                    if current_entry_data is None:
+                                                        return
+                                                    current_entry_data["last_force_toggle_time"] = dt_util.utcnow()
                                                 break
                                             else:
                                                 _LOGGER.warning(
@@ -24932,9 +25043,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                             _LOGGER.warning("Could not verify mode (status %s) - assuming success", verify_response.status)
                                             switched_back = True
                                             if not force_retoggle:
-                                                if entry.entry_id not in hass.data[DOMAIN]:
-                                                    hass.data[DOMAIN][entry.entry_id] = {}
-                                                hass.data[DOMAIN][entry.entry_id]["last_force_toggle_time"] = dt_util.utcnow()
+                                                current_entry_data = _aemo_dispatch_entry_data()
+                                                if current_entry_data is None:
+                                                    return
+                                                current_entry_data["last_force_toggle_time"] = dt_util.utcnow()
                                             break
 
                                 except Exception as e:
@@ -24963,7 +25075,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                     # Start periodic recovery check every 30 minutes
                                     async def _calibration_recovery_check(_now=None):
                                         """Periodically check if calibration has completed."""
-                                        _cal_ed = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                                        _cal_ed = _aemo_dispatch_entry_data()
+                                        if _cal_ed is None:
+                                            return
                                         if not _cal_ed.get("calibration_suspected"):
                                             return
                                         try:
@@ -24996,6 +25110,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                                     _cal_vdata = await _cal_vresp.json()
                                                     _cal_mode = _cal_vdata.get("response", {}).get("default_real_mode")
                                                     if _cal_mode == "autonomous":
+                                                        if _aemo_dispatch_entry_data() is not _cal_ed:
+                                                            return
                                                         # Calibration complete — clear state
                                                         _cal_ed["calibration_suspected"] = False
                                                         _cal_ed["calibration_detected_at"] = None
@@ -25027,8 +25143,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                     _cal_unsub = _track_cal_interval(
                                         hass, _calibration_recovery_check, timedelta(minutes=30)
                                     )
-                                    _cal_ed_store = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-                                    _cal_ed_store["_calibration_check_unsub"] = _cal_unsub
+                                    _cal_ed_store = _aemo_dispatch_entry_data()
+                                    if _cal_ed_store is not None:
+                                        _cal_ed_store["_calibration_check_unsub"] = _cal_unsub
 
                                 # Background retry with exponential backoff.
                                 # Only send push notification if ALL retries fail.
@@ -25056,7 +25173,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                                             if vdata.get("response", {}).get("default_real_mode") == "autonomous":
                                                                 _LOGGER.info("Mode restore succeeded on retry %d", retry + 1)
                                                                 # Clear calibration state on success
-                                                                _bg_ed = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                                                                _bg_ed = _aemo_dispatch_entry_data()
+                                                                if _bg_ed is None:
+                                                                    return
                                                                 _bg_ed["calibration_suspected"] = False
                                                                 _bg_ed["calibration_detected_at"] = None
                                                                 _bg_ed["_mode_stick_failures"] = []
@@ -25071,7 +25190,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                                     # All retries exhausted — NOW send notification (once)
                                     _LOGGER.error("Mode restore failed after all retries")
-                                    ed = hass.data[DOMAIN].get(entry.entry_id, {})
+                                    ed = _aemo_dispatch_entry_data()
+                                    if ed is None:
+                                        return
                                     if not ed.get("_mode_restore_notified"):
                                         try:
                                             from .automations.actions import _send_expo_push
@@ -25080,20 +25201,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                                 "Battery Alert",
                                                 "Failed to restore normal mode after multiple retries - check Tesla app"
                                             )
-                                            ed["_mode_restore_notified"] = True
+                                            if _aemo_dispatch_entry_data() is ed:
+                                                ed["_mode_restore_notified"] = True
                                         except Exception:
                                             pass
 
-                                hass.async_create_task(_retry_autonomous_restore())
+                                _schedule_aemo_dispatch_task(_retry_autonomous_restore)
                 except Exception as e:
                     _LOGGER.warning(f"Force mode toggle failed: {e}")
 
             # Enforce grid charging setting after TOU sync (counteracts VPP overrides)
-            entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
+            entry_data = _aemo_dispatch_entry_data()
+            if entry_data is None:
+                return
             dc_coordinator = entry_data.get("demand_charge_coordinator")
             if dc_coordinator and dc_coordinator.enabled and not entry_data.get("demand_allow_grid_charging", False):
                 if (
-                    _demand_grid_charging_protection_active()
+                    _demand_grid_charging_protection_active(
+                        entry_data=entry_data,
+                    )
                     or entry_data.get("grid_charging_disabled_for_demand", False)
                 ):
                     gc_success, protection_active = (
@@ -37965,6 +38091,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     NEM_PROVIDERS = ("amber", "flow_power", "localvolts", "aemo_sensor")
     is_nem_provider = electricity_provider in NEM_PROVIDERS
     aemo_startup_sync_pending = False
+    aemo_dispatch_started_unsub = None
+    aemo_dispatch_tasks = hass.data[DOMAIN][entry.entry_id]["aemo_dispatch_tasks"]
+
+    def _schedule_aemo_dispatch_task(task_factory: Callable[[], Any]) -> None:
+        """Schedule one dispatch callback and retain it until it settles."""
+        if _aemo_dispatch_entry_data() is None:
+            return
+        task = hass.async_create_task(task_factory())
+        aemo_dispatch_tasks.add(task)
+
+        def _on_aemo_dispatch_task_done(completed_task: asyncio.Task) -> None:
+            """Harvest one dispatch task and report failures exactly once."""
+            try:
+                if completed_task.cancelled():
+                    return
+                completed_task.result()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                _LOGGER.exception("AEMO dispatch task failed")
+            finally:
+                aemo_dispatch_tasks.discard(completed_task)
+
+        task.add_done_callback(_on_aemo_dispatch_task_done)
 
     def _aemo_dispatch_sync_allowed() -> bool:
         provider = entry.options.get(
@@ -37985,11 +38135,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def _run_aemo_dispatch_sync() -> None:
         """Push the settled tariff for one AEMO dispatch after a brief delay."""
+        if _aemo_dispatch_entry_data() is None:
+            return
         # Brief delay so Amber / Localvolts have time to ingest the AEMO
         # publish into their own REST APIs (network fees, batching).
         await asyncio.sleep(AEMO_SETTLED_SYNC_DELAY_SECONDS)
 
-        if entry.entry_id not in hass.data.get(DOMAIN, {}):
+        if (
+            entry.entry_id not in hass.data.get(DOMAIN, {})
+            or _aemo_dispatch_entry_data() is None
+        ):
             return
         if not _aemo_dispatch_sync_allowed():
             return
@@ -38006,6 +38161,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         nonlocal aemo_startup_sync_pending
 
+        if _aemo_dispatch_entry_data() is None:
+            return
         if not _aemo_dispatch_sync_allowed():
             return
 
@@ -38023,16 +38180,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             aemo_startup_sync_pending = True
             _LOGGER.info("Deferring AEMO-dispatch sync until HA finishes starting")
 
-            async def _sync_after_started(_event=None) -> None:
-                nonlocal aemo_startup_sync_pending
-                try:
-                    await _run_aemo_dispatch_sync()
-                finally:
-                    aemo_startup_sync_pending = False
+            def _sync_after_started(_event=None) -> None:
+                nonlocal aemo_dispatch_started_unsub, aemo_startup_sync_pending
+                aemo_dispatch_started_unsub = None
+                aemo_startup_sync_pending = False
+                current = _aemo_dispatch_entry_data()
+                if current is not None:
+                    current["aemo_dispatch_started_unsub"] = None
+                _schedule_aemo_dispatch_task(_run_aemo_dispatch_sync)
 
-            hass.bus.async_listen_once(
+            aemo_dispatch_started_unsub = hass.bus.async_listen_once(
                 EVENT_HOMEASSISTANT_STARTED, _sync_after_started
             )
+            hass.data[DOMAIN][entry.entry_id][
+                "aemo_dispatch_started_unsub"
+            ] = aemo_dispatch_started_unsub
             return
 
         await _run_aemo_dispatch_sync()
@@ -38045,7 +38207,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # `hass.async_create_task` is not thread-safe — hop back onto the
         # event loop before scheduling the coroutine.
         hass.loop.call_soon_threadsafe(
-            lambda: hass.async_create_task(_handle_aemo_dispatch_event(data))
+            lambda: _schedule_aemo_dispatch_task(
+                lambda: _handle_aemo_dispatch_event(data)
+            )
         )
 
     cancel_aemo_dispatch_sub = async_dispatcher_connect(
@@ -41368,7 +41532,31 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Tear down TOU sync hooks (AEMO dispatch subscriber + dispatch-trigger
     # coordinator + cron fallback + optional Octopus cron)
-    entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
+    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+
+    # Fence callbacks from this setup before any await below.  A dispatcher
+    # callback can already be queued on the event loop (or be waiting on the
+    # settled-price delay); cancelling and joining the tracked tasks here
+    # prevents them from touching removed data or a replacement generation.
+    if isinstance(entry_data, dict):
+        entry_data["aemo_dispatch_stopping"] = True
+        if started_unsub := entry_data.get("aemo_dispatch_started_unsub"):
+            started_unsub()
+            entry_data["aemo_dispatch_started_unsub"] = None
+        dispatch_tasks = tuple(entry_data.get("aemo_dispatch_tasks", ()))
+        for task in dispatch_tasks:
+            if not task.done():
+                task.cancel()
+        if dispatch_tasks:
+            # Completion callbacks consume and report task exceptions.  Keep
+            # return_exceptions here so a pre-existing failed task cannot
+            # abort the rest of unload or duplicate that report.
+            await asyncio.gather(
+                *dispatch_tasks,
+                return_exceptions=True,
+            )
+        entry_data["aemo_dispatch_tasks"] = set()
+
     if tesla_stream_coordinator := entry_data.get("tesla_coordinator"):
         try:
             await tesla_stream_coordinator.async_shutdown()

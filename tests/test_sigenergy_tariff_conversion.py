@@ -835,10 +835,10 @@ def test_sigenergy_region_detection_tolerates_setup_time_cache_miss():
         init_source.index("def _record_flow_power_twap_sample")
     ]
 
-    assert "domain_data = hass.data.get(DOMAIN, {})" in helper_source
-    assert "entry_domain_data = domain_data.get(entry.entry_id, {})" in helper_source
+    assert "entry_domain_data = _aemo_dispatch_entry_data()" in helper_source
+    assert "if entry_domain_data is None:" in helper_source
     assert 'hass.data[DOMAIN][entry.entry_id].get("amber_nem_region")' not in helper_source
-    assert "if entry.entry_id in domain_data:" in helper_source
+    assert "current_entry_data = _aemo_dispatch_entry_data()" in helper_source
 
 
 def test_sigenergy_cloud_region_is_collected_and_persisted():
@@ -878,15 +878,48 @@ def test_sigenergy_tariff_sync_caches_numeric_id_without_overwriting_configured_
         init_source.index("async def _sync_tariff_to_sigenergy"):
         init_source.index("async def _sync_tariff_to_foxess")
     ]
+    flow_source = init_source[
+        init_source.index("def _record_flow_power_twap_sample"):
+        init_source.index("async def _handle_sync_tou_internal")
+    ]
+    static_source = init_source[
+        init_source.index("def _static_tou_tariff_schedule_for_sync"):
+        init_source.index("async def handle_sync_rest_api_check")
+    ]
+    nem_source = init_source[
+        init_source.index("async def _get_nem_region_from_amber"):
+        init_source.index("def _record_flow_power_twap_sample")
+    ]
+    tou_source = init_source[
+        init_source.index("def _apply_provider_tariff_adjustments"):
+        init_source.index("async def handle_sync_now")
+    ]
 
     assert "CONF_SIGENERGY_TARIFF_STATION_ID" in helper_source
     assert "CONF_SIGENERGY_TARIFF_STATION_SOURCE_ID" in helper_source
     assert "new_data[CONF_SIGENERGY_STATION_ID] = tariff_station_id" not in helper_source
     assert "configured station ID remains" in helper_source
     assert "station_id=tariff_station_id" in helper_source
-    assert helper_source.count("hass.data.setdefault(DOMAIN, {}).setdefault") >= 2
+    assert "_aemo_dispatch_entry_data()" in helper_source
+    assert "hass.data.setdefault(DOMAIN, {}).setdefault" not in helper_source
     assert 'entry_data["tariff_schedule"]' in helper_source
     assert 'entry_data["sigenergy_tariff"]' in helper_source
+
+    assert "entry_data = _aemo_dispatch_entry_data()" in flow_source
+    assert "fp_tracker = entry_data.get(\"flow_power_twap_tracker\")" in flow_source
+    assert "domain_data = _aemo_dispatch_entry_data()" in flow_source
+    assert "if domain_data is None:" in flow_source
+    assert "_record_flow_power_twap_sample(electricity_provider, general_price)" in tou_source
+    assert "hass.data[DOMAIN][entry.entry_id]" not in flow_source
+    assert "hass.data.get(DOMAIN, {}).get(entry.entry_id" not in flow_source
+    assert "hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id" not in flow_source
+    assert "hass.data[DOMAIN][entry.entry_id]" not in tou_source
+    assert "hass.data.get(DOMAIN, {}).get(entry.entry_id" not in tou_source
+    assert "hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id" not in tou_source
+    assert static_source.count("_aemo_dispatch_entry_data()") >= 2
+    assert "hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id" not in static_source
+    assert "entry_domain_data = _aemo_dispatch_entry_data()" in nem_source
+    assert "current_entry_data = _aemo_dispatch_entry_data()" in nem_source
 
 
 def test_sigenergy_station_picker_preserves_system_id_and_caches_tariff_id():

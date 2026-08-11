@@ -128,6 +128,14 @@ def _base_ns(monitoring_mode: bool, **overrides) -> dict:
         )
 
     ns["_is_monitoring_mode"] = _is_monitoring_mode
+
+    def _aemo_dispatch_entry_data():
+        """Mirror the setup-generation resolver for extracted demand helpers."""
+        domain = ns["hass"].data.get(ns.get("DOMAIN", "power_sync"), {})
+        entry_data = domain.get(ns["entry"].entry_id)
+        return entry_data if isinstance(entry_data, dict) else None
+
+    ns["_aemo_dispatch_entry_data"] = _aemo_dispatch_entry_data
     return ns
 
 

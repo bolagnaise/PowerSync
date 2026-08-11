@@ -484,3 +484,69 @@ def test_aemo_dispatch_sync_debounces_during_startup():
     assert runner_source.index("entry.entry_id not") < runner_source.index(
         "await handle_sync_rest_api_check"
     )
+
+
+def test_aemo_dispatch_tasks_are_generation_scoped_and_joined_on_unload():
+    """Reloads must fence old dispatch callbacks before entry data is removed."""
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    setup = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "async_setup_entry"
+    )
+    unload = _find_module_function(tree, "async_unload_entry")
+    done_callback = _find_nested_setup_child(setup, "_on_aemo_dispatch_task_done")
+    sigenergy_sync = _find_setup_child(tree, "_sync_tariff_to_sigenergy")
+    foxess_sync = _find_setup_child(tree, "_sync_tariff_to_foxess")
+    demand_helper = _find_setup_child(
+        tree, "_enforce_demand_grid_charging_protection"
+    )
+    tou_sync = _find_setup_child(tree, "_handle_sync_tou_internal")
+    setup_source = ast.get_source_segment(source, setup)
+    unload_source = ast.get_source_segment(source, unload)
+    done_callback_source = ast.get_source_segment(source, done_callback)
+    sigenergy_sync_source = ast.get_source_segment(source, sigenergy_sync)
+    foxess_sync_source = ast.get_source_segment(source, foxess_sync)
+    demand_helper_source = ast.get_source_segment(source, demand_helper)
+    tou_sync_source = ast.get_source_segment(source, tou_sync)
+
+    assert setup_source is not None
+    assert unload_source is not None
+    assert done_callback_source is not None
+    assert sigenergy_sync_source is not None
+    assert foxess_sync_source is not None
+    assert demand_helper_source is not None
+    assert tou_sync_source is not None
+    assert "aemo_dispatch_generation" in setup_source
+    assert "aemo_dispatch_tasks" in setup_source
+    assert "aemo_dispatch_started_unsub" in setup_source
+    assert "_aemo_dispatch_entry_data" in setup_source
+    assert "completed_task.cancelled()" in done_callback_source
+    assert "completed_task.result()" in done_callback_source
+    assert "except asyncio.CancelledError" in done_callback_source
+    assert "_LOGGER.exception(\"AEMO dispatch task failed\")" in done_callback_source
+    assert "aemo_dispatch_tasks.discard(completed_task)" in done_callback_source
+    assert "aemo_dispatch_tasks.add(task)" in setup_source
+    assert "_aemo_dispatch_entry_data()" in sigenergy_sync_source
+    assert 'entry_data["sigenergy_tariff"]' in sigenergy_sync_source
+    assert "_aemo_dispatch_entry_data()" in foxess_sync_source
+    assert "Skipping FoxESS schedule write for stale AEMO dispatch" in foxess_sync_source
+    assert "current_entry_data = _aemo_dispatch_entry_data()" in demand_helper_source
+    assert "entry_data=current_entry_data" in demand_helper_source
+    assert '"grid_charging_disabled_for_demand"' in demand_helper_source
+    assert demand_helper_source.index("await ts_coordinator.set_grid_charging_enabled") < demand_helper_source.rindex(
+        "current_entry_data = _aemo_dispatch_entry_data()"
+    )
+    assert "_aemo_dispatch_entry_data() is not _toggle_entry_data" in tou_sync_source
+    assert '_toggle_entry_data.get(' in tou_sync_source
+    assert '"last_force_toggle_time"' in tou_sync_source
+    assert '"retoggle_attempted", False' in tou_sync_source
+    assert "task.cancel()" in unload_source
+    assert "await asyncio.gather" in unload_source
+    assert unload_source.index('"aemo_dispatch_stopping"') < unload_source.index(
+        '"aemo_dispatch_unsub"'
+    )
+    assert unload_source.index("task.cancel()") < unload_source.index(
+        "await asyncio.gather"
+    )
