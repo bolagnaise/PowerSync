@@ -220,7 +220,7 @@ def _tesla_charge_current_positive_floor(
     hass: HomeAssistant,
     entity_id: Optional[str],
 ) -> Optional[int]:
-    """Return a cloud Tesla entity's lowest positive integer current."""
+    """Return a Tesla current entity's lowest positive integer current."""
     entity_id = str(entity_id or "").strip()
     if not entity_id:
         return None
@@ -254,6 +254,46 @@ def _tesla_hardware_min_charge_amps(
         if entity_floor is not None:
             return entity_floor
     return TESLA_UNKNOWN_CHARGER_SAFE_AMPS
+
+
+async def _resolve_tesla_charge_current_entity(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_vin: Optional[str],
+) -> Optional[str]:
+    """Return the current entity used by the selected Tesla command path."""
+    ev_provider = _get_ev_config(config_entry)["ev_provider"]
+    ble_prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_vin)
+    if (
+        ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH)
+        and _is_ble_available(hass, ble_prefix)
+    ):
+        return TESLA_BLE_NUMBER_CHARGING_AMPS.format(prefix=ble_prefix)
+
+    if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
+        tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
+        tbt_matches_vehicle = (
+            not vehicle_vin
+            or not (len(vehicle_vin) == 17 and vehicle_vin.isalnum())
+            or str(tbt_prefix or "").lower() == vehicle_vin.lower()
+        )
+        if tbt_matches_vehicle and _is_teslemetry_bt_available(hass, tbt_prefix):
+            return TESLEMETRY_BT_NUMBER_CHARGE_AMPS.format(prefix=tbt_prefix)
+
+    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        try:
+            return await _get_tesla_ev_entity(
+                hass,
+                r"number\..*(charging_amps|charge_current)(?:_\d+)?$",
+                vehicle_vin,
+                warn_on_missing=False,
+            )
+        except Exception as err:
+            _LOGGER.debug(
+                "Could not resolve optional Tesla charge-current entity: %s",
+                err,
+            )
+    return None
 
 
 def _generic_charger_effective_integer_bounds(
@@ -1630,7 +1670,10 @@ async def _set_ev_charging_amps_ble(
     # Cap amps to entity's min/max range. Tesla integrations can report a stale
     # 16A max while idle, so solar-surplus callers may opt into the configured
     # app/home-power max instead.
-    entity_min = _coerce_positive_int(state.attributes.get("min"), 0) or 0
+    entity_min = (
+        _tesla_charge_current_positive_floor(hass, amps_entity)
+        or TESLA_UNKNOWN_CHARGER_SAFE_AMPS
+    )
     entity_max = _coerce_positive_int(state.attributes.get("max"), int(amps)) or int(amps)
     effective_max = entity_max
     if (
@@ -1783,7 +1826,10 @@ async def _set_ev_charging_amps_teslemetry_bt(
     if state is None:
         _LOGGER.error(f"Teslemetry BT charge amps entity not found: {entity_id}")
         return False
-    min_val = _coerce_positive_int(state.attributes.get("min"), 0) or 0
+    min_val = (
+        _tesla_charge_current_positive_floor(hass, entity_id)
+        or TESLA_UNKNOWN_CHARGER_SAFE_AMPS
+    )
     max_val = _coerce_positive_int(state.attributes.get("max"), 32) or 32
     effective_max = max_val
     if (
@@ -4565,22 +4611,20 @@ async def _action_set_ev_charging_amps(
         params.get("allow_stale_entity_max_override")
     )
 
-    # Cloud vehicle integrations can expose and sustain a positive current
-    # below the conventional 5A Tesla floor. Keep the raw positive request for
-    # that VIN-scoped entity, while local/unknown command paths stay fail-closed
-    # at the conservative floor below.
+    # Tesla current entities can expose and sustain a positive current below
+    # the conventional 5A floor. Each command helper validates the selected
+    # entity's own positive minimum and otherwise falls back conservatively.
     amps = max(1, min(80, int(amps)))
     if configured_max_amps is not None:
         amps = min(configured_max_amps, amps)
 
     # Prefer the free, explicitly paired ESPHome BLE control path.
-    ble_amps = max(TESLA_UNKNOWN_CHARGER_SAFE_AMPS, amps)
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
             result = await _set_ev_charging_amps_ble(
                 hass,
                 ble_prefix,
-                ble_amps,
+                amps,
                 allow_stale_entity_max_override=allow_stale_entity_max_override,
                 configured_max_amps=configured_max_amps,
                 params=params,
@@ -4600,7 +4644,7 @@ async def _action_set_ev_charging_amps(
             result = await _set_ev_charging_amps_teslemetry_bt(
                 hass,
                 tbt_prefix,
-                max(TESLA_UNKNOWN_CHARGER_SAFE_AMPS, amps),
+                amps,
                 allow_stale_entity_max_override=allow_stale_entity_max_override,
                 configured_max_amps=configured_max_amps,
                 params=params,
@@ -7035,23 +7079,17 @@ async def _refresh_dynamic_tesla_charger_capability(
         }
     )
     ev_provider = _get_ev_config(config_entry)["ev_provider"]
-    if ev_provider == EV_PROVIDER_FLEET_API:
-        charge_current_entity = await _get_tesla_ev_entity(
-            hass,
-            r"number\..*(charging_amps|charge_current)(?:_\d+)?$",
-            vehicle_id,
-            warn_on_missing=False,
-        )
-        current_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
-        if current_state is not state or not current_state.get("active"):
-            return False
-        if charge_current_entity:
-            params["tesla_charge_current_entity"] = charge_current_entity
-        else:
-            params.pop("tesla_charge_current_entity", None)
+    charge_current_entity = await _resolve_tesla_charge_current_entity(
+        hass,
+        config_entry,
+        vehicle_id,
+    )
+    current_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
+    if current_state is not state or not current_state.get("active"):
+        return False
+    if charge_current_entity:
+        params["tesla_charge_current_entity"] = charge_current_entity
     else:
-        # Local and fallback modes use a conservative positive floor; Both
-        # mode must not inherit a lower cloud floor before its BLE preference.
         params.pop("tesla_charge_current_entity", None)
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
         charging_state_entity = await _get_tesla_ev_entity(
@@ -7067,6 +7105,8 @@ async def _refresh_dynamic_tesla_charger_capability(
             params["tesla_charging_state_entity"] = charging_state_entity
         else:
             params.pop("tesla_charging_state_entity", None)
+    else:
+        params.pop("tesla_charging_state_entity", None)
     requested_fixed_amps = _coerce_positive_int(
         params.get("requested_fixed_charge_amps", params.get("fixed_charge_amps"))
     )
@@ -8980,15 +9020,13 @@ async def _action_start_ev_charging_dynamic_locked(
             "allow_stale_entity_max_override": False,
         }
         ev_provider = _get_ev_config(config_entry)["ev_provider"]
-        if ev_provider == EV_PROVIDER_FLEET_API:
-            charge_current_entity = await _get_tesla_ev_entity(
-                hass,
-                r"number\..*(charging_amps|charge_current)(?:_\d+)?$",
-                vehicle_id,
-                warn_on_missing=False,
-            )
-            if charge_current_entity:
-                params["tesla_charge_current_entity"] = charge_current_entity
+        charge_current_entity = await _resolve_tesla_charge_current_entity(
+            hass,
+            config_entry,
+            vehicle_id,
+        )
+        if charge_current_entity:
+            params["tesla_charge_current_entity"] = charge_current_entity
         if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
             charging_state_entity = await _get_tesla_ev_entity(
                 hass,

@@ -361,7 +361,7 @@ def test_tesla_active_charger_capability_rejects_conflicting_sources_and_unknown
     assert unknown["max_charge_amps"] == 5
 
 
-def test_dynamic_tesla_capability_tracks_tessie_state_without_cloud_floor_in_both_mode(
+def test_dynamic_tesla_capability_tracks_selected_current_and_state_in_both_mode(
     monkeypatch,
 ):
     vehicle_id = "LRW3F7FS1NC484342"
@@ -409,7 +409,9 @@ def test_dynamic_tesla_capability_tracks_tessie_state_without_cloud_floor_in_bot
     )
 
     assert result is True
-    assert "tesla_charge_current_entity" not in state["params"]
+    assert state["params"]["tesla_charge_current_entity"] == (
+        "number.n3bula_charge_current"
+    )
     assert state["params"]["tesla_charging_state_entity"] == (
         "sensor.n3bula_charging"
     )
@@ -4970,35 +4972,119 @@ def test_tesla_cloud_set_amps_honors_entity_positive_floor(monkeypatch):
     ]
 
 
-def test_tesla_ble_set_amps_keeps_conservative_positive_floor(monkeypatch):
-    set_amps_calls = []
-
-    async def fake_set_ble_amps(hass, prefix, amps, **kwargs):
-        set_amps_calls.append((prefix, amps))
+def test_tesla_ble_set_amps_honors_entity_positive_floor(monkeypatch):
+    async def fake_wake(*args, **kwargs):
         return True
 
     monkeypatch.setattr(actions, "_is_ble_available", lambda *args: True)
-    monkeypatch.setattr(
-        actions,
-        "_set_ev_charging_amps_ble",
-        fake_set_ble_amps,
-    )
+    monkeypatch.setattr(actions, "_wake_tesla_ble", fake_wake)
     entry = SimpleNamespace(
         entry_id="entry-1",
         data={},
         options={"ev_provider": "tesla_ble"},
     )
+    hass = _Hass([
+        _State("number.car_charging_amps", "1", {"min": 0, "max": 32}),
+    ])
 
     result = asyncio.run(
         actions._action_set_ev_charging_amps(
-            _Hass([]),
+            hass,
             entry,
             {"vehicle_vin": "ble_car", "amps": 1},
         )
     )
 
     assert result is True
-    assert set_amps_calls == [("car", 5)]
+    assert hass.services.calls == [
+        ("number", "set_value", {"entity_id": "number.car_charging_amps", "value": 1})
+    ]
+
+
+def test_tesla_ble_set_amps_uses_safe_floor_without_proven_bounds(monkeypatch):
+    async def fake_wake(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(actions, "_is_ble_available", lambda *args: True)
+    monkeypatch.setattr(actions, "_wake_tesla_ble", fake_wake)
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"ev_provider": "tesla_ble"},
+    )
+    hass = _Hass([
+        _State("number.car_charging_amps", "1", {"max": 32}),
+    ])
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            entry,
+            {"vehicle_vin": "ble_car", "amps": 1},
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        ("number", "set_value", {"entity_id": "number.car_charging_amps", "value": 5})
+    ]
+
+
+def test_teslemetry_bt_set_amps_honors_entity_positive_floor(monkeypatch):
+    monkeypatch.setattr(
+        actions,
+        "_resolve_teslemetry_bt_prefix",
+        lambda *args: "VIN123",
+    )
+    monkeypatch.setattr(actions, "_is_teslemetry_bt_available", lambda *args: True)
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"ev_provider": "teslemetry_bt"},
+    )
+    hass = _Hass([
+        _State(
+            "number.VIN123_charge_current_request",
+            "1",
+            {"min": 0, "max": 32},
+        ),
+    ])
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            entry,
+            {"vehicle_vin": "VIN123", "amps": 1},
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        (
+            "number",
+            "set_value",
+            {"entity_id": "number.VIN123_charge_current_request", "value": 1},
+        )
+    ]
+
+
+def test_resolve_tesla_charge_current_entity_uses_ble_command_path(monkeypatch):
+    monkeypatch.setattr(actions, "_is_ble_available", lambda *args: True)
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"ev_provider": "tesla_ble"},
+    )
+
+    entity_id = asyncio.run(
+        actions._resolve_tesla_charge_current_entity(
+            _Hass([]),
+            entry,
+            "ble_car",
+        )
+    )
+
+    assert entity_id == "number.car_charging_amps"
 
 
 def test_tesla_set_amps_refuses_current_entity_unavailable_after_wake(monkeypatch):
