@@ -4835,6 +4835,40 @@ def test_tesla_set_amps_clamps_to_entity_max_by_default(monkeypatch):
     ]
 
 
+def test_tesla_set_amps_refuses_current_entity_unavailable_after_wake(monkeypatch):
+    entity_id = "number.car_charging_amps"
+
+    async def fake_get_tesla_ev_entity(*args, **kwargs):
+        return entity_id
+
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", fake_get_tesla_ev_entity)
+
+    for post_wake_state in ("", "unavailable", "unknown", None):
+        hass = _Hass([
+            _State(entity_id, "16", {"min": 5, "max": 32}),
+        ])
+
+        async def fake_wake(*args, **kwargs):
+            if post_wake_state is None:
+                hass.states._states.pop(entity_id, None)
+            else:
+                hass.states.get(entity_id).state = post_wake_state
+            return True
+
+        monkeypatch.setattr(actions, "_wake_tesla_ev", fake_wake)
+
+        result = asyncio.run(
+            actions._action_set_ev_charging_amps(
+                hass,
+                _Entry(),
+                {"vehicle_vin": "VIN123", "amps": 16},
+            )
+        )
+
+        assert result is False
+        assert hass.services.calls == []
+
+
 def test_solar_surplus_tesla_set_amps_uses_configured_max_over_idle_entity_cap(monkeypatch):
     async def fake_get_tesla_ev_entity(*args, **kwargs):
         return "number.car_charging_amps"

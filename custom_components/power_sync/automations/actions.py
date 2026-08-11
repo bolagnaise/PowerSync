@@ -4474,6 +4474,25 @@ async def _action_set_ev_charging_amps(
                 _LOGGER.debug("Wake failed (possibly due to API credits), skipping set amps command")
                 return False
 
+            # Waking the vehicle can invalidate the Fleet number entity while
+            # HA refreshes its state. Never send a command using the stale
+            # pre-wake entity snapshot.
+            entity_state = hass.states.get(charging_amps_entity)
+            entity_state_value = str(
+                getattr(entity_state, "state", "") or ""
+            ).strip().lower()
+            if entity_state is None or entity_state_value in {
+                "",
+                "unknown",
+                "unavailable",
+            }:
+                _LOGGER.error(
+                    "Tesla charge-current entity %s unavailable after wake; "
+                    "refusing to set charging amps",
+                    charging_amps_entity,
+                )
+                return False
+
             await hass.services.async_call(
                 "number",
                 "set_value",
