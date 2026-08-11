@@ -9218,7 +9218,17 @@ class PriceLevelChargingExecutor:
             )
 
             # Take action per vehicle
-            if should_charge and not vehicle_state.is_charging:
+            # An away result is a scope boundary, not a stop decision. Price-level
+            # policy only manages charging at home; charging at another location
+            # may be owned by the driver or that site's charger automation.
+            if not should_charge and vehicle_state.last_decision == "away":
+                _LOGGER.info(
+                    "Price-level charging leaving %s (%s) alone while away: %s",
+                    name,
+                    vin,
+                    reason,
+                )
+            elif should_charge and not vehicle_state.is_charging:
                 await self._start_charging(mode, reason, vehicle_vin=vin)
             elif not should_charge:
                 # Stop only if this executor started the session. External

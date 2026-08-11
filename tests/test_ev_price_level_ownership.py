@@ -4712,6 +4712,38 @@ def test_enabled_price_level_still_stops_external_high_price_charging(
     stop_charging.assert_awaited_once_with("Price above threshold", vehicle_vin=VIN)
 
 
+@pytest.mark.parametrize("tracked_session", (False, True))
+def test_enabled_price_level_leaves_away_vehicle_charging_alone(
+    monkeypatch, fake_actions, tracked_session
+):
+    fake_actions._dynamic_ev_state = {}
+
+    async def away(*args, **kwargs):
+        return "work"
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("price-level must not probe or stop an away vehicle")
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _one_vehicle)
+    monkeypatch.setattr(ev_planner, "get_ev_location", away)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", fail_if_called)
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "_stop_charging",
+        fail_if_called,
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(_FakeHass(), _FakeConfigEntry())
+    state = executor._get_or_create_vehicle_state(VIN)
+    state.is_charging = tracked_session
+    state.charging_mode = "price_level_opportunity" if tracked_session else ""
+    executor.apply_preserve_home_battery = AsyncMock()
+    asyncio.run(executor.evaluate_all_vehicles(50))
+
+    assert state.last_decision == "away"
+    assert state.last_decision_reason == "Vehicle not at home (location: work)"
+
+
 def test_unknown_soc_uses_recovery_price_fallback(monkeypatch):
     async def at_home(*args, **kwargs):
         return "home"
