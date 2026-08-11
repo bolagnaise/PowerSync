@@ -419,6 +419,51 @@ def test_fetch_with_retry_reauths_when_powersync_bearer_is_invalid():
         raise AssertionError("Expected ConfigEntryAuthFailed")
 
 
+def test_tesla_auth_expiry_sends_one_actionable_mobile_alert(monkeypatch):
+    hass = _FakeHass()
+    tesla = coordinator.TeslaEnergyCoordinator(
+        hass,
+        "site-1",
+        "psync_test_token",
+        api_provider=coordinator.TESLA_PROVIDER_POWERSYNC,
+    )
+    tesla._energy_acc._last_update = datetime.now(timezone.utc)
+    tesla._lifetime_totals_restored = True
+
+    async def rejected_bearer(*args, **kwargs):
+        raise coordinator.ConfigEntryAuthFailed("token rejected")
+
+    alerts = []
+
+    async def capture_push(hass_arg, title, message):
+        alerts.append((hass_arg, title, message))
+
+    automations_package = types.ModuleType("power_sync.automations")
+    automations_package.__path__ = []
+    actions_module = types.ModuleType("power_sync.automations.actions")
+    actions_module._send_expo_push = capture_push
+    monkeypatch.setitem(sys.modules, "power_sync.automations", automations_package)
+    monkeypatch.setitem(sys.modules, "power_sync.automations.actions", actions_module)
+    monkeypatch.setattr(coordinator, "_fetch_with_retry", rejected_bearer)
+
+    for _ in range(2):
+        try:
+            asyncio.run(tesla._async_update_data())
+        except coordinator.ConfigEntryAuthFailed:
+            pass
+        else:
+            raise AssertionError("Expected ConfigEntryAuthFailed")
+
+    assert alerts == [
+        (
+            hass,
+            "PowerSync Connection Expired",
+            "Re-authenticate in Home Assistant Settings > Repairs. "
+            "Automations and battery control may be unavailable.",
+        )
+    ]
+
+
 def test_tesla_lifetime_totals_clamp_prevents_recorder_decrease():
     tesla = coordinator.TeslaEnergyCoordinator(
         _FakeHass(),

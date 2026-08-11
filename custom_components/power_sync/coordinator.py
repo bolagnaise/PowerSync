@@ -2116,6 +2116,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self._outage_notified: bool = False
         self._outage_start: float = 0  # monotonic timestamp
         self._last_outage_notification: float = 0  # monotonic timestamp (cooldown)
+        self._auth_expiry_notified = False
 
         # Lifetime energy totals (refreshed hourly from calendar_history period=lifetime)
         self._lifetime_totals: dict[str, float] | None = None
@@ -2850,7 +2851,28 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             return energy_data
 
         except ConfigEntryAuthFailed:
-            # Don't retry — let HA's reauth flow take over
+            # Home Assistant opens the repair/reauth flow, but that is easy to
+            # miss when the user primarily monitors PowerSync from the mobile
+            # app.  Notify every registered app device once per coordinator
+            # before handing control back to HA.  Notification failures must
+            # never mask or delay the reauth exception.
+            if not self._auth_expiry_notified:
+                self._auth_expiry_notified = True
+                try:
+                    from .automations.actions import _send_expo_push
+
+                    await _send_expo_push(
+                        self.hass,
+                        "PowerSync Connection Expired",
+                        "Re-authenticate in Home Assistant Settings > Repairs. "
+                        "Automations and battery control may be unavailable.",
+                    )
+                except Exception as notify_err:
+                    _LOGGER.debug(
+                        "Could not send PowerSync authentication-expired notification: %s",
+                        notify_err,
+                    )
+            # Don't retry — let HA's reauth flow take over.
             raise
         except (UpdateFailed, Exception) as err:
             now = time.monotonic()

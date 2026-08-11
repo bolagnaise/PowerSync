@@ -19467,6 +19467,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # config-entry data and can answer while setup continues.
     _register_mobile_detection_views(hass)
 
+    # Load the mobile app's persisted push registrations before the first
+    # provider refresh. A rejected cloud token aborts setup immediately and
+    # opens HA's reauth flow, so restoring tokens later with the automation
+    # engine would make the mobile authentication-expired alert impossible on
+    # startup — exactly when it is most useful.
+    from .automations import AutomationStore, AutomationEngine
+
+    automation_store = AutomationStore(hass)
+    await automation_store.async_load()
+    persisted_tokens = automation_store.get_push_tokens()
+    if persisted_tokens:
+        domain_data = hass.data.setdefault(DOMAIN, {})
+        domain_data.setdefault("push_tokens", {}).update(persisted_tokens)
+        _LOGGER.info(
+            "📱 Restored %d push token(s) before provider startup",
+            len(persisted_tokens),
+        )
+
     # Check pricing source configuration
     aemo_spike_enabled = entry.options.get(
         CONF_AEMO_SPIKE_ENABLED,
@@ -38885,11 +38903,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # AUTOMATIONS ENGINE SETUP
     # ========================================
     # Initialize the automation store and engine for user-defined automations
-    from .automations import AutomationStore, AutomationEngine
-
-    automation_store = AutomationStore(hass)
-    await automation_store.async_load()
-
     # Handle initial custom tariff from config flow (if present)
     initial_custom_tariff = entry.data.get("initial_custom_tariff")
     if initial_custom_tariff:
@@ -38987,14 +39000,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
     except Exception as err:
         _LOGGER.debug("EV runtime restore failed: %s", err)
-
-    # Restore persisted push tokens to hass.data for notification sending
-    persisted_tokens = automation_store.get_push_tokens()
-    if persisted_tokens:
-        if "push_tokens" not in hass.data[DOMAIN]:
-            hass.data[DOMAIN]["push_tokens"] = {}
-        hass.data[DOMAIN]["push_tokens"].update(persisted_tokens)
-        _LOGGER.info(f"📱 Restored {len(persisted_tokens)} push token(s) from storage")
 
     # Set up automation evaluation timer (every 30 seconds)
     async def auto_evaluate_automations(now):
