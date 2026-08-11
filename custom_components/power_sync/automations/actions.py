@@ -1199,9 +1199,13 @@ async def _wake_tesla_ev(
 
 def _get_ev_config(config_entry: ConfigEntry) -> dict:
     """Get EV configuration from config entry."""
+    config = {
+        **getattr(config_entry, "data", {}),
+        **getattr(config_entry, "options", {}),
+    }
     return {
-        "ev_provider": config_entry.options.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API),
-        "ble_prefix": config_entry.options.get(
+        "ev_provider": config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API),
+        "ble_prefix": config.get(
             CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX
         ),
     }
@@ -1279,7 +1283,11 @@ def _is_ble_available(hass: HomeAssistant, ble_prefix: str) -> bool:
     """Check if Tesla BLE entities are available."""
     charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
     state = hass.states.get(charger_entity)
-    return state is not None
+    # ESPHome commonly reports ``unknown`` while the vehicle is asleep; the
+    # bridge can still wake it and then issue the command.  ``unavailable`` is
+    # different: Home Assistant cannot currently reach the control entity, so
+    # Both mode must proceed directly to its Teslemetry/Fleet fallback.
+    return state is not None and state.state != "unavailable"
 
 
 async def _wake_tesla_ble(hass: HomeAssistant, ble_prefix: str, wait_timeout: int = 30) -> bool:

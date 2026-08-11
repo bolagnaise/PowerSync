@@ -550,6 +550,99 @@ def test_explicit_ble_mapping_is_independent_of_registry_and_prefix_order():
     assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_B) == "bridge_alpha"
 
 
+def test_ev_action_config_merges_legacy_data_with_options():
+    entry = SimpleNamespace(
+        data={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "legacy_bridge",
+        },
+        options={},
+    )
+
+    assert actions._get_ev_config(entry) == {
+        "ev_provider": "both",
+        "ble_prefix": "legacy_bridge",
+    }
+
+
+def test_ble_availability_distinguishes_sleeping_from_unavailable_bridge():
+    sleeping = _Hass([_State("switch.bridge_alpha_charger", "unknown")])
+    unavailable = _Hass([_State("switch.bridge_alpha_charger", "unavailable")])
+
+    assert actions._is_ble_available(sleeping, "bridge_alpha") is True
+    assert actions._is_ble_available(unavailable, "bridge_alpha") is False
+
+
+def test_both_provider_start_uses_fleet_when_paired_ble_is_unavailable(monkeypatch):
+    hass = _two_fleet_vehicle_hass()
+    hass.states = _States([_State("switch.bridge_alpha_charger", "unavailable")])
+    entry = _both_provider_entry(
+        "bridge_alpha,bridge_beta",
+        f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
+    )
+    ble_start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_start_ev_charging_ble", ble_start)
+    monkeypatch.setattr(actions, "_resolve_teslemetry_bt_prefix", lambda *args: "")
+    monkeypatch.setattr(actions, "_is_teslemetry_bt_available", lambda *args: False)
+    monkeypatch.setattr(
+        actions,
+        "_get_tesla_ev_entity",
+        AsyncMock(return_value="switch.w3rt1e_charge"),
+    )
+    monkeypatch.setattr(actions, "_wake_tesla_ev", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_is_api_credit_available", lambda *args: True)
+
+    result = asyncio.run(
+        actions._action_start_ev_charging(
+            hass,
+            entry,
+            {"vehicle_vin": VIN_B, "charger_type": "tesla"},
+            {},
+        )
+    )
+
+    assert result is True
+    ble_start.assert_not_awaited()
+    assert hass.services.calls == [
+        ("switch", "turn_on", {"entity_id": "switch.w3rt1e_charge"})
+    ]
+
+
+def test_both_provider_start_uses_matching_teslemetry_bt_when_ble_is_unavailable(
+    monkeypatch,
+):
+    hass = _two_fleet_vehicle_hass()
+    hass.states = _States([_State("switch.bridge_alpha_charger", "unavailable")])
+    entry = _both_provider_entry(
+        "bridge_alpha,bridge_beta",
+        f"{VIN_A}=bridge_beta,{VIN_B}=bridge_alpha",
+    )
+    ble_start = AsyncMock(return_value=True)
+    tbt_start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_start_ev_charging_ble", ble_start)
+    monkeypatch.setattr(actions, "_resolve_teslemetry_bt_prefix", lambda *args: VIN_B)
+    monkeypatch.setattr(actions, "_is_teslemetry_bt_available", lambda *args: True)
+    monkeypatch.setattr(actions, "_start_ev_charging_teslemetry_bt", tbt_start)
+    fleet_entity = AsyncMock(
+        side_effect=AssertionError("Fleet fallback was not expected")
+    )
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", fleet_entity)
+
+    result = asyncio.run(
+        actions._action_start_ev_charging(
+            hass,
+            entry,
+            {"vehicle_vin": VIN_B, "charger_type": "tesla"},
+            {},
+        )
+    )
+
+    assert result is True
+    ble_start.assert_not_awaited()
+    tbt_start.assert_awaited_once_with(hass, VIN_B)
+    fleet_entity.assert_not_awaited()
+
+
 def test_both_provider_start_prefers_paired_esphome_ble(monkeypatch):
     hass = _two_fleet_vehicle_hass()
     entry = _both_provider_entry(
