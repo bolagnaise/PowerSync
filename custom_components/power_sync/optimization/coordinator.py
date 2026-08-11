@@ -35,6 +35,7 @@ from .schedule_reader import OptimizationSchedule, ScheduleAction
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
 from .solar_forecast_learning import SolarForecastLearner
+from .solar_provenance import derive_solar_forecast_provenance
 from .solar_export import SolarExportHoldController, resolve_solar_export_adapter
 from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode
 from ..const import (
@@ -434,6 +435,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Cached forecast data (populated each optimization run)
         self._last_solar_forecast: list[float] | None = None    # kW values
+        self._last_raw_solar_forecast: list[float] | None = None
+        self._last_planned_solar_forecast: list[float] | None = None
+        self._last_solar_curtailment_forecast: list[float] | None = None
         self._has_solar_forecast: bool | None = None  # None until the first forecast attempt
         self._last_load_forecast: list[float] | None = None     # kW values
         self._last_import_prices: list[float] | None = None     # $/kWh values (LP-adjusted)
@@ -558,6 +562,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "supported": False,
             "reason": "not_evaluated",
         }
+        self._last_solar_export_upstream_outage: tuple[str, str, str] | None = None
 
         # Saving sessions coordinator (set from __init__.py when configured)
         self._saving_session_coordinator = None
@@ -5322,6 +5327,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if solar_forecast:
                 self._observe_solar_forecast_accuracy(solar_forecast, soc)
                 solar_forecast = self._apply_solar_nowcast_derate(solar_forecast, soc)
+            adjusted_solar_forecast = list(solar_forecast)
 
             # Curtailment-aware solar: cap forecast during predicted curtailment periods
             if solar_forecast and load_forecast and export_prices and self._entry:
@@ -5372,6 +5378,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             "export < %.0fc/kWh and battery full (solar limited to load)",
                             capped, curtail_threshold * 100,
                         )
+
+            solver_solar_forecast = list(solar_forecast)
 
             if solar_forecast and load_forecast:
                 ev_msg = f" (ev={ev_peak_kw:.1f}kW peak)" if ev_peak_kw > 0 else ""
@@ -6060,6 +6068,26 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._record_solar_forecast_availability(solar_forecast)
             self._last_solar_forecast = solar_forecast
             self._last_load_forecast = load_forecast
+            provenance = derive_solar_forecast_provenance(
+                raw_solar_forecast,
+                adjusted_solar_forecast,
+                solver_solar_forecast,
+                getattr(result, "solar_curtailment_w", None),
+            )
+            if provenance is None:
+                self._last_raw_solar_forecast = None
+                self._last_planned_solar_forecast = None
+                self._last_solar_curtailment_forecast = None
+            else:
+                self._last_raw_solar_forecast = (
+                    provenance.raw_forecast_values_kw
+                )
+                self._last_planned_solar_forecast = (
+                    provenance.planned_forecast_values_kw
+                )
+                self._last_solar_curtailment_forecast = (
+                    provenance.curtailment_values_kw
+                )
 
             # Track actual cost for this interval (midnight-to-midnight daily cost)
             self._track_actual_cost()
@@ -10200,6 +10228,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 }
             else:
                 status["export_limit_kw"] = limit_kw
+        outage = None
+        if status.get("reason") == "upstream_integration_not_loaded":
+            outage = (
+                str(status.get("reason")),
+                str(status.get("upstream_domain") or "upstream integration"),
+                str(status.get("upstream_state") or "unknown"),
+            )
+            if outage != getattr(
+                self, "_last_solar_export_upstream_outage", None
+            ):
+                _LOGGER.warning(
+                    "Profit Max solar export unavailable: %s (%s state=%s)",
+                    *outage,
+                )
+        self._last_solar_export_upstream_outage = outage
         self._solar_export_capability_status = status
         return status
 
@@ -15335,6 +15378,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data["solar_forecast_kwh"] = sum(self._last_solar_forecast) * dt_h
             data["solar_peak_kw"] = max(self._last_solar_forecast)
             data["solar_forecast"] = self._last_solar_forecast
+            provenance = (
+                getattr(self, "_last_raw_solar_forecast", None),
+                getattr(self, "_last_planned_solar_forecast", None),
+                getattr(self, "_last_solar_curtailment_forecast", None),
+            )
+            if all(value is not None for value in provenance):
+                raw, planned, curtailed = provenance
+                if len(raw) == len(planned) == len(curtailed):
+                    data["raw_solar_forecast"] = raw
+                    data["planned_solar_forecast"] = planned
+                    data["solar_curtailment_forecast"] = curtailed
 
         if self._last_load_forecast:
             data["load_forecast_kwh"] = sum(self._last_load_forecast) * dt_h
@@ -15890,6 +15944,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 api_response["grid_export_w"] = grid_export_w
             # Add price arrays for pricing overlay (use actual tariff rates, not LP-adjusted)
             n_sched = len(api_response["timestamps"])
+            provenance = (
+                getattr(self, "_last_raw_solar_forecast", None),
+                getattr(self, "_last_planned_solar_forecast", None),
+                getattr(self, "_last_solar_curtailment_forecast", None),
+            )
+            if all(value is not None for value in provenance):
+                raw, planned, curtailed = provenance
+                load = self._last_load_forecast
+                if (
+                    load is not None
+                    and len(raw) == len(planned) == len(curtailed) == len(load)
+                    == n_sched
+                ):
+                    data["forecast_series"] = {
+                        "timestamps": list(api_response["timestamps"]),
+                        "interval_minutes": self._config.interval_minutes,
+                        "raw_forecast_values_kw": raw,
+                        "planned_forecast_values_kw": planned,
+                        "curtailment_values_kw": curtailed,
+                        "load_forecast_values_kw": load,
+                    }
             display_import = self._last_display_import_prices or self._last_import_prices
             display_export = self._last_display_export_prices or self._last_export_prices
             if display_import:

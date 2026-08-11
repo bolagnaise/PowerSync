@@ -102,16 +102,32 @@ class PowerSyncChart extends HTMLElement {
       key: this._seriesKey(seriesConfig, index),
       entity: seriesConfig.entity,
       attribute: seriesConfig.attribute,
+      fallbackAttribute: seriesConfig.fallbackAttribute,
       dataKey: seriesConfig.key,
       name: seriesConfig.name,
       color: seriesConfig.color,
       fill: !!seriesConfig.fill,
       strokeWidth: seriesConfig.strokeWidth,
+      strokeDasharray: seriesConfig.strokeDasharray,
       axis: seriesConfig.axis,
       minValue: seriesConfig.minValue,
       maxValue: seriesConfig.maxValue,
       state: this._chartEntitySignature(mode, seriesConfig, config),
       cache: mode === 'history' ? this._historyCacheSignature(seriesConfig.entity) : undefined,
+    }));
+    const bands = (config.bands || []).map((band, index) => ({
+      key: band.key || `band_${index}`,
+      entity: band.entity,
+      lowerAttribute: band.lowerAttribute,
+      lowerFallbackAttribute: band.lowerFallbackAttribute,
+      deltaAttribute: band.deltaAttribute,
+      name: band.name,
+      color: band.color,
+      state: this._stateSignature(band.entity, [
+        band.lowerAttribute,
+        band.lowerFallbackAttribute,
+        band.deltaAttribute,
+      ].filter(Boolean)),
     }));
 
     return JSON.stringify({
@@ -140,12 +156,16 @@ class PowerSyncChart extends HTMLElement {
       entity: mode === 'tou' ? this._touEntitySignature(config) : undefined,
       hiddenSeries: Array.from(this._hiddenSeries).sort(),
       series,
+      bands,
     });
   }
 
   _chartEntitySignature(mode, seriesConfig, config) {
     if (mode === 'forecast') {
-      return this._stateSignature(seriesConfig.entity, [seriesConfig.attribute || 'forecast_values_kw']);
+      return this._stateSignature(seriesConfig.entity, [
+        seriesConfig.attribute || 'forecast_values_kw',
+        seriesConfig.fallbackAttribute,
+      ].filter(Boolean));
     }
     if (mode === 'history') {
       return this._stateSignature(seriesConfig.entity);
@@ -199,6 +219,9 @@ class PowerSyncChart extends HTMLElement {
     } else {
       allSeries = this._getForecastData(config, hass);
     }
+    const activeBands = mode === 'forecast'
+      ? this._getForecastBands(config, hass)
+      : [];
 
     allSeries = allSeries.map((series, index) => ({
       ...series,
@@ -245,6 +268,14 @@ class PowerSyncChart extends HTMLElement {
         if (!fixedWindow && t > xMax) xMax = t;
       }
     }
+    for (const band of activeBands) {
+      for (const segment of band.segments) {
+        for (const point of segment) {
+          if (!fixedWindow && point.t < xMin) xMin = point.t;
+          if (!fixedWindow && point.t > xMax) xMax = point.t;
+        }
+      }
+    }
     if (!isFinite(xMin) || !isFinite(xMax) || xMin === xMax) {
       xMin = Date.now();
       xMax = xMin + 3600000;
@@ -264,6 +295,15 @@ class PowerSyncChart extends HTMLElement {
         const scaled = v * yMultiplier;
         if (scaled < rawMin) rawMin = scaled;
         if (scaled > rawMax) rawMax = scaled;
+      }
+    }
+    for (const band of activeBands) {
+      for (const segment of band.segments) {
+        for (const point of segment) {
+          const scaled = point.upper * yMultiplier;
+          if (scaled < rawMin) rawMin = scaled;
+          if (scaled > rawMax) rawMax = scaled;
+        }
       }
     }
     if (!isFinite(rawMin)) { rawMin = 0; rawMax = 1; }
@@ -319,7 +359,11 @@ class PowerSyncChart extends HTMLElement {
     const yScale = (v) => pad.top + chartH - ((v - yMin) / (yMax - yMin)) * chartH;
     const rightYScale = (v) => pad.top + chartH - ((v - rightYMin) / (rightYMax - rightYMin)) * chartH;
 
-    let svg = '';
+    let svg = `<defs>
+      <pattern id="ps-curtailment-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(35)">
+        <line x1="0" y1="0" x2="0" y2="8" stroke="var(--secondary-text-color, #777)" stroke-width="2" opacity="0.35"/>
+      </pattern>
+    </defs>`;
 
     for (const tick of ticks) {
       const y = yScale(tick);
@@ -371,6 +415,21 @@ class PowerSyncChart extends HTMLElement {
 
     svg += `<rect x="${pad.left}" y="${pad.top}" width="${chartW}" height="${chartH}" fill="var(--card-background-color, transparent)" opacity="0.02" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.5" rx="8"/>`;
 
+    for (const band of activeBands) {
+      for (const segment of band.segments) {
+        const pathD = this._bandSegmentPath(
+          segment,
+          xScale,
+          yScale,
+          yMultiplier,
+          band.intervalMs,
+        );
+        if (!pathD) continue;
+        svg += `<path data-band="${this._escAttr(band.key)}" d="${pathD}" fill="${band.color}" opacity="${band.opacity}"/>`;
+        svg += `<path d="${pathD}" fill="url(#ps-curtailment-hatch)" opacity="0.8"/>`;
+      }
+    }
+
     for (const series of chartSeries) {
       if (series.data.length === 0) continue;
       const step = config.stepLine !== undefined ? config.stepLine : mode === 'history';
@@ -402,7 +461,7 @@ class PowerSyncChart extends HTMLElement {
         svg += `<path d="${fillD}" fill="${series.color}" opacity="${series.fillOpacity ?? 0.16}"/>`;
       }
 
-      svg += `<path d="${pathD}" fill="none" stroke="${series.color}" stroke-width="${series.strokeWidth || 2.25}" stroke-linejoin="round" stroke-linecap="round"/>`;
+      svg += `<path d="${pathD}" fill="none" stroke="${series.color}" stroke-width="${series.strokeWidth || 2.25}"${series.strokeDasharray ? ` stroke-dasharray="${this._escAttr(series.strokeDasharray)}"` : ''} stroke-linejoin="round" stroke-linecap="round"/>`;
 
       const marker = mode === 'tou' || mode === 'forecast'
         ? this._pointAt(series.data, Date.now())
@@ -420,7 +479,13 @@ class PowerSyncChart extends HTMLElement {
     }
 
     const title = config.title || '';
-    const legend = allSeries.map((s) => this._legendItem(s, yMultiplier, rightYMultiplier, config)).join('');
+    const bandLegend = activeBands.map((band) => `
+      <span class="legend-item band-legend">
+        <span class="swatch band-swatch" style="background:${band.color}"></span>
+        <span>${this._escHtml(band.name)}</span>
+      </span>
+    `).join('');
+    const legend = allSeries.map((s) => this._legendItem(s, yMultiplier, rightYMultiplier, config)).join('') + bandLegend;
     const empty = chartSeries.length === 0 || chartSeries.every(s => s.data.length === 0);
     const accent = (chartSeries.find(s => s.color) || allSeries.find(s => s.color))?.color || 'var(--primary-color, #03a9f4)';
 
@@ -502,6 +567,11 @@ class PowerSyncChart extends HTMLElement {
           height: 3px;
           border-radius: 999px;
           flex: 0 0 auto;
+        }
+        .band-swatch {
+          height: 8px;
+          border-radius: 2px;
+          background-image: repeating-linear-gradient(135deg, transparent 0 3px, rgba(255,255,255,0.55) 3px 4px);
         }
         .value {
           color: var(--primary-text-color, #333);
@@ -752,7 +822,7 @@ class PowerSyncChart extends HTMLElement {
   }
 
   _seriesKey(series, index) {
-    return String(series.entity || series.key || series.name || `series_${index}`);
+    return String(series.key || series.entity || series.name || `series_${index}`);
   }
 
   _lastValue(data) {
@@ -880,13 +950,87 @@ class PowerSyncChart extends HTMLElement {
     return (config.series || []).map(s => {
       const stateObj = s.entity ? hass.states[s.entity] : null;
       const attr = s.attribute || 'forecast_values_kw';
-      const values = stateObj?.attributes?.[attr];
+      const primaryValues = stateObj?.attributes?.[attr];
+      const fallbackValues = s.fallbackAttribute
+        ? stateObj?.attributes?.[s.fallbackAttribute]
+        : undefined;
+      const values = Array.isArray(primaryValues) ? primaryValues : fallbackValues;
       let data = [];
       if (Array.isArray(values)) {
         data = values.map((v, i) => [start + i * interval, v]);
       }
-      return { entity: s.entity, key: s.key, name: s.name, color: s.color, fill: !!s.fill, axis: s.axis, data };
+      return {
+        entity: s.entity,
+        key: s.key,
+        name: s.name,
+        color: s.color,
+        fill: !!s.fill,
+        strokeWidth: s.strokeWidth,
+        strokeDasharray: s.strokeDasharray,
+        axis: s.axis,
+        data,
+      };
     });
+  }
+
+  _getForecastBands(config, hass) {
+    const intervalMs = Math.max(60000, Number(config.intervalMinutes || 5) * 60000);
+    const start = Math.floor(Date.now() / intervalMs) * intervalMs;
+    return (config.bands || []).flatMap((band, index) => {
+      const stateObj = band.entity ? hass.states[band.entity] : null;
+      const primaryLower = stateObj?.attributes?.[band.lowerAttribute];
+      const fallbackLower = band.lowerFallbackAttribute
+        ? stateObj?.attributes?.[band.lowerFallbackAttribute]
+        : undefined;
+      const lower = Array.isArray(primaryLower) ? primaryLower : fallbackLower;
+      const delta = stateObj?.attributes?.[band.deltaAttribute];
+      if (!Array.isArray(lower) || !Array.isArray(delta) || lower.length !== delta.length) {
+        return [];
+      }
+      if (!lower.every(Number.isFinite) || !delta.every(Number.isFinite)) return [];
+
+      const segments = [];
+      let current = [];
+      delta.forEach((value, slot) => {
+        if (value > 1e-6) {
+          current.push({
+            t: start + slot * intervalMs,
+            lower: Number(lower[slot]),
+            upper: Number(lower[slot]) + Number(value),
+            delta: Number(value),
+          });
+        } else if (current.length) {
+          segments.push(current);
+          current = [];
+        }
+      });
+      if (current.length) segments.push(current);
+      if (!segments.length) return [];
+      return [{
+        key: String(band.key || `band_${index}`),
+        name: band.name || 'System Curtailment',
+        color: band.color || '#607D8B',
+        opacity: Number.isFinite(Number(band.opacity)) ? Number(band.opacity) : 0.22,
+        intervalMs,
+        segments,
+      }];
+    });
+  }
+
+  _bandSegmentPath(segment, xScale, yScale, yMultiplier, intervalMs) {
+    if (!Array.isArray(segment) || !segment.length) return '';
+    const first = segment[0];
+    const last = segment[segment.length - 1];
+    const endT = last.t + intervalMs;
+    const upper = segment.map((point, index) => (
+      `${index === 0 ? 'M' : 'L'}${xScale(point.t)},${yScale(point.upper * yMultiplier)}`
+    )).join('');
+    const lower = [...segment].reverse().map((point) => (
+      `L${xScale(point.t)},${yScale(point.lower * yMultiplier)}`
+    )).join('');
+    return `${upper}L${xScale(endT)},${yScale(last.upper * yMultiplier)}`
+      + `L${xScale(endT)},${yScale(last.lower * yMultiplier)}${lower}`
+      + `L${xScale(first.t)},${yScale(first.upper * yMultiplier)}Z`;
   }
 
   _getHistoryData(config, hass) {
@@ -3600,9 +3744,11 @@ class PowerSyncEVPanel extends HTMLElement {
     this._lastRenderSignature = '';
     this._resizeObserver = null;
     this._pollTimer = null;
+    this._delayTimerTick = null;
     this._selectedLoadpointId = null;
     this._durationMinutes = 60;
     this._policy = 'solar_only';
+    this._modesExpanded = false;
   }
 
   setConfig(config) {
@@ -3639,6 +3785,10 @@ class PowerSyncEVPanel extends HTMLElement {
     if (this._pollTimer) {
       window.clearInterval(this._pollTimer);
       this._pollTimer = null;
+    }
+    if (this._delayTimerTick) {
+      window.clearInterval(this._delayTimerTick);
+      this._delayTimerTick = null;
     }
   }
 
@@ -3810,6 +3960,7 @@ class PowerSyncEVPanel extends HTMLElement {
       selected: this._selectedLoadpointId,
       duration: this._durationMinutes,
       policy: this._policy,
+      modesExpanded: this._modesExpanded,
       fetched: this._lastFetch,
     });
   }
@@ -3957,6 +4108,21 @@ class PowerSyncEVPanel extends HTMLElement {
           font-size: 12px;
           line-height: 1.35;
           font-weight: 600;
+        }
+        .delay-status {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          margin-top: 5px;
+          color: var(--warning-color, #ff9800);
+          font-size: 12px;
+          font-weight: 700;
+          line-height: 1.3;
+        }
+        .delay-status ha-icon {
+          flex: 0 0 auto;
+          width: 16px;
+          height: 16px;
         }
         .pill {
           display: inline-flex;
@@ -4111,18 +4277,55 @@ class PowerSyncEVPanel extends HTMLElement {
           background: rgba(219, 68, 55, 0.08);
           border-color: rgba(219, 68, 55, 0.32);
         }
-        .section-title {
-          margin: 16px 0 8px;
-          color: var(--secondary-text-color);
-          font-size: 12px;
+        .modes-toggle {
+          box-sizing: border-box;
+          width: 100%;
+          min-height: 42px;
+          margin-top: 16px;
+          padding: 8px 10px;
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 8px;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          background: rgba(127, 127, 127, 0.055);
+          color: var(--primary-text-color);
+          cursor: pointer;
+          text-align: left;
+        }
+        .modes-toggle ha-icon {
+          width: 19px;
+          height: 19px;
+          color: var(--primary-color, #03a9f4);
+        }
+        .modes-toggle:focus-visible {
+          outline: 2px solid var(--primary-color, #03a9f4);
+          outline-offset: 2px;
+        }
+        .modes-toggle-label {
+          font-size: 13px;
           font-weight: 800;
-          letter-spacing: 0;
+          line-height: 1.2;
           text-transform: uppercase;
+        }
+        .modes-summary {
+          min-width: 0;
+          color: var(--secondary-text-color);
+          font-size: 11px;
+          font-weight: 700;
+          line-height: 1.2;
+          overflow-wrap: anywhere;
+          text-align: right;
         }
         .mode-grid {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 10px;
+          margin-top: 10px;
+        }
+        .mode-grid[hidden] {
+          display: none;
         }
         .mode-card {
           min-width: 0;
@@ -4323,6 +4526,7 @@ class PowerSyncEVPanel extends HTMLElement {
     `;
 
     this._attachEvents();
+    this._syncDelayTimerTick();
   }
 
   _subtitle() {
@@ -4348,6 +4552,7 @@ class PowerSyncEVPanel extends HTMLElement {
         <div>
           <h3 class="loadpoint-name">${this._escHtml(this._loadpointLabel(loadpoint))}</h3>
           <div class="state-line">${this._escHtml(owner)}${source ? ` | ${this._escHtml(source)}` : ''}${countdown ? ` | ${this._escHtml(countdown)}` : ''}</div>
+          ${this._delayTimerHtml(loadpoint)}
           ${loadpoint.blocking_reason ? `<div class="state-line">${this._escHtml(loadpoint.blocking_reason)}</div>` : ''}
           <div class="metrics">
             ${this._metric('Power', this._kw(loadpoint.current_power_kw))}
@@ -4359,6 +4564,77 @@ class PowerSyncEVPanel extends HTMLElement {
         <div class="pill ${stateClass}">${this._escHtml(stateText)}</div>
       </div>
     `;
+  }
+
+  _delayTimerHtml(loadpoint) {
+    const timer = loadpoint?.delay_timer;
+    const remainingSeconds = this._delayRemainingSeconds(timer);
+    if (remainingSeconds === null) return '';
+    const phase = timer?.phase === 'start' ? 'Start' : 'Stop';
+    const label = String(timer?.label || `${phase} delay`).trim();
+    const remaining = this._formatDelayRemaining(remainingSeconds);
+    const reason = String(timer?.reason || '').trim();
+    const accessibleLabel = `${label} running, ${remaining}${reason ? `. ${reason}` : ''}`;
+    return `
+      <div class="delay-status" data-delay-status data-delay-label="${this._escAttr(label)}" title="${this._escAttr(reason)}" aria-label="${this._escAttr(accessibleLabel)}">
+        <ha-icon icon="mdi:timer-sand"></ha-icon>
+        <span>${this._escHtml(label)} running · <span data-delay-remaining>${this._escHtml(remaining)}</span></span>
+      </div>
+    `;
+  }
+
+  _delayRemainingSeconds(timer) {
+    const startedAt = new Date(timer?.started_at || '').getTime();
+    const durationSeconds = Number(timer?.duration_seconds);
+    if (Number.isFinite(startedAt) && Number.isFinite(durationSeconds)) {
+      return Math.max(0, Math.ceil((startedAt + durationSeconds * 1000 - Date.now()) / 1000));
+    }
+    const initialRemaining = Number(timer?.remaining_seconds);
+    if (!Number.isFinite(initialRemaining)) return null;
+    const fetchedAt = new Date(this._data?.fetchedAt || '').getTime();
+    const elapsedSeconds = Number.isFinite(fetchedAt)
+      ? Math.max(0, Math.floor((Date.now() - fetchedAt) / 1000))
+      : 0;
+    return Math.max(0, Math.ceil(initialRemaining - elapsedSeconds));
+  }
+
+  _formatDelayRemaining(seconds) {
+    const remaining = Math.max(0, Math.floor(Number(seconds) || 0));
+    if (remaining <= 0) return 'Ending now';
+    const minutes = Math.floor(remaining / 60);
+    const trailingSeconds = remaining % 60;
+    if (minutes > 0) return `${minutes}m ${String(trailingSeconds).padStart(2, '0')}s remaining`;
+    return `${trailingSeconds}s remaining`;
+  }
+
+  _syncDelayTimerTick() {
+    if (this._delayTimerTick) {
+      window.clearInterval(this._delayTimerTick);
+      this._delayTimerTick = null;
+    }
+    const status = this.shadowRoot.querySelector('[data-delay-status]');
+    if (!status) return;
+
+    const update = () => {
+      const timer = this._selectedLoadpoint()?.delay_timer;
+      const remainingSeconds = this._delayRemainingSeconds(timer);
+      const target = status.querySelector('[data-delay-remaining]');
+      if (remainingSeconds === null || !target) return;
+      const remaining = this._formatDelayRemaining(remainingSeconds);
+      target.textContent = remaining;
+      const label = status.dataset.delayLabel || 'Delay';
+      const reason = String(timer?.reason || '').trim();
+      status.setAttribute('aria-label', `${label} running, ${remaining}${reason ? `. ${reason}` : ''}`);
+      if (remainingSeconds <= 0 && this._delayTimerTick) {
+        window.clearInterval(this._delayTimerTick);
+        this._delayTimerTick = null;
+      }
+    };
+
+    update();
+    if (this._delayRemainingSeconds(this._selectedLoadpoint()?.delay_timer) > 0) {
+      this._delayTimerTick = window.setInterval(update, 1000);
+    }
   }
 
   _controlsHtml(loadpoints, selected, canStart, canStop) {
@@ -4408,9 +4684,14 @@ class PowerSyncEVPanel extends HTMLElement {
 
   _modeSectionsHtml() {
     if (!this._data) return '';
+    const expanded = this._modesExpanded;
     return `
-      <div class="section-title">Modes</div>
-      <div class="mode-grid">
+      <button class="modes-toggle" data-action="toggle-modes" aria-expanded="${expanded ? 'true' : 'false'}" aria-controls="ev-mode-grid" title="${expanded ? 'Collapse' : 'Expand'} EV charging modes">
+        <span class="modes-toggle-label">Modes</span>
+        <span class="modes-summary">${this._escHtml(this._modeSummary())}</span>
+        <ha-icon icon="mdi:chevron-${expanded ? 'up' : 'down'}"></ha-icon>
+      </button>
+      <div class="mode-grid" id="ev-mode-grid" ${expanded ? '' : 'hidden'}>
         ${this._modeCard(
           'solar',
           'Solar Surplus',
@@ -4451,6 +4732,19 @@ class PowerSyncEVPanel extends HTMLElement {
         ${this._smartScheduleCard()}
       </div>
     `;
+  }
+
+  _modeSummary() {
+    const enabledModes = [];
+    if (this._data?.solarConfig?.enabled) enabledModes.push('Solar Surplus');
+    if (this._data?.priceSettings?.enabled) enabledModes.push('Price Level');
+    if (this._data?.scheduledSettings?.enabled) enabledModes.push('Scheduled');
+    const smartSettings = this._data?.autoStatus?.settings || {};
+    if (Object.values(smartSettings).some((vehicle) => !!vehicle?.enabled)) {
+      enabledModes.push('Smart Schedule');
+    }
+    if (!enabledModes.length) return 'All off';
+    return `${enabledModes.length} on: ${enabledModes.join(', ')}`;
   }
 
   _modeCard(kind, title, icon, settings, fields) {
@@ -4565,6 +4859,7 @@ class PowerSyncEVPanel extends HTMLElement {
 
   _attachEvents() {
     this.shadowRoot.querySelector('[data-action="refresh"]')?.addEventListener('click', () => this._refresh());
+    this.shadowRoot.querySelector('[data-action="toggle-modes"]')?.addEventListener('click', () => this._toggleModes());
     this.shadowRoot.querySelector('[data-control="loadpoint"]')?.addEventListener('change', (event) => {
       this._selectedLoadpointId = event.target.value;
       this._scheduleRender();
@@ -4606,6 +4901,18 @@ class PowerSyncEVPanel extends HTMLElement {
     this._notice = null;
     this._lastFetch = 0;
     this._maybeLoadData(true);
+  }
+
+  _toggleModes() {
+    this._modesExpanded = !this._modesExpanded;
+    const toggle = this.shadowRoot.querySelector('[data-action="toggle-modes"]');
+    const grid = this.shadowRoot.querySelector('#ev-mode-grid');
+    toggle?.setAttribute('aria-expanded', this._modesExpanded ? 'true' : 'false');
+    toggle?.setAttribute('title', `${this._modesExpanded ? 'Collapse' : 'Expand'} EV charging modes`);
+    toggle?.querySelector('ha-icon')?.setAttribute('icon', `mdi:chevron-${this._modesExpanded ? 'up' : 'down'}`);
+    if (grid) grid.hidden = !this._modesExpanded;
+    this._lastRenderSignature = this._renderSignature();
+    this.dispatchEvent(new CustomEvent('power-sync-card-resize', { bubbles: true, composed: true }));
   }
 
   async _startPolicy() {
@@ -4849,6 +5156,7 @@ class PowerSyncLayout extends HTMLElement {
     this._lastLayoutWidth = 0;
     this._lastLayoutColumnCount = 0;
     this._maxObservedHeight = 0;
+    this._cardResizeHandler = () => this._handleCardResize();
   }
 
   setConfig(config) {
@@ -4862,6 +5170,7 @@ class PowerSyncLayout extends HTMLElement {
   }
 
   connectedCallback() {
+    this.addEventListener('power-sync-card-resize', this._cardResizeHandler);
     if (!this._built) return;
     this._resetHeightLock();
     this._observeLayout();
@@ -4869,6 +5178,7 @@ class PowerSyncLayout extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this.removeEventListener('power-sync-card-resize', this._cardResizeHandler);
     if (this._resizeObserver) {
       this._resizeObserver.disconnect();
       this._resizeObserver = null;
@@ -4899,6 +5209,12 @@ class PowerSyncLayout extends HTMLElement {
   _resetHeightLock() {
     this._maxObservedHeight = 0;
     this.style.minHeight = '';
+  }
+
+  _handleCardResize() {
+    this._resetHeightLock();
+    this._scheduleLayout();
+    requestAnimationFrame(() => this._updateHeightLock(this.getBoundingClientRect().height));
   }
 
   _scheduleLayout() {
@@ -7556,8 +7872,21 @@ function _lpSolarLoadChart(e) {
     height: 260,
     yUnit: 'kW',
     yMin: 0,
+    bands: [
+      {
+        key: 'system_curtailment',
+        entity: e('lp_solar_forecast'),
+        lowerAttribute: 'planned_forecast_values_kw',
+        lowerFallbackAttribute: 'forecast_values_kw',
+        deltaAttribute: 'curtailment_values_kw',
+        name: 'System Curtailment',
+        color: '#607D8B',
+        opacity: 0.22,
+      },
+    ],
     series: [
-      { entity: e('lp_solar_forecast'), attribute: 'forecast_values_kw', name: 'Solar', color: '#FFD700', fill: true },
+      { key: 'raw_solar', entity: e('lp_solar_forecast'), attribute: 'raw_forecast_values_kw', name: 'Raw Solar', color: '#B0A46A', strokeWidth: 1.8, strokeDasharray: '6,4' },
+      { key: 'planned_solar', entity: e('lp_solar_forecast'), attribute: 'planned_forecast_values_kw', fallbackAttribute: 'forecast_values_kw', name: 'Planned Solar', color: '#FFD700', fill: true },
       { entity: e('lp_load_forecast'), attribute: 'forecast_values_kw', name: 'Load', color: '#9C27B0' },
     ],
   };

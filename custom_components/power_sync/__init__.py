@@ -39847,6 +39847,106 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.data[DOMAIN][entry.entry_id]["optimization_coordinator"] = optimization_coordinator
             _LOGGER.info("Smart Optimization coordinator initialized and enabled")
 
+            network_envelope_semantic_fields = (
+                "mode",
+                "scope",
+                "effective_limit_w",
+                "schedule",
+                "active_export_permitted",
+                "fault",
+                "safety_margin_w",
+                "next_change_at",
+            )
+
+            def _same_network_envelope_semantics(left, right) -> bool:
+                return all(
+                    getattr(left, field, None) == getattr(right, field, None)
+                    for field in network_envelope_semantic_fields
+                )
+
+            async def _complete_network_envelope_reoptimization(snapshot) -> bool:
+                """Solve one ready snapshot and grant only unchanged authority."""
+                try:
+                    optimized = await optimization_coordinator._run_optimization(
+                        force=True
+                    )
+                except Exception as err:
+                    _LOGGER.error(
+                        "Network envelope reoptimization failed for snapshot %s: %s",
+                        snapshot.snapshot_version,
+                        err,
+                    )
+                    if snapshot.mode == "active":
+                        await network_envelope_manager.async_set_fault(
+                            "network envelope reoptimization failed"
+                        )
+                    return False
+
+                if not optimized:
+                    _LOGGER.error(
+                        "Network envelope reoptimization did not complete for snapshot %s",
+                        snapshot.snapshot_version,
+                    )
+                    if snapshot.mode == "active":
+                        await network_envelope_manager.async_set_fault(
+                            "network envelope reoptimization failed"
+                        )
+                    return False
+
+                if snapshot.mode == "active":
+                    latest = network_envelope_manager.snapshot
+                    if _same_network_envelope_semantics(latest, snapshot):
+                        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+                        guard = (
+                            entry_data.get("network_export_guard")
+                            if isinstance(entry_data, dict)
+                            else None
+                        )
+                        if guard is not None:
+                            guard.approve_reoptimized_snapshot(
+                                latest.snapshot_version
+                            )
+                return True
+
+            async def _retry_deferred_network_envelope_reoptimization() -> None:
+                """Retry one fail-closed Active solve after telemetry startup."""
+                current_task = asyncio.current_task()
+                try:
+                    while True:
+                        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+                        if not isinstance(entry_data, dict) or entry_data.get(
+                            "optimization_coordinator"
+                        ) is not optimization_coordinator:
+                            return
+                        latest = network_envelope_manager.snapshot
+                        if latest.mode != "active":
+                            return
+                        if optimization_coordinator._energy_telemetry_ready():
+                            entry_data["network_envelope_deferred_logged"] = False
+                            await _complete_network_envelope_reoptimization(latest)
+                            return
+                        await asyncio.sleep(5.0)
+                finally:
+                    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+                    if (
+                        isinstance(entry_data, dict)
+                        and entry_data.get(
+                            "network_envelope_reoptimization_task"
+                        ) is current_task
+                    ):
+                        entry_data["network_envelope_reoptimization_task"] = None
+
+            def _schedule_deferred_network_envelope_reoptimization() -> None:
+                entry_data = hass.data[DOMAIN][entry.entry_id]
+                pending = entry_data.get("network_envelope_reoptimization_task")
+                if pending is not None and not pending.done():
+                    return
+                entry_data["network_envelope_reoptimization_task"] = (
+                    hass.async_create_task(
+                        _retry_deferred_network_envelope_reoptimization()
+                    )
+                )
+
             async def _network_envelope_changed(old, new) -> None:
                 """Apply downward controls immediately; authorize rises after solve."""
                 guard = hass.data[DOMAIN][entry.entry_id].get("network_export_guard")
@@ -39867,16 +39967,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 requires_reoptimization = any(
                     getattr(old, field, None) != getattr(new, field, None)
-                    for field in (
-                        "mode",
-                        "scope",
-                        "effective_limit_w",
-                        "schedule",
-                        "active_export_permitted",
-                        "fault",
-                        "safety_margin_w",
-                        "next_change_at",
-                    )
+                    for field in network_envelope_semantic_fields
                 )
                 if not requires_reoptimization:
                     return
@@ -39915,51 +40006,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
                 if new.mode != "active":
                     guard.reset_reoptimization_approval()
-
-                try:
-                    optimized = await optimization_coordinator._run_optimization(force=True)
-                except Exception as err:
-                    _LOGGER.error(
-                        "Network envelope reoptimization failed for snapshot %s: %s",
-                        new.snapshot_version,
-                        err,
-                    )
-                    if new.mode == "active":
-                        await network_envelope_manager.async_set_fault(
-                            "network envelope reoptimization failed"
+                entry_data = hass.data[DOMAIN][entry.entry_id]
+                if not optimization_coordinator._energy_telemetry_ready():
+                    if not entry_data.get("network_envelope_deferred_logged"):
+                        _LOGGER.info(
+                            "Network envelope reoptimization deferred for snapshot %s "
+                            "until battery telemetry is ready",
+                            new.snapshot_version,
                         )
+                        entry_data["network_envelope_deferred_logged"] = True
+                    if new.mode == "active":
+                        _schedule_deferred_network_envelope_reoptimization()
                     return
 
-                if not optimized:
-                    _LOGGER.error(
-                        "Network envelope reoptimization did not complete for snapshot %s",
-                        new.snapshot_version,
-                    )
-                    if new.mode == "active":
-                        await network_envelope_manager.async_set_fault(
-                            "network envelope reoptimization failed"
-                        )
-                    return
-
-                if new.mode == "active":
-                    latest = network_envelope_manager.snapshot
-                    semantic_fields = (
-                        "mode",
-                        "scope",
-                        "effective_limit_w",
-                        "schedule",
-                        "active_export_permitted",
-                        "fault",
-                        "safety_margin_w",
-                        "next_change_at",
-                    )
-                    if all(
-                        getattr(latest, field, None) == getattr(new, field, None)
-                        for field in semantic_fields
-                    ):
-                        guard.approve_reoptimized_snapshot(
-                            latest.snapshot_version
-                        )
+                entry_data["network_envelope_deferred_logged"] = False
+                await _complete_network_envelope_reoptimization(new)
 
             network_listener_unsub = network_envelope_manager.add_listener(
                 _network_envelope_changed
@@ -41665,6 +41726,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if network_listener_unsub := entry_data.get("network_envelope_listener_unsub"):
         network_listener_unsub()
         entry_data["network_envelope_listener_unsub"] = None
+    if network_retry_task := entry_data.get("network_envelope_reoptimization_task"):
+        if not network_retry_task.done():
+            network_retry_task.cancel()
+        await asyncio.gather(network_retry_task, return_exceptions=True)
+        entry_data["network_envelope_reoptimization_task"] = None
     if network_envelope_manager := entry_data.get("network_envelope_manager"):
         try:
             await network_envelope_manager.async_stop()

@@ -89,6 +89,32 @@ def test_optimizer_and_runtime_export_paths_consume_the_same_envelope() -> None:
     assert "NetworkExportEnvelope()," in integration
 
 
+def test_startup_telemetry_defers_network_reoptimization_fail_closed() -> None:
+    integration = _source("__init__.py")
+
+    assert "_complete_network_envelope_reoptimization" in integration
+    assert "_retry_deferred_network_envelope_reoptimization" in integration
+    assert "_schedule_deferred_network_envelope_reoptimization" in integration
+    assert "Network envelope reoptimization deferred" in integration
+    assert "network_envelope_reoptimization_task" in integration
+    assert "network_envelope_deferred_logged" in integration
+    assert "if not optimization_coordinator._energy_telemetry_ready():" in integration
+    assert "await _complete_network_envelope_reoptimization(latest)" in integration
+    assert "_same_network_envelope_semantics(latest, snapshot)" in integration
+    assert "network_retry_task.cancel()" in integration
+    assert "await asyncio.gather(network_retry_task, return_exceptions=True)" in integration
+
+    listener_start = integration.index("async def _network_envelope_changed")
+    listener_end = integration.index(
+        "network_listener_unsub = network_envelope_manager.add_listener",
+        listener_start,
+    )
+    listener = integration[listener_start:listener_end]
+    assert listener.index("await _stop_guarded_network_export()") < listener.index(
+        "if not optimization_coordinator._energy_telemetry_ready():"
+    )
+
+
 def test_network_export_strings_and_translation_remain_in_sync() -> None:
     strings = json.loads(_source("strings.json"))
     english = json.loads(_source("translations/en.json"))

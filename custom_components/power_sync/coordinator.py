@@ -9369,6 +9369,7 @@ class FroniusReservaEnergyCoordinator(
             max_discharge_kw=max_discharge_kw,
         )
         self._energy_acc = EnergyAccumulator(hass, "fronius_reserva")
+        self._last_upstream_outage: tuple[str, str] | None = None
 
         super().__init__(
             hass,
@@ -9384,6 +9385,26 @@ class FroniusReservaEnergyCoordinator(
 
         if not self._controller._entity_map:
             self._controller._discover_entities()
+
+        upstream = self._controller.upstream_integration_status()
+        if upstream["loaded"] is False:
+            outage = (upstream["domain"], upstream["state"])
+            if outage != self._last_upstream_outage:
+                _LOGGER.warning(
+                    "Fronius GEN24 storage unavailable: upstream %s config "
+                    "entry is %s",
+                    *outage,
+                )
+                self._last_upstream_outage = outage
+            stale = self._native_stale_data()
+            if stale:
+                stale["upstream_integration"] = upstream
+                return stale
+            raise UpdateFailed(
+                "Fronius GEN24 storage upstream integration is not loaded "
+                f"({upstream['state']})"
+            )
+        self._last_upstream_outage = None
 
         try:
             status = self._controller.get_status()
@@ -9442,8 +9463,13 @@ class FroniusReservaEnergyCoordinator(
             "backup_reserve": status.get("backup_reserve"),
             "min_soc": status.get("min_soc"),
             "mode": status.get("mode"),
+            "upstream_integration": status.get("upstream_integration", upstream),
             "energy_summary": self._energy_acc.as_dict(),
         }
+
+    def _native_control_surface_ready(self) -> bool:
+        """Require the selected upstream config entry to remain loaded."""
+        return self._controller.upstream_integration_status()["loaded"] is not False
 
     async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
         if not self._native_control_allowed("Fronius force_charge"):

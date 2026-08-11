@@ -272,6 +272,7 @@ class OptimizerResult:
     modeled_export_reserve_floor_slots: list[float] | None = None
     future_export_protection_floor_slots: list[float] | None = None
     free_import_command_slots: list[bool] = field(default_factory=list)
+    solar_curtailment_w: list[float] | None = None
 
 
 class BatteryOptimizer:
@@ -3795,6 +3796,7 @@ class BatteryOptimizer:
         period_grid_export = [x[grid_export_var(t)] for t in range(p_n)]
         period_battery_charge = [x[charge_var(t)] for t in range(p_n)]
         period_battery_discharge = [x[discharge_var(t)] for t in range(p_n)]
+        period_solar_curtailment = [x[curtail_var(t)] for t in range(p_n)]
         period_battery_to_grid = (
             [x[battery_to_grid_var(t)] for t in range(p_n)]
             if battery_to_grid_active
@@ -3804,6 +3806,9 @@ class BatteryOptimizer:
         grid_export = self._expand_period_values(periods, period_grid_export, n)
         battery_charge = self._expand_period_values(periods, period_battery_charge, n)
         battery_discharge = self._expand_period_values(periods, period_battery_discharge, n)
+        solar_curtailment = self._expand_period_values(
+            periods, period_solar_curtailment, n
+        )
         battery_to_grid = self._expand_period_values(
             periods, period_battery_to_grid, n
         )
@@ -3989,6 +3994,7 @@ class BatteryOptimizer:
                 else None
             ),
             free_import_command_slots=free_import_command_slots,
+            solar_curtailment_w=[value * 1000 for value in solar_curtailment],
         )
 
     def _build_reserve_recommendation(

@@ -267,6 +267,21 @@ def test_native_energy_coordinators_propagate_startup_telemetry_readiness():
         assert "if telemetry_ready:" in update_source, class_name
 
 
+def test_fronius_native_readiness_requires_loaded_upstream_entry():
+    source = ENERGY_COORDINATOR_PATH.read_text()
+    tree = ast.parse(source)
+    method = _find_class_method(
+        tree,
+        "FroniusReservaEnergyCoordinator",
+        "_native_control_surface_ready",
+    )
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    assert "upstream_integration_status" in method_source
+    assert '["loaded"] is not False' in method_source
+
+
 def test_native_readiness_mixin_requires_snapshot_and_live_entities():
     source = ENERGY_COORDINATOR_PATH.read_text()
     tree = ast.parse(source)

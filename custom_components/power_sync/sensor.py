@@ -3824,6 +3824,31 @@ class SolcastForecastSensor(CoordinatorEntity, SensorEntity):
 # LP Forecast Sensors (built-in optimizer forecast data)
 # ============================================================
 
+def _lp_solar_forecast_attributes(data: dict[str, Any]) -> dict[str, Any]:
+    """Expose provenance atomically while preserving the legacy forecast."""
+    attributes = {
+        "peak_kw": data.get("solar_peak_kw"),
+        "forecast_values_kw": data.get("solar_forecast"),
+        "forecast_learning": data.get("solar_forecast_learning", {}),
+    }
+    raw = data.get("raw_solar_forecast")
+    planned = data.get("planned_solar_forecast")
+    curtailed = data.get("solar_curtailment_forecast")
+    if (
+        isinstance(raw, list)
+        and isinstance(planned, list)
+        and isinstance(curtailed, list)
+        and len(raw) == len(planned) == len(curtailed)
+    ):
+        attributes.update(
+            {
+                "raw_forecast_values_kw": raw,
+                "planned_forecast_values_kw": planned,
+                "curtailment_values_kw": curtailed,
+            }
+        )
+    return attributes
+
 LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_LP_SOLAR_FORECAST,
@@ -3833,11 +3858,9 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         suggested_display_precision=1,
         icon="mdi:solar-power-variant",
         value_fn=lambda data: data.get("solar_forecast_kwh") if data and data.get("available") else None,
-        attr_fn=lambda data: {
-            "peak_kw": data.get("solar_peak_kw"),
-            "forecast_values_kw": data.get("solar_forecast"),
-            "forecast_learning": data.get("solar_forecast_learning", {}),
-        } if data and data.get("available") else {},
+        attr_fn=lambda data: _lp_solar_forecast_attributes(data)
+        if data and data.get("available")
+        else {},
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_LP_LOAD_FORECAST,

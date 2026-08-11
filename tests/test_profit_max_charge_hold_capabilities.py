@@ -1,10 +1,13 @@
 """Capability-matrix tests for Profit Max direct-solar export holds."""
 from __future__ import annotations
 
+import ast
 import importlib.util
+import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 _PATH = (
     Path(__file__).resolve().parent.parent
@@ -19,6 +22,39 @@ _MODULE = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 resolve_solar_export_adapter = _MODULE.resolve_solar_export_adapter
+
+
+def _load_solar_export_capability_method(warnings: list[str]):
+    path = _PATH.with_name("coordinator.py")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    class_node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "OptimizationCoordinator"
+    )
+    method = next(
+        node
+        for node in class_node.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_solar_export_capability"
+    )
+    namespace = {
+        "Any": Any,
+        "math": math,
+        "_LOGGER": SimpleNamespace(
+            warning=lambda message, *args: warnings.append(message % args)
+        ),
+    }
+    exec(
+        compile(
+            ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])),
+            str(path),
+            "exec",
+        ),
+        namespace,
+    )
+    return namespace["_solar_export_capability"]
 
 
 class _LimitController:
@@ -166,3 +202,61 @@ def test_fronius_requires_normal_auto_baseline_before_advertising_hold():
 
     assert not capability.supported
     assert capability.reason == "storage_not_in_normal_auto_mode"
+
+
+def test_fronius_rejects_stale_auto_entities_when_upstream_is_not_loaded():
+    controller = _FroniusController()
+    controller.upstream_integration_status = lambda: {
+        "domain": "fronius_modbus",
+        "state": "setup_error",
+        "loaded": False,
+    }
+    coordinator = SimpleNamespace(_controller=controller, data={})
+
+    capability = resolve_solar_export_adapter(
+        "fronius_reserva", coordinator
+    ).capability()
+
+    assert not capability.supported
+    assert capability.reason == "upstream_integration_not_loaded"
+    assert capability.upstream_domain == "fronius_modbus"
+    assert capability.upstream_state == "setup_error"
+    assert capability.as_dict()["upstream_state"] == "setup_error"
+
+
+def test_upstream_outage_warning_is_deduplicated_and_resets_on_recovery():
+    warnings: list[str] = []
+    capability_method = _load_solar_export_capability_method(warnings)
+    state = {"loaded": False}
+
+    class _Hold:
+        def capability(self):
+            if state["loaded"]:
+                return {
+                    "supported": True,
+                    "reason": "supported",
+                    "export_limit_kw": 5.0,
+                }
+            return {
+                "supported": False,
+                "reason": "upstream_integration_not_loaded",
+                "upstream_domain": "fronius_modbus",
+                "upstream_state": "setup_error",
+            }
+
+    coordinator = SimpleNamespace(
+        _solar_export_hold=_Hold(),
+        _config=SimpleNamespace(max_grid_export_w=5000),
+        _monitoring_mode_active=lambda: False,
+        _last_solar_export_upstream_outage=None,
+    )
+
+    capability_method(coordinator)
+    capability_method(coordinator)
+    assert len(warnings) == 1
+
+    state["loaded"] = True
+    assert capability_method(coordinator)["supported"] is True
+    state["loaded"] = False
+    capability_method(coordinator)
+    assert len(warnings) == 2

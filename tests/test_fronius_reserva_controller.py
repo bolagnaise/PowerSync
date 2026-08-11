@@ -173,6 +173,56 @@ def test_connect_discovers_reserva_entities_and_reads_status():
     assert status["battery_max_charge_power_w"] == 5000.0
 
 
+def test_upstream_config_entry_state_is_reported_when_available():
+    hass = _FakeHass(_reserva_states())
+    hass.config_entries = SimpleNamespace(
+        async_get_entry=lambda entry_id: SimpleNamespace(
+            state=SimpleNamespace(value="loaded")
+        )
+        if entry_id == "fronius-entry"
+        else None
+    )
+    controller = _controller(hass)
+
+    assert controller.upstream_integration_status() == {
+        "domain": "fronius_modbus",
+        "entry_id": "fronius-entry",
+        "state": "loaded",
+        "loaded": True,
+    }
+    assert asyncio.run(controller.connect())
+
+
+def test_setup_error_blocks_stale_entities_and_all_commands():
+    hass = _FakeHass(_reserva_states())
+    hass.config_entries = SimpleNamespace(
+        async_get_entry=lambda entry_id: SimpleNamespace(
+            state=SimpleNamespace(value="setup_error")
+        )
+    )
+    controller = _controller(hass)
+
+    status = controller.get_status()
+
+    assert status["upstream_integration"]["state"] == "setup_error"
+    assert status["telemetry_ready"] is False
+    assert not asyncio.run(controller.block_charging())
+    assert hass.services.calls == []
+
+
+def test_missing_selected_upstream_entry_is_not_treated_as_loaded():
+    hass = _FakeHass(_reserva_states())
+    hass.config_entries = SimpleNamespace(async_get_entry=lambda entry_id: None)
+    controller = _controller(hass)
+
+    assert controller.upstream_integration_status()["state"] == "missing"
+    with pytest.raises(
+        ValueError,
+        match="fronius_reserva_upstream_not_loaded:missing",
+    ):
+        asyncio.run(controller.connect())
+
+
 def test_status_keeps_unavailable_soc_unknown_instead_of_zero():
     states = _reserva_states()
     for state in states:

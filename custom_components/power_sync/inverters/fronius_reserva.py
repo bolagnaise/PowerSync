@@ -163,6 +163,11 @@ class FroniusReservaBatteryController:
 
     async def connect(self) -> bool:
         """Validate that the required Fronius GEN24 storage entities exist."""
+        upstream = self.upstream_integration_status()
+        if upstream["loaded"] is False:
+            raise ValueError(
+                f"fronius_reserva_upstream_not_loaded:{upstream['state']}"
+            )
         self._discover_entities()
         required = (
             "battery_level",
@@ -184,6 +189,39 @@ class FroniusReservaBatteryController:
             {k: v for k, v in self._entity_map.items()},
         )
         return True
+
+    def upstream_integration_status(self) -> dict[str, Any]:
+        """Return the selected fronius_modbus config entry's load state.
+
+        Entity-registry rows can survive an upstream setup failure.  Treat a
+        known non-loaded config entry as authoritative so stale entity states
+        can never make PowerSync advertise or perform storage control.
+        """
+        status: dict[str, Any] = {
+            "domain": "fronius_modbus",
+            "entry_id": self._fronius_entry_id,
+            "state": "unknown",
+            "loaded": None,
+        }
+        config_entries = getattr(self.hass, "config_entries", None)
+        get_entry = getattr(config_entries, "async_get_entry", None)
+        if not callable(get_entry):
+            return status
+
+        entry = get_entry(self._fronius_entry_id)
+        if entry is None:
+            return {**status, "state": "missing", "loaded": False}
+
+        raw_state = getattr(entry, "state", None)
+        state = getattr(raw_state, "value", raw_state)
+        if state is None:
+            return status
+        state_text = str(state).lower()
+        return {
+            **status,
+            "state": state_text,
+            "loaded": state_text == "loaded",
+        }
 
     def _discover_entities(self) -> None:
         """Discover entity IDs from the upstream config entry, with state fallback."""
@@ -289,6 +327,7 @@ class FroniusReservaBatteryController:
 
         return {
             "telemetry_ready": self.telemetry_ready(),
+            "upstream_integration": self.upstream_integration_status(),
             "battery_level": self._read_float("battery_level"),
             "battery_power": battery_kw,
             "grid_power": grid_kw,
@@ -317,6 +356,8 @@ class FroniusReservaBatteryController:
 
     def telemetry_ready(self) -> bool:
         """Return whether the upstream Fronius telemetry is usable for control."""
+        if self.upstream_integration_status()["loaded"] is False:
+            return False
         if not self._entity_map:
             self._discover_entities()
         optional_site_keys = (
@@ -474,6 +515,15 @@ class FroniusReservaBatteryController:
         available_required: tuple[str, ...] = (),
     ) -> bool:
         """Refresh a partial entity map and validate command-critical entities."""
+        upstream = self.upstream_integration_status()
+        if upstream["loaded"] is False:
+            _LOGGER.warning(
+                "Fronius GEN24 storage command unavailable; upstream %s "
+                "config entry is %s",
+                upstream["domain"],
+                upstream["state"],
+            )
+            return False
         if not self._entity_map or any(key not in self._entity_map for key in required):
             self._discover_entities()
 

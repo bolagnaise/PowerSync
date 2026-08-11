@@ -30,6 +30,8 @@ class SolarExportCapability:
     adapter: str | None = None
     verification: str | None = None
     targets: int = 0
+    upstream_domain: str | None = None
+    upstream_state: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Return JSON-safe capability diagnostics."""
@@ -42,6 +44,8 @@ class SolarExportCapability:
                 "adapter": self.adapter,
                 "verification": self.verification,
                 "targets": self.targets,
+                "upstream_domain": self.upstream_domain,
+                "upstream_state": self.upstream_state,
             }.items()
             if value is not None
         }
@@ -153,6 +157,18 @@ class SolarExportChargeHoldAdapter:
                 )
         elif self.system == "fronius_reserva":
             controller = getattr(self.coordinator, "_controller", None)
+            upstream_checker = getattr(
+                controller, "upstream_integration_status", None
+            )
+            upstream = upstream_checker() if callable(upstream_checker) else {}
+            if upstream.get("loaded") is False:
+                return SolarExportCapability(
+                    False,
+                    "upstream_integration_not_loaded",
+                    adapter=self.key,
+                    upstream_domain=upstream.get("domain"),
+                    upstream_state=upstream.get("state"),
+                )
             checker = getattr(controller, "_ensure_command_entities", None)
             if callable(checker) and not checker(
                 ("storage_control_mode",),
