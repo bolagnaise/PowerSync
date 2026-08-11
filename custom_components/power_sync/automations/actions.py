@@ -7401,14 +7401,20 @@ async def _dynamic_ev_update_surplus(
             low_surplus_start = state.get("low_surplus_start")
             if low_surplus_start is None:
                 state["low_surplus_start"] = datetime.now()
-                new_amps = effective_current_amps
+                # Preserve the active charging session during the stop-delay
+                # grace period, but shed any current above the charger's real
+                # minimum immediately. Holding the previous target here can
+                # needlessly draw from the home battery or grid for the full
+                # delay even though the surplus has already disappeared.
+                new_amps = min(effective_current_amps, min_amps)
             elif (datetime.now() - low_surplus_start).total_seconds() >= stop_delay_minutes * 60:
                 # Stop charging after delay
                 _LOGGER.info(f"⚡ Solar surplus EV: Stopping - insufficient surplus for {stop_delay_minutes} min")
                 new_amps = 0
             else:
-                # Keep current amps during grace period
-                new_amps = effective_current_amps
+                # Keep charging at no more than the hardware floor during the
+                # grace period so a transient dip does not stop the session.
+                new_amps = min(effective_current_amps, min_amps)
         else:
             new_amps = 0
     else:

@@ -5355,7 +5355,7 @@ def test_manual_session_records_quick_control_metadata():
     assert ownership["quick_control"] is True
 
 
-def test_solar_surplus_stop_delay_holds_current_amps_on_first_low_sample(monkeypatch):
+def test_solar_surplus_stop_delay_reduces_to_minimum_on_first_low_sample(monkeypatch):
     hass = _Hass([])
     vehicle_id = "VIN123"
     actions._dynamic_ev_state.clear()
@@ -5378,10 +5378,10 @@ def test_solar_surplus_stop_delay_holds_current_amps_on_first_low_sample(monkeyp
     )
 
     state = actions._dynamic_ev_state["entry-1"][vehicle_id]
-    assert state["current_amps"] == 8
-    assert state["target_amps"] == 8
+    assert state["current_amps"] == 5
+    assert state["target_amps"] == 5
     assert state["low_surplus_start"] is not None
-    assert set_amps_calls == []
+    assert set_amps_calls == [5]
 
 
 def test_solar_surplus_update_stops_full_ev(monkeypatch):
@@ -5417,7 +5417,7 @@ def test_solar_surplus_update_stops_full_ev(monkeypatch):
     assert last_command["reason"] == "already full"
 
 
-def test_solar_surplus_parallel_reserve_prevents_ramp_while_battery_charging(monkeypatch):
+def test_solar_surplus_parallel_reserve_sheds_to_minimum_while_battery_charging(monkeypatch):
     hass = _Hass([])
     vehicle_id = "VIN123"
     actions._dynamic_ev_state.clear()
@@ -5448,8 +5448,9 @@ def test_solar_surplus_parallel_reserve_prevents_ramp_while_battery_charging(mon
     )
 
     state = actions._dynamic_ev_state["entry-1"][vehicle_id]
-    assert state["current_amps"] == 7
+    assert state["current_amps"] == 5
     assert state["low_surplus_start"] is not None
+    assert set_amps_calls == [5]
 
 
 def test_solar_surplus_full_battery_curtailment_ramps_from_visible_headroom(monkeypatch):
@@ -5608,9 +5609,9 @@ def test_solar_surplus_below_floor_no_reserved_surplus_uses_stop_delay(monkeypat
     )
 
     state = actions._dynamic_ev_state["entry-1"][vehicle_id]
-    assert state["current_amps"] == 6
+    assert state["current_amps"] == 5
     assert state["low_surplus_start"] is not None
-    assert set_amps_calls == []
+    assert set_amps_calls == [5]
 
 
 def test_solar_surplus_below_floor_pauses_when_battery_discharges(monkeypatch):
@@ -5690,7 +5691,7 @@ def test_solar_surplus_below_floor_pauses_on_grid_import(monkeypatch):
     assert set_amps_calls == [0]
 
 
-def test_solar_surplus_stop_delay_uses_tesla_hardware_minimum(monkeypatch):
+def test_solar_surplus_stop_delay_clamps_to_tesla_hardware_minimum(monkeypatch):
     hass = _Hass([])
     vehicle_id = "VIN123"
     actions._dynamic_ev_state.clear()
@@ -5713,9 +5714,9 @@ def test_solar_surplus_stop_delay_uses_tesla_hardware_minimum(monkeypatch):
     )
 
     state = actions._dynamic_ev_state["entry-1"][vehicle_id]
-    assert state["current_amps"] == 8
+    assert state["current_amps"] == 5
     assert state["low_surplus_start"] is not None
-    assert set_amps_calls == []
+    assert set_amps_calls == [5]
 
 
 def test_solar_surplus_stop_delay_stops_after_elapsed_delay(monkeypatch):
