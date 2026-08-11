@@ -612,6 +612,15 @@ async def _get_tesla_ev_entity(
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
 
+    def _device_name(device: Any) -> str:
+        """Return a registry device label without requiring optional metadata."""
+        return str(getattr(device, "name", None) or getattr(device, "id", "unknown"))
+
+    def _device_id(device: Any) -> Optional[str]:
+        """Return a registry device ID when the registry object exposes one."""
+        value = getattr(device, "id", None)
+        return str(value) if value else None
+
     # EV-specific entity patterns that only vehicles have (not energy products)
     ev_entity_markers = [
         r"button\..*_charge",  # charge_start, force_data_update
@@ -649,7 +658,7 @@ async def _get_tesla_ev_entity(
                 id_str = str(identifier_value)
                 id_len = len(id_str)
                 is_all_digit = id_str.isdigit()
-                _LOGGER.debug(f"Tesla domain device: {device.name}, domain={domain}, id={id_str}, len={id_len}, all_digit={is_all_digit}")
+                _LOGGER.debug(f"Tesla domain device: {_device_name(device)}, domain={domain}, id={id_str}, len={id_len}, all_digit={is_all_digit}")
 
                 all_tesla_domain_devices.append((device, domain, id_str))
 
@@ -657,21 +666,22 @@ async def _get_tesla_ev_entity(
                 if id_len == 17 and not is_all_digit:
                     if vehicle_vin is None or id_str == vehicle_vin:
                         tesla_devices.append(device)
-                        _LOGGER.info(f"Found Tesla EV vehicle by VIN: {device.name}, VIN: {id_str}")
+                        _LOGGER.info(f"Found Tesla EV vehicle by VIN: {_device_name(device)}, VIN: {id_str}")
                         break
                     else:
-                        _LOGGER.debug(f"Tesla device VIN format OK but doesn't match filter: {device.name}, VIN={id_str}, filter={vehicle_vin}")
+                        _LOGGER.debug(f"Tesla device VIN format OK but doesn't match filter: {_device_name(device)}, VIN={id_str}, filter={vehicle_vin}")
                 else:
-                    _LOGGER.debug(f"Tesla device skipped VIN check (not VIN format): {device.name}, id={id_str} (len={id_len}, all_digit={is_all_digit})")
+                    _LOGGER.debug(f"Tesla device skipped VIN check (not VIN format): {_device_name(device)}, id={id_str} (len={id_len}, all_digit={is_all_digit})")
 
     # Fallback only when no explicit vehicle was requested. An explicit VIN or
     # BLE pseudo-id must never degrade to an arbitrary Tesla-domain device.
     if not tesla_devices and all_tesla_domain_devices and vehicle_vin is None:
         _LOGGER.debug(f"No VIN-based devices found, checking {len(all_tesla_domain_devices)} Tesla domain devices for EV entities")
         for device, domain, id_str in all_tesla_domain_devices:
-            if _device_has_ev_entities(device.id):
+            device_id = _device_id(device)
+            if device_id and _device_has_ev_entities(device_id):
                 tesla_devices.append(device)
-                _LOGGER.info(f"Found Tesla EV device by entity detection: {device.name}, domain={domain}, id={id_str}")
+                _LOGGER.info(f"Found Tesla EV device by entity detection: {_device_name(device)}, domain={domain}, id={id_str}")
                 break
 
     if not tesla_devices:
@@ -680,7 +690,7 @@ async def _get_tesla_ev_entity(
         if all_tesla_domain_devices:
             log_missing(f"Found {len(all_tesla_domain_devices)} Tesla domain devices but none matched VIN format or had EV entities:")
             for device, domain, id_str in all_tesla_domain_devices[:5]:
-                log_missing(f"  - {device.name}: domain={domain}, id={id_str}")
+                log_missing(f"  - {_device_name(device)}: domain={domain}, id={id_str}")
         return None
 
     # A vehicle can be exposed by more than one Tesla integration at once. Do
@@ -709,7 +719,7 @@ async def _get_tesla_ev_entity(
         ),
         (
             re.compile(
-                r"sensor\..*_(battery_level|charging_state)(?:_\d+)?$",
+                r"sensor\..*_(battery_level|charging_state|charging)(?:_\d+)?$",
                 re.IGNORECASE,
             ),
             1,
@@ -727,16 +737,19 @@ async def _get_tesla_ev_entity(
             "unavailable",
         }
 
-    entities_by_device: dict[str, list[str]] = {
-        device.id: [] for device in tesla_devices
-    }
+    entities_by_device: dict[str, list[str]] = {}
+    for device in tesla_devices:
+        device_id = _device_id(device)
+        if device_id:
+            entities_by_device[device_id] = []
     for entity in entity_registry.entities.values():
         if entity.device_id in entities_by_device:
             entities_by_device[entity.device_id].append(entity.entity_id)
 
-    candidates: list[tuple[int, int, int, Any, str]] = []
+    candidates: list[tuple[int, int, int, int, Any, str]] = []
     for registry_index, device in enumerate(tesla_devices):
-        device_entities = entities_by_device.get(device.id, [])
+        device_id = _device_id(device)
+        device_entities = entities_by_device.get(device_id or "", [])
         matching_entities = [
             entity_id for entity_id in device_entities if pattern.match(entity_id)
         ]
@@ -755,7 +768,15 @@ async def _get_tesla_ev_entity(
         )
         matching_entity = max(
             matching_entities,
-            key=lambda entity_id: int(_has_usable_state(entity_id)),
+            key=lambda entity_id: (
+                int(
+                    str(getattr(hass.states.get(entity_id), "state", "") or "")
+                    .strip()
+                    .lower()
+                    == "charging"
+                ),
+                int(_has_usable_state(entity_id)),
+            ),
         )
         # Button states are timestamps/unknown rather than availability signals,
         # so choose their provider from sibling control health. For stateful
@@ -764,8 +785,15 @@ async def _get_tesla_ev_entity(
             not matching_entity.startswith("button.")
             and _has_usable_state(matching_entity)
         )
+        matching_active = int(
+            str(getattr(hass.states.get(matching_entity), "state", "") or "")
+            .strip()
+            .lower()
+            == "charging"
+        )
         candidates.append(
             (
+                matching_active,
                 matching_usable,
                 health_score,
                 -registry_index,
@@ -775,14 +803,21 @@ async def _get_tesla_ev_entity(
         )
 
     if candidates:
-        _matching_usable, health_score, _index, target_device, matching_entity = max(
-            candidates, key=lambda candidate: candidate[:3]
+        (
+            _matching_active,
+            _matching_usable,
+            health_score,
+            _index,
+            target_device,
+            matching_entity,
+        ) = max(
+            candidates, key=lambda candidate: candidate[:4]
         )
         if len(candidates) > 1:
             _LOGGER.info(
                 "Selected Tesla EV provider device %s for %s from %d VIN-matching "
                 "devices (health score %d)",
-                target_device.name,
+                _device_name(target_device),
                 matching_entity,
                 len(candidates),
                 health_score,
@@ -790,8 +825,8 @@ async def _get_tesla_ev_entity(
         else:
             _LOGGER.debug(
                 "Found Tesla EV device: %s (id: %s)",
-                target_device.name,
-                target_device.id,
+                _device_name(target_device),
+                _device_id(target_device),
             )
         _LOGGER.debug("Found matching entity: %s", matching_entity)
         return matching_entity
@@ -855,9 +890,17 @@ _TESLA_RESTART_TELEMETRY_GRACE_SECONDS = 90
 def _get_tesla_charging_state(
     hass: HomeAssistant,
     vehicle_vin: Optional[str],
+    entity_id: Optional[str] = None,
 ) -> Optional[str]:
     """Return a usable Tesla charging state for one VIN, when exposed by HA."""
     import re
+
+    entity_id = str(entity_id or "").strip()
+    if entity_id:
+        state = hass.states.get(entity_id)
+        value = str(getattr(state, "state", "") or "").strip().lower()
+        if state is not None and value not in {"", "unknown", "unavailable", "none"}:
+            return value
 
     if not vehicle_vin or vehicle_vin == DEFAULT_VEHICLE_ID:
         return None
@@ -875,9 +918,22 @@ def _get_tesla_charging_state(
 def _get_tesla_charging_state_changed_at(
     hass: HomeAssistant,
     vehicle_vin: Optional[str],
+    entity_id: Optional[str] = None,
 ) -> Optional[datetime]:
     """Return when the usable VIN-scoped Tesla charging state last changed."""
     import re
+
+    entity_id = str(entity_id or "").strip()
+    if entity_id:
+        state = hass.states.get(entity_id)
+        value = str(getattr(state, "state", "") or "").strip().lower()
+        changed_at = getattr(state, "last_changed", None)
+        if (
+            state is not None
+            and value not in {"", "unknown", "unavailable", "none"}
+            and isinstance(changed_at, datetime)
+        ):
+            return changed_at
 
     if not vehicle_vin or vehicle_vin == DEFAULT_VEHICLE_ID:
         return None
@@ -6978,7 +7034,8 @@ async def _refresh_dynamic_tesla_charger_capability(
             "allow_stale_entity_max_override": False,
         }
     )
-    if _get_ev_config(config_entry)["ev_provider"] == EV_PROVIDER_FLEET_API:
+    ev_provider = _get_ev_config(config_entry)["ev_provider"]
+    if ev_provider == EV_PROVIDER_FLEET_API:
         charge_current_entity = await _get_tesla_ev_entity(
             hass,
             r"number\..*(charging_amps|charge_current)(?:_\d+)?$",
@@ -6992,6 +7049,24 @@ async def _refresh_dynamic_tesla_charger_capability(
             params["tesla_charge_current_entity"] = charge_current_entity
         else:
             params.pop("tesla_charge_current_entity", None)
+    else:
+        # Local and fallback modes use a conservative positive floor; Both
+        # mode must not inherit a lower cloud floor before its BLE preference.
+        params.pop("tesla_charge_current_entity", None)
+    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        charging_state_entity = await _get_tesla_ev_entity(
+            hass,
+            r"sensor\..*(charging_state|charging)(?:_\d+)?$",
+            vehicle_id,
+            warn_on_missing=False,
+        )
+        current_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
+        if current_state is not state or not current_state.get("active"):
+            return False
+        if charging_state_entity:
+            params["tesla_charging_state_entity"] = charging_state_entity
+        else:
+            params.pop("tesla_charging_state_entity", None)
     requested_fixed_amps = _coerce_positive_int(
         params.get("requested_fixed_charge_amps", params.get("fixed_charge_amps"))
     )
@@ -7230,6 +7305,7 @@ async def _dynamic_ev_update_surplus(
             charging_state = _get_tesla_charging_state(
                 hass,
                 _dynamic_ev_vehicle_vin(vid, v_params),
+                v_params.get("tesla_charging_state_entity"),
             )
         if vid == vehicle_id:
             observed_current_power_kw = observed_power_kw
@@ -7240,6 +7316,7 @@ async def _dynamic_ev_update_surplus(
                     _get_tesla_charging_state_changed_at(
                         hass,
                         _dynamic_ev_vehicle_vin(vid, v_params),
+                        v_params.get("tesla_charging_state_entity"),
                     )
                 )
         actual_power_kw = _effective_ev_power_kw(
@@ -7265,7 +7342,15 @@ async def _dynamic_ev_update_surplus(
         state.get("last_stop_command_at"),
     )
     if state.get("external_manual_override"):
-        if external_tesla_charge_active:
+        external_manual_charge_ended = (
+            current_vehicle_charging_state in _TESLA_NON_CHARGING_STATES
+            or (
+                current_vehicle_charging_state != "charging"
+                and current_vehicle_power_available
+                and observed_current_power_kw <= _ACTIVE_EV_POWER_EPSILON_KW
+            )
+        )
+        if not external_manual_charge_ended:
             state["reason"] = (
                 "External manual charging active; Solar Surplus rate control suspended"
             )
@@ -8894,7 +8979,8 @@ async def _action_start_ev_charging_dynamic_locked(
             ],
             "allow_stale_entity_max_override": False,
         }
-        if _get_ev_config(config_entry)["ev_provider"] == EV_PROVIDER_FLEET_API:
+        ev_provider = _get_ev_config(config_entry)["ev_provider"]
+        if ev_provider == EV_PROVIDER_FLEET_API:
             charge_current_entity = await _get_tesla_ev_entity(
                 hass,
                 r"number\..*(charging_amps|charge_current)(?:_\d+)?$",
@@ -8903,6 +8989,15 @@ async def _action_start_ev_charging_dynamic_locked(
             )
             if charge_current_entity:
                 params["tesla_charge_current_entity"] = charge_current_entity
+        if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+            charging_state_entity = await _get_tesla_ev_entity(
+                hass,
+                r"sensor\..*(charging_state|charging)(?:_\d+)?$",
+                vehicle_id,
+                warn_on_missing=False,
+            )
+            if charging_state_entity:
+                params["tesla_charging_state_entity"] = charging_state_entity
 
     def _same_loadpoint(candidate_id: str) -> bool:
         return (
@@ -9466,6 +9561,9 @@ async def _action_start_ev_charging_dynamic_locked(
         "charger_power_entity": params.get("charger_power_entity"),
         "tesla_charge_current_entity": params.get(
             "tesla_charge_current_entity"
+        ),
+        "tesla_charging_state_entity": params.get(
+            "tesla_charging_state_entity"
         ),
         "ocpp_charger_id": params.get("ocpp_charger_id"),
         "sigenergy_charger_host": params.get("sigenergy_charger_host"),
