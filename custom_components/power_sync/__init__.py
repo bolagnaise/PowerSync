@@ -17629,6 +17629,7 @@ class EVLoadpointStatusView(HomeAssistantView):
         battery_power_kw = 0.0
         load_power_kw = 0.0
         battery_soc = 0.0
+        is_curtailed = False
 
         for key in (
             "tesla_coordinator",
@@ -17643,6 +17644,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                 battery_power_kw = coordinator.data.get("battery_power", 0) or 0
                 load_power_kw = coordinator.data.get("load_power", 0) or 0
                 battery_soc = coordinator.data.get("battery_level", 0) or 0
+                is_curtailed = coordinator.data.get("is_curtailed", False) is True
                 break
 
         return {
@@ -17651,6 +17653,7 @@ class EVLoadpointStatusView(HomeAssistantView):
             "grid_power_kw": grid_power_kw,
             "battery_power_kw": battery_power_kw,
             "load_power_kw": load_power_kw,
+            "is_curtailed": is_curtailed,
         }
 
     async def get(self, request):
@@ -17700,6 +17703,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                 "battery_power": site["battery_power_kw"] * 1000,
                 "load_power": site["load_power_kw"] * 1000,
                 "battery_soc": site["battery_soc"],
+                "is_curtailed": site["is_curtailed"],
             }
             solar_config = get_stored_solar_surplus_config(entry_data)
 
