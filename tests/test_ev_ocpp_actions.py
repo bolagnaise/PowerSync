@@ -98,10 +98,18 @@ actions = importlib.import_module("power_sync.automations.actions")
 
 
 class _State:
-    def __init__(self, entity_id: str, state: str, attributes: dict | None = None) -> None:
+    def __init__(
+        self,
+        entity_id: str,
+        state: str,
+        attributes: dict | None = None,
+        *,
+        last_changed: datetime | None = None,
+    ) -> None:
         self.entity_id = entity_id
         self.state = state
         self.attributes = attributes or {}
+        self.last_changed = last_changed
 
 
 class _States:
@@ -4835,6 +4843,64 @@ def test_tesla_set_amps_clamps_to_entity_max_by_default(monkeypatch):
     ]
 
 
+def test_tesla_cloud_set_amps_honors_entity_positive_floor(monkeypatch):
+    async def fake_get_tesla_ev_entity(*args, **kwargs):
+        return "number.car_charging_amps"
+
+    async def fake_wake(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", fake_get_tesla_ev_entity)
+    monkeypatch.setattr(actions, "_wake_tesla_ev", fake_wake)
+    hass = _Hass([
+        _State("number.car_charging_amps", "1", {"min": 0, "max": 32}),
+    ])
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            _Entry(),
+            {"vehicle_vin": "VIN123", "amps": 1},
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        ("number", "set_value", {"entity_id": "number.car_charging_amps", "value": 1})
+    ]
+
+
+def test_tesla_ble_set_amps_keeps_conservative_positive_floor(monkeypatch):
+    set_amps_calls = []
+
+    async def fake_set_ble_amps(hass, prefix, amps, **kwargs):
+        set_amps_calls.append((prefix, amps))
+        return True
+
+    monkeypatch.setattr(actions, "_is_ble_available", lambda *args: True)
+    monkeypatch.setattr(
+        actions,
+        "_set_ev_charging_amps_ble",
+        fake_set_ble_amps,
+    )
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"ev_provider": "tesla_ble"},
+    )
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            _Hass([]),
+            entry,
+            {"vehicle_vin": "ble_car", "amps": 1},
+        )
+    )
+
+    assert result is True
+    assert set_amps_calls == [("car", 5)]
+
+
 def test_tesla_set_amps_refuses_current_entity_unavailable_after_wake(monkeypatch):
     entity_id = "number.car_charging_amps"
 
@@ -5717,6 +5783,148 @@ def test_solar_surplus_stop_delay_clamps_to_tesla_hardware_minimum(monkeypatch):
     assert state["current_amps"] == 5
     assert state["low_surplus_start"] is not None
     assert set_amps_calls == [5]
+
+
+def test_solar_surplus_stop_delay_uses_cloud_entity_positive_floor(monkeypatch):
+    entity_id = "number.car_charging_amps"
+    hass = _Hass([
+        _State(entity_id, "7", {"min": 0, "max": 32}),
+    ])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=7)
+    state["params"].update({
+        "min_charge_amps": 5,
+        "tesla_charge_current_entity": entity_id,
+    })
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    set_amps_calls = _install_solar_surplus_runtime_stubs(
+        monkeypatch,
+        {
+            "battery_soc": 40,
+            "grid_power": -10,
+            "battery_power": 380,
+            "solar_power": 0,
+            "load_power": 0,
+        },
+    )
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    state = actions._dynamic_ev_state["entry-1"][vehicle_id]
+    assert state["current_amps"] == 1
+    assert state["low_surplus_start"] is not None
+    assert set_amps_calls == [1]
+
+
+def test_solar_surplus_external_tesla_start_suspends_until_charge_ends(monkeypatch):
+    stop_command_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    hass = _Hass([
+        _State(
+            "sensor.VIN123_charging_state",
+            "charging",
+            last_changed=stop_command_at + timedelta(seconds=30),
+        ),
+    ])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=0)
+    state["low_surplus_start"] = datetime.now() - timedelta(minutes=11)
+    state["params"]["notify_on_complete"] = False
+    state["params"]["owner_mode"] = "solar_surplus"
+    state["external_start_detection_armed"] = False
+    state["last_stop_command_at"] = stop_command_at
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    set_amps_calls = _install_solar_surplus_runtime_stubs(
+        monkeypatch,
+        {
+            "battery_soc": 100,
+            "grid_power": 0,
+            "battery_power": 1000,
+            "solar_power": 600,
+            "load_power": 1600,
+        },
+    )
+
+    observation = {"power_kw": 0.24}
+
+    async def observed_power(*args, **kwargs):
+        return observation["power_kw"], True
+
+    monkeypatch.setattr(
+        actions,
+        "_get_observed_ev_power_reading_kw",
+        observed_power,
+    )
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    override_state = actions._dynamic_ev_state["entry-1"][vehicle_id]
+    assert override_state["params"]["owner_mode"] == "solar_surplus"
+    assert override_state["external_manual_override"] is True
+    assert "rate control suspended" in override_state["reason"]
+    assert set_amps_calls == []
+
+    hass.states._states["sensor.VIN123_charging_state"].state = "stopped"
+    observation["power_kw"] = 0
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    resumed_state = actions._dynamic_ev_state["entry-1"][vehicle_id]
+    assert resumed_state["external_manual_override"] is False
+    assert resumed_state["external_start_detection_armed"] is True
+    assert resumed_state["charging_started"] is False
+    assert set_amps_calls == []
+
+
+def test_solar_surplus_does_not_mistake_post_stop_lag_for_manual_start(monkeypatch):
+    stop_command_at = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State(
+            "sensor.VIN123_charging_state",
+            "charging",
+            last_changed=stop_command_at - timedelta(seconds=30),
+        ),
+    ])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=0)
+    state["low_surplus_start"] = datetime.now() - timedelta(minutes=11)
+    state["external_start_detection_armed"] = False
+    state["last_stop_command_at"] = stop_command_at
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    set_amps_calls = _install_solar_surplus_runtime_stubs(
+        monkeypatch,
+        {
+            "battery_soc": 100,
+            "grid_power": 0,
+            "battery_power": 1000,
+            "solar_power": 600,
+            "load_power": 1600,
+        },
+    )
+
+    async def observed_power(*args, **kwargs):
+        return 0.24, True
+
+    monkeypatch.setattr(
+        actions,
+        "_get_observed_ev_power_reading_kw",
+        observed_power,
+    )
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    assert state.get("external_manual_override") is not True
+    assert set_amps_calls == [0]
 
 
 def test_solar_surplus_stop_delay_stops_after_elapsed_delay(monkeypatch):

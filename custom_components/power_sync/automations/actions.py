@@ -216,6 +216,46 @@ def _normalize_generic_charger_amps(
     return amps
 
 
+def _tesla_charge_current_positive_floor(
+    hass: HomeAssistant,
+    entity_id: Optional[str],
+) -> Optional[int]:
+    """Return a cloud Tesla entity's lowest positive integer current."""
+    entity_id = str(entity_id or "").strip()
+    if not entity_id:
+        return None
+    state = hass.states.get(entity_id)
+    state_value = str(getattr(state, "state", "") or "").strip().lower()
+    if state is None or state_value in {"", "unknown", "unavailable"}:
+        return None
+
+    entity_min, entity_max, bounds_valid = _generic_charger_entity_bounds(
+        hass,
+        entity_id,
+    )
+    if not bounds_valid or entity_min is None:
+        return None
+    positive_floor = max(1, entity_min)
+    if entity_max is not None and positive_floor > entity_max:
+        return None
+    return positive_floor
+
+
+def _tesla_hardware_min_charge_amps(
+    params: dict,
+    hass: Optional[HomeAssistant] = None,
+) -> int:
+    """Return the proven positive floor for the selected Tesla command path."""
+    if hass is not None:
+        entity_floor = _tesla_charge_current_positive_floor(
+            hass,
+            params.get("tesla_charge_current_entity"),
+        )
+        if entity_floor is not None:
+            return entity_floor
+    return TESLA_UNKNOWN_CHARGER_SAFE_AMPS
+
+
 def _generic_charger_effective_integer_bounds(
     hass: HomeAssistant,
     params: dict,
@@ -830,6 +870,40 @@ def _get_tesla_charging_state(
         if value and value not in {"unknown", "unavailable", "none"}:
             return value
     return None
+
+
+def _get_tesla_charging_state_changed_at(
+    hass: HomeAssistant,
+    vehicle_vin: Optional[str],
+) -> Optional[datetime]:
+    """Return when the usable VIN-scoped Tesla charging state last changed."""
+    import re
+
+    if not vehicle_vin or vehicle_vin == DEFAULT_VEHICLE_ID:
+        return None
+
+    for state in hass.states.async_all():
+        match = re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
+        if not match or match.group(1).upper() != str(vehicle_vin).upper():
+            continue
+        value = str(state.state or "").strip().lower()
+        changed_at = getattr(state, "last_changed", None)
+        if (
+            value
+            and value not in {"unknown", "unavailable", "none"}
+            and isinstance(changed_at, datetime)
+        ):
+            return changed_at
+    return None
+
+
+def _datetime_is_after(candidate: Optional[datetime], reference: Any) -> bool:
+    """Compare HA timestamps without allowing mixed-awareness errors."""
+    if not isinstance(candidate, datetime) or not isinstance(reference, datetime):
+        return False
+    if (candidate.tzinfo is None) != (reference.tzinfo is None):
+        return False
+    return candidate > reference
 
 
 def _tesla_restart_telemetry_pending(state: Dict[str, Any]) -> bool:
@@ -4435,15 +4509,16 @@ async def _action_set_ev_charging_amps(
         params.get("allow_stale_entity_max_override")
     )
 
-    # Clamp to valid range (5-48A typical, but allow up to 80A for some chargers)
-    # Note: Tesla vehicles refuse charging below 5A, so we enforce 5A minimum
-    # Tesla BLE supports same 5-32A range as cloud API
-    amps = max(5, min(80, int(amps)))
+    # Cloud vehicle integrations can expose and sustain a positive current
+    # below the conventional 5A Tesla floor. Keep the raw positive request for
+    # that VIN-scoped entity, while local/unknown command paths stay fail-closed
+    # at the conservative floor below.
+    amps = max(1, min(80, int(amps)))
     if configured_max_amps is not None:
         amps = min(configured_max_amps, amps)
 
     # Prefer the free, explicitly paired ESPHome BLE control path.
-    ble_amps = amps
+    ble_amps = max(TESLA_UNKNOWN_CHARGER_SAFE_AMPS, amps)
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
             result = await _set_ev_charging_amps_ble(
@@ -4469,7 +4544,7 @@ async def _action_set_ev_charging_amps(
             result = await _set_ev_charging_amps_teslemetry_bt(
                 hass,
                 tbt_prefix,
-                amps,
+                max(TESLA_UNKNOWN_CHARGER_SAFE_AMPS, amps),
                 allow_stale_entity_max_override=allow_stale_entity_max_override,
                 configured_max_amps=configured_max_amps,
                 params=params,
@@ -4495,13 +4570,19 @@ async def _action_set_ev_charging_amps(
             _LOGGER.error("Could not find Tesla charge_current/charging_amps number entity")
             return False
 
-        entity_min = 5
+        entity_min = TESLA_UNKNOWN_CHARGER_SAFE_AMPS
         entity_max = 32
         try:
             # Check entity's actual min/max limits and clamp accordingly
             entity_state = hass.states.get(charging_amps_entity)
             if entity_state:
-                entity_min = _coerce_positive_int(entity_state.attributes.get("min"), 5) or 5
+                entity_min = (
+                    _tesla_charge_current_positive_floor(
+                        hass,
+                        charging_amps_entity,
+                    )
+                    or TESLA_UNKNOWN_CHARGER_SAFE_AMPS
+                )
                 entity_max = _coerce_positive_int(entity_state.attributes.get("max"), 32) or 32
                 effective_max = entity_max
                 if (
@@ -5877,9 +5958,10 @@ def _effective_min_charge_amps(
     configured_min = _coerce_positive_int(params.get("min_charge_amps"), 5) or 5
     charger_type = params.get("charger_type", "tesla")
     if charger_type == "tesla":
-        # Tesla charge-current entities clamp to at least 5A. Solar surplus may
-        # be configured lower, but hysteresis must use the hardware floor.
-        return max(configured_min, 5)
+        return max(
+            configured_min,
+            _tesla_hardware_min_charge_amps(params, hass),
+        )
     if charger_type == "ocpp":
         # OCPP AC charging follows the EVSE/J1772 6A floor. Some HACS OCPP
         # entities expose a stale or capability range below that; do not let
@@ -5897,6 +5979,16 @@ def _effective_min_charge_amps(
             return max(configured_min, configured_max) + 1
         configured_min = effective_min
     return configured_min
+
+
+def _hardware_min_charge_amps(
+    params: dict,
+    hass: Optional[HomeAssistant] = None,
+) -> int:
+    """Return the physical floor independently of the configured start floor."""
+    if params.get("charger_type", "tesla") == "tesla":
+        return _tesla_hardware_min_charge_amps(params, hass)
+    return _effective_min_charge_amps(params, hass)
 
 
 async def _set_ocpp_charging_amps(hass: HomeAssistant, charger_id: int, amps: int) -> bool:
@@ -6886,6 +6978,20 @@ async def _refresh_dynamic_tesla_charger_capability(
             "allow_stale_entity_max_override": False,
         }
     )
+    if _get_ev_config(config_entry)["ev_provider"] == EV_PROVIDER_FLEET_API:
+        charge_current_entity = await _get_tesla_ev_entity(
+            hass,
+            r"number\..*(charging_amps|charge_current)(?:_\d+)?$",
+            vehicle_id,
+            warn_on_missing=False,
+        )
+        current_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
+        if current_state is not state or not current_state.get("active"):
+            return False
+        if charge_current_entity:
+            params["tesla_charge_current_entity"] = charge_current_entity
+        else:
+            params.pop("tesla_charge_current_entity", None)
     requested_fixed_amps = _coerce_positive_int(
         params.get("requested_fixed_charge_amps", params.get("fixed_charge_amps"))
     )
@@ -7102,6 +7208,7 @@ async def _dynamic_ev_update_surplus(
     observed_current_power_kw = 0.0
     current_vehicle_power_available = False
     current_vehicle_charging_state = None
+    current_vehicle_charging_state_changed_at = None
     for vid, v_state in all_vehicles.items():
         if not v_state.get("active") or v_state.get("paused"):
             continue
@@ -7128,6 +7235,13 @@ async def _dynamic_ev_update_surplus(
             observed_current_power_kw = observed_power_kw
             current_vehicle_power_available = observed_power_available
             current_vehicle_charging_state = charging_state
+            if charging_state is not None:
+                current_vehicle_charging_state_changed_at = (
+                    _get_tesla_charging_state_changed_at(
+                        hass,
+                        _dynamic_ev_vehicle_vin(vid, v_params),
+                    )
+                )
         actual_power_kw = _effective_ev_power_kw(
             commanded_power_kw,
             observed_power_kw,
@@ -7136,6 +7250,69 @@ async def _dynamic_ev_update_surplus(
             restart_telemetry_pending=_tesla_restart_telemetry_pending(v_state),
         )
         total_ev_power_kw += actual_power_kw
+
+    restart_telemetry_pending = _tesla_restart_telemetry_pending(state)
+    external_tesla_charge_active = (
+        params.get("charger_type", "tesla") == "tesla"
+        and current_amps <= 0
+        and current_vehicle_power_available
+        and observed_current_power_kw > _ACTIVE_EV_POWER_EPSILON_KW
+        and current_vehicle_charging_state == "charging"
+        and not restart_telemetry_pending
+    )
+    external_start_after_last_stop = _datetime_is_after(
+        current_vehicle_charging_state_changed_at,
+        state.get("last_stop_command_at"),
+    )
+    if state.get("external_manual_override"):
+        if external_tesla_charge_active:
+            state["reason"] = (
+                "External manual charging active; Solar Surplus rate control suspended"
+            )
+            return
+        state["external_manual_override"] = False
+        state["external_start_detection_armed"] = True
+        state["charging_started"] = False
+        state["current_amps"] = 0
+        state["target_amps"] = 0
+        state["low_surplus_start"] = None
+        state["high_surplus_start"] = None
+        _LOGGER.info(
+            "Solar surplus EV: external manual charge ended for %s; "
+            "resuming automated control",
+            vehicle_id,
+        )
+    elif (
+        external_tesla_charge_active
+        and (
+            state.get(
+                "external_start_detection_armed",
+                not state.get("charging_started"),
+            )
+            or external_start_after_last_stop
+        )
+    ):
+        state["external_manual_override"] = True
+        state["external_start_detection_armed"] = False
+        state["reason"] = (
+            "External manual charging active; Solar Surplus rate control suspended"
+        )
+        _LOGGER.info(
+            "Solar surplus EV: detected external manual start for %s at %.2fkW; "
+            "suspending automated rate control",
+            vehicle_id,
+            observed_current_power_kw,
+        )
+        return
+    elif (
+        params.get("charger_type", "tesla") == "tesla"
+        and current_amps <= 0
+        and current_vehicle_power_available
+        and observed_current_power_kw <= _ACTIVE_EV_POWER_EPSILON_KW
+        and current_vehicle_charging_state in _TESLA_NON_CHARGING_STATES
+        and not restart_telemetry_pending
+    ):
+        state["external_start_detection_armed"] = True
 
     # Calculate available surplus after the household buffer and any configured
     # parallel battery reserve.
@@ -7326,7 +7503,6 @@ async def _dynamic_ev_update_surplus(
 
     # Calculate current EV power for THIS vehicle. Prefer measured charger
     # power so an already-active charge is treated as controllable load.
-    restart_telemetry_pending = _tesla_restart_telemetry_pending(state)
     current_ev_kw = _effective_ev_power_kw(
         (current_amps * voltage * phases) / 1000,
         observed_current_power_kw,
@@ -7347,6 +7523,7 @@ async def _dynamic_ev_update_surplus(
         effective_current_amps = 0
     elif current_amps <= 0 and observed_current_power_kw > 0.05:
         effective_current_amps = max(1, int(round((observed_current_power_kw * 1000) / (voltage * phases))))
+
     if params.get("charger_type", "tesla") == "generic" and effective_current_amps > 0:
         normalized_current_amps = _normalize_generic_charger_amps(
             hass,
@@ -7384,6 +7561,7 @@ async def _dynamic_ev_update_surplus(
 
     # Apply constraints
     min_amps = _effective_min_charge_amps(params, hass)
+    hardware_min_amps = _hardware_min_charge_amps(params, hass)
     max_amps = _effective_max_charge_amps(params, hass)
     new_amps = int(round(max(0, min(max_amps, available_amps))))
 
@@ -7406,7 +7584,7 @@ async def _dynamic_ev_update_surplus(
                 # minimum immediately. Holding the previous target here can
                 # needlessly draw from the home battery or grid for the full
                 # delay even though the surplus has already disappeared.
-                new_amps = min(effective_current_amps, min_amps)
+                new_amps = min(effective_current_amps, hardware_min_amps)
             elif (datetime.now() - low_surplus_start).total_seconds() >= stop_delay_minutes * 60:
                 # Stop charging after delay
                 _LOGGER.info(f"⚡ Solar surplus EV: Stopping - insufficient surplus for {stop_delay_minutes} min")
@@ -7414,7 +7592,7 @@ async def _dynamic_ev_update_surplus(
             else:
                 # Keep charging at no more than the hardware floor during the
                 # grace period so a transient dip does not stop the session.
-                new_amps = min(effective_current_amps, min_amps)
+                new_amps = min(effective_current_amps, hardware_min_amps)
         else:
             new_amps = 0
     else:
@@ -7549,6 +7727,17 @@ async def _dynamic_ev_update_surplus(
                 applied_amps = min(applied_amps, max_after_set)
             state["current_amps"] = applied_amps
             state["target_amps"] = applied_amps
+            if applied_amps > 0:
+                state["external_start_detection_armed"] = False
+                state["charging_started"] = True
+                state.pop("last_stop_command_at", None)
+            else:
+                # Wait for a confirmed stopped observation before treating a
+                # later positive draw as an external manual start. This avoids
+                # mistaking post-stop telemetry lag for a driver override.
+                state["external_start_detection_armed"] = False
+                state["charging_started"] = False
+                state["last_stop_command_at"] = datetime.now().astimezone()
             if applied_amps != new_amps:
                 state["reason"] = state["reason"].replace(
                     f"Target: {new_amps}A",
@@ -8705,6 +8894,15 @@ async def _action_start_ev_charging_dynamic_locked(
             ],
             "allow_stale_entity_max_override": False,
         }
+        if _get_ev_config(config_entry)["ev_provider"] == EV_PROVIDER_FLEET_API:
+            charge_current_entity = await _get_tesla_ev_entity(
+                hass,
+                r"number\..*(charging_amps|charge_current)(?:_\d+)?$",
+                vehicle_id,
+                warn_on_missing=False,
+            )
+            if charge_current_entity:
+                params["tesla_charge_current_entity"] = charge_current_entity
 
     def _same_loadpoint(candidate_id: str) -> bool:
         return (
@@ -9266,6 +9464,9 @@ async def _action_start_ev_charging_dynamic_locked(
         "charger_amps_entity": params.get("charger_amps_entity"),
         "charger_status_entity": params.get("charger_status_entity"),
         "charger_power_entity": params.get("charger_power_entity"),
+        "tesla_charge_current_entity": params.get(
+            "tesla_charge_current_entity"
+        ),
         "ocpp_charger_id": params.get("ocpp_charger_id"),
         "sigenergy_charger_host": params.get("sigenergy_charger_host"),
         "sigenergy_charger_port": params.get("sigenergy_charger_port"),
@@ -9331,6 +9532,8 @@ async def _action_start_ev_charging_dynamic_locked(
         "charging_started": (
             dynamic_mode == "battery_target" and not defer_battery_target_start
         ),
+        "external_start_detection_armed": dynamic_mode == "solar_surplus",
+        "external_manual_override": False,
         "entity_max_rechecked": False,  # Re-check Tesla entity max after charging starts
         "allocated_surplus_kw": 0,
         "reason": "",
