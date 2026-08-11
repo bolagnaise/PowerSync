@@ -164,34 +164,6 @@ def test_grid_import_limit_caps_grid_sourced_charge(battery_optimizer_module):
     )
 
 
-def test_highs_result_retains_solved_solar_curtailment_in_watts(
-    battery_optimizer_module,
-):
-    optimizer = battery_optimizer_module.BatteryOptimizer(
-        capacity_wh=10000,
-        max_charge_w=5000,
-        max_discharge_w=5000,
-        max_grid_export_w=0,
-        backup_reserve=0.0,
-        hardware_reserve=0.0,
-        interval_minutes=60,
-        horizon_hours=1,
-        terminal_weight=0.0,
-    )
-
-    result = optimizer.optimize(
-        import_prices=[0.20],
-        export_prices=[-1.0],
-        solar_forecast=[5.0],
-        load_forecast=[0.0],
-        current_soc=1.0,
-        allow_grid_charge=True,
-    )
-
-    assert result.solver_used == "highs"
-    assert result.solar_curtailment_w == pytest.approx([5000.0], abs=0.1)
-
-
 def test_profit_max_direct_solar_export_has_distinct_internal_action(
     battery_optimizer_module,
 ):

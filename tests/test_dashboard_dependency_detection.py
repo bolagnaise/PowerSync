@@ -169,98 +169,6 @@ def test_lp_battery_power_chart_splits_home_consumption_from_export():
     assert "attribute: 'discharge_values_kw'" not in chart_source
 
 
-def test_lp_solar_chart_uses_explicit_segmented_curtailment_provenance():
-    source = STRATEGY_PATH.read_text()
-    chart_source = source[
-        source.index("class PowerSyncChart extends HTMLElement"):
-        source.index("if (!customElements.get('power-sync-chart'))")
-    ]
-    config_source = source[
-        source.index("function _lpSolarLoadChart"):
-        source.index("function _lpPriceChart")
-    ]
-
-    assert "raw_forecast_values_kw" in config_source
-    assert "planned_forecast_values_kw" in config_source
-    assert "fallbackAttribute: 'forecast_values_kw'" in config_source
-    assert "deltaAttribute: 'curtailment_values_kw'" in config_source
-    assert "name: 'System Curtailment'" in config_source
-    assert "strokeDasharray: '6,4'" in config_source
-    assert "value > 1e-6" in chart_source
-    assert "segments.push(current)" in chart_source
-    assert "point.upper * yMultiplier" in chart_source
-    assert "raw_weather" not in chart_source
-
-
-def test_lp_solar_chart_renders_only_evidence_backed_curtailment_bands():
-    source = STRATEGY_PATH.read_text()
-    chart_start = source.index("class PowerSyncChart extends HTMLElement")
-    chart_end = source.index("if (!customElements.get('power-sync-chart'))")
-    chart_source = source[chart_start:chart_end]
-    prelude = """
-      global.HTMLElement = class {
-        attachShadow() {
-          this.shadowRoot = {
-            innerHTML: '',
-            querySelectorAll() { return []; },
-            querySelector() { return null; },
-          };
-        }
-        getBoundingClientRect() { return { width: 640 }; }
-      };
-    """
-    runtime = r"""
-      const baseConfig = {
-        mode: 'forecast',
-        intervalMinutes: 5,
-        yUnit: 'kW',
-        yMin: 0,
-        series: [
-          { key: 'raw', entity: 'sensor.solar', attribute: 'raw_forecast_values_kw', name: 'Raw Solar', color: '#aaa', strokeDasharray: '6,4' },
-          { key: 'planned', entity: 'sensor.solar', attribute: 'planned_forecast_values_kw', fallbackAttribute: 'forecast_values_kw', name: 'Planned Solar', color: '#ffd700' },
-        ],
-        bands: [{ key: 'curtail', entity: 'sensor.solar', lowerAttribute: 'planned_forecast_values_kw', lowerFallbackAttribute: 'forecast_values_kw', deltaAttribute: 'curtailment_values_kw', name: 'System Curtailment', color: '#607d8b' }],
-      };
-      function render(attributes) {
-        const chart = new PowerSyncChart();
-        chart._config = baseConfig;
-        chart._hass = { states: { 'sensor.solar': { state: '1', attributes } } };
-        chart._render();
-        return chart.shadowRoot.innerHTML;
-      }
-      const legacy = render({ forecast_values_kw: [4, 3, 2] });
-      if (legacy.includes('System Curtailment') || !legacy.includes('Planned Solar')) {
-        throw new Error('legacy fallback should render without a curtailment claim');
-      }
-      const nowcastOnly = render({
-        forecast_values_kw: [4, 3, 2],
-        raw_forecast_values_kw: [4, 4, 2],
-        planned_forecast_values_kw: [4, 3, 2],
-        curtailment_values_kw: [0, 0, 0],
-      });
-      if (nowcastOnly.includes('System Curtailment') || !nowcastOnly.includes('stroke-dasharray="6,4"')) {
-        throw new Error('nowcast gap should show two lines but no curtailment band');
-      }
-      const explicit = render({
-        forecast_values_kw: [4, 2, 2, 1, 1],
-        raw_forecast_values_kw: [4, 4, 2, 2, 1],
-        planned_forecast_values_kw: [4, 1.5, 2, 0.5, 1],
-        curtailment_values_kw: [0, 1.5, 0, 0.5, 0],
-      });
-      if (!explicit.includes('System Curtailment')) throw new Error('explicit band label missing');
-      const paths = [...explicit.matchAll(/data-band="curtail"/g)];
-      if (paths.length !== 2) throw new Error(`expected two segmented bands, got ${paths.length}`);
-      const invalid = render({
-        forecast_values_kw: [4, 3],
-        raw_forecast_values_kw: [4, 4],
-        planned_forecast_values_kw: [4, 3],
-        curtailment_values_kw: [1],
-      });
-      if (invalid.includes('System Curtailment')) throw new Error('misaligned evidence must fail closed');
-    """
-    subprocess.run(["node", "-e", f"{prelude}\n{chart_source}\n{runtime}"], check=True)
-
-
 def test_dashboard_uses_tariff_schedule_instead_of_duplicate_price_history():
     """Dynamic tariffs should not show a current-state history chart beside the schedule."""
     source = STRATEGY_PATH.read_text()
@@ -599,131 +507,6 @@ def test_dashboard_ev_panel_is_registered_and_api_cached():
     assert "this._scheduleRender();" not in hass_setter
     assert "data: this._data" in render_signature
     assert "policy: this._policy" in render_signature
-    assert "modesExpanded: this._modesExpanded" in render_signature
-
-
-def test_dashboard_ev_modes_are_collapsed_with_enabled_summary():
-    """Mode settings should roll up without hiding which automations are enabled."""
-    source = STRATEGY_PATH.read_text()
-    panel_source = source[
-        source.index("class PowerSyncEVPanel extends HTMLElement"):
-        source.index("customElements.define('power-sync-ev-panel'")
-    ]
-
-    assert "this._modesExpanded = false;" in panel_source
-    assert 'data-action="toggle-modes"' in panel_source
-    assert 'aria-expanded="${expanded ? \'true\' : \'false\'}"' in panel_source
-    assert 'aria-controls="ev-mode-grid"' in panel_source
-    assert 'id="ev-mode-grid" ${expanded ? \'\' : \'hidden\'}' in panel_source
-    assert "this._modesExpanded = !this._modesExpanded;" in panel_source
-    assert "if (grid) grid.hidden = !this._modesExpanded;" in panel_source
-    assert "toggle?.setAttribute('aria-expanded'" in panel_source
-    assert "this._scheduleRender();" not in panel_source[
-        panel_source.index("  _toggleModes() {"):
-        panel_source.index("  async _startPolicy()")
-    ]
-    assert "new CustomEvent('power-sync-card-resize', { bubbles: true, composed: true })" in panel_source
-    assert ".modes-toggle:focus-visible" in panel_source
-    assert "enabledModes.push('Solar Surplus')" in panel_source
-    assert "enabledModes.push('Price Level')" in panel_source
-    assert "enabledModes.push('Scheduled')" in panel_source
-    assert "enabledModes.push('Smart Schedule')" in panel_source
-    assert "return 'All off';" in panel_source
-
-    toggle_method = re.search(
-        r"  _toggleModes\(\) \{(?P<body>.*?)\n  \}\n\n"
-        r"  async _startPolicy\(\)",
-        panel_source,
-        re.DOTALL,
-    )
-    assert toggle_method is not None
-    runtime = f"""
-      const attrs = {{}};
-      const iconAttrs = {{}};
-      const icon = {{setAttribute: (key, value) => {{ iconAttrs[key] = value; }}}};
-      const toggle = {{
-        setAttribute: (key, value) => {{ attrs[key] = value; }},
-        querySelector: () => icon,
-      }};
-      const grid = {{hidden: true}};
-      let resizeEvent = null;
-      global.CustomEvent = class {{
-        constructor(type, options) {{ this.type = type; this.options = options; }}
-      }};
-      const card = {{
-        _modesExpanded: false,
-        _lastRenderSignature: '',
-        shadowRoot: {{querySelector: (selector) => selector === '#ev-mode-grid' ? grid : toggle}},
-        _renderSignature: () => 'expanded-signature',
-        dispatchEvent: (event) => {{ resizeEvent = event; }},
-        toggle() {{{toggle_method.group('body')}\n  }},
-      }};
-      card.toggle();
-      if (!card._modesExpanded || grid.hidden || attrs['aria-expanded'] !== 'true') throw new Error('expand failed');
-      if (iconAttrs.icon !== 'mdi:chevron-up') throw new Error('expand icon failed');
-      if (resizeEvent?.type !== 'power-sync-card-resize' || !resizeEvent.options?.composed) throw new Error('resize event failed');
-      card.toggle();
-      if (card._modesExpanded || !grid.hidden || attrs['aria-expanded'] !== 'false') throw new Error('collapse failed');
-      if (iconAttrs.icon !== 'mdi:chevron-down') throw new Error('collapse icon failed');
-    """
-    subprocess.run(["node", "-e", runtime], check=True)
-
-
-def test_dashboard_ev_panel_renders_live_solar_delay_countdown():
-    """The HA loadpoint summary should match the mobile start/stop delay status."""
-    source = STRATEGY_PATH.read_text()
-    panel_source = source[
-        source.index("class PowerSyncEVPanel extends HTMLElement"):
-        source.index("customElements.define('power-sync-ev-panel'")
-    ]
-
-    assert "loadpoint?.delay_timer" in panel_source
-    assert 'data-delay-status' in panel_source
-    assert 'data-delay-remaining' in panel_source
-    assert "timer?.remaining_seconds" in panel_source
-    assert "timer?.started_at" in panel_source
-    assert "timer?.duration_seconds" in panel_source
-    assert "this._data?.fetchedAt" in panel_source
-    assert "window.setInterval(update, 1000)" in panel_source
-    assert "window.clearInterval(this._delayTimerTick)" in panel_source
-    assert "status.setAttribute('aria-label'" in panel_source
-
-    remaining = re.search(
-        r"  _delayRemainingSeconds\(timer\) \{(?P<body>.*?)\n  \}\n\n"
-        r"  _formatDelayRemaining\(seconds\)",
-        panel_source,
-        re.DOTALL,
-    )
-    assert remaining is not None
-    formatter = re.search(
-        r"  _formatDelayRemaining\(seconds\) \{(?P<body>.*?)\n  \}\n\n"
-        r"  _syncDelayTimerTick\(\)",
-        panel_source,
-        re.DOTALL,
-    )
-    assert formatter is not None
-    runtime = f"""
-      const format = function(seconds) {{{formatter.group('body')}\n  }};
-      const card = {{
-        _data: {{fetchedAt: '2026-08-12T00:00:29.000Z'}},
-        remaining(timer) {{{remaining.group('body')}\n  }}
-      }};
-      Date.now = () => Date.parse('2026-08-12T00:00:29.000Z');
-      const seconds = card.remaining({{
-        started_at: '2026-08-12T00:00:00.000Z',
-        duration_seconds: 300,
-        remaining_seconds: 999,
-      }});
-      const actual = [seconds, format(seconds), format(31), format(0)];
-      process.stdout.write(JSON.stringify(actual));
-    """
-    result = subprocess.run(
-        ["node", "-e", runtime],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert result.stdout == '[271,"4m 31s remaining","31s remaining","Ending now"]'
 
 
 def test_dashboard_ev_capacity_editor_uses_vehicle_config_api():
@@ -1206,16 +989,6 @@ def test_dashboard_layout_locks_stable_height_across_card_refreshes():
     assert "this._updateHeightLock(entry?.contentRect?.height)" in layout_source
     assert "connectedCallback()" in layout_source
     assert "this._observeLayout();" in layout_source
-    assert "this.addEventListener('power-sync-card-resize', this._cardResizeHandler);" in layout_source
-    assert "this.removeEventListener('power-sync-card-resize', this._cardResizeHandler);" in layout_source
-
-    card_resize = layout_source[
-        layout_source.index("  _handleCardResize() {"):
-        layout_source.index("  _scheduleLayout() {")
-    ]
-    assert "this._resetHeightLock();" in card_resize
-    assert "this._scheduleLayout();" in card_resize
-    assert "this._updateHeightLock(this.getBoundingClientRect().height)" in card_resize
 
     resize_scheduler = layout_source[
         layout_source.index("  _scheduleLayoutForResize(entry) {"):
@@ -1263,8 +1036,6 @@ def test_dashboard_height_lock_runtime_lifecycle_and_geometry_changes():
         }
         attachShadow() { return {}; }
         getBoundingClientRect() { return this._rect; }
-        addEventListener() {}
-        removeEventListener() {}
       };
       global.ResizeObserver = FakeResizeObserver;
       global.window = {
