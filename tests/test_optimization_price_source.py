@@ -462,6 +462,33 @@ def test_planned_ev_load_forecast_data_exposes_debug_fields(opt_module):
     assert data["planned_ev_load_kwh"] == pytest.approx(0.5)
 
 
+def test_forecast_data_publishes_provenance_atomically_without_changing_legacy(
+    opt_module,
+):
+    coordinator = _planned_ev_load_coordinator(opt_module, [])
+    coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
+    coordinator._solar_nowcast_derate = 1.0
+    coordinator._last_solar_forecast = [4.0, 2.0, 2.0]
+    coordinator._last_raw_solar_forecast = [4.0, 4.0, 2.0]
+    coordinator._last_planned_solar_forecast = [4.0, 1.5, 2.0]
+    coordinator._last_solar_curtailment_forecast = [0.0, 1.5, 0.0]
+    coordinator._last_planned_ev_load_forecast_w = None
+
+    data = coordinator.get_forecast_data()
+
+    assert data["solar_forecast"] == [4.0, 2.0, 2.0]
+    assert data["raw_solar_forecast"] == [4.0, 4.0, 2.0]
+    assert data["planned_solar_forecast"] == [4.0, 1.5, 2.0]
+    assert data["solar_curtailment_forecast"] == [0.0, 1.5, 0.0]
+
+    coordinator._last_solar_curtailment_forecast = None
+    unavailable = coordinator.get_forecast_data()
+    assert unavailable["solar_forecast"] == [4.0, 2.0, 2.0]
+    assert "raw_solar_forecast" not in unavailable
+    assert "planned_solar_forecast" not in unavailable
+    assert "solar_curtailment_forecast" not in unavailable
+
+
 def test_planned_ev_load_settings_write_and_clear_without_ev_integration(opt_module):
     entry = _Entry(
         data={"optimization_ev_integration": False},
