@@ -4324,6 +4324,40 @@ def test_auto_schedule_deadline_uses_vehicle_max_amps(monkeypatch, fake_actions)
     assert params["allow_stale_entity_max_override"] is False
 
 
+def test_auto_schedule_rate_update_is_blocked_when_vehicle_moved_away(
+    monkeypatch,
+    fake_actions,
+):
+    fake_actions._set_vehicle_amps = AsyncMock(return_value=True)
+
+    async def away_location(*args, **kwargs):
+        return "remote_charger"
+
+    monkeypatch.setattr(ev_planner, "get_ev_location", away_location)
+    executor = ev_planner.AutoScheduleExecutor(
+        _FakeHass(),
+        _FakeConfigEntry(),
+        planner=SimpleNamespace(),
+    )
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id=VIN,
+        display_name="Model 3",
+        max_charge_amps=24,
+        min_charge_amps=5,
+    )
+
+    result = asyncio.run(
+        executor._set_vehicle_charge_rate(
+            VIN,
+            4600,
+            settings,
+        )
+    )
+
+    assert result is False
+    fake_actions._set_vehicle_amps.assert_not_awaited()
+
+
 def test_price_level_stop_uses_vehicle_charger_config(fake_actions):
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
 
@@ -5517,6 +5551,48 @@ def test_solar_surplus_skips_unplugged_priority_vehicle(monkeypatch):
     )
 
     assert [config["vehicle_id"] for config in selected] == [plugged_vin]
+
+
+def test_solar_surplus_skips_away_vehicle_even_when_remote_charge_looks_plugged(
+    monkeypatch,
+):
+    away_vin = "LRWYHCEKXTC687964"
+    home_vin = "XP7YGCEL7NB001704"
+    plugged_checks = []
+
+    async def vehicle_location(_hass, _entry, vehicle_vin=None):
+        return "work" if vehicle_vin == away_vin else "home"
+
+    async def plugged_in(_hass, _entry, *, vehicle_vin):
+        plugged_checks.append(vehicle_vin)
+        return True
+
+    monkeypatch.setattr(ev_planner, "get_ev_location", vehicle_location)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+
+    selected = asyncio.run(
+        ev_planner.get_solar_surplus_start_configs(
+            _FakeHass(),
+            _FakeConfigEntry(),
+            [
+                {
+                    "vehicle_id": away_vin,
+                    "display_name": "Remote Tesla",
+                    "priority": 1,
+                },
+                {
+                    "vehicle_id": home_vin,
+                    "display_name": "Home Tesla",
+                    "priority": 2,
+                },
+            ],
+            set(),
+            allow_parallel=False,
+        )
+    )
+
+    assert [config["vehicle_id"] for config in selected] == [home_vin]
+    assert plugged_checks == [home_vin]
 
 
 def test_solar_surplus_configs_honor_enabled_toggle_and_coalesce_paired_ble():

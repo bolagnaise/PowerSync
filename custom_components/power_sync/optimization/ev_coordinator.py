@@ -25,6 +25,9 @@ from homeassistant.util import dt as dt_util
 
 from ..const import (
     DOMAIN,
+    CONF_TESLA_BLE_ENTITY_PREFIX,
+    DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+    TESLA_BLE_SWITCH_CHARGER,
     CONF_ZAPTEC_STANDALONE_ENABLED,
     CONF_ZAPTEC_USERNAME,
     CONF_ZAPTEC_INSTALLATION_ID_CLOUD,
@@ -321,6 +324,9 @@ class EVCoordinator:
             if not status or not status.connected:
                 continue
 
+            if await self._release_if_tesla_away(config):
+                continue
+
             if status.soc and status.soc >= config.target_soc:
                 await self._stop_charging(config, reason="target reached")
                 continue
@@ -342,9 +348,15 @@ class EVCoordinator:
                     current_amps = self._current_charge_amps.get(config.entity_id, 0)
                     new_amps = int(available_power / 230)
                     if abs(new_amps - current_amps) >= 2:  # Only adjust if change >= 2A
-                        await self._set_charging_amps(config, new_amps)
-                        self._current_charge_amps[config.entity_id] = new_amps
-                        _LOGGER.debug(f"Adjusted {config.name} charging: {current_amps}A -> {new_amps}A")
+                        adjusted = await self._set_charging_amps(config, new_amps)
+                        if adjusted:
+                            self._current_charge_amps[config.entity_id] = new_amps
+                            _LOGGER.debug(
+                                "Adjusted %s charging: %sA -> %sA",
+                                config.name,
+                                current_amps,
+                                new_amps,
+                            )
             elif status.charging:
                 stopped = await self._stop_charging(config, reason="waiting for cheap rate")
                 if stopped:
@@ -595,6 +607,88 @@ class EVCoordinator:
         """Use the charger entity as this legacy coordinator's loadpoint id."""
         return config.entity_id or DEFAULT_VEHICLE_ID
 
+    def _tesla_vehicle_id_for_config(self, config: EVConfig) -> str | None:
+        """Resolve a vehicle-following Tesla entity to its VIN or BLE id."""
+        if self._config_entry is not None:
+            opts = {
+                **getattr(self._config_entry, "data", {}),
+                **getattr(self._config_entry, "options", {}),
+            }
+            prefixes = str(
+                opts.get(
+                    CONF_TESLA_BLE_ENTITY_PREFIX,
+                    DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+                )
+            ).split(",")
+            for prefix in (candidate.strip() for candidate in prefixes):
+                if (
+                    prefix
+                    and config.entity_id
+                    == TESLA_BLE_SWITCH_CHARGER.format(prefix=prefix)
+                ):
+                    return f"ble_{prefix}"
+
+        try:
+            from homeassistant.helpers import entity_registry as er, device_registry as dr
+            from ..automations.ev_charging_planner import _iter_tesla_vehicle_devices
+
+            entity_registry = er.async_get(self.hass)
+            entity = getattr(entity_registry, "entities", {}).get(config.entity_id)
+            if entity is None or not getattr(entity, "device_id", None):
+                return None
+            device_registry = dr.async_get(self.hass)
+            for device, vehicle_vin in _iter_tesla_vehicle_devices(device_registry):
+                if device.id == entity.device_id:
+                    return vehicle_vin
+        except Exception as err:
+            _LOGGER.debug(
+                "EV optimizer coordinator: could not resolve Tesla identity for %s: %s",
+                config.entity_id,
+                err,
+            )
+        return None
+
+    async def _tesla_away_location(self, config: EVConfig) -> str | None:
+        """Return an explicit away location for a vehicle-following charger."""
+        vehicle_id = self._tesla_vehicle_id_for_config(config)
+        if not vehicle_id:
+            return None
+        try:
+            from ..automations.ev_charging_planner import get_ev_location
+
+            location = await get_ev_location(
+                self.hass,
+                self._config_entry,
+                vehicle_vin=vehicle_id,
+            )
+        except Exception as err:
+            _LOGGER.debug(
+                "EV optimizer coordinator: could not check location for %s: %s",
+                config.name,
+                err,
+            )
+            return None
+        return location if location not in ("home", "unknown") else None
+
+    async def _release_if_tesla_away(self, config: EVConfig) -> bool:
+        """Release an away Tesla loadpoint without issuing a charger command."""
+        location = await self._tesla_away_location(config)
+        if not location:
+            return False
+        if self._owns_loadpoint(config):
+            self._release_loadpoint(
+                config,
+                "release",
+                f"vehicle away ({location})",
+            )
+        self._current_charge_amps.pop(config.entity_id, None)
+        _LOGGER.info(
+            "EV optimizer coordinator leaving %s outside automation scope while away (%s)",
+            config.name,
+            location,
+        )
+        return True
+
     def _can_control_loadpoint(self, config: EVConfig, command: str) -> bool:
         """Return whether the optimizer EV coordinator may control this charger."""
         if self._config_entry is None:
@@ -776,6 +870,8 @@ class EVCoordinator:
         """
         if not self._can_control_loadpoint(config, "start_ev_coordinator"):
             return False
+        if await self._release_if_tesla_away(config):
+            return False
 
         entity_id = config.entity_id
 
@@ -832,6 +928,8 @@ class EVCoordinator:
                 entity_id,
             )
             return False
+        if await self._release_if_tesla_away(config):
+            return False
 
         # Clamp to charger limits and the 6A minimum, as the start path does.
         amps = max(6, min(int(amps), config.max_charging_power_w // 230))
@@ -859,6 +957,9 @@ class EVCoordinator:
                     reason="not owned by EV optimizer coordinator",
                 )
             return False
+
+        if await self._release_if_tesla_away(config):
+            return True
 
         _LOGGER.info(f"Stopping EV charging: {config.name}")
 

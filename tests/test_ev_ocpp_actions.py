@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
 
@@ -7113,3 +7115,341 @@ def test_sigenergy_evdc_solar_surplus_uses_dynamic_rate_when_entity_detected(mon
     assert state["target_amps"] == 12
     assert state["params"]["supports_rate_control"] is True
     assert state["params"]["solar_control_strategy"] == "dynamic_rate"
+
+
+def _install_away_location_module(monkeypatch, location: str = "work") -> None:
+    planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    async def away_location(*args, **kwargs):
+        return location
+
+    planner.get_ev_location = away_location
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_planner",
+        planner,
+    )
+
+
+@pytest.mark.parametrize(
+    "owner_mode,dynamic_mode",
+    [
+        ("solar_surplus", "solar_surplus"),
+        ("scheduled", "battery_target"),
+        ("smart_schedule", "battery_target"),
+        ("price_level_recovery", "battery_target"),
+    ],
+)
+def test_away_tesla_dynamic_stop_is_passive_for_every_smart_mode(
+    monkeypatch,
+    owner_mode,
+    dynamic_mode,
+):
+    from power_sync.automations import ev_ownership
+
+    vehicle_id = "LRW3F7FS1NC484342"
+    hass = _Hass([])
+    _install_away_location_module(monkeypatch)
+    physical_stops = []
+    cancelled = []
+
+    async def physical_stop(*args, **kwargs):
+        physical_stops.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", physical_stop)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_id: {
+            "active": True,
+            "current_amps": 16,
+            "target_amps": 16,
+            "cancel_timer": lambda: cancelled.append(True),
+            "params": {
+                "owner_mode": owner_mode,
+                "dynamic_mode": dynamic_mode,
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_id,
+                "notify_on_complete": False,
+            },
+        }
+    }
+    ev_ownership.claim_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+        owner_mode=owner_mode,
+    )
+
+    result = asyncio.run(
+        actions._action_stop_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_id": vehicle_id,
+                "stop_charging": True,
+                "stop_reason": "mode no longer active",
+            },
+        )
+    )
+
+    assert result is True
+    assert physical_stops == []
+    assert cancelled == [True]
+    assert actions._dynamic_ev_state == {}
+    assert ev_ownership.get_ev_ownerships(hass, _Entry()) == {}
+    last_command = ev_ownership.get_ev_last_commands(hass, _Entry())[vehicle_id]
+    assert last_command["command"] == "release"
+
+
+def test_away_untracked_smart_stop_does_not_touch_external_tesla_session(
+    monkeypatch,
+):
+    from power_sync.automations import ev_ownership
+
+    vehicle_id = "LRW3F7FS1NC484342"
+    hass = _Hass([])
+    _install_away_location_module(monkeypatch, "remote_charger")
+    physical_stops = []
+
+    async def physical_stop(*args, **kwargs):
+        physical_stops.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", physical_stop)
+    actions._dynamic_ev_state.clear()
+    ev_ownership.claim_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+        owner_mode="scheduled",
+    )
+
+    result = asyncio.run(
+        actions._action_stop_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_id": vehicle_id,
+                "vehicle_vin": vehicle_id,
+                "charger_type": "tesla",
+                "owner_mode": "scheduled",
+                "stop_charging": True,
+                "stop_untracked": True,
+                "stop_reason": "outside scheduled window",
+            },
+        )
+    )
+
+    assert result is True
+    assert physical_stops == []
+    assert ev_ownership.get_ev_ownerships(hass, _Entry()) == {}
+    last_command = ev_ownership.get_ev_last_commands(hass, _Entry())[vehicle_id]
+    assert last_command["command"] == "release"
+
+
+def test_away_solar_surplus_timer_releases_without_rate_or_stop_command(monkeypatch):
+    vehicle_id = "LRW3F7FS1NC484342"
+    hass = _Hass([])
+    _install_away_location_module(monkeypatch, "remote_charger")
+    charger_commands = []
+
+    async def charger_command(*args, **kwargs):
+        charger_commands.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps", charger_command)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", charger_command)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_id: {
+            "active": True,
+            "current_amps": 12,
+            "target_amps": 12,
+            "params": {
+                "owner_mode": "solar_surplus",
+                "dynamic_mode": "solar_surplus",
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_id,
+                "notify_on_complete": False,
+            },
+        }
+    }
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(
+            hass,
+            _Entry(),
+            "entry-1",
+            vehicle_id,
+        )
+    )
+
+    assert charger_commands == []
+    assert actions._dynamic_ev_state == {}
+
+
+def test_away_battery_target_timer_releases_before_current_write(monkeypatch):
+    vehicle_id = "LRW3F7FS1NC484342"
+    hass = _Hass([])
+    _install_away_location_module(monkeypatch)
+    current_writes = []
+
+    async def set_amps(*args, **kwargs):
+        current_writes.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps", set_amps)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_id: {
+            "active": True,
+            "current_amps": 24,
+            "target_amps": 24,
+            "params": {
+                "owner_mode": "smart_schedule",
+                "dynamic_mode": "battery_target",
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_id,
+                "notify_on_complete": False,
+            },
+        }
+    }
+
+    asyncio.run(
+        actions._dynamic_ev_update(
+            hass,
+            _Entry(),
+            "entry-1",
+            vehicle_id,
+        )
+    )
+
+    assert current_writes == []
+    assert actions._dynamic_ev_state == {}
+
+
+def test_smart_schedule_group_removes_away_vehicle_before_group_write(monkeypatch):
+    home_vin = "5YJTEST00000000A1"
+    away_vin = "5YJTEST00000000B2"
+    hass = _Hass([])
+    planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    async def vehicle_location(*args, vehicle_vin=None, **kwargs):
+        return "work" if vehicle_vin == away_vin else "home"
+
+    planner.get_ev_location = vehicle_location
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_planner",
+        planner,
+    )
+
+    async def unexpected_live_status(*args, **kwargs):
+        raise AssertionError("group telemetry must not run after an away session is found")
+
+    monkeypatch.setattr(actions, "_get_tesla_live_status", unexpected_live_status)
+    actions._dynamic_ev_state.clear()
+    sessions = []
+    for vehicle_id in (home_vin, away_vin):
+        state = {
+            "active": True,
+            "current_amps": 16,
+            "target_amps": 16,
+            "params": {
+                "owner_mode": "smart_schedule",
+                "dynamic_mode": "battery_target",
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_id,
+                "notify_on_complete": False,
+            },
+        }
+        sessions.append((vehicle_id, state))
+    actions._dynamic_ev_state["entry-1"] = dict(sessions)
+
+    asyncio.run(
+        actions._update_smart_schedule_battery_target_group(
+            hass,
+            _Entry(),
+            "entry-1",
+            sessions,
+        )
+    )
+
+    assert set(actions._dynamic_ev_state["entry-1"]) == {home_vin}
+
+
+def test_away_tesla_dynamic_start_is_blocked_before_physical_command(monkeypatch):
+    vehicle_id = "LRW3F7FS1NC484342"
+    hass = _Hass([])
+    _install_away_location_module(monkeypatch)
+    physical_starts = []
+
+    async def physical_start(*args, **kwargs):
+        physical_starts.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr(actions, "_action_start_ev_charging", physical_start)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", physical_start)
+    actions._dynamic_ev_state.clear()
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_vin": vehicle_id,
+                "owner_mode": "scheduled",
+                "dynamic_mode": "battery_target",
+                "charger_type": "tesla",
+            },
+            context=None,
+        )
+    )
+
+    assert result is False
+    assert physical_starts == []
+    assert actions._dynamic_ev_state == {}
+
+
+def test_automated_tesla_command_boundaries_block_explicit_away_location(monkeypatch):
+    vehicle_id = "LRW3F7FS1NC484342"
+    hass = _Hass([])
+    _install_away_location_module(monkeypatch, "remote_charger")
+    params = {
+        "vehicle_vin": vehicle_id,
+        "vehicle_id": vehicle_id,
+        "owner_mode": "smart_schedule",
+        "dynamic_mode": "battery_target",
+        "charger_type": "tesla",
+    }
+
+    start_result = asyncio.run(
+        actions._action_start_ev_charging(
+            hass,
+            _Entry(),
+            params,
+            context=None,
+        )
+    )
+    rate_result = asyncio.run(
+        actions._set_vehicle_amps(
+            hass,
+            _Entry(),
+            vehicle_id,
+            16,
+            params,
+        )
+    )
+    stop_result = asyncio.run(
+        actions._action_stop_ev_charging(
+            hass,
+            _Entry(),
+            params,
+        )
+    )
+
+    assert start_result is False
+    assert rate_result is False
+    assert stop_result is True
+    assert hass.services.calls == []

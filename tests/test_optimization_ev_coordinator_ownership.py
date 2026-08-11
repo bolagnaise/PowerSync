@@ -417,3 +417,68 @@ def test_optimizer_zaptec_idle_stop_releases_without_stop_command():
     last_command = ev_ownership.get_ev_last_commands(hass, _Entry())["switch.garage_ev"]
     assert last_command["command"] == "release"
     assert last_command["reason"] == "waiting"
+
+
+def test_optimizer_vehicle_following_tesla_away_releases_without_stop(monkeypatch):
+    from homeassistant.helpers import entity_registry as er, device_registry as dr
+
+    vehicle_vin = "LRW3F7FS1NC484342"
+    device = SimpleNamespace(
+        id="tesla-device",
+        identifiers={("tesla_fleet", vehicle_vin)},
+    )
+    hass = _Hass()
+    hass.entity_registry = SimpleNamespace(
+        entities={
+            "switch.keksla_charge": SimpleNamespace(
+                entity_id="switch.keksla_charge",
+                device_id=device.id,
+            )
+        }
+    )
+    hass.device_registry = SimpleNamespace(devices={device.id: device})
+    monkeypatch.setattr(er, "async_get", lambda _hass: hass.entity_registry)
+    monkeypatch.setattr(dr, "async_get", lambda _hass: hass.device_registry)
+
+    planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    def iter_tesla_devices(device_registry):
+        yield device_registry.devices[device.id], vehicle_vin
+
+    async def away_location(*args, **kwargs):
+        return "remote_charger"
+
+    planner._iter_tesla_vehicle_devices = iter_tesla_devices
+    planner.get_ev_location = away_location
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_planner",
+        planner,
+    )
+
+    config = ev_coordinator.EVConfig(
+        entity_id="switch.keksla_charge",
+        name="Keksla",
+    )
+    coordinator = ev_coordinator.EVCoordinator(
+        hass,
+        [config],
+        config_entry=_Entry(),
+    )
+    ev_ownership.claim_ev_ownership(
+        hass,
+        _Entry(),
+        config.entity_id,
+        owner_mode="ev_coordinator",
+    )
+
+    result = asyncio.run(
+        coordinator._stop_charging(config, reason="waiting for cheap rate")
+    )
+
+    assert result is True
+    assert hass.services.calls == []
+    assert ev_ownership.get_ev_ownerships(hass, _Entry()) == {}
+    last_command = ev_ownership.get_ev_last_commands(hass, _Entry())[config.entity_id]
+    assert last_command["command"] == "release"
+    assert "away" in last_command["reason"]

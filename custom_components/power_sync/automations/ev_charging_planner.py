@@ -4334,6 +4334,21 @@ class AutoScheduleExecutor:
             )
             return True
 
+        if charger_type == "tesla":
+            location = await get_ev_location(
+                self.hass,
+                self.config_entry,
+                vehicle_vin,
+            )
+            if location not in ("home", "unknown"):
+                _LOGGER.info(
+                    "Auto-schedule leaving %s outside automation scope while away (%s); "
+                    "skipping charge-rate update",
+                    vehicle_id,
+                    location,
+                )
+                return False
+
         try:
             success = await _set_vehicle_amps(
                 self.hass, self.config_entry, vehicle_vin or vehicle_id, target_amps, params
@@ -7751,6 +7766,19 @@ async def get_solar_surplus_start_configs(
         vehicle_id = config.get("vehicle_id")
         if vehicle_id and vehicle_id in active_vehicle_ids:
             continue
+        if vehicle_id and config.get("charger_type", "tesla") == "tesla":
+            location = await get_ev_location(
+                hass,
+                config_entry,
+                vehicle_vin=vehicle_id,
+            )
+            if location not in ("home", "unknown"):
+                _LOGGER.info(
+                    "Solar surplus leaving %s outside automation scope while away (%s)",
+                    config.get("display_name") or vehicle_id,
+                    location,
+                )
+                continue
         if vehicle_id and not await is_ev_plugged_in(
             hass,
             config_entry,
@@ -8091,6 +8119,7 @@ async def _stop_coordinated_charging(
         stop_untracked=stop_untracked,
         reason=reason,
     )
+    params["owner_mode"] = expected_owner_mode
     charger_type = params.get("charger_type", _configured_charger_type(opts))
     loadpoint_id = params.get("vehicle_id") or params.get("vehicle_vin")
     if charger_type == "zaptec":
