@@ -18423,10 +18423,14 @@ class AutoScheduleStatusView(HomeAssistantView):
                     "error": "Auto-schedule executor not initialized"
                 }, status=503)
 
-            # Get all states and settings
-            states = executor.get_all_states()
+            # Refresh app-managed vehicle names and charger properties before
+            # serializing either settings or state.
             settings = {}
             for vehicle_id, vehicle_settings in executor._settings.items():
+                executor._sync_charger_params_from_vehicle_configs(
+                    vehicle_id,
+                    vehicle_settings,
+                )
                 executor.resolve_vehicle_capacity(vehicle_id, vehicle_settings)
                 # Derive legacy fields from departure_times for backward compat
                 legacy_departure_time = None
@@ -18464,6 +18468,8 @@ class AutoScheduleStatusView(HomeAssistantView):
                     "departure_no_grid_import": {str(k): v for k, v in vehicle_settings.departure_limit_grid_import.items()},
                     "departure_home_battery_min": {str(k): v for k, v in vehicle_settings.departure_min_battery_to_start.items()},
                 }
+
+            states = executor.get_all_states()
 
             _LOGGER.debug(
                 "Auto-schedule status: %s",

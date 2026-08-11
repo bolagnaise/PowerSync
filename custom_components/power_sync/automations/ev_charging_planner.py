@@ -3706,6 +3706,7 @@ class AutoScheduleSettings:
     def apply_charger_config(self, config: Mapping[str, Any]) -> None:
         """Apply app-managed physical charger settings to these settings."""
         field_map = {
+            "display_name": "display_name",
             "max_amps": "max_charge_amps",
             "max_charge_amps": "max_charge_amps",
             "min_amps": "min_charge_amps",
@@ -3734,7 +3735,10 @@ class AutoScheduleSettings:
         }
         for source_key, attr_name in field_map.items():
             if source_key in config:
-                setattr(self, attr_name, config[source_key])
+                value = config[source_key]
+                if source_key == "display_name" and not str(value or "").strip():
+                    continue
+                setattr(self, attr_name, value)
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -4525,9 +4529,40 @@ class AutoScheduleExecutor:
             self._state[vehicle_id] = AutoScheduleState(vehicle_id=vehicle_id)
         return self._state[vehicle_id]
 
-    def get_all_states(self) -> Dict[str, dict]:
-        """Get all vehicle states."""
-        return {vid: state.to_dict() for vid, state in self._state.items()}
+    def get_all_states(self, *, enabled_only: bool = False) -> Dict[str, dict]:
+        """Get API-safe vehicle states, optionally limited to enabled schedules."""
+        states: Dict[str, dict] = {}
+        settings_by_vehicle = getattr(self, "_settings", {}) or {}
+
+        for vehicle_id, state in self._state.items():
+            settings = settings_by_vehicle.get(vehicle_id)
+            enabled = bool(settings and settings.enabled)
+            if enabled_only and not enabled:
+                continue
+
+            state_data = state.to_dict()
+            state_data["enabled"] = enabled
+            state_data["display_name"] = (
+                settings.display_name
+                if settings and str(settings.display_name or "").strip()
+                else vehicle_id
+            )
+
+            # A cached plan is executor bookkeeping, not an active schedule.
+            # Do not expose it as a current decision after the schedule is off.
+            if not enabled:
+                state_data.update({
+                    "is_charging": False,
+                    "current_window": None,
+                    "last_decision": "disabled",
+                    "last_decision_reason": "Smart Schedule is disabled",
+                    "started_at": None,
+                    "plan_summary": None,
+                })
+
+            states[vehicle_id] = state_data
+
+        return states
 
     async def _cache_vehicle_soc(self, vehicle_id: str, soc: int) -> None:
         """Cache the vehicle SoC for use when vehicle is asleep.

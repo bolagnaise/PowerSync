@@ -400,6 +400,7 @@ def test_internal_ev_forecast_prorates_trimmed_time_critical_window():
         ],
     )
     settings = SimpleNamespace(
+        enabled=True,
         max_charge_amps=32,
         voltage=230,
         phases=1,
@@ -430,3 +431,85 @@ def test_internal_ev_forecast_prorates_trimmed_time_critical_window():
     assert sum(ev_load) / 1000 * (5 / 60) == pytest.approx(
         plan.energy_needed_kwh
     )
+
+
+def test_internal_ev_forecast_ignores_disabled_vehicle_beside_enabled_vehicle():
+    """Only the enabled vehicle may contribute to a multi-EV optimiser overlay."""
+    brisbane_tz = timezone(timedelta(hours=10))
+    now = datetime(2026, 8, 11, 12, 0, tzinfo=brisbane_tz)
+    old_now = _ha_dt.now
+    old_executor = ev_planner.get_auto_schedule_executor()
+    _ha_dt.now = lambda: now
+
+    disabled_plan = ev_planner.ChargingPlan(
+        vehicle_id="tessy",
+        current_soc=50,
+        target_soc=80,
+        target_time="2026-08-11T14:00:00",
+        energy_needed_kwh=4.0,
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time="2026-08-11T12:00:00+10:00",
+                end_time="2026-08-11T14:00:00+10:00",
+                source="grid_peak",
+                estimated_power_kw=2.0,
+                estimated_energy_kwh=4.0,
+                price_cents_kwh=31.0,
+                reason="cached_disabled_plan",
+            ),
+        ],
+    )
+    enabled_plan = ev_planner.ChargingPlan(
+        vehicle_id="w3rt1e",
+        current_soc=64,
+        target_soc=80,
+        target_time="2026-08-11T14:00:00",
+        energy_needed_kwh=4.0,
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time="2026-08-11T12:00:00+10:00",
+                end_time="2026-08-11T14:00:00+10:00",
+                source="grid_peak",
+                estimated_power_kw=2.0,
+                estimated_energy_kwh=4.0,
+                price_cents_kwh=31.0,
+                reason="enabled_plan",
+            ),
+        ],
+    )
+    executor = SimpleNamespace(
+        _state={
+            "tessy": SimpleNamespace(current_plan=disabled_plan),
+            "w3rt1e": SimpleNamespace(current_plan=enabled_plan),
+        },
+        _settings={
+            "tessy": SimpleNamespace(
+                enabled=False,
+                max_charge_amps=10,
+                voltage=230,
+                phases=1,
+            ),
+            "w3rt1e": SimpleNamespace(
+                enabled=True,
+                max_charge_amps=10,
+                voltage=230,
+                phases=1,
+            ),
+        },
+        _sync_charger_params_from_vehicle_configs=lambda *_args: None,
+    )
+    ev_planner.set_auto_schedule_executor(executor)
+
+    try:
+        coordinator = SimpleNamespace(
+            _config=SimpleNamespace(interval_minutes=5),
+        )
+        ev_load = _extract_coordinator_method("_get_ev_planned_load")(
+            coordinator,
+            24,
+        )
+    finally:
+        _ha_dt.now = old_now
+        ev_planner.set_auto_schedule_executor(old_executor)
+
+    assert ev_load == pytest.approx([2000.0] * 24)

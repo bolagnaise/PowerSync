@@ -249,6 +249,80 @@ def test_vehicle_charger_config_syncs_app_charge_amp_aliases():
     assert settings.phases == 1
 
 
+def test_vehicle_charger_config_syncs_nonempty_display_name():
+    settings = ev_planner.AutoScheduleSettings(display_name="EV")
+
+    settings.apply_charger_config({"display_name": "W3RT1E"})
+
+    assert settings.display_name == "W3RT1E"
+
+    settings.apply_charger_config({"display_name": ""})
+
+    assert settings.display_name == "W3RT1E"
+
+
+def test_auto_schedule_states_hide_disabled_cached_plan():
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor._settings = {
+        "tessy": ev_planner.AutoScheduleSettings(
+            enabled=False,
+            vehicle_id="tessy",
+            display_name="TESSY",
+        ),
+    }
+    executor._state = {
+        "tessy": ev_planner.AutoScheduleState(
+            vehicle_id="tessy",
+            is_charging=True,
+            last_decision="waiting",
+            last_decision_reason="Waiting for planned deadline window",
+            current_plan=types.SimpleNamespace(
+                windows=[object()],
+                estimated_solar_kwh=0,
+                estimated_grid_kwh=13,
+                estimated_cost_cents=403,
+                battery_capacity_kwh=60,
+                effective_battery_capacity_kwh=60,
+                battery_capacity_source="manual",
+            ),
+        ),
+    }
+
+    states = executor.get_all_states()
+
+    assert states["tessy"]["enabled"] is False
+    assert states["tessy"]["display_name"] == "TESSY"
+    assert states["tessy"]["is_charging"] is False
+    assert states["tessy"]["last_decision"] == "disabled"
+    assert states["tessy"]["plan_summary"] is None
+    assert executor.get_all_states(enabled_only=True) == {}
+
+
+def test_auto_schedule_states_keep_enabled_vehicle_identity_and_plan():
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor._settings = {
+        "w3rt1e": ev_planner.AutoScheduleSettings(
+            enabled=True,
+            vehicle_id="w3rt1e",
+            display_name="W3RT1E",
+        ),
+    }
+    executor._state = {
+        "w3rt1e": ev_planner.AutoScheduleState(
+            vehicle_id="w3rt1e",
+            is_charging=True,
+            last_decision="charging",
+        ),
+    }
+
+    states = executor.get_all_states(enabled_only=True)
+
+    assert states["w3rt1e"]["enabled"] is True
+    assert states["w3rt1e"]["display_name"] == "W3RT1E"
+    assert states["w3rt1e"]["is_charging"] is True
+    assert states["w3rt1e"]["last_decision"] == "charging"
+
+
 def test_auto_schedule_sync_reads_app_vehicle_config_store():
     automation_store = types.SimpleNamespace(
         _data={

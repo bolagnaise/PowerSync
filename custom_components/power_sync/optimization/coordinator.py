@@ -13231,18 +13231,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             configured_power_w = None
             try:
                 settings = getattr(executor, "_settings", {}).get(vehicle_id)
-                if settings is not None:
-                    executor._sync_charger_params_from_vehicle_configs(
-                        vehicle_id,
-                        settings,
-                    )
-                    configured_power_w = (
-                        float(settings.max_charge_amps)
-                        * float(settings.voltage)
-                        * float(settings.phases)
-                    )
+                if settings is None or not bool(getattr(settings, "enabled", False)):
+                    continue
+                executor._sync_charger_params_from_vehicle_configs(
+                    vehicle_id,
+                    settings,
+                )
+                configured_power_w = (
+                    float(settings.max_charge_amps)
+                    * float(settings.voltage)
+                    * float(settings.phases)
+                )
             except Exception:
-                configured_power_w = None
+                # Fail closed: a plan with missing or invalid settings must not
+                # become household demand in the battery optimiser.
+                continue
 
             plan = state.current_plan
             if not plan or not plan.windows:
@@ -15869,7 +15872,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             from ..automations.ev_charging_planner import get_auto_schedule_executor
             executor = get_auto_schedule_executor()
             if executor:
-                data["ev"]["auto_schedule"] = executor.get_all_states()
+                data["ev"]["auto_schedule"] = executor.get_all_states(
+                    enabled_only=True,
+                )
 
         # Add schedule data if available
         if self._current_schedule:
