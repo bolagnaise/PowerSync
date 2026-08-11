@@ -386,7 +386,7 @@ def _tariff_display_name(tariff: Any) -> str:
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 import homeassistant.helpers.config_validation as cv
 from homeassistant.const import Platform, CONF_ACCESS_TOKEN, CONF_TOKEN
-from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse, callback
 from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -38280,6 +38280,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             aemo_startup_sync_pending = True
             _LOGGER.info("Deferring AEMO-dispatch sync until HA finishes starting")
 
+            @callback
             def _sync_after_started(_event=None) -> None:
                 nonlocal aemo_dispatch_started_unsub, aemo_startup_sync_pending
                 aemo_dispatch_started_unsub = None

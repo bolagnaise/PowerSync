@@ -459,6 +459,8 @@ def test_aemo_dispatch_sync_debounces_during_startup():
 
     runner = _find_setup_child(tree, "_run_aemo_dispatch_sync")
     runner_source = ast.get_source_segment(source, runner)
+    sync_after_started = _find_nested_setup_child(setup, "_sync_after_started")
+    sync_after_started_source = ast.get_source_segment(source, sync_after_started)
 
     assert "AEMO_SETTLED_SYNC_DELAY_SECONDS = 5.0" in source
     # The fixed 90s startup window is gone — the deferral now tracks HA's real
@@ -468,6 +470,16 @@ def test_aemo_dispatch_sync_debounces_during_startup():
     assert allowed_source is not None
     assert handler_source is not None
     assert runner_source is not None
+    assert sync_after_started_source is not None
+    assert isinstance(sync_after_started, ast.FunctionDef)
+    assert any(
+        isinstance(decorator, ast.Name) and decorator.id == "callback"
+        for decorator in sync_after_started.decorator_list
+    )
+    assert (
+        "_schedule_aemo_dispatch_task(_run_aemo_dispatch_sync)"
+        in sync_after_started_source
+    )
     assert "aemo_startup_sync_pending = False" in setup_source
     assert "CONF_AUTO_SYNC_ENABLED" in allowed_source
     assert "nonlocal aemo_startup_sync_pending" in handler_source
