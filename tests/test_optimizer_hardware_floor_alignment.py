@@ -728,6 +728,132 @@ def test_mode_projection_matcher_compares_self_use_energy_per_run(
     )
 
 
+def test_two_powerwall_flat_price_hold_survives_mode_projection(
+    battery_optimizer_module,
+    monkeypatch,
+):
+    """A true LP hold must remain idle across recurring projected solves."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, "highs")
+    n = 144
+    optimizer = module.BatteryOptimizer(
+        # Aggregate topology matching two Powerwalls from the reported run.
+        capacity_wh=27_000,
+        max_charge_w=10_000,
+        max_discharge_w=10_000,
+        efficiency=0.92,
+        backup_reserve=0.20,
+        hardware_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=12,
+        terminal_weight=0.30,
+    )
+    kwargs = {
+        "import_prices": [0.0885] * 72 + [0.40] * 72,
+        "export_prices": [0.0885] * 72 + [0.05] * 72,
+        "solar_forecast": [0.0] * n,
+        "load_forecast": [0.701] * n,
+        "current_soc": 0.50,
+        "allow_battery_export": [False] * n,
+        "allow_grid_charge": True,
+        "disable_idle": False,
+    }
+
+    projected_runs = []
+    for _ in range(3):
+        result = optimizer.optimize(**kwargs)
+        projected_runs.append(result)
+        actions = result.schedule.actions
+
+        assert result.lp_stats["mode_converged"] is True
+        assert result.lp_stats["mode_iterations"] <= module.MODE_PROJECTION_MAX_ITERATIONS
+        assert all(action.action == "idle" for action in actions[:54])
+        assert all(
+            action.battery_discharge_w == pytest.approx(0.0)
+            for action in actions[:54]
+        )
+        assert result.grid_import_w[:54] == pytest.approx(
+            [701.0] * 54,
+            abs=0.1,
+        )
+        assert any(action.action == "charge" for action in actions[54:72])
+
+    assert [
+        (action.action, action.battery_charge_w, action.battery_discharge_w)
+        for action in projected_runs[0].schedule.actions[:72]
+    ] == [
+        (action.action, action.battery_charge_w, action.battery_discharge_w)
+        for action in projected_runs[-1].schedule.actions[:72]
+    ]
+
+
+def test_modest_nonparity_premium_keeps_self_consumption_before_recharge(
+    battery_optimizer_module,
+):
+    """A small import/export spread keeps the existing natural-use mapping."""
+    module = battery_optimizer_module
+    optimizer = _optimizer(
+        module,
+        backup_reserve=0.20,
+        hardware_reserve=0.05,
+        horizon_hours=2,
+    )
+
+    schedule = optimizer._build_schedule(
+        n=2,
+        grid_import=[0.7, 1.7],
+        grid_export=[0.0, 0.0],
+        battery_charge=[0.0, 1.0],
+        battery_discharge=[0.0, 0.0],
+        solar=[0.0, 0.0],
+        load=[0.7, 0.7],
+        soc_0=0.50,
+        import_prices=[0.10, 0.10],
+        export_prices=[0.11, 0.11],
+        allow_grid_charge=True,
+        grid_charge_allowed=[True, True],
+        disable_idle=False,
+    )
+
+    assert schedule.actions[0].action == "self_consumption"
+    assert schedule.actions[0].battery_discharge_w == pytest.approx(700.0)
+    assert schedule.actions[1].action == "charge"
+
+
+def test_parity_hold_ignores_future_free_solar_only_recharge(
+    battery_optimizer_module,
+):
+    """No grid charge means a future free solar charge cannot justify Idle."""
+    module = battery_optimizer_module
+    optimizer = _optimizer(
+        module,
+        backup_reserve=0.20,
+        hardware_reserve=0.05,
+        horizon_hours=2,
+    )
+
+    schedule = optimizer._build_schedule(
+        n=2,
+        grid_import=[0.7, 0.0],
+        grid_export=[0.0, 0.0],
+        battery_charge=[0.0, 1.3],
+        battery_discharge=[0.0, 0.0],
+        solar=[0.0, 2.0],
+        load=[0.7, 0.7],
+        soc_0=0.50,
+        import_prices=[0.10, 0.0],
+        export_prices=[0.10, 0.0],
+        allow_grid_charge=False,
+        grid_charge_allowed=[False, False],
+        disable_idle=False,
+    )
+
+    assert schedule.actions[0].action == "self_consumption"
+    assert schedule.actions[0].battery_discharge_w == pytest.approx(700.0)
+    assert schedule.actions[1].action == "self_consumption"
+    assert schedule.actions[1].battery_charge_w == pytest.approx(1300.0)
+
+
 def test_flat_price_charge_timing_is_stable_across_reserve_margin(
     battery_optimizer_module,
     monkeypatch,

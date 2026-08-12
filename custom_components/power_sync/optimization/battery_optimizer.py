@@ -5933,7 +5933,11 @@ class BatteryOptimizer:
         )
         grid_charge_cap_active = allow_grid_charge and grid_charge_soc_cap < 0.999
 
-        def _future_grid_charge_planned(start_idx: int) -> bool:
+        def _future_grid_charge_planned(
+            start_idx: int,
+            *,
+            require_grid_charge_surplus: bool = False,
+        ) -> bool:
             for future_idx in range(start_idx + 1, n):
                 if future_idx >= len(battery_charge) or future_idx >= len(grid_import):
                     break
@@ -5941,16 +5945,17 @@ class BatteryOptimizer:
                 future_import_kw = grid_import[future_idx]
                 if future_charge_kw <= threshold_kw:
                     continue
-                if (
-                    future_idx < len(free_import_command_slots)
-                    and free_import_command_slots[future_idx]
-                ) or (
-                    not free_import_command_slots
-                    and import_prices is not None
-                    and future_idx < len(import_prices)
-                    and import_prices[future_idx] <= 0.001
-                ):
-                    return True
+                if not require_grid_charge_surplus:
+                    if (
+                        future_idx < len(free_import_command_slots)
+                        and free_import_command_slots[future_idx]
+                    ) or (
+                        not free_import_command_slots
+                        and import_prices is not None
+                        and future_idx < len(import_prices)
+                        and import_prices[future_idx] <= 0.001
+                    ):
+                        return True
                 net_load_kw = max(0.0, load[future_idx] - solar[future_idx])
                 if future_import_kw > net_load_kw + threshold_kw:
                     return True
@@ -6214,10 +6219,6 @@ class BatteryOptimizer:
                 and import_kw > threshold_kw
             ):
                 # Battery idle while home draws from grid.
-                # Only use IDLE when there's a clear profit from holding
-                # battery for a future export window. Otherwise, prefer
-                # self_consumption — the battery naturally serves load,
-                # avoiding expensive grid import.
                 meaningful_hold = soc > self.backup_reserve + 0.05
                 preserve_charge_by_time_hold = (
                     not disable_idle
@@ -6235,6 +6236,23 @@ class BatteryOptimizer:
                     action = "idle"
                 elif disable_idle:
                     action = "self_consumption"
+                elif (
+                    meaningful_hold
+                    and import_prices is not None
+                    and export_prices is not None
+                    and abs(export_prices[t] - import_prices[t]) <= 0.001
+                    and _future_grid_charge_planned(
+                        t,
+                        require_grid_charge_surplus=True,
+                    )
+                ):
+                    # A zero-charge/zero-discharge LP solution with grid import
+                    # is an intentional SOC hold when import and export are at
+                    # parity ahead of a planned recharge. Keep it as IDLE
+                    # whenever that mode is allowed; otherwise reconciliation
+                    # invents natural self-consumption, spending energy through
+                    # round-trip losses and changing the LP objective.
+                    action = "idle"
                 elif meaningful_hold and export_prices is not None and import_prices is not None:
                     # Check if upcoming export prices justify holding battery
                     # over letting it serve load (avoiding import cost).
