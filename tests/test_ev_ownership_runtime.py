@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import sys
 import types
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -138,6 +139,102 @@ def test_restore_ev_runtime_state_resaves_cleared_snapshot():
     runtime = store._data["ev_runtime_state"]
     assert runtime["active_ownership"] == {}
     assert runtime["last_commands"]["VIN123"]["command"] == "ha_restart_recovery"
+
+
+def test_consume_recovered_ev_ownership_is_fresh_exact_and_one_shot():
+    vehicle_id = "5YJTEST0000000001"
+    saved_at = datetime.now(timezone.utc).isoformat()
+    store = _Store(
+        {
+            "ev_runtime_state": {
+                "active_ownership": {
+                    vehicle_id: {
+                        "owner": "powersync",
+                        "owner_mode": "solar_surplus",
+                        "charger_type": "tesla",
+                        "session_id": "solar-session",
+                        "last_commanded_amps": 1,
+                    }
+                },
+                "last_commands": {},
+                "saved_at": saved_at,
+            }
+        }
+    )
+    hass = _Hass()
+    hass.data["power_sync"]["entry-1"]["automation_store"] = store
+
+    ev_ownership.restore_ev_runtime_state(hass, _Entry(), store)
+    for task in hass.created_tasks:
+        asyncio.run(task)
+
+    assert (
+        ev_ownership.consume_recovered_ev_ownership(
+            hass,
+            _Entry(),
+            "5YJOTHER000000001",
+            expected_owner_family="solar_surplus",
+        )
+        is None
+    )
+    recovered = ev_ownership.consume_recovered_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+        expected_owner_family="solar_surplus",
+    )
+    assert recovered is not None
+    assert recovered["session_id"] == "solar-session"
+    assert recovered["last_commanded_amps"] == 1
+    assert recovered["recovered_saved_at"] == saved_at
+    assert (
+        ev_ownership.consume_recovered_ev_ownership(
+            hass,
+            _Entry(),
+            vehicle_id,
+            expected_owner_family="solar_surplus",
+        )
+        is None
+    )
+
+
+def test_consume_recovered_ev_ownership_rejects_stale_snapshot():
+    vehicle_id = "5YJTEST0000000001"
+    store = _Store(
+        {
+            "ev_runtime_state": {
+                "active_ownership": {
+                    vehicle_id: {
+                        "owner": "powersync",
+                        "owner_mode": "solar_surplus",
+                        "charger_type": "tesla",
+                        "session_id": "stale-session",
+                    }
+                },
+                "last_commands": {},
+                "saved_at": (
+                    datetime.now(timezone.utc) - timedelta(minutes=16)
+                ).isoformat(),
+            }
+        }
+    )
+    hass = _Hass()
+    hass.data["power_sync"]["entry-1"]["automation_store"] = store
+
+    ev_ownership.restore_ev_runtime_state(hass, _Entry(), store)
+    for task in hass.created_tasks:
+        asyncio.run(task)
+
+    assert (
+        ev_ownership.consume_recovered_ev_ownership(
+            hass,
+            _Entry(),
+            vehicle_id,
+            expected_owner_family="solar_surplus",
+        )
+        is None
+    )
+    assert hass.data["power_sync"]["entry-1"]["ev_recovered_ownership"] == {}
 
 
 def test_restore_ev_runtime_state_returns_unexpired_manual_quick_session():

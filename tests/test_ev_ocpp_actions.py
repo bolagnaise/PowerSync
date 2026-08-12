@@ -3609,6 +3609,202 @@ def test_solar_surplus_dynamic_start_uses_home_power_max_over_idle_tesla_cap(mon
     assert params["allow_stale_entity_max_override"] is True
 
 
+def test_solar_surplus_restart_reclaims_exact_recovered_session(monkeypatch):
+    vehicle_id = "5YJTEST0000000001"
+    current_entity = "number.car_charge_current"
+    charging_entity = "sensor.car_charging"
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    async def plugged_in(*args, **kwargs):
+        return True
+
+    async def ev_soc(*args, **kwargs):
+        return 50.0
+
+    async def at_home(*args, **kwargs):
+        return "home"
+
+    ev_planner.is_ev_plugged_in = plugged_in
+    ev_planner.get_ev_battery_level = ev_soc
+    ev_planner.get_ev_location = at_home
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_planner",
+        ev_planner,
+    )
+
+    ev_session = types.ModuleType("power_sync.automations.ev_charging_session")
+    ev_session.get_session_manager = lambda: None
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_session",
+        ev_session,
+    )
+
+    async def active_charger(*args, **kwargs):
+        return {
+            "max_charge_amps": 32,
+            "max_charge_amps_source": "active_charger",
+            "voltage": 240,
+            "phases": 1,
+            "association_known": True,
+            "capability_known": True,
+        }
+
+    async def charge_current(*args, **kwargs):
+        return current_entity
+
+    async def tesla_entity(hass, pattern, *args, **kwargs):
+        if "charging_state|charging" in pattern:
+            return charging_entity
+        return current_entity
+
+    monkeypatch.setattr(
+        actions,
+        "_resolve_tesla_active_charger_capability",
+        active_charger,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_resolve_tesla_charge_current_entity",
+        charge_current,
+    )
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", tesla_entity)
+
+    hass = _Hass([
+        _State(current_entity, "1", {"min": 0, "max": 32}),
+        _State(charging_entity, "charging"),
+    ])
+    hass.data["power_sync"]["entry-1"].update(
+        {
+            "ev_recovered_ownership": {
+                vehicle_id: {
+                    "owner": "powersync",
+                    "owner_mode": "solar_surplus",
+                    "charger_type": "tesla",
+                    "session_id": "pre-restart-session",
+                }
+            },
+            "ev_recovered_ownership_saved_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    actions._dynamic_ev_state.clear()
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_vin": vehicle_id,
+                "dynamic_mode": "solar_surplus",
+                "owner_mode": "solar_surplus",
+                "charger_type": "tesla",
+                "min_charge_amps": 1,
+                "max_charge_amps": 32,
+            },
+            context=None,
+        )
+    )
+
+    assert result is True
+    state = actions._dynamic_ev_state["entry-1"][vehicle_id]
+    assert state["current_amps"] == 1
+    assert state["charging_started"] is True
+    assert state["external_start_detection_armed"] is False
+    assert state["external_manual_override"] is False
+    assert state["ownership"]["last_command"]["command"] == "resume_solar_surplus"
+    assert state["ownership"]["last_commanded_amps"] == 1
+
+    _install_solar_surplus_runtime_stubs(
+        monkeypatch,
+        {
+            "battery_soc": 90,
+            "grid_power": 0,
+            "battery_power": 0,
+            "solar_power": 1000,
+            "load_power": 1000,
+        },
+    )
+
+    async def keep_resolved_capability(*args, **kwargs):
+        return True
+
+    async def observed_power(*args, **kwargs):
+        return 0.24, True
+
+    async def observed_power_kw(*args, **kwargs):
+        return 0.24
+
+    monkeypatch.setattr(
+        actions,
+        "_refresh_dynamic_tesla_charger_capability",
+        keep_resolved_capability,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_get_observed_ev_power_reading_kw",
+        observed_power,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_get_observed_ev_power_kw",
+        observed_power_kw,
+    )
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(
+            hass,
+            _Entry(),
+            "entry-1",
+            vehicle_id,
+        )
+    )
+
+    assert state["external_manual_override"] is False
+    assert state["charging_started"] is True
+    assert state["current_amps"] > 0
+    assert state["low_surplus_start"] is not None
+
+
+def test_solar_surplus_restart_rejects_changed_charge_current():
+    vehicle_id = "5YJTEST0000000001"
+    current_entity = "number.car_charge_current"
+    charging_entity = "sensor.car_charging"
+    hass = _Hass([
+        _State(current_entity, "1", {"min": 0, "max": 32}),
+        _State(charging_entity, "charging"),
+    ])
+    hass.data["power_sync"]["entry-1"].update(
+        {
+            "ev_recovered_ownership": {
+                vehicle_id: {
+                    "owner": "powersync",
+                    "owner_mode": "solar_surplus",
+                    "charger_type": "tesla",
+                    "session_id": "pre-restart-session",
+                    "last_commanded_amps": 5,
+                }
+            },
+            "ev_recovered_ownership_saved_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+    recovered_amps = actions._consume_recovered_solar_surplus_continuation_amps(
+        hass,
+        _Entry(),
+        vehicle_id,
+        {
+            "charger_type": "tesla",
+            "max_charge_amps": 32,
+            "tesla_charge_current_entity": current_entity,
+            "tesla_charging_state_entity": charging_entity,
+        },
+    )
+
+    assert recovered_amps is None
+    assert hass.data["power_sync"]["entry-1"]["ev_recovered_ownership"] == {}
+
+
 def test_app_solar_surplus_start_rechecks_disabled_persisted_toggle():
     hass = _Hass([])
     hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(

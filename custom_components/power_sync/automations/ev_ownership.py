@@ -9,6 +9,7 @@ from typing import Any
 
 DEFAULT_VEHICLE_ID = "_default"
 MANUAL_STOP_HOLD_SECONDS = 15 * 60
+RECOVERED_OWNERSHIP_MAX_AGE_SECONDS = 15 * 60
 
 
 def owner_family(owner_mode: Any = None) -> str:
@@ -76,7 +77,9 @@ def record_manual_stop_hold(
     vid = normalize_vehicle_id(vehicle_id)
     now = datetime.now(timezone.utc)
     expires_at = now.timestamp() + max(1, int(seconds))
-    holds = _entry_data(hass, config_entry.entry_id).setdefault("ev_manual_stop_holds", {})
+    entry = _entry_data(hass, config_entry.entry_id)
+    _discard_recovered_ev_ownership(entry, vid)
+    holds = entry.setdefault("ev_manual_stop_holds", {})
     hold = {
         "vehicle_id": vid,
         "created_at": now.isoformat(),
@@ -124,6 +127,19 @@ def _entry_data(hass: Any, entry_id: str) -> dict[str, Any]:
     from ..const import DOMAIN
 
     return hass.data.setdefault(DOMAIN, {}).setdefault(entry_id, {})
+
+
+def _discard_recovered_ev_ownership(entry: dict[str, Any], vehicle_id: Any) -> None:
+    """Discard restart evidence superseded by a newer user or runtime owner."""
+    recovered = entry.get("ev_recovered_ownership")
+    if not isinstance(recovered, dict):
+        return
+    vid = normalize_vehicle_id(vehicle_id)
+    recovered.pop(vid, None)
+    if vid != DEFAULT_VEHICLE_ID:
+        recovered.pop(DEFAULT_VEHICLE_ID, None)
+    if not recovered:
+        entry.pop("ev_recovered_ownership_saved_at", None)
 
 
 def _runtime_snapshot(hass: Any, config_entry: Any) -> dict[str, Any]:
@@ -238,6 +254,7 @@ def restore_ev_runtime_state(
     # not survive HA restarts, so restored ownership would become a ghost lock.
     get_ev_ownerships(hass, config_entry).clear()
     entry["ev_recovered_ownership"] = recovered
+    entry["ev_recovered_ownership_saved_at"] = runtime_state.get("saved_at")
 
     if stored_commands or recovered:
         _schedule_runtime_save(hass, config_entry)
@@ -248,6 +265,68 @@ def restore_ev_runtime_state(
         "resumable_manual_sessions": resumable_manual_sessions,
         "expired_manual_sessions": expired_manual_sessions,
     }
+
+
+def consume_recovered_ev_ownership(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+    *,
+    expected_owner_family: str,
+) -> dict[str, Any] | None:
+    """Consume one fresh, exact-match ownership snapshot after HA restart.
+
+    Recovered leases are evidence for rebuilding a new runtime controller, not
+    live ownership.  Keep this deliberately VIN-scoped and one-shot so a stale
+    snapshot cannot be reused for a later external charging session.
+    """
+    vid = normalize_vehicle_id(vehicle_id)
+    entry = _entry_data(hass, config_entry.entry_id)
+    recovered = entry.get("ev_recovered_ownership")
+    if not isinstance(recovered, dict):
+        return None
+
+    saved_at_raw = entry.get("ev_recovered_ownership_saved_at")
+    lease = recovered.pop(vid, None)
+    if not recovered:
+        entry.pop("ev_recovered_ownership_saved_at", None)
+    if not isinstance(lease, Mapping):
+        return None
+
+    try:
+        saved_at = datetime.fromisoformat(str(saved_at_raw))
+    except (TypeError, ValueError):
+        return None
+    if saved_at.tzinfo is None:
+        saved_at = saved_at.replace(tzinfo=timezone.utc)
+
+    age_seconds = (datetime.now(timezone.utc) - saved_at).total_seconds()
+    if age_seconds < -60 or age_seconds > RECOVERED_OWNERSHIP_MAX_AGE_SECONDS:
+        return None
+    if lease.get("owner") != "powersync":
+        return None
+    if owner_family(lease.get("owner_mode")) != expected_owner_family:
+        return None
+
+    result = dict(lease)
+    result["recovered_saved_at"] = saved_at.isoformat()
+    return result
+
+
+def update_ev_ownership_details(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+    **details: Any,
+) -> dict[str, Any] | None:
+    """Update a live ownership lease with command state worth persisting."""
+    _lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
+    if lease is None:
+        return None
+    lease.update(details)
+    lease["updated_at"] = _now_iso()
+    _schedule_runtime_save(hass, config_entry)
+    return lease
 
 
 def _candidate_vehicle_ids(vehicle_id: Any, leases: Mapping[str, Any]) -> list[str]:
@@ -360,6 +439,10 @@ def claim_ev_ownership(
 ) -> dict[str, Any]:
     """Claim ownership of an EV/loadpoint for the current config entry."""
     vid = normalize_vehicle_id(vehicle_id)
+    _discard_recovered_ev_ownership(
+        _entry_data(hass, config_entry.entry_id),
+        vid,
+    )
     now = _now_iso()
     leases = get_ev_ownerships(hass, config_entry)
     if vid != DEFAULT_VEHICLE_ID:

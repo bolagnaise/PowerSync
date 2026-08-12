@@ -7985,6 +7985,16 @@ async def _dynamic_ev_update_surplus(
                 applied_amps = min(applied_amps, max_after_set)
             state["current_amps"] = applied_amps
             state["target_amps"] = applied_amps
+            from .ev_ownership import update_ev_ownership_details
+
+            updated_ownership = update_ev_ownership_details(
+                hass,
+                config_entry,
+                vehicle_id,
+                last_commanded_amps=applied_amps,
+            )
+            if updated_ownership is not None:
+                state["ownership"] = updated_ownership
             if applied_amps > 0:
                 state["external_start_detection_armed"] = False
                 state["charging_started"] = True
@@ -9052,6 +9062,87 @@ async def _action_start_ev_charging_dynamic(
         )
 
 
+def _consume_recovered_solar_surplus_continuation_amps(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+    params: dict,
+) -> Optional[int]:
+    """Return live amps for one safely recoverable Solar Surplus session."""
+    if (
+        params.get("charger_type", "tesla") != "tesla"
+        or len(str(vehicle_id)) != 17
+        or not str(vehicle_id).isalnum()
+    ):
+        return None
+
+    from .ev_ownership import consume_recovered_ev_ownership
+
+    recovered = consume_recovered_ev_ownership(
+        hass,
+        config_entry,
+        vehicle_id,
+        expected_owner_family="solar_surplus",
+    )
+    if recovered is None:
+        return None
+
+    def reject(reason: str) -> None:
+        _LOGGER.info(
+            "Solar surplus EV: not resuming recovered session for %s because %s",
+            vehicle_id,
+            reason,
+        )
+
+    if recovered.get("charger_type") != "tesla":
+        reject("the recovered charger type is not Tesla")
+        return None
+    if not recovered.get("session_id"):
+        reject("the recovered session has no session identity")
+        return None
+
+    charging_state = _get_tesla_charging_state(
+        hass,
+        vehicle_id,
+        params.get("tesla_charging_state_entity"),
+    )
+    if charging_state != "charging":
+        reject(f"live charging state is {charging_state or 'unknown'}")
+        return None
+
+    current_entity = str(params.get("tesla_charge_current_entity") or "").strip()
+    current_state = hass.states.get(current_entity) if current_entity else None
+    live_amps = _coerce_positive_int(getattr(current_state, "state", None))
+    if live_amps is None:
+        reject("the live charge-current entity is unavailable or not positive")
+        return None
+
+    max_amps = _effective_max_charge_amps(params, hass)
+    if live_amps > max_amps:
+        reject(f"live current {live_amps}A exceeds the resolved {max_amps}A limit")
+        return None
+
+    if "last_commanded_amps" in recovered:
+        recovered_amps = _coerce_positive_int(recovered.get("last_commanded_amps"))
+        if recovered_amps is None:
+            reject("the last PowerSync command was a stop")
+            return None
+        if live_amps != recovered_amps:
+            reject(
+                f"live current {live_amps}A differs from PowerSync's last "
+                f"{recovered_amps}A command"
+            )
+            return None
+
+    _LOGGER.info(
+        "Solar surplus EV: resuming recovered PowerSync session for %s at %dA "
+        "after Home Assistant restart",
+        vehicle_id,
+        live_amps,
+    )
+    return live_amps
+
+
 async def _action_start_ev_charging_dynamic_locked(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -9823,23 +9914,47 @@ async def _action_start_ev_charging_dynamic_locked(
         except Exception:
             pass
 
+    recovered_continuation_amps = None
+    if dynamic_mode == "solar_surplus":
+        recovered_continuation_amps = (
+            _consume_recovered_solar_surplus_continuation_amps(
+                hass,
+                config_entry,
+                vehicle_id,
+                full_params,
+            )
+        )
+    initial_current_amps = (
+        recovered_continuation_amps
+        if recovered_continuation_amps is not None
+        else start_amps
+    )
+    recovered_continuation = recovered_continuation_amps is not None
+
     _dynamic_ev_state[entry_id][vehicle_id] = {
         "active": True,
         "params": full_params,
-        "current_amps": start_amps,
-        "target_amps": start_amps,
+        "current_amps": initial_current_amps,
+        "target_amps": initial_current_amps,
         "cancel_timer": cancel_timer,
         "priority": priority,
         "paused": False,
         "paused_reason": None,
         "charging_started": (
-            dynamic_mode == "battery_target" and not defer_battery_target_start
+            recovered_continuation
+            or (dynamic_mode == "battery_target" and not defer_battery_target_start)
         ),
-        "external_start_detection_armed": dynamic_mode == "solar_surplus",
+        "external_start_detection_armed": (
+            dynamic_mode == "solar_surplus" and not recovered_continuation
+        ),
         "external_manual_override": False,
         "entity_max_rechecked": False,  # Re-check Tesla entity max after charging starts
         "allocated_surplus_kw": 0,
-        "reason": "",
+        "reason": (
+            "Recovered Solar Surplus session after Home Assistant restart"
+            if recovered_continuation
+            else ""
+        ),
         "vehicle_name": full_params.get("vehicle_name"),
         "session_id": None,  # Will be set when session tracking starts
     }
@@ -9873,8 +9988,15 @@ async def _action_start_ev_charging_dynamic_locked(
         owner_mode=owner_mode,
         session_id=session_id,
         reason=_dynamic_ev_state[entry_id][vehicle_id].get("reason") or None,
-        command=f"start_{owner_mode}",
-        extra={"charger_type": charger_type},
+        command=(
+            f"resume_{owner_mode}"
+            if recovered_continuation
+            else f"start_{owner_mode}"
+        ),
+        extra={
+            "charger_type": charger_type,
+            "last_commanded_amps": initial_current_amps,
+        },
     )
 
     # Also store in hass.data for access from other places (for API endpoints)
