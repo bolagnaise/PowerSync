@@ -249,6 +249,44 @@ def test_converter_missing_price_abort_preserves_three_value_internal_contract(
     assert rolling_metadata["rolling_anchor"] == "2026-05-06T20:38:00+10:00"
 
 
+def test_amber_import_only_forecast_uses_zero_sell_tariff(
+    tariff_converter_module,
+    monkeypatch,
+):
+    brisbane = ZoneInfo("Australia/Brisbane")
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 5, 6, 20, 38, tzinfo=brisbane).astimezone(tz)
+
+    monkeypatch.setattr(tariff_converter_module, "datetime", FixedDatetime)
+    forecast = [
+        interval
+        for interval in _day_intervals(datetime(2026, 5, 6, tzinfo=brisbane))
+        if interval["channelType"] == "general"
+    ]
+
+    tariff = tariff_converter_module.convert_amber_to_tesla_tariff(
+        forecast,
+        tesla_energy_site_id="none",
+        powerwall_timezone="Australia/Brisbane",
+        current_actual_interval={
+            "general": {"perKwh": 15.03},
+            "feedIn": None,
+        },
+        electricity_provider="amber",
+    )
+
+    assert tariff is not None
+    buy_rates = tariff["energy_charges"]["Summer"]["rates"]
+    sell_rates = tariff["sell_tariff"]["energy_charges"]["Summer"]["rates"]
+    assert len(buy_rates) == 48
+    assert buy_rates["PERIOD_20_30"] == 0.51
+    assert len(sell_rates) == 48
+    assert set(sell_rates.values()) == {0.0}
+
+
 def test_static_tou_tariff_schedule_converts_to_sigenergy_slots(
     sigenergy_api_module,
 ):

@@ -25,6 +25,8 @@ except ImportError:
 
 _LOGGER = logging.getLogger(__name__)
 
+_MAX_MISSING_PRICE_PERIODS = 10
+
 
 def _numeric_tariff_rates(values: Any) -> dict[str, int | float]:
     """Keep only values that Tesla can accept as tariff rates."""
@@ -1110,6 +1112,22 @@ def convert_amber_to_tesla_tariff(
     if spike_lookup:
         _LOGGER.info("Amber spike status detected for %d periods: %s", len(spike_lookup), spike_lookup)
 
+    minimum_complete_periods = 48 - _MAX_MISSING_PRICE_PERIODS
+    if (
+        electricity_provider == "amber"
+        and include_sell_prices
+        and not feedin_lookup
+        and len(general_lookup) >= minimum_complete_periods
+    ):
+        # Import-only Amber plans legitimately omit the feedIn channel. Tesla
+        # still requires a complete sell tariff, so use a conservative zero
+        # export value for the same periods covered by the buy forecast.
+        feedin_lookup = {key: [0.0] for key in general_lookup}
+        _LOGGER.info(
+            "Amber forecast has no feed-in channel; using zero sell prices for %d periods",
+            len(feedin_lookup),
+        )
+
     # Build the rolling 24-hour tariff
     general_prices, feedin_prices, rolling_anchor = _build_rolling_24h_tariff(
         general_lookup, feedin_lookup, detected_tz, current_actual_interval,
@@ -1482,12 +1500,11 @@ def _build_rolling_24h_tariff(
         )
 
     # If more than 10 periods are missing, abort - keep using last good tariff
-    MAX_MISSING_PERIODS = 10
-    if total_missing > MAX_MISSING_PERIODS:
+    if total_missing > _MAX_MISSING_PRICE_PERIODS:
         _LOGGER.error(
             "❌ Too many missing price periods (%d > %d) - ABORTING sync to preserve last good tariff. "
             "This usually indicates Amber API is unreachable.",
-            total_missing, MAX_MISSING_PERIODS
+            total_missing, _MAX_MISSING_PRICE_PERIODS
         )
         return None, None, now
 
