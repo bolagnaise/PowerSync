@@ -332,6 +332,33 @@ def test_schedule_view_uses_vehicle_scoped_executor_soc(monkeypatch):
     assert executor.calls == ["5YJTEST0000000002"]
 
 
+def test_schedule_view_uses_same_planner_as_vehicle_scoped_executor(monkeypatch):
+    tree = ast.parse(INIT_PATH.read_text())
+    method = next(
+        item
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ChargingScheduleView"
+        for item in node.body
+        if isinstance(item, ast.FunctionDef) and item.name == "_get_planner"
+    )
+    namespace = {"__package__": "power_sync"}
+    exec(
+        compile(ast.Module(body=[method], type_ignores=[]), str(INIT_PATH), "exec"),
+        namespace,
+    )
+
+    hass = SimpleNamespace()
+    executor_planner = SimpleNamespace(name="vehicle-scoped")
+    fallback_planner = SimpleNamespace(name="global-fallback")
+    executor = SimpleNamespace(hass=hass, planner=executor_planner)
+    monkeypatch.setattr(ev_planner, "_auto_schedule_executor", executor)
+    monkeypatch.setattr(ev_planner, "_charging_planner", fallback_planner)
+
+    view = SimpleNamespace(_hass=hass)
+
+    assert namespace["_get_planner"](view) is executor_planner
+
+
 def test_two_identified_vehicles_keep_independent_capacity_and_energy():
     planner = _planner()
     async def build_plans():

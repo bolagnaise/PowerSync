@@ -16069,8 +16069,18 @@ class ChargingScheduleView(HomeAssistantView):
         self._hass = hass
 
     def _get_planner(self):
-        """Get the charging planner."""
-        from .automations.ev_charging_planner import get_charging_planner
+        """Get the vehicle-scoped planner used by the auto-schedule executor."""
+        from .automations.ev_charging_planner import (
+            get_auto_schedule_executor,
+            get_charging_planner,
+        )
+
+        executor = get_auto_schedule_executor()
+        if executor is not None and getattr(executor, "hass", None) is self._hass:
+            planner = getattr(executor, "planner", None)
+            if planner is not None:
+                return planner
+
         return get_charging_planner()
 
     def _get_store(self):
