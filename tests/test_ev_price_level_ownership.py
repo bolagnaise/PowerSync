@@ -98,6 +98,7 @@ if not hasattr(sys.modules.get("power_sync.const"), "TESLA_INTEGRATIONS"):
 
 ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner")
 ev_pricing = importlib.import_module("power_sync.automations.ev_pricing")
+ev_capacity = importlib.import_module("power_sync.automations.ev_vehicle_capacity")
 
 
 VIN = "5YJTEST0000000001"
@@ -439,6 +440,130 @@ def test_cost_optimized_prefers_guaranteed_near_zero_grid_over_solar(monkeypatch
     assert plan.estimated_solar_kwh == 0
 
 
+def test_no_departure_solar_preferred_uses_free_grid_after_battery_allocation(
+    monkeypatch,
+):
+    brisbane_tz = timezone(timedelta(hours=10))
+    now = datetime(2026, 8, 13, 7, 0, tzinfo=brisbane_tz)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    hass = _FakeHass()
+    battery_actions = [
+        {
+            "timestamp": "2026-08-13T10:00:00+10:00",
+            "action": "charge",
+            "power_w": 6500,
+        },
+        {
+            "timestamp": "2026-08-13T11:00:00+10:00",
+            "action": "charge",
+            "power_w": 4000,
+        },
+    ]
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = (
+        SimpleNamespace(
+            current_schedule=SimpleNamespace(
+                to_executor_schedule=lambda: battery_actions,
+            ),
+            _config=SimpleNamespace(max_grid_import_w=7400),
+        )
+    )
+    planner = ev_planner.ChargingPlanner(hass, _FakeConfigEntry())
+
+    class _SurplusForecaster:
+        async def forecast_surplus(self, _hours):
+            return [
+                ev_planner.SurplusForecast(
+                    hour="2026-08-13T08:00:00",
+                    solar_kw=4.0,
+                    load_kw=1.0,
+                    surplus_kw=3.0,
+                    confidence=0.7,
+                ),
+                ev_planner.SurplusForecast(
+                    hour="2026-08-13T10:00:00",
+                    solar_kw=0.0,
+                    load_kw=1.0,
+                    surplus_kw=0.0,
+                    confidence=0.7,
+                ),
+                ev_planner.SurplusForecast(
+                    hour="2026-08-13T11:00:00",
+                    solar_kw=0.0,
+                    load_kw=1.0,
+                    surplus_kw=0.0,
+                    confidence=0.7,
+                ),
+                ev_planner.SurplusForecast(
+                    hour="2026-08-13T12:00:00",
+                    solar_kw=0.0,
+                    load_kw=1.0,
+                    surplus_kw=0.0,
+                    confidence=0.7,
+                ),
+            ]
+
+    class _PriceForecaster:
+        async def get_price_forecast(self, _hours):
+            return [
+                ev_planner.PriceForecast(
+                    hour="2026-08-13T08:00:00",
+                    import_cents=30.0,
+                    export_cents=0.0,
+                    period="shoulder",
+                ),
+                ev_planner.PriceForecast(
+                    hour="2026-08-13T10:00:00",
+                    import_cents=0.0,
+                    export_cents=0.0,
+                    period="super_off_peak",
+                ),
+                ev_planner.PriceForecast(
+                    hour="2026-08-13T11:00:00",
+                    import_cents=0.0,
+                    export_cents=0.0,
+                    period="super_off_peak",
+                ),
+                ev_planner.PriceForecast(
+                    hour="2026-08-13T12:00:00",
+                    import_cents=0.0,
+                    export_cents=0.0,
+                    period="super_off_peak",
+                ),
+            ]
+
+    planner.surplus_forecaster = _SurplusForecaster()
+    planner.price_forecaster = _PriceForecaster()
+    plan = asyncio.run(
+        planner.plan_charging(
+            vehicle_id=VIN,
+            current_soc=76,
+            target_soc=80,
+            target_time=None,
+            resolved_capacity=ev_capacity.resolve_ev_battery_capacity(
+                manual_capacity_kwh=86,
+            ),
+            charger_power_kw=2.3,
+            priority=ev_planner.ChargingPriority.SOLAR_PREFERRED,
+        )
+    )
+
+    assert plan.energy_needed_kwh == pytest.approx(3.44 / 0.9)
+    assert [window.start_time for window in plan.windows] == [
+        "2026-08-13T11:00:00",
+        "2026-08-13T12:00:00",
+    ]
+    assert all(window.source == "grid_super_off_peak" for window in plan.windows)
+    assert all(window.reason == "cost_optimized" for window in plan.windows)
+    assert plan.estimated_grid_kwh == pytest.approx(plan.energy_needed_kwh)
+    assert plan.estimated_solar_kwh == 0
+
+
 def test_time_critical_uses_feasible_free_grid_before_paid_deadline(monkeypatch):
     brisbane_tz = timezone(timedelta(hours=10))
     monkeypatch.setattr(
@@ -543,6 +668,11 @@ def test_tariff_forecast_reads_nested_tesla_tou_periods(monkeypatch):
         "offpeak",
         "offpeak",
         "peak",
+    ]
+    assert [item.hour for item in forecast] == [
+        "2026-07-31T12:00:00",
+        "2026-07-31T13:00:00",
+        "2026-07-31T14:00:00",
     ]
 
 

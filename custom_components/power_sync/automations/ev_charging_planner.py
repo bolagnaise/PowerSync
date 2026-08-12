@@ -2111,7 +2111,14 @@ class PriceForecaster:
             _LOGGER.debug(f"Tariff forecast using rates: {buy_rates}, TOU periods: {list(tou_periods.keys())}")
 
             forecasts = []
-            now = _ha_local_now_naive()
+            # TOU rates change on wall-clock boundaries. Anchoring every row
+            # to the current minute shifts a real 10:00-14:00 free period to
+            # e.g. 10:47-14:47 in the EV plan.
+            now = _ha_local_now_naive().replace(
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
 
             for h in range(hours):
                 hour_dt = now + timedelta(hours=h)
@@ -2436,11 +2443,26 @@ class ChargingPlanner:
         Returns dict of {hour_iso: power_kw} for battery charging periods.
         This allows EV to use remaining grid capacity during shared charging windows.
         """
-        if not self._get_battery_schedule:
-            return {}
-
         try:
-            schedule = self._get_battery_schedule()
+            schedule_getter = self._get_battery_schedule
+            if schedule_getter is None:
+                entry_data = self.hass.data.get(DOMAIN, {}).get(
+                    self.config_entry.entry_id,
+                    {},
+                )
+                optimization_coordinator = entry_data.get(
+                    "optimization_coordinator"
+                )
+                current_schedule = getattr(
+                    optimization_coordinator,
+                    "current_schedule",
+                    None,
+                )
+                if current_schedule is None:
+                    return {}
+                schedule_getter = current_schedule.to_executor_schedule
+
+            schedule = schedule_getter()
             if hasattr(schedule, '__await__'):
                 schedule = await schedule
 
@@ -2469,7 +2491,11 @@ class ChargingPlanner:
                 else:
                     ts = ts_str
 
-                hour_key = ts.replace(minute=0, second=0, microsecond=0).isoformat()
+                hour_key = _as_ha_local_naive(ts).replace(
+                    minute=0,
+                    second=0,
+                    microsecond=0,
+                ).isoformat()
                 power_kw = power_w / 1000 if power_w > 100 else power_w  # Handle W vs kW
 
                 # Take max power for each hour (conservative estimate)
@@ -2483,6 +2509,30 @@ class ChargingPlanner:
         except Exception as e:
             _LOGGER.debug(f"Error getting battery schedule: {e}")
             return {}
+
+    def _get_grid_capacity_kw(self) -> float:
+        """Return the optimizer's current site import limit when available."""
+        try:
+            entry_data = self.hass.data.get(DOMAIN, {}).get(
+                self.config_entry.entry_id,
+                {},
+            )
+            optimization_coordinator = entry_data.get("optimization_coordinator")
+            optimization_config = getattr(
+                optimization_coordinator,
+                "_config",
+                None,
+            )
+            max_grid_import_w = getattr(
+                optimization_config,
+                "max_grid_import_w",
+                None,
+            )
+            if max_grid_import_w is not None and float(max_grid_import_w) > 0:
+                return float(max_grid_import_w) / 1000.0
+        except (AttributeError, TypeError, ValueError):
+            pass
+        return self._grid_capacity_kw
 
     def _get_available_ev_power(
         self,
@@ -2506,17 +2556,18 @@ class ChargingPlanner:
             Available power for EV in kW
         """
         battery_power = battery_power_schedule.get(hour, 0)
+        grid_capacity_kw = self._get_grid_capacity_kw()
 
         if solar_surplus_kw > 0:
             # Solar surplus available - EV can use surplus + remaining grid
             # Solar powers both battery and EV, only grid import is limited
             grid_needed_by_battery = max(0, battery_power - solar_surplus_kw)
-            available_grid = self._grid_capacity_kw - grid_needed_by_battery
+            available_grid = grid_capacity_kw - grid_needed_by_battery
             available_solar = max(0, solar_surplus_kw - battery_power)
             total_available = available_grid + available_solar
         else:
             # No solar - share grid capacity with battery
-            total_available = self._grid_capacity_kw - battery_power
+            total_available = grid_capacity_kw - battery_power
 
         # Clamp to charger limits and minimum charging threshold
         available = min(charger_max_kw, max(0, total_available))
@@ -2609,7 +2660,10 @@ class ChargingPlanner:
                 surplus_forecast,
                 battery_power_schedule=battery_power_schedule,
             )
-        elif priority == ChargingPriority.SOLAR_PREFERRED:
+        elif (
+            priority == ChargingPriority.SOLAR_PREFERRED
+            and target_time is not None
+        ):
             plan = await self._plan_solar_preferred(
                 vehicle_id, current_soc, target_soc, target_time,
                 energy_needed_kwh, charger_power_kw,
@@ -3010,6 +3064,7 @@ class ChargingPlanner:
             display_start, display_end = _forecast_window_display_bounds(
                 price.hour,
                 hour_end,
+                start_dt=max(hour_dt, now),
                 preserve_offset=(
                     hour_dt.replace(
                         minute=0,
@@ -3036,13 +3091,30 @@ class ChargingPlanner:
                     "usable_fraction": usable_fraction,
                 })
 
-            # Grid option
+            # Grid option. Respect the home battery's optimizer allocation and
+            # use only remaining site capacity. Free/negative grid can use all
+            # remaining headroom; paid grid still yields forecast solar first.
+            hour_key = hour_dt.replace(
+                minute=0,
+                second=0,
+                microsecond=0,
+            ).isoformat()
+            available_power = self._get_available_ev_power(
+                hour_key,
+                charger_power_kw,
+                battery_power_schedule,
+                solar_surplus_kw=solar_available,
+            )
+
             # When grid is free (0c) or negative, use full charger power - don't reduce for solar
             # Solar forecast is uncertain, but free grid is guaranteed
             if price.import_cents <= FREE_GRID_PRICE_EPSILON_CENTS:
-                grid_power = charger_power_kw  # Full power when grid is free/negative
+                grid_power = available_power
             else:
-                grid_power = charger_power_kw - max(0, solar_available)
+                grid_power = min(
+                    available_power,
+                    charger_power_kw - max(0, solar_available),
+                )
 
             # Skip grid hours that fall inside a demand-charge peak window unless
             # the user has opted into grid charging during demand windows.
@@ -3112,7 +3184,7 @@ class ChargingPlanner:
                 and cost <= FREE_GRID_PRICE_EPSILON_CENTS
                 else 1
             )
-            return (effective_cost, time, source_pref)
+            return (effective_cost, source_pref, time)
 
         charging_options.sort(key=sort_key)
 

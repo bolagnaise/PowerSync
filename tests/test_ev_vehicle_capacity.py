@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import importlib
 import sys
 import types
@@ -273,6 +274,62 @@ def test_secondary_ev_86_kwh_at_ten_amps_requires_full_configured_energy_duratio
         window.estimated_power_kw <= charger_power_kw
         for window in plan.windows
     )
+
+
+def test_86_kwh_vehicle_from_76_to_80_uses_four_percent_delta():
+    plan = asyncio.run(
+        _planner().plan_charging(
+            vehicle_id="5YJTEST0000000002",
+            current_soc=76,
+            target_soc=80,
+            target_time=None,
+            resolved_capacity=resolve_ev_battery_capacity(
+                manual_capacity_kwh=86,
+            ),
+            charger_power_kw=100,
+            priority=ChargingPriority.SOLAR_ONLY,
+        )
+    )
+
+    assert 86 * 0.04 == pytest.approx(3.44)
+    assert plan.energy_needed_kwh == pytest.approx(3.44 / 0.9)
+    assert plan.to_dict()["energy_needed_kwh"] == 3.82
+
+
+def test_schedule_view_uses_vehicle_scoped_executor_soc(monkeypatch):
+    tree = ast.parse(INIT_PATH.read_text())
+    method = next(
+        item
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ChargingScheduleView"
+        for item in node.body
+        if isinstance(item, ast.AsyncFunctionDef) and item.name == "_get_vehicle_soc"
+    )
+    namespace = {"__package__": "power_sync"}
+    exec(
+        compile(ast.Module(body=[method], type_ignores=[]), str(INIT_PATH), "exec"),
+        namespace,
+    )
+
+    hass = SimpleNamespace()
+
+    class _VehicleScopedExecutor:
+        def __init__(self):
+            self.hass = hass
+            self.calls = []
+
+        async def _get_vehicle_soc(self, vehicle_id):
+            self.calls.append(vehicle_id)
+            return 76
+
+    executor = _VehicleScopedExecutor()
+    monkeypatch.setattr(ev_planner, "_auto_schedule_executor", executor)
+
+    view = SimpleNamespace(_hass=hass)
+    soc = asyncio.run(namespace["_get_vehicle_soc"](view, "5YJTEST0000000002"))
+
+    assert soc == 76
+    assert executor.calls == ["5YJTEST0000000002"]
 
 
 def test_two_identified_vehicles_keep_independent_capacity_and_energy():

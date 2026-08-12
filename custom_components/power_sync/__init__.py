@@ -16093,6 +16093,17 @@ class ChargingScheduleView(HomeAssistantView):
         Returns:
             Current battery level (0-100), defaults to 50 if not found.
         """
+        # The Auto Schedule executor owns the canonical, vehicle-scoped SoC
+        # resolver (including Fleet/BLE identity mapping and the persisted
+        # asleep-vehicle cache).  Reuse it here so the display-only schedule
+        # endpoint cannot borrow the first configured BLE car's SoC for a
+        # different Fleet VIN.
+        from .automations.ev_charging_planner import get_auto_schedule_executor
+
+        executor = get_auto_schedule_executor()
+        if executor is not None and getattr(executor, "hass", None) is self._hass:
+            return await executor._get_vehicle_soc(vehicle_id)
+
         # Method 0: Generic charger SoC sensor
         from .const import CONF_GENERIC_CHARGER_ENABLED
         from .automations.generic_charger_soc import resolve_generic_charger_soc
