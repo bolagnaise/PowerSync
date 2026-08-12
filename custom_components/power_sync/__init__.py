@@ -19423,6 +19423,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # old callback from one belonging to a freshly reloaded entry.
     aemo_dispatch_generation = object()
 
+    def _aemo_dispatch_entry_data() -> dict[str, Any] | None:
+        """Return this setup generation's live entry data, or ``None``.
+
+        Callbacks can outlive an unload and see a new dictionary for the same
+        entry_id after reload.  Check both the dictionary's generation token
+        and its stopping flag before callback-owned work can recreate, mutate,
+        or command through entry state.
+        """
+        current = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if not isinstance(current, dict):
+            return None
+        if current.get("aemo_dispatch_generation") is not aemo_dispatch_generation:
+            return None
+        if current.get("aemo_dispatch_stopping", False):
+            return None
+        return current
+
     # Register the parent (hub) device.
     dev_reg = dr.async_get(hass)
     dev_reg.async_get_or_create(
@@ -22422,7 +22439,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         update_dpel_time: bool = False,
     ) -> None:
         """Record the current AC inverter control mode for services and sensors."""
-        entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+        entry_data = _aemo_dispatch_entry_data()
+        if entry_data is None:
+            return
         mode = control_mode if control_mode in INVERTER_CONTROL_MODES else INVERTER_CONTROL_MODE_CURTAILED
         entry_data["inverter_control_mode"] = mode
         entry_data["inverter_last_state"] = (
@@ -22453,8 +22472,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         Returns:
             True if we should curtail, False if we should allow production
         """
+        entry_data = _aemo_dispatch_entry_data()
+        if entry_data is None:
+            return False
+
         # Get live status for grid_power, battery_soc, solar_power, battery_power
         live_status = await get_live_status()
+
+        if _aemo_dispatch_entry_data() is not entry_data:
+            return False
 
         if live_status is None:
             _LOGGER.debug("Could not get live status - not curtailing AC solar (conservative approach)")
@@ -22483,7 +22509,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # HD-15: hysteresis on the uneconomic-export boundary (1c/kWh) so a price
         # hovering at the threshold doesn't flap curtail/restore every tick.
-        entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
         export_uneconomic = False
         if export_earnings is not None:
             export_uneconomic = with_hysteresis(
@@ -22680,6 +22705,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         Returns:
             True if operation succeeded, False otherwise
         """
+        entry_data = _aemo_dispatch_entry_data()
+        if entry_data is None:
+            return False
+
         inverter_enabled = entry.options.get(
             CONF_AC_INVERTER_CURTAILMENT_ENABLED,
             entry.data.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
@@ -22704,7 +22733,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # skip the independent fallback — the optimizer handles off-grid
             # timing as part of its schedule to avoid conflicts with
             # charge/discharge planning.
-            entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             _opt_coord = entry_data.get("optimization_coordinator")
             _optimizer_owns_offgrid = (
                 _opt_coord
@@ -22824,20 +22852,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return False
 
             # Cache controller for fast load-following updates
-            hass.data[DOMAIN][entry.entry_id]["inverter_controller"] = controller
+            entry_data["inverter_controller"] = controller
 
             if curtail:
                 # Use smart AC-coupled curtailment logic
                 # Only curtail if: import price < 0 OR (battery = 100% AND export < 1c)
                 should_curtail = await should_curtail_ac_coupled(import_price, export_earnings)
+                if _aemo_dispatch_entry_data() is not entry_data:
+                    return False
 
                 if not should_curtail:
                     # Smart logic says don't curtail - battery can still absorb solar
                     # Check if inverter is currently curtailed and needs restoring
-                    inverter_last_state = hass.data[DOMAIN][entry.entry_id].get("inverter_last_state")
+                    inverter_last_state = entry_data.get("inverter_last_state")
                     if inverter_last_state == "curtailed":
                         _LOGGER.info(f"⚡ AC-COUPLED: Battery absorbing solar - RESTORING previously curtailed inverter")
                         success = await controller.restore()
+                        if _aemo_dispatch_entry_data() is not entry_data:
+                            return False
                         if success:
                             _LOGGER.info(f"✅ Inverter restored (battery can absorb solar)")
                             _set_inverter_control_state(INVERTER_CONTROL_MODE_NORMAL)
@@ -22853,6 +22885,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 home_load_w = None
                 if inverter_brand in ("zeversolar", "sigenergy", "sungrow", "enphase", "foxess", "huawei", "goodwe", "solax", "alphaess", "solaredge", "fronius"):
                     live_status = await get_live_status()
+                    if _aemo_dispatch_entry_data() is not entry_data:
+                        return False
                     if live_status and live_status.get("load_power"):
                         home_load_w = int(live_status.get("load_power", 0))
                         # Add battery charge rate if battery is charging
@@ -22868,6 +22902,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         else:
                             _LOGGER.info(f"🔌 LOAD-FOLLOWING: Home load is {home_load_w}W (battery not charging or <50W)")
 
+                if _aemo_dispatch_entry_data() is not entry_data:
+                    return False
                 _LOGGER.info(f"🔴 Curtailing inverter at {inverter_host}")
 
                 # Pass home_load_w for load-following (Zeversolar)
@@ -22882,6 +22918,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 else:
                     success = await controller.curtail()
 
+                if _aemo_dispatch_entry_data() is not entry_data:
+                    return False
                 if success:
                     if home_load_w is not None:
                         _LOGGER.info(f"✅ Inverter load-following curtailment to {home_load_w}W")
@@ -22893,6 +22931,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         home_load_w,
                         update_dpel_time=inverter_brand == "enphase",
                     )
+                    if _aemo_dispatch_entry_data() is not entry_data:
+                        return False
                     # Inverter handled curtailment cleanly — make sure any
                     # prior off-grid fallback session is released now that
                     # the AC path is working again.
@@ -22901,6 +22941,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.error(f"❌ Failed to curtail inverter")
                     # Inverter refused or errored — try the Powerwall off-grid
                     # path as the last-resort curtailment lever.
+                    if _aemo_dispatch_entry_data() is not entry_data:
+                        return False
                     fallback_ok = await _powerwall_curtailment_fallback(True, fallback_reason)
                     if fallback_ok:
                         _LOGGER.info(
@@ -22914,10 +22956,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info(f"🟢 Restoring inverter at {inverter_host}")
                 import inspect
                 restore_sig = inspect.signature(controller.restore)
+                if _aemo_dispatch_entry_data() is not entry_data:
+                    return False
                 if "verify" in restore_sig.parameters:
                     success = await controller.restore(verify=False)
                 else:
                     success = await controller.restore()
+                if _aemo_dispatch_entry_data() is not entry_data:
+                    return False
                 if success:
                     _LOGGER.info(f"✅ Inverter restored successfully")
                     # Store last state
@@ -22927,16 +22973,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Always release any off-grid curtailment session when
                 # curtailment should be restored — even if the inverter
                 # restore itself failed, we want the grid contactor back.
+                if _aemo_dispatch_entry_data() is not entry_data:
+                    return False
                 await _powerwall_curtailment_fallback(False, "inverter_restore")
                 return success
 
         except Exception as e:
+            if _aemo_dispatch_entry_data() is not entry_data:
+                return False
             _LOGGER.error(f"Error controlling inverter: {e}", exc_info=True)
             # Exception path: if the caller wanted curtailment and the
             # inverter blew up, at least try the Powerwall fallback before
             # giving up entirely.
             if curtail:
                 try:
+                    if _aemo_dispatch_entry_data() is not entry_data:
+                        return False
                     if await _powerwall_curtailment_fallback(True, fallback_reason):
                         _LOGGER.info(
                             "⚡ Powerwall off-grid fallback activated after "
@@ -22954,23 +23006,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Register services
-    def _aemo_dispatch_entry_data() -> dict[str, Any] | None:
-        """Return this setup generation's live entry data, or ``None``.
-
-        A dispatch callback may outlive an unload and see a new dictionary for
-        the same entry_id after reload.  Check both the dictionary's generation
-        token and its stopping flag immediately before any callback-owned
-        mutation so an old generation cannot recreate or modify entry state.
-        """
-        current = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-        if not isinstance(current, dict):
-            return None
-        if current.get("aemo_dispatch_generation") is not aemo_dispatch_generation:
-            return None
-        if current.get("aemo_dispatch_stopping", False):
-            return None
-        return current
-
     def _static_tou_tariff_schedule_for_sync() -> dict | None:
         """Return a stored static TOU schedule usable for battery tariff sync."""
         entry_data = _aemo_dispatch_entry_data()
@@ -38685,7 +38720,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def fast_load_following_update(now):
         """Update inverter power limit based on current home load when load-following is active."""
         try:
-            entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
+            entry_data = _aemo_dispatch_entry_data()
+            if entry_data is None:
+                return
 
             # Check if AC curtailment is enabled
             inverter_curtailment_enabled = entry.options.get(
@@ -38743,19 +38780,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if control_mode == INVERTER_CONTROL_MODE_SHUTDOWN:
                 if inverter_brand != "enphase" or not force_reapply:
                     return
+                if _aemo_dispatch_entry_data() is not entry_data:
+                    return
+                target_power_w = entry_data.get("inverter_power_limit_w")
                 if hasattr(controller, 'curtail'):
                     success = await controller.curtail()
+                    if _aemo_dispatch_entry_data() is not entry_data:
+                        return
                     if success:
                         _LOGGER.debug("⚡ Enphase DPEL shutdown re-apply")
                         _set_inverter_control_state(
                             INVERTER_CONTROL_MODE_SHUTDOWN,
-                            entry_data.get("inverter_power_limit_w"),
+                            target_power_w,
                             update_dpel_time=True,
                         )
                 return
 
             # Get current home load from Tesla API
             live_status = await get_live_status()
+            if _aemo_dispatch_entry_data() is not entry_data:
+                return
             if not live_status or not live_status.get("load_power"):
                 return
 
@@ -38777,10 +38821,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             # Update power limit
             import inspect
+            if _aemo_dispatch_entry_data() is not entry_data:
+                return
             if hasattr(controller, 'curtail'):
                 sig = inspect.signature(controller.curtail)
                 if 'home_load_w' in sig.parameters:
                     success = await controller.curtail(home_load_w=home_load_w)
+                    if _aemo_dispatch_entry_data() is not entry_data:
+                        return
                     if success:
                         _LOGGER.debug(f"⚡ Fast load-following update: {home_load_w}W")
                         _set_inverter_control_state(

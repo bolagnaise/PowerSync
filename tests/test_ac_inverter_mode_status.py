@@ -38,7 +38,7 @@ def test_manual_curtailment_keeps_specific_mode_for_refresh_loop():
 
     assert 'requested_mode = call.data.get("mode", INVERTER_CONTROL_MODE_LOAD_FOLLOWING)' in init_source
     assert "if requested_mode == INVERTER_CONTROL_MODE_SHUTDOWN" in init_source
-    assert 'hass.data[DOMAIN][entry.entry_id]["inverter_controller"] = controller' in init_source
+    assert 'entry_data["inverter_controller"] = controller' in init_source
     assert "_set_inverter_control_state(" in init_source
     assert "update_dpel_time=inverter_brand == \"enphase\"" in init_source
 

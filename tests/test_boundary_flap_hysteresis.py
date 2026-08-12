@@ -64,6 +64,8 @@ def _nested_function_source(name: str) -> str:
 
 def _build_should_curtail_ac_coupled(get_live_status, with_hysteresis):
     """Extract and exec should_curtail_ac_coupled with a stub closure."""
+    entry_data = {}
+
     namespace = {
         "CONF_INVERTER_RESTORE_SOC": "inverter_restore_soc",
         "DEFAULT_INVERTER_RESTORE_SOC": 90,
@@ -76,6 +78,7 @@ def _build_should_curtail_ac_coupled(get_live_status, with_hysteresis):
         "hass": SimpleNamespace(data={}),
         "DOMAIN": "power_sync",
         "with_hysteresis": with_hysteresis,
+        "_aemo_dispatch_entry_data": lambda: entry_data,
     }
     exec(textwrap.dedent(_nested_function_source("should_curtail_ac_coupled")), namespace)
     return namespace["should_curtail_ac_coupled"]

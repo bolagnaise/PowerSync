@@ -9,6 +9,8 @@ from pathlib import Path
 import textwrap
 from types import SimpleNamespace
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
@@ -145,6 +147,311 @@ def test_ac_inverter_restore_keeps_heartbeat_but_skips_sungrow_verify_readback()
 
     assert signature_index < verify_false_index
     assert controller_index < restore_index < verify_false_index
+
+
+def _stale_ac_curtailment_case(kind: str, replace_during: str | None = None):
+    """Execute AC curtailment with a setup generation that is no longer live."""
+    entry_id = "entry-id"
+    old_generation = object()
+    replacement_generation = object()
+    if kind == "replacement":
+        live_entry_data = {
+            "aemo_dispatch_generation": replacement_generation,
+        }
+    elif kind == "absent":
+        live_entry_data = None
+    elif kind == "stopping":
+        live_entry_data = {
+            "aemo_dispatch_generation": old_generation,
+            "aemo_dispatch_stopping": True,
+        }
+    else:  # pragma: no cover - parameterized values are fixed below
+        raise AssertionError(kind)
+
+    if replace_during is not None:
+        live_entry_data = {"aemo_dispatch_generation": old_generation}
+
+    domain_data = {} if live_entry_data is None else {entry_id: live_entry_data}
+    replacement_entry_data = {
+        "aemo_dispatch_generation": replacement_generation,
+        "replacement_state": "untouched",
+    }
+    initial_domain_data = dict(domain_data)
+    hass = SimpleNamespace(data={"power_sync": domain_data})
+    entry = SimpleNamespace(
+        entry_id=entry_id,
+        options={},
+        data={
+            "ac_inverter_curtailment_enabled": True,
+            "inverter_brand": "sungrow",
+            "inverter_host": "192.0.2.10",
+        },
+    )
+    calls = {"construct": 0, "fallback": [], "commands": [], "state": []}
+
+    class _Logger:
+        def __getattr__(self, _name):
+            return lambda *args, **kwargs: None
+
+    def _get_inverter_controller(**_kwargs):
+        calls["construct"] += 1
+
+        async def _curtail(**_kwargs):
+            calls["commands"].append("curtail")
+            if replace_during == "command_exception":
+                hass.data["power_sync"][entry_id] = replacement_entry_data
+                raise RuntimeError("stale controller failed after reload")
+            return True
+
+        async def _restore(**_kwargs):
+            calls["commands"].append("restore")
+            return True
+
+        return SimpleNamespace(curtail=_curtail, restore=_restore)
+
+    async def _should_curtail(*_args):
+        await asyncio.sleep(0)
+        if replace_during == "decision":
+            hass.data["power_sync"][entry_id] = replacement_entry_data
+        return replace_during in ("live_status", "command_exception")
+
+    async def _get_live_status():
+        await asyncio.sleep(0)
+        if replace_during == "live_status":
+            hass.data["power_sync"][entry_id] = replacement_entry_data
+        return {"load_power": 100, "battery_power": 0}
+
+    async def _fallback(curtail, reason):
+        calls["fallback"].append((curtail, reason))
+        return False
+
+    namespace = {
+        "Any": object,
+        "DOMAIN": "power_sync",
+        "hass": hass,
+        "entry": entry,
+        "aemo_dispatch_generation": old_generation,
+        "_LOGGER": _Logger(),
+        "get_inverter_controller": _get_inverter_controller,
+        "should_curtail_ac_coupled": _should_curtail,
+        "_powerwall_curtailment_fallback": _fallback,
+        "_set_inverter_control_state": lambda *args, **kwargs: calls["state"].append(args),
+        "get_live_status": _get_live_status,
+        "INVERTER_CONTROL_MODE_NORMAL": "normal",
+        "INVERTER_CONTROL_MODE_LOAD_FOLLOWING": "load_following",
+        "INVERTER_CONTROL_MODE_CURTAILED": "curtailed",
+        "INVERTER_CONTROL_MODES": {"normal", "load_following", "curtailed"},
+        "DEFAULT_INVERTER_PORT": 502,
+        "DEFAULT_INVERTER_SLAVE_ID": 1,
+    }
+    for constant in (
+        "CONF_AC_INVERTER_CURTAILMENT_ENABLED",
+        "CONF_POWERWALL_OFFGRID_AS_CURTAILMENT",
+        "CONF_INVERTER_BRAND",
+        "CONF_INVERTER_HOST",
+        "CONF_INVERTER_PORT",
+        "CONF_INVERTER_SLAVE_ID",
+        "CONF_INVERTER_MODEL",
+        "CONF_INVERTER_TOKEN",
+        "CONF_FRONIUS_LOAD_FOLLOWING",
+        "CONF_INVERTER_RATED_POWER_W",
+        "CONF_ENPHASE_USERNAME",
+        "CONF_ENPHASE_PASSWORD",
+        "CONF_ENPHASE_SERIAL",
+        "CONF_ENPHASE_NORMAL_PROFILE",
+        "CONF_ENPHASE_ZERO_EXPORT_PROFILE",
+        "CONF_ENPHASE_IS_INSTALLER",
+        "CONF_SIGENERGY_EXPORT_LIMIT_KW",
+        "CONF_INVERTER_ENTITY_PREFIX",
+    ):
+        namespace[constant] = constant.removeprefix("CONF_").lower()
+
+    exec(_function_source("_aemo_dispatch_entry_data"), namespace)
+    exec(_function_source("apply_inverter_curtailment"), namespace)
+    result = asyncio.run(namespace["apply_inverter_curtailment"](True, -1.0, 0.0))
+    return result, calls, domain_data, initial_domain_data, replacement_entry_data
+
+
+@pytest.mark.parametrize("kind", ("replacement", "absent", "stopping"))
+def test_stale_ac_curtailment_generation_fails_closed(kind):
+    result, calls, domain_data, initial_domain_data, _replacement_entry_data = _stale_ac_curtailment_case(kind)
+
+    assert result is False
+    assert calls == {"construct": 0, "fallback": [], "commands": [], "state": []}
+    assert domain_data == initial_domain_data
+
+
+@pytest.mark.parametrize("replace_during", ("decision", "live_status"))
+def test_inflight_ac_curtailment_generation_replacement_fails_closed(replace_during):
+    result, calls, _domain_data, _initial_domain_data, replacement_entry_data = (
+        _stale_ac_curtailment_case("replacement", replace_during=replace_during)
+    )
+
+    assert result is False
+    assert calls["construct"] == 1
+    assert calls["commands"] == []
+    assert calls["fallback"] == []
+    assert calls["state"] == []
+    assert replacement_entry_data["replacement_state"] == "untouched"
+
+
+def test_stale_controller_exception_does_not_fallback_through_replacement():
+    result, calls, _domain_data, _initial_domain_data, replacement_entry_data = (
+        _stale_ac_curtailment_case(
+            "replacement",
+            replace_during="command_exception",
+        )
+    )
+
+    assert result is False
+    assert calls["construct"] == 1
+    assert calls["commands"] == ["curtail"]
+    assert calls["fallback"] == []
+    assert calls["state"] == []
+    assert replacement_entry_data["replacement_state"] == "untouched"
+
+
+@pytest.mark.parametrize("replacement", (False, True))
+def test_should_curtail_live_status_await_does_not_recreate_runtime(replacement):
+    """The smart decision itself must not write after its generation is gone."""
+    entry_id = "entry-id"
+    old_generation = object()
+    replacement_generation = object()
+    old_entry_data = {"aemo_dispatch_generation": old_generation}
+    replacement_entry_data = {
+        "aemo_dispatch_generation": replacement_generation,
+        "replacement_state": "untouched",
+    }
+    domain_data = {entry_id: old_entry_data}
+    hass = SimpleNamespace(data={"power_sync": domain_data})
+    entry = SimpleNamespace(entry_id=entry_id, options={}, data={})
+
+    async def _get_live_status():
+        await asyncio.sleep(0)
+        if replacement:
+            domain_data[entry_id] = replacement_entry_data
+        else:
+            domain_data.pop(entry_id)
+        return {
+            "solar_power": 3958,
+            "battery_power": 5,
+            "grid_power": -2851.2,
+            "load_power": 1112,
+            "battery_soc": 98.9,
+        }
+
+    namespace = {
+        "Any": object,
+        "CONF_INVERTER_RESTORE_SOC": "inverter_restore_soc",
+        "DEFAULT_INVERTER_RESTORE_SOC": 90,
+        "DOMAIN": "power_sync",
+        "aemo_dispatch_generation": old_generation,
+        "_LOGGER": SimpleNamespace(
+            debug=lambda *args, **kwargs: None,
+            info=lambda *args, **kwargs: None,
+        ),
+        "entry": entry,
+        "hass": hass,
+        "get_live_status": _get_live_status,
+        "with_hysteresis": _load_with_hysteresis(),
+    }
+    exec(_function_source("_aemo_dispatch_entry_data"), namespace)
+    exec(textwrap.dedent(_function_source("should_curtail_ac_coupled")), namespace)
+
+    assert asyncio.run(namespace["should_curtail_ac_coupled"](20.09, 0.0)) is False
+    assert domain_data.get(entry_id) is (
+        replacement_entry_data if replacement else None
+    )
+    assert replacement_entry_data["replacement_state"] == "untouched"
+
+
+def _run_fast_load_following_case(kind: str):
+    """Run the extracted timer callback against one generation lifecycle."""
+    entry_id = "entry-id"
+    old_generation = object()
+    replacement_generation = object()
+    controller_calls = []
+    status_calls = []
+    state_calls = []
+
+    async def _curtail(*, home_load_w):
+        controller_calls.append(home_load_w)
+        return True
+
+    controller = SimpleNamespace(curtail=_curtail)
+    live_entry_data = {
+        "aemo_dispatch_generation": old_generation,
+        "inverter_control_mode": "load_following",
+        "inverter_last_state": "curtailed",
+        "inverter_controller": controller,
+        "inverter_power_limit_w": None,
+    }
+    if kind == "stopping":
+        live_entry_data["aemo_dispatch_stopping"] = True
+    replacement_entry_data = {
+        "aemo_dispatch_generation": replacement_generation,
+        "replacement_state": "untouched",
+    }
+    domain_data = {entry_id: live_entry_data}
+    hass = SimpleNamespace(data={"power_sync": domain_data})
+    entry = SimpleNamespace(
+        entry_id=entry_id,
+        options={},
+        data={
+            "ac_inverter_curtailment_enabled": True,
+            "inverter_brand": "sungrow",
+            "inverter_host": "192.0.2.10",
+        },
+    )
+
+    async def _get_live_status():
+        status_calls.append(True)
+        await asyncio.sleep(0)
+        if kind == "replacement":
+            domain_data[entry_id] = replacement_entry_data
+        return {"load_power": 100, "battery_power": 0}
+
+    namespace = {
+        "Any": object,
+        "DOMAIN": "power_sync",
+        "hass": hass,
+        "entry": entry,
+        "aemo_dispatch_generation": old_generation,
+        "_LOGGER": SimpleNamespace(debug=lambda *args, **kwargs: None),
+        "get_live_status": _get_live_status,
+        "_set_inverter_control_state": lambda *args, **kwargs: state_calls.append(args),
+        "datetime": __import__("datetime").datetime,
+        "timedelta": __import__("datetime").timedelta,
+        "INVERTER_CONTROL_MODE_NORMAL": "normal",
+        "INVERTER_CONTROL_MODE_LOAD_FOLLOWING": "load_following",
+        "INVERTER_CONTROL_MODE_SHUTDOWN": "shutdown",
+        "INVERTER_CONTROL_MODE_CURTAILED": "curtailed",
+        "INVERTER_CONTROL_MODES": {"normal", "load_following", "shutdown", "curtailed"},
+    }
+    for constant in (
+        "CONF_AC_INVERTER_CURTAILMENT_ENABLED",
+        "CONF_INVERTER_BRAND",
+        "CONF_INVERTER_HOST",
+    ):
+        namespace[constant] = constant.removeprefix("CONF_").lower()
+
+    exec(_function_source("_aemo_dispatch_entry_data"), namespace)
+    exec(_function_source("fast_load_following_update"), namespace)
+    result = asyncio.run(namespace["fast_load_following_update"](SimpleNamespace(second=0)))
+    return result, status_calls, controller_calls, state_calls, replacement_entry_data
+
+
+@pytest.mark.parametrize("kind", ("stopping", "replacement", "live"))
+def test_fast_load_following_update_generation_fence(kind):
+    result, status_calls, controller_calls, state_calls, replacement_entry_data = (
+        _run_fast_load_following_case(kind)
+    )
+
+    assert result is None
+    assert status_calls == ([] if kind == "stopping" else [True])
+    assert controller_calls == ([100] if kind == "live" else [])
+    assert state_calls == ([('load_following', 100)] if kind == "live" else [])
+    assert replacement_entry_data["replacement_state"] == "untouched"
 
 
 def test_fronius_ac_inverter_uses_load_following_and_fast_refresh():
@@ -355,6 +662,8 @@ def test_ac_coupled_curtails_zero_export_when_exporting_and_battery_not_absorbin
             "battery_soc": 98.9,
         }
 
+    entry_data = {}
+
     namespace = {
         "CONF_INVERTER_RESTORE_SOC": "inverter_restore_soc",
         "DEFAULT_INVERTER_RESTORE_SOC": 90,
@@ -367,6 +676,7 @@ def test_ac_coupled_curtails_zero_export_when_exporting_and_battery_not_absorbin
         "hass": SimpleNamespace(data={}),
         "DOMAIN": "power_sync",
         "with_hysteresis": _load_with_hysteresis(),
+        "_aemo_dispatch_entry_data": lambda: entry_data,
     }
     exec(textwrap.dedent(_function_source("should_curtail_ac_coupled")), namespace)
 
