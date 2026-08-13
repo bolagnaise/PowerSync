@@ -6843,6 +6843,19 @@ class AutoScheduleExecutor:
             if active_charger is not None
             else settings.phases
         )
+        if (
+            active_charger is not None
+            and effective_max_amps < settings.max_charge_amps
+        ):
+            _LOGGER.warning(
+                "Auto-schedule: %s is configured for %dA but its active "
+                "charger currently reports a %dA limit (%s); preserving the "
+                "live limit for planning and commands",
+                vehicle_id,
+                settings.max_charge_amps,
+                effective_max_amps,
+                active_charger["max_charge_amps_source"],
+            )
 
         # Determine mode based on source
         control_battery_target = (
@@ -6887,6 +6900,7 @@ class AutoScheduleExecutor:
             "voltage": effective_voltage,
             "phases": effective_phases,
             "charger_type": charger_type,
+            "require_physical_start_confirmation": charger_type == "tesla",
             "min_battery_soc": settings.get_effective_min_battery_to_start(dt_util.now().weekday()),
             "pause_below_soc": (
                 settings.get_effective_consume_battery_level(dt_util.now().weekday())
@@ -6944,6 +6958,9 @@ class AutoScheduleExecutor:
                 # Note: Notifications are sent by _action_start_ev_charging_dynamic
                 return True
             else:
+                if charger_type == "tesla":
+                    state.current_plan = None
+                    state.current_window = None
                 count, delay = self._record_start_failure(vehicle_id)
                 _LOGGER.warning(
                     "Auto-schedule: Failed to start charging for %s "

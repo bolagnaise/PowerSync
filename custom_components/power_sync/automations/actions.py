@@ -925,6 +925,8 @@ _TESLA_NON_CHARGING_STATES = frozenset(
     }
 )
 _TESLA_RESTART_TELEMETRY_GRACE_SECONDS = 90
+_TESLA_START_CONFIRMATION_TIMEOUT_SECONDS = 90
+_TESLA_START_CONFIRMATION_POLL_SECONDS = 5
 
 
 def _get_tesla_charging_state(
@@ -1011,6 +1013,174 @@ def _tesla_restart_telemetry_pending(state: Dict[str, Any]) -> bool:
     return (
         now - started_at
     ).total_seconds() < _TESLA_RESTART_TELEMETRY_GRACE_SECONDS
+
+
+def _tesla_start_confirmation_entity_ids(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_vin: str,
+    params: Dict[str, Any],
+) -> set[str]:
+    """Return only telemetry entities associated with one Tesla loadpoint."""
+    # Do not trust a caller-supplied state/power entity here. Confirmation is
+    # safety-sensitive and must come from a registry-proven VIN device or the
+    # BLE bridge explicitly paired to this VIN.
+    entity_ids: set[str] = set()
+
+    normalized_vin = str(vehicle_vin or "").upper()
+    if len(normalized_vin) == 17 and normalized_vin.isalnum():
+        entity_registry = er.async_get(hass)
+        device_registry = dr.async_get(hass)
+        for device in device_registry.devices.values():
+            if not any(
+                len(identifier) >= 2
+                and identifier[0] in TESLA_EV_INTEGRATIONS
+                and str(identifier[1]).upper() == normalized_vin
+                for identifier in getattr(device, "identifiers", set())
+            ):
+                continue
+            entity_ids.update(
+                entity.entity_id
+                for entity in entity_registry.entities.values()
+                if entity.device_id == device.id
+            )
+
+    paired_prefix = _resolve_ble_prefix_for_vehicle(
+        hass,
+        config_entry,
+        vehicle_vin,
+    )
+    if paired_prefix:
+        entity_ids.update(
+            {
+                f"sensor.{paired_prefix}_charging_state",
+                f"sensor.{paired_prefix}_charge_current",
+                f"sensor.{paired_prefix}_charger_current",
+                f"sensor.{paired_prefix}_charger_actual_current",
+                f"sensor.{paired_prefix}_charge_power",
+                f"sensor.{paired_prefix}_charger_power",
+            }
+        )
+    return entity_ids
+
+
+def _tesla_physical_charging_snapshot(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_vin: str,
+    params: Dict[str, Any],
+    *,
+    updated_after: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Read VIN-scoped physical charging evidence, excluding control limits."""
+    charging = False
+    measurements: set[str] = set()
+    fresh_measurements: set[str] = set()
+
+    for entity_id in _tesla_start_confirmation_entity_ids(
+        hass,
+        config_entry,
+        vehicle_vin,
+        params,
+    ):
+        state = hass.states.get(entity_id)
+        if state is None:
+            continue
+        value = str(getattr(state, "state", "") or "").strip().lower()
+        if value in {"", "unknown", "unavailable", "none"}:
+            continue
+        entity_id_lower = entity_id.lower()
+        if entity_id.startswith("sensor.") and re.search(
+            r"_(?:charging|charging_state|charge_state)(?:_\d+)?$",
+            entity_id_lower,
+        ):
+            charging = charging or value == "charging"
+            continue
+
+        measurement = None
+        if entity_id.startswith("sensor.") and re.search(
+            r"_(?:charger_current|charge_current|charging_current|"
+            r"charger_actual_current)(?:_\d+)?$",
+            entity_id_lower,
+        ):
+            current = _coerce_positive_float(value)
+            if current is not None and current > 0.5:
+                measurement = f"{entity_id}={current:.1f}A"
+        elif entity_id.startswith("sensor.") and re.search(
+            r"_(?:charger_power|charge_power|charging_power)(?:_\d+)?$",
+            entity_id_lower,
+        ):
+            power_kw, available = _power_state_kw_reading(state)
+            if available and power_kw > _ACTIVE_EV_POWER_EPSILON_KW:
+                measurement = f"{entity_id}={power_kw:.2f}kW"
+
+        if measurement is None:
+            continue
+        measurements.add(measurement)
+        updated_at = getattr(state, "last_updated", None) or getattr(
+            state,
+            "last_changed",
+            None,
+        )
+        if updated_after is not None and _datetime_is_after(
+            updated_at,
+            updated_after,
+        ):
+            fresh_measurements.add(measurement)
+
+    return {
+        "charging": charging,
+        "measurements": frozenset(measurements),
+        "fresh_measurements": frozenset(fresh_measurements),
+    }
+
+
+async def _wait_for_tesla_physical_start(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_vin: str,
+    params: Dict[str, Any],
+    baseline: Dict[str, Any],
+    command_started_at: datetime,
+    *,
+    timeout_seconds: int = _TESLA_START_CONFIRMATION_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
+    """Wait for fresh VIN-scoped charging state plus measured draw."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0, timeout_seconds)
+    while True:
+        snapshot = _tesla_physical_charging_snapshot(
+            hass,
+            config_entry,
+            vehicle_vin,
+            params,
+            updated_after=command_started_at,
+        )
+        state_transitioned = (
+            snapshot["charging"] and not baseline.get("charging", False)
+        )
+        measurement_appeared = bool(
+            snapshot["measurements"] - baseline.get("measurements", frozenset())
+        )
+        measurement_refreshed = bool(snapshot["fresh_measurements"])
+        if (
+            snapshot["charging"]
+            and snapshot["measurements"]
+            and (
+                state_transitioned
+                or measurement_appeared
+                or measurement_refreshed
+            )
+        ):
+            evidence = ", ".join(sorted(snapshot["measurements"]))
+            return True, evidence
+
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False, "no fresh VIN-scoped charging state and measured draw"
+        await asyncio.sleep(
+            min(_TESLA_START_CONFIRMATION_POLL_SECONDS, remaining)
+        )
 
 
 def _effective_ev_power_kw(
@@ -4357,19 +4527,22 @@ async def _action_stop_ev_charging(
     Also cancels any scheduled stop from stop_outside_window.
     """
     entry_id = config_entry.entry_id
+    charger_type = params.get("charger_type", "tesla")
+    force_tesla_stop_request = bool(
+        charger_type == "tesla"
+        and params.get("_force_tesla_stop_request")
+    )
 
     # Cancel any scheduled stop
-    if entry_id in _ev_scheduled_stop:
+    if not force_tesla_stop_request and entry_id in _ev_scheduled_stop:
         cancel_func = _ev_scheduled_stop[entry_id].get("cancel")
         if cancel_func:
             cancel_func()
             _LOGGER.debug("Cancelled scheduled EV charging stop")
         del _ev_scheduled_stop[entry_id]
 
-    charger_type = params.get("charger_type", "tesla")
-
     owner_mode = params.get("owner_mode") or params.get("dynamic_mode")
-    if charger_type == "tesla" and owner_mode:
+    if charger_type == "tesla" and owner_mode and not force_tesla_stop_request:
         from .ev_ownership import owner_family
 
         if owner_family(owner_mode) != "manual":
@@ -4438,7 +4611,7 @@ async def _action_stop_ev_charging(
     charging_entity = await _get_tesla_ev_entity(
         hass, r"sensor\..*_charging(?:_\d+)?$", vehicle_vin
     )
-    if charging_entity:
+    if charging_entity and not force_tesla_stop_request:
         charging_state = hass.states.get(charging_entity)
         if charging_state and charging_state.state not in ("unavailable", "unknown"):
             state_lower = charging_state.state.lower()
@@ -9850,14 +10023,43 @@ async def _action_start_ev_charging_dynamic_locked(
                     )
                     return False
 
+            require_physical_confirmation = bool(
+                params.get("require_physical_start_confirmation")
+                and charger_type == "tesla"
+            )
+            confirmation_baseline = None
+            already_physically_charging = False
+            command_started_at = None
+            if require_physical_confirmation:
+                confirmation_baseline = _tesla_physical_charging_snapshot(
+                    hass,
+                    config_entry,
+                    vehicle_id,
+                    params,
+                )
+                already_physically_charging = bool(
+                    confirmation_baseline["charging"]
+                    and confirmation_baseline["measurements"]
+                )
+                command_started_at = datetime.now().astimezone()
+
             start_params = dict(params)
             start_params["amps"] = start_amps
-            start_success = await _action_start_ev_charging(
-                hass,
-                config_entry,
-                start_params,
-                context,
-            )
+            if already_physically_charging:
+                start_success = True
+                _LOGGER.info(
+                    "Dynamic EV: %s was already physically charging; "
+                    "recovering it into the managed %s session",
+                    vehicle_id,
+                    owner_mode,
+                )
+            else:
+                start_success = await _action_start_ev_charging(
+                    hass,
+                    config_entry,
+                    start_params,
+                    context,
+                )
             if not start_success:
                 _LOGGER.info("Dynamic EV: Could not start EV charging (vehicle may be disconnected)")
                 record_ev_command(
@@ -9879,6 +10081,97 @@ async def _action_start_ev_charging_dynamic_locked(
                 if not amps_success:
                     # This is expected - Tesla reports lower max amps until charging actually starts
                     _LOGGER.debug(f"Dynamic EV: Could not set initial amps to {start_amps}A (will adjust once charging starts)")
+
+            if require_physical_confirmation:
+                if already_physically_charging:
+                    confirmed = True
+                    evidence = ", ".join(
+                        sorted(confirmation_baseline["measurements"])
+                    )
+                else:
+                    confirmed, evidence = await _wait_for_tesla_physical_start(
+                        hass,
+                        config_entry,
+                        vehicle_id,
+                        params,
+                        confirmation_baseline or {},
+                        command_started_at or datetime.now().astimezone(),
+                    )
+                if not confirmed:
+                    stop_success = await _action_stop_ev_charging(
+                        hass,
+                        config_entry,
+                        {
+                            **params,
+                            "vehicle_id": vehicle_id,
+                            "vehicle_vin": vehicle_id,
+                            # A normal automated Tesla stop deliberately skips
+                            # vehicles reported stopped or away. This request
+                            # reconciles an accepted start whose telemetry may
+                            # be stale, so it must reach the exact-VIN command
+                            # path instead of trusting those suppressors.
+                            "_force_tesla_stop_request": True,
+                        },
+                    )
+                    stop_outcome = (
+                        "accepted"
+                        if stop_success
+                        else "failed or was not accepted"
+                    )
+                    reason = (
+                        "start request accepted but physical charging was not "
+                        f"confirmed: {evidence}; compensating stop request "
+                        f"{stop_outcome}"
+                    )
+                    _LOGGER.warning(
+                        "Dynamic EV: %s for %s; no timer, session, or ownership "
+                        "was created",
+                        reason,
+                        vehicle_id,
+                    )
+                    record_ev_command(
+                        hass,
+                        config_entry,
+                        vehicle_id,
+                        command=f"start_{owner_mode}",
+                        success=False,
+                        reason=reason,
+                    )
+                    return False
+                _LOGGER.info(
+                    "Dynamic EV: Confirmed physical Tesla charging for %s (%s)",
+                    vehicle_id,
+                    evidence,
+                )
+                still_allowed, _lease_id, _lease, block_reason = (
+                    can_claim_ev_ownership(
+                        hass,
+                        config_entry,
+                        vehicle_id,
+                        owner_mode=owner_mode,
+                        allow_takeover=allow_takeover,
+                    )
+                )
+                if not still_allowed:
+                    reason = (
+                        block_reason
+                        or "another EV mode claimed the loadpoint during start confirmation"
+                    )
+                    _LOGGER.info(
+                        "Dynamic EV: Physical charging confirmed for %s but %s; "
+                        "leaving charging command-neutral",
+                        vehicle_id,
+                        reason,
+                    )
+                    record_ev_command(
+                        hass,
+                        config_entry,
+                        vehicle_id,
+                        command=f"start_{owner_mode}",
+                        success=False,
+                        reason=reason,
+                    )
+                    return False
 
     # Create the periodic update callback for this vehicle
     async def periodic_update(now) -> None:

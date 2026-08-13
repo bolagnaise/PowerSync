@@ -4774,6 +4774,97 @@ def test_auto_schedule_deadline_uses_vehicle_max_amps(monkeypatch, fake_actions)
     assert params["allow_stale_entity_max_override"] is False
 
 
+def test_auto_schedule_deadline_preserves_lower_active_tesla_limit(
+    monkeypatch,
+    fake_actions,
+    caplog,
+):
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: SimpleNamespace(weekday=lambda: 0),
+    )
+
+    executor = ev_planner.AutoScheduleExecutor(
+        _FakeHass(),
+        _FakeConfigEntry(),
+        planner=SimpleNamespace(),
+    )
+    executor._resolve_effective_charger_capability = AsyncMock(
+        return_value={
+            "association_known": True,
+            "capability_known": True,
+            "max_charge_amps": 15,
+            "max_charge_amps_source": "active_charger",
+            "voltage": 230,
+            "phases": 1,
+        }
+    )
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id=VIN,
+        display_name="Model 3",
+        max_charge_amps=32,
+        limit_grid_import=False,
+    )
+    state = ev_planner.AutoScheduleState(vehicle_id=VIN)
+
+    with caplog.at_level("WARNING"):
+        assert asyncio.run(
+            executor._start_charging(
+                VIN,
+                settings,
+                state,
+                "grid_deadline",
+                force_max_rate=True,
+            )
+        ) is True
+
+    params = fake_actions._action_start_ev_charging_dynamic.await_args.args[2]
+    assert params["max_charge_amps"] == 15
+    assert params["start_amps"] == 15
+    assert params["fixed_charge_amps"] == 15
+    assert "configured for 32A" in caplog.text
+    assert "reports a 15A limit" in caplog.text
+
+
+def test_auto_schedule_unconfirmed_tesla_start_replans_and_uses_backoff(
+    monkeypatch,
+    fake_actions,
+):
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: SimpleNamespace(weekday=lambda: 0),
+    )
+
+    executor = ev_planner.AutoScheduleExecutor(
+        _FakeHass(),
+        _FakeConfigEntry(),
+        planner=SimpleNamespace(),
+    )
+    settings = ev_planner.AutoScheduleSettings(vehicle_id=VIN, display_name="Model 3")
+    state = ev_planner.AutoScheduleState(vehicle_id=VIN)
+    state.current_plan = object()
+    state.current_window = object()
+
+    assert asyncio.run(
+        executor._start_charging(VIN, settings, state, "grid_deadline")
+    ) is False
+    params = fake_actions._action_start_ev_charging_dynamic.await_args.args[2]
+    assert params["require_physical_start_confirmation"] is True
+    assert state.is_charging is False
+    assert state.current_plan is None
+    assert state.current_window is None
+    assert executor._start_failure_state[VIN][0] == 1
+
+    assert asyncio.run(
+        executor._start_charging(VIN, settings, state, "grid_deadline")
+    ) is False
+    assert fake_actions._action_start_ev_charging_dynamic.await_count == 1
+
+
 def test_auto_schedule_rate_update_is_blocked_when_vehicle_moved_away(
     monkeypatch,
     fake_actions,

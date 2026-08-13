@@ -106,6 +106,7 @@ def _reset_ev_action_module_state():
         actions._dynamic_ev_state,
         actions._dynamic_ev_update_locks,
         actions._ev_wake_lock,
+        actions._ev_scheduled_stop,
     )
     for state in mutable_state:
         state.clear()
@@ -122,11 +123,13 @@ class _State:
         attributes: dict | None = None,
         *,
         last_changed: datetime | None = None,
+        last_updated: datetime | None = None,
     ) -> None:
         self.entity_id = entity_id
         self.state = state
         self.attributes = attributes or {}
         self.last_changed = last_changed
+        self.last_updated = last_updated or last_changed
 
 
 class _States:
@@ -378,6 +381,330 @@ def test_tesla_active_charger_capability_rejects_conflicting_sources_and_unknown
     assert unknown["max_charge_amps"] == 5
 
 
+def _tesla_confirmation_hass():
+    vin_a = "5YJTEST00000000A1"
+    vin_b = "5YJTEST00000000B2"
+    states = [
+        _State("sensor.car_a_charging", "stopped"),
+        _State("sensor.car_a_charger_actual_current", "0", {"unit_of_measurement": "A"}),
+        _State("switch.car_a_charge", "off"),
+        _State("sensor.car_b_charging", "charging"),
+        _State("sensor.car_b_charger_actual_current", "15", {"unit_of_measurement": "A"}),
+    ]
+    registry_entities = {
+        state.entity_id: SimpleNamespace(
+            entity_id=state.entity_id,
+            device_id="car-a" if "car_a" in state.entity_id else "car-b",
+        )
+        for state in states
+    }
+    registry_devices = {
+        "car-a": SimpleNamespace(
+            id="car-a",
+            identifiers={("tesla_fleet", vin_a)},
+        ),
+        "car-b": SimpleNamespace(
+            id="car-b",
+            identifiers={("tesla_fleet", vin_b)},
+        ),
+    }
+    return _Hass(states, registry_entities, registry_devices), vin_a, vin_b
+
+
+def test_tesla_physical_start_requires_fresh_state_and_measured_draw():
+    hass, vin_a, _vin_b = _tesla_confirmation_hass()
+    command_started_at = datetime.now(timezone.utc)
+    baseline = actions._tesla_physical_charging_snapshot(
+        hass,
+        _Entry(),
+        vin_a,
+        {},
+    )
+
+    # A start-control switch changing to on is not measured charging evidence.
+    hass.states.get("switch.car_a_charge").state = "on"
+    hass.states.get("sensor.car_a_charging").state = "charging"
+    no_draw = asyncio.run(
+        actions._wait_for_tesla_physical_start(
+            hass,
+            _Entry(),
+            vin_a,
+            {},
+            baseline,
+            command_started_at,
+            timeout_seconds=0,
+        )
+    )
+    assert no_draw[0] is False
+
+    # Fresh VIN-scoped actual current plus the charging-state transition proves
+    # the vehicle physically started; the 15A value is observation, not a cap
+    # override or proof that PowerSync set the limit.
+    actual_current = hass.states.get("sensor.car_a_charger_actual_current")
+    actual_current.state = "15"
+    actual_current.last_updated = command_started_at + timedelta(seconds=1)
+    confirmed = asyncio.run(
+        actions._wait_for_tesla_physical_start(
+            hass,
+            _Entry(),
+            vin_a,
+            {},
+            baseline,
+            command_started_at,
+            timeout_seconds=0,
+        )
+    )
+    assert confirmed[0] is True
+    assert "15.0A" in confirmed[1]
+
+
+def test_tesla_physical_start_rejects_stale_and_other_vin_telemetry():
+    hass, vin_a, vin_b = _tesla_confirmation_hass()
+    command_started_at = datetime.now(timezone.utc)
+
+    # VIN B is actively drawing 15A, but cannot confirm VIN A's start.
+    baseline_a = actions._tesla_physical_charging_snapshot(
+        hass,
+        _Entry(),
+        vin_a,
+        {},
+    )
+    other_vin = asyncio.run(
+        actions._wait_for_tesla_physical_start(
+            hass,
+            _Entry(),
+            vin_a,
+            {"tesla_charging_state_entity": "sensor.car_b_charging"},
+            baseline_a,
+            command_started_at,
+            timeout_seconds=0,
+        )
+    )
+    assert other_vin[0] is False
+
+    # An unchanged pre-command charging/current record is stale evidence until
+    # one of its VIN-scoped measurements refreshes after this request.
+    baseline_b = actions._tesla_physical_charging_snapshot(
+        hass,
+        _Entry(),
+        vin_b,
+        {},
+    )
+    stale = asyncio.run(
+        actions._wait_for_tesla_physical_start(
+            hass,
+            _Entry(),
+            vin_b,
+            {},
+            baseline_b,
+            command_started_at,
+            timeout_seconds=0,
+        )
+    )
+    assert stale[0] is False
+
+
+def test_unconfirmed_tesla_dynamic_start_creates_no_runtime_or_ownership(
+    monkeypatch,
+):
+    vin = "5YJTEST00000000A1"
+    timer_calls: list[tuple] = []
+    stop_calls: list[dict] = []
+
+    async def active_capability(*args, **kwargs):
+        return {
+            "association_known": True,
+            "capability_known": True,
+            "max_charge_amps": 15,
+            "max_charge_amps_source": "active_charger",
+            "voltage": 230,
+            "phases": 1,
+        }
+
+    async def none_result(*args, **kwargs):
+        return None
+
+    async def true_result(*args, **kwargs):
+        return True
+
+    async def unconfirmed_result(*args, **kwargs):
+        return False, "no fresh VIN-scoped charging state and measured draw"
+
+    async def record_stop(_hass, _entry, params, *_args, **_kwargs):
+        stop_calls.append(params)
+        return True
+
+    monkeypatch.setattr(
+        actions,
+        "_resolve_tesla_active_charger_capability",
+        active_capability,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_resolve_tesla_charge_current_entity",
+        none_result,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_tesla_vehicle_away_location",
+        none_result,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_action_start_ev_charging",
+        true_result,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_set_vehicle_amps",
+        true_result,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_wait_for_tesla_physical_start",
+        unconfirmed_result,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_action_stop_ev_charging",
+        record_stop,
+    )
+    monkeypatch.setattr(
+        actions,
+        "async_track_time_interval",
+        lambda *args, **kwargs: timer_calls.append((args, kwargs)),
+    )
+
+    hass = _Hass([])
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_id": vin,
+                "vehicle_vin": vin,
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "min_charge_amps": 5,
+                "max_charge_amps": 15,
+                "fixed_charge_amps": 15,
+                "require_physical_start_confirmation": True,
+            },
+        )
+    )
+
+    assert result is False
+    assert actions._dynamic_ev_state == {}
+    assert timer_calls == []
+    assert len(stop_calls) == 1
+    assert stop_calls[0]["vehicle_id"] == vin
+    assert stop_calls[0]["vehicle_vin"] == vin
+    assert stop_calls[0]["_force_tesla_stop_request"] is True
+    assert hass.data["power_sync"]["entry-1"].get("ev_ownership") in (None, {})
+    command = hass.data["power_sync"]["entry-1"]["ev_last_command"][vin]
+    assert command["success"] is False
+    assert "physical charging was not confirmed" in command["reason"]
+    assert "compensating stop request accepted" in command["reason"]
+
+
+def test_already_charging_tesla_is_recovered_without_restart_or_stop(
+    monkeypatch,
+):
+    vin = "5YJTEST00000000A1"
+    timer_calls: list[tuple] = []
+    start_calls: list[tuple] = []
+    stop_calls: list[tuple] = []
+
+    async def active_capability(*args, **kwargs):
+        return {
+            "association_known": True,
+            "capability_known": True,
+            "max_charge_amps": 15,
+            "max_charge_amps_source": "active_charger",
+            "voltage": 230,
+            "phases": 1,
+        }
+
+    async def none_result(*args, **kwargs):
+        return None
+
+    async def true_result(*args, **kwargs):
+        return True
+
+    async def unexpected_start(*args, **kwargs):
+        start_calls.append((args, kwargs))
+        return True
+
+    async def unexpected_stop(*args, **kwargs):
+        stop_calls.append((args, kwargs))
+        return True
+
+    async def unexpected_wait(*args, **kwargs):
+        raise AssertionError("already-active telemetry must not wait for a transition")
+
+    monkeypatch.setattr(
+        actions,
+        "_resolve_tesla_active_charger_capability",
+        active_capability,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_resolve_tesla_charge_current_entity",
+        none_result,
+    )
+    monkeypatch.setattr(actions, "_tesla_vehicle_away_location", none_result)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", unexpected_start)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", unexpected_stop)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", true_result)
+    monkeypatch.setattr(
+        actions,
+        "_tesla_physical_charging_snapshot",
+        lambda *args, **kwargs: {
+            "charging": True,
+            "measurements": frozenset({"sensor.car_a_charger_current=15.0A"}),
+            "fresh_measurements": frozenset(),
+        },
+    )
+    monkeypatch.setattr(
+        actions,
+        "_wait_for_tesla_physical_start",
+        unexpected_wait,
+    )
+    monkeypatch.setattr(
+        actions,
+        "async_track_time_interval",
+        lambda *args, **kwargs: timer_calls.append((args, kwargs)),
+    )
+
+    hass = _Hass([])
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_id": vin,
+                "vehicle_vin": vin,
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "min_charge_amps": 5,
+                "max_charge_amps": 15,
+                "fixed_charge_amps": 15,
+                "require_physical_start_confirmation": True,
+            },
+        )
+    )
+
+    assert result is True
+    assert start_calls == []
+    assert stop_calls == []
+    assert len(timer_calls) == 1
+    assert actions._dynamic_ev_state["entry-1"][vin]["active"] is True
+    ownership = hass.data["power_sync"]["entry-1"]["ev_ownership"]
+    assert ownership[vin]["owner_mode"] == "smart_schedule"
+
+
 def test_dynamic_tesla_capability_tracks_selected_current_and_state_in_both_mode(
     monkeypatch,
 ):
@@ -591,6 +918,74 @@ def test_tesla_stop_accepts_numbered_teslemetry_charge_switch(monkeypatch):
     assert result is True
     assert hass.services.calls == [
         ("switch", "turn_off", {"entity_id": "switch.charge_2"})
+    ]
+
+
+def test_tesla_reconciliation_stop_bypasses_stale_stopped_and_away_guards(
+    monkeypatch,
+):
+    vin_a = "5YJTEST00000000A1"
+    vin_b = "5YJTEST00000000B2"
+    states = [
+        _State("sensor.car_a_charging", "stopped"),
+        _State("switch.car_a_charge", "on"),
+        _State("sensor.car_b_charging", "charging"),
+        _State("switch.car_b_charge", "on"),
+    ]
+    hass = _Hass(
+        states,
+        registry_entities={
+            state.entity_id: SimpleNamespace(
+                entity_id=state.entity_id,
+                device_id="car-a" if "car_a" in state.entity_id else "car-b",
+            )
+            for state in states
+        },
+        registry_devices={
+            "car-a": SimpleNamespace(
+                id="car-a",
+                name="Car A",
+                identifiers={("tesla_fleet", vin_a)},
+            ),
+            "car-b": SimpleNamespace(
+                id="car-b",
+                name="Car B",
+                identifiers={("tesla_fleet", vin_b)},
+            ),
+        },
+    )
+    _install_away_location_module(monkeypatch, "remote_charger")
+    wake_calls: list[str] = []
+    cancelled_stops: list[str] = []
+    actions._ev_scheduled_stop["entry-1"] = {
+        "cancel": lambda: cancelled_stops.append(vin_b),
+        "vehicle_vin": vin_b,
+    }
+
+    async def wake_success(_hass, vehicle_vin):
+        wake_calls.append(vehicle_vin)
+        return True
+
+    monkeypatch.setattr(actions, "_wake_tesla_ev", wake_success)
+    params = {
+        "charger_type": "tesla",
+        "vehicle_id": vin_a,
+        "vehicle_vin": vin_a,
+        "owner_mode": "smart_schedule",
+        "dynamic_mode": "battery_target",
+        "_force_tesla_stop_request": True,
+    }
+
+    result = asyncio.run(
+        actions._action_stop_ev_charging(hass, _tesla_entry(), params)
+    )
+
+    assert result is True
+    assert wake_calls == [vin_a]
+    assert cancelled_stops == []
+    assert actions._ev_scheduled_stop["entry-1"]["vehicle_vin"] == vin_b
+    assert hass.services.calls == [
+        ("switch", "turn_off", {"entity_id": "switch.car_a_charge"})
     ]
 
 
