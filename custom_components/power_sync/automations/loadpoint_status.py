@@ -560,12 +560,14 @@ def _loadpoint_status(
     commanded_amps: int,
     paused: bool,
 ) -> str:
+    # Measured charger power/state is authoritative over a stale controller
+    # pause marker during ownership or command acknowledgement handoffs.
+    if actually_charging:
+        return "charging"
     if paused:
         return "paused"
     if commanded_amps > 0 and not actually_charging:
         return "commanded_no_power"
-    if actually_charging:
-        return "charging"
     if connected:
         return "connected_idle"
     return "idle"
@@ -812,7 +814,11 @@ def _dynamic_loadpoint(
 
     paused = bool(state.get("paused", False))
     status = _loadpoint_status(connected, actually_charging, current_amps, paused)
-    blocking_reason = state.get("paused_reason") or state.get("reason") or None
+    blocking_reason = (
+        state.get("reason") or None
+        if actually_charging
+        else state.get("paused_reason") or state.get("reason") or None
+    )
     if status == "commanded_no_power" and not blocking_reason:
         blocking_reason = f"Commanded {current_amps}A but no measured charge power"
 

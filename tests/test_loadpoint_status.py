@@ -1064,6 +1064,76 @@ def test_generic_charger_observation_uses_measured_power():
     assert loadpoints[0]["soc"] == 69
 
 
+def test_measured_charging_suppresses_stale_waiting_reason():
+    loadpoints = build_loadpoint_status(
+        {
+            "generic_ev": {
+                "active": True,
+                "current_amps": 32,
+                "target_amps": 32,
+                "charging_started": False,
+                "paused": True,
+                "paused_reason": (
+                    "Waiting for battery to reach 95% (currently 75%)"
+                ),
+                "reason": "",
+                "params": {
+                    "dynamic_mode": "solar_surplus",
+                    "owner_mode": "smart_schedule_solar_surplus",
+                    "charger_type": "generic",
+                    "voltage": 230,
+                    "phases": 1,
+                },
+            }
+        },
+        [
+            build_generic_charger_observation(
+                vehicle_id="generic_ev",
+                switch_state="on",
+                amps_value="32",
+                status_state="charging",
+                power_value="6900",
+            )
+        ],
+    )
+
+    assert loadpoints[0]["actual_charging"] is True
+    assert loadpoints[0]["status"] == "charging"
+    assert loadpoints[0]["blocking_reason"] is None
+
+
+def test_measured_charging_retains_non_pause_runtime_reason():
+    loadpoints = build_loadpoint_status(
+        {
+            "generic_ev": {
+                "active": True,
+                "current_amps": 32,
+                "paused": True,
+                "paused_reason": "Waiting for battery to reach 95%",
+                "reason": "Latest charger command was not acknowledged",
+                "params": {
+                    "dynamic_mode": "solar_surplus",
+                    "owner_mode": "smart_schedule_solar_surplus",
+                    "charger_type": "generic",
+                },
+            }
+        },
+        [
+            build_generic_charger_observation(
+                vehicle_id="generic_ev",
+                status_state="charging",
+                power_value="6900",
+            )
+        ],
+    )
+
+    assert loadpoints[0]["status"] == "charging"
+    assert (
+        loadpoints[0]["blocking_reason"]
+        == "Latest charger command was not acknowledged"
+    )
+
+
 def test_generic_charger_loadpoint_uses_fallback_soc_value():
     hass = _Hass({
         "sensor.primary_soc": _State("unknown"),

@@ -7158,7 +7158,6 @@ def _refresh_solar_surplus_runtime_params(
         return params
 
     config = normalize_solar_surplus_config(raw_config)
-    min_battery_soc = get_solar_surplus_min_battery_soc(config)
     params.update(
         {
             "household_buffer_kw": config.get("household_buffer_kw", 0.5),
@@ -7166,12 +7165,22 @@ def _refresh_solar_surplus_runtime_params(
             "sustained_surplus_minutes": config.get("sustained_surplus_minutes", 2),
             "stop_delay_minutes": config.get("stop_delay_minutes", 5),
             "dual_vehicle_strategy": config.get("dual_vehicle_strategy", "priority_first"),
-            "min_battery_soc": min_battery_soc,
-            "pause_below_soc": max(0, min_battery_soc - 10),
             "allow_parallel_charging": config.get("allow_parallel_charging", False),
             "max_battery_charge_rate_kw": config.get("max_battery_charge_rate_kw", 5.0),
         }
     )
+    # Smart Schedule supplies the home-battery floor for its solar-surplus
+    # handoff. Do not let the standalone Solar Surplus store (including a
+    # disabled/stale value) overwrite that policy on the next update tick.
+    if params.get("owner_mode") != "smart_schedule_solar_surplus":
+        min_battery_soc = get_solar_surplus_min_battery_soc(config)
+        params.update(
+            {
+                "home_battery_minimum": min_battery_soc,
+                "min_battery_soc": min_battery_soc,
+                "pause_below_soc": max(0, min_battery_soc - 10),
+            }
+        )
     return params
 
 
@@ -9490,13 +9499,78 @@ async def _action_start_ev_charging_dynamic_locked(
             and _same_loadpoint(vid)
             and v_state.get("params", {}).get("dynamic_mode") == dynamic_mode
         ):
+            existing_params = v_state.setdefault("params", {})
+            existing_owner_mode = (
+                existing_params.get("owner_mode")
+                or existing_params.get("dynamic_mode")
+                or dynamic_mode
+            )
+
+            # A duplicate start from the same business owner is idempotent.
+            # A different owner using the same dynamic control mode refreshes
+            # the existing controller in place. Keep this command-neutral so a
+            # policy handoff cannot interrupt an EV that is already charging.
+            if owner_family(existing_owner_mode) != owner_family(owner_mode):
+                if can_take_over_ev_ownership(
+                    existing_owner_mode,
+                    owner_mode,
+                    allow_takeover=allow_takeover,
+                ):
+                    # Carry only explicitly supplied policy onto the live
+                    # controller. Shared Solar Surplus controls that Smart
+                    # Schedule does not provide must retain their current
+                    # values until the normal persisted-config refresh.
+                    existing_params.update(
+                        {
+                            key: value
+                            for key, value in params.items()
+                            if key != "allow_ownership_takeover"
+                        }
+                    )
+                    if dynamic_mode == "solar_surplus":
+                        previous_floor = get_solar_surplus_min_battery_soc(
+                            existing_params
+                        )
+                        incoming_floor = get_solar_surplus_min_battery_soc(
+                            params,
+                            previous_floor,
+                        )
+                        existing_params["home_battery_minimum"] = incoming_floor
+                        existing_params["min_battery_soc"] = incoming_floor
+                        existing_params["pause_below_soc"] = params.get(
+                            "pause_below_soc",
+                            max(0, incoming_floor - 10),
+                        )
+                    existing_params["owner_mode"] = owner_mode
+                    v_state["paused"] = False
+                    v_state["paused_reason"] = None
+                    v_state["parallel_charging_mode"] = False
+                    v_state["reason"] = ""
+                    v_state["ownership"] = claim_ev_ownership(
+                        hass,
+                        config_entry,
+                        vid,
+                        owner_mode=owner_mode,
+                        session_id=v_state.get("session_id"),
+                        reason=None,
+                        command=f"update_{owner_mode}",
+                        extra={
+                            "charger_type": existing_params.get(
+                                "charger_type", "tesla"
+                            )
+                        },
+                    )
+                    _LOGGER.info(
+                        "Dynamic session (%s) for %s updated in place for owner %s "
+                        "(previously %s)",
+                        dynamic_mode,
+                        vid,
+                        owner_mode,
+                        existing_owner_mode,
+                    )
+                return True
+
             if vid == vehicle_id:
-                existing_params = v_state.setdefault("params", {})
-                existing_owner_mode = (
-                    existing_params.get("owner_mode")
-                    or existing_params.get("dynamic_mode")
-                    or dynamic_mode
-                )
                 if can_take_over_ev_ownership(
                     existing_owner_mode,
                     owner_mode,
@@ -9517,12 +9591,6 @@ async def _action_start_ev_charging_dynamic_locked(
                 return True
             # _default overlaps with any VIN (single-vehicle setup)
             if vid == DEFAULT_VEHICLE_ID or vehicle_id == DEFAULT_VEHICLE_ID:
-                existing_params = v_state.setdefault("params", {})
-                existing_owner_mode = (
-                    existing_params.get("owner_mode")
-                    or existing_params.get("dynamic_mode")
-                    or dynamic_mode
-                )
                 if can_take_over_ev_ownership(
                     existing_owner_mode,
                     owner_mode,
