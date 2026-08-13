@@ -151,6 +151,7 @@ class BatteryControllerWrapper:
         power_w: float = 5000,
         _extend_hardware: bool = False,
         _tariff_duration: int | None = None,
+        battery_discharge_w: float | None = None,
     ) -> bool:
         """
         Command battery to discharge.
@@ -169,6 +170,8 @@ class BatteryControllerWrapper:
             _LOGGER.info(f"🔋 Optimizer: Force discharge {duration_minutes}min at {power_w}W")
 
             service_data = {"duration": duration_minutes, "power_w": power_w, "source": "optimizer"}
+            if self.battery_system == "solax" and battery_discharge_w is not None:
+                service_data["battery_discharge_w"] = battery_discharge_w
             if _extend_hardware:
                 service_data["_extend_hardware"] = True
             if _tariff_duration is not None:

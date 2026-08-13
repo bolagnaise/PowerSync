@@ -27240,6 +27240,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "hardware_expires_at": None,
         "duration": None,
         "power_w": 0,
+        "battery_discharge_w": 0,
         "cancel_expiry_timer": None,
         "_skip_backup_reserve_restore": False,
     }
@@ -27682,6 +27683,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "hardware_expires_at": force_discharge_state["hardware_expires_at"].isoformat() if force_discharge_state.get("hardware_expires_at") else None,
                 "duration": force_discharge_state.get("duration"),
                 "power_w": _coerce_force_power_w(force_discharge_state.get("power_w", 0)),
+                "battery_discharge_w": _coerce_force_power_w(
+                    force_discharge_state.get("battery_discharge_w", 0)
+                ),
                 "source": force_discharge_state.get("source", "user"),
                 "saved_tariff": _select_restorable_tesla_tariff(force_discharge_state["saved_tariff"]),
                 "saved_operation_mode": force_discharge_state["saved_operation_mode"],
@@ -27877,6 +27881,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             persisted_source = persisted_force_state.get("source", "user")
             persisted_power_w = _coerce_force_power_w(
                 persisted_force_state.get("power_w", 0)
+            )
+            persisted_battery_discharge_w = _coerce_force_power_w(
+                persisted_force_state.get("battery_discharge_w", 0)
             )
 
             if mode == "self_consumption":
@@ -28308,6 +28315,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state["hardware_expires_at"] = hardware_expires_at
                     force_discharge_state["duration"] = persisted_force_state.get("duration", int(remaining_minutes))
                     force_discharge_state["power_w"] = persisted_power_w
+                    force_discharge_state["battery_discharge_w"] = (
+                        persisted_battery_discharge_w
+                    )
                     force_discharge_state["source"] = persisted_force_state.get("source", "user")
                     force_discharge_state["saved_tariff"] = _select_restorable_tesla_tariff(
                         persisted_force_state.get("saved_tariff"),
@@ -29303,6 +29313,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "discharge",
             call.data.get("power_w", 0),
         )
+        requested_export_power_w = command_power_w
+        requested_battery_discharge_w = (
+            _coerce_force_power_w(call.data.get("battery_discharge_w", 0))
+            if source == "optimizer"
+            else 0
+        )
+        solax_home_discharge_w = max(
+            0,
+            requested_battery_discharge_w - requested_export_power_w,
+        )
         raw_tariff_duration = call.data.get("_tariff_duration")
 
         # Convert to int if string (from HA service selector or button-card)
@@ -29670,6 +29690,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         force_discharge_state["source"] = source
         force_discharge_state["duration"] = duration
         force_discharge_state["power_w"] = command_power_w
+        force_discharge_state["battery_discharge_w"] = (
+            solax_home_discharge_w + command_power_w
+            if requested_battery_discharge_w > 0
+            else 0
+        )
 
         # Check if this is a Sigenergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
@@ -30016,10 +30041,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 power_w = command_power_w
-                discharge_result = await _guarded_force_discharge_write(
-                    lambda guarded_w: solax_coord.force_discharge(
-                        duration, power_w=guarded_w
+                async def _write_solax_discharge(guarded_w: float) -> bool:
+                    total_discharge_w = (
+                        solax_home_discharge_w + guarded_w
+                        if requested_battery_discharge_w > 0
+                        else None
                     )
+                    result = await solax_coord.force_discharge(
+                        duration,
+                        power_w=guarded_w,
+                        battery_discharge_w=total_discharge_w,
+                    )
+                    if result:
+                        force_discharge_state["battery_discharge_w"] = (
+                            total_discharge_w or 0
+                        )
+                    return bool(result)
+
+                discharge_result = await _guarded_force_discharge_write(
+                    _write_solax_discharge
                 )
 
                 if discharge_result:

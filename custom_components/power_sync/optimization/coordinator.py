@@ -7355,6 +7355,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self,
         battery: Any,
         requested_w: float,
+        total_battery_discharge_w: float | None = None,
         **command_kwargs: Any,
     ) -> tuple[bool, float]:
         """Issue one export-increasing write through the centralized guard.
@@ -7369,9 +7370,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         async def _writer(power_w: float) -> bool:
             nonlocal applied_w
             applied_w = max(0.0, float(power_w))
+            writer_kwargs = dict(command_kwargs)
+            if (
+                self.battery_system == "solax"
+                and total_battery_discharge_w is not None
+            ):
+                home_discharge_w = max(
+                    0.0,
+                    float(total_battery_discharge_w) - max(0.0, float(requested_w)),
+                )
+                writer_kwargs["battery_discharge_w"] = (
+                    home_discharge_w + applied_w
+                )
             result = await battery.force_discharge(
                 power_w=applied_w,
-                **command_kwargs,
+                **writer_kwargs,
             )
             return result is not False
 
@@ -8412,6 +8425,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     await self._force_discharge_through_export_guard(
                                         battery,
                                         force_power_w,
+                                        total_battery_discharge_w=(
+                                            getattr(
+                                                force_window_action,
+                                                "battery_discharge_w",
+                                                None,
+                                            )
+                                            if self.battery_system == "solax"
+                                            else None
+                                        ),
                                         duration_minutes=extend_mins,
                                         _extend_hardware=True,
                                         _tariff_duration=tariff_mins,
@@ -9148,6 +9170,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         await self._force_discharge_through_export_guard(
                             battery,
                             discharge_power,
+                            total_battery_discharge_w=(
+                                getattr(action, "battery_discharge_w", None)
+                                if self.battery_system == "solax"
+                                else None
+                            ),
                             duration_minutes=discharge_duration,
                             _tariff_duration=tariff_duration,
                         )

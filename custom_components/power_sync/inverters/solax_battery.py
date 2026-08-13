@@ -564,19 +564,31 @@ class SolaxBatteryController:
         )
         return True
 
-    async def force_discharge(self, duration_minutes: int, power_w: int) -> bool:
+    async def force_discharge(
+        self,
+        duration_minutes: int,
+        power_w: int,
+        battery_discharge_w: int | None = None,
+    ) -> bool:
         """Force discharge to grid for duration_minutes at approximately power_w."""
         from homeassistant.helpers.event import async_call_later
 
         await self._ensure_connected()
 
         effective_power_w = power_w or int(self._max_discharge_a * self._nominal_v)
-        amps = min(effective_power_w / max(self._nominal_v, 1.0), self._max_discharge_a)
+        manual_export_control = (
+            self._control_profile == "manual"
+            and self._force_state_is_restorable("export_limit")
+        )
+        current_power_w = effective_power_w
+        if manual_export_control:
+            current_power_w = battery_discharge_w or effective_power_w
+        amps = min(current_power_w / max(self._nominal_v, 1.0), self._max_discharge_a)
         amps = max(0.0, amps)
 
         _LOGGER.info(
             "Solax force discharge: %.1f A (%.0f W / %.1f V) for %d min",
-            amps, effective_power_w, self._nominal_v, duration_minutes,
+            amps, current_power_w, self._nominal_v, duration_minutes,
         )
 
         if self._control_profile == "force_time":
@@ -594,8 +606,13 @@ class SolaxBatteryController:
             )
             return True
 
-        self._save_force_time_states(("discharge_current",))
+        restore_keys = ["discharge_current"]
+        if manual_export_control:
+            restore_keys.append("export_limit")
+        self._save_force_time_states(tuple(restore_keys))
         await self._set_number("discharge_current", amps)
+        if manual_export_control:
+            await self._set_number("export_limit", max(0, effective_power_w))
         await self._set_select("charger_use_mode", _MODE_MANUAL)
         await self._set_select("manual_mode_select", _MANUAL_DISCHARGE)
         await self._set_manual_mode_control(_MANUAL_CONTROL_ON)
@@ -1079,6 +1096,17 @@ class SolaxBatteryController:
                 best_delta = delta
 
         await self._set_select("export_duration", best_option or options[0])
+
+    def _force_state_is_restorable(self, key: str) -> bool:
+        """Return whether a force write can be unwound for this entity."""
+        if key in (self._saved_force_time_states or {}):
+            return True
+        entity_id = self._entity_map.get(key)
+        state = self.hass.states.get(entity_id) if entity_id else None
+        return bool(
+            state
+            and state.state not in ("unknown", "unavailable", "")
+        )
 
     def _save_force_time_states(self, keys: tuple[str, ...]) -> None:
         """Remember Gen2/Gen3 entities so restore_normal can unwind cleanly.

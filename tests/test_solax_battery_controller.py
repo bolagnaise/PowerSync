@@ -336,6 +336,195 @@ def test_manual_force_discharge_restores_original_max_current():
     ) in restore_calls
 
 
+def test_manual_force_discharge_uses_total_power_and_restores_both_limits():
+    """Manual mode needs total battery power plus a separate grid export cap."""
+    hass = _FakeHass(
+        _base_states()
+        + _manual_states()
+        + [_FakeState("number.solax_export_control_user_limit", "5000")]
+    )
+    hass.states.get("number.solax_battery_discharge_max_current").state = "35"
+    controller = SolaxBatteryController(
+        hass,
+        entity_prefix="solax",
+        battery_nominal_v=100,
+        max_discharge_current_a=40,
+    )
+
+    assert asyncio.run(controller.connect())
+    assert asyncio.run(
+        controller.force_discharge(
+            duration_minutes=30,
+            power_w=1000,
+            battery_discharge_w=3000,
+        )
+    )
+    assert (
+        "number",
+        "set_value",
+        {
+            "entity_id": "number.solax_battery_discharge_max_current",
+            "value": 30.0,
+        },
+    ) in hass.services.calls
+    assert (
+        "number",
+        "set_value",
+        {
+            "entity_id": "number.solax_export_control_user_limit",
+            "value": 1000,
+        },
+    ) in hass.services.calls
+
+    hass.states.get("number.solax_battery_discharge_max_current").state = "30"
+    hass.states.get("number.solax_export_control_user_limit").state = "1000"
+    assert asyncio.run(
+        controller.force_discharge(
+            duration_minutes=25,
+            power_w=900,
+            battery_discharge_w=2900,
+        )
+    )
+    assert controller.get_force_restore_state() == {
+        "discharge_current": "35",
+        "export_limit": "5000",
+    }
+
+    restore_start = len(hass.services.calls)
+    assert asyncio.run(controller.restore_normal())
+    restore_calls = hass.services.calls[restore_start:]
+    assert (
+        "number",
+        "set_value",
+        {
+            "entity_id": "number.solax_battery_discharge_max_current",
+            "value": 35.0,
+        },
+    ) in restore_calls
+    assert (
+        "number",
+        "set_value",
+        {
+            "entity_id": "number.solax_export_control_user_limit",
+            "value": 5000.0,
+        },
+    ) in restore_calls
+
+
+def test_manual_force_discharge_restart_timer_restores_both_limits():
+    hass = _FakeHass(
+        _base_states()
+        + _manual_states()
+        + [_FakeState("number.solax_export_control_user_limit", "4500")]
+    )
+    first = SolaxBatteryController(
+        hass,
+        entity_prefix="solax",
+        battery_nominal_v=100,
+        max_discharge_current_a=40,
+    )
+
+    assert asyncio.run(first.connect())
+    assert asyncio.run(
+        first.force_discharge(30, power_w=1000, battery_discharge_w=3000)
+    )
+    persisted = first.get_force_restore_state()
+    assert persisted == {"discharge_current": "25", "export_limit": "4500"}
+
+    hass.states.get("number.solax_battery_discharge_max_current").state = "30"
+    hass.states.get("number.solax_export_control_user_limit").state = "1000"
+    restarted = SolaxBatteryController(
+        hass,
+        entity_prefix="solax",
+        battery_nominal_v=100,
+        max_discharge_current_a=40,
+    )
+    restarted.set_force_restore_state(persisted)
+    assert asyncio.run(restarted.connect())
+    assert asyncio.run(
+        restarted.force_discharge(20, power_w=1000, battery_discharge_w=3000)
+    )
+
+    restore_start = len(hass.services.calls)
+    asyncio.run(restarted._timer_restore())
+    restore_calls = hass.services.calls[restore_start:]
+    assert (
+        "number",
+        "set_value",
+        {
+            "entity_id": "number.solax_battery_discharge_max_current",
+            "value": 25.0,
+        },
+    ) in restore_calls
+    assert (
+        "number",
+        "set_value",
+        {
+            "entity_id": "number.solax_export_control_user_limit",
+            "value": 4500.0,
+        },
+    ) in restore_calls
+
+
+def test_manual_force_discharge_without_export_limit_keeps_conservative_current():
+    hass = _FakeHass(_base_states() + _manual_states())
+    controller = SolaxBatteryController(
+        hass,
+        entity_prefix="solax",
+        battery_nominal_v=100,
+        max_discharge_current_a=40,
+    )
+
+    assert asyncio.run(controller.connect())
+    assert asyncio.run(
+        controller.force_discharge(30, power_w=1000, battery_discharge_w=3000)
+    )
+    assert (
+        "number",
+        "set_value",
+        {
+            "entity_id": "number.solax_battery_discharge_max_current",
+            "value": 10.0,
+        },
+    ) in hass.services.calls
+    assert all(
+        call[2].get("entity_id") != "number.solax_export_control_user_limit"
+        for call in hass.services.calls
+    )
+
+
+def test_manual_force_discharge_unavailable_export_limit_is_conservative():
+    hass = _FakeHass(
+        _base_states()
+        + _manual_states()
+        + [_FakeState("number.solax_export_control_user_limit", "unavailable")]
+    )
+    controller = SolaxBatteryController(
+        hass,
+        entity_prefix="solax",
+        battery_nominal_v=100,
+        max_discharge_current_a=40,
+    )
+
+    assert asyncio.run(controller.connect())
+    assert asyncio.run(
+        controller.force_discharge(30, power_w=1000, battery_discharge_w=3000)
+    )
+    assert (
+        "number",
+        "set_value",
+        {
+            "entity_id": "number.solax_battery_discharge_max_current",
+            "value": 10.0,
+        },
+    ) in hass.services.calls
+    assert controller.get_force_restore_state() == {"discharge_current": "25"}
+    assert all(
+        call[2].get("entity_id") != "number.solax_export_control_user_limit"
+        for call in hass.services.calls
+    )
+
+
 def test_manual_force_discharge_restores_baseline_after_controller_restart():
     hass = _FakeHass(_base_states() + _manual_states())
     first = SolaxBatteryController(hass, entity_prefix="solax")

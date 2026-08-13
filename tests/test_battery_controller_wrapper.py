@@ -167,6 +167,42 @@ def test_non_tesla_force_discharge_keeps_fire_and_wait_service_contract():
         restore()
 
 
+def test_only_solax_routes_total_battery_discharge_to_service():
+    module, restore = _load_controller_module()
+    try:
+        solax_services = _Services()
+        solax = module.BatteryControllerWrapper(
+            SimpleNamespace(services=solax_services),
+            "solax",
+        )
+        assert asyncio.run(
+            solax.force_discharge(
+                30,
+                1000,
+                battery_discharge_w=3000,
+            )
+        ) is True
+        assert solax_services.calls[0][2]["power_w"] == 1000
+        assert solax_services.calls[0][2]["battery_discharge_w"] == 3000
+
+        sungrow_services = _Services()
+        sungrow = module.BatteryControllerWrapper(
+            SimpleNamespace(services=sungrow_services),
+            "sungrow",
+        )
+        assert asyncio.run(
+            sungrow.force_discharge(
+                30,
+                1000,
+                battery_discharge_w=3000,
+            )
+        ) is True
+        assert sungrow_services.calls[0][2]["power_w"] == 1000
+        assert "battery_discharge_w" not in sungrow_services.calls[0][2]
+    finally:
+        restore()
+
+
 def test_tesla_mode_reads_current_ha_entity_but_backup_reserve_prefers_cache():
     module, restore = _load_controller_module()
     try:

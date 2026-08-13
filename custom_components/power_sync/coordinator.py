@@ -8794,10 +8794,19 @@ class SolaxBatteryEnergyCoordinator(
             return False
         return await self._controller.force_charge(duration_minutes, power_w)
 
-    async def force_discharge(self, duration_minutes: int, power_w: int) -> bool:
+    async def force_discharge(
+        self,
+        duration_minutes: int,
+        power_w: int,
+        battery_discharge_w: int | None = None,
+    ) -> bool:
         if not self._native_control_allowed("SolaX force_discharge"):
             return False
-        return await self._controller.force_discharge(duration_minutes, power_w)
+        return await self._controller.force_discharge(
+            duration_minutes,
+            power_w,
+            battery_discharge_w=battery_discharge_w,
+        )
 
     async def restore_normal(self) -> bool:
         if not self._native_control_allowed("SolaX restore_normal"):
