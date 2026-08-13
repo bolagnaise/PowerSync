@@ -4338,12 +4338,14 @@ class _FakeBattery:
         force_charge_result: bool | None = None,
         force_discharge_result: bool | None = None,
         restore_normal_result: bool | None = None,
+        self_consumption_result: bool | None = None,
     ) -> None:
         self.hardware_mode = hardware_mode
         self.backup_reserve = backup_reserve
         self.self_consumption_calls = 0
         self.restore_normal_calls = 0
         self.restore_normal_result = restore_normal_result
+        self.self_consumption_result = self_consumption_result
         self.backup_reserve_calls = []
         self.force_charge_calls = []
         self.force_charge_result = force_charge_result
@@ -4358,6 +4360,7 @@ class _FakeBattery:
 
     async def set_self_consumption_mode(self):
         self.self_consumption_calls += 1
+        return self.self_consumption_result
 
     async def restore_normal(self):
         self.restore_normal_calls += 1
@@ -6132,6 +6135,176 @@ def test_self_consumption_reapplies_tesla_reserve_floor_when_mode_matches(opt_mo
     assert battery.self_consumption_calls == 0
     assert battery.backup_reserve_calls == [20]
     assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_self_consumption_initial_tesla_reserve_uses_soc_clamp(
+    opt_module,
+):
+    battery = _FakeBattery(hardware_mode="self_consumption", backup_reserve=20)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.19)
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.backup_reserve_calls == [19]
+
+
+@pytest.mark.parametrize("current_reserve", [20, 25])
+def test_self_consumption_initial_tesla_reserve_clamp_avoids_grid_charging(
+    opt_module,
+    current_reserve,
+):
+    battery = _FakeBattery(
+        hardware_mode="self_consumption",
+        backup_reserve=current_reserve,
+    )
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.11)
+    coordinator._startup_backup_reserve = 25
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.backup_reserve_calls == [11]
+
+
+def test_self_consumption_raises_lower_tesla_reserve_toward_startup_floor(
+    opt_module,
+):
+    battery = _FakeBattery(hardware_mode="self_consumption", backup_reserve=18)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.19)
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.backup_reserve_calls == [19]
+
+
+def test_self_consumption_does_not_ratchet_tesla_reserve_down_after_raise(
+    opt_module,
+):
+    battery = _FakeBattery(hardware_mode="self_consumption", backup_reserve=18)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.19)
+    soc_values = [0.19, 0.18]
+
+    async def _battery_state():
+        return soc_values.pop(0), 13500
+
+    coordinator._get_battery_state = _battery_state
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+    battery.backup_reserve = 19
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.backup_reserve_calls == [19]
+    assert coordinator._last_optimizer_self_consumption_reserve_target == 19
+
+
+def test_self_consumption_transition_uses_initial_tesla_soc_clamp(
+    opt_module,
+):
+    battery = _FakeBattery(hardware_mode="autonomous", backup_reserve=20)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.19)
+    coordinator._last_executed_action = "idle"
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.self_consumption_calls == 1
+    assert battery.backup_reserve_calls == [19]
+
+
+def test_self_consumption_mode_failure_clears_reserve_provenance(
+    opt_module,
+):
+    battery = _FakeBattery(
+        hardware_mode="autonomous",
+        backup_reserve=18,
+        self_consumption_result=False,
+    )
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.19)
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.self_consumption_calls == 1
+    assert battery.backup_reserve_calls == [19]
+    assert coordinator._last_executed_action == "self_consumption"
+    assert coordinator._last_optimizer_self_consumption_reserve_target is None
+
+
+def test_self_consumption_reserve_provenance_clears_on_disable_reset(opt_module):
+    async def _run():
+        battery = _FakeBattery(
+            hardware_mode="self_consumption",
+            backup_reserve=18,
+        )
+        coordinator = _execution_coordinator(opt_module, battery, soc=0.19)
+        soc_values = [0.19, 0.18]
+
+        async def _battery_state():
+            return soc_values.pop(0), 13500
+
+        coordinator._get_battery_state = _battery_state
+        coordinator._enabled = True
+
+        await coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+        assert battery.backup_reserve_calls == [19]
+        assert coordinator._last_optimizer_self_consumption_reserve_target == 19
+
+        coordinator._polling_task = None
+        coordinator._initial_opt_task = None
+        coordinator._deferred_restore_task = None
+        coordinator._settings_reoptimize_task = None
+        coordinator._price_reoptimize_task = None
+        coordinator._price_listener_unsub = None
+        coordinator._octopus_gate_listener_unsub = None
+        coordinator._ev_coordinator = None
+        coordinator._cost_store = SimpleNamespace(
+            async_save=lambda *_args: asyncio.sleep(0)
+        )
+        coordinator._cost_data_to_save = lambda: {}
+        coordinator._executor.stop = lambda **_kwargs: asyncio.sleep(0)
+
+        await coordinator.disable()
+
+        assert coordinator._last_executed_action is None
+        assert coordinator._last_optimizer_self_consumption_reserve_target is None
+
+        coordinator._enabled = True
+        battery.backup_reserve = 19
+        await coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+
+        assert battery.backup_reserve_calls == [19, 18]
+
+    asyncio.run(_run())
 
 
 def test_self_consumption_uses_hardware_reserve_when_startup_reserve_is_lower(opt_module):

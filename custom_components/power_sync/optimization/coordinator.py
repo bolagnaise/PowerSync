@@ -659,6 +659,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # User's real backup reserve captured ONCE on startup, before any
         # IDLE modifies it. Used as the authoritative restore value.
         self._startup_backup_reserve: int | None = None
+        # Last reserve target successfully written by optimizer self-consumption
+        # in this runtime. Used to distinguish our own SOC clamp from a manual
+        # or stale hardware reserve on a later cycle.
+        self._last_optimizer_self_consumption_reserve_target: int | None = None
         self._idle_reserve_adjustment: bool = False  # True while IDLE is setting backup_reserve (suppresses persistence)
 
         # Background task handles (for cancellation on disable)
@@ -5026,6 +5030,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             else:
                 await self._release_scheduled_ev_no_discharge_mode("optimizer disabled")
+        self._last_optimizer_self_consumption_reserve_target = None
         self._last_executed_action = None
 
         # Cancel background tasks first so they can't run optimization
@@ -9275,6 +9280,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     sungrow_inferred_restore = False
                     configured_reserve_pct = int(self._config.backup_reserve * 100)
                     reserve_pct: int | None = None
+                    desired_reserve_pct: int | None = None
+                    current_reserve: int | None = None
+                    current_reserve_trust = None
+                    last_optimizer_reserve_target = getattr(
+                        self,
+                        "_last_optimizer_self_consumption_reserve_target",
+                        None,
+                    )
                     if not apply_self_consumption:
                         # Verify the hardware mode has not drifted. On HA restart
                         # Tesla can remain in autonomous while the optimizer's
@@ -9294,27 +9307,41 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         ):
                             soc_now, _ = await self._get_battery_state()
                             soc_pct = max(0, min(100, int(soc_now * 100)))
-                            reserve_pct = (
+                            desired_reserve_pct = (
                                 self._startup_backup_reserve
                                 if self._startup_backup_reserve is not None
                                 else configured_reserve_pct
                             )
-                            reserve_pct = max(0, min(100, reserve_pct))
+                            reserve_pct = max(0, min(100, desired_reserve_pct))
                             if 81 <= reserve_pct <= 99:
                                 reserve_pct = 80
                             if soc_pct < reserve_pct:
                                 reserve_pct = min(reserve_pct, soc_pct)
                                 if 81 <= reserve_pct <= 99:
                                     reserve_pct = 80
-                            current_reserve_trust = None
                             if hasattr(battery, "read_backup_reserve"):
                                 current_reserve_reading = await battery.read_backup_reserve()
                                 current_reserve = current_reserve_reading.percent
                                 current_reserve_trust = current_reserve_reading.trust
                             else:
                                 current_reserve = await battery.get_backup_reserve()
+                            # Only protect a lower reserve that matches the target
+                            # PowerSync successfully wrote earlier in this runtime.
+                            # A readable startup/manual reserve must still be lowered
+                            # to the SOC clamp on the first self-consumption command.
                             if (
                                 current_reserve is not None
+                                and last_optimizer_reserve_target is not None
+                                and current_reserve == last_optimizer_reserve_target
+                                and desired_reserve_pct is not None
+                                and last_optimizer_reserve_target < desired_reserve_pct
+                                and current_reserve != 100
+                                and not 81 <= current_reserve <= 99
+                            ):
+                                reserve_pct = max(reserve_pct, current_reserve)
+                            if (
+                                not apply_self_consumption
+                                and current_reserve is not None
                                 and reserve_pct is not None
                                 and current_reserve != reserve_pct
                             ):
@@ -9500,6 +9527,46 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 "Optimizer: Already in self-consumption mode — "
                                 "skipping redundant API call"
                             )
+                    # A mode transition skips the existing-mode verification
+                    # above, so resolve its Tesla target separately. Apply only
+                    # the provenance-aware ratchet guard here; the initial SOC
+                    # clamp must remain authoritative for stale/manual reserves.
+                    if (
+                        apply_self_consumption
+                        and reserve_pct is None
+                        and self.battery_system == "tesla"
+                        and hasattr(battery, "get_backup_reserve")
+                    ):
+                        soc_now, _ = await self._get_battery_state()
+                        soc_pct = max(0, min(100, int(soc_now * 100)))
+                        desired_reserve_pct = (
+                            self._startup_backup_reserve
+                            if self._startup_backup_reserve is not None
+                            else configured_reserve_pct
+                        )
+                        reserve_pct = max(0, min(100, desired_reserve_pct))
+                        if 81 <= reserve_pct <= 99:
+                            reserve_pct = 80
+                        if soc_pct < reserve_pct:
+                            reserve_pct = min(reserve_pct, soc_pct)
+                            if 81 <= reserve_pct <= 99:
+                                reserve_pct = 80
+                        if hasattr(battery, "read_backup_reserve"):
+                            current_reserve = (
+                                await battery.read_backup_reserve()
+                            ).percent
+                        else:
+                            current_reserve = await battery.get_backup_reserve()
+                        if (
+                            current_reserve is not None
+                            and last_optimizer_reserve_target is not None
+                            and current_reserve == last_optimizer_reserve_target
+                            and desired_reserve_pct is not None
+                            and last_optimizer_reserve_target < desired_reserve_pct
+                            and current_reserve != 100
+                            and not 81 <= current_reserve <= 99
+                        ):
+                            reserve_pct = max(reserve_pct, current_reserve)
                     mode_apply_failed = False
                     if apply_self_consumption or reapply_backup_reserve:
                         if hasattr(battery, "set_self_consumption_mode"):
@@ -9542,7 +9609,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     reserve_pct = min(reserve_pct, soc_pct)
                                     if 81 <= reserve_pct <= 99:
                                         reserve_pct = 80
-                            await battery.set_backup_reserve(reserve_pct)
+                            reserve_result = await battery.set_backup_reserve(reserve_pct)
+                            if reserve_result is not False:
+                                self._last_optimizer_self_consumption_reserve_target = (
+                                    reserve_pct
+                                )
                             _LOGGER.info(
                                 "Optimizer: self_consumption — set backup_reserve=%d%% "
                                 "(startup=%s%%, floor=%d%%, current_soc=%d%%)",
@@ -9556,6 +9627,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 soc_pct,
                             )
                     if mode_apply_failed:
+                        self._last_optimizer_self_consumption_reserve_target = None
                         # Do not record success: the base BatteryController
                         # returns False instead of raising, and advancing the
                         # marker here masked the failure — the change-detection
