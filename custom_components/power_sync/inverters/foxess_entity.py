@@ -157,6 +157,7 @@ class FoxESSEntityController:
     def get_status(self) -> dict[str, Any]:
         """Read current FoxESS data and return PowerSync-canonical values."""
         self._ensure_entity_map()
+        battery_voltage_v = self._refresh_battery_voltage()
 
         soc = self._read_float("battery_level")
         telemetry_ready = self.telemetry_ready()
@@ -173,7 +174,7 @@ class FoxESSEntityController:
             "telemetry_ready": telemetry_ready,
             "battery_level": soc,
             "battery_power": battery_kw,
-            "battery_voltage_v": self._read_float("battery_voltage"),
+            "battery_voltage_v": battery_voltage_v,
             "grid_power": grid_kw,
             "solar_power": max(0.0, total_solar_kw),
             "ct2_power": ct2_kw,
@@ -201,14 +202,16 @@ class FoxESSEntityController:
 
         if status["max_charge_current_a"]:
             status["battery_max_charge_power_w"] = self._current_to_power_w(
-                status["max_charge_current_a"]
+                status["max_charge_current_a"],
+                battery_voltage_v or 500.0,
             )
             status["battery_max_charge_power"] = round(
                 status["battery_max_charge_power_w"] / 1000.0, 2
             )
         if status["max_discharge_current_a"]:
             status["battery_max_discharge_power_w"] = self._current_to_power_w(
-                status["max_discharge_current_a"]
+                status["max_discharge_current_a"],
+                battery_voltage_v or 500.0,
             )
             status["battery_max_discharge_power"] = round(
                 status["battery_max_discharge_power_w"] / 1000.0, 2
@@ -813,6 +816,60 @@ class FoxESSEntityController:
         if not self._entity_map:
             self._discover_entities()
 
+    def _refresh_battery_voltage(self) -> float | None:
+        """Keep the mapped voltage entity usable without rebuilding all mappings."""
+        entity_id = self._entity_map.get("battery_voltage")
+        if entity_id and self._state_is_available(entity_id):
+            return self._read_float("battery_voltage")
+
+        self._entity_map.pop("battery_voltage", None)
+        suffixes = _READ_ENTITIES["battery_voltage"]
+
+        if self._foxess_entry_id:
+            registry = er.async_get(self.hass)
+            entries = er.async_entries_for_config_entry(registry, self._foxess_entry_id)
+            entity_ids = [entry.entity_id for entry in entries if entry.entity_id]
+            entity_id = self._resolve_entity_id(
+                entity_ids,
+                "sensor",
+                suffixes,
+                None,
+                require_available=True,
+            )
+            if entity_id:
+                self._entity_map["battery_voltage"] = entity_id
+                return self._read_float("battery_voltage")
+
+            fallback_entity_ids = [
+                state.entity_id
+                for state in self.hass.states.async_all()
+                if state.entity_id.startswith(("sensor.", "number.", "select."))
+            ]
+            entity_id = self._resolve_entity_id(
+                fallback_entity_ids,
+                "sensor",
+                suffixes,
+                self._prefix or None,
+                require_available=True,
+            )
+        else:
+            entity_ids = [
+                state.entity_id
+                for state in self.hass.states.async_all()
+                if state.entity_id.startswith(("sensor.", "number.", "select."))
+            ]
+            entity_id = self._resolve_entity_id(
+                entity_ids,
+                "sensor",
+                suffixes,
+                self._prefix or None,
+                require_available=True,
+            )
+
+        if entity_id:
+            self._entity_map["battery_voltage"] = entity_id
+        return self._read_float("battery_voltage")
+
     def _discover_entities(self) -> None:
         """Populate logical entity map from config entry or suffix scan."""
         self._entity_map = {}
@@ -824,7 +881,7 @@ class FoxESSEntityController:
             entity_ids = [entry.entity_id for entry in entries if entry.entity_id]
             self._discover_entities_from_ids(
                 entity_ids,
-                legacy_prefix=self._prefix or None,
+                legacy_prefix=None,
                 allow_ct2_tail_match=True,
             )
 
@@ -1042,8 +1099,10 @@ class FoxESSEntityController:
             return pv_string_kw
         return max(solar_kw, pv_string_kw)
 
-    def _current_to_power_w(self, amps: float) -> int:
-        voltage = self._read_float("battery_voltage") or 500.0
+    def _current_to_power_w(self, amps: float, voltage: float | None = None) -> int:
+        if voltage is None:
+            voltage = self._refresh_battery_voltage()
+        voltage = voltage or 500.0
         return int(max(0.0, amps) * voltage)
 
     async def _set_number(self, key: str, value: float | int) -> None:

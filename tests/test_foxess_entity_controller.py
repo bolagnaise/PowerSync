@@ -505,6 +505,123 @@ def test_h3_smart_voltage_falls_back_to_inverter_sensor():
     assert status["battery_max_charge_power_w"] == 20920
 
 
+def test_delayed_batvolt_refreshes_and_remaps_without_full_discovery():
+    states = _without_suffix(
+        _base_states(), ("_battery_voltage", "_battery_1_voltage")
+    )
+    for state in states:
+        if state.entity_id in {
+            "number.foxess_max_charge_current",
+            "number.foxess_max_discharge_current",
+        }:
+            state.state = "50"
+    hass = _FakeHass(states)
+    controller = FoxESSEntityController(hass, entity_prefix="foxess")
+
+    assert asyncio.run(controller.connect())
+    initial_status = controller.get_status()
+    assert "battery_voltage" not in controller._entity_map
+    assert initial_status["battery_voltage_v"] is None
+    assert initial_status["battery_max_charge_power_w"] == 25000
+
+    def unexpected_full_discovery() -> None:
+        raise AssertionError("status refresh must not rebuild the full entity map")
+
+    controller._discover_entities = unexpected_full_discovery
+    hass.states._states["sensor.batvolt_1"] = _FakeState("sensor.batvolt_1", "418.4")
+    original_async_all = hass.states.async_all
+    scans = 0
+
+    def counted_async_all(domain: str | None = None):
+        nonlocal scans
+        scans += 1
+        return original_async_all(domain)
+
+    hass.states.async_all = counted_async_all
+
+    status = controller.get_status()
+
+    assert scans == 1
+    assert controller._entity_map["battery_voltage"] == "sensor.batvolt_1"
+    assert status["battery_voltage_v"] == 418.4
+    assert status["battery_max_charge_power_w"] == 20920
+
+    hass.states._states["sensor.batvolt_1"].state = "unavailable"
+    hass.states._states["sensor.invbatvolt_1"] = _FakeState(
+        "sensor.invbatvolt_1", "416.0"
+    )
+    scans = 0
+
+    remapped_status = controller.get_status()
+
+    assert scans == 1
+    assert controller._entity_map["battery_voltage"] == "sensor.invbatvolt_1"
+    assert remapped_status["battery_voltage_v"] == 416.0
+    assert remapped_status["battery_max_charge_power_w"] == 20800
+
+
+def test_config_entry_voltage_refresh_prefers_registered_id_over_prefix_alias():
+    states = _without_suffix(
+        _base_states(), ("_battery_voltage", "_battery_1_voltage")
+    )
+    registered_voltage = _FakeState("sensor.batvolt_1", "418.4")
+    unrelated_voltage = _FakeState("sensor.foxess_battery_voltage", "402.0")
+    states.extend([registered_voltage, unrelated_voltage])
+    registry_ids = [
+        state.entity_id
+        for state in states
+        if state.entity_id != unrelated_voltage.entity_id
+    ]
+    hass = _FakeHass(
+        states,
+        registry_entries={"fox-entry": registry_ids},
+    )
+    controller = FoxESSEntityController(
+        hass,
+        foxess_entry_id="fox-entry",
+        entity_prefix="foxess",
+    )
+
+    assert asyncio.run(controller.connect())
+    assert controller._entity_map["battery_voltage"] == registered_voltage.entity_id
+    assert controller.get_status()["battery_voltage_v"] == 418.4
+
+    registered_voltage.state = "unavailable"
+    registered_fallback = _FakeState("sensor.invbatvolt_1", "416.0")
+    hass.states._states[registered_fallback.entity_id] = registered_fallback
+    hass.entity_registry._entries["fox-entry"].append(registered_fallback.entity_id)
+
+    status = controller.get_status()
+
+    assert controller._entity_map["battery_voltage"] == registered_fallback.entity_id
+    assert status["battery_voltage_v"] == 416.0
+
+
+def test_config_entry_voltage_refresh_keeps_registered_entity_priority():
+    states = _without_suffix(
+        _base_states(), ("_battery_voltage", "_battery_1_voltage")
+    )
+    registry_ids = [state.entity_id for state in states]
+    hass = _FakeHass(states, registry_entries={"fox-entry": registry_ids})
+    controller = FoxESSEntityController(hass, foxess_entry_id="fox-entry")
+
+    assert asyncio.run(controller.connect())
+    assert controller.get_status()["battery_voltage_v"] is None
+
+    selected_voltage = _FakeState("sensor.batvolt_1", "418.4")
+    global_higher_priority_alias = _FakeState(
+        "sensor.battery_1_voltage", "402.0"
+    )
+    hass.states._states[selected_voltage.entity_id] = selected_voltage
+    hass.states._states[global_higher_priority_alias.entity_id] = global_higher_priority_alias
+    hass.entity_registry._entries["fox-entry"].append(selected_voltage.entity_id)
+
+    status = controller.get_status()
+
+    assert controller._entity_map["battery_voltage"] == selected_voltage.entity_id
+    assert status["battery_voltage_v"] == 418.4
+
+
 def test_legacy_voltage_alias_priority_and_fallback():
     states = _base_states()
     states.append(_FakeState("sensor.foxess_battery_1_voltage", "420"))
