@@ -123,6 +123,11 @@ def test_solaredge_energy_bridge_maps_modbus_multi_battery_entities():
                     "-1800",
                     {"unit_of_measurement": "W"},
                 ),
+                "sensor.solaredge_i1_dc_power": State(
+                    "sensor.solaredge_i1_dc_power",
+                    "3200",
+                    {"unit_of_measurement": "W"},
+                ),
                 "sensor.solaredge_m1_ac_power": State(
                     "sensor.solaredge_m1_ac_power",
                     "-500",
@@ -163,8 +168,8 @@ def test_solaredge_energy_bridge_maps_modbus_multi_battery_entities():
     assert status["battery_level"] == 64.0
     assert status["battery_power"] == 1.8
     assert status["grid_power"] == 0.5
-    assert status["solar_power"] == 3.2
-    assert status["load_power"] == 5.5
+    assert status["solar_power"] == pytest.approx(1.4)
+    assert status["load_power"] == pytest.approx(3.7)
 
 
 def test_solaredge_energy_bridge_uses_import_export_fallbacks():
@@ -301,6 +306,370 @@ def test_solaredge_energy_bridge_does_not_map_battery_dc_power_as_solar():
     assert status["load_power"] == pytest.approx(1.8)
 
 
+@pytest.mark.parametrize(
+    ("inverter_dc", "battery_dc", "expected_solar"),
+    [
+        (1.25, -1.25, 0.0),  # nighttime battery discharge
+        (4.0, 1.0, 5.0),  # daylight battery charging
+        (4.0, -1.0, 3.0),  # daylight battery discharging
+    ],
+)
+def test_solaredge_energy_bridge_reconstructs_pv_from_dc_and_battery(
+    inverter_dc: float,
+    battery_dc: float,
+    expected_solar: float,
+):
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(
+                {
+                    "sensor.solaredge_b1_state_of_energy": _SEState(
+                        "sensor.solaredge_b1_state_of_energy", "55", {"unit_of_measurement": "%"}
+                    ),
+                    "sensor.solaredge_i1_ac_power": _SEState(
+                        "sensor.solaredge_i1_ac_power", "1.2", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_dc_power": _SEState(
+                        "sensor.solaredge_i1_dc_power", str(inverter_dc), {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_b1_dc_power": _SEState(
+                        "sensor.solaredge_i1_b1_dc_power", str(battery_dc), {"unit_of_measurement": "kW"}
+                    ),
+                }
+            )
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["solar_power"] == pytest.approx(expected_solar)
+
+
+def test_solaredge_energy_bridge_prefers_pv_strings_and_sums_battery_channels():
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(
+                {
+                    "sensor.solaredge_b1_state_of_energy": _SEState(
+                        "sensor.solaredge_b1_state_of_energy", "55", {"unit_of_measurement": "%"}
+                    ),
+                    "sensor.solaredge_i1_ac_power": _SEState(
+                        "sensor.solaredge_i1_ac_power", "9.0", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_dc_power": _SEState(
+                        "sensor.solaredge_i1_dc_power", "8.0", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_b1_dc_power": _SEState(
+                        "sensor.solaredge_i1_b1_dc_power", "-1.0", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_b2_dc_power": _SEState(
+                        "sensor.solaredge_i1_b2_dc_power", "-0.5", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_pv1_power": _SEState(
+                        "sensor.solaredge_i1_pv1_power", "0.6", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_pv2_power": _SEState(
+                        "sensor.solaredge_i1_pv2_power", "0.4", {"unit_of_measurement": "kW"}
+                    ),
+                }
+            )
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["solar_power"] == pytest.approx(1.0)
+    assert status["battery_power"] == pytest.approx(1.5)
+
+
+def test_solaredge_energy_bridge_rejects_pv_strings_with_incomplete_battery_channels():
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(
+                {
+                    "sensor.solaredge_b1_state_of_energy": _SEState(
+                        "sensor.solaredge_b1_state_of_energy", "55", {"unit_of_measurement": "%"}
+                    ),
+                    "sensor.solaredge_i1_dc_power": _SEState(
+                        "sensor.solaredge_i1_dc_power", "2.0", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_b1_dc_power": _SEState(
+                        "sensor.solaredge_i1_b1_dc_power", "-0.5", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_b2_dc_power": _SEState(
+                        "sensor.solaredge_i1_b2_dc_power", "unavailable", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_pv1_power": _SEState(
+                        "sensor.solaredge_i1_pv1_power", "1.0", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_pv2_power": _SEState(
+                        "sensor.solaredge_i1_pv2_power", "0.5", {"unit_of_measurement": "kW"}
+                    ),
+                }
+            )
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["solar_power"] == 0.0
+    assert status["telemetry_ready"] is False
+
+
+def test_solaredge_energy_bridge_uses_complete_pv_strings_without_inverter_dc():
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(
+                {
+                    "sensor.solaredge_b1_state_of_energy": _SEState(
+                        "sensor.solaredge_b1_state_of_energy", "55", {"unit_of_measurement": "%"}
+                    ),
+                    "sensor.solaredge_i1_dc_power": _SEState(
+                        "sensor.solaredge_i1_dc_power", "unknown", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_b1_dc_power": _SEState(
+                        "sensor.solaredge_i1_b1_dc_power", "-0.5", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_pv1_power": _SEState(
+                        "sensor.solaredge_i1_pv1_power", "1.0", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_pv2_power": _SEState(
+                        "sensor.solaredge_i1_pv2_power", "0.5", {"unit_of_measurement": "kW"}
+                    ),
+                }
+            )
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["solar_power"] == pytest.approx(1.5)
+    assert status["telemetry_ready"] is True
+
+
+@pytest.mark.parametrize("invalid_value", ["nan", "inf", "-inf"])
+def test_solaredge_energy_bridge_rejects_non_finite_power(invalid_value: str):
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(
+                {
+                    "sensor.solaredge_b1_state_of_energy": _SEState(
+                        "sensor.solaredge_b1_state_of_energy", "55", {"unit_of_measurement": "%"}
+                    ),
+                    "sensor.solaredge_i1_dc_power": _SEState(
+                        "sensor.solaredge_i1_dc_power", "2.0", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_b1_dc_power": _SEState(
+                        "sensor.solaredge_i1_b1_dc_power", invalid_value, {"unit_of_measurement": "kW"}
+                    ),
+                }
+            )
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["battery_power"] == 0.0
+    assert status["solar_power"] == 0.0
+    assert status["telemetry_ready"] is False
+
+
+@pytest.mark.parametrize(
+    ("inverter_dc", "battery_dc"),
+    [(None, -1.0), (2.0, None)],
+)
+def test_solaredge_energy_bridge_fails_closed_when_dc_is_unavailable(
+    inverter_dc: float | None,
+    battery_dc: float | None,
+):
+    def state(entity_id: str, value: float | None) -> _SEState:
+        return _SEState(
+            entity_id,
+            "unavailable" if value is None else str(value),
+            {"unit_of_measurement": "kW"},
+        )
+
+    states = {
+        "sensor.solaredge_b1_state_of_energy": _SEState(
+            "sensor.solaredge_b1_state_of_energy", "55", {"unit_of_measurement": "%"}
+        ),
+        "sensor.solaredge_i1_ac_power": state("sensor.solaredge_i1_ac_power", 2.2),
+        "sensor.solaredge_i1_dc_power": state("sensor.solaredge_i1_dc_power", inverter_dc),
+        "sensor.solaredge_i1_b1_dc_power": state(
+            "sensor.solaredge_i1_b1_dc_power", battery_dc
+        ),
+    }
+
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(states)
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+    assert status["solar_power"] == 0.0
+    assert status["telemetry_ready"] is False
+
+
+def test_solaredge_energy_bridge_preserves_ac_priority_without_battery_source():
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(
+                {
+                    "sensor.solaredge_b1_state_of_energy": _SEState(
+                        "sensor.solaredge_b1_state_of_energy", "55", {"unit_of_measurement": "%"}
+                    ),
+                    "sensor.solaredge_i1_ac_power": _SEState(
+                        "sensor.solaredge_i1_ac_power", "1.2", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_dc_power": _SEState(
+                        "sensor.solaredge_i1_dc_power", "2.5", {"unit_of_measurement": "kW"}
+                    ),
+                }
+            )
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    assert controller.get_status()["solar_power"] == pytest.approx(1.2)
+
+
+def test_solaredge_energy_bridge_maps_generic_dc_as_inverter_without_battery():
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(
+                {
+                    "sensor.solaredge_b1_state_of_energy": _SEState(
+                        "sensor.solaredge_b1_state_of_energy", "55", {"unit_of_measurement": "%"}
+                    ),
+                    "sensor.solaredge_dc_power": _SEState(
+                        "sensor.solaredge_dc_power", "2.5", {"unit_of_measurement": "kW"}
+                    ),
+                }
+            )
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert controller._entity_map["inverter_dc_power"] == "sensor.solaredge_dc_power"
+    assert "battery_power" not in controller._entity_map
+    assert status["solar_power"] == pytest.approx(2.5)
+    assert status["telemetry_ready"] is True
+
+
+def test_solaredge_energy_bridge_rejects_unavailable_discovered_battery_channel():
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(
+                {
+                    "sensor.solaredge_b1_state_of_energy": _SEState(
+                        "sensor.solaredge_b1_state_of_energy", "55", {"unit_of_measurement": "%"}
+                    ),
+                    "sensor.solaredge_i1_ac_power": _SEState(
+                        "sensor.solaredge_i1_ac_power", "2.2", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_dc_power": _SEState(
+                        "sensor.solaredge_i1_dc_power", "2.0", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_b1_dc_power": _SEState(
+                        "sensor.solaredge_i1_b1_dc_power", "unavailable", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_b2_dc_power": _SEState(
+                        "sensor.solaredge_i1_b2_dc_power", "-0.5", {"unit_of_measurement": "kW"}
+                    ),
+                }
+            )
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["battery_power"] == 0.0
+    assert status["solar_power"] == 0.0
+    assert status["telemetry_ready"] is False
+
+
+def test_solaredge_energy_bridge_allows_ac_fallback_without_battery_source():
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(
+                {
+                    "sensor.solaredge_b1_state_of_energy": _SEState(
+                        "sensor.solaredge_b1_state_of_energy", "55", {"unit_of_measurement": "%"}
+                    ),
+                    "sensor.solaredge_i1_ac_power": _SEState(
+                        "sensor.solaredge_i1_ac_power", "2.2", {"unit_of_measurement": "kW"}
+                    ),
+                }
+            )
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["solar_power"] == pytest.approx(2.2)
+    assert status["telemetry_ready"] is True
+
+
+def test_solaredge_ac_daily_energy_is_not_a_pv_total_when_battery_is_present():
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(
+                {
+                    "sensor.solaredge_b1_state_of_energy": _SEState(
+                        "sensor.solaredge_b1_state_of_energy", "55", {"unit_of_measurement": "%"}
+                    ),
+                    "sensor.solaredge_b1_dc_power": _SEState(
+                        "sensor.solaredge_b1_dc_power", "-1.25", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_ac_energy_today": _SEState(
+                        "sensor.solaredge_i1_ac_energy_today", "12.5", {"unit_of_measurement": "kWh"}
+                    ),
+                }
+            )
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    assert controller.get_status()["daily_solar_energy_kwh"] is None
+
+
+def test_solaredge_explicit_solar_daily_energy_is_preserved_with_battery():
+    class Hass:
+        def __init__(self) -> None:
+            self.states = _SEStates(
+                {
+                    "sensor.solaredge_b1_state_of_energy": _SEState(
+                        "sensor.solaredge_b1_state_of_energy", "55", {"unit_of_measurement": "%"}
+                    ),
+                    "sensor.solaredge_b1_dc_power": _SEState(
+                        "sensor.solaredge_b1_dc_power", "-1.25", {"unit_of_measurement": "kW"}
+                    ),
+                    "sensor.solaredge_i1_ac_energy_today": _SEState(
+                        "sensor.solaredge_i1_ac_energy_today", "12.5", {"unit_of_measurement": "kWh"}
+                    ),
+                    "sensor.solaredge_solar_energy_today": _SEState(
+                        "sensor.solaredge_solar_energy_today", "7.5", {"unit_of_measurement": "kWh"}
+                    ),
+                }
+            )
+
+    controller = SolarEdgeEnergyController(Hass(), entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    assert controller.get_status()["daily_solar_energy_kwh"] == pytest.approx(7.5)
+
+
 def test_solaredge_energy_bridge_prefers_battery1_power_over_inverter_dc_power():
     class Hass:
         def __init__(self) -> None:
@@ -341,8 +710,8 @@ def test_solaredge_energy_bridge_prefers_battery1_power_over_inverter_dc_power()
 
     assert controller._entity_map["battery_power"] == "sensor.solaredge_battery1_power"
     assert status["battery_power"] == pytest.approx(4.419)
-    assert status["solar_power"] == pytest.approx(1.9308)
-    assert status["load_power"] == pytest.approx(6.3498)
+    assert status["solar_power"] == 0.0
+    assert status["load_power"] == pytest.approx(4.419)
 
 
 def test_solaredge_m1_kwh_counters_are_reported_as_lifetime_totals():
@@ -472,6 +841,11 @@ class _SEHass:
             ),
             "sensor.solaredge_b1_dc_power": _SEState(
                 "sensor.solaredge_b1_dc_power",
+                "0",
+                {"unit_of_measurement": "W"},
+            ),
+            "sensor.solaredge_i1_dc_power": _SEState(
+                "sensor.solaredge_i1_dc_power",
                 "0",
                 {"unit_of_measurement": "W"},
             ),

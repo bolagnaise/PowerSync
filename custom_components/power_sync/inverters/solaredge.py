@@ -169,7 +169,14 @@ _ENERGY_READ_ENTITIES: dict[str, tuple[str, ...]] = {
         "battery_power",
         "battery1_power",
         "battery_power_charge",
-        "dc_power",
+        "b1_dc_power",
+        "b2_dc_power",
+        "b3_dc_power",
+        "b4_dc_power",
+        "battery1_dc_power",
+        "battery2_dc_power",
+        "battery3_dc_power",
+        "battery4_dc_power",
     ),
     "battery_charge": (
         "battery_charge_power",
@@ -208,6 +215,15 @@ _ENERGY_READ_ENTITIES: dict[str, tuple[str, ...]] = {
         "i1_dc_power",
         "dc_power",
     ),
+    # SolarEdge Modbus Multi exposes inverter DC separately from i1_ac_power.
+    # On battery systems the latter includes battery discharge and is not a
+    # solar-only measurement.
+    "inverter_dc_power": (
+        "i1_dc_power",
+        "inverter_dc_power",
+        "inverter1_dc_power",
+        "dc_power",
+    ),
     "load_power": (
         "load_power",
         "home_consumption_power",
@@ -231,10 +247,10 @@ _ENERGY_READ_ENTITIES: dict[str, tuple[str, ...]] = {
         "battery_backup_reserve",
     ),
     "daily_solar_energy": (
-        "i1_ac_energy_today",
         "solar_energy_today",
         "today_solar_energy",
         "daily_solar_energy",
+        "i1_ac_energy_today",
     ),
     "daily_grid_import": (
         "m1_imported_kwh",
@@ -633,6 +649,7 @@ class SolarEdgeEnergyController:
         self._solaredge_entry_id = (solaredge_entry_id or "").strip()
         self._entity_map: dict[str, str] = {}
         self._control_entity_map: dict[str, str] = {}
+        self._battery_power_entity_ids: list[str] = []
         self._saved_control_state: dict[str, Any] | None = None
 
     async def connect(self) -> bool:
@@ -688,7 +705,7 @@ class SolarEdgeEnergyController:
             "battery_soh": self._read_float("battery_soh"),
             "backup_reserve": self._read_float("backup_reserve"),
             "min_soc": self._read_float("backup_reserve"),
-            "daily_solar_energy_kwh": self._energy_kwh("daily_solar_energy"),
+            "daily_solar_energy_kwh": self._daily_solar_energy_kwh(),
             "daily_grid_import_kwh": None if grid_import_is_total else grid_import_kwh,
             "daily_grid_export_kwh": None if grid_export_is_total else grid_export_kwh,
             "total_grid_import_kwh": grid_import_kwh if grid_import_is_total else None,
@@ -712,14 +729,20 @@ class SolarEdgeEnergyController:
     def telemetry_ready(self) -> bool:
         """Return whether the entity bridge has complete optimizer telemetry."""
         self._ensure_entity_map()
-        battery_mapped = any(
-            key in self._entity_map
-            for key in ("battery_power", "battery_charge", "battery_discharge")
-        )
-        battery_ready = not battery_mapped or self._power_kw("battery_power") is not None or (
-            self._power_kw("battery_charge") is not None
-            and self._power_kw("battery_discharge") is not None
-        )
+        if self._battery_power_entity_ids:
+            battery_ready = all(
+                self._power_kw_from_entity_id(entity_id) is not None
+                for entity_id in self._battery_power_entity_ids
+            )
+        else:
+            battery_mapped = any(
+                key in self._entity_map
+                for key in ("battery_power", "battery_charge", "battery_discharge")
+            )
+            battery_ready = not battery_mapped or self._power_kw("battery_power") is not None or (
+                self._power_kw("battery_charge") is not None
+                and self._power_kw("battery_discharge") is not None
+            )
         grid_mapped = any(
             key in self._entity_map
             for key in ("grid_power", "grid_import", "grid_export")
@@ -733,13 +756,28 @@ class SolarEdgeEnergyController:
             for idx in range(1, 5)
             if f"pv{idx}_power" in self._entity_map
         ]
-        solar_ready = (
-            "solar_power" not in self._entity_map
-            and not mapped_pv_keys
-        ) or self._power_kw("solar_power") is not None or (
-            bool(mapped_pv_keys)
-            and all(self._power_kw(key) is not None for key in mapped_pv_keys)
+        pv_strings_ready = bool(mapped_pv_keys) and all(
+            self._power_kw(key) is not None for key in mapped_pv_keys
         )
+        solar_kw = self._power_kw("solar_power")
+        solar_entity_id = self._entity_map.get("solar_power")
+        explicit_solar_ready = solar_kw is not None and not self._is_ac_solar_source(
+            solar_entity_id
+        )
+        if pv_strings_ready or explicit_solar_ready:
+            solar_ready = True
+        elif self._has_battery_power_source():
+            solar_ready = (
+                self._power_kw("inverter_dc_power") is not None
+                and self._battery_dc_power_kw_for_solar() is not None
+            )
+        else:
+            # AC solar is a supported fallback only when no battery source is
+            # mapped, because battery discharge contaminates i1_ac_power.
+            solar_ready = (
+                solar_kw is not None
+                or self._power_kw("inverter_dc_power") is not None
+            )
         return (
             self._read_float("battery_level") is not None
             and battery_ready
@@ -977,6 +1015,35 @@ class SolarEdgeEnergyController:
                 )
             if entity_id:
                 self._control_entity_map[key] = entity_id
+        self._battery_power_entity_ids = self._discover_battery_power_entities(entity_ids)
+
+    def _discover_battery_power_entities(self, entity_ids: list[str]) -> list[str]:
+        """Return one power entity for each mapped SolarEdge battery channel."""
+        candidates: dict[int, list[str]] = {}
+        prefix = f"{self._prefix.lower()}_" if self._prefix else ""
+        for entity_id in entity_ids:
+            if not entity_id.startswith("sensor."):
+                continue
+            body = entity_id.split(".", 1)[-1].lower()
+            if prefix and not body.startswith(prefix):
+                continue
+            match = re.search(r"(?:^|_)b(\d+)_(?:dc_)?power$", body)
+            if not match:
+                match = re.search(r"(?:^|_)battery(\d+)_(?:dc_)?power$", body)
+            if not match:
+                continue
+            channel = int(match.group(1))
+            if self.hass.states.get(entity_id) is not None:
+                candidates.setdefault(channel, []).append(entity_id)
+
+        selected = [
+            sorted(channel_entities, key=lambda entity_id: self._match_score(entity_id, "battery_power"))[0]
+            for channel_entities in candidates.values()
+        ]
+        selected.sort()
+        if not selected and self._entity_map.get("battery_power"):
+            selected = [self._entity_map["battery_power"]]
+        return selected
 
     def _resolve_control_entity_id(
         self,
@@ -1042,6 +1109,18 @@ class SolarEdgeEnergyController:
             for entity_id in dict.fromkeys(matches)
             if self.hass.states.get(entity_id) is not None
         ]
+        if key == "battery_power":
+            valid_matches = [
+                entity_id
+                for entity_id in valid_matches
+                if not self._is_inverter_dc_entity(entity_id)
+            ]
+        if key == "inverter_dc_power":
+            valid_matches = [
+                entity_id
+                for entity_id in valid_matches
+                if not self._is_explicit_battery_power_entity(entity_id)
+            ]
         if key.startswith("solar") or key.startswith("pv"):
             valid_matches = [
                 entity_id
@@ -1115,6 +1194,24 @@ class SolarEdgeEnergyController:
     def _is_non_solar_power_entity(entity_id: str) -> bool:
         body = entity_id.split(".", 1)[-1].lower()
         return any(token in body for token in ("_b", "battery", "_m", "meter", "grid"))
+
+    @staticmethod
+    def _is_inverter_dc_entity(entity_id: str) -> bool:
+        body = entity_id.split(".", 1)[-1].lower()
+        return bool(
+            re.search(r"(?:^|_)i\d+_dc_power$", body)
+            or body.endswith("_inverter_dc_power")
+            or body.endswith("_inverter1_dc_power")
+        )
+
+    @staticmethod
+    def _is_explicit_battery_power_entity(entity_id: str) -> bool:
+        body = entity_id.split(".", 1)[-1].lower()
+        return bool(
+            re.search(r"(?:^|_)b\d+_(?:dc_)?power$", body)
+            or re.search(r"(?:^|_)battery\d+_(?:dc_)?power$", body)
+            or body.endswith("_battery_power")
+        )
 
     def _match_score(self, entity_id: str, key: str) -> tuple[int, int, str]:
         body = entity_id.split(".", 1)[-1].lower()
@@ -1376,11 +1473,22 @@ class SolarEdgeEnergyController:
             return None
 
     def _power_kw(self, key: str) -> float | None:
-        value = self._read_float(key)
-        if value is None:
-            return None
         entity_id = self._entity_map.get(key)
-        state = self.hass.states.get(entity_id) if entity_id else None
+        return self._power_kw_from_entity_id(entity_id)
+
+    def _power_kw_from_entity_id(self, entity_id: str | None) -> float | None:
+        """Read one mapped power entity and normalize it to kW."""
+        if not entity_id:
+            return None
+        state = self.hass.states.get(entity_id)
+        if not state or str(state.state) in _UNAVAILABLE:
+            return None
+        try:
+            value = float(state.state)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value):
+            return None
         unit = str((getattr(state, "attributes", {}) or {}).get("unit_of_measurement", "")).lower()
         if unit == "w":
             return value / 1000.0
@@ -1411,6 +1519,17 @@ class SolarEdgeEnergyController:
         )
 
     def _battery_power_kw(self) -> float:
+        if self._battery_power_entity_ids:
+            channel_values = [
+                self._power_kw_from_entity_id(entity_id)
+                for entity_id in self._battery_power_entity_ids
+            ]
+            if all(value is not None for value in channel_values):
+                # SolarEdge battery DC power is positive when charging and
+                # negative when discharging; PowerSync uses the opposite.
+                return -sum(value or 0.0 for value in channel_values)
+            return 0.0
+
         discharge_kw = self._power_kw("battery_discharge")
         charge_kw = self._power_kw("battery_charge")
         if discharge_kw is not None or charge_kw is not None:
@@ -1422,6 +1541,35 @@ class SolarEdgeEnergyController:
         # SolarEdge battery power is positive when charging and negative when
         # discharging; PowerSync uses the opposite convention.
         return -raw_kw
+
+    def _battery_dc_power_kw_for_solar(self) -> float | None:
+        """Return raw SolarEdge battery DC power for PV reconstruction."""
+        if self._battery_power_entity_ids:
+            channel_values = [
+                self._power_kw_from_entity_id(entity_id)
+                for entity_id in self._battery_power_entity_ids
+            ]
+            if not all(value is not None for value in channel_values):
+                return None
+            return sum(value or 0.0 for value in channel_values)
+
+        charge_kw = self._power_kw("battery_charge")
+        discharge_kw = self._power_kw("battery_discharge")
+        if charge_kw is not None or discharge_kw is not None:
+            if charge_kw is None or discharge_kw is None:
+                return None
+            return charge_kw - discharge_kw
+
+        return self._power_kw("battery_power")
+
+    def _has_battery_power_source(self) -> bool:
+        return bool(
+            self._battery_power_entity_ids
+            or any(
+                key in self._entity_map
+                for key in ("battery_power", "battery_charge", "battery_discharge")
+            )
+        )
 
     def _grid_power_kw(self) -> float:
         import_kw = self._power_kw("grid_import")
@@ -1437,8 +1585,65 @@ class SolarEdgeEnergyController:
         return -raw_kw
 
     def _solar_power_kw(self) -> float:
-        pv_kw = sum(self._power_kw(f"pv{idx}_power") or 0.0 for idx in range(1, 5))
+        has_battery_source = self._has_battery_power_source()
+        mapped_pv_keys = [
+            f"pv{idx}_power"
+            for idx in range(1, 5)
+            if f"pv{idx}_power" in self._entity_map
+        ]
+        pv_values = [self._power_kw(key) for key in mapped_pv_keys]
         solar_kw = self._power_kw("solar_power")
-        if solar_kw is None:
-            return pv_kw
-        return max(0.0, max(solar_kw, pv_kw))
+        if not has_battery_source:
+            # Preserve the published battery-free behavior: use the first
+            # legacy solar/AC source and compare it with available PV strings.
+            pv_kw = sum(value or 0.0 for value in pv_values)
+            return max(0.0, max(solar_kw or 0.0, pv_kw))
+
+        battery_dc_kw = self._battery_dc_power_kw_for_solar()
+        if battery_dc_kw is None:
+            # A missing battery channel makes the site's DC energy split
+            # incomplete even when a PV-string sensor is still available.
+            return 0.0
+
+        if mapped_pv_keys and all(value is not None for value in pv_values):
+            # PV string channels are the most direct solar-only source.
+            return max(0.0, sum(value or 0.0 for value in pv_values))
+
+        solar_entity_id = self._entity_map.get("solar_power")
+        inverter_dc_entity_id = self._entity_map.get("inverter_dc_power")
+        if (
+            solar_kw is not None
+            and solar_entity_id != inverter_dc_entity_id
+            and not self._is_ac_solar_source(solar_entity_id)
+        ):
+            return max(0.0, solar_kw)
+
+        inverter_dc_kw = self._power_kw("inverter_dc_power")
+        if inverter_dc_kw is None:
+            # Never expose contaminated i1_ac_power as PV on a battery system
+            # when the DC reconstruction inputs are incomplete.
+            return 0.0
+        return max(0.0, inverter_dc_kw + battery_dc_kw)
+
+    @staticmethod
+    def _is_ac_solar_source(entity_id: str | None) -> bool:
+        if not entity_id:
+            return False
+        body = entity_id.split(".", 1)[-1].lower()
+        return bool(
+            body == "ac_power"
+            or body.endswith("_ac_power")
+            or re.search(r"(?:^|_)i\d+_ac_power$", body)
+        )
+
+    def _daily_solar_energy_kwh(self) -> float | None:
+        """Return a safe daily PV source, excluding contaminated AC counters."""
+        entity_id = self._entity_map.get("daily_solar_energy")
+        body = entity_id.split(".", 1)[-1].lower() if entity_id else ""
+        inverter_ac_counter = bool(
+            re.search(r"(?:^|_)i\d+_ac_energy_today$", body)
+            or body.endswith("_inverter_ac_energy_today")
+        )
+        if inverter_ac_counter and self._has_battery_power_source():
+            return None
+        return self._energy_kwh("daily_solar_energy")

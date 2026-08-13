@@ -117,6 +117,19 @@ class _FakeEnergyAccumulator:
         }
 
 
+class _LiveSolarAccumulator(_FakeEnergyAccumulator):
+    def __init__(self) -> None:
+        self.pv_today_kwh = 0.0
+
+    def update(self, solar_kw, *args) -> None:
+        self.pv_today_kwh = float(solar_kw)
+
+    def as_dict(self) -> dict:
+        summary = super().as_dict()
+        summary["pv_today_kwh"] = self.pv_today_kwh
+        return summary
+
+
 class _FakeStore:
     def __init__(self) -> None:
         self.data = None
@@ -173,6 +186,7 @@ def test_solaredge_daily_import_export_are_derived_from_lifetime_totals():
             "battery_power": 0.0,
             "load_power": 4.0,
             "battery_level": 70,
+            "telemetry_ready": True,
             "total_grid_import_kwh": 1000.0,
             "total_grid_export_kwh": 500.0,
         },
@@ -182,6 +196,7 @@ def test_solaredge_daily_import_export_are_derived_from_lifetime_totals():
             "battery_power": 0.0,
             "load_power": 4.0,
             "battery_level": 70,
+            "telemetry_ready": True,
             "total_grid_import_kwh": 1002.345,
             "total_grid_export_kwh": 501.25,
         },
@@ -199,6 +214,31 @@ def test_solaredge_daily_import_export_are_derived_from_lifetime_totals():
     assert coordinator._daily_total_store.data["export_baseline_kwh"] == 500.0
 
 
+def test_solaredge_contaminated_ac_daily_total_does_not_overwrite_live_pv():
+    coordinator = _new_coordinator(
+        [
+            {
+                # This is the corrected live PV value after removing battery
+                # discharge from i1_ac_power.
+                "solar_power": 2.0,
+                "grid_power": 0.0,
+                "battery_power": 0.0,
+                "load_power": 2.0,
+                "battery_level": 70,
+                "telemetry_ready": True,
+                # SolarEdgeEnergyController returns None for a contaminated
+                # i1_ac_energy_today counter on a battery system.
+                "daily_solar_energy_kwh": None,
+            }
+        ]
+    )
+    coordinator._energy_acc = _LiveSolarAccumulator()
+
+    data = asyncio.run(coordinator._async_update_data())
+
+    assert data["energy_summary"]["pv_today_kwh"] == pytest.approx(2.0)
+
+
 def test_solaredge_daily_total_baseline_restores_after_restart():
     coordinator = _new_coordinator(
         [
@@ -208,6 +248,7 @@ def test_solaredge_daily_total_baseline_restores_after_restart():
                 "battery_power": 0.0,
                 "load_power": 0.0,
                 "battery_level": 70,
+                "telemetry_ready": True,
                 "total_grid_import_kwh": 1010.0,
                 "total_grid_export_kwh": 505.5,
             }
@@ -234,6 +275,7 @@ def test_solaredge_daily_total_baseline_uses_recorder_midnight_state():
                 "battery_power": 0.0,
                 "load_power": 0.0,
                 "battery_level": 70,
+                "telemetry_ready": True,
                 "total_grid_import_kwh": 9625.716,
                 "total_grid_export_kwh": 150.25,
                 "total_grid_import_entity_id": "sensor.solaredge_m1_imported_kwh",
@@ -271,6 +313,7 @@ def test_solaredge_daily_total_recorder_corrects_existing_midday_baseline():
                 "battery_power": 0.0,
                 "load_power": 0.0,
                 "battery_level": 70,
+                "telemetry_ready": True,
                 "total_grid_import_kwh": 9625.716,
                 "total_grid_export_kwh": 150.25,
                 "total_grid_import_entity_id": "sensor.solaredge_m1_imported_kwh",
