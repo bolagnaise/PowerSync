@@ -10059,9 +10059,13 @@ class EVChargingModeCoordinator:
                     f"mode={mode}, reason={reason}"
                 )
 
-            # Track if any vehicle is charging for coordinator state
+            # Track successful Price-Level-owned sessions for coordinator state.
+            # ``should_charge`` is only the policy intent; a start may have
+            # been rejected by another mode's ownership lease.
+            vehicle_states = getattr(price_level_exec, "_vehicle_states", {})
             any_price_level_charging = any(
-                should_charge for should_charge, _, _ in vehicle_results.values()
+                getattr(vehicle_states.get(vin), "is_charging", False)
+                for vin in vehicle_results
             )
         else:
             any_price_level_charging = False
@@ -10128,7 +10132,17 @@ class EVChargingModeCoordinator:
         else:
             # No mode wants to charge
             stopped_external_scheduled = False
-            if self._is_charging and not any_price_level_charging:
+            # Price-Level has already handled its per-vehicle stop above. Only
+            # ask the coordinator to stop when it owns a non-Price-Level mode
+            # (for example Scheduled, or a mixed Scheduled/Price-Level cycle).
+            coordinator_owned_modes = [
+                mode for mode in self._active_modes if mode != "Price-Level"
+            ]
+            if (
+                self._is_charging
+                and not any_price_level_charging
+                and coordinator_owned_modes
+            ):
                 reasons = [d.reason for d in decisions if d.reason]
                 combined_reason = " | ".join(reasons) if reasons else "No mode wants to charge"
                 await self._stop_charging(combined_reason)

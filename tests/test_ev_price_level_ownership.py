@@ -2335,6 +2335,125 @@ def test_scheduled_coordinator_starts_second_tesla_when_first_already_charging(
     assert params["vehicle_vin"] == second_vin
 
 
+def test_coordinator_does_not_report_price_level_after_smart_schedule_rejects_start(
+    monkeypatch,
+    fake_actions,
+):
+    """A rejected Price-Level intent must not become coordinator ownership."""
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    hass = _FakeHass(price_settings={"opportunity_price_cents": 10})
+    entry = _FakeConfigEntry()
+    ev_ownership.claim_ev_ownership(hass, entry, VIN, owner_mode="smart_schedule")
+
+    async def price_level_decision(self, vehicle_vin, current_price_cents):
+        if current_price_cents <= 10:
+            return True, "Cheap price", "price_level_opportunity"
+        return False, "Price above threshold", ""
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _one_vehicle)
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "get_charging_decision_for_vehicle",
+        price_level_decision,
+    )
+
+    price_level = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    coordinator = ev_planner.EVChargingModeCoordinator(hass, entry)
+    stop_spy = AsyncMock(return_value=False)
+    monkeypatch.setattr(coordinator, "_stop_charging", stop_spy)
+
+    previous_price_executor = ev_planner.get_price_level_executor()
+    previous_scheduled_executor = ev_planner.get_scheduled_charging_executor()
+    try:
+        ev_planner.set_price_level_executor(price_level)
+        ev_planner.set_scheduled_charging_executor(None)
+
+        asyncio.run(coordinator.evaluate({}, 5))
+        cheap_state = coordinator.get_state()
+
+        asyncio.run(coordinator.evaluate({}, 50))
+        high_state = coordinator.get_state()
+    finally:
+        ev_planner.set_price_level_executor(previous_price_executor)
+        ev_planner.set_scheduled_charging_executor(previous_scheduled_executor)
+
+    assert fake_actions._action_start_ev_charging_dynamic.await_count == 0
+    assert cheap_state["is_charging"] is False
+    assert cheap_state["active_modes"] == []
+    assert high_state["is_charging"] is False
+    assert high_state["active_modes"] == []
+    stop_spy.assert_not_awaited()
+    assert ev_ownership.get_active_ev_owner_mode(hass, entry, VIN) == "smart_schedule"
+
+
+def test_coordinator_does_not_stop_price_level_session_twice_after_release(
+    monkeypatch,
+    fake_actions,
+):
+    """Price-Level owns its per-VIN stop; the coordinator must not stop again."""
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+    hass = _FakeHass(price_settings={"opportunity_price_cents": 10})
+    entry = _FakeConfigEntry()
+
+    async def price_level_decision(self, vehicle_vin, current_price_cents):
+        if current_price_cents <= 10:
+            return True, "Cheap price", "price_level_opportunity"
+        return False, "Price above threshold", ""
+
+    async def stop_and_release(*args, **kwargs):
+        ev_ownership.release_ev_ownership(
+            hass,
+            entry,
+            VIN,
+            reason=kwargs.get("stop_reason"),
+            command="stop",
+        )
+        return True
+
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(
+        side_effect=stop_and_release
+    )
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _one_vehicle)
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "get_charging_decision_for_vehicle",
+        price_level_decision,
+    )
+
+    price_level = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    coordinator = ev_planner.EVChargingModeCoordinator(hass, entry)
+    coordinator_stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(coordinator, "_stop_charging", coordinator_stop)
+
+    previous_price_executor = ev_planner.get_price_level_executor()
+    previous_scheduled_executor = ev_planner.get_scheduled_charging_executor()
+    try:
+        ev_planner.set_price_level_executor(price_level)
+        ev_planner.set_scheduled_charging_executor(None)
+
+        asyncio.run(coordinator.evaluate({}, 5))
+        cheap_state = coordinator.get_state()
+        assert cheap_state["is_charging"] is True
+        assert cheap_state["active_modes"] == ["Price-Level"]
+
+        asyncio.run(coordinator.evaluate({}, 50))
+        high_state = coordinator.get_state()
+    finally:
+        ev_planner.set_price_level_executor(previous_price_executor)
+        ev_planner.set_scheduled_charging_executor(previous_scheduled_executor)
+
+    assert fake_actions._action_start_ev_charging_dynamic.await_count == 1
+    assert fake_actions._action_stop_ev_charging_dynamic.await_count == 1
+    coordinator_stop.assert_not_awaited()
+    assert ev_ownership.get_active_ev_owner_mode(hass, entry, VIN) is None
+    assert high_state["is_charging"] is False
+    assert high_state["active_modes"] == []
+
+
 def test_price_level_preserve_home_battery_sets_optimizer_intent(fake_actions):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
