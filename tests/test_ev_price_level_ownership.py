@@ -2692,6 +2692,125 @@ def test_unspecified_ev_plug_state_checks_later_home_vehicle(monkeypatch):
     )
 
 
+def _paired_ble_plug_hass(
+    states: dict[str, str],
+    first_vin: str,
+    second_vin: str,
+) -> _FakeHass:
+    hass = _FakeHass(states=states)
+    hass.device_registry = SimpleNamespace(
+        devices={
+            "device-1": SimpleNamespace(
+                id="device-1",
+                identifiers={("tesla_fleet", first_vin)},
+            ),
+            "device-2": SimpleNamespace(
+                id="device-2",
+                identifiers={("tesla_fleet", second_vin)},
+            ),
+        }
+    )
+    hass.entity_registry = SimpleNamespace(
+        entities={
+            entity_id: SimpleNamespace(
+                entity_id=entity_id,
+                device_id=("device-1" if "flinn" in entity_id else "device-2"),
+            )
+            for entity_id in states
+            if entity_id.endswith("_charge_cable")
+        }
+    )
+    return hass
+
+
+def _paired_ble_plug_entry(first_vin: str, second_vin: str):
+    return SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "tesla_flinn,tesla_yf88",
+            "tesla_ble_vehicle_mapping": (
+                f"{first_vin}=tesla_flinn,{second_vin}=tesla_yf88"
+            ),
+        },
+    )
+
+
+def test_mapped_ble_plug_state_wins_over_stale_fleet_row(monkeypatch):
+    first_vin = "XP7YHCEL7TB811704"
+    second_vin = "LRWYHCEKXTC687964"
+    hass = _paired_ble_plug_hass(
+        {
+            "binary_sensor.tesla_yf88_charge_flap": "on",
+            "binary_sensor.tesla_yf88_charge_cable": "off",
+        },
+        first_vin,
+        second_vin,
+    )
+    entry = _paired_ble_plug_entry(first_vin, second_vin)
+    monkeypatch.setattr(_ha_dr, "async_get", lambda _hass: _hass.device_registry)
+
+    assert (
+        asyncio.run(
+            ev_planner.is_ev_plugged_in(hass, entry, vehicle_vin=second_vin)
+        )
+        is True
+    )
+
+
+def test_unavailable_mapped_ble_falls_back_to_fleet_plug_state(monkeypatch):
+    first_vin = "XP7YHCEL7TB811704"
+    second_vin = "LRWYHCEKXTC687964"
+    hass = _paired_ble_plug_hass(
+        {
+            "binary_sensor.tesla_yf88_charge_flap": "unavailable",
+            "sensor.tesla_yf88_charging_state": "unavailable",
+            "switch.tesla_yf88_charger": "unavailable",
+            "binary_sensor.tesla_yf88_charge_cable": "on",
+        },
+        first_vin,
+        second_vin,
+    )
+    entry = _paired_ble_plug_entry(first_vin, second_vin)
+    monkeypatch.setattr(_ha_dr, "async_get", lambda _hass: _hass.device_registry)
+
+    assert (
+        asyncio.run(
+            ev_planner.is_ev_plugged_in(hass, entry, vehicle_vin=second_vin)
+        )
+        is True
+    )
+
+
+def test_mapped_ble_plug_state_does_not_borrow_another_vehicle(monkeypatch):
+    first_vin = "XP7YHCEL7TB811704"
+    second_vin = "LRWYHCEKXTC687964"
+    hass = _paired_ble_plug_hass(
+        {
+            "binary_sensor.tesla_flinn_charge_flap": "off",
+            "binary_sensor.tesla_yf88_charge_flap": "on",
+            "binary_sensor.tesla_flinn_charge_cable": "off",
+            "binary_sensor.tesla_yf88_charge_cable": "off",
+        },
+        first_vin,
+        second_vin,
+    )
+    entry = _paired_ble_plug_entry(first_vin, second_vin)
+    monkeypatch.setattr(_ha_dr, "async_get", lambda _hass: _hass.device_registry)
+
+    assert (
+        asyncio.run(ev_planner.is_ev_plugged_in(hass, entry, vehicle_vin=first_vin))
+        is False
+    )
+    assert (
+        asyncio.run(
+            ev_planner.is_ev_plugged_in(hass, entry, vehicle_vin=second_vin)
+        )
+        is True
+    )
+
+
 def test_external_scheduled_guard_does_not_report_away_vehicle_when_home_vehicle_seen(
     monkeypatch,
     fake_actions,

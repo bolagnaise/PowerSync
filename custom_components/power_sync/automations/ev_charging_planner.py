@@ -1083,6 +1083,28 @@ async def is_ev_plugged_in(
                     )
                     return True
 
+    # A physical Tesla VIN can have a specifically paired ESPHome BLE bridge
+    # in BOTH mode. Prefer that direct local cable signal for this exact VIN
+    # before consulting a stale/asleep Fleet row. If BLE cannot determine the
+    # state (for example the bridge is unavailable), continue to Fleet/
+    # Teslemetry below. Identity-safe mapping returns no prefix for ambiguous
+    # multi-vehicle configurations, so another car's BLE state is never used.
+    if vehicle_vin and not vehicle_vin.startswith("ble_"):
+        for prefix in _configured_ble_prefixes(
+            config_entry,
+            vehicle_vin,
+            hass=hass,
+        ):
+            plugged = _tesla_ble_plugged_in_status(hass, prefix)
+            if plugged is not None:
+                _LOGGER.debug(
+                    "Tesla %s plug state from paired BLE %s: %s",
+                    vehicle_vin[:8],
+                    prefix,
+                    plugged,
+                )
+                return plugged
+
     # Method 0: Teslemetry Bluetooth — check sensor.*_charging_state
     import re as _re
     for state in hass.states.async_all():
