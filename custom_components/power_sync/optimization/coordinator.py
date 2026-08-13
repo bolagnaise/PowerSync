@@ -10405,13 +10405,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         n = min(len(import_prices), len(export_prices), len(solar), len(load))
         selected = [False] * n
         if n <= 1 or not self.profit_max_mode:
+            reason = (
+                "profit_max_disabled"
+                if not self.profit_max_mode
+                else "insufficient_horizon"
+            )
             self._solar_export_capability_status = {
                 "supported": False,
-                "reason": "profit_max_disabled",
+                "reason": reason,
+                "selected_slots": 0,
+                "current_slot": (
+                    {"selected": False, "reason": reason} if n else None
+                ),
+                "rejection_counts": (
+                    {reason: max(1, n - 1)} if n else {}
+                ),
             }
             return selected
         capability = self._solar_export_capability()
         if not capability.get("supported"):
+            reason = str(capability.get("reason") or "capability_unsupported")
+            self._solar_export_capability_status = {
+                **capability,
+                "selected_slots": 0,
+                "current_slot": {"selected": False, "reason": reason},
+                "rejection_counts": {reason: n - 1},
+            }
             return selected
 
         interval_hours = max(1, int(self._config.interval_minutes or 5)) / 60.0
@@ -10428,6 +10447,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 **capability,
                 "supported": False,
                 "reason": "battery_limits_unknown",
+                "selected_slots": 0,
+                "current_slot": {
+                    "selected": False,
+                    "reason": "battery_limits_unknown",
+                },
+                "rejection_counts": {"battery_limits_unknown": n - 1},
             }
             return selected
 
@@ -10479,10 +10504,36 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             0.0, 1.0 - max(0.0, min(1.0, current_soc))
         )
         margin = 0.001  # Internal 0.1c/kWh anti-churn margin; not user config.
+        current_slot_status: dict[str, Any] | None = None
+        rejection_counts: dict[str, int] = {}
+
+        def _record_slot(
+            idx: int,
+            reason: str,
+            **details: Any,
+        ) -> None:
+            nonlocal current_slot_status
+            selected_slot = reason == "selected"
+            if not selected_slot:
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+            if idx == 0:
+                current_slot_status = {
+                    "selected": selected_slot,
+                    "reason": reason,
+                    **details,
+                }
+
         for idx in range(n - 1):
             if remaining_headroom_kwh <= 1e-9:
+                for blocked_idx in range(idx, n - 1):
+                    _record_slot(
+                        blocked_idx,
+                        "battery_headroom_exhausted",
+                        remaining_headroom_kwh=0.0,
+                    )
                 break
             if idx < len(hard_charge_blocks) and hard_charge_blocks[idx]:
+                _record_slot(idx, "hard_charge_block")
                 continue
             if (
                 grid_export_limits_w is not None
@@ -10490,9 +10541,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 and grid_export_limits_w[idx] is not None
                 and float(grid_export_limits_w[idx]) <= 100.0
             ):
+                _record_slot(
+                    idx,
+                    "grid_export_limit_blocked",
+                    grid_export_limit_w=round(
+                        float(grid_export_limits_w[idx]), 3
+                    ),
+                )
                 continue
             surplus_kw = min(max_charge_kw, max(0.0, solar[idx] - load[idx]))
-            if surplus_kw <= 0.1 or export_prices[idx] <= margin:
+            slot_details = {
+                "solar_surplus_kw": round(surplus_kw, 6),
+                "export_price_per_kwh": round(float(export_prices[idx]), 6),
+                "remaining_headroom_kwh": round(remaining_headroom_kwh, 6),
+            }
+            if surplus_kw <= 0.1:
+                _record_slot(idx, "insufficient_solar_surplus", **slot_details)
+                continue
+            if export_prices[idx] <= margin:
+                _record_slot(idx, "non_positive_export_price", **slot_details)
                 continue
             deferred_kwh = min(
                 remaining_headroom_kwh,
@@ -10512,7 +10579,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ]
             candidates.sort(key=lambda future_idx: future_cost_per_input_kwh[future_idx])
             available = sum(future_capacity_kwh[future_idx] for future_idx in candidates)
+            cheapest_cost = (
+                future_cost_per_input_kwh[candidates[0]]
+                if candidates
+                else None
+            )
+            funding_details = {
+                **slot_details,
+                "deferred_kwh": round(deferred_kwh, 6),
+                "eligible_replenishment_kwh": round(available, 6),
+                "cheapest_replenishment_cost_per_kwh": (
+                    round(float(cheapest_cost), 6)
+                    if cheapest_cost is not None
+                    else None
+                ),
+            }
             if available + 1e-9 < deferred_kwh:
+                _record_slot(
+                    idx,
+                    "insufficient_cheaper_replenishment",
+                    **funding_details,
+                )
                 continue
             remaining = deferred_kwh
             for future_idx in candidates:
@@ -10522,11 +10609,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if remaining <= 1e-9:
                     break
             selected[idx] = True
+            _record_slot(idx, "selected", **funding_details)
             remaining_headroom_kwh -= deferred_kwh
 
         self._solar_export_capability_status = {
             **capability,
             "selected_slots": sum(selected),
+            "current_slot": current_slot_status,
+            "rejection_counts": rejection_counts,
         }
         return selected
 

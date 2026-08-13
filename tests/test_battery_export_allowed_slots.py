@@ -407,6 +407,62 @@ def test_profit_max_solar_export_requires_cheaper_reachable_recharge(opt_module)
     assert slots == [True, False, False, False]
 
 
+def test_profit_max_solar_export_reports_current_slot_funding_for_reported_variant(
+    opt_module,
+):
+    coordinator = _sigenergy_profit_max_coordinator(opt_module)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator._config.interval_minutes = 5
+    coordinator._solar_export_hold = SimpleNamespace(
+        capability=lambda: {
+            "supported": True,
+            "reason": "supported",
+            "adapter": "fronius_reserva.entity.block_charging.v1",
+            "export_limit_kw": 5.0,
+        }
+    )
+
+    slots = coordinator._profit_max_solar_export_slots(
+        import_prices=[0.1836, 0.1836],
+        export_prices=[0.0837, 0.03],
+        solar=[1.10, 1.10],
+        load=[0.18, 0.18],
+        current_soc=0.599,
+        hard_charge_blocks=[False, False],
+        grid_charge_allowed=[False, False],
+    )
+
+    assert slots == [True, False]
+    status = coordinator._solar_export_capability_status
+    assert status["selected_slots"] == 1
+    assert status["current_slot"]["selected"] is True
+    assert status["current_slot"]["reason"] == "selected"
+    assert status["current_slot"]["solar_surplus_kw"] == pytest.approx(0.92)
+    assert status["current_slot"]["eligible_replenishment_kwh"] > 0
+
+    slots = coordinator._profit_max_solar_export_slots(
+        import_prices=[0.1836, 0.1836],
+        export_prices=[0.0837, 0.03],
+        solar=[1.10, 0.18],
+        load=[0.18, 0.18],
+        current_soc=0.599,
+        hard_charge_blocks=[False, False],
+        grid_charge_allowed=[False, False],
+    )
+
+    assert slots == [False, False]
+    status = coordinator._solar_export_capability_status
+    assert status["current_slot"]["selected"] is False
+    assert (
+        status["current_slot"]["reason"]
+        == "insufficient_cheaper_replenishment"
+    )
+    assert status["current_slot"]["eligible_replenishment_kwh"] == 0
+    assert status["rejection_counts"] == {
+        "insufficient_cheaper_replenishment": 1
+    }
+
+
 def test_profit_max_solar_export_fails_closed_without_capability(opt_module):
     coordinator = _sigenergy_profit_max_coordinator(
         opt_module, export_limit_kw=None

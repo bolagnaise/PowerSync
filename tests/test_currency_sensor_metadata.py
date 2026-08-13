@@ -918,6 +918,54 @@ def test_optimizer_current_action_exposes_reserve_recommendation():
     assert attrs["idle_hold_reserve_percent"] == 100
 
 
+def test_optimizer_current_action_exposes_profit_max_solar_export_diagnostics():
+    sensor = _sensor_module()
+    desc = next(
+        d
+        for d in sensor.OPTIMIZER_ACTION_SENSORS
+        if d.key == "optimization_status"
+    )
+    solar_export = {
+        "capability": {
+            "supported": True,
+            "reason": "supported",
+            "export_limit_kw": 5.0,
+            "selected_slots": 0,
+            "current_slot": {
+                "selected": False,
+                "reason": "insufficient_cheaper_replenishment",
+            },
+            "rejection_counts": {"insufficient_cheaper_replenishment": 1},
+        },
+        "planned_slots": 0,
+        "hold": {"active": False},
+    }
+    payload = {
+        "current_action": "self_consumption",
+        "current_action_detail": None,
+        "planned_current_action": "self_consumption",
+        "planned_current_action_detail": None,
+        "effective_current_action": "self_consumption",
+        "effective_current_action_detail": None,
+        "monitoring_mode": False,
+        "profit_max_enabled": True,
+        "profit_max_solar_export": solar_export,
+    }
+    entity = sensor.OptimizerActionSensor(
+        SimpleNamespace(data=payload),
+        desc,
+        _entry("amber"),
+    )
+
+    attrs = entity.extra_state_attributes
+    assert attrs["current_action_detail"] is None
+    assert attrs["planned_action_detail"] is None
+    assert attrs["effective_action_detail"] is None
+    assert attrs["monitoring_mode"] is False
+    assert attrs["profit_max_enabled"] is True
+    assert attrs["profit_max_solar_export"] == solar_export
+
+
 def test_optimizer_current_action_exposes_charge_by_time_settings():
     sensor = _sensor_module()
     desc = next(
