@@ -139,6 +139,7 @@ class SungrowSHController(InverterController):
 
     # Timeout for Modbus operations
     TIMEOUT_SECONDS = 10.0
+    CONNECT_TIMEOUT_SECONDS = 3.0
     CONNECT_SETTLE_SECONDS = 0.2
     MESSAGE_WAIT_SECONDS = 0.05
 
@@ -180,35 +181,64 @@ class SungrowSHController(InverterController):
                 if self._client and self._client.connected:
                     return True
 
+                # Never replace a failed client without closing it first.
+                # Pymodbus clients can retain reconnect tasks after a failed
+                # connection, which accumulates retries across coordinator
+                # polls when the inverter or WiNet-S endpoint is unavailable.
+                self._close_client()
                 self._client = AsyncModbusTcpClient(
                     host=self.host,
                     port=self.port,
                     timeout=self.TIMEOUT_SECONDS,
+                    retries=1,
+                    reconnect_delay=0,
                 )
 
-                connected = await self._client.connect()
+                try:
+                    connected = await asyncio.wait_for(
+                        self._client.connect(),
+                        timeout=self.CONNECT_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    _LOGGER.debug(
+                        "Connection timeout to Sungrow SH inverter at %s:%s",
+                        self.host,
+                        self.port,
+                    )
+                    self._close_client()
+                    return False
+
                 if connected:
                     self._connected = True
                     self._last_connect_at = time.monotonic()
                     _LOGGER.info(f"Connected to Sungrow SH inverter at {self.host}:{self.port}")
                 else:
-                    _LOGGER.error(f"Failed to connect to Sungrow SH inverter at {self.host}:{self.port}")
+                    _LOGGER.debug(f"Failed to connect to Sungrow SH inverter at {self.host}:{self.port}")
+                    self._close_client()
 
                 return connected
 
             except Exception as e:
                 _LOGGER.error(f"Error connecting to Sungrow SH inverter: {e}")
-                self._connected = False
+                self._close_client()
                 return False
+
+    def _close_client(self) -> None:
+        """Close and discard the active Modbus client without leaking retries."""
+        client = self._client
+        if client:
+            try:
+                client.close()
+            except Exception as err:
+                _LOGGER.debug("Error closing Sungrow SH Modbus client: %s", err)
+        self._client = None
+        self._connected = False
 
     async def disconnect(self) -> None:
         """Disconnect from the Sungrow SH inverter."""
         async with self._request_lock:
             async with self._lock:
-                if self._client:
-                    self._client.close()
-                    self._client = None
-                self._connected = False
+                self._close_client()
                 _LOGGER.debug(f"Disconnected from Sungrow SH inverter at {self.host}")
 
     async def _wait_for_request_slot(self) -> None:

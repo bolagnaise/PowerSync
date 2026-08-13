@@ -52,6 +52,11 @@ def _install_const_stub() -> None:
     const.CONF_FLEET_API_BASE_URL = "fleet_api_base_url"
     const.CONF_MONITORING_MODE = "monitoring_mode"
     const.CONF_POWERSYNC_CLIENT_INSTANCE_ID = "powersync_client_instance_id"
+    const.CONF_EV_PROVIDER = "ev_provider"
+    const.CONF_TESLA_BLE_ENTITY_PREFIX = "tesla_ble_entity_prefix"
+    const.CONF_TESLA_BLE_VEHICLE_MAPPING = "tesla_ble_vehicle_mapping"
+    const.DEFAULT_TESLA_BLE_ENTITY_PREFIX = "tesla_ble"
+    const.EV_PROVIDER_BOTH = "both"
     const.TESLA_SITE_INFO_CACHE_TTL_SECONDS = 3600
     const.CONF_SIGENERGY_CHARGER_ENABLED = "sigenergy_charger_enabled"
     const.CONF_SIGENERGY_CHARGER_HOST = "sigenergy_charger_host"
@@ -191,6 +196,50 @@ def _controller_with_recorded_writes():
     controller._write_register = write_register
     controller._read_register = read_register
     return controller, writes
+
+
+@pytest.mark.parametrize("outcome", ["failed", "timeout", "exception"])
+def test_failed_connections_close_clients_and_disable_background_retries(
+    monkeypatch, outcome,
+):
+    """Every failed poll must discard its client before the next attempt."""
+    clients = []
+
+    class FailedClient:
+        def __init__(self, **kwargs):
+            self.connected = False
+            self.kwargs = kwargs
+            self.close_calls = 0
+            clients.append(self)
+
+        async def connect(self):
+            if outcome == "failed":
+                return False
+            if outcome == "exception":
+                raise OSError("endpoint unavailable")
+            await asyncio.Event().wait()
+
+        def close(self):
+            self.close_calls += 1
+
+    sungrow_module = sys.modules[SungrowSHController.__module__]
+    monkeypatch.setattr(sungrow_module, "AsyncModbusTcpClient", FailedClient)
+
+    async def run_connects():
+        controller = SungrowSHController("192.0.2.10")
+        controller.CONNECT_TIMEOUT_SECONDS = 0.01
+        results = [await controller.connect(), await controller.connect()]
+        return controller, results
+
+    controller, results = asyncio.run(run_connects())
+
+    assert results == [False, False]
+    assert len(clients) == 2
+    assert [client.close_calls for client in clients] == [1, 1]
+    assert all(client.kwargs["retries"] == 1 for client in clients)
+    assert all(client.kwargs["reconnect_delay"] == 0 for client in clients)
+    assert controller._client is None
+    assert controller.is_connected is False
 
 
 def test_force_discharge_writes_requested_power_to_forced_power_register():
