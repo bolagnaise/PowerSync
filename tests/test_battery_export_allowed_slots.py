@@ -5502,6 +5502,37 @@ def test_scheduled_ev_preserve_blocks_export_but_allows_charge(opt_module):
     assert energy.no_discharge_calls == 1
 
 
+def test_no_idle_uses_self_consumption_after_smart_schedule_preserve_clears(
+    opt_module,
+):
+    battery = _FakeBattery(hardware_mode="autonomous")
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    energy = _FakeEnergyCoordinator()
+    coordinator.energy_coordinator = energy
+    coordinator._config.disable_idle_enabled = True
+    coordinator.hass.data = {
+        "power_sync": {
+            coordinator.entry_id: {
+                "scheduled_ev_preserve_state": {
+                    "active": False,
+                    "source": "smart_schedule",
+                    "reason": "no active Smart Schedule charging",
+                }
+            }
+        }
+    }
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="idle", power_w=0)
+        )
+    )
+
+    assert battery.self_consumption_calls == 1
+    assert energy.no_discharge_calls == 0
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_scheduled_ev_preserve_blocks_polling_backup_reserve_restore(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)

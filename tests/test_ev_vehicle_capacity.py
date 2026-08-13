@@ -188,6 +188,21 @@ def test_vehicle_capacity_api_regenerates_without_charger_command_and_refreshes_
     assert "_stop_charging(" not in view_source
 
 
+def test_vehicle_deletion_releases_smart_schedule_battery_preserve_owner():
+    source = INIT_PATH.read_text()
+    start = source.index("class VehicleChargingConfigView")
+    end = source.index("class SolarSurplusConfigView", start)
+    view_source = source[start:end]
+
+    clear_index = view_source.index(
+        "auto_executor._clear_active_charging_preserve_intent("
+    )
+    settings_pop_index = view_source.index("auto_executor._settings.pop(vid, None)")
+
+    assert '"vehicle deleted"' in view_source
+    assert clear_index < settings_pop_index
+
+
 class _SurplusForecaster:
     async def forecast_surplus(self, hours):
         now = datetime.now().replace(minute=0, second=0, microsecond=0)

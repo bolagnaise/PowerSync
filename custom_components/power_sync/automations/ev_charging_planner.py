@@ -4122,10 +4122,9 @@ class AutoScheduleExecutor:
             str, Tuple[bool, bool, int, int, int, str]
         ] = {}
 
-        # Tracks when Smart Schedule is asking the battery optimiser to preserve
-        # energy for a vehicle that is not currently available to charge.
-        self._future_demand_preserve_active = False
-        self._future_demand_preserve_reason = ""
+        # Home-battery preservation is owned only by vehicles that Smart
+        # Schedule is actively charging.  A future plan for an unavailable EV
+        # must not hold the home battery at the vehicle's current SOC.
         self._active_charging_preserve_vehicles: set[str] = set()
         self._active_charging_preserve_reasons: Dict[str, str] = {}
         self._last_external_smart_schedule_stops: Dict[
@@ -5086,6 +5085,10 @@ class AutoScheduleExecutor:
         for vehicle_id, settings in self._settings.items():
             if not settings.enabled:
                 self._clear_start_failure(vehicle_id)
+                self._clear_active_charging_preserve_intent(
+                    vehicle_id,
+                    "Smart Schedule disabled",
+                )
                 # Restore curtailment if modified and auto-schedule is now disabled
                 state = self._state.get(vehicle_id)
                 if state:
@@ -5104,7 +5107,7 @@ class AutoScheduleExecutor:
             except Exception as e:
                 _LOGGER.error(f"Auto-schedule evaluation failed for {vehicle_id}: {e}")
 
-        self._sync_future_demand_preserve_intent()
+        self._sync_inactive_smart_schedule_preserve_intent()
 
         # Periodically save cached SoC values to storage
         await self._save_cached_soc_if_needed()
@@ -5990,55 +5993,11 @@ class AutoScheduleExecutor:
         except Exception as e:
             _LOGGER.error(f"Failed to regenerate plan for {vehicle_id}: {e}")
 
-    def _has_future_plan_demand(self, state: AutoScheduleState) -> bool:
-        """Return True if a vehicle has future planned charging demand."""
-        plan = state.current_plan
-        if not plan or not plan.windows or plan.energy_needed_kwh <= 0:
-            return False
-
-        now = dt_util.now()
-        if not isinstance(now, datetime):
-            now = _ha_local_now_naive()
-        for window in plan.windows:
-            try:
-                end = datetime.fromisoformat(window.end_time)
-            except (TypeError, ValueError):
-                continue
-
-            if end.tzinfo is None and getattr(now, "tzinfo", None) is not None:
-                end = end.replace(tzinfo=now.tzinfo)
-            elif end.tzinfo is not None and getattr(now, "tzinfo", None) is None:
-                end = end.replace(tzinfo=None)
-
-            if end > now:
-                return True
-
-        return False
-
-    def _set_future_demand_preserve_intent(self, reason: str) -> None:
-        """Publish Smart Schedule preserve intent for future EV demand."""
-        from ..const import DOMAIN
-
-        self._future_demand_preserve_reason = reason
-        entry_data = self.hass.data.setdefault(DOMAIN, {}).setdefault(
-            self.config_entry.entry_id,
-            {},
-        )
-        existing = entry_data.get("scheduled_ev_preserve_state", {})
-        if existing.get("active") and existing.get("source") not in (None, "smart_schedule"):
-            self._future_demand_preserve_active = True
-            return
-
-        self._write_smart_schedule_preserve_state(reason)
-        if not self._future_demand_preserve_active:
-            _LOGGER.info(
-                "Smart Schedule: requested home battery preserve mode (%s)",
-                reason,
-            )
-        self._future_demand_preserve_active = True
-
-    def _clear_future_demand_preserve_intent(self, reason: str = "") -> None:
-        """Clear Smart Schedule preserve intent without touching other EV modes."""
+    def _sync_inactive_smart_schedule_preserve_intent(
+        self,
+        reason: str = "no active Smart Schedule charging",
+    ) -> None:
+        """Clear Smart Schedule preserve unless a vehicle is actively charging."""
         from ..const import DOMAIN
 
         entry_data = self.hass.data.get(DOMAIN, {}).get(
@@ -6047,26 +6006,26 @@ class AutoScheduleExecutor:
         )
         state = entry_data.setdefault("scheduled_ev_preserve_state", {})
         if state.get("source") != "smart_schedule":
-            self._future_demand_preserve_active = False
             return
 
-        self._future_demand_preserve_active = False
-        self._future_demand_preserve_reason = ""
         if self._active_charging_preserve_vehicles:
             self._write_smart_schedule_preserve_state(
                 self._smart_schedule_active_preserve_reason(reason)
             )
-        else:
-            state.update({
-                "active": False,
-                "mode": "no_discharge_charge_allowed",
-                "source": "smart_schedule",
-                "reason": reason,
-            })
-        _LOGGER.info(
-            "Smart Schedule: cleared future-demand home battery preserve request%s",
-            f" ({reason})" if reason else "",
-        )
+            return
+
+        was_active = bool(state.get("active"))
+        state.update({
+            "active": False,
+            "mode": "no_discharge_charge_allowed",
+            "source": "smart_schedule",
+            "reason": reason,
+        })
+        if was_active:
+            _LOGGER.info(
+                "Smart Schedule: cleared inactive home battery preserve request%s",
+                f" ({reason})" if reason else "",
+            )
 
     def _write_smart_schedule_preserve_state(self, reason: str) -> None:
         """Publish Smart Schedule preserve state without overwriting other EV modes."""
@@ -6122,17 +6081,7 @@ class AutoScheduleExecutor:
                 self._smart_schedule_active_preserve_reason(reason)
             )
             return
-        if self._future_demand_preserve_active:
-            self._write_smart_schedule_preserve_state(
-                self._future_demand_preserve_reason or reason
-            )
-            return
-        state.update({
-            "active": False,
-            "mode": "no_discharge_charge_allowed",
-            "source": "smart_schedule",
-            "reason": reason,
-        })
+        self._sync_inactive_smart_schedule_preserve_intent(reason)
 
     def _sync_active_charging_preserve_intent(
         self,
@@ -6222,37 +6171,7 @@ class AutoScheduleExecutor:
                     err,
                 )
 
-        self._sync_future_demand_preserve_intent()
-
-    def _sync_future_demand_preserve_intent(self) -> None:
-        """Keep optimiser no-discharge intent aligned with unavailable EV demand."""
-        unavailable_with_demand = []
-        now = dt_util.now()
-        weekday = (
-            now.weekday()
-            if hasattr(now, "weekday")
-            else _ha_local_now_naive().weekday()
-        )
-        for vehicle_id, state in self._state.items():
-            settings = self._settings.get(vehicle_id)
-            if (
-                settings is None
-                or not settings.enabled
-                or not settings.get_effective_preserve_home_battery(weekday)
-            ):
-                continue
-            if state.last_decision not in ("away", "unplugged"):
-                continue
-            if self._has_future_plan_demand(state):
-                unavailable_with_demand.append(vehicle_id)
-
-        if unavailable_with_demand:
-            vehicles = ", ".join(sorted(unavailable_with_demand))
-            self._set_future_demand_preserve_intent(
-                f"future EV demand while unavailable: {vehicles}"
-            )
-        else:
-            self._clear_future_demand_preserve_intent("no unavailable EV demand")
+        self._sync_inactive_smart_schedule_preserve_intent()
 
     async def _get_current_price(self) -> float:
         """Get current import price from available sources (provider-aware).

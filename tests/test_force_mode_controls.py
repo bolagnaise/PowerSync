@@ -2752,6 +2752,30 @@ def test_tesla_force_discharge_arms_cleanup_for_unconfirmed_accepted_upload():
     )
 
 
+def test_tesla_force_charge_arms_cleanup_for_unconfirmed_accepted_upload():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_force_charge")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert "accepted_sites: list[str] = []" in function_source
+    assert "unconfirmed_sites: list[str] = []" in function_source
+    assert "accepted_status=upload_status" in function_source
+    assert 'upload_status.get("accepted")' in function_source
+    assert "FORCE CHARGE CLEANUP ARMED" in function_source
+    assert "if all_success or accepted_sites:" in function_source
+    active_branch = function_source.split("if all_success or accepted_sites:", 1)[1].split(
+        'else:\n                _LOGGER.error("Failed to upload charge tariff',
+        1,
+    )[0]
+    assert 'return {"success": True, "error": None}' in active_branch
+    assert '"_allow_monitoring_restore": True' in function_source
+    assert function_source.index("FORCE CHARGE CLEANUP ARMED") < function_source.rindex(
+        "async def auto_restore_charge"
+    )
+
+
 def test_tesla_force_timers_ignore_callbacks_before_current_expiry():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

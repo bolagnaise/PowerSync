@@ -1632,6 +1632,12 @@ def fake_actions(monkeypatch):
 
     actions._resolve_max_grid_import_kw = resolve_max_grid_import_kw
     monkeypatch.setitem(sys.modules, "power_sync.automations.actions", actions)
+    monkeypatch.setattr(
+        sys.modules["power_sync.automations"],
+        "actions",
+        actions,
+        raising=False,
+    )
     return actions
 
 
@@ -3101,14 +3107,13 @@ def test_auto_schedule_start_allows_solar_surplus_takeover(monkeypatch, fake_act
 
 
 @pytest.mark.parametrize(
-    ("preserve_home_battery", "expect_preserve"),
-    [(False, False), (True, True)],
+    "preserve_home_battery",
+    [False, True],
 )
-def test_auto_schedule_keeps_future_plan_when_vehicle_away(
+def test_auto_schedule_keeps_future_plan_without_preserving_for_away_vehicle(
     monkeypatch,
     fake_actions,
     preserve_home_battery,
-    expect_preserve,
 ):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
     now = datetime(2026, 5, 27, 15, 0, tzinfo=timezone.utc)
@@ -3196,13 +3201,11 @@ def test_auto_schedule_keeps_future_plan_when_vehicle_away(
     fake_actions._action_start_ev_charging_dynamic.assert_not_awaited()
 
     preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
-    assert preserve_state.get("active", False) is expect_preserve
-    if expect_preserve:
-        assert preserve_state["source"] == "smart_schedule"
-        assert "future EV demand" in preserve_state["reason"]
+    assert preserve_state.get("active", False) is False
+    assert preserve_state.get("source") in (None, "smart_schedule")
 
 
-def test_auto_schedule_clears_future_preserve_when_effective_setting_turns_off(
+def test_auto_schedule_clears_legacy_future_preserve_while_vehicle_away(
     monkeypatch,
 ):
     now = datetime(2026, 5, 27, 15, 0, tzinfo=timezone.utc)
@@ -3214,6 +3217,12 @@ def test_auto_schedule_clears_future_preserve_when_effective_setting_turns_off(
         _FakeConfigEntry(),
         planner=SimpleNamespace(),
     )
+    hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"] = {
+        "active": True,
+        "mode": "no_discharge_charge_allowed",
+        "source": "smart_schedule",
+        "reason": "future EV demand while unavailable: Model 3",
+    }
     settings = ev_planner.AutoScheduleSettings(
         enabled=True,
         vehicle_id=VIN,
@@ -3241,17 +3250,12 @@ def test_auto_schedule_clears_future_preserve_when_effective_setting_turns_off(
         ],
     )
 
-    executor._sync_future_demand_preserve_intent()
-    assert hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"][
-        "active"
-    ] is True
-
-    settings.preserve_home_battery = False
-    executor._sync_future_demand_preserve_intent()
+    executor._sync_inactive_smart_schedule_preserve_intent()
 
     preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is False
     assert preserve_state["source"] == "smart_schedule"
+    assert preserve_state["reason"] == "no active Smart Schedule charging"
 
 
 def test_auto_schedule_stops_untracked_tesla_while_waiting(monkeypatch, fake_actions):
@@ -3612,7 +3616,6 @@ def test_auto_schedule_clears_stale_plan_when_away_vehicle_reaches_target(
         _FakeConfigEntry(),
         planner=SimpleNamespace(),
     )
-    executor._future_demand_preserve_active = True
     executor._settings[VIN] = ev_planner.AutoScheduleSettings(
         enabled=True,
         vehicle_id=VIN,
@@ -3769,14 +3772,14 @@ def test_auto_schedule_preserve_does_not_overwrite_price_level_intent(
         ],
     )
 
-    executor._sync_future_demand_preserve_intent()
+    executor._sync_inactive_smart_schedule_preserve_intent()
     preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is True
     assert preserve_state["source"] == "price_level_charging"
     assert preserve_state["reason"] == "cheap price"
 
     state.current_plan = None
-    executor._sync_future_demand_preserve_intent()
+    executor._sync_inactive_smart_schedule_preserve_intent()
     preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is True
     assert preserve_state["source"] == "price_level_charging"

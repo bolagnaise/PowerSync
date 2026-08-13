@@ -15380,6 +15380,10 @@ class VehicleChargingConfigView(HomeAssistantView):
             auto_executor = get_auto_schedule_executor()
             if auto_executor:
                 for vid in runtime_ids:
+                    auto_executor._clear_active_charging_preserve_intent(
+                        vid,
+                        "vehicle deleted",
+                    )
                     if auto_executor._settings.pop(vid, None) is not None:
                         changes.append(f"auto_settings:{vid}")
                     if auto_executor._state.pop(vid, None) is not None:
@@ -32556,7 +32560,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Step 4: Create and upload charge tariff to all gateways
             charge_tariff, actual_expiry = _create_charge_tariff(duration)
             all_success = True
+            accepted_sites: list[str] = []
+            unconfirmed_sites: list[str] = []
             for site_id, current_token, provider in site_configs:
+                upload_status: dict[str, bool] = {}
                 success = await send_tariff_to_tesla(
                     hass,
                     site_id,
@@ -32564,16 +32571,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     current_token,
                     provider,
                     fleet_base_url=entry.data.get(CONF_FLEET_API_BASE_URL),
+                    accepted_status=upload_status,
                 )
+                if upload_status.get("accepted"):
+                    accepted_sites.append(site_id)
                 if not success:
-                    _LOGGER.error("Failed to upload charge tariff to site %s", site_id)
                     all_success = False
+                    if upload_status.get("accepted"):
+                        _LOGGER.warning(
+                            "Force charge tariff was accepted by Tesla for site %s "
+                            "but readback did not confirm it; keeping cleanup armed",
+                            site_id,
+                        )
+                        unconfirmed_sites.append(site_id)
+                    else:
+                        _LOGGER.error("Failed to upload charge tariff to site %s", site_id)
                 elif len(site_configs) > 1:
                     await asyncio.sleep(1)
 
-            if all_success:
+            if all_success or accepted_sites:
+                if all_success:
+                    active_site_ids = {
+                        site_id for site_id, _token, _provider in site_configs
+                    }
+                else:
+                    active_site_ids = set(accepted_sites)
+                active_site_configs = [
+                    config for config in site_configs if config[0] in active_site_ids
+                ]
                 reserve_result = await _tesla_force_pulse_backup_reserve(
-                    site_configs,
+                    active_site_configs,
                     100,
                     reason="force charge final reserve pulse",
                     is_current=lambda: (
@@ -32584,7 +32611,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 if not _tesla_force_result_all_confirmed(
                     reserve_result,
-                    site_configs,
+                    active_site_configs,
                 ):
                     if _command_generation[0] != _restore_gen:
                         _LOGGER.info(
@@ -32627,13 +32654,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # the period boundary (Tesla API requirement) but the timer fires
                 # after the user's requested duration and restore_normal reverts.
                 force_charge_state["expires_at"] = tesla_requested_expiry.astimezone(dt_util.UTC)
-                force_charge_state["hardware_expires_at"] = actual_expiry.astimezone(dt_util.UTC)
+                force_charge_state["hardware_expires_at"] = _tesla_force_retry_expiry(
+                    force_charge_state,
+                    actual_expiry,
+                    degraded=bool(unconfirmed_sites),
+                )
                 _LOGGER.info(
                     "FORCE CHARGE ACTIVE%s: Tariff uploaded to %d gateway(s), "
                     "expires in %dmin (tariff window to %s)",
                     " (optimizer)" if source == "optimizer" else "",
-                    len(site_configs), duration, actual_expiry.strftime('%H:%M'),
+                    len(active_site_configs), duration, actual_expiry.strftime('%H:%M'),
                 )
+                if unconfirmed_sites:
+                    _LOGGER.warning(
+                        "FORCE CHARGE CLEANUP ARMED: Tesla accepted the tariff for %d "
+                        "gateway(s), but %d gateway(s) did not confirm readback; restore "
+                        "will still run after %dmin",
+                        len(accepted_sites),
+                        len(unconfirmed_sites),
+                        duration,
+                    )
 
                 # Kick PW3 to ensure it starts charging immediately
                 _schedule_tesla_charge_kick(
