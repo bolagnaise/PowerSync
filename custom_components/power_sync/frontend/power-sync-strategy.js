@@ -6455,6 +6455,52 @@ class PowerSyncStrategy {
       if (pvStringCard) left.push(pvStringCard);
     }
 
+    // --- Right Column: selected upstream battery integration details ---
+    // PowerSync keeps its normalized entities as the public contract and
+    // references the original upstream entities here, avoiding duplicate HA
+    // recorder rows. Canonical flow entities already shown above are omitted.
+    if (hasE('battery_integration_details')) {
+      const detailsEntity = e('battery_integration_details');
+      const detailsState = (hass.states || {})[detailsEntity];
+      const attrs = (detailsState && detailsState.attributes) || {};
+      const groups = attrs.groups || {};
+      const canonical = new Set(Object.values(attrs.canonical_entities || {}));
+      const categoryLabels = {
+        battery: 'Battery Details',
+        solar: 'Solar Strings & MPPT',
+        grid: 'Grid & Phases',
+        load: 'Home & Loads',
+        inverter: 'Inverter & Backup',
+        energy: 'Energy Totals',
+        diagnostics: 'Temperature, Health & Status',
+        charger: 'Chargers',
+        other: 'Additional System Details',
+      };
+      const categoryOrder = [
+        'battery', 'solar', 'grid', 'load', 'inverter', 'energy',
+        'diagnostics', 'charger', 'other',
+      ];
+      const detailCards = [];
+      for (const category of categoryOrder) {
+        const entityIds = Array.isArray(groups[category]) ? groups[category] : [];
+        const visible = entityIds.filter((entityId) =>
+          !canonical.has(entityId) && !!(hass.states || {})[entityId]
+        );
+        if (!visible.length) continue;
+        detailCards.push({
+          type: 'entities',
+          title: categoryLabels[category] || category,
+          show_header_toggle: false,
+          entities: visible,
+        });
+      }
+      if (detailCards.length === 1) {
+        right.push(detailCards[0]);
+      } else if (detailCards.length > 1) {
+        right.push({ type: 'vertical-stack', cards: detailCards });
+      }
+    }
+
     // --- Left Column: Battery Health (requires button-card) ---
     if (hasButton && hasE('battery_health')) {
       left.push(_batteryHealth(e, hass));

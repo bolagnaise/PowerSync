@@ -7482,12 +7482,14 @@ class CustomEntityEnergyCoordinator(DataUpdateCoordinator):
         hass: HomeAssistant,
         source_entities: dict[str, str],
         entry_id: str,
+        power_multipliers: dict[str, float] | None = None,
     ) -> None:
         self._entry_id = entry_id
         self._source_entities = {
             key: str(entity_id or "").strip()
             for key, entity_id in source_entities.items()
         }
+        self._power_multipliers = dict(power_multipliers or {})
         self._energy_acc = EnergyAccumulator(hass, f"custom_{entry_id}")
 
         super().__init__(
@@ -7553,6 +7555,8 @@ class CustomEntityEnergyCoordinator(DataUpdateCoordinator):
             raise UpdateFailed("custom_invalid_power_value")
         solar_kw = max(0.0, solar_kw)
         load_kw = max(0.0, load_kw)
+        grid_kw *= self._power_multipliers.get("grid_power", 1.0)
+        battery_kw *= self._power_multipliers.get("battery_power", 1.0)
         battery_level = max(0.0, min(100.0, raw_values["battery_level"]))
 
         buy, sell = _get_current_prices(self.hass, self._entry_id)
@@ -7645,6 +7649,84 @@ class NativeBatteryIntegrationReadinessMixin:
         if "grid_power_valid" in stale:
             stale["grid_power_valid"] = False
         return stale
+
+
+class DiscoveredEntityEnergyCoordinator(
+    NativeBatteryIntegrationReadinessMixin,
+    CustomEntityEnergyCoordinator,
+):
+    """Monitoring-only normalized telemetry from a selected HA integration."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        source_entities: dict[str, str],
+        entry_id: str,
+        *,
+        profile_id: str,
+        power_multipliers: dict[str, float] | None = None,
+    ) -> None:
+        self.profile_id = profile_id
+        super().__init__(
+            hass,
+            source_entities,
+            entry_id,
+            power_multipliers=power_multipliers,
+        )
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        data = await super()._async_update_data()
+        data["telemetry_ready"] = True
+        data["connection_profile_id"] = self.profile_id
+        data["monitoring_only"] = True
+        return data
+
+    def _unsupported_control(self, operation: str) -> bool:
+        _LOGGER.warning(
+            "%s is unavailable for monitoring-only battery profile %s",
+            operation,
+            self.profile_id,
+        )
+        return False
+
+    async def force_charge(self, *args: Any, **kwargs: Any) -> bool:
+        return self._unsupported_control("force_charge")
+
+    async def force_discharge(self, *args: Any, **kwargs: Any) -> bool:
+        return self._unsupported_control("force_discharge")
+
+    async def restore_normal(self, *args: Any, **kwargs: Any) -> bool:
+        return self._unsupported_control("restore_normal")
+
+    async def set_backup_reserve(self, *args: Any, **kwargs: Any) -> bool:
+        return self._unsupported_control("set_backup_reserve")
+
+    async def set_backup_mode(self, *args: Any, **kwargs: Any) -> bool:
+        return self._unsupported_control("set_backup_mode")
+
+    async def restore_work_mode_from_idle(self, *args: Any, **kwargs: Any) -> bool:
+        return self._unsupported_control("restore_work_mode_from_idle")
+
+    async def set_work_mode(self, *args: Any, **kwargs: Any) -> bool:
+        return self._unsupported_control("set_work_mode")
+
+    async def set_charge_rate_limit(self, *args: Any, **kwargs: Any) -> bool:
+        return self._unsupported_control("set_charge_rate_limit")
+
+    async def set_discharge_rate_limit(self, *args: Any, **kwargs: Any) -> bool:
+        return self._unsupported_control("set_discharge_rate_limit")
+
+    async def curtail(self, *args: Any, **kwargs: Any) -> bool:
+        return self._unsupported_control("curtail")
+
+    async def restore_curtailment(self, *args: Any, **kwargs: Any) -> bool:
+        return self._unsupported_control("restore_curtailment")
+
+    async def async_shutdown(self) -> None:
+        await self._energy_acc.async_flush()
+
+    def async_start_teslemetry_stream(self) -> None:
+        """Compatibility no-op for Tesla monitoring profiles."""
 
 
 class FoxESSEntityEnergyCoordinator(
@@ -8218,8 +8300,6 @@ class GoodWeEnergyCoordinator(
         entity_telemetry_prefix: str | None = None,
     ) -> None:
         """Initialize the coordinator."""
-        from .inverters.goodwe_battery import GoodWeBatteryController
-
         self.host = host
         self.port = port
         self._entry_id = entry_id
@@ -8230,12 +8310,10 @@ class GoodWeEnergyCoordinator(
         # only reachable via a Modbus TCP gateway — the EMS mode registers accept
         # Modbus TCP writes whereas the standard operation-mode registers do not.
         self._ems_prefix = ems_entity_prefix
-        self._controller = GoodWeBatteryController(
-            host=host, port=port, comm_addr=comm_addr
-        )
-        self._telemetry_controller = self._controller
         self._entity_telemetry_prefix = (entity_telemetry_prefix or "").strip()
         self._using_entity_telemetry = bool(self._entity_telemetry_prefix)
+        self._controller = None
+        self._telemetry_controller = None
         if self._using_entity_telemetry:
             from .inverters.goodwe_entity import GoodWeEntityTelemetryController
 
@@ -8243,6 +8321,13 @@ class GoodWeEnergyCoordinator(
                 hass,
                 entity_prefix=self._entity_telemetry_prefix,
             )
+        else:
+            from .inverters.goodwe_battery import GoodWeBatteryController
+
+            self._controller = GoodWeBatteryController(
+                host=host, port=port, comm_addr=comm_addr
+            )
+            self._telemetry_controller = self._controller
         self._connected = False
         self._telemetry_validated = False
         self._entity_telemetry_rated_power_w: int | None = None
@@ -8281,6 +8366,8 @@ class GoodWeEnergyCoordinator(
 
     async def _probe_entity_telemetry_rated_power(self) -> int | None:
         """Best-effort one-time direct probe for GoodWe nameplate power."""
+        if self._controller is None:
+            return None
         if self._entity_telemetry_rated_power_probe_attempted:
             return self._entity_telemetry_rated_power_w
 
@@ -8614,6 +8701,8 @@ class GoodWeEnergyCoordinator(
             if power_w <= 0:
                 power_w = (self.data or {}).get("rated_power_w", 5000)
             return await self._ems_set_mode("charge_pv", power_w, fallback_option="charge_battery")
+        if self._controller is None:
+            return False
         if not self._connected:
             await self._controller.connect()
             self._connected = True
@@ -8629,6 +8718,8 @@ class GoodWeEnergyCoordinator(
             if power_w <= 0:
                 power_w = (self.data or {}).get("rated_power_w", 5000)
             return await self._ems_set_mode("sell_power", power_w, fallback_option="discharge_battery")
+        if self._controller is None:
+            return False
         if not self._connected:
             await self._controller.connect()
             self._connected = True
@@ -8659,6 +8750,8 @@ class GoodWeEnergyCoordinator(
                 reset_power_limit=True,
                 restore_operation_mode=True,
             )
+        if self._controller is None:
+            return False
         if not self._connected:
             await self._controller.connect()
             self._connected = True
@@ -8667,6 +8760,11 @@ class GoodWeEnergyCoordinator(
     async def set_backup_reserve(self, percent: int) -> bool:
         """Set minimum SOC (backup reserve) via DOD."""
         if not self._native_control_allowed("GoodWe set_backup_reserve"):
+            return False
+        if self._controller is None:
+            _LOGGER.warning(
+                "GoodWe backup reserve is unsupported by the selected entity-only profile"
+            )
             return False
         if not self._connected:
             await self._controller.connect()
@@ -8678,7 +8776,8 @@ class GoodWeEnergyCoordinator(
         """Disconnect from GoodWe system on shutdown."""
         if self._using_entity_telemetry:
             await self._telemetry_controller.disconnect()
-        await self._controller.disconnect()
+        if self._controller is not None:
+            await self._controller.disconnect()
         self._connected = False
 
 

@@ -102,6 +102,12 @@ from .const import (
     POWERSYNC_AUTH_ME_URL,
     # Battery system selection
     CONF_BATTERY_SYSTEM,
+    CONF_BATTERY_CONNECTION_PROFILE,
+    CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID,
+    CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY,
+    CONF_BATTERY_SENSOR_DISPLAY_MODE,
+    BATTERY_SENSOR_DISPLAY_RECOMMENDED,
+    BATTERY_SENSOR_DISPLAY_MODES,
     BATTERY_SYSTEM_TESLA,
     BATTERY_SYSTEM_SIGENERGY,
     BATTERY_SYSTEM_SUNGROW,
@@ -586,6 +592,16 @@ from .const import (
     CONF_NZ_DAILY_SUPPLY,
     NZ_RETAILERS,
     NZ_DISTRIBUTION_ZONES,
+)
+from .battery_backend.profiles import (
+    PROFILE_REGISTRY,
+    profiles_for_system,
+    resolve_connection_profile,
+)
+from .battery_backend.discovery import (
+    discover_battery_sensor_catalog,
+    discover_canonical_entities,
+    infer_entity_prefix,
 )
 from .covau import (
     SUPPORTED_SOLARMAX_PLANS,
@@ -1862,6 +1878,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._goodwe_data: dict[str, Any] = {}  # GoodWe configuration
         self._neovolt_data: dict[str, Any] = {}  # Neovolt bridge configuration
         self._solaredge_data: dict[str, Any] = {}  # SolarEdge curtailment configuration
+        self._battery_profile_data: dict[str, Any] = {}
         self._aemo_only_mode: bool = False  # True if using AEMO spike only (no Amber)
         self._aemo_data: dict[str, Any] = {}
         self._agl_data: dict[str, Any] = {}
@@ -2598,6 +2615,189 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         else:
             return await self.async_step_tesla_provider()
 
+    async def async_step_battery_connection_profile_setup(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Choose the battery connection bundle during initial setup."""
+        battery_system = self._selected_battery_system or BATTERY_SYSTEM_TESLA
+        profiles = profiles_for_system(battery_system)
+        errors: dict[str, str] = {}
+        accepted_domains = {
+            domain for profile in profiles for domain in profile.upstream_domains
+        }
+        upstream_entries = [
+            entry
+            for domain in sorted(accepted_domains)
+            for entry in self.hass.config_entries.async_entries(domain)
+        ]
+
+        if user_input is not None:
+            profile_id = str(user_input.get(CONF_BATTERY_CONNECTION_PROFILE) or "")
+            profile = PROFILE_REGISTRY.get(profile_id)
+            selected_entry_id = str(
+                user_input.get(CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID) or ""
+            ).strip()
+            anchor_entity = str(
+                user_input.get(CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY) or ""
+            ).strip()
+            if profile is None or profile.battery_system != battery_system:
+                errors[CONF_BATTERY_CONNECTION_PROFILE] = "invalid_connection_profile"
+            elif profile.requires_upstream:
+                if not selected_entry_id and len(upstream_entries) == 1:
+                    selected_entry_id = upstream_entries[0].entry_id
+                selected_entry = (
+                    self.hass.config_entries.async_get_entry(selected_entry_id)
+                    if selected_entry_id
+                    else None
+                )
+                yaml_anchor_allowed = (
+                    battery_system == BATTERY_SYSTEM_SUNGROW
+                    and "modbus" in profile.upstream_domains
+                )
+                if selected_entry is None and not (yaml_anchor_allowed and anchor_entity):
+                    errors[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = (
+                        "battery_integration_source_required"
+                    )
+                elif selected_entry is not None and selected_entry.domain not in profile.upstream_domains:
+                    errors[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = (
+                        "battery_integration_source_mismatch"
+                    )
+
+                if not errors and (
+                    profile.route_kind == "ha_monitoring"
+                    or profile.profile_id in {"goodwe_ha", "solaredge_ha_only"}
+                ):
+                    catalog = discover_battery_sensor_catalog(
+                        self.hass,
+                        battery_system=battery_system,
+                        profile_id=profile.profile_id,
+                        allowed_domains=profile.upstream_domains,
+                        config_entry_id=selected_entry_id or None,
+                        anchor_entity_id=anchor_entity or None,
+                        display_mode="all",
+                    )
+                    _canonical, missing = discover_canonical_entities(
+                        catalog,
+                        battery_system=battery_system,
+                    )
+                    if missing:
+                        errors["base"] = "battery_integration_missing_telemetry"
+
+                    if not errors and profile.profile_id == "goodwe_ha":
+                        inferred_prefix = infer_entity_prefix(_canonical)
+                        telemetry_prefix = await resolve_goodwe_entity_telemetry_prefix(
+                            self.hass,
+                            inferred_prefix,
+                        )
+                        ems_prefix = resolve_goodwe_ems_entity_prefix(
+                            self.hass,
+                            inferred_prefix,
+                        )
+                        if not telemetry_prefix or not ems_prefix:
+                            errors["base"] = "goodwe_ems_entities_missing"
+                        else:
+                            self._battery_profile_data = {
+                                CONF_GOODWE_EMS_ENTITY_PREFIX: ems_prefix,
+                            }
+
+            if not errors and profile is not None:
+                if not profile.requires_upstream:
+                    selected_entry_id = ""
+                    anchor_entity = ""
+                self._battery_profile_data = {
+                    **getattr(self, "_battery_profile_data", {}),
+                    CONF_BATTERY_CONNECTION_PROFILE: profile.profile_id,
+                    CONF_BATTERY_SENSOR_DISPLAY_MODE: user_input.get(
+                        CONF_BATTERY_SENSOR_DISPLAY_MODE,
+                        BATTERY_SENSOR_DISPLAY_RECOMMENDED,
+                    ),
+                }
+                if selected_entry_id:
+                    self._battery_profile_data[
+                        CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID
+                    ] = selected_entry_id
+                if anchor_entity:
+                    self._battery_profile_data[
+                        CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY
+                    ] = anchor_entity
+                if profile.monitoring_only:
+                    self._ml_options[CONF_MONITORING_MODE] = True
+                if profile.route_value is not None:
+                    route_key = {
+                        BATTERY_SYSTEM_SUNGROW: CONF_SUNGROW_CONNECTION_TYPE,
+                        BATTERY_SYSTEM_FOXESS: CONF_FOXESS_CONNECTION_TYPE,
+                        BATTERY_SYSTEM_ALPHAESS: CONF_ALPHAESS_CONNECTION_TYPE,
+                        BATTERY_SYSTEM_ANKER_SOLIX: CONF_ANKER_SOLIX_CONNECTION_TYPE,
+                    }.get(battery_system)
+                    if route_key:
+                        self._battery_profile_data[route_key] = profile.route_value
+                if profile.profile_id == "goodwe_ha":
+                    self._battery_profile_data[CONF_GOODWE_EMS_CONTROL_MODE] = (
+                        GOODWE_EMS_CONTROL_ENTITY
+                    )
+                elif profile.profile_id == "goodwe_direct":
+                    self._battery_profile_data[CONF_GOODWE_EMS_CONTROL_MODE] = (
+                        GOODWE_EMS_CONTROL_DIRECT
+                    )
+
+                if profile.route_kind == "ha_monitoring" or profile.profile_id in {
+                    "goodwe_ha",
+                    "solaredge_ha_only",
+                }:
+                    return self._create_final_entry()
+                return await self._route_to_battery_setup()
+
+        schema_fields: dict[Any, Any] = {
+            vol.Required(
+                CONF_BATTERY_CONNECTION_PROFILE,
+                default=profiles[0].profile_id,
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=profile.profile_id, label=profile.label)
+                        for profile in profiles
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required(
+                CONF_BATTERY_SENSOR_DISPLAY_MODE,
+                default=BATTERY_SENSOR_DISPLAY_RECOMMENDED,
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=value, label=label)
+                        for value, label in BATTERY_SENSOR_DISPLAY_MODES.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+        }
+        if upstream_entries:
+            schema_fields[
+                vol.Optional(CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID)
+            ] = SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(
+                            value=source.entry_id,
+                            label=f"{source.title or source.entry_id} ({source.domain})",
+                        )
+                        for source in upstream_entries
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            )
+        if battery_system == BATTERY_SYSTEM_SUNGROW:
+            schema_fields[
+                vol.Optional(CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY)
+            ] = EntitySelector(EntitySelectorConfig(domain="sensor"))
+        return self.async_show_form(
+            step_id="battery_connection_profile_setup",
+            data_schema=vol.Schema(schema_fields),
+            errors=errors,
+        )
+
     def _create_final_entry(self) -> FlowResult:
         """Create final config entry after battery connection is established.
 
@@ -2630,6 +2830,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **getattr(self, "_solaredge_data", {}),
             **getattr(self, "_anker_solix_data", {}),
             **getattr(self, "_custom_battery_data", {}),
+            **getattr(self, "_battery_profile_data", {}),
             CONF_ELECTRICITY_PROVIDER: self._selected_electricity_provider,
         }
 
@@ -3275,7 +3476,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_ml_options()
             else:
                 # User wants native battery optimization - proceed to battery connection
-                return await self._route_to_battery_setup()
+                return await self.async_step_battery_connection_profile_setup()
 
         # Get the native optimization name based on battery system
         native_name = OPTIMIZATION_PROVIDER_NATIVE_NAMES.get(
@@ -3468,7 +3669,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         max_grid_export_w
                     )
             # Proceed to battery connection setup
-            return await self._route_to_battery_setup()
+            return await self.async_step_battery_connection_profile_setup()
 
         opt_providers = _optimization_provider_options_for_battery(battery_system)
         schema_fields: dict[Any, Any] = {
@@ -3960,7 +4161,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             connection_type = user_input.get(
                 CONF_ALPHAESS_CONNECTION_TYPE,
-                ALPHAESS_CONNECTION_MODBUS_CLOUD,
+                getattr(self, "_battery_profile_data", {}).get(
+                    CONF_ALPHAESS_CONNECTION_TYPE,
+                    ALPHAESS_CONNECTION_MODBUS_CLOUD,
+                ),
             )
             if connection_type == ALPHAESS_CONNECTION_CLOUD_ONLY:
                 self._alphaess_data = {
@@ -4022,7 +4226,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(
                         CONF_ALPHAESS_CONNECTION_TYPE,
-                        default=ALPHAESS_CONNECTION_MODBUS_CLOUD,
+                        default=getattr(self, "_battery_profile_data", {}).get(
+                            CONF_ALPHAESS_CONNECTION_TYPE,
+                            ALPHAESS_CONNECTION_MODBUS_CLOUD,
+                        ),
                     ): SelectSelector(
                         SelectSelectorConfig(
                             options=[
@@ -4425,11 +4632,20 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     if not anker_entries:
                         errors["base"] = "anker_solix_ha_not_installed"
                     else:
-                        selected_entry_id = (
-                            anker_entries[0].entry_id
-                            if len(anker_entries) == 1
-                            else user_input.get(CONF_ANKER_SOLIX_CONFIG_ENTRY_ID, "")
-                        )
+                        selected_entry_id = getattr(
+                            self,
+                            "_battery_profile_data",
+                            {},
+                        ).get(CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID, "")
+                        if not selected_entry_id:
+                            selected_entry_id = (
+                                anker_entries[0].entry_id
+                                if len(anker_entries) == 1
+                                else user_input.get(
+                                    CONF_ANKER_SOLIX_CONFIG_ENTRY_ID,
+                                    "",
+                                )
+                            )
                         entity_prefix = (
                             user_input.get(CONF_ANKER_SOLIX_ENTITY_PREFIX) or ""
                         ).strip()
@@ -4459,7 +4675,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._anker_solix_data = data
                 return self._create_final_entry()
 
-        current = user_input or getattr(self, "_anker_solix_data", {})
+        current = user_input or {
+            **getattr(self, "_battery_profile_data", {}),
+            **getattr(self, "_anker_solix_data", {}),
+        }
         connection_type = current.get(
             CONF_ANKER_SOLIX_CONNECTION_TYPE,
             ANKER_SOLIX_CONNECTION_MODBUS,
@@ -5136,7 +5355,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             connection_type = user_input.get(
                 CONF_SUNGROW_CONNECTION_TYPE,
-                SUNGROW_CONNECTION_DIRECT,
+                getattr(self, "_battery_profile_data", {}).get(
+                    CONF_SUNGROW_CONNECTION_TYPE,
+                    SUNGROW_CONNECTION_DIRECT,
+                ),
             )
             host = user_input.get(CONF_SUNGROW_HOST, "").strip()
             default_port = (
@@ -5188,7 +5410,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(
                         CONF_SUNGROW_CONNECTION_TYPE,
-                        default=SUNGROW_CONNECTION_DIRECT,
+                        default=getattr(self, "_battery_profile_data", {}).get(
+                            CONF_SUNGROW_CONNECTION_TYPE,
+                            SUNGROW_CONNECTION_DIRECT,
+                        ),
                     ): SelectSelector(
                         SelectSelectorConfig(
                             options=[
@@ -5222,7 +5447,11 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Choose FoxESS connection type: TCP, Serial, Cloud, or entity bridge."""
         if user_input is not None:
             conn_type = user_input.get(
-                CONF_FOXESS_CONNECTION_TYPE, FOXESS_CONNECTION_TCP
+                CONF_FOXESS_CONNECTION_TYPE,
+                getattr(self, "_battery_profile_data", {}).get(
+                    CONF_FOXESS_CONNECTION_TYPE,
+                    FOXESS_CONNECTION_TCP,
+                ),
             )
             if conn_type == FOXESS_CONNECTION_SERIAL:
                 return await self.async_step_foxess_serial()
@@ -5244,7 +5473,11 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(
-                        CONF_FOXESS_CONNECTION_TYPE, default=FOXESS_CONNECTION_TCP
+                        CONF_FOXESS_CONNECTION_TYPE,
+                        default=getattr(self, "_battery_profile_data", {}).get(
+                            CONF_FOXESS_CONNECTION_TYPE,
+                            FOXESS_CONNECTION_TCP,
+                        ),
                     ): SelectSelector(
                         SelectSelectorConfig(
                             options=[
@@ -5269,7 +5502,13 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             selected_entry_id = ""
-            if len(entries) == 1:
+            profile_entry_id = getattr(self, "_battery_profile_data", {}).get(
+                CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID,
+                "",
+            )
+            if profile_entry_id:
+                selected_entry_id = profile_entry_id
+            elif len(entries) == 1:
                 selected_entry_id = entries[0]["value"]
             elif entries:
                 selected_entry_id = user_input.get(CONF_FOXESS_ENTITY_CONFIG_ENTRY_ID, "")
@@ -7458,6 +7697,52 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         self._schedule_entry_reload()
         return self.async_create_entry(title="", data=new_options)
 
+    async def _save_connection_profile_and_reload(
+        self,
+        data_updates: dict[str, Any],
+    ) -> FlowResult:
+        """Restore the old route, then atomically persist a profile change."""
+        old_profile = resolve_connection_profile(
+            self.config_entry.data,
+            self.config_entry.options,
+            self._effective_battery_system(),
+        )
+        route_changed = any(
+            data_updates.get(key) != self._get_option(key)
+            for key in (
+                CONF_BATTERY_CONNECTION_PROFILE,
+                CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID,
+                CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY,
+                CONF_SUNGROW_CONNECTION_TYPE,
+                CONF_FOXESS_CONNECTION_TYPE,
+                CONF_ALPHAESS_CONNECTION_TYPE,
+                CONF_ANKER_SOLIX_CONNECTION_TYPE,
+                CONF_GOODWE_EMS_CONTROL_MODE,
+            )
+        )
+        handoff_started = False
+        if route_changed and not old_profile.monitoring_only:
+            try:
+                await async_prepare_monitoring_handoff(
+                    self.hass,
+                    self.config_entry,
+                )
+                handoff_started = True
+            except Exception as err:
+                finish_monitoring_handoff(self.hass, self.config_entry)
+                _LOGGER.warning(
+                    "Battery connection profile remained '%s' because control "
+                    "cleanup failed: %s",
+                    old_profile.profile_id,
+                    err,
+                )
+                return self.async_abort(reason="monitoring_cleanup_failed")
+        try:
+            return self._save_connection_and_reload(data_updates)
+        finally:
+            if handoff_started:
+                finish_monitoring_handoff(self.hass, self.config_entry)
+
     def _electricity_provider(self) -> str:
         """Return the configured electricity provider."""
         pending_provider = getattr(self, "_provider", None)
@@ -7601,7 +7886,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         battery_system = self._effective_battery_system()
 
         # Build menu options based on current config
-        menu_options = ["pricing", "battery_system"]
+        menu_options = ["pricing", "battery_system", "battery_connection_profile"]
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
         if current_provider == "globird":
             menu_options.append("provider_portal")
@@ -8026,6 +8311,203 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     ),
                 }
             ),
+        )
+
+    async def async_step_battery_connection_profile(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Select one validated connection bundle and upstream source."""
+        battery_system = self._effective_battery_system()
+        profiles = profiles_for_system(battery_system)
+        current_profile = resolve_connection_profile(
+            self.config_entry.data,
+            self.config_entry.options,
+            battery_system,
+        )
+        errors: dict[str, str] = {}
+
+        accepted_domains = {
+            domain for profile in profiles for domain in profile.upstream_domains
+        }
+        upstream_entries = [
+            entry
+            for domain in sorted(accepted_domains)
+            for entry in self.hass.config_entries.async_entries(domain)
+        ]
+
+        if user_input is not None:
+            profile_id = str(user_input.get(CONF_BATTERY_CONNECTION_PROFILE) or "")
+            profile = PROFILE_REGISTRY.get(profile_id)
+            selected_entry_id = str(
+                user_input.get(CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID) or ""
+            ).strip()
+            anchor_entity = str(
+                user_input.get(CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY) or ""
+            ).strip()
+            if profile is None or profile.battery_system != battery_system:
+                errors[CONF_BATTERY_CONNECTION_PROFILE] = "invalid_connection_profile"
+            elif profile.requires_upstream:
+                if not selected_entry_id and len(upstream_entries) == 1:
+                    selected_entry_id = upstream_entries[0].entry_id
+                selected_entry = (
+                    self.hass.config_entries.async_get_entry(selected_entry_id)
+                    if selected_entry_id
+                    else None
+                )
+                yaml_anchor_allowed = (
+                    battery_system == BATTERY_SYSTEM_SUNGROW
+                    and "modbus" in profile.upstream_domains
+                )
+                if selected_entry is None and not (yaml_anchor_allowed and anchor_entity):
+                    errors[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = (
+                        "battery_integration_source_required"
+                    )
+                elif selected_entry is not None and selected_entry.domain not in profile.upstream_domains:
+                    errors[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = (
+                        "battery_integration_source_mismatch"
+                    )
+
+                if not errors and (
+                    profile.route_kind == "ha_monitoring"
+                    or profile.profile_id in {"goodwe_ha", "solaredge_ha_only"}
+                ):
+                    catalog = discover_battery_sensor_catalog(
+                        self.hass,
+                        battery_system=battery_system,
+                        profile_id=profile.profile_id,
+                        allowed_domains=profile.upstream_domains,
+                        config_entry_id=selected_entry_id or None,
+                        anchor_entity_id=anchor_entity or None,
+                        display_mode="all",
+                    )
+                    canonical, missing = discover_canonical_entities(
+                        catalog,
+                        battery_system=battery_system,
+                    )
+                    if missing:
+                        errors["base"] = "battery_integration_missing_telemetry"
+                    elif profile.profile_id == "goodwe_ha":
+                        inferred_prefix = infer_entity_prefix(canonical)
+                        telemetry_prefix = await resolve_goodwe_entity_telemetry_prefix(
+                            self.hass,
+                            inferred_prefix,
+                        )
+                        ems_prefix = resolve_goodwe_ems_entity_prefix(
+                            self.hass,
+                            inferred_prefix,
+                        )
+                        if not telemetry_prefix or not ems_prefix:
+                            errors["base"] = "goodwe_ems_entities_missing"
+                        else:
+                            user_input[CONF_GOODWE_EMS_ENTITY_PREFIX] = ems_prefix
+
+            if not errors and profile is not None:
+                if not profile.requires_upstream:
+                    selected_entry_id = ""
+                    anchor_entity = ""
+                updates: dict[str, Any] = {
+                    CONF_BATTERY_CONNECTION_PROFILE: profile.profile_id,
+                    CONF_BATTERY_SENSOR_DISPLAY_MODE: user_input.get(
+                        CONF_BATTERY_SENSOR_DISPLAY_MODE,
+                        BATTERY_SENSOR_DISPLAY_RECOMMENDED,
+                    ),
+                }
+                if selected_entry_id:
+                    updates[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = selected_entry_id
+                else:
+                    updates[CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID] = None
+                if anchor_entity:
+                    updates[CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY] = anchor_entity
+                else:
+                    updates[CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY] = None
+
+                if profile.route_value is not None:
+                    route_key = {
+                        BATTERY_SYSTEM_SUNGROW: CONF_SUNGROW_CONNECTION_TYPE,
+                        BATTERY_SYSTEM_FOXESS: CONF_FOXESS_CONNECTION_TYPE,
+                        BATTERY_SYSTEM_ALPHAESS: CONF_ALPHAESS_CONNECTION_TYPE,
+                        BATTERY_SYSTEM_ANKER_SOLIX: CONF_ANKER_SOLIX_CONNECTION_TYPE,
+                    }.get(battery_system)
+                    if route_key:
+                        updates[route_key] = profile.route_value
+                if profile.profile_id == "goodwe_ha":
+                    updates[CONF_GOODWE_EMS_CONTROL_MODE] = GOODWE_EMS_CONTROL_ENTITY
+                    updates[CONF_GOODWE_EMS_ENTITY_PREFIX] = user_input.get(
+                        CONF_GOODWE_EMS_ENTITY_PREFIX,
+                        "",
+                    )
+                elif profile.profile_id == "goodwe_direct":
+                    updates[CONF_GOODWE_EMS_CONTROL_MODE] = GOODWE_EMS_CONTROL_DIRECT
+
+                return await self._save_connection_profile_and_reload(updates)
+
+        schema_fields: dict[Any, Any] = {
+            vol.Required(
+                CONF_BATTERY_CONNECTION_PROFILE,
+                default=current_profile.profile_id,
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=profile.profile_id, label=profile.label)
+                        for profile in profiles
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Required(
+                CONF_BATTERY_SENSOR_DISPLAY_MODE,
+                default=self._get_option(
+                    CONF_BATTERY_SENSOR_DISPLAY_MODE,
+                    BATTERY_SENSOR_DISPLAY_RECOMMENDED,
+                ),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=value, label=label)
+                        for value, label in BATTERY_SENSOR_DISPLAY_MODES.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+        }
+        if upstream_entries:
+            current_source = self._get_option(
+                CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID, ""
+            )
+            schema_fields[
+                vol.Optional(
+                    CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID,
+                    default=current_source or upstream_entries[0].entry_id,
+                )
+            ] = SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(
+                            value=source.entry_id,
+                            label=f"{source.title or source.entry_id} ({source.domain})",
+                        )
+                        for source in upstream_entries
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            )
+        if battery_system == BATTERY_SYSTEM_SUNGROW:
+            schema_fields[
+                vol.Optional(
+                    CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY,
+                    default=self._get_option(
+                        CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY, ""
+                    ),
+                )
+            ] = EntitySelector(EntitySelectorConfig(domain="sensor"))
+
+        return self.async_show_form(
+            step_id="battery_connection_profile",
+            data_schema=vol.Schema(schema_fields),
+            errors=errors,
+            description_placeholders={
+                "controls": current_profile.controls_summary,
+            },
         )
 
     async def async_step_custom_battery(
@@ -8550,11 +9032,19 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     if not anker_entries:
                         errors["base"] = "anker_solix_ha_not_installed"
                     else:
-                        selected_entry_id = (
-                            anker_entries[0].entry_id
-                            if len(anker_entries) == 1
-                            else user_input.get(CONF_ANKER_SOLIX_CONFIG_ENTRY_ID, "")
+                        selected_entry_id = self._get_option(
+                            CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID,
+                            "",
                         )
+                        if not selected_entry_id:
+                            selected_entry_id = (
+                                anker_entries[0].entry_id
+                                if len(anker_entries) == 1
+                                else user_input.get(
+                                    CONF_ANKER_SOLIX_CONFIG_ENTRY_ID,
+                                    "",
+                                )
+                            )
                         entity_prefix = (
                             user_input.get(CONF_ANKER_SOLIX_ENTITY_PREFIX) or ""
                         ).strip()

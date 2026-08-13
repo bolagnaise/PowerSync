@@ -199,6 +199,14 @@ write-free after cleaning an older hold. Provider charge blocks remain
 independent, and Charge By Time still wins: a solar-export hold is not planned
 unless its replacement energy is reachable before the configured deadline.
 
+The battery **Connection method** controls which integration owns telemetry and
+dispatch. A monitoring-only method never writes, including manual PowerSync
+services. Home Assistant-backed methods reuse the selected upstream config entry
+instead of opening a parallel Modbus or local API client. When the method is
+changed, PowerSync restores any active force or idle state through the old route
+before it saves and reloads the new route; a failed restore leaves the previous
+method selected.
+
 For Flow Power users, Profit Max still unlocks the Flow Power Happy Hour export
 window behavior: battery export is allowed during the configured Happy Hour
 export period when the plan is profitable. Other providers rely on their export

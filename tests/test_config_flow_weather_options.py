@@ -1839,7 +1839,10 @@ def test_options_menu_exposes_editable_battery_system_section():
     method_source = ast.get_source_segment(source, method)
 
     assert method_source is not None
-    assert 'menu_options = ["pricing", "battery_system"]' in method_source
+    assert (
+        'menu_options = ["pricing", "battery_system", '
+        '"battery_connection_profile"]'
+    ) in method_source
     assert "battery_system = self._effective_battery_system()" in method_source
     assert 'menu_options.append("alphaess_connection")' in method_source
     assert 'menu_options.append("anker_solix")' in method_source

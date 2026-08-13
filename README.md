@@ -42,6 +42,16 @@
 | **Anker Solix** | Direct local X1 Modbus TCP, official local Anker HA integration, or unofficial Anker cloud HA bridge | Telemetry, live flow, Smart Optimization, force charge/discharge and restore when direct Modbus or writable official HA controls are available. Unofficial cloud bridge can be monitoring-only |
 | **Custom / external controller** | Existing Home Assistant entities for battery SOC, battery power, grid power, solar power, and home load | Planner-only Smart Optimization in monitoring mode. PowerSync exposes optimizer decisions and telemetry; your existing controller or automations keep ownership of hardware dispatch |
 
+Each battery system has a **Connection method** setting. Choose either the
+PowerSync-owned direct route or a supported Home Assistant battery integration.
+Home Assistant-backed and monitoring-only methods reuse the selected upstream
+config entry and do not open a second PowerSync hardware connection. PowerSync
+validates the source before switching, restores any active temporary battery
+mode through the old route, and blocks the change if cleanup cannot be proven.
+The dashboard can show recommended or all discovered upstream battery, solar,
+grid, load, energy, inverter, and diagnostic sensors without cloning them into
+duplicate PowerSync entities.
+
 ### AC-Coupled Inverter Curtailment
 
 Solar inverters that bypass the battery can be curtailed during negative feed-in prices:

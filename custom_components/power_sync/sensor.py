@@ -35,6 +35,9 @@ from datetime import timedelta
 
 from .const import (
     CONF_POWERWALL_LOCAL_PAIRED,
+    CONF_BATTERY_SENSOR_DISPLAY_MODE,
+    BATTERY_SENSOR_DISPLAY_RECOMMENDED,
+    BATTERY_SENSOR_DISPLAY_ALL,
     DOMAIN,
     SENSOR_TYPE_CURRENT_PRICE,
     SENSOR_TYPE_CURRENT_IMPORT_PRICE,
@@ -217,6 +220,10 @@ from .const import (
     SENSOR_FAMILY_OCTOPUS,
     TESLA_INTEGRATIONS,
     TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
+)
+from .battery_backend.discovery import (
+    discover_battery_sensor_catalog,
+    discover_canonical_entities,
 )
 from .coordinator import (
     AmberPriceCoordinator,
@@ -1708,6 +1715,93 @@ class NetworkExportLimitSensor(SensorEntity):
         self.async_write_ha_state()
 
 
+class BatteryIntegrationDetailsSensor(SensorEntity):
+    """Expose a live, non-duplicating catalog of upstream battery sensors."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Battery Integration Details"
+    _attr_icon = "mdi:home-battery-outline"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._hass = hass
+        self._entry = entry
+        self._catalog: dict[str, Any] = {}
+        self._attr_unique_id = f"{entry.entry_id}_battery_integration_details"
+        self._attr_suggested_object_id = "power_sync_battery_integration_details"
+
+    @property
+    def device_info(self) -> dict[str, Any]:
+        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_GRID_HOME)
+
+    @property
+    def native_value(self) -> int:
+        return len(self._catalog.get("entity_ids", []))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        metrics = self._catalog.get("metrics", [])
+        return {
+            "catalog_version": self._catalog.get("version", 1),
+            "connection_profile": self._catalog.get("profile_id", ""),
+            "battery_system": self._catalog.get("battery_system", ""),
+            "display_mode": self._catalog.get("display_mode", "recommended"),
+            "monitoring_only": bool(self._catalog.get("monitoring_only", False)),
+            "controls_summary": self._catalog.get("controls_summary", ""),
+            "entity_ids": list(self._catalog.get("entity_ids", [])),
+            "groups": dict(self._catalog.get("groups", {})),
+            "canonical_entities": dict(
+                self._catalog.get("canonical_entities", {})
+            ),
+            "disabled_count": int(self._catalog.get("disabled_count", 0)),
+            "unavailable_count": sum(
+                1
+                for metric in metrics
+                if metric.get("enabled") and not metric.get("available")
+            ),
+        }
+
+    async def async_update(self) -> None:
+        domain_data = self._hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        profile = domain_data.get("battery_connection_profile")
+        prior = domain_data.get("battery_sensor_catalog", {})
+        if profile is None:
+            self._catalog = dict(prior)
+            return
+        kwargs = {
+            "battery_system": prior.get("battery_system", ""),
+            "profile_id": profile.profile_id,
+            "allowed_domains": profile.upstream_domains,
+            "config_entry_id": prior.get("source_config_entry_id") or None,
+            "anchor_entity_id": prior.get("anchor_entity_id") or None,
+        }
+        display_mode = self._entry.options.get(
+            CONF_BATTERY_SENSOR_DISPLAY_MODE,
+            self._entry.data.get(
+                CONF_BATTERY_SENSOR_DISPLAY_MODE,
+                BATTERY_SENSOR_DISPLAY_RECOMMENDED,
+            ),
+        )
+        catalog = discover_battery_sensor_catalog(
+            self._hass,
+            **kwargs,
+            display_mode=display_mode,
+        )
+        all_metrics = discover_battery_sensor_catalog(
+            self._hass,
+            **kwargs,
+            display_mode=BATTERY_SENSOR_DISPLAY_ALL,
+        )
+        canonical, _missing = discover_canonical_entities(
+            all_metrics,
+            battery_system=kwargs["battery_system"],
+        )
+        catalog["canonical_entities"] = canonical
+        catalog["monitoring_only"] = profile.monitoring_only
+        catalog["controls_summary"] = profile.controls_summary
+        self._catalog = catalog
+        domain_data["battery_sensor_catalog"] = catalog
+
+
 def _cleanup_inactive_flow_power_registry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -1830,6 +1924,10 @@ async def async_setup_entry(
     if network_envelope_manager is not None:
         entities.append(NetworkExportLimitSensor(network_envelope_manager, entry))
         _LOGGER.info("Network export limit sensor added")
+
+    integration_details = BatteryIntegrationDetailsSensor(hass, entry)
+    await integration_details.async_update()
+    entities.append(integration_details)
 
     # Add price sensors
     # For Amber/Localvolts users: use AmberPriceSensor with live API data

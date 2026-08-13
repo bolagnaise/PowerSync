@@ -1153,6 +1153,10 @@
       "network_export_source_untrusted": "Templates and PowerSync-owned entities cannot arm active export. Select the original certified vendor or inverter entity.",
       "network_export_limit_invalid": "The selected limit entity must currently expose a non-negative finite power value in W or kW.",
       "network_export_pcc_invalid": "The selected PCC entity must currently expose a finite power value in W or kW, using positive import and negative export.",
+      "invalid_connection_profile": "Select a connection method supported by this battery system.",
+      "battery_integration_source_required": "Select the Home Assistant integration entry that owns this battery, or choose the required Sungrow anchor sensor.",
+      "battery_integration_source_mismatch": "The selected integration does not match this connection method.",
+      "battery_integration_missing_telemetry": "The selected integration does not currently expose all required battery SOC, battery power, grid power, solar power, and home load sensors.",
       "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again."
     },
     "step": {
@@ -1162,6 +1166,7 @@
         "menu_options": {
           "pricing": "Electricity pricing & provider",
           "battery_system": "Battery / control method",
+          "battery_connection_profile": "Battery connection method & sensors",
           "provider_portal": "Provider portal login",
           "tesla_connection": "Tesla API connection",
           "sigenergy_connection": "Sigenergy connection",
@@ -1205,6 +1210,40 @@
         },
         "data_description": {
           "battery_system": "Choose the primary battery, inverter, or external controller PowerSync should use."
+        },
+        "submit": "Next"
+      },
+      "battery_connection_profile": {
+        "title": "Battery connection method & sensors",
+        "description": "Choose the single route PowerSync should use for telemetry and control. Home Assistant monitoring-only methods open no PowerSync hardware connection. Current control coverage: {controls}",
+        "data": {
+          "battery_connection_profile": "Connection method",
+          "battery_integration_config_entry_id": "Home Assistant integration",
+          "battery_integration_anchor_entity": "Sungrow anchor sensor",
+          "battery_sensor_display_mode": "Additional sensors"
+        },
+        "data_description": {
+          "battery_connection_profile": "Only validated bundles are offered. Existing installations keep their current method until changed here.",
+          "battery_integration_config_entry_id": "Select the exact upstream integration entry for this physical installation.",
+          "battery_integration_anchor_entity": "For YAML-based Sungrow setups without a config entry, select a sensor belonging to the intended inverter. PowerSync will restrict discovery to its stable namespace.",
+          "battery_sensor_display_mode": "Recommended shows high-value battery, solar, grid, energy and status entities. All supported includes every sensor in the selected source scope."
+        },
+        "submit": "Save"
+      },
+      "battery_connection_profile_setup": {
+        "title": "Battery connection method & sensors",
+        "description": "Choose the single route PowerSync should use. Monitoring-only Home Assistant methods open no PowerSync hardware connection and require five fresh core telemetry sensors.",
+        "data": {
+          "battery_connection_profile": "Connection method",
+          "battery_integration_config_entry_id": "Home Assistant integration",
+          "battery_integration_anchor_entity": "Sungrow anchor sensor",
+          "battery_sensor_display_mode": "Additional sensors"
+        },
+        "data_description": {
+          "battery_connection_profile": "Only connection bundles validated for the selected battery are offered.",
+          "battery_integration_config_entry_id": "Select the exact upstream integration entry for this physical installation.",
+          "battery_integration_anchor_entity": "For YAML-based Sungrow setups, select a sensor belonging to the intended inverter.",
+          "battery_sensor_display_mode": "Recommended shows useful battery, solar, grid, energy and status values without duplicating recorder entities."
         },
         "submit": "Next"
       },

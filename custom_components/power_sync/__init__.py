@@ -705,6 +705,12 @@ from .const import (
     DEFAULT_SOLAREDGE_RATED_POWER_W,
     # Battery system selection
     CONF_BATTERY_SYSTEM,
+    CONF_BATTERY_CONNECTION_PROFILE,
+    CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID,
+    CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY,
+    CONF_BATTERY_SENSOR_DISPLAY_MODE,
+    BATTERY_SENSOR_DISPLAY_RECOMMENDED,
+    BATTERY_SENSOR_DISPLAY_ALL,
     BATTERY_SYSTEM_SUNGROW,
     # Sungrow battery system configuration
     CONF_SUNGROW_CONNECTION_TYPE,
@@ -875,6 +881,12 @@ from .inverters import get_inverter_controller
 from .tariff_utils import with_hysteresis
 from .tesla_ble import get_tesla_ble_status_state
 from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
+from .battery_backend.profiles import resolve_connection_profile
+from .battery_backend.discovery import (
+    discover_battery_sensor_catalog,
+    discover_canonical_entities,
+    infer_entity_prefix,
+)
 from .network_envelope import (
     ExportGuard,
     HANetworkEnvelopeManager,
@@ -893,6 +905,7 @@ from .coordinator import (
     FoxESSEnergyCoordinator,
     FoxESSEntityEnergyCoordinator,
     CustomEntityEnergyCoordinator,
+    DiscoveredEntityEnergyCoordinator,
     FoxESSCloudEnergyCoordinator,
     GoodWeEnergyCoordinator,
     AlphaESSEnergyCoordinator,
@@ -19443,6 +19456,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Read config entry options with data fallback."""
         return entry.options.get(key, entry.data.get(key, default))
 
+    battery_connection_profile = resolve_connection_profile(
+        entry.data,
+        entry.options,
+    )
+    _LOGGER.info(
+        "Battery connection profile: %s (%s)",
+        battery_connection_profile.profile_id,
+        battery_connection_profile.route_kind,
+    )
+
     # Every setup gets a private generation token.  Dispatch callbacks can be
     # queued from another thread, so entry_id alone is not enough to tell an
     # old callback from one belonging to a freshly reloaded entry.
@@ -19682,6 +19705,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     def _is_monitoring_mode() -> bool:
         """Check if monitoring mode is active (blocks all control commands)."""
+        if battery_connection_profile.monitoring_only:
+            return True
         if (
             alphaess_coordinator is not None
             and not alphaess_coordinator.supports_dispatch
@@ -19823,6 +19848,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     def _monitoring_mode_should_block_control(call: ServiceCall) -> bool:
         """Return True when monitoring mode should block this control call."""
+        if battery_connection_profile.monitoring_only:
+            return True
         source = _control_call_source(call)
         return _is_monitoring_mode() and source not in ("user", "manual")
 
@@ -19887,6 +19914,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     def _get_solaredge_curtailment_controller(entry_data: dict):
         """Return the cached SolarEdge active-power curtailment controller."""
+        if battery_connection_profile.profile_id == "solaredge_ha_only":
+            raise RuntimeError(
+                "SolarEdge direct curtailment is disabled by the HA-only profile"
+            )
         from .inverters.solaredge import SolarEdgeController
 
         host = entry.options.get(
@@ -20179,7 +20210,98 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     custom_energy_coordinator = None
     token_getter = None  # Will be set for Tesla users
 
-    if is_sigenergy:
+    source_config_entry_id = str(
+        _entry_value(CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID, "") or ""
+    ).strip()
+    if not source_config_entry_id:
+        legacy_source_keys = {
+            BATTERY_SYSTEM_FOXESS: CONF_FOXESS_ENTITY_CONFIG_ENTRY_ID,
+            BATTERY_SYSTEM_ESY_SUNHOME: CONF_ESY_CONFIG_ENTRY_ID,
+            BATTERY_SYSTEM_SOLAX: CONF_SOLAX_CONFIG_ENTRY_ID,
+            BATTERY_SYSTEM_SAJ_H2: CONF_SAJ_CONFIG_ENTRY_ID,
+            BATTERY_SYSTEM_FRONIUS_RESERVA: CONF_FRONIUS_RESERVA_CONFIG_ENTRY_ID,
+            BATTERY_SYSTEM_ANKER_SOLIX: CONF_ANKER_SOLIX_CONFIG_ENTRY_ID,
+        }
+        legacy_source_key = legacy_source_keys.get(active_battery_system)
+        if legacy_source_key:
+            source_config_entry_id = str(_entry_value(legacy_source_key, "") or "").strip()
+        elif active_battery_system == BATTERY_SYSTEM_NEOVOLT:
+            neovolt_sources = _get_neovolt_entry_ids(
+                {**entry.data, **entry.options}, hass
+            )
+            source_config_entry_id = neovolt_sources[0] if neovolt_sources else ""
+
+    anchor_entity_id = str(
+        _entry_value(CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY, "") or ""
+    ).strip()
+    sensor_display_mode = str(
+        _entry_value(
+            CONF_BATTERY_SENSOR_DISPLAY_MODE,
+            BATTERY_SENSOR_DISPLAY_RECOMMENDED,
+        )
+    )
+    discovery_kwargs = {
+        "battery_system": active_battery_system,
+        "profile_id": battery_connection_profile.profile_id,
+        "allowed_domains": battery_connection_profile.upstream_domains,
+        "config_entry_id": source_config_entry_id or None,
+        "anchor_entity_id": anchor_entity_id or None,
+    }
+    battery_sensor_catalog = discover_battery_sensor_catalog(
+        hass,
+        **discovery_kwargs,
+        display_mode=sensor_display_mode,
+    )
+    canonical_catalog = discover_battery_sensor_catalog(
+        hass,
+        **discovery_kwargs,
+        display_mode=BATTERY_SENSOR_DISPLAY_ALL,
+    )
+    canonical_source_entities, canonical_missing_roles = discover_canonical_entities(
+        canonical_catalog,
+        battery_system=active_battery_system,
+    )
+    battery_sensor_catalog["canonical_entities"] = canonical_source_entities
+    battery_sensor_catalog["monitoring_only"] = battery_connection_profile.monitoring_only
+    battery_sensor_catalog["controls_summary"] = (
+        battery_connection_profile.controls_summary
+    )
+
+    if battery_connection_profile.route_kind == "ha_monitoring":
+        if canonical_missing_roles:
+            _LOGGER.error(
+                "Battery HA monitoring profile %s is missing required telemetry roles: %s",
+                battery_connection_profile.profile_id,
+                ", ".join(canonical_missing_roles),
+            )
+        else:
+            multipliers = {
+                "grid_power": float(canonical_catalog.get("grid_power_multiplier", 1.0))
+            }
+            discovered_coordinator = DiscoveredEntityEnergyCoordinator(
+                hass,
+                canonical_source_entities,
+                entry.entry_id,
+                profile_id=battery_connection_profile.profile_id,
+                power_multipliers=multipliers,
+            )
+            if is_sigenergy:
+                sigenergy_coordinator = discovered_coordinator
+            elif is_sungrow:
+                sungrow_coordinator = discovered_coordinator
+            elif is_alphaess:
+                alphaess_coordinator = discovered_coordinator
+            elif is_goodwe:
+                goodwe_coordinator = discovered_coordinator
+            elif active_battery_system == BATTERY_SYSTEM_TESLA:
+                tesla_coordinator = discovered_coordinator
+
+    if battery_connection_profile.route_kind == "ha_monitoring":
+        _LOGGER.info(
+            "Using monitoring-only Home Assistant battery profile; no direct battery client will be constructed"
+        )
+
+    elif is_sigenergy:
         _LOGGER.info("Running in Sigenergy mode - Tesla credentials not required")
 
         # Initialize Sigenergy Modbus coordinator if Modbus host is configured
@@ -20221,12 +20343,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Running in Sungrow mode - Tesla credentials not required")
 
         # Initialize Sungrow Modbus coordinator
-        sungrow_connection_type = entry.options.get(
-            CONF_SUNGROW_CONNECTION_TYPE,
-            entry.data.get(
+        sungrow_connection_type = (
+            battery_connection_profile.route_value
+            or entry.options.get(
                 CONF_SUNGROW_CONNECTION_TYPE,
-                SUNGROW_CONNECTION_DIRECT,
-            ),
+                entry.data.get(
+                    CONF_SUNGROW_CONNECTION_TYPE,
+                    SUNGROW_CONNECTION_DIRECT,
+                ),
+            )
         )
         sungrow_telemetry_only = (
             sungrow_connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
@@ -20303,7 +20428,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Running in FoxESS mode - Tesla credentials not required")
 
         # Initialize selected FoxESS backend.
-        foxess_conn_type = entry.data.get(CONF_FOXESS_CONNECTION_TYPE, FOXESS_CONNECTION_TCP)
+        foxess_conn_type = (
+            battery_connection_profile.route_value
+            or entry.options.get(
+                CONF_FOXESS_CONNECTION_TYPE,
+                entry.data.get(CONF_FOXESS_CONNECTION_TYPE, FOXESS_CONNECTION_TCP),
+            )
+        )
         if foxess_conn_type == FOXESS_CONNECTION_CLOUD:
             foxess_api_key = entry.data.get(CONF_FOXESS_CLOUD_API_KEY, "")
             foxess_device_sn = entry.data.get(CONF_FOXESS_CLOUD_DEVICE_SN, "")
@@ -20320,7 +20451,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "FoxESS Cloud mode enabled but API key or device serial is missing"
                 )
         elif foxess_conn_type == FOXESS_CONNECTION_ENTITY:
-            foxess_entry_id = entry.options.get(
+            foxess_entry_id = source_config_entry_id or entry.options.get(
                 CONF_FOXESS_ENTITY_CONFIG_ENTRY_ID,
                 entry.data.get(CONF_FOXESS_ENTITY_CONFIG_ENTRY_ID, ""),
             )
@@ -20376,14 +20507,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_GOODWE_PROTOCOL,
             entry.data.get(CONF_GOODWE_PROTOCOL, "udp"),
         )
-        goodwe_ems_control_mode = entry.options.get(
-            CONF_GOODWE_EMS_CONTROL_MODE,
-            entry.data.get(CONF_GOODWE_EMS_CONTROL_MODE),
+        goodwe_ems_control_mode = (
+            GOODWE_EMS_CONTROL_ENTITY
+            if battery_connection_profile.profile_id == "goodwe_ha"
+            else entry.options.get(
+                CONF_GOODWE_EMS_CONTROL_MODE,
+                entry.data.get(CONF_GOODWE_EMS_CONTROL_MODE),
+            )
         )
         configured_ems_prefix = entry.options.get(
             CONF_GOODWE_EMS_ENTITY_PREFIX,
             entry.data.get(CONF_GOODWE_EMS_ENTITY_PREFIX),
         )
+        if (
+            battery_connection_profile.profile_id == "goodwe_ha"
+            and not configured_ems_prefix
+        ):
+            configured_ems_prefix = infer_entity_prefix(canonical_source_entities)
         goodwe_ems_prefix = (
             _resolve_goodwe_ems_entity_prefix(hass, configured_ems_prefix)
             if goodwe_ems_control_mode == GOODWE_EMS_CONTROL_ENTITY
@@ -20410,7 +20550,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
 
         goodwe_entity_telemetry_prefix = ""
-        if goodwe_protocol == "tcp" or goodwe_port == DEFAULT_GOODWE_PORT_TCP:
+        if (
+            battery_connection_profile.profile_id == "goodwe_ha"
+            or goodwe_protocol == "tcp"
+            or goodwe_port == DEFAULT_GOODWE_PORT_TCP
+        ):
             goodwe_entity_telemetry_prefix = await _resolve_goodwe_entity_telemetry_prefix(
                 hass,
                 goodwe_ems_prefix or configured_ems_prefix,
@@ -20423,20 +20567,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     goodwe_entity_telemetry_prefix,
                 )
 
-        _LOGGER.info(
+        if (
+            battery_connection_profile.profile_id == "goodwe_ha"
+            and not goodwe_entity_telemetry_prefix
+        ):
+            _LOGGER.error(
+                "GoodWe HA profile could not resolve fresh entity telemetry; refusing direct fallback"
+            )
+        else:
+            _LOGGER.info(
             "Initializing GoodWe coordinator: %s:%s%s%s",
             goodwe_host, goodwe_port,
             f" (EMS relay via '{goodwe_ems_prefix}' entities)" if goodwe_ems_prefix else "",
             f" (telemetry via '{goodwe_entity_telemetry_prefix}' entities)" if goodwe_entity_telemetry_prefix else "",
         )
-        goodwe_coordinator = GoodWeEnergyCoordinator(
-            hass,
-            goodwe_host,
-            port=goodwe_port,
-            entry_id=entry.entry_id,
-            ems_entity_prefix=goodwe_ems_prefix,
-            entity_telemetry_prefix=goodwe_entity_telemetry_prefix,
-        )
+            goodwe_coordinator = GoodWeEnergyCoordinator(
+                hass,
+                goodwe_host,
+                port=goodwe_port,
+                entry_id=entry.entry_id,
+                ems_entity_prefix=goodwe_ems_prefix,
+                entity_telemetry_prefix=goodwe_entity_telemetry_prefix,
+            )
     elif is_alphaess:
         _LOGGER.info("Running in AlphaESS mode - Tesla credentials not required")
 
@@ -20452,12 +20604,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_ALPHAESS_MODBUS_SLAVE_ID, DEFAULT_ALPHAESS_MODBUS_SLAVE_ID),
         )
         alphaess_export_limit_kw = entry.data.get(CONF_ALPHAESS_EXPORT_LIMIT_KW)
-        alphaess_connection_type = entry.options.get(
-            CONF_ALPHAESS_CONNECTION_TYPE,
-            entry.data.get(
+        alphaess_connection_type = (
+            battery_connection_profile.route_value
+            or entry.options.get(
                 CONF_ALPHAESS_CONNECTION_TYPE,
-                ALPHAESS_CONNECTION_MODBUS_CLOUD,
-            ),
+                entry.data.get(
+                    CONF_ALPHAESS_CONNECTION_TYPE,
+                    ALPHAESS_CONNECTION_MODBUS_CLOUD,
+                ),
+            )
         )
 
         # Optional cloud client for fallback telemetry when Modbus is unreachable
@@ -20498,12 +20653,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Running in ESY Sunhome mode — bridging via esy_sunhome companion integration")
         esy_sunhome_coordinator = ESYSunhomeEnergyCoordinator(
             hass,
-            esy_entry_id=entry.data[CONF_ESY_CONFIG_ENTRY_ID],
+            esy_entry_id=source_config_entry_id
+            or entry.data[CONF_ESY_CONFIG_ENTRY_ID],
             entry_id=entry.entry_id,
         )
     elif is_solax:
         _LOGGER.info("Running in Solax mode — bridging via homeassistant-solax-modbus integration")
-        solax_config_entry_id = entry.options.get(
+        solax_config_entry_id = source_config_entry_id or entry.options.get(
             CONF_SOLAX_CONFIG_ENTRY_ID,
             entry.data.get(CONF_SOLAX_CONFIG_ENTRY_ID, ""),
         )
@@ -20551,7 +20707,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             saj_reserve_pct = saj_reserve_pct * 100  # decimal → percent
         saj_h2_coordinator = SajH2EnergyCoordinator(
             hass,
-            saj_entry_id=entry.data[CONF_SAJ_CONFIG_ENTRY_ID],
+            saj_entry_id=source_config_entry_id
+            or entry.data[CONF_SAJ_CONFIG_ENTRY_ID],
             battery_capacity_kwh=float(saj_capacity_kwh),
             entry_id=entry.entry_id,
             min_soc_pct=float(saj_reserve_pct or 5.0),
@@ -20582,7 +20739,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         fronius_reserva_coordinator = FroniusReservaEnergyCoordinator(
             hass,
-            fronius_entry_id=entry.data[CONF_FRONIUS_RESERVA_CONFIG_ENTRY_ID],
+            fronius_entry_id=source_config_entry_id
+            or entry.data[CONF_FRONIUS_RESERVA_CONFIG_ENTRY_ID],
             battery_capacity_kwh=float(fronius_capacity_kwh),
             entry_id=entry.entry_id,
             max_charge_kw=float(fronius_max_charge_kw),
@@ -20652,11 +20810,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass,
             entity_prefix=solaredge_entity_prefix or "solaredge",
             entry_id=entry.entry_id,
+            solaredge_entry_id=source_config_entry_id or None,
         )
     elif is_anker_solix:
-        anker_connection_type = entry.options.get(
-            CONF_ANKER_SOLIX_CONNECTION_TYPE,
-            entry.data.get(CONF_ANKER_SOLIX_CONNECTION_TYPE, ANKER_SOLIX_CONNECTION_MODBUS),
+        anker_connection_type = (
+            battery_connection_profile.route_value
+            or entry.options.get(
+                CONF_ANKER_SOLIX_CONNECTION_TYPE,
+                entry.data.get(CONF_ANKER_SOLIX_CONNECTION_TYPE, ANKER_SOLIX_CONNECTION_MODBUS),
+            )
         )
         _LOGGER.info("Running in Anker Solix mode (%s)", anker_connection_type)
 
@@ -20694,7 +20856,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
             ),
             integration_domain=anker_domain,
-            anker_entry_id=entry.options.get(
+            anker_entry_id=source_config_entry_id or entry.options.get(
                 CONF_ANKER_SOLIX_CONFIG_ENTRY_ID,
                 entry.data.get(CONF_ANKER_SOLIX_CONFIG_ENTRY_ID),
             ),
@@ -20798,7 +20960,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # If Tesla live_status returns an empty response during startup, the Tesla
     # coordinator can still publish local LAN telemetry instead of making the
     # config entry unavailable.
-    if tesla_coordinator and entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
+    if (
+        tesla_coordinator
+        and entry.data.get(CONF_POWERWALL_LOCAL_PAIRED)
+        and battery_connection_profile.profile_id != "tesla_powerwall_monitoring"
+    ):
         try:
             await hass.async_add_executor_job(_preload_powerwall_local_modules)
             from .powerwall_local.views import (
@@ -20816,15 +20982,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if amber_coordinator:
         await amber_coordinator.async_config_entry_first_refresh()
     if tesla_coordinator:
-        await tesla_coordinator.async_config_entry_first_refresh()
+        if battery_connection_profile.profile_id == "tesla_powerwall_monitoring":
+            try:
+                await tesla_coordinator.async_config_entry_first_refresh()
+            except Exception as err:
+                _LOGGER.warning(
+                    "Tesla Powerwall integration entities are not ready yet; "
+                    "keeping monitoring coordinator active so it can retry: %s",
+                    err,
+                )
+        else:
+            await tesla_coordinator.async_config_entry_first_refresh()
     if sigenergy_coordinator:
         try:
             await sigenergy_coordinator.async_config_entry_first_refresh()
             _LOGGER.info("Sigenergy Modbus coordinator initialized successfully")
         except Exception as e:
-            _LOGGER.warning("Sigenergy Modbus coordinator failed to initialize: %s", e)
-            # Don't fail the entire setup - allow other features to work
-            sigenergy_coordinator = None
+            if _uses_native_battery_integration(sigenergy_coordinator):
+                _LOGGER.warning(
+                    "Sigenergy integration entities are not ready yet; keeping "
+                    "monitoring coordinator active so it can retry: %s",
+                    e,
+                )
+            else:
+                _LOGGER.warning("Sigenergy Modbus coordinator failed to initialize: %s", e)
+                # Don't fail the entire setup - allow other features to work
+                sigenergy_coordinator = None
     if sungrow_coordinator:
         try:
             await sungrow_coordinator.async_config_entry_first_refresh()
@@ -20876,8 +21059,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await alphaess_coordinator.async_config_entry_first_refresh()
             _LOGGER.info("AlphaESS coordinator initialized successfully")
         except Exception as e:
-            _LOGGER.warning("AlphaESS coordinator failed to initialize: %s", e)
-            alphaess_coordinator = None
+            if _uses_native_battery_integration(alphaess_coordinator):
+                _LOGGER.warning(
+                    "AlphaESS integration entities are not ready yet; keeping "
+                    "monitoring coordinator active so it can retry: %s",
+                    e,
+                )
+            else:
+                _LOGGER.warning("AlphaESS coordinator failed to initialize: %s", e)
+                alphaess_coordinator = None
     if esy_sunhome_coordinator:
         try:
             await esy_sunhome_coordinator.async_config_entry_first_refresh()
@@ -21672,6 +21862,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "solaredge_coordinator": solaredge_coordinator,  # For SolarEdge Home battery telemetry
         "anker_solix_coordinator": anker_solix_coordinator,  # For Anker Solix X1/HA bridge telemetry and control
         "battery_energy_coordinator": energy_coord_for_demand,  # Active battery coordinator used for startup readiness
+        "battery_connection_profile": battery_connection_profile,
+        "battery_sensor_catalog": battery_sensor_catalog,
         "custom_energy_coordinator": custom_energy_coordinator,  # For custom external-controller HA entity telemetry
         "powerwall_local": powerwall_local_runtime or {"client": None, "coordinator": None, "pairing_manager": None},
         "demand_charge_coordinator": demand_charge_coordinator,
@@ -21939,7 +22131,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Build the local Powerwall coordinator before entities are created. Tesla
     # energy sensors attach a second listener to this coordinator so paired
     # installs update from LAN telemetry instead of waiting for cloud samples.
-    if entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
+    if (
+        entry.data.get(CONF_POWERWALL_LOCAL_PAIRED)
+        and battery_connection_profile.profile_id != "tesla_powerwall_monitoring"
+    ):
         try:
             await hass.async_add_executor_job(_preload_powerwall_local_modules)
             from .powerwall_local.views import (
@@ -25923,6 +26118,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def handle_solaredge_curtailment(feedin_price=None, import_price=None) -> None:
         """Handle SolarEdge active-power curtailment via Modbus/entity fallback."""
+        if battery_connection_profile.profile_id == "solaredge_ha_only":
+            _LOGGER.debug(
+                "SolarEdge direct curtailment is unavailable in the HA-only profile"
+            )
+            return
         dc_curtailment_enabled = entry.options.get(
             CONF_SOLAREDGE_DC_CURTAILMENT_ENABLED,
             entry.data.get(CONF_SOLAREDGE_DC_CURTAILMENT_ENABLED, False),

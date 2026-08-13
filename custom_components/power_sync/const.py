@@ -17,7 +17,7 @@ except (FileNotFoundError, json.JSONDecodeError):
     POWER_SYNC_VERSION = "0.0.0"
 
 # Dashboard JS version — bump this to cache-bust the strategy JS independently of the app version
-DASHBOARD_JS_VERSION = "46"
+DASHBOARD_JS_VERSION = "47"
 
 # User-Agent for API identification
 POWER_SYNC_USER_AGENT = f"PowerSync/{POWER_SYNC_VERSION} HomeAssistant"
@@ -180,6 +180,18 @@ DEFAULT_SIGENERGY_EVDC_DISCHARGE_POWER_LIMIT_ENTITY = (
 
 # Battery System Selection
 CONF_BATTERY_SYSTEM = "battery_system"
+CONF_BATTERY_CONNECTION_PROFILE = "battery_connection_profile"
+CONF_BATTERY_INTEGRATION_CONFIG_ENTRY_ID = "battery_integration_config_entry_id"
+CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY = "battery_integration_anchor_entity"
+CONF_BATTERY_SENSOR_DISPLAY_MODE = "battery_sensor_display_mode"
+BATTERY_SENSOR_DISPLAY_RECOMMENDED = "recommended"
+BATTERY_SENSOR_DISPLAY_ALL = "all"
+BATTERY_SENSOR_DISPLAY_OFF = "off"
+BATTERY_SENSOR_DISPLAY_MODES = {
+    BATTERY_SENSOR_DISPLAY_RECOMMENDED: "Recommended sensors",
+    BATTERY_SENSOR_DISPLAY_ALL: "All supported sensors",
+    BATTERY_SENSOR_DISPLAY_OFF: "Off",
+}
 BATTERY_SYSTEM_TESLA = "tesla"
 BATTERY_SYSTEM_SIGENERGY = "sigenergy"
 BATTERY_SYSTEM_SUNGROW = "sungrow"
