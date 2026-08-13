@@ -988,6 +988,29 @@ def test_tesla_force_discharge_exposes_optional_optimizer_result():
     assert "raise" in home_assistant_error_handler
 
 
+def test_tesla_backup_reserve_service_exposes_truthful_optional_result():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    handler = _find_function(tree, "handle_set_backup_reserve")
+    handler_source = ast.get_source_segment(source, handler)
+
+    assert handler_source is not None
+    assert (
+        "SERVICE_SET_BACKUP_RESERVE,\n"
+        "        handle_set_backup_reserve,\n"
+        "        supports_response=SupportsResponse.OPTIONAL"
+    ) in source
+    assert "tesla_success = bool(success)" in handler_source
+    assert '{"success": True, "error": None}' in handler_source
+    assert '"success": False' in handler_source
+    assert '"error": "backup reserve write did not verify"' in handler_source
+    assert '{"success": False, "error": str(e)}' in handler_source
+    assert '{"success": False, "error": "blocked by monitoring mode"}' in handler_source
+    assert '{"success": False, "error": "blocked by hold SoC"}' in handler_source
+    assert 'response.get("success") is not True' in handler_source
+    assert "Skipping backup reserve persistence after unconfirmed write" in handler_source
+
+
 def test_tesla_automation_force_actions_require_confirmed_service_response():
     source = AUTOMATION_ACTIONS_PATH.read_text()
     tree = ast.parse(source)

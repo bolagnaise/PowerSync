@@ -35847,31 +35847,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # POWERWALL SETTINGS SERVICES (for mobile app Controls)
     # ======================================================================
 
-    async def handle_set_backup_reserve(call: ServiceCall) -> None:
+    async def handle_set_backup_reserve(
+        call: ServiceCall,
+    ) -> dict[str, Any] | None:
         """Set the battery backup reserve percentage.
 
         Supports both Tesla Powerwall and SigEnergy systems.
         """
+        response: dict[str, Any] | None = None
         percent = call.data.get("percent")
         if percent is None:
             _LOGGER.error("Missing 'percent' parameter for set_backup_reserve")
-            return
+            return {"success": False, "error": "missing percent"}
 
         try:
             percent = int(percent)
             if percent < 0 or percent > 100:
                 _LOGGER.error(f"Invalid backup reserve percent: {percent}. Must be 0-100.")
-                return
+                return {"success": False, "error": "invalid backup reserve percent"}
         except (ValueError, TypeError):
             _LOGGER.error(f"Invalid backup reserve percent: {percent}")
-            return
+            return {"success": False, "error": "invalid backup reserve percent"}
 
         if _monitoring_mode_should_block_control(call):
             _LOGGER.info(
                 "[MONITORING] Would set backup reserve to %d%% — blocked by monitoring mode",
                 percent,
             )
-            return
+            return {"success": False, "error": "blocked by monitoring mode"}
 
         reserve_source = call.data.get("source")
         if (
@@ -35882,7 +35885,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Hold SoC active — skipping optimizer backup reserve write to %d%%",
                 percent,
             )
-            return
+            return {"success": False, "error": "blocked by hold SoC"}
 
         _tesla_reserve_generation[0] += 1
         backup_reserve_kick_generation = _supersede_tesla_charge_kick(
@@ -36102,6 +36105,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error setting Anker Solix backup reserve: {e}", exc_info=True)
         else:
             # Tesla Powerwall — local V1R first when paired, cloud Fleet API as fallback.
+            tesla_success = False
             try:
                 # Tesla constraint (July 2025): only 0-80% and 100% are valid.
                 # Values 81-99% are rejected and auto-clamped to 80%.
@@ -36238,6 +36242,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         cloud_call=_cloud,
                         label="set_backup_reserve",
                     )
+                tesla_success = bool(success)
                 if success:
                     _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
                     if _tesla_coord_for_cache is not None:
@@ -36254,14 +36259,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 "backup_reserve_100",
                                 allow_grid_field_absent_compatibility=True,
                             )
+                response = (
+                    {"success": True, "error": None}
+                    if tesla_success
+                    else {
+                        "success": False,
+                        "error": "backup reserve write did not verify",
+                    }
+                )
 
             except Exception as e:
                 _LOGGER.error(f"Error setting Tesla backup reserve: {e}", exc_info=True)
+                response = {"success": False, "error": str(e)}
 
         # Persist the user's chosen backup reserve so the optimizer knows
         # the correct restore value (survives HA restarts and IDLE cycles).
         # Skip optimizer-originated writes — LP actions may temporarily adjust
         # backup_reserve to hold or align SOC and must not overwrite the real value.
+        if isinstance(response, dict) and response.get("success") is not True:
+            _LOGGER.debug(
+                "Skipping backup reserve persistence after unconfirmed write"
+            )
+            return response
         try:
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             opt_coord = entry_data.get("optimization_coordinator")
@@ -36315,6 +36334,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
         except Exception as e:
             _LOGGER.debug("Could not persist backup reserve: %s", e)
+
+        return response
 
     async def handle_set_operation_mode(call: ServiceCall) -> None:
         """Set the Powerwall operation mode.
@@ -37282,7 +37303,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.async_create_task(restore_force_mode_from_persistence())
 
     # Register Powerwall settings services
-    hass.services.async_register(DOMAIN, SERVICE_SET_BACKUP_RESERVE, handle_set_backup_reserve)
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_BACKUP_RESERVE,
+        handle_set_backup_reserve,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(DOMAIN, SERVICE_SET_OPERATION_MODE, handle_set_operation_mode)
     hass.services.async_register(DOMAIN, SERVICE_SET_GRID_EXPORT, handle_set_grid_export)
     hass.services.async_register(

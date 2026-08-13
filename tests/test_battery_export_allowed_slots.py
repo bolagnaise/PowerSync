@@ -6256,6 +6256,37 @@ def test_self_consumption_mode_failure_clears_reserve_provenance(
     assert coordinator._last_optimizer_self_consumption_reserve_target is None
 
 
+def test_self_consumption_reserve_write_failure_does_not_advance_provenance(
+    opt_module,
+):
+    class FailingReserveBattery(_FakeBattery):
+        async def set_backup_reserve(self, percent):
+            self.backup_reserve_calls.append(percent)
+            return False
+
+    battery = FailingReserveBattery(
+        hardware_mode="self_consumption",
+        backup_reserve=18,
+    )
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.19)
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.backup_reserve_calls == [19]
+    assert (
+        getattr(
+            coordinator,
+            "_last_optimizer_self_consumption_reserve_target",
+            None,
+        )
+        is None
+    )
+
+
 def test_self_consumption_reserve_provenance_clears_on_disable_reset(opt_module):
     async def _run():
         battery = _FakeBattery(

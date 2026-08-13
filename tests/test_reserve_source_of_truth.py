@@ -740,13 +740,13 @@ def _handle_set_backup_reserve_persist_source() -> str:
     return source[start:end]
 
 
-def _run_persist_backup_reserve(*, hass, entry, percent, call):
+def _run_persist_backup_reserve(*, hass, entry, percent, call, response=None):
     block = textwrap.indent(
         textwrap.dedent(_handle_set_backup_reserve_persist_source()),
         "    ",
     )
     func_src = (
-        "async def _persist(hass, entry, percent, call, DOMAIN):\n"
+        "async def _persist(hass, entry, percent, call, DOMAIN, response):\n"
         "    reserve_source = call.data.get('source')\n"
         f"{block}"
     )
@@ -759,7 +759,16 @@ def _run_persist_backup_reserve(*, hass, entry, percent, call):
         )
     }
     exec(compile(func_src, "<handle_set_backup_reserve_persist>", "exec"), namespace)
-    return asyncio.run(namespace["_persist"](hass, entry, percent, call, "power_sync"))
+    return asyncio.run(
+        namespace["_persist"](
+            hass,
+            entry,
+            percent,
+            call,
+            "power_sync",
+            response,
+        )
+    )
 
 
 def _backup_reserve_hass(*, entry_id="entry-1"):
@@ -834,3 +843,28 @@ def test_handle_set_backup_reserve_migrates_legacy_key_even_when_value_matches()
     assert entry.data["hardware_backup_reserve"] == 0.2
     assert entry.options["hardware_backup_reserve"] == 0.2
     assert "_user_backup_reserve" not in entry.options
+
+
+def test_handle_set_backup_reserve_failed_tesla_write_is_not_persisted():
+    hass, config_entries = _backup_reserve_hass()
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={"hardware_backup_reserve": 0.2},
+        options={"hardware_backup_reserve": 0.2},
+    )
+    call = SimpleNamespace(data={})
+    response = {"success": False, "error": "backup reserve write did not verify"}
+
+    result = _run_persist_backup_reserve(
+        hass=hass,
+        entry=entry,
+        percent=30,
+        call=call,
+        response=response,
+    )
+
+    assert result == response
+    assert config_entries.calls == []
+    assert entry.data["hardware_backup_reserve"] == 0.2
+    assert entry.options["hardware_backup_reserve"] == 0.2
+    assert "_skip_reload" not in hass.data["power_sync"]["entry-1"]

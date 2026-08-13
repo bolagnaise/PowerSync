@@ -403,11 +403,12 @@ def test_tesla_backup_reserve_ignores_stale_local_readback():
 def test_optimizer_backup_reserve_write_marks_source():
     module, restore = _load_controller_module()
     try:
-        services = _Services()
+        services = _Services({"success": True, "error": None})
         hass = SimpleNamespace(services=services)
         controller = module.BatteryControllerWrapper(hass, "tesla")
 
         assert asyncio.run(controller.set_backup_reserve(52))
+        assert services.return_response_requests == [True]
 
         assert services.calls == [
             (
@@ -417,6 +418,20 @@ def test_optimizer_backup_reserve_write_marks_source():
                 True,
             )
         ]
+    finally:
+        restore()
+
+
+def test_optimizer_backup_reserve_rejects_failed_or_missing_service_response():
+    module, restore = _load_controller_module()
+    try:
+        for response in ({"success": False, "error": "write failed"}, None):
+            services = _Services(response)
+            hass = SimpleNamespace(services=services)
+            controller = module.BatteryControllerWrapper(hass, "tesla")
+
+            assert asyncio.run(controller.set_backup_reserve(52)) is False
+            assert services.return_response_requests == [True]
     finally:
         restore()
 

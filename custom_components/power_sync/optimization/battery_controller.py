@@ -418,11 +418,29 @@ class BatteryControllerWrapper:
             True if command was sent successfully
         """
         try:
-            await self.hass.services.async_call(
-                "power_sync", "set_backup_reserve",
-                {"percent": percent, "source": "optimizer"},
-                blocking=True,
-            )
+            service_data = {"percent": percent, "source": "optimizer"}
+            if self.battery_system == "tesla":
+                response = await self.hass.services.async_call(
+                    "power_sync",
+                    "set_backup_reserve",
+                    service_data,
+                    blocking=True,
+                    return_response=True,
+                )
+                if not isinstance(response, dict) or response.get("success") is not True:
+                    error = response.get("error") if isinstance(response, dict) else None
+                    _LOGGER.warning(
+                        "Optimizer: Tesla backup reserve was not confirmed%s",
+                        f": {error}" if error else "",
+                    )
+                    return False
+            else:
+                await self.hass.services.async_call(
+                    "power_sync",
+                    "set_backup_reserve",
+                    service_data,
+                    blocking=True,
+                )
             return True
 
         except Exception as e:
