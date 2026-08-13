@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import ast
+import math
 from pathlib import Path
 from types import SimpleNamespace
 import sys
 import types
+from typing import Any
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
+COORDINATOR_PATH = COMPONENT_ROOT / "coordinator.py"
 
 
 def _install_stubs() -> None:
@@ -234,6 +238,39 @@ def _unprefixed_states() -> list[_FakeState]:
     ]
 
 
+def _load_daily_energy_merge():
+    tree = ast.parse(COORDINATOR_PATH.read_text())
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"_finite_float", "_merge_foxess_entity_daily_energy"}
+    ]
+    assert {node.name for node in functions} == {
+        "_finite_float",
+        "_merge_foxess_entity_daily_energy",
+    }
+    module = ast.Module(body=functions, type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace: dict[str, Any] = {"Any": Any, "math": math}
+    exec(compile(module, str(COORDINATOR_PATH), "exec"), namespace)
+    return namespace["_merge_foxess_entity_daily_energy"]
+
+
+def _entity_coordinator_method_source(method_name: str) -> str:
+    source = COORDINATOR_PATH.read_text()
+    tree = ast.parse(source)
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != "FoxESSEntityEnergyCoordinator":
+            continue
+        for member in node.body:
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name == method_name:
+                segment = ast.get_source_segment(source, member)
+                assert segment is not None
+                return segment
+    raise AssertionError(f"FoxESSEntityEnergyCoordinator.{method_name} not found")
+
+
 def test_prefix_discovery_maps_telemetry_and_daily_energy():
     hass = _FakeHass(_base_states())
     controller = FoxESSEntityController(hass, entity_prefix="foxess")
@@ -259,6 +296,268 @@ def test_prefix_discovery_maps_telemetry_and_daily_energy():
     assert status["pv1_current"] == 5.2
     assert status["battery_max_charge_power_w"] == 10250
     assert status["telemetry_ready"] is True
+
+
+def test_ct2_meter_is_normalized_and_added_to_solar_without_foreign_suffix_match():
+    states = _base_states()
+    for state in states:
+        if state.entity_id.endswith("_pv_power_now") or state.entity_id.endswith(
+            "_pv1_power"
+        ):
+            state.state = "0"
+        elif state.entity_id.endswith("_solar_energy_today"):
+            state.state = "0"
+    states.extend(
+        [
+            _FakeState("sensor.ct2_meter", "1500", _w()),
+            _FakeState("sensor.enphase_ct2_meter", "9000", _w()),
+        ]
+    )
+    controller = FoxESSEntityController(_FakeHass(states), entity_prefix="foxess")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert controller._entity_map["ct2_power"] == "sensor.ct2_meter"
+    assert status["ct2_power"] == pytest.approx(1.5)
+    assert status["solar_power"] == pytest.approx(1.5)
+    assert status["daily_solar_energy_kwh"] == 0
+
+    foreign_only_states = [
+        state for state in states if state.entity_id != "sensor.ct2_meter"
+    ]
+    foreign_only_controller = FoxESSEntityController(
+        _FakeHass(foreign_only_states), entity_prefix="foxess"
+    )
+
+    assert asyncio.run(foreign_only_controller.connect())
+    foreign_only_status = foreign_only_controller.get_status()
+
+    assert "ct2_power" not in foreign_only_controller._entity_map
+    assert foreign_only_status["ct2_power"] == 0
+    assert foreign_only_status["solar_power"] == 0
+
+
+def test_selected_entry_allows_renamed_ct2_meter_but_global_fallback_does_not():
+    states = [
+        state
+        for state in _base_states()
+        if not state.entity_id.endswith("_ct2_meter")
+    ]
+    states.extend(
+        [
+            _FakeState("sensor.kitchen_ct2_meter", "1500", _w()),
+            _FakeState("sensor.enphase_ct2_meter", "9000", _w()),
+        ]
+    )
+    selected_ids = [state.entity_id for state in states if state.entity_id != "sensor.enphase_ct2_meter"]
+    selected_hass = _FakeHass(
+        states,
+        registry_entries={"fox-entry": selected_ids},
+    )
+    selected_controller = FoxESSEntityController(
+        selected_hass,
+        foxess_entry_id="fox-entry",
+    )
+
+    assert asyncio.run(selected_controller.connect())
+    selected_status = selected_controller.get_status()
+
+    assert selected_controller._entity_map["ct2_power"] == "sensor.kitchen_ct2_meter"
+    assert selected_status["ct2_power"] == pytest.approx(1.5)
+
+    unselected_hass = _FakeHass(
+        states,
+        registry_entries={
+            "fox-entry": [
+                entity_id
+                for entity_id in selected_ids
+                if entity_id != "sensor.kitchen_ct2_meter"
+            ]
+        },
+    )
+    global_controller = FoxESSEntityController(unselected_hass, foxess_entry_id="fox-entry")
+
+    assert asyncio.run(global_controller.connect())
+    global_status = global_controller.get_status()
+
+    assert "ct2_power" not in global_controller._entity_map
+    assert global_status["ct2_power"] == 0
+
+
+def test_negative_ct2_meter_does_not_inflate_solar_power():
+    states = _base_states()
+    for state in states:
+        if state.entity_id.endswith("_pv_power_now") or state.entity_id.endswith(
+            "_pv1_power"
+        ):
+            state.state = "0"
+    states.append(_FakeState("sensor.ct2_meter", "-250", _w()))
+    controller = FoxESSEntityController(_FakeHass(states), entity_prefix="foxess")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["ct2_power"] == pytest.approx(-0.25)
+    assert status["solar_power"] == 0
+
+
+def test_voltage_resolver_skips_invalid_high_priority_aliases():
+    states = _base_states()
+    next(
+        state
+        for state in states
+        if state.entity_id == "sensor.foxess_battery_voltage"
+    ).state = "nan"
+    states.extend(
+        [
+            _FakeState("sensor.foxess_battery_1_voltage", "bad"),
+            _FakeState("sensor.batvolt_1", "418.4"),
+            _FakeState("sensor.invbatvolt_1", "416.0"),
+        ]
+    )
+    controller = FoxESSEntityController(_FakeHass(states), entity_prefix="foxess")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert controller._entity_map["battery_voltage"] == "sensor.batvolt_1"
+    assert status["battery_voltage_v"] == 418.4
+
+
+def test_daily_solar_merges_dc_counter_with_separate_ct2_accumulator():
+    merge = _load_daily_energy_merge()
+    energy_summary = {"pv_today_kwh": 3.75, "grid_import_today_kwh": 1.0}
+
+    merge(
+        energy_summary,
+        {"daily_solar_energy_kwh": 0, "daily_grid_import_kwh": 4.5},
+        {"pv_today_kwh": 1.25},
+    )
+
+    assert energy_summary["pv_today_kwh"] == 1.25
+    assert energy_summary["grid_import_today_kwh"] == 4.5
+
+    merge(energy_summary, {"daily_solar_energy_kwh": 6.25}, {"pv_today_kwh": 1.25})
+    assert energy_summary["pv_today_kwh"] == 7.5
+
+    merge(energy_summary, {}, {"pv_today_kwh": 2.0})
+    assert energy_summary["pv_today_kwh"] == 7.5
+
+
+def test_entity_coordinator_persists_ct2_and_uses_total_accumulator_when_dc_missing():
+    init_source = _entity_coordinator_method_source("__init__")
+    update_source = _entity_coordinator_method_source("_async_update_data")
+    shutdown_source = _entity_coordinator_method_source("async_shutdown")
+
+    assert 'EnergyAccumulator(hass, "foxess_entity_ct2")' in init_source
+    assert "await self._ct2_energy_acc.async_restore()" in update_source
+    assert "positive_ct2_kw" in update_source
+    assert "self._ct2_energy_acc.update" in update_source
+    assert "_merge_foxess_entity_daily_energy" in update_source
+    assert "battery_voltage_v" in update_source
+    assert "await self._ct2_energy_acc.async_flush()" in shutdown_source
+
+
+def test_h3_smart_voltage_prefers_bms_pack_sensor_for_current_power():
+    states = _without_suffix(_base_states(), ("_battery_voltage",))
+    states.extend(
+        [
+            _FakeState("sensor.batvolt_1", "418.4"),
+            _FakeState("sensor.invbatvolt_1", "416.0"),
+        ]
+    )
+    for state in states:
+        if state.entity_id in {
+            "number.foxess_max_charge_current",
+            "number.foxess_max_discharge_current",
+        }:
+            state.state = "50"
+
+    controller = FoxESSEntityController(_FakeHass(states), entity_prefix="foxess")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert controller._entity_map["battery_voltage"] == "sensor.batvolt_1"
+    assert status["battery_voltage_v"] == 418.4
+    assert status["battery_max_charge_power_w"] == 20920
+    assert status["battery_max_discharge_power_w"] == 20920
+
+
+def test_h3_smart_voltage_falls_back_to_inverter_sensor():
+    states = _without_suffix(_base_states(), ("_battery_voltage",))
+    states.append(_FakeState("sensor.invbatvolt_1", "418.4"))
+    for state in states:
+        if state.entity_id in {
+            "number.foxess_max_charge_current",
+            "number.foxess_max_discharge_current",
+        }:
+            state.state = "50"
+
+    controller = FoxESSEntityController(_FakeHass(states), entity_prefix="foxess")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert controller._entity_map["battery_voltage"] == "sensor.invbatvolt_1"
+    assert status["battery_voltage_v"] == 418.4
+    assert status["battery_max_charge_power_w"] == 20920
+
+
+def test_legacy_voltage_alias_priority_and_fallback():
+    states = _base_states()
+    states.append(_FakeState("sensor.foxess_battery_1_voltage", "420"))
+    controller = FoxESSEntityController(_FakeHass(states), entity_prefix="foxess")
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert controller._entity_map["battery_voltage"] == "sensor.foxess_battery_voltage"
+    assert status["battery_max_charge_power_w"] == 10250
+
+    fallback_states = _without_suffix(states, ("_battery_voltage", "_battery_1_voltage"))
+    fallback_controller = FoxESSEntityController(
+        _FakeHass(fallback_states), entity_prefix="foxess"
+    )
+
+    assert asyncio.run(fallback_controller.connect())
+    fallback_status = fallback_controller.get_status()
+
+    assert "battery_voltage" not in fallback_controller._entity_map
+    assert fallback_status["battery_voltage_v"] is None
+    assert fallback_status["battery_max_charge_power_w"] == 12500
+
+    unavailable_states = _base_states()
+    unavailable_states.extend(
+        [
+            _FakeState("sensor.foxess_battery_1_voltage", "unavailable"),
+            _FakeState("sensor.batvolt_1", "unavailable"),
+            _FakeState("sensor.invbatvolt_1", "unavailable"),
+        ]
+    )
+    next(
+        state
+        for state in unavailable_states
+        if state.entity_id == "sensor.foxess_battery_voltage"
+    ).state = "unavailable"
+    for state in unavailable_states:
+        if state.entity_id in {
+            "number.foxess_max_charge_current",
+            "number.foxess_max_discharge_current",
+        }:
+            state.state = "50"
+
+    unavailable_controller = FoxESSEntityController(
+        _FakeHass(unavailable_states), entity_prefix="foxess"
+    )
+
+    assert asyncio.run(unavailable_controller.connect())
+    unavailable_status = unavailable_controller.get_status()
+
+    assert "battery_voltage" not in unavailable_controller._entity_map
+    assert unavailable_status["battery_voltage_v"] is None
+    assert unavailable_status["battery_max_charge_power_w"] == 25000
 
 
 def test_startup_readiness_rejects_unavailable_values_but_accepts_zeroes():

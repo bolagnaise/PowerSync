@@ -260,6 +260,37 @@ def _foxess_cloud_grid_power(
     return grid_kw, True
 
 
+def _merge_foxess_entity_daily_energy(
+    energy_summary: dict[str, Any],
+    status: dict[str, Any],
+    ct2_energy_summary: dict[str, Any] | None = None,
+) -> None:
+    """Merge FoxESS entity totals, combining a separate positive CT2 total."""
+    for status_key, summary_key in (
+        ("daily_grid_import_kwh", "grid_import_today_kwh"),
+        ("daily_grid_export_kwh", "grid_export_today_kwh"),
+        ("daily_battery_charge_kwh", "charge_today_kwh"),
+        ("daily_battery_discharge_kwh", "discharge_today_kwh"),
+    ):
+        value = _finite_float(status.get(status_key))
+        if value is None or value < 0:
+            continue
+        energy_summary[summary_key] = round(float(value), 3)
+
+    dc_solar_kwh = _finite_float(status.get("daily_solar_energy_kwh"))
+    if dc_solar_kwh is None or dc_solar_kwh < 0:
+        return
+    ct2_solar_kwh = 0.0
+    if isinstance(ct2_energy_summary, dict):
+        raw_ct2_solar_kwh = _finite_float(ct2_energy_summary.get("pv_today_kwh"))
+        if raw_ct2_solar_kwh is not None and raw_ct2_solar_kwh > 0:
+            ct2_solar_kwh = raw_ct2_solar_kwh
+    energy_summary["pv_today_kwh"] = round(
+        float(dc_solar_kwh) + ct2_solar_kwh,
+        3,
+    )
+
+
 def _configured_sungrow_ac_inverter_attributes(
     hass: HomeAssistant,
     entry_id: str,
@@ -7638,6 +7669,7 @@ class FoxESSEntityEnergyCoordinator(
             entity_prefix=entity_prefix,
         )
         self._energy_acc = EnergyAccumulator(hass, "foxess_entity")
+        self._ct2_energy_acc = EnergyAccumulator(hass, "foxess_entity_ct2")
         self._validated = False
 
         super().__init__(
@@ -7651,6 +7683,8 @@ class FoxESSEntityEnergyCoordinator(
         """Return FoxESS data assembled from foxess_modbus entity states."""
         if not self._energy_acc._last_update:
             await self._energy_acc.async_restore()
+        if not self._ct2_energy_acc._last_update:
+            await self._ct2_energy_acc.async_restore()
 
         try:
             if not self._validated:
@@ -7669,6 +7703,8 @@ class FoxESSEntityEnergyCoordinator(
 
         telemetry_ready = status.get("telemetry_ready") is True
         solar_kw = status.get("solar_power", 0.0) or 0.0
+        ct2_kw = _finite_float(status.get("ct2_power", 0.0)) or 0.0
+        positive_ct2_kw = max(0.0, ct2_kw)
         grid_kw, grid_power_valid = _foxess_entity_grid_power_valid(
             telemetry_ready,
             status.get("grid_power"),
@@ -7687,17 +7723,19 @@ class FoxESSEntityEnergyCoordinator(
                 buy,
                 sell,
             )
+            self._ct2_energy_acc.update(
+                positive_ct2_kw,
+                0.0,
+                0.0,
+                0.0,
+            )
         energy_summary = self._energy_acc.as_dict()
-        for status_key, summary_key in (
-            ("daily_solar_energy_kwh", "pv_today_kwh"),
-            ("daily_grid_import_kwh", "grid_import_today_kwh"),
-            ("daily_grid_export_kwh", "grid_export_today_kwh"),
-            ("daily_battery_charge_kwh", "charge_today_kwh"),
-            ("daily_battery_discharge_kwh", "discharge_today_kwh"),
-        ):
-            value = status.get(status_key)
-            if isinstance(value, (int, float)) and value >= 0:
-                energy_summary[summary_key] = round(float(value), 3)
+        ct2_energy_summary = self._ct2_energy_acc.as_dict()
+        _merge_foxess_entity_daily_energy(
+            energy_summary,
+            status,
+            ct2_energy_summary,
+        )
 
         data = {
             "telemetry_ready": telemetry_ready,
@@ -7708,6 +7746,8 @@ class FoxESSEntityEnergyCoordinator(
             "load_power": load_kw,
             "battery_level": soc,
             "last_update": dt_util.utcnow(),
+            "ct2_power": ct2_kw,
+            "battery_voltage_v": status.get("battery_voltage_v"),
             "battery_temperature": status.get("battery_temperature"),
             "battery_soh": status.get("battery_soh"),
             "backup_reserve": status.get("backup_reserve"),
@@ -7819,6 +7859,8 @@ class FoxESSEntityEnergyCoordinator(
         return await self._controller.restore()
 
     async def async_shutdown(self) -> None:
+        await self._energy_acc.async_flush()
+        await self._ct2_energy_acc.async_flush()
         await self._controller.disconnect()
 
 

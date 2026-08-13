@@ -44,7 +44,15 @@ _FOXESS_REMOTE_CONTROL_MODEL_HINTS = {
 _READ_ENTITIES: dict[str, tuple[str, ...]] = {
     "battery_level": ("battery_soc", "battery_soc_1"),
     "battery_soh": ("battery_soh", "battery_soh_1"),
-    "battery_voltage": ("battery_voltage", "battery_1_voltage"),
+    # Keep the legacy aliases first for existing integrations.  H3-Smart
+    # exposes the live pack voltage as ``batvolt_1`` and the inverter-side
+    # fallback as ``invbatvolt_1``.
+    "battery_voltage": (
+        "battery_voltage",
+        "battery_1_voltage",
+        "batvolt_1",
+        "invbatvolt_1",
+    ),
     "battery_temperature": ("battery_temp", "battery_temp_1"),
     "battery_power": ("invbatpower", "inverter_battery_power"),
     "battery_charge": ("battery_charge",),
@@ -53,6 +61,7 @@ _READ_ENTITIES: dict[str, tuple[str, ...]] = {
     "grid_feed_in": ("feed_in",),
     "grid_consumption": ("grid_consumption",),
     "solar_power": ("pv_power_now",),
+    "ct2_power": ("ct2_meter",),
     "load_power": ("load_power",),
     "work_mode": ("work_mode",),
     "backup_reserve": ("min_soc_on_grid", "min_soc"),
@@ -154,16 +163,20 @@ class FoxESSEntityController:
         battery_kw = self._battery_power_kw()
         grid_kw = self._grid_power_kw()
         solar_kw = self._solar_power_kw()
+        ct2_kw = self._power_kw("ct2_power") or 0.0
+        total_solar_kw = solar_kw + max(0.0, ct2_kw)
         load_kw = self._power_kw("load_power")
         if load_kw is None or load_kw <= 0:
-            load_kw = max(0.0, solar_kw + grid_kw + battery_kw)
+            load_kw = max(0.0, total_solar_kw + grid_kw + battery_kw)
 
         status: dict[str, Any] = {
             "telemetry_ready": telemetry_ready,
             "battery_level": soc,
             "battery_power": battery_kw,
+            "battery_voltage_v": self._read_float("battery_voltage"),
             "grid_power": grid_kw,
-            "solar_power": max(0.0, solar_kw),
+            "solar_power": max(0.0, total_solar_kw),
+            "ct2_power": ct2_kw,
             "load_power": max(0.0, load_kw),
             "battery_temperature": self._read_float("battery_temperature"),
             "battery_soh": self._read_float("battery_soh"),
@@ -809,7 +822,11 @@ class FoxESSEntityController:
             registry = er.async_get(self.hass)
             entries = er.async_entries_for_config_entry(registry, self._foxess_entry_id)
             entity_ids = [entry.entity_id for entry in entries if entry.entity_id]
-            self._discover_entities_from_ids(entity_ids, legacy_prefix=self._prefix or None)
+            self._discover_entities_from_ids(
+                entity_ids,
+                legacy_prefix=self._prefix or None,
+                allow_ct2_tail_match=True,
+            )
 
             fallback_entity_ids = [
                 state.entity_id
@@ -833,12 +850,20 @@ class FoxESSEntityController:
         self,
         entity_ids: list[str],
         legacy_prefix: str | None = None,
+        allow_ct2_tail_match: bool = False,
     ) -> None:
         for key, suffixes in _READ_ENTITIES.items():
             if key in self._entity_map:
                 continue
             domain = "select" if key == "work_mode" else "sensor"
-            entity_id = self._resolve_entity_id(entity_ids, domain, suffixes, legacy_prefix)
+            entity_id = self._resolve_entity_id(
+                entity_ids,
+                domain,
+                suffixes,
+                legacy_prefix,
+                require_available=key == "battery_voltage",
+                allow_tail_matches=key != "ct2_power" or allow_ct2_tail_match,
+            )
             if entity_id:
                 self._entity_map[key] = entity_id
 
@@ -857,18 +882,29 @@ class FoxESSEntityController:
         domain: str,
         suffixes: tuple[str, ...],
         legacy_prefix: str | None,
+        require_available: bool = False,
+        allow_tail_matches: bool = True,
     ) -> str | None:
         if legacy_prefix:
             for suffix in suffixes:
                 candidate = f"{domain}.{legacy_prefix}_{suffix}"
-                if self.hass.states.get(candidate) is not None:
+                if self.hass.states.get(candidate) is not None and (
+                    not require_available or self._state_is_available(candidate)
+                ):
                     return candidate
 
         domain_prefix = f"{domain}."
         for suffix in suffixes:
             candidate = f"{domain}.{suffix}"
-            if candidate in entity_ids and self.hass.states.get(candidate) is not None:
+            if (
+                candidate in entity_ids
+                and self.hass.states.get(candidate) is not None
+                and (not require_available or self._state_is_available(candidate))
+            ):
                 return candidate
+
+            if not allow_tail_matches:
+                continue
 
             tail = f"_{suffix}"
             matches = [
@@ -880,10 +916,22 @@ class FoxESSEntityController:
                 continue
             matches = sorted(matches, key=lambda entity_id: (len(entity_id), entity_id))
             for entity_id in matches:
-                if self.hass.states.get(entity_id) is not None:
+                if self.hass.states.get(entity_id) is not None and (
+                    not require_available or self._state_is_available(entity_id)
+                ):
                     return entity_id
-            return matches[0]
+            if not require_available:
+                return matches[0]
         return None
+
+    def _state_is_available(self, entity_id: str) -> bool:
+        state = self.hass.states.get(entity_id)
+        if state is None or str(state.state) in _UNAVAILABLE:
+            return False
+        try:
+            return math.isfinite(float(state.state)) and float(state.state) > 0
+        except (TypeError, ValueError):
+            return False
 
     def _missing_required(self) -> list[str]:
         required = ["battery_level", "work_mode"]

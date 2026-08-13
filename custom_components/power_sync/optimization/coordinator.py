@@ -138,6 +138,51 @@ GLOBIRD_QUOTA_IMPORT_RULE_ID = "globird_zerocharge_import"
 COST_NEUTRAL_OPTION = "cost_neutral_enabled"
 
 
+def _positive_finite_number(value: Any) -> float | None:
+    """Return a finite positive numeric telemetry value."""
+    if isinstance(value, bool):
+        return None
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(numeric_value) or numeric_value <= 0:
+        return None
+    return numeric_value
+
+
+def _foxess_auto_power_limits(data: dict[str, Any] | None) -> tuple[int, int] | None:
+    """Resolve FoxESS optimizer power limits from live power or voltage telemetry."""
+    if not isinstance(data, dict):
+        return None
+
+    charge_power_w = _positive_finite_number(data.get("battery_max_charge_power_w"))
+    discharge_power_w = _positive_finite_number(
+        data.get("battery_max_discharge_power_w")
+    )
+    charge_current_a = _positive_finite_number(data.get("max_charge_current_a"))
+    discharge_current_a = _positive_finite_number(data.get("max_discharge_current_a"))
+
+    derived_charge_w: int | None = None
+    derived_discharge_w: int | None = None
+    if charge_current_a is not None:
+        voltage_v = _positive_finite_number(data.get("battery_voltage_v")) or 300.0
+        derived_charge_w = int(charge_current_a * voltage_v)
+        derived_discharge_w = int(
+            (discharge_current_a or charge_current_a) * voltage_v
+        )
+
+    charge_w = int(charge_power_w) if charge_power_w is not None else derived_charge_w
+    discharge_w = (
+        int(discharge_power_w)
+        if discharge_power_w is not None
+        else derived_discharge_w
+    )
+    if charge_w is None or discharge_w is None or charge_w <= 0 or discharge_w <= 0:
+        return None
+    return charge_w, discharge_w
+
+
 def _grid_status_is_terminal_off_grid(value: Any) -> bool:
     """Return True only for a confirmed terminal off-grid state."""
     if not isinstance(value, str):
@@ -13409,28 +13454,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # FoxESS coordinators don't have site_info, but provide current limits via Modbus
         if hasattr(self.energy_coordinator, '_controller') and self.energy_coordinator.data:
             data = self.energy_coordinator.data
-            max_charge_a = data.get("max_charge_current_a")
-            max_discharge_a = data.get("max_discharge_current_a")
+            if type(self.energy_coordinator).__name__ in {
+                "FoxESSEnergyCoordinator",
+                "FoxESSEntityEnergyCoordinator",
+            }:
+                foxess_limits = _foxess_auto_power_limits(data)
+                if foxess_limits is not None:
+                    charge_w, discharge_w = foxess_limits
+                    self._config.max_charge_w = charge_w
+                    self._config.max_discharge_w = discharge_w
+                    self._battery_specs_source = "auto"
 
-            if max_charge_a and max_charge_a > 0:
-                # FoxESS HV batteries typically run at ~300-400V nominal
-                # Use a conservative 300V to estimate power from current
-                # Users can override via app settings if this is inaccurate
-                battery_voltage = 300
-                charge_w = int(max_charge_a * battery_voltage)
-                discharge_w = int((max_discharge_a or max_charge_a) * battery_voltage)
-
-                self._config.max_charge_w = charge_w
-                self._config.max_discharge_w = discharge_w
-                self._battery_specs_source = "auto"
-
-                _LOGGER.info(
-                    "Auto-detected FoxESS battery power from Modbus: "
-                    "charge %.1fA × %dV = %.1f kW, discharge %.1fA × %dV = %.1f kW",
-                    max_charge_a, battery_voltage, charge_w / 1000,
-                    max_discharge_a or max_charge_a, battery_voltage, discharge_w / 1000,
-                )
-                return
+                    _LOGGER.info(
+                        "Auto-detected battery power from live FoxESS telemetry: "
+                        "charge %.1f kW, discharge %.1f kW",
+                        charge_w / 1000,
+                        discharge_w / 1000,
+                    )
+                    return
 
             # AlphaESS auto-detection: the coordinator exposes BMS-reported
             # max charge/discharge power (watts) and rated capacity (kWh) directly
