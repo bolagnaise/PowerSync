@@ -117,6 +117,29 @@ def test_legacy_entries_resolve_to_their_existing_route():
         {const.CONF_BATTERY_SYSTEM: const.BATTERY_SYSTEM_ANKER_SOLIX},
         {},
     ).profile_id == "anker_direct"
+    assert profiles.resolve_connection_profile(
+        {
+            const.CONF_BATTERY_SYSTEM: const.BATTERY_SYSTEM_GOODWE,
+            "goodwe_ems_control_mode": "entity",
+        },
+        {},
+    ).profile_id == "goodwe_direct"
+    assert profiles.resolve_connection_profile(
+        {
+            const.CONF_BATTERY_SYSTEM: const.BATTERY_SYSTEM_GOODWE,
+            const.CONF_BATTERY_CONNECTION_PROFILE: "goodwe_ha",
+            "goodwe_ems_control_mode": "entity",
+        },
+        {},
+    ).profile_id == "goodwe_ha"
+    assert profiles.resolve_connection_profile(
+        {
+            const.CONF_BATTERY_SYSTEM: const.BATTERY_SYSTEM_GOODWE,
+            const.CONF_BATTERY_CONNECTION_PROFILE: "goodwe_direct",
+            "goodwe_ems_control_mode": "entity",
+        },
+        {},
+    ).profile_id == "goodwe_direct"
 
 
 def test_cross_brand_profile_is_rejected_by_resolution():

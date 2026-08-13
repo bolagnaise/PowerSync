@@ -246,7 +246,10 @@ def legacy_profile_id(
             FOXESS_CONNECTION_ENTITY: "foxess_ha_modbus",
         }.get(route, "foxess_tcp")
     if battery_system == BATTERY_SYSTEM_GOODWE:
-        return "goodwe_ha" if _value(data, options, "goodwe_ems_control_mode") == "entity" else "goodwe_direct"
+        # Legacy entity EMS settings retain the direct TCP telemetry fallback
+        # and the existing EMS entity relay; only an explicit goodwe_ha profile
+        # opts into HA-only telemetry and fail-closed semantics.
+        return "goodwe_direct"
     if battery_system == BATTERY_SYSTEM_ALPHAESS:
         return "alphaess_cloud_monitoring" if _value(data, options, CONF_ALPHAESS_CONNECTION_TYPE) == ALPHAESS_CONNECTION_CLOUD_ONLY else "alphaess_modbus_cloud"
     if battery_system == BATTERY_SYSTEM_ANKER_SOLIX:
