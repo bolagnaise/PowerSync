@@ -564,6 +564,85 @@ def test_no_departure_solar_preferred_uses_free_grid_after_battery_allocation(
     assert plan.estimated_solar_kwh == 0
 
 
+def test_cheapest_uses_home_site_limit_during_concurrent_free_battery_charge(
+    monkeypatch,
+):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 8, 13, 12, 36, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
+        "home_power_settings"
+    ] = {
+        "phase_type": "three",
+        "max_grid_import_amps": 35,
+        "default_voltage": 240,
+    }
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = (
+        SimpleNamespace(_config=SimpleNamespace(max_grid_import_w=7400))
+    )
+    planner = ev_planner.ChargingPlanner(hass, _FakeConfigEntry())
+    hour = "2026-08-13T12:00:00"
+
+    default_planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    assert default_planner._get_available_ev_power(
+        hour,
+        11.04,
+        {hour: 15.0},
+        solar_surplus_kw=5.5,
+    ) == 0
+
+    plan = asyncio.run(
+        planner._plan_cost_optimized(
+            vehicle_id=VIN,
+            current_soc=56,
+            target_soc=80,
+            target_time=None,
+            energy_needed_kwh=4.0,
+            charger_power_kw=11.04,
+            surplus_forecast=[
+                ev_planner.SurplusForecast(
+                    hour=hour,
+                    solar_kw=10.9,
+                    load_kw=5.4,
+                    surplus_kw=5.5,
+                    confidence=0.8,
+                )
+            ],
+            price_forecast=[
+                ev_planner.PriceForecast(
+                    hour=hour,
+                    import_cents=0.0,
+                    export_cents=0.0,
+                    period="offpeak",
+                )
+            ],
+            battery_power_schedule={hour: 15.0},
+        )
+    )
+
+    assert planner._get_grid_capacity_kw() == pytest.approx(25.2)
+    assert planner._get_available_ev_power(
+        hour,
+        11.04,
+        {hour: 15.0},
+        solar_surplus_kw=5.5,
+    ) == pytest.approx(11.04)
+    assert len(plan.windows) == 1
+    assert plan.windows[0].source == "grid_offpeak"
+    assert plan.estimated_grid_kwh == pytest.approx(4.0)
+    assert plan.estimated_solar_kwh == 0
+
+
 def test_time_critical_uses_feasible_free_grid_before_paid_deadline(monkeypatch):
     brisbane_tz = timezone(timedelta(hours=10))
     monkeypatch.setattr(

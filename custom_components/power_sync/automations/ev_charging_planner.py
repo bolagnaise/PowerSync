@@ -10,6 +10,7 @@ Plans optimal charging windows based on:
 """
 
 import logging
+import math
 import statistics
 import time
 from dataclasses import dataclass, field
@@ -2533,25 +2534,43 @@ class ChargingPlanner:
             return {}
 
     def _get_grid_capacity_kw(self) -> float:
-        """Return the optimizer's current site import limit when available."""
+        """Return the configured site import limit used by EV power sharing."""
+        entry_data: dict[str, Any] = {}
+        # Home Power is the runtime EV controller's configured site capacity,
+        # so it is authoritative for Smart Schedule too. Otherwise a stale or
+        # absent optimizer-only value can make concurrent battery charging
+        # falsely remove a feasible free-grid EV slot from the displayed plan.
         try:
             entry_data = self.hass.data.get(DOMAIN, {}).get(
                 self.config_entry.entry_id,
                 {},
             )
+            automation_store = entry_data.get("automation_store")
+            stored_data = getattr(automation_store, "_data", {}) or {}
+            settings = stored_data.get("home_power_settings", {}) or {}
+            max_grid_import_amps = float(
+                settings.get("max_grid_import_amps") or 0
+            )
+            if math.isfinite(max_grid_import_amps) and max_grid_import_amps > 0:
+                phases = 3 if settings.get("phase_type") == "three" else 1
+                voltage = float(settings.get("default_voltage") or 240)
+                if math.isfinite(voltage) and voltage > 0:
+                    return max_grid_import_amps * voltage * phases / 1000.0
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+        try:
             optimization_coordinator = entry_data.get("optimization_coordinator")
             optimization_config = getattr(
                 optimization_coordinator,
                 "_config",
                 None,
             )
-            max_grid_import_w = getattr(
-                optimization_config,
-                "max_grid_import_w",
-                None,
+            max_grid_import_w = float(
+                getattr(optimization_config, "max_grid_import_w", 0) or 0
             )
-            if max_grid_import_w is not None and float(max_grid_import_w) > 0:
-                return float(max_grid_import_w) / 1000.0
+            if math.isfinite(max_grid_import_w) and max_grid_import_w > 0:
+                return max_grid_import_w / 1000.0
         except (AttributeError, TypeError, ValueError):
             pass
         return self._grid_capacity_kw
@@ -2671,7 +2690,8 @@ class ChargingPlanner:
         if battery_power_schedule:
             _LOGGER.debug(
                 f"Battery charging in {len(battery_power_schedule)} hours - "
-                f"EV will share grid capacity (max {self._grid_capacity_kw}kW)"
+                f"EV will share grid capacity "
+                f"(max {self._get_grid_capacity_kw():.1f}kW)"
             )
 
         # Create plan based on priority

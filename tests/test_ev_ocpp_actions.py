@@ -99,6 +99,21 @@ sys.modules.pop("power_sync.automations.actions", None)
 actions = importlib.import_module("power_sync.automations.actions")
 
 
+@pytest.fixture(autouse=True)
+def _reset_ev_action_module_state():
+    """Keep mutable EV action state isolated from test execution order."""
+    mutable_state = (
+        actions._dynamic_ev_state,
+        actions._dynamic_ev_update_locks,
+        actions._ev_wake_lock,
+    )
+    for state in mutable_state:
+        state.clear()
+    yield
+    for state in mutable_state:
+        state.clear()
+
+
 class _State:
     def __init__(
         self,
