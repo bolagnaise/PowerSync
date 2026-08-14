@@ -302,6 +302,43 @@ def test_powerwall_islanded_binary_sensor_keeps_non_terminal_states_unknown():
     assert entity.is_on is None
 
 
+def test_powerwall_islanded_binary_sensor_ignores_failed_local_snapshot():
+    hass = _Hass("SystemIslandedActive")
+    coordinator = hass.data["power_sync"]["entry-1"]["powerwall_local"][
+        "coordinator"
+    ]
+    coordinator.last_update_success = False
+    hass.states._states["sensor.power_sync_grid_status"] = _State(
+        "SystemGridConnected"
+    )
+
+    entity = binary_sensor.PowerwallLocalIslandedBinarySensor(hass, _entry())
+
+    assert entity.is_on is False
+
+
+def test_calibration_binary_sensor_exposes_evidence_source():
+    hass = _Hass("SystemGridConnected")
+    entry_data = hass.data["power_sync"]["entry-1"]
+    entry_data.update(
+        {
+            "calibration_suspected": True,
+            "calibration_detected_at": "2026-08-14T19:54:21+10:00",
+            "calibration_source": "local_alert",
+            "calibration_sources": ["local_alert"],
+        }
+    )
+
+    entity = binary_sensor.CalibrationActiveBinarySensor(hass, _entry())
+
+    assert entity.is_on is True
+    assert entity.extra_state_attributes == {
+        "detected_at": "2026-08-14T19:54:21+10:00",
+        "source": "local_alert",
+        "sources": ["local_alert"],
+    }
+
+
 def test_off_grid_command_shares_pending_state_across_both_switches():
     off_grid, on_grid, hass = _switches("SystemGridConnected")
 

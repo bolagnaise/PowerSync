@@ -6575,8 +6575,9 @@ class PowerSyncStrategy {
     // --- Left Column: Powerwall Local Control (only when paired) ---
     // Gated on the binary_sensor.powerwall_local_paired entity so the card
     // stays hidden until the user completes the pairing flow in the app.
-    if (hasE('powerwall_local_paired')) {
-      left.push(_powerwallLocalControl(e, hasE));
+    const powerwallLocalPaired = findEntity('binary_sensor', 'powerwall_local_paired');
+    if (powerwallLocalPaired && hass.states[powerwallLocalPaired]?.state === 'on') {
+      left.push(_powerwallLocalControl(e, hasE, findEntity));
       const health = _powerwallHealth(hass);
       if (health) left.push(health);
     }
@@ -8361,15 +8362,19 @@ function _demandCharge(e) {
   };
 }
 
-function _powerwallLocalControl(e, hasE) {
+function _powerwallLocalControl(e, hasE, findEntity) {
+  const pairedEntity = findEntity('binary_sensor', 'powerwall_local_paired');
+  const islandedEntity = findEntity('binary_sensor', 'powerwall_local_islanded');
+  const criticalAlertEntity = findEntity('binary_sensor', 'pw_critical_alert');
+  const calibrationEntity = findEntity('binary_sensor', 'calibration_active');
   const statusEntities = [
     {
-      entity: e('powerwall_local_paired'),
+      entity: pairedEntity,
       name: 'Paired',
       icon: 'mdi:key-variant',
     },
     {
-      entity: e('powerwall_local_islanded'),
+      entity: islandedEntity,
       name: 'Off-Grid',
       icon: 'mdi:transmission-tower-off',
     },
@@ -8423,11 +8428,18 @@ function _powerwallLocalControl(e, hasE) {
       icon: 'mdi:web-check',
     });
   }
-  if (hasE && hasE('pw_critical_alert')) {
+  if (criticalAlertEntity) {
     statusEntities.push({
-      entity: e('pw_critical_alert'),
+      entity: criticalAlertEntity,
       name: 'Alert Active',
       icon: 'mdi:alert-octagon',
+    });
+  }
+  if (calibrationEntity) {
+    statusEntities.push({
+      entity: calibrationEntity,
+      name: 'Calibration Active',
+      icon: 'mdi:battery-sync',
     });
   }
   return {
@@ -8443,7 +8455,7 @@ function _powerwallLocalControl(e, hasE) {
       {
         type: 'conditional',
         conditions: [
-          { entity: e('powerwall_local_paired'), state: 'on' },
+          { entity: pairedEntity, state: 'on' },
         ],
         card: {
           type: 'entities',

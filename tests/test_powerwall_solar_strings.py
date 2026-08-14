@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
+INIT_PATH = ROOT / "__init__.py"
 
 
 def _fleet_api_bms_module():
@@ -18,6 +19,23 @@ def _fleet_api_bms_module():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def test_solar_string_v1r_path_uses_local_ttl_and_skips_loopback():
+    source = INIT_PATH.read_text()
+    method_source = source[
+        source.index("    async def _try_fleet_api_solar_strings_fetch"):
+        source.index(
+            "    async def get(self, request: web.Request)",
+            source.index("    async def _try_fleet_api_solar_strings_fetch"),
+        )
+    ]
+
+    assert "_sign_in_thread, 12" in method_source
+    assert "data=signed_local" in method_source
+    assert "not is_loopback_host(local_ip)" in method_source
+    assert "_sign_in_thread, 300" in method_source
+    assert "_b64.b64encode(signed_cloud)" in method_source
 
 
 def test_pw3_components_strings_include_active_voltages_and_groups():

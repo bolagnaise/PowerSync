@@ -337,6 +337,9 @@ async def ensure_coordinator(
                 existing.update_interval = None
             except Exception:
                 pass
+            shutdown = getattr(existing, "async_shutdown", None)
+            if callable(shutdown):
+                await shutdown()
             runtime["coordinator"] = None
         await ensure_client(hass, entry)
         return None
@@ -352,6 +355,9 @@ async def ensure_coordinator(
             existing.update_interval = None
         except Exception:
             pass
+        shutdown = getattr(existing, "async_shutdown", None)
+        if callable(shutdown):
+            await shutdown()
         runtime["coordinator"] = None
 
     client = await ensure_client(hass, entry)
@@ -364,6 +370,9 @@ async def ensure_coordinator(
         await coordinator.async_config_entry_first_refresh()
     except Exception as err:
         _LOGGER.warning("Initial Powerwall local refresh failed: %s", err)
+    # Common API identity/network paths are independent of the DCQ snapshot.
+    # Attempt them even when the initial live-status query fails.
+    coordinator._schedule_v1r_diagnostics_if_due()
 
     return coordinator
 
@@ -584,6 +593,9 @@ class PowerwallPairUnpairView(HomeAssistantView):
         coordinator = runtime.get("coordinator")
         if coordinator is not None:
             coordinator.update_interval = None
+            shutdown = getattr(coordinator, "async_shutdown", None)
+            if callable(shutdown):
+                await shutdown()
         runtime["coordinator"] = None
         runtime["pairing_manager"] = None
         return web.json_response({"success": True})
@@ -659,6 +671,9 @@ class PowerwallSetGatewayIpView(HomeAssistantView):
                 existing_coord.update_interval = None
             except Exception:
                 pass
+            shutdown = getattr(existing_coord, "async_shutdown", None)
+            if callable(shutdown):
+                await shutdown()
         runtime["coordinator"] = None
 
         _LOGGER.info(

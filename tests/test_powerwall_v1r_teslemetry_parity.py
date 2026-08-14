@@ -438,6 +438,58 @@ def _bare_client() -> object:
     return client
 
 
+@async_test
+async def test_v1r_diagnostics_keep_successful_paths_when_one_endpoint_fails():
+    client = _bare_client()
+    client._transport = SimpleNamespace(
+        get_system_info=AsyncMock(side_effect=RuntimeError("unsupported field")),
+        get_networking_status=AsyncMock(
+            return_value={"wifi": {"active_route": True}}
+        ),
+        check_internet=AsyncMock(
+            return_value={
+                "wifi": {"connectivity": {"internet": True}}
+            }
+        ),
+    )
+
+    diagnostics = await client.get_v1r_diagnostics()
+
+    assert diagnostics["system_info"] is None
+    assert diagnostics["networking"] == {"wifi": {"active_route": True}}
+    assert diagnostics["internet"] == {
+        "wifi": {"connectivity": {"internet": True}}
+    }
+    assert diagnostics["errors"] == {"system_info": "unsupported field"}
+
+
+@async_test
+async def test_dcq_preserves_signature_rejection_for_repair_handling():
+    client = _bare_client()
+    client._transport = SimpleNamespace(
+        post_v1r=AsyncMock(
+            side_effect=client_mod.PowerwallSignatureError("inactive key")
+        )
+    )
+
+    with pytest.raises(client_mod.PowerwallSignatureError, match="inactive key"):
+        await client._fetch_dcq_local()
+
+
+@async_test
+async def test_snapshot_preserves_signature_rejection_for_coordinator():
+    client = _bare_client()
+    client._transport = SimpleNamespace(
+        post_v1r=AsyncMock(
+            side_effect=client_mod.PowerwallSignatureError("inactive key")
+        ),
+        read_config=AsyncMock(return_value={}),
+    )
+
+    with pytest.raises(client_mod.PowerwallSignatureError, match="inactive key"):
+        await client.get_snapshot()
+
+
 @pytest.mark.parametrize(
     ("grid_status", "off_grid", "expected"),
     [

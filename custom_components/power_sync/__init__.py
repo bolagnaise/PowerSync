@@ -20,6 +20,14 @@ from .settings_metadata import (
     optimizer_settings_schema,
     split_optimizer_reserve_values,
 )
+from .tesla_calibration import (
+    CALIBRATION_SOURCE_LOCAL_ALERT,
+    CALIBRATION_SOURCE_MODE_STICK,
+    calibration_sources,
+    clear_calibration_sources,
+    dispatch_calibration_state,
+    set_calibration_source,
+)
 
 # Module-level state for alert cooldowns (keyed by entry_id)
 _last_discrepancy_alert: dict[str, datetime] = {}
@@ -7273,10 +7281,16 @@ class BatteryHealthView(HomeAssistantView):
             key_bytes = private_key_pem.encode() if isinstance(private_key_pem, str) else private_key_pem
             envelope = build_device_controller_query_envelope(din)
 
-            def _sign_in_thread() -> bytes:
-                return build_signed_routable_message(envelope, din, key_bytes, ttl_seconds=300)
+            def _sign_in_thread(ttl_seconds: int) -> bytes:
+                return build_signed_routable_message(
+                    envelope, din, key_bytes, ttl_seconds=ttl_seconds
+                )
 
-            signed = await self._hass.async_add_executor_job(_sign_in_thread)
+            # Direct LAN messages have Tesla's short local TTL constraint.
+            # The Fleet relay is signed separately below with its longer TTL.
+            signed_local = await self._hass.async_add_executor_job(
+                _sign_in_thread, 12
+            )
         except Exception as err:
             _LOGGER.error("fleet_api_bms: signing failed: %s", err)
             return None
@@ -7305,7 +7319,7 @@ class BatteryHealthView(HomeAssistantView):
                 ) as sess:
                     async with sess.post(
                         f"https://{local_ip}/tedapi/v1r",
-                        data=signed,
+                        data=signed_local,
                         headers={"Content-Type": "application/octet-stream"},
                     ) as resp:
                         if resp.status == 200:
@@ -7345,6 +7359,13 @@ class BatteryHealthView(HomeAssistantView):
                 _LOGGER.debug("fleet_api_bms: no local gateway and no Fleet API credentials")
                 return None
             source = "ha_fleet_api_relay"
+            try:
+                signed_cloud = await self._hass.async_add_executor_job(
+                    _sign_in_thread, 300
+                )
+            except Exception as err:
+                _LOGGER.error("fleet_api_bms: cloud signing failed: %s", err)
+                return None
             fleet_url = f"{fleet_base}/api/1/energy_sites/{fleet_site_id}/device_command"
             fleet_headers = {
                 "Authorization": f"Bearer {fleet_token}",
@@ -7353,7 +7374,7 @@ class BatteryHealthView(HomeAssistantView):
             fleet_payload = {
                 "data": {
                     "target_id": din,
-                    "routable_message": _b64.b64encode(signed).decode(),
+                    "routable_message": _b64.b64encode(signed_cloud).decode(),
                     "command_timeout_s": 10,
                     "identifier_type": 1,
                 }
@@ -7682,10 +7703,14 @@ class BatteryHealthView(HomeAssistantView):
             try:
                 envelope = envelope_builder(din)
 
-                def _sign_in_thread() -> bytes:
-                    return build_signed_routable_message(envelope, din, key_bytes, ttl_seconds=300)
+                def _sign_in_thread(ttl_seconds: int) -> bytes:
+                    return build_signed_routable_message(
+                        envelope, din, key_bytes, ttl_seconds=ttl_seconds
+                    )
 
-                signed = await self._hass.async_add_executor_job(_sign_in_thread)
+                signed_local = await self._hass.async_add_executor_job(
+                    _sign_in_thread, 12
+                )
             except Exception as err:
                 _LOGGER.debug("fleet_api_solar_strings: %s signing failed: %s", log_label, err)
                 return None, None
@@ -7696,7 +7721,9 @@ class BatteryHealthView(HomeAssistantView):
                 )
             except ValueError:
                 local_ip = ""
-            if local_ip:
+            from .powerwall_local.client import is_loopback_host
+
+            if local_ip and not is_loopback_host(local_ip):
                 try:
                     from .powerwall_local.transport import get_insecure_ssl_context
                     from .powerwall_local import tedapi_combined_pb2 as _pb2
@@ -7708,7 +7735,7 @@ class BatteryHealthView(HomeAssistantView):
                     ) as sess:
                         async with sess.post(
                             f"https://{local_ip}/tedapi/v1r",
-                            data=signed,
+                            data=signed_local,
                             headers={"Content-Type": "application/octet-stream"},
                         ) as resp:
                             if resp.status == 200:
@@ -7740,6 +7767,18 @@ class BatteryHealthView(HomeAssistantView):
             if not fleet_token or not fleet_base or not fleet_site_id:
                 return None, None
 
+            try:
+                signed_cloud = await self._hass.async_add_executor_job(
+                    _sign_in_thread, 300
+                )
+            except Exception as err:
+                _LOGGER.debug(
+                    "fleet_api_solar_strings: %s cloud signing failed: %s",
+                    log_label,
+                    err,
+                )
+                return None, None
+
             fleet_url = f"{fleet_base}/api/1/energy_sites/{fleet_site_id}/device_command"
             fleet_headers = {
                 "Authorization": f"Bearer {fleet_token}",
@@ -7748,7 +7787,7 @@ class BatteryHealthView(HomeAssistantView):
             fleet_payload = {
                 "data": {
                     "target_id": din,
-                    "routable_message": _b64.b64encode(signed).decode(),
+                    "routable_message": _b64.b64encode(signed_cloud).decode(),
                     "command_timeout_s": 10,
                     "identifier_type": 1,
                 }
@@ -22199,6 +22238,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "saving_session_cancel": None,  # Will store the session check cancel function
         "calibration_suspected": False,
         "calibration_detected_at": None,
+        "calibration_source": None,
+        "calibration_sources": [],
+        "_calibration_sources": [],
+        "_calibration_alert_clear_polls": 0,
         "_mode_stick_failures": [],  # list of timestamps for calibration detection
         "_calibration_check_unsub": None,
     }
@@ -25472,9 +25515,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 failures = [t for t in failures if t > cutoff]
                 entry_data["_mode_stick_failures"] = failures
 
-                if len(failures) >= 3 and not entry_data.get("calibration_suspected"):
-                    entry_data["calibration_suspected"] = True
-                    entry_data["calibration_detected_at"] = now
+                if len(failures) >= 3:
+                    transition = set_calibration_source(
+                        entry_data,
+                        CALIBRATION_SOURCE_MODE_STICK,
+                        True,
+                        now=now,
+                    )
+                else:
+                    transition = None
+                if transition is not None and transition.started:
+                    dispatch_calibration_state(hass, entry_id)
                     _LOGGER.warning(
                         "Calibration suspected: %d mode-stick failures in 30 minutes — pausing battery control",
                         len(failures),
@@ -25706,6 +25757,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                             return
                                         if not _cal_ed.get("calibration_suspected"):
                                             return
+                                        if (
+                                            CALIBRATION_SOURCE_LOCAL_ALERT
+                                            in calibration_sources(_cal_ed)
+                                        ):
+                                            _LOGGER.debug(
+                                                "Calibration recovery check deferred — "
+                                                "local BatteryCalibration alert is active"
+                                            )
+                                            return
                                         try:
                                             _cal_session = async_get_clientsession(hass)
                                             _cal_site_id = entry.data[CONF_TESLA_ENERGY_SITE_ID]
@@ -25738,11 +25798,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                                     if _cal_mode == "autonomous":
                                                         if _aemo_dispatch_entry_data() is not _cal_ed:
                                                             return
-                                                        # Calibration complete — clear state
-                                                        _cal_ed["calibration_suspected"] = False
-                                                        _cal_ed["calibration_detected_at"] = None
+                                                        transition = set_calibration_source(
+                                                            _cal_ed,
+                                                            CALIBRATION_SOURCE_MODE_STICK,
+                                                            False,
+                                                        )
+                                                        dispatch_calibration_state(
+                                                            hass, entry.entry_id
+                                                        )
                                                         _cal_ed["_mode_stick_failures"] = []
-                                                        _LOGGER.info("Calibration complete — mode restored to autonomous")
+                                                        if transition.completed:
+                                                            _LOGGER.info("Calibration complete — mode restored to autonomous")
+                                                        else:
+                                                            _LOGGER.info(
+                                                                "Calibration mode-stick inference cleared; "
+                                                                "another calibration source remains active"
+                                                            )
 
                                                         # Cancel periodic check
                                                         unsub = _cal_ed.get("_calibration_check_unsub")
@@ -25750,16 +25821,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                                             unsub()
                                                             _cal_ed["_calibration_check_unsub"] = None
 
-                                                        # Send push notification
-                                                        try:
-                                                            from .automations.actions import _send_expo_push
-                                                            await _send_expo_push(
-                                                                hass,
-                                                                "Battery",
-                                                                "Calibration complete — resuming normal battery control",
-                                                            )
-                                                        except Exception:
-                                                            pass
+                                                        if transition.completed:
+                                                            # Send push notification
+                                                            try:
+                                                                from .automations.actions import _send_expo_push
+                                                                await _send_expo_push(
+                                                                    hass,
+                                                                    "Battery",
+                                                                    "Calibration complete — resuming normal battery control",
+                                                                )
+                                                            except Exception:
+                                                                pass
                                                     else:
                                                         _LOGGER.debug("Calibration recovery check: mode still '%s'", _cal_mode)
                                         except Exception as _cal_err:
@@ -25777,9 +25849,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 # Only send push notification if ALL retries fail.
                                 async def _retry_autonomous_restore():
                                     for retry in range(6):  # Up to ~10 minutes total
+                                        _retry_ed = _aemo_dispatch_entry_data()
+                                        if _retry_ed is None:
+                                            return
+                                        if (
+                                            CALIBRATION_SOURCE_LOCAL_ALERT
+                                            in calibration_sources(_retry_ed)
+                                        ):
+                                            _LOGGER.info(
+                                                "Stopping mode restore retries — local "
+                                                "BatteryCalibration alert is active"
+                                            )
+                                            return
                                         delay = min(300, 30 * (2 ** retry))  # 30, 60, 120, 240, 300, 300
                                         _LOGGER.info("Mode restore retry %d/6 in %ds", retry + 1, delay)
                                         await asyncio.sleep(delay)
+                                        _retry_ed = _aemo_dispatch_entry_data()
+                                        if _retry_ed is None:
+                                            return
+                                        if (
+                                            CALIBRATION_SOURCE_LOCAL_ALERT
+                                            in calibration_sources(_retry_ed)
+                                        ):
+                                            _LOGGER.info(
+                                                "Stopping mode restore retries — local "
+                                                "BatteryCalibration alert became active"
+                                            )
+                                            return
                                         try:
                                             async with session.post(
                                                 f"{api_base}/api/1/energy_sites/{site_id}/operation",
@@ -25798,12 +25894,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                                             vdata = await vresp.json()
                                                             if vdata.get("response", {}).get("default_real_mode") == "autonomous":
                                                                 _LOGGER.info("Mode restore succeeded on retry %d", retry + 1)
-                                                                # Clear calibration state on success
                                                                 _bg_ed = _aemo_dispatch_entry_data()
                                                                 if _bg_ed is None:
                                                                     return
-                                                                _bg_ed["calibration_suspected"] = False
-                                                                _bg_ed["calibration_detected_at"] = None
+                                                                set_calibration_source(
+                                                                    _bg_ed,
+                                                                    CALIBRATION_SOURCE_MODE_STICK,
+                                                                    False,
+                                                                )
+                                                                dispatch_calibration_state(
+                                                                    hass, entry.entry_id
+                                                                )
                                                                 _bg_ed["_mode_stick_failures"] = []
                                                                 # Cancel periodic calibration check if running
                                                                 _bg_unsub = _bg_ed.get("_calibration_check_unsub")
@@ -37548,12 +37649,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         the Powerwall itself — purely resets the integration's local guard.
         """
         entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
-        was_suspected = entry_data.get("calibration_suspected", False)
-        entry_data["calibration_suspected"] = False
-        entry_data["calibration_detected_at"] = None
+        transition = clear_calibration_sources(entry_data)
+        dispatch_calibration_state(hass, entry.entry_id)
+        entry_data["_mode_stick_failures"] = []
         _LOGGER.info(
             "🔄 Calibration flag cleared (was %s)",
-            "set" if was_suspected else "already clear",
+            "set" if transition.was_active else "already clear",
         )
 
     # Register force discharge, force charge, and restore normal services

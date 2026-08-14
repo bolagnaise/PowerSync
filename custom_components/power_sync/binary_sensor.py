@@ -131,6 +131,24 @@ class _TeslaBinarySensorBase(BinarySensorEntity):
         )
 
 
+class _PowerwallLocalBinarySensorBase(_TeslaBinarySensorBase):
+    """Binary sensor refreshed from the local Powerwall coordinator."""
+
+    def _local_coord(self):
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        runtime = entry_data.get("powerwall_local") or {}
+        return runtime.get("coordinator")
+
+    async def async_added_to_hass(self) -> None:
+        """Refresh immediately whenever a fresh local snapshot lands."""
+        await super().async_added_to_hass()
+        coordinator = self._local_coord()
+        if coordinator is not None:
+            self.async_on_remove(
+                coordinator.async_add_listener(self.async_write_ha_state)
+            )
+
+
 class StormWatchActiveBinarySensor(_TeslaBinarySensorBase):
     """True while Tesla reports a storm is actively being predicted/prepared for."""
 
@@ -189,7 +207,7 @@ class ManualExportOverrideBinarySensor(_TeslaBinarySensorBase):
         }
 
 
-class PowerwallCriticalAlertBinarySensor(_TeslaBinarySensorBase):
+class PowerwallCriticalAlertBinarySensor(_PowerwallLocalBinarySensorBase):
     """True when at least one Powerwall alert is active.
 
     Reads the local TEDAPI snapshot's ``alerts`` list. Severity strings vary
@@ -214,10 +232,10 @@ class PowerwallCriticalAlertBinarySensor(_TeslaBinarySensorBase):
 
     @property
     def is_on(self) -> bool | None:
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        runtime = entry_data.get("powerwall_local") or {}
-        coord = runtime.get("coordinator")
+        coord = self._local_coord()
         if coord is None:
+            return None
+        if getattr(coord, "last_update_success", True) is False:
             return None
         snap = coord.data
         if snap is None or snap.alerts is None:
@@ -226,9 +244,9 @@ class PowerwallCriticalAlertBinarySensor(_TeslaBinarySensorBase):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        runtime = entry_data.get("powerwall_local") or {}
-        coord = runtime.get("coordinator")
+        coord = self._local_coord()
+        if coord is not None and getattr(coord, "last_update_success", True) is False:
+            return {}
         snap = getattr(coord, "data", None)
         if snap is None or not snap.alerts:
             return {}
@@ -236,6 +254,7 @@ class PowerwallCriticalAlertBinarySensor(_TeslaBinarySensorBase):
             "alerts": [
                 a.get("name") or a.get("alert_name") or "Unknown" for a in snap.alerts
             ],
+            "alert_details": [dict(alert) for alert in snap.alerts],
         }
 
 
@@ -291,7 +310,7 @@ class GridServicesActiveBinarySensor(_TeslaBinarySensorBase):
         return bool(coord.data.get("grid_services_active", False))
 
 
-class CalibrationActiveBinarySensor(_TeslaBinarySensorBase):
+class CalibrationActiveBinarySensor(_PowerwallLocalBinarySensorBase):
     """True when PowerSync has detected a Powerwall calibration cycle.
 
     The optimiser flips ``calibration_suspected`` after repeated mode-toggle
@@ -314,6 +333,19 @@ class CalibrationActiveBinarySensor(_TeslaBinarySensorBase):
     def device_info(self):
         return powerwall_device_info(self._entry.entry_id)
 
+    async def async_added_to_hass(self) -> None:
+        """Track both explicit local alerts and cloud mode-stick inference."""
+        from homeassistant.helpers.dispatcher import async_dispatcher_connect
+
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{DOMAIN}_calibration_state_{self._entry.entry_id}",
+                self.async_write_ha_state,
+            )
+        )
+
     @property
     def is_on(self) -> bool | None:
         entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
@@ -325,6 +357,8 @@ class CalibrationActiveBinarySensor(_TeslaBinarySensorBase):
         detected_at = entry_data.get("calibration_detected_at")
         return {
             "detected_at": detected_at,
+            "source": entry_data.get("calibration_source"),
+            "sources": entry_data.get("calibration_sources", []),
         }
 
 
@@ -404,7 +438,7 @@ class PowerwallLocalIPMissingBinarySensor(_TeslaBinarySensorBase):
         return not host
 
 
-class PowerwallLocalIslandedBinarySensor(_TeslaBinarySensorBase):
+class PowerwallLocalIslandedBinarySensor(_PowerwallLocalBinarySensorBase):
     """True when the Powerwall reports it is running off-grid (islanded).
 
     Reads the latest snapshot from ``PowerwallLocalCoordinator``. None when
@@ -429,10 +463,11 @@ class PowerwallLocalIslandedBinarySensor(_TeslaBinarySensorBase):
     @property
     def is_on(self) -> bool | None:
         # Try local coordinator snapshot first
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        runtime = entry_data.get("powerwall_local") or {}
-        coord = runtime.get("coordinator")
-        if coord is not None:
+        coord = self._local_coord()
+        if (
+            coord is not None
+            and getattr(coord, "last_update_success", True) is not False
+        ):
             snap = coord.data
             if snap is not None:
                 return _grid_status_is_off_grid(getattr(snap, "grid_status", None))

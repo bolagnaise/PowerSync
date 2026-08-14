@@ -66,6 +66,19 @@ def test_battery_health_fetch_uses_site_info_as_authoritative_count():
     ]
 
 
+def test_battery_health_uses_separate_local_and_cloud_v1r_ttls():
+    source = INIT_PATH.read_text()
+    method_source = source[
+        source.index("    async def _try_fleet_api_bms_fetch"):
+        source.index("    async def _try_fleet_api_solar_strings_fetch")
+    ]
+
+    assert "_sign_in_thread, 12" in method_source
+    assert "data=signed_local" in method_source
+    assert "_sign_in_thread, 300" in method_source
+    assert "_b64.b64encode(signed_cloud)" in method_source
+
+
 def test_site_info_corrects_intermittent_relay_pack_undercount_after_degradation():
     assert resolve_physical_battery_count(4, 5) == 5
 

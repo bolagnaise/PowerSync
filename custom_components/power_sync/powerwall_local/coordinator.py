@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -22,6 +22,15 @@ from ..const import (
     CONF_POWERWALL_LOCAL_PAIRED,
     DOMAIN,
     POWERWALL_LOCAL_POLL_INTERVAL,
+    TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
+)
+from ..tesla_calibration import (
+    CALIBRATION_SOURCE_LOCAL_ALERT,
+    CALIBRATION_SOURCE_MODE_STICK,
+    calibration_sources,
+    dispatch_calibration_state,
+    powerwall_calibration_alert_active,
+    set_calibration_source,
 )
 from .client import PowerwallLocalClient, PowerwallSnapshot
 from .exceptions import (
@@ -46,6 +55,7 @@ _LOGGER = logging.getLogger(__name__)
 POWERWALL_LOCAL_SNAPSHOT_TIMEOUT = 15.0
 POWERWALL_LOCAL_DIAGNOSTICS_INTERVAL = 300.0
 POWERWALL_LOCAL_DIAGNOSTICS_TIMEOUT = 15.0
+POWERWALL_CALIBRATION_CLEAR_POLLS = 3
 _BACKUP_RESERVE_WRITE_LOCAL_KEY = "powerwall_local_backup_reserve_write_local_pct"
 _BACKUP_RESERVE_WRITE_USER_KEY = "powerwall_local_backup_reserve_write_user_pct"
 _CLOUD_FALLBACK_PENDING_KEY = "powerwall_local_cloud_fallback_pending"
@@ -109,6 +119,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         }
         self._v1r_diagnostics_last_attempt_monotonic: float | None = None
         self._v1r_diagnostics_task: asyncio.Task[None] | None = None
+        self._calibration_notification_tasks: set[asyncio.Task[None]] = set()
 
         # DataUpdateCoordinator pauses its periodic schedule when it has zero
         # listeners (HA 2023.x+ optimisation). Entity listeners attach in
@@ -143,7 +154,14 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
 
     @property
     def reachable(self) -> bool:
-        return self._consecutive_failures == 0
+        if self._consecutive_failures != 0:
+            return False
+        last_success = self._last_success_monotonic
+        return (
+            last_success is not None
+            and time.monotonic() - last_success
+            <= TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS
+        )
 
     def replace_client(self, client: PowerwallLocalClient) -> None:
         """Swap in a new client (eg after re-pair) without resetting the coordinator."""
@@ -203,8 +221,146 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             self._last_success_monotonic = time.monotonic()
         self._consecutive_failures = 0
         self._update_backup_reserve_offset(snap)
+        await self._sync_calibration_alert(snap)
         self._schedule_v1r_diagnostics_if_due()
         return snap
+
+    async def _sync_calibration_alert(self, snap: PowerwallSnapshot) -> None:
+        """Make Tesla's explicit local calibration alert authoritative."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
+        if not isinstance(entry_data, dict):
+            return
+
+        alert_active = powerwall_calibration_alert_active(snap.alerts)
+        source_was_active = (
+            CALIBRATION_SOURCE_LOCAL_ALERT in calibration_sources(entry_data)
+        )
+
+        if alert_active:
+            entry_data["_calibration_alert_clear_polls"] = 0
+            transition = set_calibration_source(
+                entry_data,
+                CALIBRATION_SOURCE_LOCAL_ALERT,
+                True,
+                now=datetime.now(timezone.utc),
+            )
+            if CALIBRATION_SOURCE_MODE_STICK in calibration_sources(entry_data):
+                # The explicit gateway alert supersedes the older inference.
+                # Folding it into the local source ensures the state can clear
+                # when Tesla clears the alert, even though the probing recovery
+                # timer is cancelled below.
+                set_calibration_source(
+                    entry_data,
+                    CALIBRATION_SOURCE_MODE_STICK,
+                    False,
+                )
+
+            # Once Tesla states calibration explicitly, do not keep probing the
+            # locked operation mode every 30 minutes.  Fresh local alerts are a
+            # safer and more precise completion signal than an actuator write.
+            calibration_check_unsub = entry_data.get("_calibration_check_unsub")
+            if calibration_check_unsub:
+                calibration_check_unsub()
+                entry_data["_calibration_check_unsub"] = None
+
+            if transition.started:
+                dispatch_calibration_state(self.hass, self._entry_id)
+                _LOGGER.warning(
+                    "Powerwall calibration detected from local BatteryCalibration "
+                    "alert — pausing automatic battery charge/export control"
+                )
+                self._schedule_calibration_transition_notification(started=True)
+            return
+
+        if not source_was_active:
+            entry_data["_calibration_alert_clear_polls"] = 0
+            return
+
+        clear_polls = int(entry_data.get("_calibration_alert_clear_polls") or 0) + 1
+        entry_data["_calibration_alert_clear_polls"] = clear_polls
+        if clear_polls < POWERWALL_CALIBRATION_CLEAR_POLLS:
+            return
+
+        entry_data["_calibration_alert_clear_polls"] = 0
+        transition = set_calibration_source(
+            entry_data,
+            CALIBRATION_SOURCE_LOCAL_ALERT,
+            False,
+        )
+        if transition.completed:
+            dispatch_calibration_state(self.hass, self._entry_id)
+            _LOGGER.info(
+                "Powerwall BatteryCalibration alert cleared for %d consecutive "
+                "polls — resuming normal battery control",
+                POWERWALL_CALIBRATION_CLEAR_POLLS,
+            )
+            self._schedule_calibration_transition_notification(started=False)
+
+    def _schedule_calibration_transition_notification(self, *, started: bool) -> None:
+        """Deliver notifications without delaying the two-second snapshot loop."""
+        coroutine = self._notify_calibration_transition(started=started)
+        create_task = getattr(self.hass, "async_create_task", None)
+        if callable(create_task):
+            try:
+                task = create_task(
+                    coroutine,
+                    f"powerwall_calibration_notification_{self._entry_id}",
+                )
+            except TypeError:
+                task = create_task(coroutine)
+        else:
+            task = asyncio.create_task(coroutine)
+        tasks = getattr(self, "_calibration_notification_tasks", None)
+        if tasks is None:
+            tasks = set()
+            self._calibration_notification_tasks = tasks
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    async def _notify_calibration_transition(self, *, started: bool) -> None:
+        """Send one HA notification and one mobile push per transition."""
+        notification_id = f"power_sync_powerwall_calibration_{self._entry_id}"
+        if started:
+            title = "Powerwall Calibration"
+            message = (
+                "Tesla reports BatteryCalibration is active. PowerSync has paused "
+                "automatic battery charge and export control until the alert clears."
+            )
+            try:
+                await self.hass.services.async_call(
+                    "persistent_notification",
+                    "create",
+                    {
+                        "title": title,
+                        "message": message,
+                        "notification_id": notification_id,
+                    },
+                    blocking=False,
+                )
+            except Exception as err:
+                _LOGGER.debug("Calibration persistent notification failed: %s", err)
+        else:
+            title = "Powerwall Calibration Complete"
+            message = (
+                "Tesla's BatteryCalibration alert has cleared. PowerSync is "
+                "resuming normal automatic battery control."
+            )
+            try:
+                await self.hass.services.async_call(
+                    "persistent_notification",
+                    "dismiss",
+                    {"notification_id": notification_id},
+                    blocking=False,
+                )
+            except Exception as err:
+                _LOGGER.debug("Calibration notification dismissal failed: %s", err)
+
+        try:
+            from ..automations.actions import _send_expo_push
+
+            await _send_expo_push(self.hass, title, message)
+        except Exception as err:
+            _LOGGER.debug("Calibration mobile push failed: %s", err)
 
     def _schedule_v1r_diagnostics_if_due(self) -> None:
         """Refresh slow Common API diagnostics without delaying live telemetry."""
@@ -241,10 +397,14 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             raise
         except Exception as err:
             self._v1r_diagnostics = {
-                **previous,
                 "available": False,
                 "last_attempt_ts": attempted_at,
+                "last_success_ts": previous.get("last_success_ts"),
                 "error": str(err),
+                "errors": {"diagnostics": str(err)},
+                "system_info": None,
+                "networking": None,
+                "internet": None,
             }
             _LOGGER.debug("Powerwall v1r diagnostics unavailable: %s", err)
         else:
@@ -253,6 +413,12 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
                 "networking",
                 "internet",
             ))
+            errors = diagnostics.get("errors") or {}
+            error = "; ".join(
+                f"{key}: {value}" for key, value in errors.items()
+            )
+            if not error and not available:
+                error = "No supported Common API response"
             self._v1r_diagnostics = {
                 **diagnostics,
                 "available": available,
@@ -260,12 +426,24 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
                 "last_success_ts": attempted_at if available else previous.get(
                     "last_success_ts"
                 ),
-                "error": None if available else "No supported Common API response",
+                "error": error or None,
             }
         self.async_update_listeners()
 
     async def async_shutdown(self) -> None:
         """Cancel any in-flight background diagnostics during entry unload."""
+        keepalive_unsub = getattr(self, "_keepalive_unsub", None)
+        if callable(keepalive_unsub):
+            keepalive_unsub()
+            self._keepalive_unsub = None
+        notification_tasks = list(
+            getattr(self, "_calibration_notification_tasks", set())
+        )
+        for notification_task in notification_tasks:
+            notification_task.cancel()
+        if notification_tasks:
+            await asyncio.gather(*notification_tasks, return_exceptions=True)
+        self._calibration_notification_tasks = set()
         task = getattr(self, "_v1r_diagnostics_task", None)
         if task is None or task.done():
             return
@@ -433,6 +611,14 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             "backup_reserve_percent": snap.backup_reserve_percent,
             "grid_charging_enabled": snap.grid_charging_enabled,
             "grid_export_rule": snap.grid_export_rule,
+            "system_island_state": snap.system_island_state,
+            "pw_count": snap.pw_count,
+            "total_pack_full_wh": snap.total_pack_full_wh,
+            "total_pack_remaining_wh": snap.total_pack_remaining_wh,
+            "battery_blocks": [
+                dict(block) for block in (snap.battery_blocks or [])
+            ],
+            "alerts": [dict(alert) for alert in (snap.alerts or [])],
             "gateway_host": self._client.host,
             "gateway_din": self._client.din,
             "version": self._client.version.value,

@@ -33,6 +33,59 @@ def test_button_card_resource_fallback_accepts_dashed_hacs_url():
     assert "url.includes(name)" in source
 
 
+def test_powerwall_local_card_uses_domain_aware_entity_resolution():
+    """V1R/DCQ card must resolve binary sensors and switches, not sensor IDs."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "const powerwallLocalPaired = findEntity('binary_sensor', 'powerwall_local_paired');" in source
+    assert "hass.states[powerwallLocalPaired]?.state === 'on'" in source
+    assert "_powerwallLocalControl(e, hasE, findEntity)" in source
+    assert "function _powerwallLocalControl(e, hasE, findEntity)" in source
+
+    start = source.index("function _powerwallLocalControl")
+    end = source.index("function _powerwallHealth", start)
+    helper_source = source[start:end]
+    runtime = r"""
+      const sensors = new Set([
+        'pw_system_island_state', 'pw_count', 'pw_active_alerts',
+        'pw_v1r_device', 'pw_v1r_firmware', 'pw_v1r_network', 'pw_v1r_internet',
+      ]);
+      const e = name => `sensor.power_sync_${name}`;
+      const hasE = name => sensors.has(name);
+      const findEntity = (domain, suffix) => `${domain}.power_sync_${suffix}`;
+      const card = _powerwallLocalControl(e, hasE, findEntity);
+      const status = card.cards[0].entities.map(row => row.entity);
+      if (!status.includes('binary_sensor.power_sync_powerwall_local_paired')) {
+        throw new Error('paired binary sensor is not wired');
+      }
+      if (!status.includes('binary_sensor.power_sync_powerwall_local_islanded')) {
+        throw new Error('islanded binary sensor is not wired');
+      }
+      if (!status.includes('binary_sensor.power_sync_pw_critical_alert')) {
+        throw new Error('critical alert binary sensor is not wired');
+      }
+      if (!status.includes('binary_sensor.power_sync_calibration_active')) {
+        throw new Error('calibration binary sensor is not wired');
+      }
+      if (!status.includes('sensor.power_sync_pw_v1r_device')) {
+        throw new Error('V1R device sensor is not wired');
+      }
+      const controls = card.cards[1].card.entities.map(row => row.entity);
+      if (!controls.includes('switch.power_sync_on_grid')) {
+        throw new Error('on-grid switch is not wired');
+      }
+      if (!controls.includes('switch.power_sync_off_grid')) {
+        throw new Error('off-grid switch is not wired');
+      }
+    """
+    subprocess.run(
+        ["node", "-e", f"{helper_source}\n{runtime}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_optimizer_windows_use_combined_visual_card():
     """Optimizer schedule should use the native API-backed dashboard card."""
     source = STRATEGY_PATH.read_text()

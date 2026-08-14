@@ -20,7 +20,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from .exceptions import PowerwallLocalError, PowerwallUnreachableError
+from .exceptions import (
+    PowerwallLocalError,
+    PowerwallSignatureError,
+    PowerwallUnreachableError,
+)
 from .fleet_api_bms import (
     build_device_controller_query_envelope,
     parse_device_controller_response,
@@ -217,6 +221,10 @@ class PowerwallLocalClient:
             resp = await self._transport.post_v1r(envelope, self._din)
         except PowerwallUnreachableError:
             raise
+        except PowerwallSignatureError:
+            # Preserve rejected/revoked-key semantics so the coordinator can
+            # disable local polling and surface the re-pair workflow.
+            raise
         except PowerwallLocalError as err:
             _LOGGER.warning("DeviceControllerQuery v1r POST failed: %s", err)
             return None
@@ -245,11 +253,13 @@ class PowerwallLocalClient:
         dcq, cfg = await asyncio.gather(dcq_task, cfg_task, return_exceptions=True)
 
         if isinstance(dcq, BaseException):
-            if isinstance(dcq, PowerwallUnreachableError):
+            if isinstance(dcq, (PowerwallUnreachableError, PowerwallSignatureError)):
                 raise dcq
             _LOGGER.warning("DeviceControllerQuery raised: %s", dcq)
             dcq = None
         if isinstance(cfg, BaseException):
+            if isinstance(cfg, PowerwallSignatureError):
+                raise cfg
             _LOGGER.debug("config.json read raised: %s", cfg)
             cfg = None
 
@@ -397,16 +407,26 @@ class PowerwallLocalClient:
 
     async def get_v1r_diagnostics(self) -> dict[str, Any]:
         """Read the safe Common API diagnostics published by the gateway."""
-        system_info, networking, internet = await asyncio.gather(
+        results = await asyncio.gather(
             self._transport.get_system_info(self._din),
             self._transport.get_networking_status(self._din),
             self._transport.check_internet(self._din),
+            return_exceptions=True,
         )
-        return {
-            "system_info": system_info,
-            "networking": networking,
-            "internet": internet,
-        }
+        diagnostics: dict[str, Any] = {}
+        errors: dict[str, str] = {}
+        for key, result in zip(
+            ("system_info", "networking", "internet"),
+            results,
+            strict=True,
+        ):
+            if isinstance(result, Exception):
+                diagnostics[key] = None
+                errors[key] = str(result)
+            else:
+                diagnostics[key] = result
+        diagnostics["errors"] = errors
+        return diagnostics
 
     async def list_authorized_clients(self) -> dict[str, Any] | None:
         """Read authorized clients directly from the local gateway."""

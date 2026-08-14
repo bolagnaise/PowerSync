@@ -360,6 +360,9 @@ async def _unpair_powerwall(hass: HomeAssistant, entry: ConfigEntry) -> None:
     coordinator = runtime.get("coordinator")
     if coordinator is not None:
         coordinator.update_interval = None
+        shutdown = getattr(coordinator, "async_shutdown", None)
+        if callable(shutdown):
+            await shutdown()
     runtime["coordinator"] = None
     runtime["pairing_manager"] = None
 

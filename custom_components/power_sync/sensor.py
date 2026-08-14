@@ -1431,6 +1431,10 @@ OPTIMIZER_ACTION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             "status": data.get("status"),
             "until": data.get("current_action_end_time"),
             "monitoring_mode": data.get("monitoring_mode", False),
+            "calibration_suspected": data.get("calibration_suspected", False),
+            "calibration_detected_at": data.get("calibration_detected_at"),
+            "calibration_source": data.get("calibration_source"),
+            "calibration_sources": data.get("calibration_sources", []),
             "profit_max_enabled": data.get("profit_max_enabled", False),
             "profit_max_solar_export": data.get("profit_max_solar_export", {}),
             "lp_stats": data.get("lp_stats", {}),
@@ -3260,10 +3264,36 @@ class _PowerwallLocalSensorBase(CoordinatorEntity, SensorEntity):
         return diagnostics if isinstance(diagnostics, dict) else {}
 
 
-class PowerwallV1rDeviceSensor(_PowerwallLocalSensorBase):
+class _PowerwallV1rSensorBase(_PowerwallLocalSensorBase):
+    """Common API sensor with per-endpoint availability and diagnostics."""
+
+    diagnostic_key = ""
+
+    @property
+    def available(self) -> bool:
+        # Common API diagnostics are refreshed independently of the live DCQ
+        # snapshot, so a DCQ polling failure must not hide a successful
+        # identity/network/internet response.
+        return isinstance(self._v1r_diagnostics.get(self.diagnostic_key), dict)
+
+    def _diagnostic_attributes(self) -> dict[str, Any]:
+        diagnostics = self._v1r_diagnostics
+        attrs: dict[str, Any] = {}
+        if diagnostics.get("last_attempt_ts") is not None:
+            attrs["last_attempt_ts"] = diagnostics["last_attempt_ts"]
+        if diagnostics.get("last_success_ts") is not None:
+            attrs["last_success_ts"] = diagnostics["last_success_ts"]
+        errors = diagnostics.get("errors") or {}
+        if isinstance(errors, dict) and errors.get(self.diagnostic_key):
+            attrs["error"] = errors[self.diagnostic_key]
+        return attrs
+
+
+class PowerwallV1rDeviceSensor(_PowerwallV1rSensorBase):
     """Gateway device identity from the read-only v1r Common API."""
 
     _attr_icon = "mdi:developer-board"
+    diagnostic_key = "system_info"
 
     def __init__(self, coordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry, "pw_v1r_device", "v1r Device")
@@ -3280,13 +3310,14 @@ class PowerwallV1rDeviceSensor(_PowerwallLocalSensorBase):
             key: info.get(key)
             for key in ("part_number", "serial_number", "din")
             if info.get(key) is not None
-        }
+        } | self._diagnostic_attributes()
 
 
-class PowerwallV1rFirmwareSensor(_PowerwallLocalSensorBase):
+class PowerwallV1rFirmwareSensor(_PowerwallV1rSensorBase):
     """Gateway firmware reported by the v1r Common API."""
 
     _attr_icon = "mdi:chip"
+    diagnostic_key = "system_info"
 
     def __init__(self, coordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry, "pw_v1r_firmware", "v1r Firmware")
@@ -3300,13 +3331,15 @@ class PowerwallV1rFirmwareSensor(_PowerwallLocalSensorBase):
     def extra_state_attributes(self) -> dict[str, Any]:
         info = self._v1r_diagnostics.get("system_info") or {}
         githash = info.get("firmware_githash")
-        return {"githash": githash} if githash else {}
+        attrs = {"githash": githash} if githash else {}
+        return attrs | self._diagnostic_attributes()
 
 
-class PowerwallV1rNetworkSensor(_PowerwallLocalSensorBase):
+class PowerwallV1rNetworkSensor(_PowerwallV1rSensorBase):
     """Active gateway route with credential-free interface diagnostics."""
 
     _attr_icon = "mdi:router-network"
+    diagnostic_key = "networking"
 
     def __init__(self, coordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry, "pw_v1r_network", "v1r Network")
@@ -3325,20 +3358,17 @@ class PowerwallV1rNetworkSensor(_PowerwallLocalSensorBase):
     def extra_state_attributes(self) -> dict[str, Any]:
         diagnostics = self._v1r_diagnostics
         interfaces = diagnostics.get("networking")
-        attrs: dict[str, Any] = {}
+        attrs = self._diagnostic_attributes()
         if isinstance(interfaces, dict):
             attrs["interfaces"] = interfaces
-        if diagnostics.get("last_success_ts") is not None:
-            attrs["last_success_ts"] = diagnostics["last_success_ts"]
-        if diagnostics.get("error"):
-            attrs["error"] = diagnostics["error"]
         return attrs
 
 
-class PowerwallV1rInternetSensor(_PowerwallLocalSensorBase):
+class PowerwallV1rInternetSensor(_PowerwallV1rSensorBase):
     """Live gateway internet reachability from Common API field 30/31."""
 
     _attr_icon = "mdi:web-check"
+    diagnostic_key = "internet"
 
     def __init__(self, coordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry, "pw_v1r_internet", "v1r Internet")
@@ -3361,7 +3391,10 @@ class PowerwallV1rInternetSensor(_PowerwallLocalSensorBase):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         interfaces = self._v1r_diagnostics.get("internet")
-        return {"interfaces": interfaces} if isinstance(interfaces, dict) else {}
+        attrs = self._diagnostic_attributes()
+        if isinstance(interfaces, dict):
+            attrs["interfaces"] = interfaces
+        return attrs
 
 
 class PowerwallSystemIslandStateSensor(_PowerwallLocalSensorBase):
@@ -3428,7 +3461,11 @@ class PowerwallActiveAlertsSensor(_PowerwallLocalSensorBase):
             names.append(name)
             if sev:
                 severities[name] = sev
-        return {"alerts": names, "severities": severities}
+        return {
+            "alerts": names,
+            "severities": severities,
+            "alert_details": [dict(alert) for alert in snap.alerts],
+        }
 
 
 class _PowerwallBlockSensorBase(SensorEntity):

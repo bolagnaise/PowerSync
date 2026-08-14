@@ -288,9 +288,12 @@ class TEDAPIv1rTransport:
         if fault != combined_pb2.MESSAGEFAULT_ERROR_NONE:
             fault_name = combined_pb2.MessageFault_E.Name(fault)
             _LOGGER.warning("v1r response fault: %s (code %s)", fault_name, fault)
-            if fault == combined_pb2.MESSAGEFAULT_ERROR_UNKNOWN_KEY_ID:
+            if fault in (
+                combined_pb2.MESSAGEFAULT_ERROR_UNKNOWN_KEY_ID,
+                combined_pb2.MESSAGEFAULT_ERROR_INACTIVE_KEY,
+            ):
                 raise PowerwallSignatureError(
-                    "Gateway does not recognise our RSA key — re-pairing required"
+                    f"Gateway rejected our RSA key ({fault_name}) — re-pairing required"
                 )
             return TEDAPIResponse(False, None, fault_name=fault_name)
 

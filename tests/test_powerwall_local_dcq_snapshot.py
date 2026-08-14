@@ -43,6 +43,7 @@ _ensure_test_package()
 ha_config_entries = types.ModuleType("homeassistant.config_entries")
 ha_core = types.ModuleType("homeassistant.core")
 ha_update = types.ModuleType("homeassistant.helpers.update_coordinator")
+ha_dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
 
 ha_config_entries.ConfigEntry = type("ConfigEntry", (), {})
 ha_core.HomeAssistant = type("HomeAssistant", (), {})
@@ -62,14 +63,17 @@ class _DataUpdateCoordinator:
 
 ha_update.DataUpdateCoordinator = _DataUpdateCoordinator
 ha_update.UpdateFailed = Exception
+ha_dispatcher.async_dispatcher_send = lambda *args, **kwargs: None
 sys.modules["homeassistant.config_entries"] = ha_config_entries
 sys.modules["homeassistant.core"] = ha_core
 sys.modules["homeassistant.helpers.update_coordinator"] = ha_update
+sys.modules["homeassistant.helpers.dispatcher"] = ha_dispatcher
 
 const_stub = types.ModuleType(f"{PKG}.const")
 const_stub.CONF_POWERWALL_LOCAL_PAIRED = "powerwall_local_paired"
 const_stub.DOMAIN = "power_sync"
 const_stub.POWERWALL_LOCAL_POLL_INTERVAL = 5
+const_stub.TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
 sys.modules[f"{PKG}.const"] = const_stub
 
 # Stub modules the client imports but the test doesn't exercise.
@@ -125,6 +129,7 @@ coordinator_mod = _load_module(
     f"{LOCAL_PKG}.coordinator",
     ROOT / "powerwall_local" / "coordinator.py",
 )
+calibration_mod = sys.modules[f"{PKG}.tesla_calibration"]
 
 
 def test_loopback_host_is_not_treated_as_local_access():
@@ -132,6 +137,17 @@ def test_loopback_host_is_not_treated_as_local_access():
     assert client_mod.is_loopback_host("localhost")
     assert client_mod.is_loopback_host("::1")
     assert not client_mod.is_loopback_host("192.168.1.50")
+
+
+def test_calibration_alert_matching_is_firmware_tolerant_and_specific():
+    matches = calibration_mod.powerwall_calibration_alert_active
+
+    assert matches(["BatteryCalibration"])
+    assert matches(["battery_calibration"])
+    assert matches([{"alert_name": "BATTERY-CALIBRATION"}])
+    assert not matches(["SiteMinPowerLimited"])
+    assert not matches({"name": "BatteryCalibration"})
+    assert not matches(None)
 
 
 def test_local_backup_reserve_readback_subtracts_hidden_reserve():
@@ -328,7 +344,7 @@ def test_v1r_diagnostics_refresh_publishes_without_replacing_snapshot():
     assert listener_calls == [True]
 
 
-def test_v1r_diagnostics_failure_retains_last_read_but_marks_unavailable():
+def test_v1r_diagnostics_failure_clears_stale_values_and_marks_unavailable():
     class _FailingDiagnosticsClient:
         async def get_v1r_diagnostics(self):
             raise RuntimeError("gateway busy")
@@ -350,8 +366,109 @@ def test_v1r_diagnostics_failure_retains_last_read_but_marks_unavailable():
 
     assert coord._v1r_diagnostics["available"] is False
     assert coord._v1r_diagnostics["last_success_ts"] == 123.0
-    assert coord._v1r_diagnostics["system_info"]["firmware_version"] == "24.44.0"
+    assert coord._v1r_diagnostics["system_info"] is None
     assert coord._v1r_diagnostics["error"] == "gateway busy"
+
+
+def test_v1r_diagnostics_partial_success_keeps_working_endpoints():
+    class _PartialDiagnosticsClient:
+        async def get_v1r_diagnostics(self):
+            return {
+                "system_info": None,
+                "networking": {"wifi": {"active_route": True}},
+                "internet": {"wifi": {"connectivity": {"internet": True}}},
+                "errors": {"system_info": "unsupported field"},
+            }
+
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord._client = _PartialDiagnosticsClient()
+    coord._v1r_diagnostics = {}
+    coord.async_update_listeners = lambda: None
+
+    asyncio.run(coord._async_refresh_v1r_diagnostics())
+
+    assert coord._v1r_diagnostics["available"] is True
+    assert coord._v1r_diagnostics["system_info"] is None
+    assert coord._v1r_diagnostics["networking"]["wifi"]["active_route"] is True
+    assert "system_info: unsupported field" in coord._v1r_diagnostics["error"]
+
+
+def _calibration_snapshot(active: bool):
+    return client_mod.PowerwallSnapshot(
+        soc=50.0,
+        solar_w=0.0,
+        battery_w=12000.0 if active else 0.0,
+        grid_w=-10000.0 if active else 0.0,
+        load_w=2000.0,
+        grid_status="SystemGridConnected",
+        operation_mode="self_consumption",
+        backup_reserve_percent=0,
+        raw={},
+        alerts=[{"name": "BatteryCalibration"}] if active else [],
+    )
+
+
+def test_local_battery_calibration_alert_sets_and_stably_clears_guard():
+    entry_data: dict = {}
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord.hass = SimpleNamespace(data={"power_sync": {"entry-1": entry_data}})
+    coord._entry_id = "entry-1"
+    notifications: list[bool] = []
+
+    def _notify(*, started: bool):
+        notifications.append(started)
+
+    coord._schedule_calibration_transition_notification = _notify
+
+    asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(True)))
+    asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(True)))
+
+    assert entry_data["calibration_suspected"] is True
+    assert entry_data["calibration_source"] == "local_alert"
+    assert entry_data["calibration_sources"] == ["local_alert"]
+    assert entry_data["calibration_detected_at"] is not None
+    assert notifications == [True]
+
+    asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(False)))
+    asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(False)))
+    assert entry_data["calibration_suspected"] is True
+
+    asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(False)))
+    assert entry_data["calibration_suspected"] is False
+    assert entry_data["calibration_source"] is None
+    assert entry_data["calibration_detected_at"] is None
+    assert notifications == [True, False]
+
+
+def test_explicit_calibration_alert_supersedes_mode_stick_recovery():
+    cancelled: list[bool] = []
+    entry_data = {
+        "calibration_suspected": True,
+        "calibration_source": "mode_stick",
+        "calibration_sources": ["mode_stick"],
+        "_calibration_sources": ["mode_stick"],
+        "_calibration_check_unsub": lambda: cancelled.append(True),
+    }
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord.hass = SimpleNamespace(data={"power_sync": {"entry-1": entry_data}})
+    coord._entry_id = "entry-1"
+
+    def _notify(*, started: bool):
+        raise AssertionError("already-active calibration must not notify twice")
+
+    coord._schedule_calibration_transition_notification = _notify
+
+    asyncio.run(coord._sync_calibration_alert(_calibration_snapshot(True)))
+
+    assert entry_data["calibration_sources"] == ["local_alert"]
+    assert entry_data["_calibration_check_unsub"] is None
+    assert cancelled == [True]
 
 
 def test_coordinator_detects_hidden_reserve_offset_from_cloud_site_info():
@@ -482,6 +599,7 @@ def _coordinator_with_snapshot(ev_power_kw: float = 0.0):
     coord._entry_id = "entry-1"
     coord._consecutive_failures = 0
     coord._last_success_ts = 123.0
+    coord._last_success_monotonic = __import__("time").monotonic()
     coord._needs_repair = False
     coord._client = SimpleNamespace(
         host="gateway.local",
@@ -643,6 +761,36 @@ def test_local_status_api_load_never_goes_negative_after_ev_subtraction():
     assert coord.snapshot_as_api()["load_w"] == 0.0
 
 
+def test_local_status_api_exposes_v1r_dcq_status_and_alert_details():
+    coord = _coordinator_with_snapshot()
+    coord.data.system_island_state = "SystemGridConnected"
+    coord.data.total_pack_full_wh = 27000.0
+    coord.data.total_pack_remaining_wh = 13500.0
+    coord.data.battery_blocks = [{"din": "BATTERY--1"}]
+    coord.data.alerts = [
+        {
+            "name": "BatteryCalibration",
+            "severity": "warning",
+            "code": "CAL-1",
+        }
+    ]
+
+    api = coord.snapshot_as_api()
+
+    assert api["system_island_state"] == "SystemGridConnected"
+    assert api["pw_count"] == 2
+    assert api["total_pack_full_wh"] == 27000.0
+    assert api["total_pack_remaining_wh"] == 13500.0
+    assert api["battery_blocks"] == [{"din": "BATTERY--1"}]
+    assert api["alerts"] == [
+        {
+            "name": "BatteryCalibration",
+            "severity": "warning",
+            "code": "CAL-1",
+        }
+    ]
+
+
 def test_local_status_api_marks_stale_snapshot_unavailable_when_unreachable():
     coord = _coordinator_with_snapshot()
     coord._consecutive_failures = 2
@@ -653,6 +801,17 @@ def test_local_status_api_marks_stale_snapshot_unavailable_when_unreachable():
     assert api["reachable"] is False
     assert api["snapshot_available"] is True
     assert api["soc_percent"] == 88.0
+
+
+def test_local_status_api_marks_aged_snapshot_unavailable_without_failure():
+    coord = _coordinator_with_snapshot()
+    coord._last_success_monotonic = 0.0
+
+    api = coord.snapshot_as_api()
+
+    assert api["available"] is False
+    assert api["reachable"] is False
+    assert api["snapshot_available"] is True
 
 
 def test_local_status_api_marks_missing_snapshot_unavailable():

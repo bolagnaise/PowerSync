@@ -16430,6 +16430,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data["calibration_suspected"] = _cal_entry_data.get("calibration_suspected", False)
         _cal_detected_at = _cal_entry_data.get("calibration_detected_at")
         data["calibration_detected_at"] = _cal_detected_at.isoformat() if _cal_detected_at else None
+        data["calibration_source"] = _cal_entry_data.get("calibration_source")
+        data["calibration_sources"] = list(
+            _cal_entry_data.get("calibration_sources") or []
+        )
 
         return data
 
