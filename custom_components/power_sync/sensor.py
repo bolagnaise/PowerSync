@@ -6657,6 +6657,12 @@ class EVStatusSensor(SensorEntity):
     async def async_added_to_hass(self) -> None:
         """Start polling when added to hass."""
         await super().async_added_to_hass()
+        from . import _get_ev_display_coordinator
+
+        self._unsub_display = _get_ev_display_coordinator(
+            self.hass,
+            self._entry,
+        ).async_add_listener(self._handle_display_update)
         # Also listen to energy coordinator updates for faster refresh
         entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
         self._unsub_coordinators = []
@@ -6677,206 +6683,40 @@ class EVStatusSensor(SensorEntity):
         """Stop polling when removed."""
         if self._unsub_timer:
             self._unsub_timer()
+        if getattr(self, "_unsub_display", None):
+            self._unsub_display()
         for unsub in getattr(self, "_unsub_coordinators", []):
             unsub()
 
     @callback
-    def _handle_coordinator_update(self) -> None:
-        """Handle energy coordinator updates with embedded EV telemetry."""
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        for key in ("tesla_coordinator", "sigenergy_coordinator", "solaredge_coordinator"):
-            coordinator = entry_data.get(key)
-            if not coordinator or not coordinator.data:
-                continue
-            coord_data = coordinator.data
-            ev_power = coord_data.get("ev_power")
-            if ev_power is None:
-                continue
-            if self._ev_data is None:
-                self._ev_data = {}
-            if key == "solaredge_coordinator":
-                self._ev_data["ev_power_kw"] = ev_power
-                self._ev_data["vehicle_id"] = "solaredge_ev_charger"
-                self._ev_data["vehicle_name"] = "SolarEdge EV Charger"
-                self._ev_data["is_connected"] = coord_data.get(
-                    "ev_charger_connected", ev_power > 0.05
-                )
-                self._ev_data["is_charging"] = coord_data.get(
-                    "ev_charger_charging", ev_power > 0.05
-                )
-                self._ev_data["is_discharging"] = coord_data.get(
-                    "ev_charger_discharging", False
-                )
-            elif coord_data.get("ev_charger_type"):
-                self._apply_sigenergy_charger_context(
-                    charger_type=coord_data.get("ev_charger_type"),
-                    ev_power_kw=ev_power,
-                    is_connected=coord_data.get("ev_charger_connected", False),
-                    is_charging=coord_data.get("ev_charger_charging", False),
-                    is_discharging=coord_data.get("ev_charger_discharging", False),
-                    ev_soc=coord_data.get("ev_soc"),
-                )
-            elif abs(ev_power) > 0.05 or self._ev_data.get("ev_power_kw", 0) == 0:
-                self._ev_data["ev_power_kw"] = ev_power
-        cached_snapshot = entry_data.get("observed_ev_load_snapshot")
-        if cached_snapshot is not None and self._ev_data is not None:
-            self._ev_data["ev_power_kw"] = cached_snapshot.power_kw
+    def _handle_display_update(self, snapshot: dict[str, Any]) -> None:
+        """Apply the canonical vehicle attribution used by mobile displays."""
+        from .ev_display import display_snapshot_to_sensor_data
+
+        display_data = display_snapshot_to_sensor_data(snapshot)
+        if self._ev_data is None:
+            self._ev_data = {}
+        self._ev_data.update(display_data)
         self.async_write_ha_state()
 
-    @staticmethod
-    def _active_vehicle(vehicles: list[dict]) -> dict | None:
-        """Return the most relevant vehicle for dashboard attribution."""
-        if not vehicles:
-            return None
-        return (
-            next(
-                (
-                    vehicle
-                    for vehicle in vehicles
-                    if vehicle.get("is_charging")
-                    or (vehicle.get("ev_power_kw") or 0) > 0.05
-                ),
-                None,
-            )
-            or next(
-                (vehicle for vehicle in vehicles if vehicle.get("is_connected")),
-                None,
-            )
-            or vehicles[0]
-        )
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Refresh the canonical display snapshot after energy telemetry changes."""
+        from . import _get_ev_display_coordinator
 
-    def _apply_vehicle_context(self, vehicles: list[dict]) -> None:
-        """Attach backend-matched vehicle context to the EV sensor data."""
-        if self._ev_data is None:
-            self._ev_data = {}
-
-        active_vehicle = self._active_vehicle(vehicles)
-        if active_vehicle is None:
-            self._ev_data["vehicle_count"] = len(vehicles)
-            return
-
-        self._ev_data["vehicle_count"] = len(vehicles)
-        for source_key, target_key in (
-            ("vehicle_id", "vehicle_id"),
-            ("vehicle_name", "vehicle_name"),
-            ("is_connected", "is_connected"),
-            ("is_charging", "is_charging"),
-            ("is_discharging", "is_discharging"),
-        ):
-            if source_key in active_vehicle:
-                self._ev_data[target_key] = active_vehicle.get(source_key)
-
-        active_power = active_vehicle.get("ev_power_kw") or 0
-        if abs(active_power) > 0.05 or self._ev_data.get("ev_power_kw", 0) == 0:
-            self._ev_data["ev_power_kw"] = active_power
-
-        active_soc = active_vehicle.get("ev_soc")
-        if active_soc is not None:
-            self._ev_data["ev_soc"] = active_soc
-
-    @staticmethod
-    def _sigenergy_vehicle_name(charger_type: Any) -> str:
-        """Return a dashboard label for a Sigenergy charger type."""
-        if str(charger_type or "").lower() == "evdc":
-            return "Sigenergy EVDC"
-        return "Sigenergy EVAC"
-
-    def _apply_sigenergy_charger_context(
-        self,
-        *,
-        charger_type: Any,
-        ev_power_kw: Any,
-        is_connected: Any,
-        is_charging: Any,
-        is_discharging: Any = False,
-        ev_soc: Any = None,
-    ) -> None:
-        """Attach Sigenergy charger presence so the dashboard can show idle EVs."""
-        if self._ev_data is None:
-            self._ev_data = {}
-
-        try:
-            power_kw = float(ev_power_kw if ev_power_kw is not None else 0.0)
-        except (TypeError, ValueError):
-            power_kw = 0.0
-
-        self._ev_data["ev_power_kw"] = power_kw
-        self._ev_data["vehicle_id"] = "sigenergy_charger"
-        self._ev_data["vehicle_name"] = self._sigenergy_vehicle_name(charger_type)
-        self._ev_data["is_connected"] = bool(is_connected)
-        self._ev_data["is_charging"] = bool(is_charging)
-        self._ev_data["is_discharging"] = bool(is_discharging)
-        if ev_soc is not None:
-            self._ev_data["ev_soc"] = ev_soc
+        coordinator = _get_ev_display_coordinator(self.hass, self._entry)
+        self.hass.async_create_task(coordinator.async_request_refresh())
 
     async def _async_update_ev(self, _now=None) -> None:
         """Poll EV status from vehicle sensors."""
-        from . import (
-            _get_ev_load_observations,
-            _get_ev_vehicle_status,
-            _get_ev_vehicles_status,
-        )
-        from .ev_load import aggregate_ev_load
+        from . import _get_ev_display_coordinator
+        from .ev_display import display_snapshot_to_sensor_data
         try:
-            self._ev_data = _get_ev_vehicle_status(self.hass, self._entry)
-            vehicles = _get_ev_vehicles_status(self.hass, self._entry)
-            self._apply_vehicle_context(vehicles)
-            entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-            observations = await _get_ev_load_observations(
+            display_snapshot = await _get_ev_display_coordinator(
                 self.hass,
                 self._entry,
-                vehicles,
-            )
-            snapshot = aggregate_ev_load(observations, at=dt_util.utcnow())
-            entry_data["observed_ev_load_snapshot"] = snapshot
-            self._ev_data["ev_power_kw"] = snapshot.power_kw
-            self._ev_data["loadpoint_count"] = len(snapshot.components)
-            self._ev_data["observation_quality"] = snapshot.quality.value
-
-            from .ev_load import normalize_energy_data
-
-            coordinator_systems = {
-                "tesla_coordinator": "tesla",
-                "sigenergy_coordinator": "sigenergy",
-                "sungrow_coordinator": "sungrow",
-                "foxess_coordinator": "foxess",
-                "goodwe_coordinator": "goodwe",
-                "alphaess_coordinator": "alphaess",
-                "esy_sunhome_coordinator": "esy_sunhome",
-                "solax_coordinator": "solax",
-                "saj_h2_coordinator": "saj_h2",
-                "fronius_reserva_coordinator": "fronius_reserva",
-                "neovolt_coordinator": "neovolt",
-                "solaredge_coordinator": "solaredge",
-                "anker_solix_coordinator": "anker_solix",
-                "custom_energy_coordinator": "custom",
-            }
-            for coordinator_key, battery_system in coordinator_systems.items():
-                coordinator = entry_data.get(coordinator_key)
-                if not coordinator or not isinstance(coordinator.data, dict):
-                    continue
-                normalized = normalize_energy_data(
-                    coordinator.data,
-                    battery_system=battery_system,
-                    ev_load=snapshot,
-                    at=dt_util.utcnow(),
-                )
-                if normalized is not None:
-                    coordinator.data = normalized
-
-            sigenergy_state = entry_data.get("observed_sigenergy_charger_state")
-            if sigenergy_state is not None:
-                self._apply_sigenergy_charger_context(
-                    charger_type=getattr(sigenergy_state, "charger_type", None),
-                    ev_power_kw=getattr(sigenergy_state, "power_kw", 0.0),
-                    is_connected=getattr(sigenergy_state, "is_connected", False),
-                    is_charging=getattr(sigenergy_state, "is_charging", False),
-                    is_discharging=getattr(sigenergy_state, "is_discharging", False),
-                    ev_soc=getattr(sigenergy_state, "vehicle_soc", None),
-                )
-                # Context helpers set one display loadpoint; restore the site
-                # total after they have populated name/SOC/status fields.
-                self._ev_data["ev_power_kw"] = snapshot.power_kw
+            ).async_refresh()
+            self._ev_data = display_snapshot_to_sensor_data(display_snapshot)
         except Exception:
             _LOGGER.debug("Error polling EV status", exc_info=True)
         self.async_write_ha_state()

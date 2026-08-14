@@ -1548,6 +1548,22 @@ def test_has_solaredge_ev_power_ignores_unrelated_charger_power():
 
 def test_ev_status_sensor_labels_solaredge_coordinator_power():
     sensor = _sensor_module()
+    power_sync = sys.modules["power_sync"]
+
+    class DisplayCoordinator:
+        snapshot = {
+            "site": {"ev_power_kw": 7.4},
+            "loadpoints": [{
+                "loadpoint_id": "solaredge_ev_charger",
+                "vehicle_name": "SolarEdge EV Charger",
+                "current_power_kw": 7.4,
+                "connected": True,
+                "actual_charging": True,
+                "status": "charging",
+            }],
+        }
+
+    power_sync._get_ev_display_coordinator = lambda hass, entry: DisplayCoordinator()
     desc = next(d for d in sensor.EV_SENSORS if d.key == "ev_power")
     entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
     entity = sensor.EVStatusSensor(SimpleNamespace(data={}), entry, desc)
@@ -1569,7 +1585,7 @@ def test_ev_status_sensor_labels_solaredge_coordinator_power():
         }
     )
 
-    entity._handle_coordinator_update()
+    entity._handle_display_update(DisplayCoordinator.snapshot)
 
     assert entity.native_value == 7.4
     assert entity.extra_state_attributes["vehicle_name"] == "SolarEdge EV Charger"
@@ -1579,7 +1595,24 @@ def test_ev_status_sensor_labels_solaredge_coordinator_power():
 def test_ev_status_sensor_exposes_idle_sigenergy_evac_presence():
     sensor = _sensor_module()
     power_sync = sys.modules["power_sync"]
-    power_sync._get_ev_vehicle_status = lambda hass, entry: {"ev_power_kw": 0.0}
+
+    class DisplayCoordinator:
+        async def async_refresh(self, *, force=False):
+            return {
+                "site": {"ev_power_kw": 0.0},
+                "loadpoints": [{
+                    "loadpoint_id": "sigenergy_charger",
+                    "vehicle_name": "Sigenergy EVAC",
+                    "charger_type": "sigenergy",
+                    "current_power_kw": 0.0,
+                    "soc": None,
+                    "connected": True,
+                    "actual_charging": False,
+                    "status": "connected_idle",
+                }],
+            }
+
+    power_sync._get_ev_display_coordinator = lambda hass, entry: DisplayCoordinator()
     power_sync._get_ev_vehicles_status = lambda hass, entry: []
 
     async def read_sigenergy_charger_state(entry, hass):

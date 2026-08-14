@@ -85,16 +85,16 @@ def test_manual_action_params_carries_stored_vehicle_display_name():
     assert 'params["vehicle_name"] = stored_config["display_name"]' in method_source
 
 
-def test_widget_data_reconciles_runtime_identifier_with_observed_name():
+def test_widget_data_uses_canonical_display_snapshot():
     source = INIT_PATH.read_text()
     view_start = source.index("class EVWidgetDataView")
     view_source = source[
         view_start:source.index("class EVLoadpointStatusView", view_start)
     ]
 
-    assert "from .automations.loadpoint_status import resolve_vehicle_display_name" in view_source
-    assert "vehicle_name = resolve_vehicle_display_name(" in view_source
-    assert "matched_vehicle," in view_source
+    assert "_get_ev_display_coordinator(" in view_source
+    assert "display_snapshot_to_widgets(snapshot)" in view_source
+    assert "_get_ev_vehicles_status" not in view_source
 
 
 def test_disabling_solar_surplus_awaits_immediate_runtime_teardown():

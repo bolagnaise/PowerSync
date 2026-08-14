@@ -1515,6 +1515,25 @@ import {
           const switchState = this._entityState(slot.chargeSwitchEntity);
           const presenceState = this._entityState(slot.presenceEntity);
           const batteryPct = toPct(batteryState, Number.NaN);
+          const canonicalLabel = String(
+            powerState?.attributes?.vehicle_name ||
+            batteryState?.attributes?.vehicle_name ||
+            ''
+          ).trim();
+          const canonicalConnected = (
+            typeof powerState?.attributes?.is_connected === 'boolean'
+              ? powerState.attributes.is_connected
+              : (typeof batteryState?.attributes?.is_connected === 'boolean'
+                ? batteryState.attributes.is_connected
+                : null)
+          );
+          const canonicalCharging = (
+            typeof powerState?.attributes?.is_charging === 'boolean'
+              ? powerState.attributes.is_charging
+              : (typeof batteryState?.attributes?.is_charging === 'boolean'
+                ? batteryState.attributes.is_charging
+                : null)
+          );
           const derivedLabel = (
             friendlyEntityName(powerState) ||
             friendlyEntityName(batteryState) ||
@@ -1531,9 +1550,10 @@ import {
             drawPower: Math.max(0, signedPower),
             supplyPower: Math.max(0, -signedPower),
             battery: Number.isFinite(batteryPct) ? batteryPct : 0,
-            switchOn: switchState?.state === 'on',
-            present: isTruthyPresenceState(presenceState),
+            switchOn: canonicalCharging ?? switchState?.state === 'on',
+            present: canonicalConnected ?? isTruthyPresenceState(presenceState),
             customLabel: String(slot.customLabel || '').trim(),
+            canonicalLabel,
             derivedLabel
           };
         })
@@ -1543,7 +1563,7 @@ import {
       const hasPresenceEntities = evSlots.some((slot) => !!slot.presenceEntity);
       const normalized = vehicles.map((vehicle) => ({
         ...vehicle,
-        labelText: vehicle.customLabel || vehicle.derivedLabel || (vehicle.key === 'ev2'
+        labelText: vehicle.canonicalLabel || vehicle.customLabel || vehicle.derivedLabel || (vehicle.key === 'ev2'
           ? 'EV 2'
           : (hasConfiguredSecondaryEv ? 'EV 1' : this._t('card.node.ev', 'EV'))),
         batteryText: vehicle.hasBatteryEntity ? `${Math.round(vehicle.battery)}%` : '--%'

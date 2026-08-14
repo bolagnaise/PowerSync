@@ -1817,7 +1817,13 @@ async def _get_ev_load_observations(hass, entry, vehicles=None):
                 getattr(settings, "charger_type", None) or "generic"
             ).lower()
             if charger_type in {"tesla", "tesla_ble", "fleet_api", "teslemetry"}:
-                physical_key = f"vehicle:{_vehicle_identity_key(vehicle_id)}"
+                resolve_vehicle_vin = getattr(executor, "_resolve_vehicle_vin", None)
+                resolved_vehicle_id = (
+                    resolve_vehicle_vin(vehicle_id)
+                    if callable(resolve_vehicle_vin)
+                    else None
+                )
+                physical_key = f"vehicle:{_vehicle_identity_key(resolved_vehicle_id or vehicle_id)}"
                 kind = EvMeasurementKind.VEHICLE
             else:
                 physical_key = _meter_physical_key(
@@ -17310,6 +17316,74 @@ class OCPPChargerStopView(HomeAssistantView):
             )
 
 
+def _get_ev_display_coordinator(hass, entry):
+    """Return the entry-scoped coordinator for all EV display projections."""
+    from .ev_display import EVDisplayCoordinator
+
+    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+    coordinator = entry_data.get("ev_display_coordinator")
+    if coordinator is not None:
+        return coordinator
+
+    async def async_load_snapshot():
+        observed_vehicles = []
+        response = await EVLoadpointStatusView(hass, entry)._async_build_response(
+            None,
+            observed_vehicle_sink=observed_vehicles,
+        )
+        payload = json.loads(response.body)
+        if response.status >= 400 or not payload.get("success"):
+            raise RuntimeError(payload.get("error") or "EV display snapshot unavailable")
+        from .ev_load import aggregate_ev_load, normalize_energy_data
+
+        entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+        observed_at = dt_util.utcnow()
+        observations = await _get_ev_load_observations(
+            hass,
+            entry,
+            observed_vehicles,
+        )
+        observed_load = aggregate_ev_load(observations, at=observed_at)
+        entry_data["observed_ev_load_snapshot"] = observed_load
+        site = payload.setdefault("site", {})
+        site["ev_power_kw"] = observed_load.power_kw
+        site["observation_quality"] = observed_load.quality.value
+
+        coordinator_systems = {
+            "tesla_coordinator": "tesla",
+            "sigenergy_coordinator": "sigenergy",
+            "sungrow_coordinator": "sungrow",
+            "foxess_coordinator": "foxess",
+            "goodwe_coordinator": "goodwe",
+            "alphaess_coordinator": "alphaess",
+            "esy_sunhome_coordinator": "esy_sunhome",
+            "solax_coordinator": "solax",
+            "saj_h2_coordinator": "saj_h2",
+            "fronius_reserva_coordinator": "fronius_reserva",
+            "neovolt_coordinator": "neovolt",
+            "solaredge_coordinator": "solaredge",
+            "anker_solix_coordinator": "anker_solix",
+            "custom_energy_coordinator": "custom",
+        }
+        for coordinator_key, battery_system in coordinator_systems.items():
+            energy_coordinator = entry_data.get(coordinator_key)
+            if not energy_coordinator or not isinstance(energy_coordinator.data, dict):
+                continue
+            normalized = normalize_energy_data(
+                energy_coordinator.data,
+                battery_system=battery_system,
+                ev_load=observed_load,
+                at=observed_at,
+            )
+            if normalized is not None:
+                energy_coordinator.data = normalized
+        return payload
+
+    coordinator = EVDisplayCoordinator(async_load_snapshot)
+    entry_data["ev_display_coordinator"] = coordinator
+    return coordinator
+
+
 class EVWidgetDataView(HomeAssistantView):
     """API endpoint for EV widget data (home screen widgets).
 
@@ -17325,655 +17399,17 @@ class EVWidgetDataView(HomeAssistantView):
         self._config_entry = entry
 
     async def get(self, request):
-        """Get widget data for EV charging status."""
+        """Get widget data from the same snapshot used by HA EV sensors."""
         try:
-            from .automations.actions import (
-                DEFAULT_VEHICLE_ID,
-                _dynamic_ev_state,
-                _calculate_solar_surplus,
-            )
-            from .automations.ev_charging_planner import (
-                _vehicle_config_matches,
-                get_auto_schedule_executor,
-            )
-            from .automations.loadpoint_status import resolve_vehicle_display_name
-            from .solar_surplus_config import get_stored_solar_surplus_config
+            from .ev_display import display_snapshot_to_widgets
 
-            entry_id = self._config_entry.entry_id
-            entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id, {})
-
-            # Get data from coordinator (preferred over separate API call)
-            solar_power_kw = 0.0
-            grid_power_kw = 0.0
-            battery_power_kw = 0.0
-            load_power_kw = 0.0
-            battery_soc = 0.0
-
-            tesla_coordinator = entry_data.get("tesla_coordinator")
-            sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
-            sungrow_coordinator = entry_data.get("sungrow_coordinator")
-            foxess_coordinator = entry_data.get("foxess_coordinator")
-
-            if tesla_coordinator and tesla_coordinator.data:
-                solar_power_kw = tesla_coordinator.data.get("solar_power", 0)
-                grid_power_kw = tesla_coordinator.data.get("grid_power", 0)
-                battery_power_kw = tesla_coordinator.data.get("battery_power", 0)
-                load_power_kw = tesla_coordinator.data.get("load_power", 0)
-                battery_soc = tesla_coordinator.data.get("battery_level", 0)
-            elif sigenergy_coordinator and sigenergy_coordinator.data:
-                solar_power_kw = sigenergy_coordinator.data.get("solar_power", 0)
-                grid_power_kw = sigenergy_coordinator.data.get("grid_power", 0)
-                battery_power_kw = sigenergy_coordinator.data.get("battery_power", 0)
-                load_power_kw = sigenergy_coordinator.data.get("load_power", 0)
-                battery_soc = sigenergy_coordinator.data.get("battery_level", 0)
-            elif sungrow_coordinator and sungrow_coordinator.data:
-                solar_power_kw = sungrow_coordinator.data.get("solar_power", 0)
-                grid_power_kw = sungrow_coordinator.data.get("grid_power", 0)
-                battery_power_kw = sungrow_coordinator.data.get("battery_power", 0)
-                load_power_kw = sungrow_coordinator.data.get("load_power", 0)
-                battery_soc = sungrow_coordinator.data.get("battery_level", 0)
-            elif foxess_coordinator and foxess_coordinator.data:
-                solar_power_kw = foxess_coordinator.data.get("solar_power", 0)
-                grid_power_kw = foxess_coordinator.data.get("grid_power", 0)
-                battery_power_kw = foxess_coordinator.data.get("battery_power", 0)
-                load_power_kw = foxess_coordinator.data.get("load_power", 0)
-                battery_soc = foxess_coordinator.data.get("battery_level", 0)
-
-            # Build live_status dict for surplus calculation (expects watts)
-            live_status = {
-                "solar_power": solar_power_kw * 1000,
-                "grid_power": grid_power_kw * 1000,
-                "battery_power": battery_power_kw * 1000,
-                "load_power": load_power_kw * 1000,
-                "battery_soc": battery_soc,
-            }
-
-            # Calculate current surplus
-            solar_config = get_stored_solar_surplus_config(entry_data)
-            surplus_kw = _calculate_solar_surplus(live_status, 0, solar_config)
-
-            # Get actual EV power from Tesla Wall Connector API (ground truth)
-            # This prevents showing phantom power when commanded amps > 0 but car isn't
-            # actually charging (e.g. not plugged in, or charge command didn't take effect)
-            actual_ev_power_kw = None  # None = no Tesla data available
-            if tesla_coordinator and tesla_coordinator.data:
-                actual_ev_power_kw = _kw_from_wall_connector_power(
-                    tesla_coordinator.data.get("ev_power", 0)
-                )
-
-            # Per-vehicle Tesla telemetry is the source of truth for assigning
-            # charge/connection state in multi-vehicle accounts.
-            tesla_vehicles = _get_ev_vehicles_status(self._hass, self._config_entry)
-
-            # Get dynamic EV state
-            vehicles = _dynamic_ev_state.get(entry_id, {})
-            auto_executor = get_auto_schedule_executor()
-
-            widget_data = []
-            for vehicle_id, state in vehicles.items():
-                if not state.get("active"):
-                    continue
-
-                params = state.get("params", {})
-                vehicle_name = (
-                    params.get("vehicle_name")
-                    or state.get("vehicle_name")
-                    or params.get("display_name")
-                    or (vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
-                )
-                matched_vehicle = _find_vehicle_status(
-                    tesla_vehicles,
-                    vehicle_id,
-                    params.get("vehicle_vin"),
-                    params.get("vehicle_id"),
-                    vehicle_name,
-                )
-                vehicle_name = resolve_vehicle_display_name(
-                    vehicle_name,
-                    vehicle_id,
-                    matched_vehicle,
-                )
-                charger_type = params.get("charger_type", "tesla")
-                is_tesla_vehicle = charger_type == "tesla" or matched_vehicle is not None
-
-                # Skip the legacy "_default" placeholder when no display name
-                # is set. It is internal bookkeeping (single-vehicle/manual
-                # paths) and would otherwise render as "_DEFAULT" in the
-                # mobile app alongside the real vehicle, which is added later
-                # via the tesla_vehicles / BYD discovery paths.
-                if (
-                    vehicle_id == DEFAULT_VEHICLE_ID
-                    and not (params.get("vehicle_name") or state.get("vehicle_name"))
-                ):
-                    continue
-
-                current_amps = state.get("current_amps", 0)
-                voltage = params.get("voltage", 240)
-                phases = params.get("phases", 1)
-                commanded_power_kw = (current_amps * voltage * phases) / 1000
-
-                observed_power_kw = None
-                observed_connected = False
-                observed_charging = False
-                if matched_vehicle is not None:
-                    try:
-                        observed_power_kw = float(matched_vehicle.get("ev_power_kw") or 0)
-                    except (TypeError, ValueError):
-                        observed_power_kw = 0.0
-                    observed_charging = (
-                        bool(matched_vehicle.get("is_charging"))
-                        or observed_power_kw > 0.05
-                    )
-                    observed_connected = (
-                        bool(matched_vehicle.get("is_connected"))
-                        or observed_charging
-                    )
-
-                # Cross-check with actual per-vehicle telemetry for Tesla systems.
-                # Commanded amps can be non-zero when car isn't plugged in
-                if matched_vehicle is not None:
-                    current_power_kw = observed_power_kw or 0.0
-                    actually_charging = observed_charging
-                elif is_tesla_vehicle and actual_ev_power_kw is not None:
-                    # With multiple Teslas, global Wall Connector power cannot
-                    # safely identify which active session owns the connected car.
-                    if len(tesla_vehicles) <= 1 and actual_ev_power_kw > 0.05:
-                        current_power_kw = actual_ev_power_kw
-                        actually_charging = True
-                    else:
-                        current_power_kw = 0.0
-                        actually_charging = False
-                else:
-                    # Non-Tesla: trust commanded amps (no WC API available)
-                    current_power_kw = commanded_power_kw
-                    actually_charging = current_amps > 0
-
-                # Determine charging source
-                if current_amps == 0 or not actually_charging:
-                    source = "idle"
-                elif state.get("allocated_surplus_kw", 0) >= current_power_kw * 0.8:
-                    source = "solar"
-                else:
-                    source = "grid"
-
-                # Get vehicle SoC from BLE/Fleet sensors
-                current_soc = 0
-                target_soc = params.get("target_soc", 80)
-                if matched_vehicle is not None and matched_vehicle.get("ev_soc") is not None:
-                    current_soc = matched_vehicle.get("ev_soc") or 0
-                else:
-                    try:
-                        ev_status = _get_ev_vehicle_status(self._hass, self._config_entry)
-                        current_soc = ev_status.get("ev_soc") or 0
-                    except Exception:
-                        pass
-
-                # Estimate ETA (rough calculation)
-                effective_capacity_kwh = params.get(
-                    "effective_battery_capacity_kwh",
-                    params.get("battery_capacity_kwh", 60),
-                )
-                capacity_source = params.get(
-                    "battery_capacity_source", "default_estimate"
-                )
-                manual_capacity_kwh = params.get("battery_capacity_kwh")
-                if auto_executor:
-                    matched_settings_id = next(
-                        (
-                            settings_id for settings_id in auto_executor._settings
-                            if _vehicle_config_matches(settings_id, vehicle_id)
-                        ),
-                        None,
-                    )
-                    if matched_settings_id is not None:
-                        resolved_capacity = auto_executor.resolve_vehicle_capacity(
-                            matched_settings_id,
-                            auto_executor._settings[matched_settings_id],
-                        )
-                        effective_capacity_kwh = (
-                            resolved_capacity.effective_battery_capacity_kwh
-                        )
-                        capacity_source = resolved_capacity.battery_capacity_source
-                        manual_capacity_kwh = resolved_capacity.battery_capacity_kwh
-                eta_minutes = None
-                if current_power_kw > 0 and target_soc > current_soc:
-                    energy_needed_kwh = (
-                        (target_soc - current_soc)
-                        / 100
-                        * effective_capacity_kwh
-                        / 0.9
-                    )
-                    eta_minutes = int(energy_needed_kwh / current_power_kw * 60)
-
-                # Determine connected status. For Tesla, only use the matched
-                # vehicle's own sensors; global WC/charge-cable signals can
-                # belong to another car on the account.
-                if matched_vehicle is not None:
-                    is_connected = observed_connected
-                else:
-                    is_connected = actually_charging
-
-                allow_global_connection_fallback = (
-                    not is_tesla_vehicle or len(tesla_vehicles) <= 1
-                )
-                if not is_connected and allow_global_connection_fallback:
-                    # Check Tesla WC state from coordinator (state 4 = connected)
-                    if tesla_coordinator and tesla_coordinator.data:
-                        wc_data = tesla_coordinator.data.get("wall_connectors_raw")
-                        if isinstance(wc_data, list):
-                            for wc in wc_data:
-                                if wc.get("wall_connector_state") in (2, 4, 6, 7, 11):
-                                    is_connected = True
-                                    break
-                if not is_connected and allow_global_connection_fallback:
-                    # Check charge_cable / charge_flap binary sensors
-                    for pattern in ("charge_cable", "charge_flap"):
-                        for state_obj in self._hass.states.async_all("binary_sensor"):
-                            if pattern in state_obj.entity_id and state_obj.state == "on":
-                                is_connected = True
-                                break
-                        if is_connected:
-                            break
-                if not is_connected and allow_global_connection_fallback:
-                    # Check HA wall_connector vehicle sensors
-                    for wc_state in self._hass.states.async_all("sensor"):
-                        wc_eid = wc_state.entity_id.lower()
-                        if "wall_connector" in wc_eid and "vehicle" in wc_eid and "power" not in wc_eid:
-                            if wc_state.state.lower() not in ("disconnected", "unknown", "unavailable", ""):
-                                is_connected = True
-                                break
-
-                widget_data.append({
-                    "vehicle_name": vehicle_name,
-                    "is_charging": actually_charging,
-                    "is_connected": is_connected,
-                    "current_soc": current_soc,
-                    "target_soc": target_soc,
-                    "current_power_kw": round(current_power_kw, 2),
-                    "source": source,
-                    "eta_minutes": eta_minutes,
-                    "battery_capacity_kwh": manual_capacity_kwh,
-                    "effective_battery_capacity_kwh": effective_capacity_kwh,
-                    "battery_capacity_source": capacity_source,
-                    "surplus_kw": round(surplus_kw, 2),
-                })
-
-            # Always check external chargers (Zaptec, OCPP) regardless of dynamic EV state
-            # This ensures standalone chargers appear even when idle vehicles exist
-            zaptec_cached = entry_data.get("zaptec_cached_state")
-            if zaptec_cached:
-                zaptec_mode = zaptec_cached.get("charger_operation_mode", "")
-                zaptec_connected = zaptec_mode in ("charging", "connected_waiting", "connected_finishing")
-                power_w = zaptec_cached.get("total_charge_power_w", 0)
-                power_kw = power_w / 1000
-                zaptec_charging = power_kw > 0.05 or zaptec_mode == "charging"
-                if zaptec_connected or zaptec_charging:
-                    if power_kw > 0.05:
-                        if surplus_kw >= power_kw * 0.8:
-                            zaptec_source = "solar"
-                        else:
-                            zaptec_source = "grid"
-                    else:
-                        zaptec_source = "idle"
-                    widget_data.append({
-                        "vehicle_name": "EV Charger",
-                        "is_charging": zaptec_charging,
-                        "is_connected": zaptec_connected,
-                        "current_soc": 0,
-                        "target_soc": 80,
-                        "current_power_kw": round(power_kw, 2),
-                        "source": zaptec_source,
-                        "eta_minutes": None,
-                        "surplus_kw": round(surplus_kw, 2),
-                    })
-
-            configured_sigenergy_state = _configured_sigenergy_charger_state(self._config_entry)
-            if configured_sigenergy_state:
-                from .sigenergy_charger import sigenergy_charger_state_to_widget
-
-                sigenergy_state = await _read_sigenergy_charger_state_for_entry(
-                    self._config_entry,
-                    self._hass,
-                )
-                widget_data.append(
-                    sigenergy_charger_state_to_widget(
-                        sigenergy_state or configured_sigenergy_state,
-                        surplus_kw=surplus_kw,
-                        capabilities=_configured_sigenergy_charger_capabilities(
-                            self._config_entry,
-                            self._hass,
-                        ),
-                    )
-                )
-
-            # Check OCPP chargers — built-in server
-            ocpp_server = entry_data.get("ocpp_server")
-            if ocpp_server:
-                try:
-                    for cp_id, cp in ocpp_server.charge_points.items():
-                        meter_w = getattr(cp, 'meter_power_w', 0) or 0
-                        power_kw = meter_w / 1000
-                        is_charging = power_kw > 0.05
-                        is_connected = is_charging or (hasattr(cp, 'active_transaction') and cp.active_transaction)
-                        if is_connected or is_charging:
-                            ocpp_source = "solar" if surplus_kw >= power_kw * 0.8 else "grid"
-                            widget_data.append({
-                                "vehicle_name": f"OCPP {cp_id[:8]}",
-                                "is_charging": is_charging,
-                                "is_connected": True,
-                                "current_soc": 0,
-                                "target_soc": 80,
-                                "current_power_kw": round(power_kw, 2),
-                                "source": ocpp_source if is_charging else "idle",
-                                "eta_minutes": None,
-                                "surplus_kw": round(surplus_kw, 2),
-                            })
-                except Exception as e:
-                    _LOGGER.debug(f"Error checking built-in OCPP server for widget: {e}")
-
-            # Check HACS OCPP integration entities
-            # Looks for sensor.*_status, sensor.*_current_power from the ocpp platform
-            try:
-                from homeassistant.helpers import entity_registry as er
-                from .automations.ocpp_status import (
-                    extract_hacs_ocpp_prefix,
-                    is_hacs_ocpp_power_entity,
-                    is_hacs_ocpp_status_entity,
-                    is_ocpp_charging,
-                    is_ocpp_vehicle_present,
-                    normalize_ocpp_status,
-                )
-                ent_reg = er.async_get(self._hass)
-                ocpp_chargers_found = {}
-                for entity in ent_reg.entities.values():
-                    if entity.platform != "ocpp":
-                        continue
-                    eid = entity.entity_id.lower()
-                    state = self._hass.states.get(entity.entity_id)
-                    if not state or state.state in ("unknown", "unavailable"):
-                        continue
-                    # Extract charger prefix (e.g. "my_charger" from
-                    # "sensor.my_charger_status_connector").
-                    prefix = extract_hacs_ocpp_prefix(eid)
-                    if not prefix:
-                        continue
-                    if prefix not in ocpp_chargers_found:
-                        ocpp_chargers_found[prefix] = {"name": prefix, "status": None, "power_kw": 0, "connected": False, "charging": False}
-                    charger = ocpp_chargers_found[prefix]
-                    if is_hacs_ocpp_status_entity(eid):
-                        if eid.endswith("_status_connector") or charger["status"] is None:
-                            charger["status"] = normalize_ocpp_status(state.state)
-                            charger["connected"] = is_ocpp_vehicle_present(state.state)
-                            charger["charging"] = is_ocpp_charging(state.state)
-                    elif is_hacs_ocpp_power_entity(eid):
-                        try:
-                            pwr = float(state.state)
-                            charger["power_kw"] = pwr / 1000 if pwr > 100 else pwr  # W or kW
-                            power_w = pwr if pwr > 100 else pwr * 1000
-                            charger["charging"] = charger["charging"] or power_w > 50
-                            charger["connected"] = charger["connected"] or power_w > 50
-                        except (ValueError, TypeError):
-                            pass
-
-                for prefix, charger in ocpp_chargers_found.items():
-                    # Skip if already added from built-in OCPP server
-                    if any(prefix in (w.get("vehicle_name", "").lower()) for w in widget_data):
-                        continue
-                    if charger["connected"] or charger["charging"]:
-                        ocpp_source = "solar" if surplus_kw >= charger["power_kw"] * 0.8 else "grid"
-                        widget_data.append({
-                            "vehicle_name": f"OCPP {charger['name'][:12]}",
-                            "is_charging": charger["charging"],
-                            "is_connected": charger["connected"],
-                            "current_soc": 0,
-                            "target_soc": 80,
-                            "current_power_kw": round(charger["power_kw"], 2),
-                            "source": ocpp_source if charger["charging"] else "idle",
-                            "eta_minutes": None,
-                            "surplus_kw": round(surplus_kw, 2),
-                        })
-                        _LOGGER.debug("EV widget: HACS OCPP charger %s (status=%s, power=%.1fkW)", prefix, charger["status"], charger["power_kw"])
-            except Exception as e:
-                _LOGGER.debug(f"Error checking HACS OCPP integration for widget: {e}")
-
-            # Check Tesla EV vehicles — per-vehicle data (power, SOC, connected status)
-            # Supplement connected status from BLE/Fleet presence sensors
-            # (same detection as HA dashboard strategy: charge_flap, charge_cable)
-            # The device-based scan may miss BLE entities if they're on a different device
-            for tv in tesla_vehicles:
-                if tv["is_connected"]:
-                    continue
-                # Search for presence sensors matching this vehicle's name
-                vname = (tv.get("vehicle_name") or "").lower().replace(" ", "_")
-                if not vname:
-                    continue
-                for eid_suffix in ["_charge_flap", "_charge_cable", "_charging_state"]:
-                    for prefix in [vname, vname.replace("-", "_")]:
-                        sensor_domain = "binary_sensor" if eid_suffix in ("_charge_flap", "_charge_cable") else "sensor"
-                        eid = f"{sensor_domain}.{prefix}{eid_suffix}"
-                        state = self._hass.states.get(eid)
-                        if state and state.state not in ("unknown", "unavailable"):
-                            if sensor_domain == "binary_sensor" and state.state == "on":
-                                tv["is_connected"] = True
-                                _LOGGER.debug("EV widget: %s connected via %s", tv["vehicle_name"], eid)
-                                break
-                            elif sensor_domain == "sensor" and state.state.lower() in ("charging", "connected", "stopped", "complete"):
-                                tv["is_connected"] = True
-                                _LOGGER.debug("EV widget: %s connected via %s=%s", tv["vehicle_name"], eid, state.state)
-                                break
-                    if tv["is_connected"]:
-                        break
-
-            # Check Teslemetry/Fleet API sensors (binary_sensor.*_charge_cable, sensor.*_charging)
-            for state in self._hass.states.async_all():
-                eid = state.entity_id.lower()
-                if state.state in ("unknown", "unavailable"):
-                    continue
-                # charge_cable (Teslemetry/Fleet) — "on" = plugged in
-                if eid.startswith("binary_sensor.") and eid.endswith("_charge_cable") and "power_sync" not in eid:
-                    if state.state == "on":
-                        # Extract vehicle name from entity: binary_sensor.primary_ev_charge_cable → primary_ev
-                        vname = eid.replace("binary_sensor.", "").replace("_charge_cable", "")
-                        matched = False
-                        for tv in tesla_vehicles:
-                            tv_name = (tv.get("vehicle_name") or "").lower().replace(" ", "_")
-                            if tv_name == vname or vname in tv_name or tv_name in vname:
-                                if not tv["is_connected"]:
-                                    tv["is_connected"] = True
-                                    _LOGGER.debug("EV widget: %s connected via Teslemetry %s", tv["vehicle_name"], eid)
-                                matched = True
-                                break
-                        if not matched:
-                            # Check for SOC
-                            soc_eid = f"sensor.{vname}_battery_level"
-                            soc_state = self._hass.states.get(soc_eid)
-                            soc = None
-                            if soc_state and soc_state.state not in ("unknown", "unavailable"):
-                                try:
-                                    soc = int(float(soc_state.state))
-                                except (ValueError, TypeError):
-                                    pass
-                            tesla_vehicles.append({
-                                "vehicle_name": vname.replace("_", " ").title(),
-                                "ev_power_kw": 0,
-                                "ev_soc": soc,
-                                "is_connected": True,
-                                "is_charging": False,
-                            })
-                            _LOGGER.debug("EV widget: added Teslemetry vehicle %s via %s", vname, eid)
-
-            # Also check BLE prefix entities (teslable_charge_flap etc)
-            ble_prefix = self._config_entry.options.get("ble_prefix", self._config_entry.data.get("ble_prefix", ""))
-            if ble_prefix:
-                for prefix in ble_prefix.split(","):
-                    prefix = prefix.strip()
-                    if not prefix:
-                        continue
-                    flap = self._hass.states.get(f"binary_sensor.{prefix}_charge_flap")
-                    if flap and flap.state == "on":
-                        # Find matching vehicle or add as new
-                        matched = False
-                        for tv in tesla_vehicles:
-                            if not tv["is_connected"]:
-                                tv["is_connected"] = True
-                                _LOGGER.debug("EV widget: %s connected via BLE %s_charge_flap", tv["vehicle_name"], prefix)
-                                matched = True
-                                break
-                        if not matched and not any(tv["is_connected"] for tv in tesla_vehicles):
-                            # BLE shows connected but no matching vehicle — add one
-                            soc_state = self._hass.states.get(f"sensor.{prefix}_charge_level")
-                            soc = None
-                            if soc_state and soc_state.state not in ("unknown", "unavailable"):
-                                try:
-                                    soc = int(float(soc_state.state))
-                                except (ValueError, TypeError):
-                                    pass
-                            tesla_vehicles.append({
-                                "vehicle_name": prefix.replace("_", " ").title(),
-                                "ev_power_kw": 0,
-                                "ev_soc": soc,
-                                "is_connected": True,
-                                "is_charging": False,
-                            })
-                            _LOGGER.debug("EV widget: added BLE vehicle %s (connected, not charging)", prefix)
-
-            _LOGGER.debug("EV widget: found %d vehicles: %s", len(tesla_vehicles), [{k: v for k, v in tv.items() if k != 'ev_power_kw'} for tv in tesla_vehicles])
-
-            # Supplement from Wall Connector data (Tesla live_status)
-            # WC state 4 = connected/ready, state 2 = charging
-            if tesla_coordinator and tesla_coordinator.data:
-                wc_data = (
-                    tesla_coordinator.data.get("wall_connectors_raw")
-                    or tesla_coordinator.data.get("wall_connectors")
-                )
-                for wc in _wall_connector_records(wc_data):
-                    wc_state = wc.get("wall_connector_state", 0)
-                    wc_pwr = _kw_from_wall_connector_power(
-                        wc.get("wall_connector_power", wc.get("power"))
-                    )
-                    wc_vin = wc.get("vin") or wc.get("vehicle_vin")
-                    # State 2=charging, 4=connected/ready, 6=ready, 1=disconnected
-                    wc_connected = wc_state in (2, 4, 6, 7, 11) or wc_pwr > 0.05
-                    wc_charging = wc_pwr > 0.05 or wc_state == 2
-
-                    if wc_connected:
-                        matched = _apply_wall_connector_observation(
-                            tesla_vehicles,
-                            wc_pwr,
-                            wc_connected,
-                            wc_charging,
-                            wc_vin,
-                        )
-                        if matched:
-                            _LOGGER.debug(
-                                "EV widget: Wall Connector matched vehicle (state=%d, power=%.1fkW, vin=%s)",
-                                wc_state,
-                                wc_pwr,
-                                "present" if wc_vin else "unknown",
-                            )
-                        elif not tesla_vehicles:
-                            tesla_vehicles.append({
-                                "vehicle_id": "wall_connector",
-                                "vehicle_name": "Tesla EV",
-                                "ev_power_kw": wc_pwr,
-                                "ev_soc": None,
-                                "is_connected": True,
-                                "is_charging": wc_charging,
-                            })
-
-                # Legacy fallback: ev_power sensor only
-                wc_power = _kw_from_wall_connector_power(
-                    tesla_coordinator.data.get("ev_power", 0)
-                )
-                if not tesla_vehicles and wc_power > 0.05:
-                    tesla_vehicles = [{
-                        "vehicle_id": "wall_connector",
-                        "vehicle_name": "Tesla EV",
-                        "ev_power_kw": wc_power,
-                        "ev_soc": None,
-                        "is_connected": True,
-                        "is_charging": True,
-                    }]
-
-            # Add all known Tesla vehicles to the widget — even idle ones.
-            # Skip vehicles already represented in widget_data (by name) to avoid duplicates.
-            existing_names = {(w.get("vehicle_name") or "").lower() for w in widget_data}
-            for tv in tesla_vehicles:
-                if (tv.get("vehicle_name") or "").lower() in existing_names:
-                    continue
-                tv_power_kw = tv["ev_power_kw"]
-                tv_soc = tv["ev_soc"]
-                if tv_power_kw > 0.05:
-                    if surplus_kw >= tv_power_kw * 0.8:
-                        tv_source = "solar"
-                    else:
-                        tv_source = "grid"
-                else:
-                    tv_source = "idle"
-                widget_data.append({
-                    "vehicle_name": tv["vehicle_name"],
-                    "is_charging": tv["is_charging"],
-                    "is_connected": tv["is_connected"],
-                    "current_soc": tv_soc if tv_soc is not None else 0,
-                    "target_soc": 80,
-                    "current_power_kw": round(tv_power_kw, 2),
-                    "source": tv_source,
-                    "eta_minutes": None,
-                    "surplus_kw": round(surplus_kw, 2),
-                })
-
-            # Check BYD vehicles
-            if BYD_INTEGRATION in self._hass.config_entries.async_domains():
-                byd_device_registry = dr.async_get(self._hass)
-                byd_entity_registry = er.async_get(self._hass)
-                for byd_device in byd_device_registry.devices.values():
-                    is_byd = any(i[0] == BYD_INTEGRATION for i in byd_device.identifiers)
-                    if not is_byd:
-                        continue
-                    byd_soc = 0
-                    byd_charging = False
-                    byd_connected = False
-                    for byd_entity in byd_entity_registry.entities.values():
-                        if byd_entity.device_id != byd_device.id:
-                            continue
-                        byd_state = self._hass.states.get(byd_entity.entity_id)
-                        if not byd_state or byd_state.state in ("unknown", "unavailable"):
-                            continue
-                        eid = byd_entity.entity_id.lower()
-                        if eid.startswith("sensor.") and "battery_level" in eid:
-                            try:
-                                byd_soc = int(float(byd_state.state))
-                            except (ValueError, TypeError):
-                                pass
-                        if eid.startswith("binary_sensor.") and "charging" in eid and "charger" not in eid:
-                            byd_charging = byd_state.state == "on"
-                        if eid.startswith("binary_sensor.") and "plugged_in" in eid:
-                            byd_connected = byd_state.state == "on"
-                    # If charging, must be connected
-                    if byd_charging:
-                        byd_connected = True
-                    if byd_connected or byd_charging:
-                        widget_data.append({
-                            "vehicle_name": byd_device.name or "BYD Vehicle",
-                            "is_charging": byd_charging,
-                            "is_connected": byd_connected,
-                            "current_soc": byd_soc,
-                            "target_soc": 100,
-                            "current_power_kw": 0,
-                            "source": "grid" if byd_charging else "idle",
-                            "eta_minutes": None,
-                            "surplus_kw": round(surplus_kw, 2),
-                        })
-
-            # Show all known vehicles regardless of connection state. Idle vehicles
-            # appear with current_power_kw=0 and source="idle". Only fall back to a
-            # placeholder if there are literally zero vehicles in the system.
-            from .automations.loadpoint_status import coalesce_ev_widget_data
-
-            active_widget_data = coalesce_ev_widget_data(widget_data)
-
-            if not active_widget_data:
-                active_widget_data.append({
+            snapshot = await _get_ev_display_coordinator(
+                self._hass,
+                self._config_entry,
+            ).async_refresh()
+            widgets = display_snapshot_to_widgets(snapshot)
+            if not widgets:
+                widgets = [{
                     "vehicle_name": "No Active Vehicle",
                     "is_charging": False,
                     "is_connected": False,
@@ -17982,21 +17418,18 @@ class EVWidgetDataView(HomeAssistantView):
                     "current_power_kw": 0,
                     "source": "idle",
                     "eta_minutes": None,
-                    "surplus_kw": round(surplus_kw, 2),
-                })
-
-            return web.json_response({
-                "success": True,
-                "widgets": active_widget_data,
-            })
-
-        except Exception as e:
-            _LOGGER.error(f"Error getting widget data: {e}", exc_info=True)
-            return web.json_response({
-                "success": False,
-                "error": str(e)
-            }, status=500)
-
+                    "surplus_kw": round(
+                        float((snapshot.get("site") or {}).get("surplus_kw") or 0),
+                        2,
+                    ),
+                }]
+            return web.json_response({"success": True, "widgets": widgets})
+        except Exception as err:
+            _LOGGER.error("Error getting canonical EV widget data: %s", err, exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(err)},
+                status=500,
+            )
 
 class EVLoadpointStatusView(HomeAssistantView):
     """API endpoint for normalized EV/loadpoint status.
@@ -18050,6 +17483,25 @@ class EVLoadpointStatusView(HomeAssistantView):
         }
 
     async def get(self, request):
+        """Return the locked canonical EV display snapshot."""
+        try:
+            snapshot = await _get_ev_display_coordinator(
+                self._hass,
+                self._config_entry,
+            ).async_refresh()
+            return web.json_response(snapshot)
+        except Exception as err:
+            _LOGGER.error(
+                "Error getting canonical EV loadpoint status: %s",
+                err,
+                exc_info=True,
+            )
+            return web.json_response(
+                {"success": False, "error": str(err)},
+                status=500,
+            )
+
+    async def _async_build_response(self, request, *, observed_vehicle_sink=None):
         """Get normalized EV loadpoint status."""
         try:
             from .automations.actions import _dynamic_ev_state, _calculate_solar_surplus
@@ -18273,6 +17725,9 @@ class EVLoadpointStatusView(HomeAssistantView):
             except Exception as err:
                 _LOGGER.debug("Error checking HACS OCPP integration for loadpoints: %s", err)
 
+            if observed_vehicle_sink is not None:
+                observed_vehicle_sink.extend(observed_vehicles)
+
             # Normalize first so bridge/alias observations are counted once,
             # then calculate site surplus with the actual aggregate EV draw.
             preliminary_loadpoints = build_loadpoint_status(
@@ -18353,7 +17808,7 @@ class EVLoadpointStatusView(HomeAssistantView):
             price_level = get_price_level_executor()
             scheduled = get_scheduled_charging_executor()
 
-            return web.json_response({
+            payload = {
                 "success": True,
                 "site": site,
                 "loadpoints": loadpoints,
@@ -18362,7 +17817,8 @@ class EVLoadpointStatusView(HomeAssistantView):
                     "price_level": price_level.get_state() if price_level else None,
                     "scheduled": scheduled.get_state() if scheduled else None,
                 },
-            })
+            }
+            return web.json_response(payload)
 
         except Exception as e:
             _LOGGER.error("Error getting EV loadpoint status: %s", e, exc_info=True)

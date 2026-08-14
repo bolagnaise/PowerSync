@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 import types
@@ -49,6 +50,7 @@ def _install_import_stubs() -> None:
     ha_core.HomeAssistant = type("HomeAssistant", (), {})
     ha_core.ServiceCall = type("ServiceCall", (), {})
     ha_core.SupportsResponse = SimpleNamespace(ONLY="only", OPTIONAL="optional", NONE="none")
+    ha_core.callback = lambda func: func
     ha_exceptions.ConfigEntryNotReady = type("ConfigEntryNotReady", (Exception,), {})
     ha_exceptions.HomeAssistantError = type("HomeAssistantError", (Exception,), {})
     ha_http.HomeAssistantView = type("HomeAssistantView", (), {})
@@ -135,6 +137,7 @@ def _install_import_stubs() -> None:
         "FoxESSEnergyCoordinator",
         "FoxESSEntityEnergyCoordinator",
         "CustomEntityEnergyCoordinator",
+        "DiscoveredEntityEnergyCoordinator",
         "FoxESSCloudEnergyCoordinator",
         "GoodWeEnergyCoordinator",
         "AlphaESSEnergyCoordinator",
@@ -689,7 +692,8 @@ def test_ev_vehicle_status_uses_wall_connector_power_without_vehicle_sensors():
     vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
 
     assert vehicles == [{
-        "vehicle_id": "wall_connector",
+        "vehicle_id": "wall_connector_ha",
+        "charger_id": "wall_connector_ha",
         "vehicle_name": "Wall Connector",
         "ev_power_kw": 3.4,
         "ev_soc": None,
@@ -856,3 +860,51 @@ def test_aggregate_ev_status_prefers_configured_generic_soc_over_vehicle_fallbac
     status = power_sync._get_ev_vehicle_status(hass, entry)
 
     assert status == {"ev_power_kw": 0.0, "ev_soc": 64}
+
+
+def test_app_managed_sequential_tesla_id_deduplicates_with_vehicle_vin(monkeypatch):
+    power_sync = _power_sync_module()
+    planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+
+    async def no_sigenergy_state(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        power_sync,
+        "_read_sigenergy_charger_state_for_entry",
+        no_sigenergy_state,
+    )
+    vin = "5YJTEST0000000001"
+    settings = SimpleNamespace(
+        vehicle_id="1",
+        charger_type="tesla",
+        charger_power_entity="sensor.sequential_tesla_power",
+    )
+    executor = SimpleNamespace(
+        _settings={"1": settings},
+        _resolve_vehicle_vin=lambda vehicle_id: vin if vehicle_id == "1" else None,
+    )
+    monkeypatch.setattr(planner, "get_auto_schedule_executor", lambda: executor)
+    hass = _Hass([
+        _State(
+            "sensor.sequential_tesla_power",
+            "7.2",
+            {"unit_of_measurement": "kW"},
+        )
+    ])
+    vehicles = [{
+        "vehicle_id": vin,
+        "vehicle_name": "W3RT1E",
+        "ev_power_kw": 7.2,
+        "is_charging": True,
+    }]
+
+    observations = asyncio.run(
+        power_sync._get_ev_load_observations(hass, _Entry(), vehicles)
+    )
+    ev_load = importlib.import_module("power_sync.ev_load")
+    snapshot = ev_load.aggregate_ev_load(observations)
+
+    assert snapshot.power_kw == 7.2
+    assert len(snapshot.components) == 1
+    assert snapshot.components[0].physical_load_key == f"vehicle:{vin.lower()}"

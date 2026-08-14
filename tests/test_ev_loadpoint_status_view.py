@@ -16,9 +16,12 @@ def _get_method() -> ast.AsyncFunctionDef:
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == "EVLoadpointStatusView":
             for child in node.body:
-                if isinstance(child, ast.AsyncFunctionDef) and child.name == "get":
+                if (
+                    isinstance(child, ast.AsyncFunctionDef)
+                    and child.name == "_async_build_response"
+                ):
                     return child
-    raise AssertionError("EVLoadpointStatusView.get not found")
+    raise AssertionError("EVLoadpointStatusView._async_build_response not found")
 
 
 def _get_site_snapshot_method() -> ast.FunctionDef:
