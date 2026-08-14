@@ -3671,11 +3671,22 @@ def test_auto_schedule_stop_uses_targeted_smart_schedule_owner_guard(monkeypatch
     monkeypatch.setattr(ev_planner, "_stop_coordinated_charging", guarded_stop)
     monkeypatch.setattr(executor, "_restore_curtailment", restore)
 
-    assert asyncio.run(executor._stop_charging(VIN, settings, state)) is True
+    assert asyncio.run(
+        executor._stop_charging(
+            VIN,
+            settings,
+            state,
+            reason="Surplus 1.9kW < min 3.5kW",
+        )
+    ) is True
     guarded_stop.assert_awaited_once()
     assert guarded_stop.await_args.kwargs["expected_owner_mode"] == "smart_schedule"
     assert guarded_stop.await_args.kwargs["vehicle_vin"] == VIN
     assert guarded_stop.await_args.kwargs["stop_untracked"] is False
+    assert (
+        guarded_stop.await_args.kwargs["reason"]
+        == "Surplus 1.9kW < min 3.5kW"
+    )
     assert state.is_charging is False
     restore.assert_awaited_once_with(state)
 

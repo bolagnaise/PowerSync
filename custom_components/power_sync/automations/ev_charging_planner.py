@@ -15,7 +15,7 @@ import statistics
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, time as dt_time, timezone
-from typing import Optional, List, Dict, Any, Tuple, Iterator, Mapping
+from typing import Optional, List, Dict, Any, Tuple, Iterator, Mapping, Sequence
 from enum import Enum
 
 import aiohttp
@@ -41,6 +41,7 @@ from ..solar_surplus_config import (
     normalize_solar_surplus_config,
 )
 from ..tesla_ble_mapping import (
+    canonical_tesla_vehicle_id,
     coalesce_paired_vehicle_configs,
     configured_ble_prefixes,
     resolve_ble_prefixes,
@@ -4138,6 +4139,11 @@ class AutoScheduleExecutor:
 
         # Settings per vehicle (loaded from storage)
         self._settings: Dict[str, AutoScheduleSettings] = {}
+        # Fleet VINs discovered during settings load.  Runtime API/state
+        # calls use this same identity set so a paired BLE alias cannot create
+        # a second in-memory loadpoint.
+        self._fleet_vins: tuple[str, ...] = ()
+        self._resolved_ble_prefixes: tuple[str, ...] = ()
 
         # Runtime state per vehicle
         self._state: Dict[str, AutoScheduleState] = {}
@@ -4491,10 +4497,37 @@ class AutoScheduleExecutor:
             if not stored_data:
                 stored_data = {}
 
+            fleet_vins: list[str] = []
+            try:
+                discovered_vehicles = await discover_all_tesla_vehicles(
+                    self.hass,
+                    self.config_entry,
+                )
+                fleet_vins = list(dict.fromkeys(
+                    str(vehicle.get("vin") or "").strip()
+                    for vehicle in discovered_vehicles or []
+                    if str(vehicle.get("vin") or "").strip()
+                    and not str(vehicle.get("vin") or "").strip().startswith("ble_")
+                ))
+            except Exception as err:
+                _LOGGER.debug(
+                    "Auto-schedule Fleet VIN discovery unavailable during load: %s",
+                    err,
+                )
+            self._fleet_vins = tuple(fleet_vins)
+            resolved_prefixes = _configured_ble_prefixes(
+                self.config_entry,
+                None,
+                hass=self.hass,
+            )
+            self._resolved_ble_prefixes = tuple(resolved_prefixes)
+
             storage_changed = _normalize_stored_auto_schedule_ids(
                 self.hass,
                 self.config_entry,
                 stored_data,
+                fleet_vins=self._fleet_vins,
+                resolved_prefixes=resolved_prefixes,
             )
             auto_schedule_data = stored_data.get("auto_schedule_settings", {})
 
@@ -4573,6 +4606,8 @@ class AutoScheduleExecutor:
             getattr(self, "hass", None),
             getattr(self, "config_entry", None),
             vehicle_id,
+            getattr(self, "_fleet_vins", ()),
+            getattr(self, "_resolved_ble_prefixes", ()),
         )
         if vehicle_id not in self._settings:
             self._settings[vehicle_id] = AutoScheduleSettings(vehicle_id=vehicle_id)
@@ -4587,6 +4622,8 @@ class AutoScheduleExecutor:
             getattr(self, "hass", None),
             getattr(self, "config_entry", None),
             vehicle_id,
+            getattr(self, "_fleet_vins", ()),
+            getattr(self, "_resolved_ble_prefixes", ()),
         )
         settings = self.get_settings(vehicle_id)
 
@@ -4652,6 +4689,8 @@ class AutoScheduleExecutor:
             getattr(self, "hass", None),
             getattr(self, "config_entry", None),
             vehicle_id,
+            getattr(self, "_fleet_vins", ()),
+            getattr(self, "_resolved_ble_prefixes", ()),
         )
         if vehicle_id not in self._state:
             self._state[vehicle_id] = AutoScheduleState(vehicle_id=vehicle_id)
@@ -4697,6 +4736,13 @@ class AutoScheduleExecutor:
 
         Saves immediately to ensure persistence across restarts.
         """
+        vehicle_id = _canonical_auto_schedule_vehicle_id(
+            self.hass,
+            self.config_entry,
+            vehicle_id,
+            getattr(self, "_fleet_vins", ()),
+            getattr(self, "_resolved_ble_prefixes", ()),
+        )
         now = datetime.now()
 
         # Check if SOC actually changed to avoid unnecessary saves
@@ -4721,6 +4767,13 @@ class AutoScheduleExecutor:
 
     def _get_cached_soc(self, vehicle_id: str) -> Optional[int]:
         """Get cached SoC for a vehicle, or None if not cached or stale."""
+        vehicle_id = _canonical_auto_schedule_vehicle_id(
+            self.hass,
+            self.config_entry,
+            vehicle_id,
+            getattr(self, "_fleet_vins", ()),
+            getattr(self, "_resolved_ble_prefixes", ()),
+        )
         # Check state first (in-memory)
         if vehicle_id in self._state and self._state[vehicle_id].last_known_soc is not None:
             return self._state[vehicle_id].last_known_soc
@@ -5141,7 +5194,12 @@ class AutoScheduleExecutor:
                         await self._restore_curtailment(state)
                     # Also stop charging if still active
                     if state.is_charging:
-                        await self._stop_charging(vehicle_id, settings, state)
+                        await self._stop_charging(
+                            vehicle_id,
+                            settings,
+                            state,
+                            reason="Smart Schedule disabled",
+                        )
                 continue
 
             try:
@@ -5459,7 +5517,12 @@ class AutoScheduleExecutor:
         if ev_soc >= settings.target_soc:
             # Stop charging if still charging
             if state.is_charging:
-                await self._stop_charging(vehicle_id, settings, state)
+                await self._stop_charging(
+                    vehicle_id,
+                    settings,
+                    state,
+                    reason=f"EV reached target {settings.target_soc}%",
+                )
                 state.last_decision = "complete"
                 state.last_decision_reason = f"EV reached target {settings.target_soc}%"
                 self._sync_active_charging_preserve_intent(
@@ -5548,7 +5611,12 @@ class AutoScheduleExecutor:
                     reason = "Smart Optimization: no charging scheduled"
 
                 if state.is_charging:
-                    await self._stop_charging(vehicle_id, settings, state)
+                    await self._stop_charging(
+                        vehicle_id,
+                        settings,
+                        state,
+                        reason=reason,
+                    )
                     state.last_decision = "stopped"
                     state.last_decision_reason = reason
                     self._sync_active_charging_preserve_intent(
@@ -5638,7 +5706,12 @@ class AutoScheduleExecutor:
                     f"EV charging stopped (stop at floor enabled)"
                 )
                 if state.is_charging:
-                    await self._stop_charging(vehicle_id, settings, state)
+                    await self._stop_charging(
+                        vehicle_id,
+                        settings,
+                        state,
+                        reason=reason,
+                    )
                     state.last_decision = "stopped"
                 elif await self._stop_external_charging_if_needed(
                     vehicle_id,
@@ -5915,7 +5988,12 @@ class AutoScheduleExecutor:
             self._clear_start_failure(vehicle_id)
             if state.is_charging:
                 # Restore backup reserve when stopping - we'll set it again when next window starts
-                await self._stop_charging(vehicle_id, settings, state)
+                await self._stop_charging(
+                    vehicle_id,
+                    settings,
+                    state,
+                    reason=reason,
+                )
                 state.last_decision = "stopped"
             elif await self._stop_external_charging_if_needed(
                 vehicle_id,
@@ -7096,8 +7174,10 @@ class AutoScheduleExecutor:
         vehicle_id: str,
         settings: AutoScheduleSettings,
         state: AutoScheduleState,
+        *,
+        reason: Optional[str] = None,
     ) -> bool:
-        """Stop charging for the vehicle."""
+        """Stop charging for the vehicle and report the decision reason."""
         from ..const import DOMAIN
 
         opts = {**self.config_entry.data, **self.config_entry.options}
@@ -7127,7 +7207,7 @@ class AutoScheduleExecutor:
                 DOMAIN,
                 self.config_entry,
                 expected_owner_mode="smart_schedule",
-                reason="Auto-schedule window ended",
+                reason=reason or "Auto-schedule window ended",
                 vehicle_vin=loadpoint_id,
                 command="stop_smart_schedule",
                 stop_untracked=False,
@@ -7377,16 +7457,27 @@ def _canonical_auto_schedule_vehicle_id(
     hass: "HomeAssistant",
     config_entry: "ConfigEntry",
     vehicle_id: str | None,
+    fleet_vins: Sequence[str] = (),
+    resolved_prefixes: Sequence[str] | None = None,
 ) -> str:
-    """Map legacy default IDs onto the configured shared charger loadpoint."""
+    """Map a stored/runtime ID onto its physical auto-schedule loadpoint."""
     normalized = str(vehicle_id or "_default")
-    if normalized != "_default":
-        return normalized
 
     opts = {
         **getattr(config_entry, "data", {}),
         **getattr(config_entry, "options", {}),
     }
+    if normalized.startswith("ble_"):
+        return canonical_tesla_vehicle_id(
+            opts,
+            normalized,
+            fleet_vins,
+            resolved_prefixes,
+        )
+
+    if normalized != "_default":
+        return normalized
+
     charger_type = _configured_charger_type(opts)
     if charger_type == "generic":
         return "generic_ev"
@@ -7411,11 +7502,90 @@ def _normalize_stored_auto_schedule_ids(
     hass: "HomeAssistant",
     config_entry: "ConfigEntry",
     stored_data: dict[str, Any],
+    *,
+    fleet_vins: Sequence[str] = (),
+    resolved_prefixes: Sequence[str] | None = None,
 ) -> bool:
-    """Migrate legacy schedule IDs to the configured stable loadpoint IDs."""
+    """Migrate stored schedule IDs to one profile per physical loadpoint."""
     changed = False
     auto_schedule_data = dict(stored_data.get("auto_schedule_settings", {}) or {})
     cached_soc = dict(stored_data.get("cached_vehicle_soc", {}) or {})
+
+    opts = {
+        **getattr(config_entry, "data", {}),
+        **getattr(config_entry, "options", {}),
+    }
+    if resolved_prefixes is None:
+        resolved_prefixes = _configured_ble_prefixes(
+            config_entry,
+            None,
+            hass=hass,
+        )
+
+    # Auto Schedule storage historically used the BLE discovery ID as a
+    # separate profile from the Fleet VIN.  Coalesce those profiles before
+    # loading runtime settings/state.  The shared helper establishes all VIN
+    # profiles first, so a VIN profile wins regardless of persisted order.
+    coalesced_data = auto_schedule_data
+    if any(str(vehicle_id).startswith("ble_") for vehicle_id in auto_schedule_data):
+        stored_configs = [
+            {
+                **settings,
+                "vehicle_id": vehicle_id,
+            }
+            for vehicle_id, settings in auto_schedule_data.items()
+            if isinstance(settings, Mapping)
+        ]
+        coalesced_data = {}
+        # Establish VIN-backed and other non-BLE profiles first so their
+        # settings always win over a stale duplicate BLE profile.
+        for config in stored_configs:
+            vehicle_id = str(config.get("vehicle_id") or "")
+            if vehicle_id.startswith("ble_"):
+                continue
+            coalesced_data[vehicle_id] = {
+                **config,
+                "vehicle_id": vehicle_id,
+            }
+        # Then migrate an alias-only profile to the mapped physical VIN.
+        # Passing discovered VINs preserves safe single-vehicle inference
+        # without inventing an empty VIN profile that discards its settings.
+        for config in stored_configs:
+            vehicle_id = str(config.get("vehicle_id") or "")
+            if not vehicle_id.startswith("ble_"):
+                continue
+            canonical_id = canonical_tesla_vehicle_id(
+                opts,
+                vehicle_id,
+                fleet_vins,
+                resolved_prefixes,
+            )
+            coalesced_data.setdefault(
+                canonical_id,
+                {
+                    **config,
+                    "vehicle_id": canonical_id,
+                },
+            )
+    if coalesced_data != auto_schedule_data:
+        auto_schedule_data = coalesced_data
+        changed = True
+
+    # Cached SOC is keyed independently from settings.  Move an alias cache to
+    # its physical VIN, but never replace a cache already keyed by that VIN.
+    canonical_cached_soc: dict[str, Any] = {}
+    for vehicle_id, soc_data in cached_soc.items():
+        canonical_id = canonical_tesla_vehicle_id(
+            opts,
+            str(vehicle_id),
+            fleet_vins,
+            resolved_prefixes,
+        )
+        if canonical_id not in canonical_cached_soc or canonical_id == vehicle_id:
+            canonical_cached_soc[canonical_id] = soc_data
+    if canonical_cached_soc != cached_soc:
+        cached_soc = canonical_cached_soc
+        changed = True
 
     stable_ids = [
         vehicle_id
@@ -7443,6 +7613,8 @@ def _normalize_stored_auto_schedule_ids(
         hass,
         config_entry,
         "_default",
+        fleet_vins,
+        resolved_prefixes,
     )
     if canonical_id != "_default":
         if "_default" in auto_schedule_data:

@@ -752,6 +752,150 @@ def test_stable_vehicle_settings_remove_legacy_phantom_rows():
     assert set(stored_data["cached_vehicle_soc"]) == {"5YJTEST0000000001"}
 
 
+def test_paired_ble_auto_schedule_profile_is_coalesced_into_existing_vin():
+    vin = "5YJTEST0000000001"
+    entry = types.SimpleNamespace(
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "bridge_alpha",
+            "tesla_ble_vehicle_mapping": f"{vin}=bridge_alpha",
+        },
+    )
+    stored_data = {
+        "auto_schedule_settings": {
+            vin: {
+                "enabled": True,
+                "display_name": "Canonical Tesla",
+                "charger_type": "tesla",
+            },
+            "ble_bridge_alpha": {
+                "enabled": False,
+                "display_name": "Stale BLE alias",
+                "charger_type": "tesla",
+            },
+        },
+        "cached_vehicle_soc": {
+            vin: {"soc": 61},
+            "ble_bridge_alpha": {"soc": 42},
+        },
+    }
+
+    changed = ev_planner._normalize_stored_auto_schedule_ids(
+        None,
+        entry,
+        stored_data,
+        fleet_vins=[vin],
+        resolved_prefixes=["bridge_alpha"],
+    )
+
+    assert changed is True
+    assert stored_data["auto_schedule_settings"] == {
+        vin: {
+            "enabled": True,
+            "display_name": "Canonical Tesla",
+            "charger_type": "tesla",
+            "vehicle_id": vin,
+        }
+    }
+    assert stored_data["cached_vehicle_soc"] == {vin: {"soc": 61}}
+
+
+def test_paired_ble_only_auto_schedule_profile_migrates_to_vin():
+    vin = "5YJTEST0000000001"
+    entry = types.SimpleNamespace(
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "bridge_alpha",
+            "tesla_ble_vehicle_mapping": f"{vin}=bridge_alpha",
+        },
+    )
+    stored_data = {
+        "auto_schedule_settings": {
+            "ble_bridge_alpha": {
+                "enabled": True,
+                "display_name": "Tesla BLE",
+                "charger_type": "tesla",
+            },
+        },
+        "cached_vehicle_soc": {
+            "ble_bridge_alpha": {"soc": 57},
+        },
+    }
+
+    changed = ev_planner._normalize_stored_auto_schedule_ids(
+        None,
+        entry,
+        stored_data,
+        fleet_vins=[vin],
+        resolved_prefixes=["bridge_alpha"],
+    )
+
+    assert changed is True
+    assert stored_data["auto_schedule_settings"] == {
+        vin: {
+            "enabled": True,
+            "display_name": "Tesla BLE",
+            "charger_type": "tesla",
+            "vehicle_id": vin,
+        }
+    }
+    assert stored_data["cached_vehicle_soc"] == {vin: {"soc": 57}}
+
+
+def test_paired_ble_runtime_updates_use_canonical_vin():
+    vin = "5YJTEST0000000001"
+    entry = types.SimpleNamespace(
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "bridge_alpha",
+            "tesla_ble_vehicle_mapping": f"{vin}=bridge_alpha",
+        },
+    )
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = None
+    executor.config_entry = entry
+    executor._fleet_vins = (vin,)
+    executor._settings = {}
+    executor._state = {}
+
+    settings = executor.update_settings(
+        "ble_bridge_alpha",
+        {"enabled": True},
+    )
+
+    assert settings.vehicle_id == vin
+    assert set(executor._settings) == {vin}
+
+
+def test_autodiscovered_ble_runtime_updates_use_canonical_vin():
+    vin = "5YJTEST0000000001"
+    entry = types.SimpleNamespace(
+        data={},
+        options={
+            "ev_provider": "both",
+            "tesla_ble_entity_prefix": "tesla_ble",
+        },
+    )
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = None
+    executor.config_entry = entry
+    executor._fleet_vins = (vin,)
+    executor._resolved_ble_prefixes = ("garage_ble",)
+    executor._settings = {}
+    executor._state = {}
+
+    settings = executor.update_settings(
+        "ble_garage_ble",
+        {"enabled": True},
+    )
+
+    assert settings.vehicle_id == vin
+    assert set(executor._settings) == {vin}
+
+
 def test_missing_vehicle_id_updates_canonical_generic_settings():
     entry = types.SimpleNamespace(
         data={},
