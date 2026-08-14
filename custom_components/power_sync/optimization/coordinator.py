@@ -15752,10 +15752,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 current_power_w = ca.power_w
                 planned_current_action = current_action
                 planned_current_power_w = current_power_w
-                runtime_current_action = self._effective_runtime_action(
-                    planned_current_action,
-                    ca.timestamp,
-                )
                 force_state = self._get_active_force_state()
                 force_type = force_state.get("type") if force_state.get("active") else None
                 last_executed_action = getattr(self, "_last_executed_action", None)
@@ -15809,10 +15805,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if current_action in ("idle", "no_discharge", "self_consumption"):
                         current_power_w = actual_battery_power_w
                 else:
-                    effective_current_action = runtime_current_action or current_action
+                    # A schedule is only intent. If execution was skipped,
+                    # blocked, or failed before recording an acknowledgement,
+                    # keep the plan in planned_current_action and report the
+                    # last accepted hardware action (or the safe default).
+                    safe_default_action = (
+                        self._effective_runtime_action(default_action, ca.timestamp)
+                        or default_action
+                    )
+                    effective_current_action = (
+                        last_executed_action or safe_default_action
+                    )
                     current_action = effective_current_action
-                    if current_action in ("idle", "no_discharge", "self_consumption"):
-                        current_power_w = actual_battery_power_w
+                    current_power_w = actual_battery_power_w
 
             now = dt_util.now()
 

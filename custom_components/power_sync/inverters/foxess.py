@@ -1063,6 +1063,40 @@ class FoxESSController(InverterController):
 
         return False
 
+    async def _cleanup_failed_remote_force(
+        self,
+        label: str,
+        *,
+        restore_work_mode: bool,
+    ) -> bool:
+        """Clear an unconfirmed remote command and restore changed work mode."""
+        if restore_work_mode:
+            cleaned = await self.restore_normal()
+        else:
+            reg = self._register_map
+            cleaned = bool(
+                reg
+                and (
+                    not reg.remote_enable
+                    or await self._write_holding_register(reg.remote_enable, 0)
+                )
+            )
+            if cleaned:
+                # Pro/Smart force paths do not change work mode or min SOC.
+                # Once remote control is confirmed off, their snapshots are no
+                # longer needed and must not become stale restore targets.
+                self._original_work_mode = None
+                self._original_min_soc = None
+
+        if cleaned:
+            _LOGGER.info("FoxESS %s failure cleanup confirmed", label)
+        else:
+            _LOGGER.error(
+                "FoxESS %s cleanup failed; saved baseline retained for retry",
+                label,
+            )
+        return cleaned
+
     async def force_charge(
         self,
         duration_minutes: int = 60,
@@ -1094,12 +1128,37 @@ class FoxESSController(InverterController):
         # Changing mode causes post-timeout corruption (mode stays as
         # Backup instead of reverting). H1/H3/KH need the mode change.
         is_pro_smart = self._model_family in (FoxESSModelFamily.H3_PRO, FoxESSModelFamily.H3_SMART)
+        mode_transition_attempted = False
         if not is_pro_smart and reg.work_mode and reg.supports_work_mode_rw:
-            await self.set_work_mode(reg.work_mode_backup, _from_force=True)
+            mode_transition_attempted = True
+            if not await self.set_work_mode(reg.work_mode_backup, _from_force=True):
+                _LOGGER.error(
+                    "FoxESS force charge could not confirm Backup mode; restoring baseline"
+                )
+                await self._cleanup_failed_remote_force(
+                    "force charge mode transition",
+                    restore_work_mode=True,
+                )
+                return False
 
         timeout_seconds = max(duration_minutes * 60, min_timeout_seconds)
         power_val = -int(abs(power_w))
-        return await self._write_remote_control(reg, power_val, duration_minutes, timeout_seconds, "force charge")
+        confirmed = await self._write_remote_control(
+            reg,
+            power_val,
+            duration_minutes,
+            timeout_seconds,
+            "force charge",
+        )
+        if not confirmed:
+            _LOGGER.error(
+                "FoxESS force charge was not confirmed; clearing failed remote control"
+            )
+            await self._cleanup_failed_remote_force(
+                "force charge",
+                restore_work_mode=mode_transition_attempted,
+            )
+        return confirmed
 
     async def force_discharge(
         self,
@@ -1132,8 +1191,18 @@ class FoxESSController(InverterController):
         # Changing mode causes post-timeout corruption (mode stays as
         # Feed-in instead of reverting). H1/H3/KH need the mode change.
         is_pro_smart = self._model_family in (FoxESSModelFamily.H3_PRO, FoxESSModelFamily.H3_SMART)
+        mode_transition_attempted = False
         if not is_pro_smart and reg.work_mode and reg.supports_work_mode_rw:
-            await self.set_work_mode(reg.work_mode_feed_in, _from_force=True)
+            mode_transition_attempted = True
+            if not await self.set_work_mode(reg.work_mode_feed_in, _from_force=True):
+                _LOGGER.error(
+                    "FoxESS force discharge could not confirm Feed-in mode; restoring baseline"
+                )
+                await self._cleanup_failed_remote_force(
+                    "force discharge mode transition",
+                    restore_work_mode=True,
+                )
+                return False
 
         timeout_seconds = max(duration_minutes * 60, min_timeout_seconds)
         power_val = int(abs(power_w))
@@ -1141,10 +1210,19 @@ class FoxESSController(InverterController):
         # Inverter auto-reduces battery contribution when PV is active, so the
         # export figure is precise (e.g. GloBird bonus export tariff).
         # force_charge still uses AC mode — see _write_remote_control docstring.
-        return await self._write_remote_control(
+        confirmed = await self._write_remote_control(
             reg, power_val, duration_minutes, timeout_seconds, "force discharge",
             enable_val=REMOTE_CONTROL_GRID,
         )
+        if not confirmed:
+            _LOGGER.error(
+                "FoxESS force discharge was not confirmed; clearing failed remote control"
+            )
+            await self._cleanup_failed_remote_force(
+                "force discharge",
+                restore_work_mode=mode_transition_attempted,
+            )
+        return confirmed
 
     async def restore_normal(self) -> bool:
         """Restore normal operation (Self Use mode)."""

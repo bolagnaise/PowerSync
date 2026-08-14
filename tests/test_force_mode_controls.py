@@ -2379,6 +2379,28 @@ def test_foxess_optimizer_force_charge_propagates_unconfirmed_result():
     assert "FoxESS force charge hardware refresh was not confirmed" in foxess_branch
 
 
+def test_foxess_optimizer_force_discharge_propagates_unconfirmed_result():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_discharge"),
+    )
+
+    assert function_source is not None
+    foxess_branch = function_source.split(
+        'foxess_coord = entry_data.get("foxess_coordinator")',
+        1,
+    )[1].split(
+        'sig_coord = entry_data.get("sigenergy_coordinator")',
+        1,
+    )[0]
+    assert "discharge_result = await _guarded_force_discharge_write(" in foxess_branch
+    assert "if discharge_result is False:" in foxess_branch
+    assert "raise HomeAssistantError(" in foxess_branch
+    assert "FoxESS force discharge hardware refresh was not confirmed" in foxess_branch
+
+
 def test_tesla_reserve_only_supersession_cleans_force_tariff_without_clobbering_reserve():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

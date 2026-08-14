@@ -29738,13 +29738,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             foxess_coord = entry_data.get("foxess_coordinator")
             if foxess_coord:
                 min_timeout = duration * 60 if source == "optimizer" else 600
-                await _guarded_force_discharge_write(
+                discharge_result = await _guarded_force_discharge_write(
                     lambda guarded_w: foxess_coord.force_discharge(
                         duration,
                         power_w=guarded_w,
                         min_timeout_seconds=min_timeout,
                     )
                 )
+                if discharge_result is False:
+                    raise HomeAssistantError(
+                        "FoxESS force discharge hardware refresh was not confirmed"
+                    )
                 _LOGGER.debug(f"FoxESS force discharge hardware extended ({duration}min, {power_w}W)")
                 return
             sig_coord = entry_data.get("sigenergy_coordinator")

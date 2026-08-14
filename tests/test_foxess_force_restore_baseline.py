@@ -265,6 +265,179 @@ def test_h3_pro_smart_skips_work_mode_change_but_still_guards_baseline(foxess_mo
     assert controller._original_work_mode == reg.work_mode_self_use
 
 
+@pytest.mark.parametrize(
+    ("method_name", "temporary_mode"),
+    [
+        ("force_charge", "work_mode_backup"),
+        ("force_discharge", "work_mode_feed_in"),
+    ],
+)
+def test_failed_remote_force_restores_mode_transition(
+    foxess_module,
+    method_name,
+    temporary_mode,
+):
+    """A rejected remote-power write must not strand H3 in a force work mode."""
+    reg = foxess_module.REGISTER_MAPS[foxess_module.FoxESSModelFamily.H3]
+    holding = {
+        reg.work_mode: reg.work_mode_self_use,
+        reg.min_soc: 20,
+    }
+    controller = _make_controller(foxess_module, holding)
+    transition_writes: list[int] = []
+
+    async def reject_remote_force(*args, **kwargs):
+        transition_writes.append(holding[reg.work_mode])
+        return False
+
+    controller._write_remote_control = reject_remote_force
+
+    result = asyncio.run(
+        getattr(controller, method_name)(
+            duration_minutes=5,
+            power_w=3000,
+            min_timeout_seconds=60,
+        )
+    )
+
+    assert result is False
+    assert transition_writes == [getattr(reg, temporary_mode)]
+    assert holding[reg.work_mode] == reg.work_mode_self_use
+    assert controller._original_work_mode is None
+    assert controller._original_min_soc is None
+
+
+@pytest.mark.parametrize("method_name", ["force_charge", "force_discharge"])
+def test_failed_remote_force_retains_baseline_when_cleanup_fails(
+    foxess_module,
+    method_name,
+):
+    """A failed cleanup remains retryable instead of discarding the saved mode."""
+    reg = foxess_module.REGISTER_MAPS[foxess_module.FoxESSModelFamily.H3]
+    holding = {
+        reg.work_mode: reg.work_mode_self_use,
+        reg.min_soc: 20,
+    }
+    controller = _make_controller(foxess_module, holding)
+
+    async def reject_remote_force(*args, **kwargs):
+        return False
+
+    async def fail_self_use_restore(address: int, value: int):
+        if address == reg.work_mode and value == reg.work_mode_self_use:
+            return False
+        holding[address] = value
+        return True
+
+    controller._write_remote_control = reject_remote_force
+    controller._write_holding_register = fail_self_use_restore
+
+    assert asyncio.run(
+        getattr(controller, method_name)(
+            duration_minutes=5,
+            power_w=3000,
+            min_timeout_seconds=60,
+        )
+    ) is False
+    expected_temporary_mode = (
+        reg.work_mode_backup
+        if method_name == "force_charge"
+        else reg.work_mode_feed_in
+    )
+    assert holding[reg.work_mode] == expected_temporary_mode
+    assert controller._original_work_mode == reg.work_mode_self_use
+    assert controller._original_min_soc == 20
+
+
+@pytest.mark.parametrize("model_family", ["H3-Pro", "H3-Smart"])
+def test_failed_pro_smart_remote_force_clears_remote_without_mode_restore(
+    foxess_module,
+    model_family,
+):
+    """Pro/Smart failures clear remote control without touching work mode."""
+    family = {
+        "H3-Pro": foxess_module.FoxESSModelFamily.H3_PRO,
+        "H3-Smart": foxess_module.FoxESSModelFamily.H3_SMART,
+    }[model_family]
+    reg = foxess_module.REGISTER_MAPS[family]
+    holding = {
+        reg.work_mode: reg.work_mode_self_use,
+        reg.min_soc: 30,
+        reg.remote_enable: foxess_module.REMOTE_CONTROL_GRID,
+    }
+    controller = _make_controller(foxess_module, holding, model_family=model_family)
+    mode_writes: list[int] = []
+
+    async def reject_remote_force(*args, **kwargs):
+        return False
+
+    async def record_write(address: int, value: int):
+        if address == reg.work_mode:
+            mode_writes.append(value)
+        holding[address] = value
+        return True
+
+    controller._write_remote_control = reject_remote_force
+    controller._write_holding_register = record_write
+
+    assert asyncio.run(
+        controller.force_discharge(
+            duration_minutes=5,
+            power_w=3000,
+            min_timeout_seconds=60,
+        )
+    ) is False
+    assert mode_writes == []
+    assert holding[reg.work_mode] == reg.work_mode_self_use
+    assert holding[reg.remote_enable] == 0
+    assert controller._original_work_mode is None
+    assert controller._original_min_soc is None
+
+
+@pytest.mark.parametrize("model_family", ["H3-Pro", "H3-Smart"])
+@pytest.mark.parametrize("method_name", ["force_charge", "force_discharge"])
+def test_failed_pro_smart_remote_clear_retains_baseline_for_retry(
+    foxess_module,
+    model_family,
+    method_name,
+):
+    """A Pro/Smart remote-clear failure keeps snapshots for later cleanup."""
+    family = {
+        "H3-Pro": foxess_module.FoxESSModelFamily.H3_PRO,
+        "H3-Smart": foxess_module.FoxESSModelFamily.H3_SMART,
+    }[model_family]
+    reg = foxess_module.REGISTER_MAPS[family]
+    holding = {
+        reg.work_mode: reg.work_mode_self_use,
+        reg.min_soc: 30,
+        reg.remote_enable: foxess_module.REMOTE_CONTROL_GRID,
+    }
+    controller = _make_controller(foxess_module, holding, model_family=model_family)
+
+    async def reject_remote_force(*args, **kwargs):
+        return False
+
+    async def reject_remote_clear(address: int, value: int):
+        if address == reg.remote_enable and value == 0:
+            return False
+        holding[address] = value
+        return True
+
+    controller._write_remote_control = reject_remote_force
+    controller._write_holding_register = reject_remote_clear
+
+    assert asyncio.run(
+        getattr(controller, method_name)(
+            duration_minutes=5,
+            power_w=3000,
+            min_timeout_seconds=60,
+        )
+    ) is False
+    assert holding[reg.remote_enable] == foxess_module.REMOTE_CONTROL_GRID
+    assert controller._original_work_mode == reg.work_mode_self_use
+    assert controller._original_min_soc == 30
+
+
 @pytest.mark.parametrize("model_family", ["H3", "H3-Smart"])
 def test_set_work_mode_fails_when_remote_control_clear_fails(foxess_module, model_family):
     """A failed remote-control clear must prevent a mode-change success."""

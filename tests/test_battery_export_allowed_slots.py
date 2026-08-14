@@ -5074,6 +5074,94 @@ def test_api_external_self_consumption_overrides_planned_charge_status(
     assert data["actual_battery_power_w"] == -838
 
 
+@pytest.mark.parametrize("planned_action", ["charge", "export"])
+@pytest.mark.parametrize(
+    (
+        "last_executed_action",
+        "last_executed_planned_action",
+        "in_demand_window",
+        "expected_action",
+    ),
+    [
+        (None, None, False, "idle"),
+        (None, None, True, "self_consumption"),
+        ("self_consumption", "self_consumption", False, "self_consumption"),
+    ],
+)
+def test_api_unacknowledged_force_plan_is_not_effective_hardware_status(
+    opt_module,
+    planned_action,
+    last_executed_action,
+    last_executed_planned_action,
+    in_demand_window,
+    expected_action,
+):
+    coordinator = _coordinator(opt_module, "flow_power")
+    now = datetime(2026, 8, 14, 17, 30, tzinfo=timezone.utc)
+    actions = [
+        _api_action(now, planned_action, 5000, 0.80),
+        _api_action(now + timedelta(minutes=5), "self_consumption", 0, 0.78),
+    ]
+    coordinator._current_schedule = SimpleNamespace(
+        actions=actions,
+        to_api_response=lambda: {
+            "timestamps": [action.timestamp.isoformat() for action in actions],
+            "soc": [action.soc for action in actions],
+            "actions": [action.action for action in actions],
+        },
+    )
+    coordinator._optimizer = object()
+    coordinator._enabled = True
+    coordinator._cost_function = opt_module.CostFunction("cost")
+    coordinator._last_update_time = now
+    coordinator._last_optimizer_result = None
+    coordinator._last_executed_action = last_executed_action
+    coordinator._last_executed_planned_action = last_executed_planned_action
+    coordinator._optimizer_force_state = {"active": False, "type": None}
+    coordinator._force_state_getter = None
+    coordinator._startup_backup_reserve = 20
+    coordinator._battery_specs_source = "config"
+    coordinator._planned_ev_load_entity_id = None
+    coordinator._ev_integration_enabled = False
+    coordinator._ev_configs = []
+    coordinator._ev_coordinator = None
+    coordinator._last_planned_ev_load_forecast_w = []
+    coordinator._last_import_prices = None
+    coordinator._last_export_prices = None
+    coordinator._last_display_import_prices = None
+    coordinator._last_display_export_prices = None
+    coordinator._actual_cost_today = 0.0
+    coordinator._actual_baseline_today = 0.0
+    coordinator._actual_import_cost_today = 0.0
+    coordinator._actual_export_earnings_today = 0.0
+    coordinator._actual_import_kwh_today = 0.0
+    coordinator._actual_export_kwh_today = 0.0
+    coordinator._actual_charge_kwh_today = 0.0
+    coordinator._actual_discharge_kwh_today = 0.0
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator.entry_id = "entry-1"
+    coordinator._get_actual_battery_power_w = lambda: 630
+    coordinator._get_current_action = lambda: actions[0]
+    coordinator._get_daily_cost = lambda: 0.0
+    coordinator._get_daily_savings = lambda: 0.0
+    coordinator._get_predicted_cost_to_midnight = lambda: (0.0, 0.0)
+    coordinator._get_warnings = lambda: []
+    coordinator._summarise_load_forecast = lambda: None
+    coordinator._zerohero_cost_breakdown = lambda: {}
+    coordinator._should_spread_export_schedule = lambda: False
+    coordinator._should_spread_import_schedule = lambda: False
+    coordinator._get_demand_window_config = lambda: None
+    coordinator._is_in_demand_window_at = lambda timestamp: in_demand_window
+
+    data = coordinator.get_api_data()
+
+    assert data["planned_current_action"] == planned_action
+    assert data["planned_current_power_w"] == 5000
+    assert data["effective_current_action"] == expected_action
+    assert data["current_action"] == expected_action
+    assert data["current_power_w"] == 630
+
+
 def test_api_current_action_uses_held_optimizer_force_when_plan_changes(opt_module):
     coordinator = _coordinator(opt_module, "flow_power")
     now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
