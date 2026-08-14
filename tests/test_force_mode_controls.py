@@ -6,9 +6,12 @@ import ast
 import asyncio
 import copy
 import textwrap
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1000,7 +1003,8 @@ def test_tesla_backup_reserve_service_exposes_truthful_optional_result():
         "        handle_set_backup_reserve,\n"
         "        supports_response=SupportsResponse.OPTIONAL"
     ) in source
-    assert "tesla_success = bool(success)" in handler_source
+    assert "tesla_success = _tesla_force_result_all_confirmed(" in handler_source
+    assert "reserve_result = await _tesla_force_apply_backup_reserve(" in handler_source
     assert '{"success": True, "error": None}' in handler_source
     assert '"success": False' in handler_source
     assert '"error": "backup reserve write did not verify"' in handler_source
@@ -2017,11 +2021,317 @@ def test_tesla_reserve_pulse_mapping_uses_a_distinct_valid_value():
     mapper = namespace["_tesla_backup_reserve_pulse_percent"]
 
     assert {target: mapper(target) for target in (0, 20, 80, 100)} == {
-        0: 20,
-        20: 0,
-        80: 20,
-        100: 20,
+        0: 1,
+        20: 21,
+        80: 100,
+        100: None,
     }
+
+
+class _NoopLogger:
+    def debug(self, *_args, **_kwargs):
+        return None
+
+    info = debug
+    warning = debug
+    error = debug
+
+
+class _AsyncioProxy:
+    CancelledError = asyncio.CancelledError
+    TimeoutError = asyncio.TimeoutError
+    Task = asyncio.Task
+    current_task = staticmethod(asyncio.current_task)
+    create_task = staticmethod(asyncio.create_task)
+    shield = staticmethod(asyncio.shield)
+
+    @staticmethod
+    async def sleep(_seconds):
+        return None
+
+
+def _extracted_tesla_reserve_pulse(apply_reserve):
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    mapper_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "_tesla_backup_reserve_pulse_percent"),
+    )
+    pulse_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "_tesla_force_pulse_backup_reserve"),
+    )
+    assert mapper_source is not None
+    assert pulse_source is not None
+
+    namespace = {
+        "Callable": Callable,
+        "asyncio": _AsyncioProxy,
+        "_LOGGER": _NoopLogger(),
+        "_normalize_tesla_backup_reserve_percent": lambda value: int(value),
+        "_tesla_force_apply_backup_reserve_unlocked": apply_reserve,
+        "_tesla_force_result_all_confirmed": lambda result, configs: {
+            site_id for site_id, _token, _provider in configs
+        }.issubset(set(result["confirmed_sites"])),
+        "_tesla_reserve_write_lock": asyncio.Lock(),
+        "_tesla_reserve_write_tasks": set(),
+        "_tesla_reserve_pulse_runtime": {
+            "tesla_reserve_pulse_stopping": False,
+        },
+    }
+    exec(mapper_source, namespace)
+    exec(textwrap.dedent(pulse_source), namespace)
+    return namespace["_tesla_force_pulse_backup_reserve"], namespace
+
+
+def _reserve_result(site_id: str, confirmed: bool) -> dict[str, list[str]]:
+    return {
+        "confirmed_sites": [site_id] if confirmed else [],
+        "accepted_sites": [],
+        "failed_sites": [] if confirmed else [site_id],
+    }
+
+
+def test_tesla_failed_exact_restore_keeps_stronger_temporary_reserve():
+    physical_reserve = {"percent": 20}
+    writes: list[int] = []
+
+    async def apply_reserve(site_configs, percent, **_kwargs):
+        writes.append(percent)
+        site_id = site_configs[0][0]
+        if percent == 21:
+            physical_reserve["percent"] = percent
+            return _reserve_result(site_id, True)
+        return _reserve_result(site_id, False)
+
+    pulse, namespace = _extracted_tesla_reserve_pulse(apply_reserve)
+    result = asyncio.run(
+        pulse([("site-1", "token", "fleet")], 20, reason="test")
+    )
+
+    assert writes == [21, 20, 20]
+    assert physical_reserve["percent"] == 21
+    assert result["failed_sites"] == ["site-1"]
+    assert namespace["_tesla_reserve_write_tasks"] == set()
+
+
+def test_tesla_cancellation_during_restore_is_drained_before_propagation():
+    async def scenario():
+        physical_reserve = {"percent": 20}
+        restore_started = asyncio.Event()
+        allow_restore = asyncio.Event()
+
+        async def apply_reserve(site_configs, percent, **_kwargs):
+            site_id = site_configs[0][0]
+            if percent == 21:
+                physical_reserve["percent"] = percent
+                return _reserve_result(site_id, True)
+            restore_started.set()
+            await allow_restore.wait()
+            physical_reserve["percent"] = percent
+            return _reserve_result(site_id, True)
+
+        pulse, _namespace = _extracted_tesla_reserve_pulse(apply_reserve)
+        pulse_task = asyncio.create_task(
+            pulse([("site-1", "token", "fleet")], 20, reason="test")
+        )
+        await restore_started.wait()
+        pulse_task.cancel()
+        await asyncio.sleep(0)
+        assert not pulse_task.done()
+        allow_restore.set()
+        try:
+            await pulse_task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("pulse cancellation was not propagated")
+        return physical_reserve["percent"]
+
+    assert asyncio.run(scenario()) == 20
+
+
+def test_tesla_supersession_after_temporary_write_still_restores_exact_target():
+    physical_reserve = {"percent": 20}
+    writes: list[int] = []
+    current = {"value": True}
+
+    async def apply_reserve(site_configs, percent, **_kwargs):
+        writes.append(percent)
+        physical_reserve["percent"] = percent
+        if percent == 21:
+            current["value"] = False
+        return _reserve_result(site_configs[0][0], True)
+
+    pulse, _namespace = _extracted_tesla_reserve_pulse(apply_reserve)
+    result = asyncio.run(
+        pulse(
+            [("site-1", "token", "fleet")],
+            20,
+            reason="test",
+            is_current=lambda: current["value"],
+        )
+    )
+
+    assert writes == [21, 20]
+    assert physical_reserve["percent"] == 20
+    assert result["failed_sites"] == ["site-1"]
+
+
+def test_tesla_full_reserve_skips_any_weaker_temporary_value():
+    writes: list[int] = []
+
+    async def apply_reserve(site_configs, percent, **_kwargs):
+        writes.append(percent)
+        return _reserve_result(site_configs[0][0], True)
+
+    pulse, _namespace = _extracted_tesla_reserve_pulse(apply_reserve)
+    result = asyncio.run(
+        pulse([("site-1", "token", "fleet")], 100, reason="test")
+    )
+
+    assert writes == [100, 100]
+    assert result["confirmed_sites"] == ["site-1"]
+
+
+def test_tesla_reserve_writes_are_drained_before_unload_replacement_setup():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    setup_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "async_setup_entry"),
+    )
+    unload_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "async_unload_entry"),
+    )
+
+    assert setup_source is not None
+    assert unload_source is not None
+    assert '"tesla_reserve_write_tasks"' in setup_source
+    assert setup_source.count('_tesla_reserve_write_tasks.add(current_task)') == 2
+    assert setup_source.count('_tesla_reserve_write_tasks.discard(current_task)') == 2
+    assert 'entry_data["tesla_reserve_pulse_stopping"] = True' in unload_source
+    assert "await asyncio.gather(*reserve_write_tasks" in unload_source
+
+
+def test_tesla_queued_ordinary_reserve_write_is_fenced_during_reload():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    wrapper_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "_tesla_force_apply_backup_reserve"),
+    )
+    assert wrapper_source is not None
+
+    async def scenario():
+        lock = asyncio.Lock()
+        await lock.acquire()
+        writes: list[int] = []
+
+        async def apply_reserve(site_configs, percent, **_kwargs):
+            writes.append(percent)
+            return _reserve_result(site_configs[0][0], True)
+
+        runtime = {"tesla_reserve_pulse_stopping": False}
+        tracked_tasks: set[asyncio.Task] = set()
+        namespace = {
+            "asyncio": asyncio,
+            "_tesla_reserve_write_lock": lock,
+            "_tesla_reserve_write_tasks": tracked_tasks,
+            "_tesla_reserve_pulse_runtime": runtime,
+            "_tesla_force_apply_backup_reserve_unlocked": apply_reserve,
+        }
+        exec(textwrap.dedent(wrapper_source), namespace)
+        wrapper = namespace["_tesla_force_apply_backup_reserve"]
+        task = asyncio.create_task(
+            wrapper([("site-1", "token", "fleet")], 19, reason="test")
+        )
+        await asyncio.sleep(0)
+        assert task in tracked_tasks
+
+        runtime["tesla_reserve_pulse_stopping"] = True
+        lock.release()
+        result = await task
+        return writes, result, tracked_tasks
+
+    writes, result, tracked_tasks = asyncio.run(scenario())
+    assert writes == []
+    assert result["failed_sites"] == ["site-1"]
+    assert tracked_tasks == set()
+
+
+@pytest.mark.parametrize(("confirmed", "expected", "post_count"), [
+    (True, True, 1),
+    (False, False, 3),
+])
+def test_tesla_cloud_reserve_requires_readback_confirmation(
+    confirmed,
+    expected,
+    post_count,
+):
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "_tesla_force_set_backup_reserve_cloud"),
+    )
+    assert function_source is not None
+
+    class Response:
+        status = 200
+
+        async def text(self):
+            return ""
+
+    class ResponseContext:
+        async def __aenter__(self):
+            return Response()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Session:
+        def __init__(self):
+            self.posts = 0
+
+        def post(self, *_args, **_kwargs):
+            self.posts += 1
+            return ResponseContext()
+
+    async def confirm(*_args, **_kwargs):
+        return confirmed
+
+    aiohttp_stub = SimpleNamespace(
+        ClientTimeout=lambda **_kwargs: object(),
+        ClientError=RuntimeError,
+    )
+    namespace = {
+        "aiohttp": aiohttp_stub,
+        "asyncio": _AsyncioProxy,
+        "_LOGGER": _NoopLogger(),
+        "_tesla_force_confirm_backup_reserve": confirm,
+        "get_tesla_api_base_url": lambda *_args: "https://tesla.example",
+        "entry": SimpleNamespace(data={}),
+        "CONF_FLEET_API_BASE_URL": "fleet_api_base_url",
+    }
+    exec(textwrap.dedent(function_source), namespace)
+    setter = namespace["_tesla_force_set_backup_reserve_cloud"]
+    session = Session()
+
+    result = asyncio.run(
+        setter(
+            session,
+            "site-1",
+            "token",
+            "fleet",
+            20,
+            reason="test",
+        )
+    )
+
+    assert result is expected
+    assert session.posts == post_count
 
 
 def test_tesla_restore_and_discharge_fail_safe_around_reserve_pulse():
@@ -2045,6 +2355,28 @@ def test_tesla_restore_and_discharge_fail_safe_around_reserve_pulse():
     assert "_tesla_reserve_generation[0]" in restore_source
     assert "_cleanup_failed_tesla_force_discharge(" in discharge_source
     assert "Tesla reserve transition did not verify" in discharge_source
+
+
+def test_foxess_optimizer_force_charge_propagates_unconfirmed_result():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_force_charge"),
+    )
+
+    assert function_source is not None
+    foxess_branch = function_source.split(
+        'foxess_coord = entry_data.get("foxess_coordinator")',
+        1,
+    )[1].split(
+        'sig_coord = entry_data.get("sigenergy_coordinator")',
+        1,
+    )[0]
+    assert "charge_result = await foxess_coord.force_charge(" in foxess_branch
+    assert "if charge_result is False:" in foxess_branch
+    assert 'raise HomeAssistantError(' in foxess_branch
+    assert "FoxESS force charge hardware refresh was not confirmed" in foxess_branch
 
 
 def test_tesla_reserve_only_supersession_cleans_force_tariff_without_clobbering_reserve():
@@ -3268,16 +3600,31 @@ def test_optimizer_backup_reserve_writes_do_not_persist_as_user_reserve():
 def test_tesla_local_backup_reserve_write_uses_hidden_reserve_offset():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
-    function = _find_function(tree, "handle_set_backup_reserve")
-    function_source = ast.get_source_segment(source, function)
+    setter_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_set_backup_reserve"),
+    )
+    helper_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "_tesla_force_apply_backup_reserve_unlocked"),
+    )
 
-    assert function_source is not None
-    assert "detect_local_backup_reserve_offset" in function_source
-    assert '"powerwall_local_low_soe_reserve_pct"' in function_source
-    assert "local_backup_reserve_write_percent" in function_source
-    assert "local_percent = local_backup_reserve_write_percent(" in function_source
-    assert '"site_info.backup_reserve_percent": local_percent' in function_source
-    assert 'json={"backup_reserve_percent": percent}' in function_source
+    assert setter_source is not None
+    assert helper_source is not None
+    assert "_tesla_force_apply_backup_reserve(" in setter_source
+    assert "_tesla_force_result_all_confirmed(" in setter_source
+    assert "detect_local_backup_reserve_offset" in helper_source
+    assert '"powerwall_local_low_soe_reserve_pct"' in helper_source
+    assert "local_backup_reserve_write_percent" in helper_source
+    assert "local_percent = local_backup_reserve_write_percent(" in helper_source
+    assert '"site_info.backup_reserve_percent": local_percent' in helper_source
+    cloud_source = ast.get_source_segment(
+        source,
+        _find_function(tree, "_tesla_force_set_backup_reserve_cloud"),
+    )
+    assert cloud_source is not None
+    assert 'json={"backup_reserve_percent": percent}' in cloud_source
+    assert "_tesla_force_confirm_backup_reserve(" in cloud_source
 
 
 def test_tesla_setting_writes_refresh_local_readback_and_invalidate_fleet_cache():

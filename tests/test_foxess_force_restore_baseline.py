@@ -405,3 +405,128 @@ def test_restore_normal_propagates_min_soc_failure_and_retries(foxess_module):
     assert holding[reg.min_soc] == 20
     assert controller._original_work_mode is None
     assert controller._original_min_soc is None
+
+
+@pytest.mark.parametrize(
+    "model_family",
+    ["H3", "H3-Pro"],
+)
+@pytest.mark.parametrize("readback_matches", [True, False])
+def test_remote_force_power_requires_matching_signed_readback(
+    foxess_module,
+    monkeypatch,
+    model_family,
+    readback_matches,
+):
+    """Both 16-bit and 32-bit FoxESS commands must reject a real mismatch."""
+    family = {
+        "H3": foxess_module.FoxESSModelFamily.H3,
+        "H3-Pro": foxess_module.FoxESSModelFamily.H3_PRO,
+    }[model_family]
+    reg = foxess_module.REGISTER_MAPS[family]
+    controller = foxess_module.FoxESSController(
+        host="192.0.2.1",
+        model_family=model_family,
+    )
+    power_writes = 0
+
+    async def no_sleep(_seconds):
+        return None
+
+    async def write_one(address: int, value: int):
+        nonlocal power_writes
+        if address == reg.remote_active_power:
+            power_writes += 1
+        return True
+
+    async def write_many(address: int, values: list[int]):
+        nonlocal power_writes
+        if address == reg.remote_active_power:
+            power_writes += 1
+        return True
+
+    async def read_holding(address: int, count: int = 1):
+        if address == reg.remote_enable:
+            return [foxess_module.REMOTE_CONTROL_AC]
+        if address != reg.remote_active_power:
+            return [0] * count
+        readback = -5000 if readback_matches else 0
+        if reg.remote_active_power_is_32bit:
+            raw = readback & 0xFFFFFFFF
+            return [(raw >> 16) & 0xFFFF, raw & 0xFFFF]
+        return [readback & 0xFFFF]
+
+    monkeypatch.setattr(foxess_module.asyncio, "sleep", no_sleep)
+    controller._write_holding_register = write_one
+    controller._write_holding_registers = write_many
+    controller._read_holding_registers = read_holding
+
+    result = asyncio.run(
+        controller._write_remote_control(
+            reg,
+            -5000,
+            duration_minutes=5,
+            timeout_seconds=300,
+            label="force charge",
+        )
+    )
+
+    assert result is readback_matches
+    assert power_writes == (1 if readback_matches else 3)
+
+
+@pytest.mark.parametrize("model_family", ["H3", "H3-Pro"])
+def test_remote_force_power_preserves_missing_readback_compatibility(
+    foxess_module,
+    monkeypatch,
+    model_family,
+):
+    """A confirmed write remains usable on firmware without power readback."""
+    family = {
+        "H3": foxess_module.FoxESSModelFamily.H3,
+        "H3-Pro": foxess_module.FoxESSModelFamily.H3_PRO,
+    }[model_family]
+    reg = foxess_module.REGISTER_MAPS[family]
+    controller = foxess_module.FoxESSController(
+        host="192.0.2.1",
+        model_family=model_family,
+    )
+    power_writes = 0
+
+    async def no_sleep(_seconds):
+        return None
+
+    async def write_one(address: int, _value: int):
+        nonlocal power_writes
+        if address == reg.remote_active_power:
+            power_writes += 1
+        return True
+
+    async def write_many(address: int, _values: list[int]):
+        nonlocal power_writes
+        if address == reg.remote_active_power:
+            power_writes += 1
+        return True
+
+    async def read_holding(address: int, count: int = 1):
+        if address == reg.remote_enable:
+            return [foxess_module.REMOTE_CONTROL_AC]
+        if address == reg.remote_active_power:
+            return None
+        return [0] * count
+
+    monkeypatch.setattr(foxess_module.asyncio, "sleep", no_sleep)
+    controller._write_holding_register = write_one
+    controller._write_holding_registers = write_many
+    controller._read_holding_registers = read_holding
+
+    assert asyncio.run(
+        controller._write_remote_control(
+            reg,
+            -5000,
+            duration_minutes=5,
+            timeout_seconds=300,
+            label="force charge",
+        )
+    ) is True
+    assert power_writes == 1

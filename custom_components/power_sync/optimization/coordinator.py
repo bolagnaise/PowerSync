@@ -15764,7 +15764,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "_last_executed_planned_action",
                     None,
                 )
-                if force_type in ("charge", "discharge"):
+                if force_type == "self_consumption":
+                    # A user-owned self-consumption override controls the
+                    # hardware even when the retained LP plan still wants a
+                    # charge/export action. Keep the planned action visible,
+                    # but publish the mode that is actually in force.
+                    effective_current_action = "self_consumption"
+                    current_action = effective_current_action
+                    current_power_w = actual_battery_power_w
+                elif force_type in ("charge", "discharge"):
                     effective_current_action = (
                         "charge" if force_type == "charge" else "discharge"
                     )

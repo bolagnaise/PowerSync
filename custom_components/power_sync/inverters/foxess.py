@@ -1003,38 +1003,52 @@ class FoxESSController(InverterController):
                 # FoxESS H3-Smart can acknowledge the register write but not switch
                 # mode if the firmware is in a transitional state.
                 await asyncio.sleep(2)
-                if reg.remote_active_power_is_32bit:
-                    power_readback = await self._read_holding_registers(reg.remote_active_power, 2)
-                    if power_readback and len(power_readback) == 2:
+                read_count = 2 if reg.remote_active_power_is_32bit else 1
+                power_readback = await self._read_holding_registers(
+                    reg.remote_active_power,
+                    read_count,
+                )
+                rb_val: int | None = None
+                if power_readback and len(power_readback) == read_count:
+                    if reg.remote_active_power_is_32bit:
                         rb_val = (power_readback[0] << 16) | power_readback[1]
                         if rb_val > 0x7FFFFFFF:
                             rb_val -= 0x100000000
-                        _LOGGER.debug(
-                            "FoxESS %s power readback: wrote=%d read=%d",
-                            label, power_val, rb_val,
-                        )
-                        if rb_val != power_val:
-                            _LOGGER.warning(
-                                "FoxESS %s power verify mismatch: wrote %d, read %d (attempt %d/%d) — retrying",
-                                label, power_val, rb_val, attempt, max_attempts,
-                            )
-                            if attempt < max_attempts:
-                                await asyncio.sleep(2)
-                                continue
-                            # Final attempt failed — log but still return True
-                            # (register write succeeded, inverter may catch up)
-                            _LOGGER.warning(
-                                "FoxESS %s power verify still mismatched after %d attempts — "
-                                "inverter may not have actioned the command",
-                                label, max_attempts,
-                            )
-                else:
-                    power_readback = await self._read_holding_registers(reg.remote_active_power, 1)
-                    if power_readback:
+                    else:
                         rb_val = power_readback[0]
                         if rb_val > 0x7FFF:
                             rb_val -= 0x10000
-                        _LOGGER.debug("FoxESS %s power readback: wrote=%d read=%d", label, power_val, rb_val)
+                _LOGGER.debug(
+                    "FoxESS %s power readback: wrote=%d read=%s",
+                    label,
+                    power_val,
+                    rb_val,
+                )
+                if rb_val is not None and rb_val != power_val:
+                    _LOGGER.warning(
+                        "FoxESS %s power verify mismatch: wrote %d, read %s "
+                        "(attempt %d/%d)",
+                        label,
+                        power_val,
+                        rb_val,
+                        attempt,
+                        max_attempts,
+                    )
+                    if attempt < max_attempts:
+                        await asyncio.sleep(2)
+                        continue
+                    _LOGGER.error(
+                        "FoxESS %s power did not verify after %d attempts",
+                        label,
+                        max_attempts,
+                    )
+                    return False
+                if rb_val is None:
+                    _LOGGER.warning(
+                        "FoxESS %s power readback unavailable; trusting the "
+                        "confirmed register write for compatibility",
+                        label,
+                    )
 
                 _LOGGER.info(
                     "FoxESS %s activated for %d minutes (timeout %ds)%s",

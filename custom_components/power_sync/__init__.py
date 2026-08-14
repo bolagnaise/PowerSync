@@ -66,9 +66,13 @@ def _normalize_tesla_backup_reserve_percent(value: Any) -> int:
     return 100 if 81 <= target <= 99 else target
 
 
-def _tesla_backup_reserve_pulse_percent(target_percent: int) -> int:
-    """Return a known-valid temporary reserve different from the target."""
-    return 0 if target_percent == 20 else 20
+def _tesla_backup_reserve_pulse_percent(target_percent: int) -> int | None:
+    """Return a safe temporary reserve above the target, when one exists."""
+    if target_percent >= 100:
+        return None
+    if target_percent >= 80:
+        return 100
+    return target_percent + 1
 
 
 def _disabled_optimizer_backup_reserve_target(entry: Any) -> tuple[int | None, str]:
@@ -27512,6 +27516,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # A reserve nudge must be atomic: once the temporary value is written, its
     # exact target must be restored before a newer reserve command can proceed.
     _tesla_reserve_write_lock = asyncio.Lock()
+    _tesla_reserve_write_tasks: set[asyncio.Task] = set()
+    _tesla_reserve_pulse_runtime = hass.data[DOMAIN][entry.entry_id]
+    _tesla_reserve_pulse_runtime["tesla_reserve_write_tasks"] = (
+        _tesla_reserve_write_tasks
+    )
+    _tesla_reserve_pulse_runtime["tesla_reserve_pulse_stopping"] = False
 
     def _supersede_tesla_charge_kick(
         reason: str = "",
@@ -29201,7 +29211,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as response:
                     if response.status == 200:
-                        return True
+                        if await _tesla_force_confirm_backup_reserve(
+                            session,
+                            api_base,
+                            site_id,
+                            headers,
+                            percent,
+                        ):
+                            return True
+                        _LOGGER.warning(
+                            "Tesla %s reserve was accepted but readback did not "
+                            "verify for site %s",
+                            reason,
+                            site_id,
+                        )
+                        continue
                     text = await response.text()
                     if response.status not in (429, 500, 502, 503, 504):
                         _LOGGER.warning(
@@ -29375,13 +29399,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         prefer_local: bool = True,
     ) -> dict[str, list[str]]:
         """Serialize an ordinary Tesla reserve write with dispatch nudges."""
-        async with _tesla_reserve_write_lock:
-            return await _tesla_force_apply_backup_reserve_unlocked(
-                site_configs,
-                percent,
-                reason=reason,
-                prefer_local=prefer_local,
-            )
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            _tesla_reserve_write_tasks.add(current_task)
+        try:
+            if _tesla_reserve_pulse_runtime.get("tesla_reserve_pulse_stopping"):
+                return {
+                    "confirmed_sites": [],
+                    "accepted_sites": [],
+                    "failed_sites": [
+                        site_id for site_id, _token, _provider in site_configs
+                    ],
+                }
+            async with _tesla_reserve_write_lock:
+                if _tesla_reserve_pulse_runtime.get(
+                    "tesla_reserve_pulse_stopping"
+                ):
+                    return {
+                        "confirmed_sites": [],
+                        "accepted_sites": [],
+                        "failed_sites": [
+                            site_id for site_id, _token, _provider in site_configs
+                        ],
+                    }
+                return await _tesla_force_apply_backup_reserve_unlocked(
+                    site_configs,
+                    percent,
+                    reason=reason,
+                    prefer_local=prefer_local,
+                )
+        finally:
+            if current_task is not None:
+                _tesla_reserve_write_tasks.discard(current_task)
 
     async def _tesla_force_pulse_backup_reserve(
         site_configs: list[tuple[str, str, str]],
@@ -29391,13 +29440,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         prefer_local: bool = True,
         is_current: Callable[[], bool] | None = None,
     ) -> dict[str, list[str]]:
-        """Wake Tesla dispatch with a real reserve transition, then restore it.
+        """Wake Tesla dispatch with a safe reserve reapply, then restore it.
 
         Tesla gateways can confirm a mode write while retaining their previous
-        physical dispatch. A different reserve value, a short pause, and an
-        exact restore makes the gateway re-evaluate dispatch. The temporary
-        value stays inside this internal primitive, so it never changes the
-        user's persisted reserve setting.
+        physical dispatch. A stronger reserve value, a short pause, and an
+        exact restore makes the gateway re-evaluate dispatch without weakening
+        the user's configured protection. At 100%, where no stronger valid
+        reserve exists, the exact target is confirmed both before and after the
+        pause. The temporary value stays inside this internal primitive, so it
+        never changes the user's persisted reserve setting.
         """
         target_percent = _normalize_tesla_backup_reserve_percent(target_percent)
         pulse_percent = _tesla_backup_reserve_pulse_percent(target_percent)
@@ -29410,69 +29461,123 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "failed_sites": list(site_ids),
             }
 
-        if is_current is not None and not is_current():
-            _LOGGER.info("Tesla %s reserve pulse superseded before start", reason)
-            return _failed_result()
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            _tesla_reserve_write_tasks.add(current_task)
 
-        async with _tesla_reserve_write_lock:
-            if is_current is not None and not is_current():
-                _LOGGER.info(
-                    "Tesla %s reserve pulse superseded while waiting to start",
-                    reason,
-                )
-                return _failed_result()
-
-            pulse_result: dict[str, list[str]] = _failed_result()
-            final_result: dict[str, list[str]] = _failed_result()
-            try:
-                pulse_result = await _tesla_force_apply_backup_reserve_unlocked(
-                    site_configs,
-                    pulse_percent,
-                    reason=f"{reason} temporary {pulse_percent}%",
-                    prefer_local=prefer_local,
-                )
-                if not _tesla_force_result_all_confirmed(
-                    pulse_result,
-                    site_configs,
-                ):
-                    _LOGGER.warning(
-                        "Tesla %s temporary reserve did not verify for every site; "
-                        "the exact target will still be restored",
-                        reason,
-                    )
-                await asyncio.sleep(3)
-            finally:
+        async def _restore_exact_target() -> dict[str, list[str]]:
+            """Restore the authoritative target with one bounded retry."""
+            final_result = _failed_result()
+            for attempt in range(1, 3):
                 final_result = await _tesla_force_apply_backup_reserve_unlocked(
                     site_configs,
                     target_percent,
                     reason=f"{reason} restore {target_percent}%",
                     prefer_local=prefer_local,
                 )
+                if _tesla_force_result_all_confirmed(
+                    final_result,
+                    site_configs,
+                ):
+                    return final_result
+                if attempt < 2:
+                    _LOGGER.warning(
+                        "Tesla %s exact reserve restore did not verify; retrying",
+                        reason,
+                    )
+                    await asyncio.sleep(1)
+            return final_result
 
+        async def _finish_restore_despite_cancellation() -> dict[str, list[str]]:
+            """Drain the exact restore before propagating task cancellation."""
+            restore_task = asyncio.create_task(_restore_exact_target())
+            cancellation: asyncio.CancelledError | None = None
+            while True:
+                try:
+                    final_result = await asyncio.shield(restore_task)
+                    break
+                except asyncio.CancelledError as err:
+                    cancellation = err
+                    continue
+            if cancellation is not None:
+                raise cancellation
+            return final_result
+
+        try:
+            if _tesla_reserve_pulse_runtime.get("tesla_reserve_pulse_stopping"):
+                _LOGGER.info("Tesla %s reserve pulse skipped during unload", reason)
+                return _failed_result()
             if is_current is not None and not is_current():
-                _LOGGER.info(
-                    "Tesla %s reserve pulse superseded after exact restore",
-                    reason,
-                )
+                _LOGGER.info("Tesla %s reserve pulse superseded before start", reason)
                 return _failed_result()
 
-            pulse_confirmed = set(pulse_result["confirmed_sites"])
-            final_confirmed = set(final_result["confirmed_sites"])
-            confirmed_sites = [
-                site_id
-                for site_id in site_ids
-                if site_id in pulse_confirmed and site_id in final_confirmed
-            ]
-            return {
-                "confirmed_sites": confirmed_sites,
-                "accepted_sites": sorted(
-                    set(pulse_result["accepted_sites"])
-                    | set(final_result["accepted_sites"])
-                ),
-                "failed_sites": [
-                    site_id for site_id in site_ids if site_id not in confirmed_sites
-                ],
-            }
+            async with _tesla_reserve_write_lock:
+                if is_current is not None and not is_current():
+                    _LOGGER.info(
+                        "Tesla %s reserve pulse superseded while waiting to start",
+                        reason,
+                    )
+                    return _failed_result()
+
+                pulse_result: dict[str, list[str]] = _failed_result()
+                final_result: dict[str, list[str]] = _failed_result()
+                try:
+                    first_percent = (
+                        target_percent if pulse_percent is None else pulse_percent
+                    )
+                    first_reason = (
+                        f"{reason} safe reapply {target_percent}%"
+                        if pulse_percent is None
+                        else f"{reason} temporary {pulse_percent}%"
+                    )
+                    pulse_result = (
+                        await _tesla_force_apply_backup_reserve_unlocked(
+                            site_configs,
+                            first_percent,
+                            reason=first_reason,
+                            prefer_local=prefer_local,
+                        )
+                    )
+                    if not _tesla_force_result_all_confirmed(
+                        pulse_result,
+                        site_configs,
+                    ):
+                        _LOGGER.warning(
+                            "Tesla %s initial reserve write did not verify for "
+                            "every site; the exact target will still be restored",
+                            reason,
+                        )
+                    await asyncio.sleep(3)
+                finally:
+                    final_result = await _finish_restore_despite_cancellation()
+
+                if is_current is not None and not is_current():
+                    _LOGGER.info(
+                        "Tesla %s reserve pulse superseded after exact restore",
+                        reason,
+                    )
+                    return _failed_result()
+
+                pulse_confirmed = set(pulse_result["confirmed_sites"])
+                final_confirmed = set(final_result["confirmed_sites"])
+                confirmed_sites = [
+                    site_id
+                    for site_id in site_ids
+                    if site_id in pulse_confirmed and site_id in final_confirmed
+                ]
+                return {
+                    "confirmed_sites": confirmed_sites,
+                    "accepted_sites": sorted(
+                        set(pulse_result["accepted_sites"])
+                        | set(final_result["accepted_sites"])
+                    ),
+                    "failed_sites": [
+                        site_id for site_id in site_ids if site_id not in confirmed_sites
+                    ],
+                }
+        finally:
+            if current_task is not None:
+                _tesla_reserve_write_tasks.discard(current_task)
 
     def _tesla_force_retry_expiry(
         state: dict,
@@ -31415,11 +31520,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             foxess_coord = entry_data.get("foxess_coordinator")
             if foxess_coord:
                 min_timeout = duration * 60 if source == "optimizer" else 600
-                await foxess_coord.force_charge(
+                charge_result = await foxess_coord.force_charge(
                     duration,
                     power_w=power_w,
                     min_timeout_seconds=min_timeout,
                 )
+                if charge_result is False:
+                    raise HomeAssistantError(
+                        "FoxESS force charge hardware refresh was not confirmed"
+                    )
                 _LOGGER.debug(f"FoxESS force charge hardware extended ({duration}min, {power_w}W)")
                 return
             sig_coord = entry_data.get("sigenergy_coordinator")
@@ -36116,134 +36225,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     percent = 100
 
-                from .const import CONF_POWERWALL_LOCAL_DIN
-                from .powerwall_local.dispatch import dispatch_powerwall_write
-
-                async def _local(transport) -> bool:
-                    din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
-                    if not din:
-                        return False
-                    from .powerwall_local.normalization import (
-                        detect_local_backup_reserve_offset,
-                        local_backup_reserve_write_percent,
-                    )
-
-                    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-                    low_soe_reserve = entry_data.get("powerwall_local_low_soe_reserve_pct")
-                    if low_soe_reserve is None:
-                        try:
-                            config = await transport.read_config(din)
-                            local_reserve = (
-                                ((config or {}).get("site_info") or {})
-                                .get("backup_reserve_percent")
-                            )
-                            coord = entry_data.get("tesla_coordinator")
-                            site_info = getattr(coord, "_site_info_cache", None)
-                            cloud_reserve = (
-                                site_info.get("backup_reserve_percent")
-                                if isinstance(site_info, dict)
-                                else None
-                            )
-                            detected = detect_local_backup_reserve_offset(
-                                local_reserve,
-                                cloud_reserve,
-                            )
-                            if detected is not None:
-                                low_soe_reserve = detected
-                                entry_data["powerwall_local_low_soe_reserve_pct"] = detected
-                        except Exception as err:
-                            _LOGGER.debug(
-                                "Could not auto-detect Powerwall local reserve offset: %s",
-                                err,
-                            )
-
-                    local_percent = local_backup_reserve_write_percent(
+                site_configs = _get_tesla_site_configs(hass, entry)
+                if not site_configs:
+                    _LOGGER.error("Missing Tesla site ID or token for set_backup_reserve")
+                    reserve_result = {
+                        "confirmed_sites": [],
+                        "accepted_sites": [],
+                        "failed_sites": [],
+                    }
+                else:
+                    reserve_result = await _tesla_force_apply_backup_reserve(
+                        site_configs,
                         percent,
-                        low_soe_reserve,
+                        reason="set backup reserve",
                     )
-                    if local_percent is None:
-                        return False
-                    local_ok = await transport.write_config(
-                        din, {"site_info.backup_reserve_percent": local_percent}
-                    )
-                    if local_ok:
-                        try:
-                            entry_data[
-                                "powerwall_local_backup_reserve_write_local_pct"
-                            ] = local_percent
-                            entry_data["powerwall_local_backup_reserve_write_user_pct"] = percent
-                            detected = detect_local_backup_reserve_offset(
-                                local_percent,
-                                percent,
-                            )
-                            if detected is not None:
-                                entry_data["powerwall_local_low_soe_reserve_pct"] = detected
-                        except Exception as err:
-                            _LOGGER.debug(
-                                "Could not cache Powerwall local reserve write readback: %s",
-                                err,
-                            )
-                    return local_ok
-
-                async def _cloud() -> bool:
-                    site_configs = _get_tesla_site_configs(hass, entry)
-                    if not site_configs:
-                        _LOGGER.error("Missing Tesla site ID or token for set_backup_reserve")
-                        return False
-
-                    any_ok = False
-                    session = async_get_clientsession(hass)
-                    for site_id, current_token, provider in site_configs:
-                        headers = {
-                            "Authorization": f"Bearer {current_token}",
-                            "Content-Type": "application/json",
-                        }
-                        api_base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
-
-                        # Retry up to 3 times for backup reserve
-                        for attempt in range(1, 4):
-                            try:
-                                async with session.post(
-                                    f"{api_base}/api/1/energy_sites/{site_id}/backup",
-                                    headers=headers,
-                                    json={"backup_reserve_percent": percent},
-                                    timeout=aiohttp.ClientTimeout(total=30),
-                                ) as response:
-                                    if response.status == 200:
-                                        _LOGGER.info("Tesla site %s backup reserve set to %d%%", site_id, percent)
-                                        any_ok = True
-                                        break
-                                    elif response.status in (429, 500, 502, 503, 504):
-                                        text = await response.text()
-                                        _LOGGER.warning(
-                                            "Tesla backup reserve attempt %d/3 failed for site %s: %s",
-                                            attempt, site_id, response.status,
-                                        )
-                                        if attempt < 3:
-                                            await asyncio.sleep(2 ** attempt)
-                                        else:
-                                            _LOGGER.error("Failed to set Tesla backup reserve for site %s after 3 attempts: %s - %s", site_id, response.status, text[:200])
-                                            hass.async_create_task(_notify_api_error(hass, "Backup Reserve Failed", f"Could not set backup reserve after 3 attempts — Tesla API {response.status}"))
-                                    else:
-                                        text = await response.text()
-                                        _LOGGER.error("Failed to set Tesla backup reserve for site %s: %s - %s", site_id, response.status, text[:200])
-                                        hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Could not set backup reserve — Tesla API error"))
-                                        break
-                            except asyncio.TimeoutError:
-                                _LOGGER.warning("Tesla backup reserve attempt %d/3 timed out for site %s", attempt, site_id)
-                                if attempt < 3:
-                                    await asyncio.sleep(2 ** attempt)
-                    return any_ok
-
-                async with _tesla_reserve_write_lock:
-                    success = await dispatch_powerwall_write(
-                        hass, entry,
-                        local_call=_local,
-                        cloud_call=_cloud,
-                        label="set_backup_reserve",
-                    )
-                tesla_success = bool(success)
-                if success:
+                tesla_success = _tesla_force_result_all_confirmed(
+                    reserve_result,
+                    site_configs,
+                )
+                if tesla_success:
                     _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
                     if _tesla_coord_for_cache is not None:
                         _tesla_coord_for_cache.invalidate_site_info_cache()
@@ -36259,6 +36259,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 "backup_reserve_100",
                                 allow_grid_field_absent_compatibility=True,
                             )
+                else:
+                    _LOGGER.error(
+                        "Tesla backup reserve %d%% was not confirmed for every site",
+                        percent,
+                    )
                 response = (
                     {"success": True, "error": None}
                     if tesla_success
@@ -42063,6 +42068,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Tear down TOU sync hooks (AEMO dispatch subscriber + dispatch-trigger
     # coordinator + cron fallback + optional Octopus cron)
     entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+
+    # Let every in-flight Tesla reserve pulse finish its verified exact restore
+    # before a replacement setup receives a new lock/generation namespace.
+    if isinstance(entry_data, dict):
+        entry_data["tesla_reserve_pulse_stopping"] = True
+        current_task = asyncio.current_task()
+        reserve_write_tasks = tuple(
+            task
+            for task in entry_data.get("tesla_reserve_write_tasks", ())
+            if task is not current_task and not task.done()
+        )
+        if reserve_write_tasks:
+            await asyncio.gather(*reserve_write_tasks, return_exceptions=True)
+        entry_data["tesla_reserve_write_tasks"] = set()
 
     # Fence callbacks from this setup before any await below.  A dispatcher
     # callback can already be queued on the event loop (or be waiting on the
