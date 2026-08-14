@@ -26694,6 +26694,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # FoxESS uses Modbus-based curtailment, not Tesla API
         if is_foxess:
             await handle_foxess_curtailment()
+            async_dispatcher_send(
+                hass, f"power_sync_curtailment_updated_{entry.entry_id}"
+            )
             return
 
         # Sigenergy uses Modbus-based curtailment, not Tesla API
@@ -27063,6 +27066,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             feedin_price = websocket_data.get('feedIn', {}).get('perKwh') if websocket_data else None
             import_price = websocket_data.get('general', {}).get('perKwh') if websocket_data else None
             await handle_foxess_curtailment(feedin_price=feedin_price, import_price=import_price)
+            async_dispatcher_send(
+                hass, f"power_sync_curtailment_updated_{entry.entry_id}"
+            )
             return
 
         # Sigenergy uses Modbus-based curtailment, not Tesla API

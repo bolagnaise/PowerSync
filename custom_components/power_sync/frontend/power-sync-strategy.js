@@ -7990,7 +7990,8 @@ function _curtailmentStatus(e, hasDC, hasAC) {
       show_label: true,
       label: `[[[
         const state = states['${dcEntity}']?.state;
-        if (state === 'Active') return 'CURTAILED - Export blocked';
+        if (state === 'Active') return 'CURTAILED - Export confirmed stopped';
+        if (state === 'Pending') return 'PENDING - Export not confirmed';
         return 'Normal - Export allowed';
       ]]]`,
       icon: `[[[
@@ -8006,8 +8007,11 @@ function _curtailmentStatus(e, hasDC, hasAC) {
           {
             background: `[[[
               const state = states['${dcEntity}']?.state;
-              return state === 'Active'
-                ? 'linear-gradient(135deg, rgba(244, 67, 54, 0.15) 0%, rgba(244, 67, 54, 0.05) 100%)'
+              if (state === 'Active') {
+                return 'linear-gradient(135deg, rgba(244, 67, 54, 0.15) 0%, rgba(244, 67, 54, 0.05) 100%)';
+              }
+              return state === 'Pending'
+                ? 'linear-gradient(135deg, rgba(255, 152, 0, 0.15) 0%, rgba(255, 152, 0, 0.05) 100%)'
                 : 'linear-gradient(135deg, rgba(76, 175, 80, 0.15) 0%, rgba(76, 175, 80, 0.05) 100%)';
             ]]]`,
           },
@@ -8024,7 +8028,8 @@ function _curtailmentStatus(e, hasDC, hasAC) {
           {
             color: `[[[
               const state = states['${dcEntity}']?.state;
-              return state === 'Active' ? 'var(--red-color)' : 'var(--green-color)';
+              if (state === 'Active') return 'var(--red-color)';
+              return state === 'Pending' ? 'var(--orange-color)' : 'var(--green-color)';
             ]]]`,
           },
         ],

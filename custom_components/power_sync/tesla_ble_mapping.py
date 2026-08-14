@@ -184,12 +184,16 @@ def canonical_tesla_vehicle_id(
     """Return the physical VIN for a paired BLE alias when it is known.
 
     Standalone BLE vehicles deliberately retain their ``ble_*`` identifier.
+    Pairing is meaningful only in ``Both`` mode; BLE-only installations must
+    never borrow stale Fleet device-registry identities.
     Explicit mappings can resolve an alias even before Fleet discovery has
     populated a vehicle list; single-vehicle inference still requires the
     caller to supply the unambiguous Fleet VIN.
     """
     normalized_id = str(vehicle_id or "")
     if not normalized_id.startswith("ble_"):
+        return normalized_id
+    if config.get(CONF_EV_PROVIDER) != EV_PROVIDER_BOTH:
         return normalized_id
 
     prefix = normalized_id[4:]

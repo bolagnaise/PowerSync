@@ -870,6 +870,62 @@ def test_paired_ble_runtime_updates_use_canonical_vin():
     assert set(executor._settings) == {vin}
 
 
+def test_ble_only_storage_drops_ambiguous_fleet_profiles_and_keeps_aliases():
+    vin_a = "5YJTEST0000000001"
+    vin_b = "5YJTEST0000000002"
+    entry = types.SimpleNamespace(
+        data={},
+        options={
+            "ev_provider": "tesla_ble",
+            "tesla_ble_entity_prefix": "tesla_yf88,tesla_flinn",
+        },
+    )
+    stored_data = {
+        "auto_schedule_settings": {
+            vin_a: {"enabled": True, "charger_type": "ocpp"},
+            vin_b: {"enabled": True, "charger_type": "ocpp"},
+            "ble_tesla_flinn": {"enabled": True, "charger_type": "tesla"},
+        },
+        "cached_vehicle_soc": {
+            vin_a: {"soc": 60},
+            vin_b: {"soc": 61},
+            "ble_tesla_flinn": {"soc": 67},
+        },
+    }
+
+    changed = ev_planner._normalize_stored_auto_schedule_ids(
+        None,
+        entry,
+        stored_data,
+        fleet_vins=[vin_a, vin_b],
+        resolved_prefixes=["tesla_yf88", "tesla_flinn"],
+    )
+
+    assert changed is True
+    assert stored_data["auto_schedule_settings"] == {
+        "ble_tesla_flinn": {
+            "enabled": True,
+            "charger_type": "tesla",
+            "vehicle_id": "ble_tesla_flinn",
+        }
+    }
+    assert stored_data["cached_vehicle_soc"] == {
+        "ble_tesla_flinn": {"soc": 67},
+    }
+
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = None
+    executor.config_entry = entry
+    executor._fleet_vins = (vin_a, vin_b)
+    executor._resolved_ble_prefixes = ("tesla_yf88", "tesla_flinn")
+    executor._settings = {}
+    executor._state = {}
+    settings = executor.update_settings("ble_tesla_yf88", {"enabled": True})
+
+    assert settings.vehicle_id == "ble_tesla_yf88"
+    assert set(executor._settings) == {"ble_tesla_yf88"}
+
+
 def test_autodiscovered_ble_runtime_updates_use_canonical_vin():
     vin = "5YJTEST0000000001"
     entry = types.SimpleNamespace(

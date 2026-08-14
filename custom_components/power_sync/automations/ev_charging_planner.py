@@ -858,20 +858,28 @@ async def discover_all_tesla_vehicles(
 
     device_registry = dr.async_get(hass)
     vehicles: List[Dict[str, Any]] = []
+    opts = {**config_entry.data, **config_entry.options} if config_entry else {}
+    ev_provider = opts.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
 
     # Method 1 — HA device registry scan for Fleet API / Teslemetry / Tessie /
     # Tesla Custom / legacy Tesla integration devices. Each such device
     # publishes an identifier tuple ``(<integration>, <VIN>)``.
-    for device, device_vin in _iter_tesla_vehicle_devices(device_registry):
-        vehicles.append({
-            "vin": device_vin,
-            "name": device.name or device.name_by_user or device_vin,
-            "device_id": device.id,
-            "device": device,
-            "source": "fleet_api",
-            "ble_prefix": None,
-        })
-        _LOGGER.debug(f"Discovered Tesla vehicle: {device.name} (VIN: {device_vin})")
+    # Ignore lingering Fleet registry rows in BLE-only mode. Those rows are not
+    # controllable by the configured provider and must not become phantom
+    # Smart Schedule loadpoints.
+    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        for device, device_vin in _iter_tesla_vehicle_devices(device_registry):
+            vehicles.append({
+                "vin": device_vin,
+                "name": device.name or device.name_by_user or device_vin,
+                "device_id": device.id,
+                "device": device,
+                "source": "fleet_api",
+                "ble_prefix": None,
+            })
+            _LOGGER.debug(
+                f"Discovered Tesla vehicle: {device.name} (VIN: {device_vin})"
+            )
 
     # Method 2 — ESPHome Tesla BLE fallback. BLE-only setups don't register a
     # Tesla-domain device in the HA registry (the ESPHome bridge registers under
@@ -881,8 +889,6 @@ async def discover_all_tesla_vehicles(
     # Gated on ``ev_provider`` so fleet_api-only users never see spurious BLE
     # vehicles from unrelated ESPHome devices that happen to match the default
     # prefix.
-    opts = {**config_entry.data, **config_entry.options} if config_entry else {}
-    ev_provider = opts.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         ble_prefixes = resolve_ble_prefixes(hass, opts)
         fleet_vins = [vehicle["vin"] for vehicle in vehicles]
@@ -7515,6 +7521,39 @@ def _normalize_stored_auto_schedule_ids(
         **getattr(config_entry, "data", {}),
         **getattr(config_entry, "options", {}),
     }
+    from ..const import CONF_EV_PROVIDER, EV_PROVIDER_TESLA_BLE
+
+    if opts.get(CONF_EV_PROVIDER) == EV_PROVIDER_TESLA_BLE:
+        stale_fleet_ids = [
+            str(vehicle_id)
+            for vehicle_id in auto_schedule_data
+            if len(str(vehicle_id)) == 17
+            and str(vehicle_id).isalnum()
+            and not str(vehicle_id).isdigit()
+        ]
+        stale_fleet_cache_ids = [
+            str(vehicle_id)
+            for vehicle_id in cached_soc
+            if len(str(vehicle_id)) == 17
+            and str(vehicle_id).isalnum()
+            and not str(vehicle_id).isdigit()
+        ]
+        if stale_fleet_ids or stale_fleet_cache_ids:
+            # v2.12.1098 could incorrectly canonicalize multiple standalone BLE
+            # aliases onto lingering Fleet VINs. Their intended BLE owner is
+            # ambiguous, so fail closed instead of migrating a schedule to the
+            # wrong car. The reporter can explicitly re-enable each BLE alias.
+            for vehicle_id in stale_fleet_ids:
+                auto_schedule_data.pop(vehicle_id, None)
+            for vehicle_id in stale_fleet_cache_ids:
+                cached_soc.pop(vehicle_id, None)
+            _LOGGER.warning(
+                "Removed stale Fleet auto-schedule identities in Tesla BLE-only "
+                "mode: settings=%s, cached_soc=%s",
+                stale_fleet_ids,
+                stale_fleet_cache_ids,
+            )
+            changed = True
     if resolved_prefixes is None:
         resolved_prefixes = _configured_ble_prefixes(
             config_entry,

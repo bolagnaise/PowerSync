@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import logging
 import math
 from typing import Any
@@ -31,8 +31,6 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
-from datetime import timedelta
-
 from .const import (
     CONF_POWERWALL_LOCAL_PAIRED,
     CONF_BATTERY_SENSOR_DISPLAY_MODE,
@@ -144,6 +142,7 @@ from .const import (
     CONF_GENERIC_CHARGER_ENABLED,
     CONF_SIGENERGY_CHARGER_ENABLED,
     CONF_BATTERY_SYSTEM,
+    BATTERY_SYSTEM_FOXESS,
     BATTERY_SYSTEM_SUNGROW,
     BATTERY_MODE_STATE_NORMAL,
     BATTERY_MODE_STATE_FORCE_CHARGE,
@@ -4836,6 +4835,67 @@ class TariffPriceSensor(PowerSyncCurrencyMixin, RestoredNumericStateMixin, Senso
 SIGNAL_CURTAILMENT_UPDATED = "power_sync_curtailment_updated_{}"
 
 
+def _foxess_curtailment_visible_status(
+    *,
+    curtailment_enabled: bool,
+    control_state: str,
+    grid_power_kw: Any,
+    grid_power_valid: bool,
+    telemetry_ready: bool,
+    last_update_success: bool,
+    last_update: Any,
+    update_interval: Any = None,
+    now: datetime | None = None,
+) -> tuple[str, float | None, bool]:
+    """Return honest FoxESS curtailment state and physical export evidence.
+
+    ``Active`` requires both an acknowledged curtailment lifecycle state and a
+    fresh telemetry snapshot confirming no material export. An acknowledged
+    command without that physical evidence remains ``Pending``.
+    """
+    if not curtailment_enabled or control_state != "curtailed":
+        return "Normal", None, False
+
+    try:
+        if isinstance(grid_power_kw, bool):
+            raise TypeError
+        parsed_grid_power_kw = float(grid_power_kw)
+        if not math.isfinite(parsed_grid_power_kw):
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        return "Pending", None, False
+
+    telemetry_fresh = False
+    if isinstance(last_update, datetime):
+        normalized_update = last_update
+        if normalized_update.tzinfo is None:
+            normalized_update = normalized_update.replace(tzinfo=timezone.utc)
+        current_time = now or datetime.now(timezone.utc)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+        age_seconds = (
+            current_time.astimezone(timezone.utc)
+            - normalized_update.astimezone(timezone.utc)
+        ).total_seconds()
+        interval_seconds = (
+            update_interval.total_seconds()
+            if isinstance(update_interval, timedelta)
+            else 0.0
+        )
+        telemetry_fresh = 0.0 <= age_seconds <= max(120.0, interval_seconds * 3.0)
+
+    telemetry_usable = (
+        last_update_success is True
+        and telemetry_ready is True
+        and grid_power_valid is True
+        and telemetry_fresh
+    )
+    export_w = max(0.0, -parsed_grid_power_kw * 1000.0)
+    if telemetry_usable and export_w <= 250.0:
+        return "Active", export_w, True
+    return "Pending", export_w if telemetry_usable else None, False
+
+
 class SolarCurtailmentSensor(SensorEntity):
     """Sensor for displaying solar curtailment status."""
 
@@ -4885,12 +4945,34 @@ class SolarCurtailmentSensor(SensorEntity):
         else:
             self._unsub_amber = None
 
+        foxess_coordinator = entry_data.get("foxess_coordinator")
+        if self._is_foxess() and foxess_coordinator:
+            self._unsub_foxess = foxess_coordinator.async_add_listener(
+                _handle_curtailment_update
+            )
+        else:
+            self._unsub_foxess = None
+
     async def async_will_remove_from_hass(self) -> None:
         """Run when entity is removed from hass."""
         if self._unsub_dispatcher:
             self._unsub_dispatcher()
         if hasattr(self, '_unsub_amber') and self._unsub_amber:
             self._unsub_amber()
+        if hasattr(self, '_unsub_foxess') and self._unsub_foxess:
+            self._unsub_foxess()
+
+    def _is_foxess(self) -> bool:
+        """Return whether this sensor belongs to a FoxESS battery system."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        battery_system = self._entry.options.get(
+            CONF_BATTERY_SYSTEM,
+            self._entry.data.get(CONF_BATTERY_SYSTEM),
+        )
+        return (
+            entry_data.get("is_foxess") is True
+            or battery_system == BATTERY_SYSTEM_FOXESS
+        )
 
     def _get_feedin_price(self) -> float | None:
         """Get current feed-in price from Amber coordinator."""
@@ -4907,7 +4989,10 @@ class SolarCurtailmentSensor(SensorEntity):
         return None
 
     def _is_curtailed(self) -> bool:
-        """Determine if curtailment should be active based on current price."""
+        """Determine whether curtailment is confirmed active."""
+        if self._is_foxess():
+            return self._foxess_status()[0] == "Active"
+
         feedin_price = self._get_feedin_price()
 
         if feedin_price is not None:
@@ -4920,9 +5005,35 @@ class SolarCurtailmentSensor(SensorEntity):
         cached_rule = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("cached_export_rule")
         return cached_rule == "never"
 
+    def _foxess_status(self) -> tuple[str, float | None, bool]:
+        """Return FoxESS lifecycle state reconciled with live grid telemetry."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        coordinator = entry_data.get("foxess_coordinator")
+        coordinator_data = getattr(coordinator, "data", None)
+        if not isinstance(coordinator_data, dict):
+            coordinator_data = {}
+        curtailment_enabled = self._entry.options.get(
+            CONF_BATTERY_CURTAILMENT_ENABLED,
+            self._entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
+        )
+        return _foxess_curtailment_visible_status(
+            curtailment_enabled=bool(curtailment_enabled),
+            control_state=str(entry_data.get("foxess_curtailment_state", "normal")),
+            grid_power_kw=coordinator_data.get("grid_power"),
+            grid_power_valid=coordinator_data.get("grid_power_valid") is True,
+            telemetry_ready=coordinator_data.get("telemetry_ready") is not False,
+            last_update_success=(
+                getattr(coordinator, "last_update_success", False) is True
+            ),
+            last_update=coordinator_data.get("last_update"),
+            update_interval=getattr(coordinator, "update_interval", None),
+        )
+
     @property
     def native_value(self) -> str:
         """Return the state - whether curtailment is active."""
+        if self._is_foxess():
+            return self._foxess_status()[0]
         if self._is_curtailed():
             return "Active"
         return "Normal"
@@ -4930,6 +5041,8 @@ class SolarCurtailmentSensor(SensorEntity):
     @property
     def icon(self) -> str:
         """Return the icon based on state."""
+        if self._is_foxess() and self._foxess_status()[0] == "Pending":
+            return "mdi:solar-power-variant-outline"
         if self._is_curtailed():
             return "mdi:solar-power-variant-outline"  # Different icon when curtailed
         return "mdi:solar-power-variant"
@@ -4945,6 +5058,33 @@ class SolarCurtailmentSensor(SensorEntity):
         )
         feedin_price = self._get_feedin_price()
         export_earnings = -feedin_price if feedin_price is not None else None
+
+        if self._is_foxess():
+            visible_state, grid_export_w, effect_confirmed = self._foxess_status()
+            export_uneconomic = export_earnings is not None and export_earnings < 1.0
+            descriptions = {
+                "Active": "Curtailment confirmed; grid export is below 250 W",
+                "Pending": (
+                    "Curtailment command acknowledged, but physical zero-export "
+                    "is not confirmed"
+                ),
+                "Normal": (
+                    "Curtailment is economically eligible but not active"
+                    if export_uneconomic
+                    else "Normal solar export allowed"
+                ),
+            }
+            return {
+                "export_rule": cached_rule,
+                "curtailment_enabled": curtailment_enabled,
+                "feedin_price": feedin_price,
+                "export_earnings": export_earnings,
+                "export_uneconomic": export_uneconomic,
+                "control_state": entry_data.get("foxess_curtailment_state", "normal"),
+                "grid_export_w": grid_export_w,
+                "effect_confirmed": effect_confirmed,
+                "description": descriptions[visible_state],
+            }
 
         return {
             "export_rule": cached_rule,

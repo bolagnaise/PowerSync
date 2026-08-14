@@ -101,6 +101,25 @@ def test_single_vehicle_single_bridge_is_inferred_safely():
     assert vehicle_ble_prefix(config, VIN_A, [VIN_A]) == "bridge_alpha"
 
 
+def test_ble_only_alias_never_borrows_lingering_fleet_identity():
+    config = {
+        "ev_provider": "tesla_ble",
+        "tesla_ble_entity_prefix": "tesla_yf88,tesla_flinn",
+        "tesla_ble_vehicle_mapping": f"{VIN_A}=tesla_yf88,{VIN_B}=tesla_flinn",
+    }
+
+    assert canonical_tesla_vehicle_id(
+        config,
+        "ble_tesla_yf88",
+        [VIN_A, VIN_B],
+    ) == "ble_tesla_yf88"
+    assert canonical_tesla_vehicle_id(
+        config,
+        "ble_tesla_flinn",
+        [VIN_A, VIN_B],
+    ) == "ble_tesla_flinn"
+
+
 def test_mapping_to_an_unconfigured_bridge_fails_closed():
     config = _both_config("bridge_alpha", f"{VIN_A}=bridge_beta")
 

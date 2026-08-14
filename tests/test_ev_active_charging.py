@@ -239,6 +239,32 @@ def test_discovery_hides_only_explicitly_paired_ble_duplicate():
     assert [vehicle["vin"] for vehicle in vehicles] == [vin, "ble_bridge_alpha"]
 
 
+def test_ble_only_discovery_ignores_lingering_fleet_devices():
+    _install_registry_stubs()
+    vin_a = "5YJTEST0000000001"
+    vin_b = "5YJTEST0000000002"
+    hass = _Hass(
+        [
+            _State("binary_sensor.tesla_yf88_status", "on"),
+            _State("binary_sensor.tesla_flinn_status", "on"),
+        ],
+        devices=_fleet_devices(vin_a, vin_b),
+    )
+    entry = _Entry()
+    entry.options = {
+        "ev_provider": "tesla_ble",
+        "tesla_ble_entity_prefix": "tesla_yf88,tesla_flinn",
+    }
+
+    vehicles = asyncio.run(ev_planner.discover_all_tesla_vehicles(hass, entry))
+
+    assert [vehicle["vin"] for vehicle in vehicles] == [
+        "ble_tesla_yf88",
+        "ble_tesla_flinn",
+    ]
+    assert {vehicle["source"] for vehicle in vehicles} == {"tesla_ble"}
+
+
 def test_discovery_empty_prefix_uses_default_bridge():
     _install_registry_stubs()
     hass = _Hass([_State("binary_sensor.tesla_ble_status", "on")])
