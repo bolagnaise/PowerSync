@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import importlib.util
 import sys
 import types
@@ -607,6 +608,33 @@ def test_local_status_api_load_excludes_observed_ev_power():
     assert api["load_w"] == 3600.0
     assert api["raw_load_w"] == 10700.0
     assert api["ev_power_w"] == 7100.0
+
+
+def test_local_status_api_prefers_complete_site_ev_snapshot_over_zero_coordinator():
+    coord = _coordinator_with_snapshot(ev_power_kw=0.0)
+    ev_load = sys.modules.get("power_sync_ev_load_dcq")
+    if ev_load is None:
+        spec = importlib.util.spec_from_file_location(
+            "power_sync_ev_load_dcq", ROOT / "ev_load.py"
+        )
+        assert spec and spec.loader
+        ev_load = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = ev_load
+        spec.loader.exec_module(ev_load)
+    coord.hass.data["power_sync"]["entry-1"]["observed_ev_load_snapshot"] = (
+        ev_load.ObservedEvLoadSnapshot(
+            power_kw=1.0,
+            components=(),
+            observed_at=datetime.now(timezone.utc),
+            quality=ev_load.EvLoadQuality.COMPLETE,
+        )
+    )
+
+    api = coord.snapshot_as_api()
+
+    assert api["load_w"] == 9700.0
+    assert api["ev_power_w"] == 1000.0
+    assert api["home_load_normalization_quality"] == "complete"
 
 
 def test_local_status_api_load_never_goes_negative_after_ev_subtraction():

@@ -2642,6 +2642,31 @@ def test_non_ev_home_load_uses_site_balance_when_load_power_is_already_adjusted(
     assert round(actions._non_ev_home_load_kw(live_status, 7.1), 3) == 3.6
 
 
+def test_direct_surplus_does_not_subtract_ev_from_normalized_home_load_twice():
+    live_status = {
+        "solar_power": 10_000,
+        "grid_power": -5_000,
+        "battery_power": 0,
+        "load_power": 2_000,
+        "home_load_basis": "excludes_ev",
+    }
+
+    assert actions._calculate_solar_surplus(
+        live_status,
+        current_ev_power_kw=3.0,
+        config={"surplus_calculation": "direct", "household_buffer_kw": 0.0},
+    ) == 8.0
+
+
+def test_non_ev_home_load_does_not_subtract_normalized_fallback_twice():
+    live_status = {
+        "load_power": 2_000,
+        "home_load_basis": "excludes_ev",
+    }
+
+    assert actions._non_ev_home_load_kw(live_status, 3.0) == 2.0
+
+
 def test_ocpp_amps_falls_back_to_hacs_number_entity():
     entity_id = "number.evse_1_maximum_current"
     hass = _Hass(

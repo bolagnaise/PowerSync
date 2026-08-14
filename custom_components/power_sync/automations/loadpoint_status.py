@@ -493,6 +493,54 @@ def _display_name(vehicle_id: str, state: Mapping[str, Any]) -> str:
     )
 
 
+def resolve_vehicle_display_name(
+    current_name: Any,
+    vehicle_id: Any,
+    observation: Mapping[str, Any] | None = None,
+) -> str:
+    """Prefer observed friendly names over raw loadpoint identifiers.
+
+    Manual/runtime state is keyed by a stable identifier and older sessions may
+    have persisted that identifier (or its first eight characters) as the
+    display name.  Keep a real configured name, but replace identifier-shaped
+    fallbacks with the friendly name from current vehicle telemetry.
+    """
+    current = str(current_name or "").strip()
+    observed = str(
+        (observation or {}).get("vehicle_name")
+        or (observation or {}).get("name")
+        or ""
+    ).strip()
+
+    identifiers = [
+        vehicle_id,
+        (observation or {}).get("vehicle_id"),
+        (observation or {}).get("charger_id"),
+        (observation or {}).get("vin"),
+    ]
+    identifier_fallback = not current
+    current_key = _normal_key(current)
+    for identifier in identifiers:
+        identifier_text = str(identifier or "").strip()
+        identifier_key = _normal_key(identifier_text)
+        if not identifier_key:
+            continue
+        if current_key == identifier_key:
+            identifier_fallback = True
+            break
+        if (
+            len(current_key) >= 8
+            and len(identifier_key) > len(current_key)
+            and identifier_key.startswith(current_key)
+        ):
+            identifier_fallback = True
+            break
+
+    if observed and identifier_fallback:
+        return observed
+    return current or observed or str(vehicle_id or "EV")
+
+
 def _status_source(
     power_kw: float,
     surplus_kw: float,
@@ -762,7 +810,11 @@ def _dynamic_loadpoint(
     ownership: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     params = state.get("params") or {}
-    vehicle_name = _display_name(vehicle_id, state)
+    vehicle_name = resolve_vehicle_display_name(
+        _display_name(vehicle_id, state),
+        vehicle_id,
+        observation,
+    )
     loadpoint_id = vehicle_id
     observation_vehicle_id = None
     if observation is not None and _is_default_loadpoint(vehicle_id, vehicle_name):

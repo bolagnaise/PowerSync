@@ -119,7 +119,9 @@ sys.modules.pop("power_sync.coordinator", None)
 from power_sync.coordinator import (  # noqa: E402
     DOMAIN,
     TeslaEnergyCoordinator,
+    _fresh_site_ev_load,
     _mapped_tesla_other_charger_power_kw,
+    _update_energy_accumulator_with_ev_load,
 )
 from power_sync.const import (  # noqa: E402
     POWERSYNC_AUTH_START_URL,
@@ -127,6 +129,64 @@ from power_sync.const import (  # noqa: E402
     TESLA_PROVIDER_POWERSYNC,
     TESLA_PROVIDER_TESLEMETRY,
 )
+
+
+def test_fresh_site_ev_load_prefers_complete_provider_neutral_total():
+    snapshot = types.SimpleNamespace(
+        power_kw=9.2,
+        observed_at=datetime(2026, 7, 8, 0, 59, 30),
+        quality=types.SimpleNamespace(value="complete"),
+        components=(object(), object()),
+        unavailable_active_keys=(),
+    )
+    hass = types.SimpleNamespace(
+        data={DOMAIN: {"entry-1": {"observed_ev_load_snapshot": snapshot}}}
+    )
+
+    assert _fresh_site_ev_load(hass, "entry-1", 7.2) == (9.2, True)
+
+
+def test_stale_site_ev_load_fails_closed_instead_of_using_partial_fallback():
+    snapshot = types.SimpleNamespace(
+        power_kw=9.2,
+        observed_at=datetime(2026, 7, 8, 0, 58, 0),
+        quality=types.SimpleNamespace(value="complete"),
+        components=(object(),),
+        unavailable_active_keys=(),
+    )
+    hass = types.SimpleNamespace(
+        data={DOMAIN: {"entry-1": {"observed_ev_load_snapshot": snapshot}}}
+    )
+
+    assert _fresh_site_ev_load(hass, "entry-1", 7.2) == (7.2, False)
+
+
+def test_daily_home_energy_uses_the_same_site_ev_total():
+    snapshot = types.SimpleNamespace(
+        power_kw=2.0,
+        observed_at=datetime(2026, 7, 8, 0, 59, 30),
+        quality=types.SimpleNamespace(value="complete"),
+        components=(object(),),
+        unavailable_active_keys=(),
+    )
+    hass = types.SimpleNamespace(
+        data={DOMAIN: {"entry-1": {"observed_ev_load_snapshot": snapshot}}}
+    )
+    calls = []
+    accumulator = types.SimpleNamespace(update=lambda *args: calls.append(args))
+
+    assert _update_energy_accumulator_with_ev_load(
+        accumulator,
+        hass,
+        "entry-1",
+        4.0,
+        1.0,
+        0.0,
+        5.0,
+        0.3,
+        0.1,
+    )
+    assert calls == [(4.0, 1.0, 0.0, 3.0, 0.3, 0.1)]
 
 
 class _FakeEnergyAccumulator:

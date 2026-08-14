@@ -1632,7 +1632,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             tesla_coordinator.data.get("wall_connectors_raw")
             or tesla_coordinator.data.get("wall_connectors")
         )
-        for wc in _wall_connector_records(raw_wc):
+        for wc_index, wc in enumerate(_wall_connector_records(raw_wc)):
             wc_state = wc.get("wall_connector_state", 0)
             wc_power_kw = _kw_from_wall_connector_power(
                 wc.get("wall_connector_power", wc.get("power"))
@@ -1644,6 +1644,13 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 wc_connected,
                 wc_charging,
                 wc.get("vin") or wc.get("vehicle_vin"),
+                str(
+                    wc.get("wall_connector_id")
+                    or wc.get("id")
+                    or wc.get("din")
+                    or wc.get("serial_number")
+                    or wc_index
+                ),
             ))
 
         if not wc_observations:
@@ -1651,7 +1658,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 tesla_coordinator.data.get("ev_power", 0)
             )
             if wc_power_kw > 0.05:
-                wc_observations.append((wc_power_kw, True, True, None))
+                wc_observations.append((wc_power_kw, True, True, None, "site"))
 
     if not wc_observations:
         wc_power = 0.0
@@ -1674,9 +1681,9 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 if val > 0:
                     wc_power = max(wc_power, val)
         if wc_connected or wc_power > 0.05:
-            wc_observations.append((wc_power, wc_connected, wc_power > 0.05, wc_vin))
+            wc_observations.append((wc_power, wc_connected, wc_power > 0.05, wc_vin, "ha"))
 
-    for wc_power, wc_connected, wc_charging, wc_vin in wc_observations:
+    for wc_power, wc_connected, wc_charging, wc_vin, wc_id in wc_observations:
         matched = _apply_wall_connector_observation(
             vehicles,
             wc_power,
@@ -1686,7 +1693,8 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         )
         if not matched:
             vehicles.append({
-                "vehicle_id": "wall_connector",
+                "vehicle_id": f"wall_connector_{wc_id}",
+                "charger_id": f"wall_connector_{wc_id}",
                 "vehicle_name": "Wall Connector",
                 "ev_power_kw": wc_power,
                 "ev_soc": None,
@@ -1695,6 +1703,242 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             })
 
     return list(coalesce_vehicle_observations(vehicles))
+
+
+async def _get_ev_load_observations(hass, entry, vehicles=None):
+    """Collect all supported charger powers as physical-load observations."""
+    from .const import (
+        CONF_GENERIC_CHARGER_ENABLED,
+        CONF_GENERIC_CHARGER_POWER_ENTITY,
+        CONF_SIGENERGY_CHARGER_TYPE,
+    )
+    from .ev_load import (
+        EvLoadObservation,
+        EvMeasurementKind,
+        meter_physical_load_key,
+    )
+
+    observed_at = dt_util.utcnow()
+    config = {**entry.data, **entry.options}
+    entry_data = getattr(hass, "data", {}).get(DOMAIN, {}).get(entry.entry_id, {})
+    observations = []
+    vehicles = list(vehicles if vehicles is not None else _get_ev_vehicles_status(hass, entry))
+
+    def _meter_physical_key(entity_id, charger_type="generic", settings=None):
+        """Resolve an entity-backed meter to the same key as its native source."""
+        entity_id = str(entity_id or "").strip()
+        charger_type = str(charger_type or "generic").lower()
+        physical_key = meter_physical_load_key(
+            charger_type=charger_type,
+            entity_id=entity_id,
+            entry_id=entry.entry_id,
+            native_id=getattr(settings, "ocpp_charger_id", None),
+            zaptec_id=config.get(CONF_ZAPTEC_CHARGER_ID),
+            sigenergy_type=config.get(CONF_SIGENERGY_CHARGER_TYPE),
+        )
+        if not physical_key.startswith("generic:"):
+            return physical_key
+        try:
+            from homeassistant.helpers import entity_registry as er_local
+            from .automations.ocpp_status import extract_hacs_ocpp_prefix
+
+            registry_entry = er_local.async_get(hass).async_get(entity_id)
+            platform = str(getattr(registry_entry, "platform", "") or "").lower()
+            if platform == "ocpp":
+                prefix = extract_hacs_ocpp_prefix(entity_id.lower())
+                if prefix:
+                    return f"ocpp:{prefix}:1"
+            if platform == "zaptec" and config.get(CONF_ZAPTEC_STANDALONE_ENABLED):
+                return f"zaptec:{config.get(CONF_ZAPTEC_CHARGER_ID) or 'standalone'}"
+            if platform == "solaredge":
+                return f"solaredge:{entry.entry_id}:internal"
+        except Exception:
+            pass
+        return physical_key
+
+    for vehicle in vehicles:
+        vehicle_id = str(
+            vehicle.get("bridge_vehicle_id")
+            or vehicle.get("vehicle_id")
+            or vehicle.get("charger_id")
+            or ""
+        ).strip()
+        if not vehicle_id:
+            continue
+        charger_id = str(vehicle.get("charger_id") or "").strip()
+        if charger_id.startswith("wall_connector_"):
+            physical_key = f"tesla:{charger_id}"
+            kind = EvMeasurementKind.LOADPOINT_METER
+        elif vehicle_id == "generic_ev":
+            generic_entity = config.get(CONF_GENERIC_CHARGER_POWER_ENTITY)
+            physical_key = _meter_physical_key(generic_entity)
+            kind = EvMeasurementKind.LOADPOINT_METER
+        else:
+            physical_key = f"vehicle:{_vehicle_identity_key(vehicle_id)}"
+            kind = EvMeasurementKind.VEHICLE
+        observations.append(
+            EvLoadObservation(
+                physical_load_key=physical_key,
+                source_key=charger_id or str(vehicle.get("vehicle_id") or vehicle_id),
+                power_kw=vehicle.get("ev_power_kw"),
+                observed_at=observed_at,
+                active=bool(vehicle.get("is_charging")),
+                measurement_kind=kind,
+            )
+        )
+
+    # App-managed vehicle/charger configs can define more than one generic
+    # power entity.  Treat each distinct physical entity/loadpoint separately;
+    # alias Tesla vehicle configs to their canonical vehicle identity.
+    try:
+        from .automations.ev_charging_planner import get_auto_schedule_executor
+
+        executor = get_auto_schedule_executor()
+        for settings_key, settings in (getattr(executor, "_settings", {}) or {}).items():
+            entity_id = str(getattr(settings, "charger_power_entity", None) or "").strip()
+            if not entity_id:
+                continue
+            state = hass.states.get(entity_id)
+            if not state or state.state in ("unknown", "unavailable"):
+                continue
+            power_kw = _kw_from_power_state(state)
+            vehicle_id = str(
+                getattr(settings, "vehicle_id", None) or settings_key or ""
+            ).strip()
+            charger_type = str(
+                getattr(settings, "charger_type", None) or "generic"
+            ).lower()
+            if charger_type in {"tesla", "tesla_ble", "fleet_api", "teslemetry"}:
+                physical_key = f"vehicle:{_vehicle_identity_key(vehicle_id)}"
+                kind = EvMeasurementKind.VEHICLE
+            else:
+                physical_key = _meter_physical_key(
+                    entity_id,
+                    charger_type,
+                    settings,
+                )
+                kind = EvMeasurementKind.LOADPOINT_METER
+            observations.append(
+                EvLoadObservation(
+                    physical_load_key=physical_key,
+                    source_key=entity_id,
+                    power_kw=power_kw,
+                    observed_at=getattr(state, "last_updated", observed_at),
+                    active=power_kw > 0.05,
+                    measurement_kind=kind,
+                )
+            )
+    except Exception:
+        _LOGGER.debug("Could not collect app-managed charger power", exc_info=True)
+
+    if config.get(CONF_ZAPTEC_STANDALONE_ENABLED):
+        cached = entry_data.get("zaptec_cached_state") or {}
+        try:
+            power_kw = float(cached.get("total_charge_power_w") or 0.0) / 1000.0
+        except (TypeError, ValueError):
+            power_kw = None
+        mode = str(cached.get("charger_operation_mode") or "").lower()
+        charger_id = str(config.get(CONF_ZAPTEC_CHARGER_ID) or "standalone")
+        observations.append(
+            EvLoadObservation(
+                physical_load_key=f"zaptec:{charger_id}",
+                source_key="zaptec_cloud",
+                power_kw=power_kw,
+                observed_at=observed_at,
+                active=mode == "charging" or bool(power_kw and power_kw > 0.05),
+                measurement_kind=EvMeasurementKind.LOADPOINT_METER,
+            )
+        )
+
+    if config.get(CONF_OCPP_ENABLED):
+        ocpp_server = entry_data.get("ocpp_server")
+        if ocpp_server and hasattr(ocpp_server, "charge_points"):
+            for cp_id, cp in ocpp_server.charge_points.items():
+                try:
+                    power_kw = float(getattr(cp, "meter_power_w", 0) or 0) / 1000.0
+                except (TypeError, ValueError):
+                    power_kw = None
+                observations.append(
+                    EvLoadObservation(
+                        physical_load_key=f"ocpp:{cp_id}:1",
+                        source_key=f"ocpp_server:{cp_id}",
+                        power_kw=power_kw,
+                        observed_at=observed_at,
+                        active=bool(getattr(cp, "active_transaction", None)) or bool(power_kw and power_kw > 0.05),
+                        measurement_kind=EvMeasurementKind.LOADPOINT_METER,
+                    )
+                )
+
+        try:
+            from homeassistant.helpers import entity_registry as er_local
+            from .automations.ocpp_status import (
+                claimed_hacs_ocpp_prefixes,
+                extract_hacs_ocpp_prefix,
+                is_hacs_ocpp_power_entity,
+            )
+
+            registry_entries = tuple(er_local.async_get(hass).entities.values())
+            claimed = claimed_hacs_ocpp_prefixes(
+                (config.get(CONF_GENERIC_CHARGER_POWER_ENTITY),)
+                if config.get(CONF_GENERIC_CHARGER_ENABLED)
+                else (),
+                registry_entries,
+            )
+            for entity in registry_entries:
+                if entity.platform != "ocpp" or not is_hacs_ocpp_power_entity(entity.entity_id):
+                    continue
+                prefix = extract_hacs_ocpp_prefix(entity.entity_id.lower())
+                if not prefix or prefix in claimed:
+                    continue
+                state = hass.states.get(entity.entity_id)
+                if not state or state.state in ("unknown", "unavailable"):
+                    continue
+                power_kw = _kw_from_power_state(state)
+                observations.append(
+                    EvLoadObservation(
+                        physical_load_key=f"ocpp:{prefix}:1",
+                        source_key=entity.entity_id,
+                        power_kw=power_kw,
+                        observed_at=getattr(state, "last_updated", observed_at),
+                        active=power_kw > 0.05,
+                        measurement_kind=EvMeasurementKind.LOADPOINT_METER,
+                    )
+                )
+        except Exception:
+            _LOGGER.debug("Could not collect HACS OCPP load observations", exc_info=True)
+
+    sigenergy_state = await _read_sigenergy_charger_state_for_entry(entry, hass)
+    if sigenergy_state is not None:
+        entry_data["observed_sigenergy_charger_state"] = sigenergy_state
+        charger_type = str(getattr(sigenergy_state, "charger_type", "evac") or "evac").lower()
+        observations.append(
+            EvLoadObservation(
+                physical_load_key=f"sigenergy:{charger_type}",
+                source_key=f"sigenergy_{charger_type}",
+                power_kw=getattr(sigenergy_state, "power_kw", None),
+                observed_at=observed_at,
+                active=bool(getattr(sigenergy_state, "is_charging", False) or getattr(sigenergy_state, "is_discharging", False)),
+                measurement_kind=EvMeasurementKind.INTEGRATED_CHARGER,
+                supports_bidirectional_power=charger_type == "evdc",
+            )
+        )
+
+    solaredge = entry_data.get("solaredge_coordinator")
+    if solaredge and solaredge.data and solaredge.data.get("ev_power") is not None:
+        power_kw = solaredge.data.get("ev_power")
+        observations.append(
+            EvLoadObservation(
+                physical_load_key=f"solaredge:{entry.entry_id}:internal",
+                source_key="solaredge_coordinator",
+                power_kw=power_kw,
+                observed_at=getattr(solaredge, "last_update_success_time", None) or observed_at,
+                active=bool(solaredge.data.get("ev_charger_charging", abs(float(power_kw or 0)) > 0.05)),
+                measurement_kind=EvMeasurementKind.INTEGRATED_CHARGER,
+                supports_bidirectional_power=bool(solaredge.data.get("ev_charger_discharging")),
+            )
+        )
+
+    return observations
 
 
 def _get_external_tesla_ev_power_kw(hass, entry) -> float:
@@ -14387,6 +14631,8 @@ class EVVehicleCommandView(HomeAssistantView):
 
         stored_config = self._get_vehicle_charging_config(vehicle_vin, manual_vehicle_id)
         if stored_config:
+            if stored_config.get("display_name"):
+                params["vehicle_name"] = stored_config["display_name"]
             for key in (
                 "charger_type",
                 "charger_switch_entity",
@@ -17051,6 +17297,7 @@ class EVWidgetDataView(HomeAssistantView):
                 _vehicle_config_matches,
                 get_auto_schedule_executor,
             )
+            from .automations.loadpoint_status import resolve_vehicle_display_name
             from .solar_surplus_config import get_stored_solar_surplus_config
 
             entry_id = self._config_entry.entry_id
@@ -17141,6 +17388,11 @@ class EVWidgetDataView(HomeAssistantView):
                     params.get("vehicle_vin"),
                     params.get("vehicle_id"),
                     vehicle_name,
+                )
+                vehicle_name = resolve_vehicle_display_name(
+                    vehicle_name,
+                    vehicle_id,
+                    matched_vehicle,
                 )
                 charger_type = params.get("charger_type", "tesla")
                 is_tesla_vehicle = charger_type == "tesla" or matched_vehicle is not None

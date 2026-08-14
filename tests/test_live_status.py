@@ -36,9 +36,24 @@ def test_coordinator_data_to_ev_live_status_converts_kw_to_watts():
         "solar_power": 5500.0,
         "battery_power": -2000.0,
         "load_power": 3750.0,
+        "site_load_power": 3750.0,
         "ev_power": 7100.0,
+        "home_load_basis": "includes_ev",
         "is_curtailed": True,
     }
+
+
+def test_normalized_home_load_keeps_gross_site_load_for_ev_headroom():
+    live_status = coordinator_data_to_ev_live_status({
+        "load_power": 4.67,
+        "site_load_power": 5.67,
+        "home_load_basis": "excludes_ev",
+        "ev_power": 1.0,
+    })
+
+    assert live_status["load_power"] == 4670.0
+    assert live_status["site_load_power"] == 5670.0
+    assert live_status["home_load_basis"] == "excludes_ev"
 
 
 def test_coordinator_data_to_ev_live_status_handles_missing_values():

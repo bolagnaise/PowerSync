@@ -74,6 +74,29 @@ def test_manual_vehicle_config_lookup_filters_ambiguous_ble_only_vins():
     assert "for config in safe_configs:" in method_source
 
 
+def test_manual_action_params_carries_stored_vehicle_display_name():
+    source = INIT_PATH.read_text()
+    method_start = source.index("    def _manual_action_params(")
+    method_source = source[
+        method_start:source.index("    def _generic_charger_ready_for_start(", method_start)
+    ]
+
+    assert 'if stored_config.get("display_name"):' in method_source
+    assert 'params["vehicle_name"] = stored_config["display_name"]' in method_source
+
+
+def test_widget_data_reconciles_runtime_identifier_with_observed_name():
+    source = INIT_PATH.read_text()
+    view_start = source.index("class EVWidgetDataView")
+    view_source = source[
+        view_start:source.index("class EVLoadpointStatusView", view_start)
+    ]
+
+    assert "from .automations.loadpoint_status import resolve_vehicle_display_name" in view_source
+    assert "vehicle_name = resolve_vehicle_display_name(" in view_source
+    assert "matched_vehicle," in view_source
+
+
 def test_disabling_solar_surplus_awaits_immediate_runtime_teardown():
     source = INIT_PATH.read_text()
     view_start = source.index("class SolarSurplusConfigView")

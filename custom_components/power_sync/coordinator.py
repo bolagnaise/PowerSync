@@ -59,7 +59,6 @@ from .const import (
     SIGENERGY_CHARGER_EVDC,
 )
 from .sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
-from .sigenergy_model import sigenergy_home_load_kw
 from .tesla_grid_control import async_set_tesla_grid_charging_confirmed
 from .tesla_ble_mapping import (
     TeslaBleMappingError,
@@ -2158,6 +2157,62 @@ class AmberUsageCoordinator:
         }
 
 
+def _fresh_site_ev_load(
+    hass: HomeAssistant,
+    entry_id: str,
+    fallback_power_kw: float,
+) -> tuple[float, bool]:
+    """Return the fresh provider-neutral EV total, or a backend fallback."""
+    try:
+        snapshot = hass.data.get(DOMAIN, {}).get(entry_id, {}).get(
+            "observed_ev_load_snapshot"
+        )
+        if snapshot is None:
+            return float(fallback_power_kw or 0.0), True
+        observed_at = getattr(snapshot, "observed_at", None)
+        now = dt_util.utcnow()
+        age = now - observed_at
+        if not timedelta(0) <= age <= timedelta(seconds=90):
+            had_observed_loadpoints = bool(
+                getattr(snapshot, "components", ())
+                or getattr(snapshot, "unavailable_active_keys", ())
+            )
+            return float(fallback_power_kw or 0.0), not had_observed_loadpoints
+        quality = getattr(snapshot, "quality", None)
+        quality_value = getattr(quality, "value", quality)
+        if quality_value != "complete":
+            return float(getattr(snapshot, "power_kw", 0.0) or 0.0), False
+        return float(getattr(snapshot, "power_kw", 0.0) or 0.0), True
+    except (AttributeError, TypeError, ValueError):
+        return float(fallback_power_kw or 0.0), True
+
+
+def _update_energy_accumulator_with_ev_load(
+    accumulator: Any,
+    hass: HomeAssistant,
+    entry_id: str,
+    solar_kw: float,
+    grid_kw: float,
+    battery_kw: float,
+    raw_load_kw: float,
+    buy: float,
+    sell: float,
+) -> bool:
+    """Integrate non-EV Home Load, withholding incomplete charger samples."""
+    ev_power_kw, complete = _fresh_site_ev_load(hass, entry_id, 0.0)
+    if not complete:
+        return False
+    accumulator.update(
+        solar_kw,
+        grid_kw,
+        battery_kw,
+        max(0.0, raw_load_kw - ev_power_kw),
+        buy,
+        sell,
+    )
+    return True
+
+
 class TeslaEnergyCoordinator(DataUpdateCoordinator):
     """Coordinator to fetch Tesla energy data from Tesla API (Teslemetry or Fleet API)."""
 
@@ -2480,14 +2535,26 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         # let load go negative.
         observed_ev_power_w = getattr(local_coordinator, "_observed_ev_power_w", None)
         ev_power_kw = 0.0
+        ev_load_complete = True
         if callable(observed_ev_power_w):
             try:
-                ev_power_kw = max(0.0, _kw(observed_ev_power_w()))
+                observed = observed_ev_power_w()
+                if isinstance(observed, tuple):
+                    observed, ev_load_complete = observed
+                ev_power_kw = _kw(observed)
             except Exception:
                 ev_power_kw = 0.0
-        load_kw = max(0.0, raw_load_kw - ev_power_kw)
+                ev_load_complete = False
+        load_kw = (
+            max(0.0, raw_load_kw - ev_power_kw)
+            if ev_load_complete
+            else None
+        )
 
-        self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, 0.0, 0.0)
+        if load_kw is not None:
+            self._energy_acc.update(
+                max(0, solar_kw), grid_kw, battery_kw, load_kw, 0.0, 0.0
+            )
 
         local_is_off_grid = _grid_status_is_off_grid(
             getattr(snap, "grid_status", None)
@@ -2535,6 +2602,13 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             "grid_power": grid_kw,
             "battery_power": battery_kw,
             "load_power": load_kw,
+            "raw_home_load_power": raw_load_kw,
+            "home_load_basis": (
+                "excludes_ev" if ev_load_complete else "unknown"
+            ),
+            "home_load_normalization_quality": (
+                "complete" if ev_load_complete else "incomplete"
+            ),
             "battery_level": soc_pct,
             "grid_status": grid_status,
             "ev_power": ev_power_kw,
@@ -2799,15 +2873,29 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 except Exception:
                     pass
 
+            ev_power_kw, ev_load_complete = _fresh_site_ev_load(
+                self.hass,
+                self._entry_id,
+                ev_power_kw,
+            )
+
             # Map Teslemetry API response to our data structure
             solar_kw = live_status.get("solar_power", 0) / 1000
             grid_kw = live_status.get("grid_power", 0) / 1000
             battery_kw = live_status.get("battery_power", 0) / 1000
-            load_kw = (live_status.get("load_power", 0) / 1000) - ev_power_kw
+            raw_load_kw = live_status.get("load_power", 0) / 1000
+            load_kw = (
+                max(0.0, raw_load_kw - ev_power_kw)
+                if ev_load_complete
+                else None
+            )
 
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+            if load_kw is not None:
+                self._energy_acc.update(
+                    max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell
+                )
 
             # Fetch site_info periodically to detect firmware updates (every 6 hours)
             _site_info_stale = (
@@ -2933,6 +3021,14 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 "grid_power": grid_kw,
                 "battery_power": battery_kw,
                 "load_power": load_kw,
+                "raw_home_load_power": raw_load_kw,
+                "home_load_basis": (
+                    "excludes_ev" if ev_load_complete else "unknown"
+                ),
+                "home_load_normalization_quality": (
+                    "complete" if ev_load_complete else "incomplete"
+                ),
+                "site_load_power": max(0.0, raw_load_kw),
                 "battery_level": soc_pct,
                 "grid_status": grid_status,
                 "ev_power": ev_power_kw,
@@ -4764,20 +4860,30 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
                     err,
                 )
 
-            # Balance-derived Sigenergy load includes DC-side EVDC and external
-            # AC EV power. Keep Home separate because the dashboard and load
-            # planner model those EV measurements as their own branch.
-            load_kw = sigenergy_home_load_kw(
-                solar_kw=solar_kw,
-                grid_kw=grid_kw,
-                battery_kw=battery_kw,
-                evdc_power_kw=evdc_power_kw,
-                external_ev_power_kw=external_ev_power_kw,
+            # Normalize the balance with the same site-wide charger total used
+            # by the HA sensors. The legacy EVDC/Tesla values remain a startup
+            # fallback until the provider-neutral snapshot has polled.
+            raw_load_kw = solar_kw + grid_kw + battery_kw
+            fallback_ev_power_kw = (
+                evdc_power_kw + max(0.0, external_ev_power_kw)
+            )
+            observed_ev_power_kw, ev_load_complete = _fresh_site_ev_load(
+                self.hass,
+                self._entry_id,
+                fallback_ev_power_kw,
+            )
+            load_kw = (
+                max(0.0, raw_load_kw - observed_ev_power_kw)
+                if ev_load_complete
+                else None
             )
 
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+            if load_kw is not None:
+                self._energy_acc.update(
+                    max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell
+                )
 
             # Rated charge/discharge power — hardware spec, static. Fetch once
             # from the ESS rated power registers via the controller's internal
@@ -4806,8 +4912,16 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
                 "grid_power": grid_kw,  # kW, positive = importing, negative = exporting
                 "battery_power": battery_kw,  # kW, positive = discharging, negative = charging
                 "load_power": load_kw,  # kW, calculated from energy balance
-                "ev_power": evdc_power_kw,  # kW, positive = EV charging, negative = V2X discharge
-                "ev_power_kw": evdc_power_kw,
+                "raw_home_load_power": raw_load_kw,
+                "home_load_basis": (
+                    "excludes_ev" if ev_load_complete else "unknown"
+                ),
+                "home_load_normalization_quality": (
+                    "complete" if ev_load_complete else "incomplete"
+                ),
+                "site_load_power": max(0.0, raw_load_kw),
+                "ev_power": observed_ev_power_kw,
+                "ev_power_kw": observed_ev_power_kw,
                 "ev_charger_type": evdc_state.charger_type if evdc_state else None,
                 "ev_charger_status": evdc_state.status if evdc_state else None,
                 "ev_charger_connected": evdc_state.is_connected if evdc_state else False,
@@ -5072,7 +5186,17 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
         load_kw = solar_kw + grid_kw + battery_kw
 
         buy, sell = _get_current_prices(self.hass, self._entry_id)
-        self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+        _update_energy_accumulator_with_ev_load(
+            self._energy_acc,
+            self.hass,
+            self._entry_id,
+            max(0, solar_kw),
+            grid_kw,
+            battery_kw,
+            load_kw,
+            buy,
+            sell,
+        )
 
         # BMS-reported power limits (W) — used to default force-mode power and
         # to cap the mobile app slider so users can't request more than the
@@ -5875,7 +5999,10 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(
+            _update_energy_accumulator_with_ev_load(
+                self._energy_acc,
+                self.hass,
+                self._entry_id,
                 max(0, site_solar_kw),
                 grid_kw,
                 battery_kw,
@@ -7243,7 +7370,17 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
 
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(total_solar_kw, grid_kw, battery_kw, load_kw, buy, sell)
+            _update_energy_accumulator_with_ev_load(
+                self._energy_acc,
+                self.hass,
+                self._entry_id,
+                total_solar_kw,
+                grid_kw,
+                battery_kw,
+                load_kw,
+                buy,
+                sell,
+            )
 
             # Merge Modbus energy registers (charge/discharge) with accumulated values
             acc = self._energy_acc.as_dict()
@@ -7560,7 +7697,10 @@ class CustomEntityEnergyCoordinator(DataUpdateCoordinator):
         battery_level = max(0.0, min(100.0, raw_values["battery_level"]))
 
         buy, sell = _get_current_prices(self.hass, self._entry_id)
-        self._energy_acc.update(
+        _update_energy_accumulator_with_ev_load(
+            self._energy_acc,
+            self.hass,
+            self._entry_id,
             solar_kw,
             grid_kw,
             battery_kw,
@@ -7797,7 +7937,10 @@ class FoxESSEntityEnergyCoordinator(
 
         if telemetry_ready:
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(
+            _update_energy_accumulator_with_ev_load(
+                self._energy_acc,
+                self.hass,
+                self._entry_id,
                 max(0.0, solar_kw),
                 grid_kw,
                 battery_kw,
@@ -8131,7 +8274,17 @@ class FoxESSCloudEnergyCoordinator(DataUpdateCoordinator):
                 )
 
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(solar_kw, grid_kw, battery_kw, load_kw, buy, sell)
+            _update_energy_accumulator_with_ev_load(
+                self._energy_acc,
+                self.hass,
+                self._entry_id,
+                solar_kw,
+                grid_kw,
+                battery_kw,
+                load_kw,
+                buy,
+                sell,
+            )
             acc = self._energy_acc.as_dict()
 
             charge_total = self._to_float(values.get("chargeEnergyToTal"), acc["charge_today_kwh"])
@@ -8431,7 +8584,10 @@ class GoodWeEnergyCoordinator(
             # Accumulate daily energy from power readings (with cost tracking)
             if telemetry_ready:
                 buy, sell = _get_current_prices(self.hass, self._entry_id)
-                self._energy_acc.update(
+                _update_energy_accumulator_with_ev_load(
+                    self._energy_acc,
+                    self.hass,
+                    self._entry_id,
                     max(0, solar_kw),
                     grid_kw,
                     battery_kw,
@@ -8845,7 +9001,10 @@ class SolaxBatteryEnergyCoordinator(
 
         if telemetry_ready:
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(
+            _update_energy_accumulator_with_ev_load(
+                self._energy_acc,
+                self.hass,
+                self._entry_id,
                 max(0.0, solar_kw),
                 grid_kw,
                 battery_kw,
@@ -9015,7 +9174,10 @@ class SolarEdgeEnergyCoordinator(
 
         if telemetry_ready:
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(
+            _update_energy_accumulator_with_ev_load(
+                self._energy_acc,
+                self.hass,
+                self._entry_id,
                 max(0.0, solar_kw),
                 grid_kw,
                 battery_kw,
@@ -9425,7 +9587,10 @@ class SajH2EnergyCoordinator(
 
         if telemetry_ready:
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(
+            _update_energy_accumulator_with_ev_load(
+                self._energy_acc,
+                self.hass,
+                self._entry_id,
                 max(0.0, solar_kw),
                 grid_kw,
                 battery_kw,
@@ -9581,7 +9746,10 @@ class FroniusReservaEnergyCoordinator(
 
         if telemetry_ready:
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(
+            _update_energy_accumulator_with_ev_load(
+                self._energy_acc,
+                self.hass,
+                self._entry_id,
                 max(0.0, solar_kw),
                 grid_kw,
                 battery_kw,
@@ -9744,7 +9912,10 @@ class NeovoltEnergyCoordinator(
 
         if telemetry_ready:
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(
+            _update_energy_accumulator_with_ev_load(
+                self._energy_acc,
+                self.hass,
+                self._entry_id,
                 max(0.0, solar_kw),
                 grid_kw,
                 battery_kw,
@@ -9913,7 +10084,10 @@ class AnkerSolixEnergyCoordinator(
 
         if telemetry_ready:
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(
+            _update_energy_accumulator_with_ev_load(
+                self._energy_acc,
+                self.hass,
+                self._entry_id,
                 max(0.0, solar_kw),
                 grid_kw,
                 battery_kw,
@@ -10181,7 +10355,10 @@ class ESYSunhomeEnergyCoordinator(
 
         if telemetry_ready:
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(
+            _update_energy_accumulator_with_ev_load(
+                self._energy_acc,
+                self.hass,
+                self._entry_id,
                 max(0.0, solar_kw),
                 grid_kw,
                 battery_kw,

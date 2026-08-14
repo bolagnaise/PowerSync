@@ -5697,7 +5697,11 @@ def _calculate_solar_surplus(
         # IMPORTANT: If load sensor includes EV power (e.g., mobile connector), we need to
         # subtract it to get the "real" household load, then calculate true surplus
         battery_charge_kw = max(0, -battery_kw)
-        real_household_load_kw = load_kw - current_ev_power_kw  # Remove EV from house load
+        real_household_load_kw = (
+            load_kw
+            if live_status.get("home_load_basis") == "excludes_ev"
+            else load_kw - current_ev_power_kw
+        )
         surplus = solar_kw - real_household_load_kw - battery_charge_kw
         battery_reserve_kw = _parallel_battery_reserve_kw(
             live_status, config, method, battery_charge_kw
@@ -6760,6 +6764,8 @@ def _non_ev_home_load_kw(live_status: dict, current_ev_power_kw: float) -> float
         return max(0.0, balanced_total_kw - ev_kw)
 
     load_power_kw = _live_status_power_kw(live_status, "load_power")
+    if live_status.get("home_load_basis") == "excludes_ev":
+        return max(0.0, load_power_kw)
     return max(0.0, load_power_kw - ev_kw)
 
 

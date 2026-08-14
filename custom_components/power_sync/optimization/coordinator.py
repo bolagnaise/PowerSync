@@ -2476,12 +2476,70 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return data
 
     def _get_energy_data(self) -> dict[str, Any] | None:
-        """Return custom aggregate telemetry when configured, else coordinator data."""
+        """Return the same canonical non-EV Home Load used by HA sensors."""
         custom_data = self._read_custom_energy_data()
-        if custom_data:
-            return custom_data
-        data = getattr(self.energy_coordinator, "data", None)
-        return data if isinstance(data, dict) else None
+        data = custom_data or getattr(self.energy_coordinator, "data", None)
+        if not isinstance(data, dict):
+            return None
+
+        from ..ev_load import (
+            EvLoadObservation,
+            EvLoadQuality,
+            EvMeasurementKind,
+            ObservedEvLoadSnapshot,
+            aggregate_ev_load,
+            normalize_energy_data,
+        )
+
+        now = dt_util.utcnow()
+        entry_data = self.hass.data.get("power_sync", {}).get(
+            getattr(self._entry, "entry_id", ""), {}
+        )
+        ev_snapshot = entry_data.get("observed_ev_load_snapshot")
+        if isinstance(ev_snapshot, ObservedEvLoadSnapshot):
+            age = now - ev_snapshot.observed_at
+            if not (timedelta(0) <= age <= timedelta(seconds=90)):
+                ev_snapshot = ObservedEvLoadSnapshot(
+                    power_kw=0.0,
+                    components=(),
+                    observed_at=now,
+                    quality=EvLoadQuality.INCOMPLETE,
+                    unavailable_active_keys=tuple(
+                        item.physical_load_key for item in ev_snapshot.components
+                    ) or ev_snapshot.unavailable_active_keys,
+                )
+        else:
+            embedded_ev = data.get("ev_power")
+            if embedded_ev is not None:
+                ev_snapshot = aggregate_ev_load(
+                    [
+                        EvLoadObservation(
+                            physical_load_key="coordinator:embedded_ev",
+                            source_key="energy_coordinator",
+                            power_kw=embedded_ev,
+                            observed_at=now,
+                            active=abs(float(embedded_ev or 0.0)) > 0.05,
+                            measurement_kind=EvMeasurementKind.INTEGRATED_CHARGER,
+                            supports_bidirectional_power=(
+                                getattr(self, "battery_system", "") == "sigenergy"
+                            ),
+                        )
+                    ],
+                    at=now,
+                )
+            else:
+                ev_snapshot = ObservedEvLoadSnapshot(
+                    power_kw=0.0,
+                    components=(),
+                    observed_at=now,
+                    quality=EvLoadQuality.COMPLETE,
+                )
+        return normalize_energy_data(
+            data,
+            battery_system=getattr(self, "battery_system", ""),
+            ev_load=ev_snapshot,
+            at=now,
+        )
 
     def _energy_telemetry_ready(self) -> bool:
         """Return False only when a coordinator explicitly reports stale telemetry."""
@@ -7716,7 +7774,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
 
         solar_w = self._kw_to_w(data.get("solar_power"))
-        load_w = self._kw_to_w(data.get("load_power"))
+        load_w = self._kw_to_w(
+            data.get("site_load_power", data.get("load_power"))
+        )
         if solar_w is not None and load_w is not None:
             return max(0.0, min(max_charge_w, max_grid_import_w + solar_w - load_w))
 
@@ -7786,7 +7846,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if battery_level >= 98.0:
             return False
 
-        load_w = self._kw_to_w(data.get("load_power"))
+        load_w = self._kw_to_w(
+            data.get("site_load_power", data.get("load_power"))
+        )
         battery_w = self._kw_to_w(data.get("battery_power"))
         grid_w = self._kw_to_w(data.get("grid_power"))
 
@@ -13246,14 +13308,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _ev_load_subtraction_entities(self) -> list[str]:
         """EV charger power sensors to subtract from load history.
 
-        Only returned for battery brands whose home-load sensor does NOT
-        already exclude EV charging (Tesla and Sigenergy subtract it upstream,
-        so subtracting again would under-forecast household load), and only when
-        the user has configured a generic charger power entity. Returning an
-        empty list leaves the forecast unchanged — zero regression for setups
-        without a configured charger power sensor.
+        PowerSync Home Load declares ``home_load_basis=excludes_ev`` and must
+        never be adjusted again. An external recorder-backed gross load sensor
+        can still opt into per-entity history subtraction. Returning an empty
+        list leaves an already-normalized or unconfigured history unchanged.
         """
         if not getattr(self, "_ev_integration_enabled", False):
+            return []
+        load_entity_id = getattr(self._load_estimator, "load_entity_id", None)
+        load_state = self.hass.states.get(load_entity_id) if load_entity_id else None
+        if (
+            load_state
+            and (load_state.attributes or {}).get("home_load_basis") == "excludes_ev"
+        ):
             return []
         if getattr(self, "battery_system", None) in ("tesla", "sigenergy"):
             return []

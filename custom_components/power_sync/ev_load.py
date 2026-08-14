@@ -1,0 +1,299 @@
+"""Provider-neutral EV load attribution and Home Load normalization."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from enum import Enum, IntEnum
+import math
+from typing import Any, Iterable
+
+
+class EvMeasurementKind(IntEnum):
+    """Preference order for competing views of one physical loadpoint."""
+
+    INFERRED = 0
+    DERIVED = 1
+    VEHICLE = 2
+    INTEGRATED_CHARGER = 3
+    LOADPOINT_METER = 4
+
+
+class EvLoadQuality(str, Enum):
+    COMPLETE = "complete"
+    INCOMPLETE = "incomplete"
+
+
+class HomeLoadBasis(str, Enum):
+    INCLUDES_EV = "includes_ev"
+    EXCLUDES_EV = "excludes_ev"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class EvLoadObservation:
+    """One timestamped power view for a physical charging loadpoint."""
+
+    physical_load_key: str
+    source_key: str
+    power_kw: float | None
+    observed_at: datetime
+    active: bool | None = None
+    measurement_kind: EvMeasurementKind = EvMeasurementKind.VEHICLE
+    supports_bidirectional_power: bool = False
+
+
+@dataclass(frozen=True)
+class ObservedEvLoadSnapshot:
+    """One selected power reading per distinct physical loadpoint."""
+
+    power_kw: float
+    components: tuple[EvLoadObservation, ...]
+    observed_at: datetime
+    quality: EvLoadQuality
+    unavailable_active_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SitePowerSnapshot:
+    """A raw site load and its single normalized non-EV Home Load result."""
+
+    raw_home_load_kw: float | None
+    raw_home_load_basis: HomeLoadBasis
+    observed_ev_load_kw: float
+    non_ev_home_load_kw: float | None
+    timestamp: datetime
+    normalization_quality: EvLoadQuality
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def normalize_power_kw(
+    value: Any,
+    unit: Any = "kW",
+    *,
+    supports_bidirectional_power: bool = False,
+) -> float | None:
+    """Normalize a measured charger value to finite signed kW."""
+    try:
+        power = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(power):
+        return None
+    normalized_unit = str(unit or "").strip().lower()
+    if normalized_unit in ("w", "watt", "watts"):
+        power /= 1000.0
+    elif normalized_unit not in ("kw", "kilowatt", "kilowatts"):
+        return None
+    if power < 0 and not supports_bidirectional_power:
+        return None
+    return 0.0 if abs(power) < 0.001 else power
+
+
+def meter_physical_load_key(
+    *,
+    charger_type: Any,
+    entity_id: Any,
+    entry_id: Any,
+    native_id: Any = None,
+    zaptec_id: Any = None,
+    sigenergy_type: Any = None,
+) -> str:
+    """Return the canonical identity for an entity-backed charger meter."""
+    charger = str(charger_type or "generic").strip().lower()
+    if charger == "ocpp" and native_id is not None:
+        return f"ocpp:{native_id}:1"
+    if charger == "zaptec":
+        return f"zaptec:{zaptec_id or 'standalone'}"
+    if charger == "sigenergy":
+        return f"sigenergy:{str(sigenergy_type or 'evac').lower()}"
+    if charger == "solaredge":
+        return f"solaredge:{entry_id}:internal"
+    return f"generic:{str(entity_id or entry_id).strip()}"
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def aggregate_ev_load(
+    observations: Iterable[EvLoadObservation],
+    *,
+    at: datetime | None = None,
+    max_age: timedelta = timedelta(seconds=90),
+) -> ObservedEvLoadSnapshot:
+    """Select one fresh reading per physical load and sum distinct loads."""
+    target = _as_utc(at or utc_now())
+    eligible: dict[str, list[EvLoadObservation]] = {}
+    unavailable_active: set[str] = set()
+
+    for observation in observations:
+        physical_key = str(observation.physical_load_key or "").strip()
+        source_key = str(observation.source_key or "").strip()
+        if not physical_key or not source_key:
+            continue
+        observed_at = _as_utc(observation.observed_at)
+        age = target - observed_at
+        if age < timedelta(0) or age > max_age:
+            if observation.active:
+                unavailable_active.add(physical_key)
+            continue
+        power_kw = normalize_power_kw(
+            observation.power_kw,
+            "kW",
+            supports_bidirectional_power=observation.supports_bidirectional_power,
+        )
+        if power_kw is None:
+            if observation.active:
+                unavailable_active.add(physical_key)
+            continue
+        eligible.setdefault(physical_key, []).append(
+            EvLoadObservation(
+                physical_load_key=physical_key,
+                source_key=source_key,
+                power_kw=power_kw,
+                observed_at=observed_at,
+                active=observation.active,
+                measurement_kind=observation.measurement_kind,
+                supports_bidirectional_power=observation.supports_bidirectional_power,
+            )
+        )
+
+    selected: list[EvLoadObservation] = []
+    for physical_key, candidates in eligible.items():
+        choice = max(
+            candidates,
+            key=lambda item: (int(item.measurement_kind), _as_utc(item.observed_at)),
+        )
+        selected.append(choice)
+        unavailable_active.discard(physical_key)
+
+    selected.sort(key=lambda item: item.physical_load_key)
+    quality = (
+        EvLoadQuality.INCOMPLETE
+        if unavailable_active
+        else EvLoadQuality.COMPLETE
+    )
+    return ObservedEvLoadSnapshot(
+        power_kw=sum(float(item.power_kw or 0.0) for item in selected),
+        components=tuple(selected),
+        observed_at=target,
+        quality=quality,
+        unavailable_active_keys=tuple(sorted(unavailable_active)),
+    )
+
+
+def normalize_home_load(
+    raw_home_load_kw: Any,
+    basis: HomeLoadBasis,
+    ev_load: ObservedEvLoadSnapshot,
+    *,
+    at: datetime | None = None,
+) -> SitePowerSnapshot:
+    """Normalize Home Load once according to its explicit source basis."""
+    timestamp = _as_utc(at or ev_load.observed_at)
+    try:
+        raw_kw = float(raw_home_load_kw)
+    except (TypeError, ValueError):
+        raw_kw = None
+    if raw_kw is not None and not math.isfinite(raw_kw):
+        raw_kw = None
+
+    normalized: float | None = None
+    quality = ev_load.quality
+    if raw_kw is not None and basis == HomeLoadBasis.EXCLUDES_EV:
+        normalized = max(0.0, raw_kw)
+    elif (
+        raw_kw is not None
+        and basis == HomeLoadBasis.INCLUDES_EV
+        and ev_load.quality == EvLoadQuality.COMPLETE
+    ):
+        normalized = max(0.0, raw_kw - ev_load.power_kw)
+    else:
+        quality = EvLoadQuality.INCOMPLETE
+
+    return SitePowerSnapshot(
+        raw_home_load_kw=raw_kw,
+        raw_home_load_basis=basis,
+        observed_ev_load_kw=ev_load.power_kw,
+        non_ev_home_load_kw=normalized,
+        timestamp=timestamp,
+        normalization_quality=quality,
+    )
+
+
+def normalize_energy_data(
+    data: dict[str, Any] | None,
+    *,
+    battery_system: str,
+    ev_load: ObservedEvLoadSnapshot,
+    at: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Return coordinator data with one canonical non-EV Home Load contract.
+
+    Tesla's cloud coordinator has historically removed its own EV scalar,
+    while Sigenergy derives an already-adjusted value from site balance.  All
+    other coordinator load values are gross site/load telemetry.  Reconstruct
+    the raw branch for the two adjusted backends, then normalize once with the
+    complete provider-neutral EV snapshot.
+    """
+    if not isinstance(data, dict):
+        return None
+    result = dict(data)
+    existing_raw = result.get("raw_home_load_power")
+    try:
+        existing_raw = float(existing_raw) if existing_raw is not None else None
+    except (TypeError, ValueError):
+        existing_raw = None
+    if existing_raw is not None and not math.isfinite(existing_raw):
+        existing_raw = None
+
+    try:
+        published_load = float(result.get("load_power"))
+    except (TypeError, ValueError):
+        published_load = existing_raw
+    if published_load is None or not math.isfinite(published_load):
+        return result
+
+    system = str(battery_system or "").strip().lower()
+    if existing_raw is not None:
+        raw_load = existing_raw
+    elif system == "tesla":
+        try:
+            embedded_ev = float(result.get("ev_power") or 0.0)
+        except (TypeError, ValueError):
+            embedded_ev = 0.0
+        raw_load = published_load + embedded_ev
+    elif system == "sigenergy":
+        try:
+            raw_load = sum(
+                float(result.get(key) or 0.0)
+                for key in ("solar_power", "grid_power", "battery_power")
+            )
+        except (TypeError, ValueError):
+            raw_load = published_load
+    else:
+        raw_load = published_load
+
+    normalized = normalize_home_load(
+        raw_load,
+        HomeLoadBasis.INCLUDES_EV,
+        ev_load,
+        at=at,
+    )
+    result.update(
+        {
+            "raw_home_load_power": normalized.raw_home_load_kw,
+            "home_load_basis": HomeLoadBasis.EXCLUDES_EV.value,
+            "observed_ev_power": normalized.observed_ev_load_kw,
+            "home_load_normalization_quality": normalized.normalization_quality.value,
+        }
+    )
+    result["load_power"] = normalized.non_ev_home_load_kw
+    result["site_load_power"] = max(0.0, raw_load)
+    return result

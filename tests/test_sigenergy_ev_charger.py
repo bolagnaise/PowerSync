@@ -362,4 +362,6 @@ def test_sigenergy_coordinator_wires_external_tesla_power_into_home_load():
 
     assert "from . import _get_external_tesla_ev_power_kw" in source
     assert "external_ev_power_kw = _get_external_tesla_ev_power_kw(" in source
-    assert "external_ev_power_kw=external_ev_power_kw" in source
+    assert "fallback_ev_power_kw = (" in source
+    assert "evdc_power_kw + max(0.0, external_ev_power_kw)" in source
+    assert "observed_ev_power_kw, ev_load_complete = _fresh_site_ev_load(" in source

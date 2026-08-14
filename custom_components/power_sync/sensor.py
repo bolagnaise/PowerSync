@@ -2903,6 +2903,7 @@ def _local_value_for(
     snap: Any,
     *,
     ev_power_kw: float = 0.0,
+    ev_load_complete: bool = True,
 ) -> Any:
     """Map a sensor key to its equivalent on the local PowerwallSnapshot.
 
@@ -2921,10 +2922,12 @@ def _local_value_for(
     if sensor_key == SENSOR_TYPE_HOME_LOAD:
         if snap.load_w is None:
             return None
+        if not ev_load_complete:
+            return None
         # Powerwall local TEDAPI reports total behind-the-meter load, which
         # includes EV charging. Keep Home Load aligned with the cloud
         # coordinator and Tesla app by removing observed EV charging power.
-        return max(0.0, (snap.load_w / 1000.0) - max(0.0, ev_power_kw))
+        return max(0.0, (snap.load_w / 1000.0) - ev_power_kw)
     if sensor_key == SENSOR_TYPE_BATTERY_LEVEL:
         return snap.soc
     if sensor_key == SENSOR_TYPE_GRID_STATUS:
@@ -3041,6 +3044,83 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
         )
         return bucket.get("coordinator")
 
+    def _battery_system(self) -> str:
+        """Return the configured site battery backend."""
+        return str(
+            self._entry.options.get(
+                CONF_BATTERY_SYSTEM,
+                self._entry.data.get(CONF_BATTERY_SYSTEM, "tesla"),
+            )
+            or "tesla"
+        ).lower()
+
+    def _observed_ev_snapshot(self):
+        """Return the fresh site-wide EV observation cached by EVStatusSensor."""
+        from .ev_load import (
+            EvLoadObservation,
+            EvLoadQuality,
+            EvMeasurementKind,
+            ObservedEvLoadSnapshot,
+            aggregate_ev_load,
+        )
+
+        now = dt_util.utcnow()
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        snapshot = entry_data.get("observed_ev_load_snapshot")
+        if isinstance(snapshot, ObservedEvLoadSnapshot):
+            age = now - snapshot.observed_at
+            if timedelta(0) <= age <= timedelta(seconds=90):
+                return snapshot
+            if snapshot.components or snapshot.unavailable_active_keys:
+                return ObservedEvLoadSnapshot(
+                    power_kw=0.0,
+                    components=(),
+                    observed_at=now,
+                    quality=EvLoadQuality.INCOMPLETE,
+                    unavailable_active_keys=tuple(
+                        item.physical_load_key for item in snapshot.components
+                    ) or snapshot.unavailable_active_keys,
+                )
+
+        coordinator_data = self.coordinator.data or {}
+        embedded_ev = coordinator_data.get("ev_power")
+        if embedded_ev is not None:
+            try:
+                active = abs(float(embedded_ev or 0.0)) > 0.05
+            except (TypeError, ValueError):
+                active = True
+            return aggregate_ev_load(
+                [
+                    EvLoadObservation(
+                        physical_load_key="coordinator:embedded_ev",
+                        source_key="energy_coordinator",
+                        power_kw=embedded_ev,
+                        observed_at=now,
+                        active=active,
+                        measurement_kind=EvMeasurementKind.INTEGRATED_CHARGER,
+                        supports_bidirectional_power=self._battery_system() == "sigenergy",
+                    )
+                ],
+                at=now,
+            )
+        return ObservedEvLoadSnapshot(
+            power_kw=0.0,
+            components=(),
+            observed_at=now,
+            quality=EvLoadQuality.COMPLETE,
+        )
+
+    def _normalized_energy_data(self) -> dict[str, Any] | None:
+        """Return the canonical site snapshot used by every energy sensor."""
+        from .ev_load import normalize_energy_data
+
+        return normalize_energy_data(
+            self.coordinator.data,
+            battery_system=self._battery_system(),
+            ev_load=self._observed_ev_snapshot(),
+            at=dt_util.utcnow(),
+        )
+
     @property
     def available(self) -> bool:
         """Return False when the backing energy coordinator is stale."""
@@ -3060,25 +3140,26 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
         if self.entity_description.key in _LOCAL_OVERRIDABLE:
             local_coord = self._local_coordinator()
             if local_coord is not None and _local_data_is_fresh(local_coord):
+                ev_snapshot = self._observed_ev_snapshot()
                 local_v = _local_value_for(
                     self.entity_description.key,
                     local_coord.data,
-                    ev_power_kw=(
-                        (self.coordinator.data or {}).get("ev_power", 0.0) or 0.0
-                    ),
+                    ev_power_kw=ev_snapshot.power_kw,
+                    ev_load_complete=ev_snapshot.quality.value == "complete",
                 )
                 if self.entity_description.key == SENSOR_TYPE_GRID_STATUS:
                     return local_v
                 if local_v is not None:
                     return local_v
         if self.entity_description.value_fn:
-            value = self.entity_description.value_fn(self.coordinator.data)
+            energy_data = self._normalized_energy_data()
+            value = self.entity_description.value_fn(energy_data)
             if (
                 self.entity_description.key == SENSOR_TYPE_SOLAR_POWER
                 and value is not None
                 and (
-                    not self.coordinator.data
-                    or "ac_inverter_solar_power" not in self.coordinator.data
+                    not energy_data
+                    or "ac_inverter_solar_power" not in energy_data
                 )
             ):
                 value += _sungrow_ac_inverter_power_kw(self._entry, self.hass)
@@ -3106,12 +3187,13 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return additional attributes."""
+        energy_data = self._normalized_energy_data() or {}
         if self.entity_description.attr_fn:
-            attrs = self.entity_description.attr_fn(self.coordinator.data)
+            attrs = self.entity_description.attr_fn(energy_data)
         else:
             attrs = {}
         if self.entity_description.key == SENSOR_TYPE_SOLAR_POWER:
-            coordinator_data = self.coordinator.data or {}
+            coordinator_data = energy_data
             has_coordinator_breakdown = (
                 "ac_inverter_solar_power" in coordinator_data
             )
@@ -3138,6 +3220,17 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
                         "total_solar_power_kw": round(float(total_solar_kw or 0), 3),
                     }
                 )
+        if self.entity_description.key == SENSOR_TYPE_HOME_LOAD:
+            attrs.update(
+                {
+                    "home_load_basis": energy_data.get("home_load_basis"),
+                    "raw_home_load_kw": energy_data.get("raw_home_load_power"),
+                    "observed_ev_power_kw": energy_data.get("observed_ev_power"),
+                    "normalization_quality": energy_data.get(
+                        "home_load_normalization_quality"
+                    ),
+                }
+            )
         return _entity_currency_attrs(self, attrs)
 
 
@@ -6588,6 +6681,9 @@ class EVStatusSensor(SensorEntity):
                 )
             elif abs(ev_power) > 0.05 or self._ev_data.get("ev_power_kw", 0) == 0:
                 self._ev_data["ev_power_kw"] = ev_power
+        cached_snapshot = entry_data.get("observed_ev_load_snapshot")
+        if cached_snapshot is not None and self._ev_data is not None:
+            self._ev_data["ev_power_kw"] = cached_snapshot.power_kw
         self.async_write_ha_state()
 
     @staticmethod
@@ -6679,47 +6775,59 @@ class EVStatusSensor(SensorEntity):
     async def _async_update_ev(self, _now=None) -> None:
         """Poll EV status from vehicle sensors."""
         from . import (
+            _get_ev_load_observations,
             _get_ev_vehicle_status,
             _get_ev_vehicles_status,
-            _read_sigenergy_charger_state_for_entry,
         )
+        from .ev_load import aggregate_ev_load
         try:
             self._ev_data = _get_ev_vehicle_status(self.hass, self._entry)
-            self._apply_vehicle_context(_get_ev_vehicles_status(self.hass, self._entry))
-            # Supplement with Tesla coordinator Wall Connector data
+            vehicles = _get_ev_vehicles_status(self.hass, self._entry)
+            self._apply_vehicle_context(vehicles)
             entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-            tesla_coordinator = entry_data.get("tesla_coordinator")
-            if tesla_coordinator and tesla_coordinator.data:
-                wc_power = tesla_coordinator.data.get("ev_power", 0)
-                if wc_power > 0 and self._ev_data.get("ev_power_kw", 0) <= 0:
-                    self._ev_data["ev_power_kw"] = wc_power
-            sigenergy_context_applied = False
-            sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
-            if sigenergy_coordinator and sigenergy_coordinator.data:
-                coord_data = sigenergy_coordinator.data
-                ev_power = coord_data.get("ev_power")
-                if ev_power is not None and coord_data.get("ev_charger_type"):
-                    sigenergy_context_applied = True
-                    self._apply_sigenergy_charger_context(
-                        charger_type=coord_data.get("ev_charger_type"),
-                        ev_power_kw=ev_power,
-                        is_connected=coord_data.get("ev_charger_connected", False),
-                        is_charging=coord_data.get("ev_charger_charging", False),
-                        is_discharging=coord_data.get("ev_charger_discharging", False),
-                        ev_soc=coord_data.get("ev_soc"),
-                    )
-                elif ev_power is not None and (
-                    abs(ev_power) > 0.05 or self._ev_data.get("ev_power_kw", 0) == 0
-                ):
-                    self._ev_data["ev_power_kw"] = ev_power
+            observations = await _get_ev_load_observations(
+                self.hass,
+                self._entry,
+                vehicles,
+            )
+            snapshot = aggregate_ev_load(observations, at=dt_util.utcnow())
+            entry_data["observed_ev_load_snapshot"] = snapshot
+            self._ev_data["ev_power_kw"] = snapshot.power_kw
+            self._ev_data["loadpoint_count"] = len(snapshot.components)
+            self._ev_data["observation_quality"] = snapshot.quality.value
 
-            if not sigenergy_context_applied:
-                sigenergy_state = await _read_sigenergy_charger_state_for_entry(
-                    self._entry,
-                    self.hass,
+            from .ev_load import normalize_energy_data
+
+            coordinator_systems = {
+                "tesla_coordinator": "tesla",
+                "sigenergy_coordinator": "sigenergy",
+                "sungrow_coordinator": "sungrow",
+                "foxess_coordinator": "foxess",
+                "goodwe_coordinator": "goodwe",
+                "alphaess_coordinator": "alphaess",
+                "esy_sunhome_coordinator": "esy_sunhome",
+                "solax_coordinator": "solax",
+                "saj_h2_coordinator": "saj_h2",
+                "fronius_reserva_coordinator": "fronius_reserva",
+                "neovolt_coordinator": "neovolt",
+                "solaredge_coordinator": "solaredge",
+                "anker_solix_coordinator": "anker_solix",
+                "custom_energy_coordinator": "custom",
+            }
+            for coordinator_key, battery_system in coordinator_systems.items():
+                coordinator = entry_data.get(coordinator_key)
+                if not coordinator or not isinstance(coordinator.data, dict):
+                    continue
+                normalized = normalize_energy_data(
+                    coordinator.data,
+                    battery_system=battery_system,
+                    ev_load=snapshot,
+                    at=dt_util.utcnow(),
                 )
-            else:
-                sigenergy_state = None
+                if normalized is not None:
+                    coordinator.data = normalized
+
+            sigenergy_state = entry_data.get("observed_sigenergy_charger_state")
             if sigenergy_state is not None:
                 self._apply_sigenergy_charger_context(
                     charger_type=getattr(sigenergy_state, "charger_type", None),
@@ -6729,23 +6837,9 @@ class EVStatusSensor(SensorEntity):
                     is_discharging=getattr(sigenergy_state, "is_discharging", False),
                     ev_soc=getattr(sigenergy_state, "vehicle_soc", None),
                 )
-            solaredge_coordinator = entry_data.get("solaredge_coordinator")
-            if solaredge_coordinator and solaredge_coordinator.data:
-                coord_data = solaredge_coordinator.data
-                ev_power = coord_data.get("ev_power")
-                if ev_power is not None:
-                    self._ev_data["ev_power_kw"] = ev_power
-                    self._ev_data["vehicle_id"] = "solaredge_ev_charger"
-                    self._ev_data["vehicle_name"] = "SolarEdge EV Charger"
-                    self._ev_data["is_connected"] = coord_data.get(
-                        "ev_charger_connected", ev_power > 0.05
-                    )
-                    self._ev_data["is_charging"] = coord_data.get(
-                        "ev_charger_charging", ev_power > 0.05
-                    )
-                    self._ev_data["is_discharging"] = coord_data.get(
-                        "ev_charger_discharging", False
-                    )
+                # Context helpers set one display loadpoint; restore the site
+                # total after they have populated name/SOC/status fields.
+                self._ev_data["ev_power_kw"] = snapshot.power_kw
         except Exception:
             _LOGGER.debug("Error polling EV status", exc_info=True)
         self.async_write_ha_state()
@@ -6771,6 +6865,8 @@ class EVStatusSensor(SensorEntity):
             "is_charging",
             "is_discharging",
             "vehicle_count",
+            "loadpoint_count",
+            "observation_quality",
         ):
             value = self._ev_data.get(key)
             if value is not None:

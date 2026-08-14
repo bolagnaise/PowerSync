@@ -403,10 +403,12 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
                 "needs_repair": self._needs_repair,
                 "v1r_diagnostics": getattr(self, "_v1r_diagnostics", None),
             }
-        ev_power_w = self._observed_ev_power_w()
+        ev_power_w, ev_complete = self._observed_ev_power_w()
         load_w = snap.load_w
-        if load_w is not None:
+        if load_w is not None and ev_complete:
             load_w = max(0.0, load_w - ev_power_w)
+        elif not ev_complete:
+            load_w = None
 
         local_reachable = self.reachable
         return {
@@ -422,6 +424,10 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             "load_w": load_w,
             "raw_load_w": snap.load_w,
             "ev_power_w": ev_power_w,
+            "home_load_basis": "excludes_ev",
+            "home_load_normalization_quality": (
+                "complete" if ev_complete else "incomplete"
+            ),
             "grid_status": snap.grid_status,
             "operation_mode": snap.operation_mode,
             "backup_reserve_percent": snap.backup_reserve_percent,
@@ -433,10 +439,18 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             "v1r_diagnostics": getattr(self, "_v1r_diagnostics", None),
         }
 
-    def _observed_ev_power_w(self) -> float:
-        """Return observed EV charging power from the site coordinator in watts."""
+    def _observed_ev_power_w(self) -> tuple[float, bool]:
+        """Return the provider-neutral cached site EV total in watts."""
         try:
             entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
+            snapshot = entry_data.get("observed_ev_load_snapshot")
+            if snapshot is not None:
+                quality = getattr(snapshot, "quality", None)
+                quality_value = getattr(quality, "value", quality)
+                return (
+                    float(getattr(snapshot, "power_kw", 0.0) or 0.0) * 1000.0,
+                    quality_value == "complete",
+                )
             for coord_key in (
                 "tesla_coordinator",
                 "sigenergy_coordinator",
@@ -450,7 +464,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
                 if ev_power_kw is None:
                     ev_power_kw = data.get("ev_power_kw")
                 if ev_power_kw is not None:
-                    return max(0.0, float(ev_power_kw or 0.0) * 1000.0)
+                    return float(ev_power_kw or 0.0) * 1000.0, True
         except (TypeError, ValueError, AttributeError):
-            return 0.0
-        return 0.0
+            return 0.0, False
+        return 0.0, True

@@ -614,6 +614,47 @@ def test_local_powerwall_home_load_excludes_observed_ev_power():
     assert round(entity.native_value, 3) == 3.6
 
 
+def test_local_powerwall_home_load_uses_site_ev_snapshot_when_coordinator_is_zero():
+    """W3 regression: the EV sensor can be fresher than Tesla site telemetry."""
+    sensor = _sensor_module()
+    ev_load = importlib.import_module("power_sync.ev_load")
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "home_load")
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={sensor.CONF_POWERWALL_LOCAL_PAIRED: True},
+        options={},
+    )
+    local_coord = SimpleNamespace(
+        data=SimpleNamespace(load_w=5_670.0),
+        last_success_ts=time.time(),
+        last_success_monotonic=time.monotonic(),
+    )
+    observed = ev_load.ObservedEvLoadSnapshot(
+        power_kw=1.0,
+        components=(),
+        observed_at=datetime(2026, 5, 3, 12, 0, tzinfo=timezone.utc),
+        quality=ev_load.EvLoadQuality.COMPLETE,
+    )
+    entity = sensor.TeslaEnergySensor(
+        SimpleNamespace(data={"load_power": 5.67, "ev_power": 0.0}),
+        desc,
+        entry,
+    )
+    entity.hass = SimpleNamespace(
+        config=SimpleNamespace(currency="AUD"),
+        data={
+            sensor.DOMAIN: {
+                "entry-1": {
+                    "powerwall_local": {"coordinator": local_coord},
+                    "observed_ev_load_snapshot": observed,
+                }
+            }
+        },
+    )
+
+    assert entity.native_value == 4.67
+
+
 def test_local_powerwall_home_load_never_goes_negative_after_ev_subtraction():
     sensor = _sensor_module()
     desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "home_load")
@@ -1552,6 +1593,24 @@ def test_ev_status_sensor_exposes_idle_sigenergy_evac_presence():
         )
 
     power_sync._read_sigenergy_charger_state_for_entry = read_sigenergy_charger_state
+    async def get_ev_load_observations(hass, entry, vehicles):
+        state = await read_sigenergy_charger_state(entry, hass)
+        hass.data[sensor.DOMAIN][entry.entry_id][
+            "observed_sigenergy_charger_state"
+        ] = state
+        ev_load = importlib.import_module("power_sync.ev_load")
+        return [
+            ev_load.EvLoadObservation(
+                physical_load_key="sigenergy:evac",
+                source_key="sigenergy_evac",
+                power_kw=0.0,
+                observed_at=datetime(2026, 5, 3, 12, 0, tzinfo=timezone.utc),
+                active=False,
+                measurement_kind=ev_load.EvMeasurementKind.INTEGRATED_CHARGER,
+            )
+        ]
+
+    power_sync._get_ev_load_observations = get_ev_load_observations
     desc = next(d for d in sensor.EV_SENSORS if d.key == "ev_power")
     entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
     entity = sensor.EVStatusSensor(SimpleNamespace(data={}), entry, desc)

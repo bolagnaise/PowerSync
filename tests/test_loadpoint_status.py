@@ -22,6 +22,7 @@ from power_sync.automations.loadpoint_status import (  # noqa: E402
     build_loadpoint_status,
     charging_state_plugged_status,
     coalesce_ev_widget_data,
+    resolve_vehicle_display_name,
 )
 from power_sync.automations.generic_charger_soc import (  # noqa: E402
     resolve_generic_charger_soc,
@@ -135,6 +136,48 @@ def test_widget_data_keeps_wall_connector_without_named_active_ev():
     ]
 
     assert coalesce_ev_widget_data(widgets) == widgets
+
+
+def test_vehicle_display_name_replaces_full_or_truncated_vin_fallback():
+    vin = "5YJTEST0000000001"
+    observation = {
+        "vehicle_id": vin,
+        "vin": vin,
+        "vehicle_name": "Blue Car",
+    }
+
+    assert resolve_vehicle_display_name(vin, vin, observation) == "Blue Car"
+    assert resolve_vehicle_display_name(vin[:8], vin, observation) == "Blue Car"
+    assert resolve_vehicle_display_name("Family EV", vin, observation) == "Family EV"
+
+
+def test_loadpoint_status_uses_observed_name_for_runtime_vin_fallback():
+    vin = "5YJTEST0000000001"
+    loadpoints = build_loadpoint_status(
+        {
+            vin: {
+                "active": True,
+                "vehicle_name": vin,
+                "current_amps": 0,
+                "target_amps": 0,
+                "params": {"charger_type": "tesla"},
+            }
+        },
+        [
+            {
+                "vehicle_id": vin,
+                "vin": vin,
+                "vehicle_name": "Blue Car",
+                "charger_type": "tesla",
+                "ev_power_kw": 0,
+                "ev_soc": 80,
+                "is_connected": True,
+                "is_charging": False,
+            }
+        ],
+    )
+
+    assert [loadpoint["vehicle_name"] for loadpoint in loadpoints] == ["Blue Car"]
 
 
 def test_loadpoint_status_merges_wall_connector_into_single_active_tesla():
