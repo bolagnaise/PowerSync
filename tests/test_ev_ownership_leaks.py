@@ -519,6 +519,19 @@ def test_unmapped_multi_vehicle_setup_never_guesses_a_ble_bridge():
     assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_B) == ""
 
 
+def test_ble_only_multi_bridge_stale_vin_command_fails_closed():
+    hass = _Hass()
+    entry = SimpleNamespace(
+        data={},
+        options={
+            "ev_provider": "tesla_ble",
+            "tesla_ble_entity_prefix": "tesla_yf88,tesla_flinn",
+        },
+    )
+
+    assert actions._resolve_ble_prefix_for_vehicle(hass, entry, VIN_A) == ""
+
+
 def test_single_vehicle_command_uses_unambiguous_autodetected_ble_bridge(monkeypatch):
     monkeypatch.setattr(actions, "TESLA_EV_INTEGRATIONS", {"tesla_fleet"})
     monkeypatch.setattr(actions.dr, "async_get", lambda hass: hass.device_registry)

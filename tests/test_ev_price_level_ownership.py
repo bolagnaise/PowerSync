@@ -1975,6 +1975,39 @@ def test_vehicle_charger_params_accept_app_charge_amp_aliases(fake_actions):
     assert params["phases"] == 1
 
 
+def test_ble_only_multi_bridge_charger_lookup_ignores_stale_vin_fallback(
+    fake_actions,
+):
+    class BleOnlyEntry(_FakeConfigEntry):
+        options = {
+            "ev_provider": "tesla_ble",
+            "tesla_ble_entity_prefix": "tesla_yf88,tesla_flinn",
+        }
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
+        "vehicle_charging_configs"
+    ] = [{
+        "vehicle_id": VIN,
+        "charger_type": "ocpp",
+        "max_charge_amps": 16,
+    }]
+
+    params = ev_planner._get_vehicle_charger_params(
+        hass,
+        "power_sync",
+        BleOnlyEntry(),
+        "ble_tesla_yf88",
+    )
+
+    assert params == {
+        "min_charge_amps": 5,
+        "max_charge_amps": 32,
+        "voltage": 230,
+        "phases": 1,
+    }
+
+
 def test_price_level_sigenergy_start_uses_zero_battery_target(fake_actions):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
 
@@ -6200,6 +6233,35 @@ def test_solar_surplus_configs_honor_enabled_toggle_and_coalesce_paired_ble():
             "priority": 2,
         }
     ]
+
+
+def test_ble_only_multi_bridge_solar_configs_drop_stale_vin_profiles():
+    class BleOnlyEntry(_FakeConfigEntry):
+        options = {
+            "ev_provider": "tesla_ble",
+            "tesla_ble_entity_prefix": "tesla_yf88,tesla_flinn",
+        }
+
+    configs = ev_planner.get_solar_surplus_vehicle_configs(
+        _FakeHass(),
+        BleOnlyEntry(),
+        {
+            "vehicle_charging_configs": [
+                {
+                    "vehicle_id": VIN,
+                    "charger_type": "ocpp",
+                    "solar_charging_enabled": True,
+                },
+                {
+                    "vehicle_id": "ble_tesla_flinn",
+                    "charger_type": "tesla",
+                    "solar_charging_enabled": True,
+                },
+            ],
+        },
+    )
+
+    assert [config["vehicle_id"] for config in configs] == ["ble_tesla_flinn"]
 
 
 def test_solar_surplus_parallel_selects_only_available_inactive_vehicles(

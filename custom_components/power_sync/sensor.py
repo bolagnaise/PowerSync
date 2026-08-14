@@ -4843,6 +4843,7 @@ def _foxess_curtailment_visible_status(
     grid_power_valid: bool,
     telemetry_ready: bool,
     last_update_success: bool,
+    force_dispatch_active: bool,
     last_update: Any,
     update_interval: Any = None,
     now: datetime | None = None,
@@ -4855,6 +4856,8 @@ def _foxess_curtailment_visible_status(
     """
     if not curtailment_enabled or control_state != "curtailed":
         return "Normal", None, False
+    if force_dispatch_active:
+        return "Pending", None, False
 
     try:
         if isinstance(grid_power_kw, bool):
@@ -4924,7 +4927,7 @@ class SolarCurtailmentSensor(SensorEntity):
         await super().async_added_to_hass()
 
         @callback
-        def _handle_curtailment_update():
+        def _handle_curtailment_update(_data=None):
             """Handle curtailment update signal."""
             self.async_write_ha_state()
 
@@ -4953,6 +4956,17 @@ class SolarCurtailmentSensor(SensorEntity):
         else:
             self._unsub_foxess = None
 
+        self._unsub_force_charge = async_dispatcher_connect(
+            self.hass,
+            f"{DOMAIN}_force_charge_state",
+            _handle_curtailment_update,
+        )
+        self._unsub_force_discharge = async_dispatcher_connect(
+            self.hass,
+            f"{DOMAIN}_force_discharge_state",
+            _handle_curtailment_update,
+        )
+
     async def async_will_remove_from_hass(self) -> None:
         """Run when entity is removed from hass."""
         if self._unsub_dispatcher:
@@ -4961,6 +4975,10 @@ class SolarCurtailmentSensor(SensorEntity):
             self._unsub_amber()
         if hasattr(self, '_unsub_foxess') and self._unsub_foxess:
             self._unsub_foxess()
+        if self._unsub_force_charge:
+            self._unsub_force_charge()
+        if self._unsub_force_discharge:
+            self._unsub_force_discharge()
 
     def _is_foxess(self) -> bool:
         """Return whether this sensor belongs to a FoxESS battery system."""
@@ -5016,6 +5034,7 @@ class SolarCurtailmentSensor(SensorEntity):
             CONF_BATTERY_CURTAILMENT_ENABLED,
             self._entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
         )
+        force_dispatch_active = self._foxess_force_dispatch_active()
         return _foxess_curtailment_visible_status(
             curtailment_enabled=bool(curtailment_enabled),
             control_state=str(entry_data.get("foxess_curtailment_state", "normal")),
@@ -5025,9 +5044,34 @@ class SolarCurtailmentSensor(SensorEntity):
             last_update_success=(
                 getattr(coordinator, "last_update_success", False) is True
             ),
+            force_dispatch_active=force_dispatch_active,
             last_update=coordinator_data.get("last_update"),
             update_interval=getattr(coordinator, "update_interval", None),
         )
+
+    def _foxess_force_dispatch_active(self) -> bool:
+        """Return whether force dispatch currently owns FoxESS control."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        force_dispatch_active = any(
+            bool((entry_data.get(key) or {}).get("active"))
+            for key in ("force_charge_state", "force_discharge_state")
+        )
+        active_force_getter = getattr(
+            entry_data.get("optimization_coordinator"),
+            "get_active_force_state",
+            None,
+        )
+        if callable(active_force_getter):
+            try:
+                active_force = active_force_getter() or {}
+            except Exception as err:
+                _LOGGER.debug("FoxESS status force-owner check failed: %s", err)
+            else:
+                force_dispatch_active = force_dispatch_active or (
+                    bool(active_force.get("active"))
+                    and active_force.get("type") in {"charge", "discharge", "export"}
+                )
+        return force_dispatch_active
 
     @property
     def native_value(self) -> str:
@@ -5061,11 +5105,14 @@ class SolarCurtailmentSensor(SensorEntity):
 
         if self._is_foxess():
             visible_state, grid_export_w, effect_confirmed = self._foxess_status()
+            force_dispatch_active = self._foxess_force_dispatch_active()
             export_uneconomic = export_earnings is not None and export_earnings < 1.0
             descriptions = {
                 "Active": "Curtailment confirmed; grid export is below 250 W",
                 "Pending": (
-                    "Curtailment command acknowledged, but physical zero-export "
+                    "Curtailment status is pending while force dispatch owns control"
+                    if force_dispatch_active
+                    else "Curtailment command acknowledged, but physical zero-export "
                     "is not confirmed"
                 ),
                 "Normal": (
@@ -5081,6 +5128,13 @@ class SolarCurtailmentSensor(SensorEntity):
                 "export_earnings": export_earnings,
                 "export_uneconomic": export_uneconomic,
                 "control_state": entry_data.get("foxess_curtailment_state", "normal"),
+                "control_owner": (
+                    "force_dispatch"
+                    if force_dispatch_active
+                    else "curtailment"
+                    if entry_data.get("foxess_curtailment_state") == "curtailed"
+                    else "normal"
+                ),
                 "grid_export_w": grid_export_w,
                 "effect_confirmed": effect_confirmed,
                 "description": descriptions[visible_state],

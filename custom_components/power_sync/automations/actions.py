@@ -1573,14 +1573,30 @@ def _resolve_ble_prefix_for_vehicle(
         **getattr(config_entry, "options", {}),
     }
     resolved_prefixes = resolve_ble_prefixes(hass, config)
+    is_vehicle_vin = bool(
+        vehicle_vin
+        and len(vehicle_vin) == 17
+        and vehicle_vin.isalnum()
+        and not vehicle_vin.isdigit()
+    )
+    if (
+        is_vehicle_vin
+        and config.get(CONF_EV_PROVIDER) == EV_PROVIDER_TESLA_BLE
+        and len(resolved_prefixes) != 1
+    ):
+        _LOGGER.warning(
+            "Refusing ambiguous Tesla BLE command for stale Fleet VIN %s "
+            "across prefixes %s",
+            vehicle_vin,
+            resolved_prefixes,
+        )
+        return ""
     explicitly_mapped_prefix = vehicle_ble_prefix(config, vehicle_vin)
     if explicitly_mapped_prefix:
         return explicitly_mapped_prefix
 
     if (
-        vehicle_vin
-        and len(vehicle_vin) == 17
-        and vehicle_vin.isalnum()
+        is_vehicle_vin
         and config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API) == EV_PROVIDER_BOTH
     ):
         try:

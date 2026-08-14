@@ -7996,7 +7996,7 @@ function _curtailmentStatus(e, hasDC, hasAC) {
       ]]]`,
       icon: `[[[
         const state = states['${dcEntity}']?.state;
-        return state === 'Active'
+        return state === 'Active' || state === 'Pending'
           ? 'mdi:solar-power-variant-outline'
           : 'mdi:solar-power-variant';
       ]]]`,

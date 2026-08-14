@@ -47,6 +47,7 @@ def _status(**overrides):
         "grid_power_valid": True,
         "telemetry_ready": True,
         "last_update_success": True,
+        "force_dispatch_active": False,
         "last_update": now - timedelta(seconds=15),
         "update_interval": timedelta(seconds=30),
         "now": now,
@@ -76,6 +77,24 @@ def test_stale_or_invalid_telemetry_cannot_confirm_physical_effect():
         False,
     )
     assert _status(grid_power_kw=None) == ("Pending", None, False)
+    assert _status(grid_power_valid=False, grid_power_kw=-0.1) == (
+        "Pending",
+        None,
+        False,
+    )
+    assert _status(telemetry_ready=False, grid_power_kw=-0.1) == (
+        "Pending",
+        None,
+        False,
+    )
+
+
+def test_force_dispatch_ownership_cannot_report_curtailment_active():
+    assert _status(grid_power_kw=-0.1, force_dispatch_active=True) == (
+        "Pending",
+        None,
+        False,
+    )
 
 
 def test_disabled_curtailment_is_normal_even_at_negative_price():
@@ -91,7 +110,10 @@ def test_sensor_and_dashboard_expose_pending_as_distinct_state():
 
     assert "return self._foxess_status()[0]" in source
     assert 'entry_data.get("foxess_curtailment_state", "normal")' in source
+    assert '"get_active_force_state"' in source
+    assert 'f"{DOMAIN}_force_charge_state"' in source
     assert init_source.count(
         'f"power_sync_curtailment_updated_{entry.entry_id}"'
     ) >= 3
     assert "PENDING - Export not confirmed" in frontend
+    assert "state === 'Active' || state === 'Pending'" in frontend

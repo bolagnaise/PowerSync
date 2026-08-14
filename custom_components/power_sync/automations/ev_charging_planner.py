@@ -5267,7 +5267,11 @@ class AutoScheduleExecutor:
             stores = [automation_store, self._store]
             for store in stores:
                 stored_data = getattr(store, '_data', {}) or {}
-                for vc in stored_data.get("vehicle_charging_configs", []):
+                vehicle_configs = _safe_vehicle_charging_configs(
+                    self.config_entry,
+                    stored_data.get("vehicle_charging_configs", []),
+                )
+                for vc in vehicle_configs:
                     if any(
                         _vehicle_config_matches(candidate, vc.get("vehicle_id"))
                         for candidate in candidate_vehicle_ids
@@ -7933,6 +7937,46 @@ def _with_configured_charger_entities(
     return params
 
 
+def _safe_vehicle_charging_configs(
+    config_entry: "ConfigEntry",
+    raw_configs: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Exclude ambiguous stale VIN profiles from multi-bridge BLE-only control."""
+    configs = [dict(config) for config in raw_configs if isinstance(config, Mapping)]
+    opts = {
+        **getattr(config_entry, "data", {}),
+        **getattr(config_entry, "options", {}),
+    }
+    from ..const import CONF_EV_PROVIDER, EV_PROVIDER_TESLA_BLE
+
+    if (
+        opts.get(CONF_EV_PROVIDER) != EV_PROVIDER_TESLA_BLE
+        or len(configured_ble_prefixes(opts)) <= 1
+    ):
+        return configs
+
+    safe_configs: list[dict[str, Any]] = []
+    rejected_ids: list[str] = []
+    for config in configs:
+        vehicle_id = str(config.get("vehicle_id") or "")
+        is_stale_vin = (
+            len(vehicle_id) == 17
+            and vehicle_id.isalnum()
+            and not vehicle_id.isdigit()
+        )
+        if is_stale_vin:
+            rejected_ids.append(vehicle_id)
+            continue
+        safe_configs.append(config)
+    if rejected_ids:
+        _LOGGER.warning(
+            "Ignoring ambiguous Fleet vehicle charger profiles in Tesla BLE-only "
+            "multi-bridge mode: %s",
+            rejected_ids,
+        )
+    return safe_configs
+
+
 def get_solar_surplus_vehicle_configs(
     hass: "HomeAssistant",
     config_entry: "ConfigEntry",
@@ -7940,11 +7984,7 @@ def get_solar_surplus_vehicle_configs(
 ) -> list[dict[str, Any]]:
     """Return app solar-surplus vehicle configs, falling back to the entry charger."""
     raw_configs = stored.get("vehicle_charging_configs", [])
-    configs = [
-        dict(config)
-        for config in raw_configs
-        if isinstance(config, Mapping)
-    ]
+    configs = _safe_vehicle_charging_configs(config_entry, raw_configs)
     if configs:
         opts = {
             **getattr(config_entry, "data", {}),
@@ -8446,7 +8486,10 @@ def _get_vehicle_charger_params(
         store = entry_data.get("automation_store")
         if store:
             stored_data = getattr(store, '_data', {}) or {}
-            configs = stored_data.get("vehicle_charging_configs", [])
+            configs = _safe_vehicle_charging_configs(
+                config_entry,
+                stored_data.get("vehicle_charging_configs", []),
+            )
             for vc in configs:
                 if vehicle_vin and _vehicle_config_matches(vehicle_vin, vc.get("vehicle_id")):
                     params = {

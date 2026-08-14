@@ -62,6 +62,18 @@ def test_manual_owner_guard_uses_manual_takeover_policy():
     assert "owner_family(" not in method_source
 
 
+def test_manual_vehicle_config_lookup_filters_ambiguous_ble_only_vins():
+    source = INIT_PATH.read_text()
+    method_start = source.index("    def _get_vehicle_charging_config(")
+    method_source = source[
+        method_start:source.index("    def _manual_session_identity(", method_start)
+    ]
+
+    assert "_safe_vehicle_charging_configs" in method_source
+    assert "safe_configs = _safe_vehicle_charging_configs(" in method_source
+    assert "for config in safe_configs:" in method_source
+
+
 def test_disabling_solar_surplus_awaits_immediate_runtime_teardown():
     source = INIT_PATH.read_text()
     view_start = source.index("class SolarSurplusConfigView")

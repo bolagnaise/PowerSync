@@ -14280,6 +14280,11 @@ class EVVehicleCommandView(HomeAssistantView):
         wanted = {str(vehicle_id) for vehicle_id in vehicle_ids if vehicle_id}
         if not wanted:
             return None
+        config_entry = self._get_powersync_entry()
+        if config_entry is None:
+            return None
+
+        from .automations.ev_charging_planner import _safe_vehicle_charging_configs
 
         for entry_data in self._hass.data.get(DOMAIN, {}).values():
             if not isinstance(entry_data, dict):
@@ -14288,7 +14293,11 @@ class EVVehicleCommandView(HomeAssistantView):
             if not store:
                 continue
             stored = getattr(store, "_data", {}) or {}
-            for config in stored.get("vehicle_charging_configs", []):
+            safe_configs = _safe_vehicle_charging_configs(
+                config_entry,
+                stored.get("vehicle_charging_configs", []),
+            )
+            for config in safe_configs:
                 if str(config.get("vehicle_id")) in wanted:
                     return config
         return None
