@@ -2166,65 +2166,21 @@ def _fresh_site_ev_load(
 ) -> tuple[float, bool]:
     """Return the fresh provider-neutral EV total, or a backend fallback."""
     try:
-        fallback_by_physical_key = {
-            str(key): float(value or 0.0)
-            for key, value in (fallback_by_physical_key or {}).items()
-            if key
-        }
+        from .ev_load import EvLoadQuality, reconcile_ev_load_snapshot
+
         snapshot = hass.data.get(DOMAIN, {}).get(entry_id, {}).get(
             "observed_ev_load_snapshot"
         )
-        if snapshot is None:
-            return float(fallback_power_kw or 0.0), True
-        observed_at = getattr(snapshot, "observed_at", None)
-        now = dt_util.utcnow()
-        age = now - observed_at
-        if not timedelta(0) <= age <= timedelta(seconds=90):
-            stale_keys = {
-                str(getattr(component, "physical_load_key", "") or "")
-                for component in getattr(snapshot, "components", ())
-            }
-            stale_keys.update(
-                str(key)
-                for key in getattr(snapshot, "unavailable_active_keys", ())
-                if key
-            )
-            stale_keys.discard("")
-            if (
-                stale_keys
-                and fallback_by_physical_key
-                and stale_keys <= fallback_by_physical_key.keys()
-            ):
-                return sum(
-                    fallback_by_physical_key[key] for key in stale_keys
-                ), True
-            had_observed_loadpoints = bool(
-                getattr(snapshot, "components", ())
-                or getattr(snapshot, "unavailable_active_keys", ())
-            )
-            return float(fallback_power_kw or 0.0), not had_observed_loadpoints
-        quality = getattr(snapshot, "quality", None)
-        quality_value = getattr(quality, "value", quality)
-        if quality_value != "complete":
-            unavailable_keys = {
-                str(key)
-                for key in getattr(snapshot, "unavailable_active_keys", ())
-                if key
-            }
-            if (
-                unavailable_keys
-                and fallback_by_physical_key
-                and unavailable_keys <= fallback_by_physical_key.keys()
-            ):
-                observed_power_kw = float(
-                    getattr(snapshot, "power_kw", 0.0) or 0.0
-                )
-                return observed_power_kw + sum(
-                    fallback_by_physical_key[key]
-                    for key in unavailable_keys
-                ), True
-            return float(getattr(snapshot, "power_kw", 0.0) or 0.0), False
-        return float(getattr(snapshot, "power_kw", 0.0) or 0.0), True
+        reconciled = reconcile_ev_load_snapshot(
+            snapshot,
+            at=dt_util.utcnow(),
+            fallback_power_kw=fallback_power_kw,
+            fallback_by_physical_key=fallback_by_physical_key,
+        )
+        return (
+            reconciled.power_kw,
+            reconciled.quality == EvLoadQuality.COMPLETE,
+        )
     except (AttributeError, TypeError, ValueError):
         return float(fallback_power_kw or 0.0), True
 
@@ -3106,6 +3062,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 "battery_level": soc_pct,
                 "grid_status": grid_status,
                 "ev_power": ev_power_kw,
+                "ev_power_fallback_by_physical_key": dict(
+                    wall_connector_power_by_load_key
+                ),
                 "wall_connectors_raw": wall_connectors_raw,
                 "last_update": stream_created_at or dt_util.utcnow(),
                 "energy_summary": self._energy_acc.as_dict(),

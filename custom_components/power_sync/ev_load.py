@@ -188,6 +188,129 @@ def aggregate_ev_load(
     )
 
 
+def reconcile_ev_load_snapshot(
+    snapshot: Any,
+    *,
+    at: datetime | None = None,
+    fallback_power_kw: Any = 0.0,
+    fallback_by_physical_key: dict[str, Any] | None = None,
+    max_age: timedelta = timedelta(seconds=90),
+) -> ObservedEvLoadSnapshot:
+    """Fill missing physical loads from current backend-scoped direct meters.
+
+    The aggregate snapshot remains authoritative for every loadpoint it can
+    measure. A backend fallback may only replace the exact physical keys it
+    owns; it must never make a distinct unmeasured charger look complete.
+    """
+    target = _as_utc(at or utc_now())
+    normalized_fallbacks: dict[str, float] = {}
+    for key, value in (fallback_by_physical_key or {}).items():
+        physical_key = str(key or "").strip()
+        power_kw = normalize_power_kw(value, "kW")
+        if physical_key and power_kw is not None:
+            normalized_fallbacks[physical_key] = power_kw
+
+    fallback_power = normalize_power_kw(fallback_power_kw, "kW") or 0.0
+    if snapshot is None:
+        return ObservedEvLoadSnapshot(
+            power_kw=fallback_power,
+            components=(),
+            observed_at=target,
+            quality=EvLoadQuality.COMPLETE,
+        )
+
+    components = tuple(getattr(snapshot, "components", ()) or ())
+    unavailable_keys = {
+        str(key)
+        for key in (getattr(snapshot, "unavailable_active_keys", ()) or ())
+        if key
+    }
+    observed_at = getattr(snapshot, "observed_at", None)
+    try:
+        age = target - _as_utc(observed_at)
+    except (AttributeError, TypeError, ValueError):
+        age = max_age + timedelta(seconds=1)
+
+    def _fallback_observation(physical_key: str) -> EvLoadObservation:
+        power_kw = normalized_fallbacks[physical_key]
+        return EvLoadObservation(
+            physical_load_key=physical_key,
+            source_key="backend_direct_meter",
+            power_kw=power_kw,
+            observed_at=target,
+            active=power_kw > 0.05,
+            measurement_kind=EvMeasurementKind.LOADPOINT_METER,
+        )
+
+    if not timedelta(0) <= age <= max_age:
+        stale_keys = {
+            str(getattr(component, "physical_load_key", "") or "")
+            for component in components
+        }
+        stale_keys.update(unavailable_keys)
+        stale_keys.discard("")
+        if (
+            stale_keys
+            and normalized_fallbacks
+            and stale_keys <= normalized_fallbacks.keys()
+        ):
+            replacements = tuple(
+                _fallback_observation(key) for key in sorted(stale_keys)
+            )
+            return ObservedEvLoadSnapshot(
+                power_kw=sum(float(item.power_kw or 0.0) for item in replacements),
+                components=replacements,
+                observed_at=target,
+                quality=EvLoadQuality.COMPLETE,
+            )
+        had_observed_loadpoints = bool(components or unavailable_keys)
+        return ObservedEvLoadSnapshot(
+            power_kw=fallback_power,
+            components=components,
+            observed_at=target,
+            quality=(
+                EvLoadQuality.INCOMPLETE
+                if had_observed_loadpoints
+                else EvLoadQuality.COMPLETE
+            ),
+            unavailable_active_keys=tuple(sorted(stale_keys or unavailable_keys)),
+        )
+
+    quality = getattr(snapshot, "quality", None)
+    quality_value = getattr(quality, "value", quality)
+    if quality_value == EvLoadQuality.COMPLETE.value:
+        return ObservedEvLoadSnapshot(
+            power_kw=float(getattr(snapshot, "power_kw", 0.0) or 0.0),
+            components=components,
+            observed_at=_as_utc(observed_at),
+            quality=EvLoadQuality.COMPLETE,
+        )
+    if (
+        unavailable_keys
+        and normalized_fallbacks
+        and unavailable_keys <= normalized_fallbacks.keys()
+    ):
+        replacements = tuple(
+            _fallback_observation(key) for key in sorted(unavailable_keys)
+        )
+        return ObservedEvLoadSnapshot(
+            power_kw=(
+                float(getattr(snapshot, "power_kw", 0.0) or 0.0)
+                + sum(float(item.power_kw or 0.0) for item in replacements)
+            ),
+            components=components + replacements,
+            observed_at=target,
+            quality=EvLoadQuality.COMPLETE,
+        )
+    return ObservedEvLoadSnapshot(
+        power_kw=float(getattr(snapshot, "power_kw", 0.0) or 0.0),
+        components=components,
+        observed_at=_as_utc(observed_at),
+        quality=EvLoadQuality.INCOMPLETE,
+        unavailable_active_keys=tuple(sorted(unavailable_keys)),
+    )
+
+
 def normalize_home_load(
     raw_home_load_kw: Any,
     basis: HomeLoadBasis,

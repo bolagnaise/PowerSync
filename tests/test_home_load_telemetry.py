@@ -910,6 +910,9 @@ def test_tesla_direct_wall_connector_fills_incomplete_same_vehicle_snapshot():
     assert result["raw_home_load_power"] == pytest.approx(17.334)
     assert result["load_power"] == pytest.approx(6.80154)
     assert result["home_load_normalization_quality"] == "complete"
+    assert result["ev_power_fallback_by_physical_key"] == {
+        f"vehicle:{vin.lower()}": pytest.approx(10.53246)
+    }
     assert result["wall_connectors_raw"] == [wall_connector]
 
 

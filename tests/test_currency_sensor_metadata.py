@@ -697,6 +697,92 @@ def test_home_load_sensor_never_publishes_negative_history_value():
     assert desc.value_fn({"load_power": 1.234}) == 1.234
 
 
+def test_tesla_home_load_sensor_keeps_direct_wall_connector_reconciliation():
+    """Ticket #204: the sensor must not undo the coordinator's VIN fallback."""
+    sensor = _sensor_module()
+    ev_load = importlib.import_module("power_sync.ev_load")
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "home_load")
+    vin_key = "vehicle:5yjtest0000000001"
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+    coordinator = SimpleNamespace(
+        data={
+            "load_power": 6.80154,
+            "raw_home_load_power": 17.334,
+            "ev_power": 10.53246,
+            "ev_power_fallback_by_physical_key": {vin_key: 10.53246},
+            "home_load_basis": "excludes_ev",
+            "home_load_normalization_quality": "complete",
+        }
+    )
+    incomplete = ev_load.ObservedEvLoadSnapshot(
+        power_kw=0.0,
+        components=(),
+        observed_at=datetime(2026, 5, 3, 12, 0, tzinfo=timezone.utc),
+        quality=ev_load.EvLoadQuality.INCOMPLETE,
+        unavailable_active_keys=(vin_key,),
+    )
+    entity = sensor.TeslaEnergySensor(coordinator, desc, entry)
+    entity.hass = SimpleNamespace(
+        config=SimpleNamespace(currency="AUD"),
+        data={
+            sensor.DOMAIN: {
+                "entry-1": {"observed_ev_load_snapshot": incomplete}
+            }
+        },
+    )
+
+    assert abs(entity.native_value - 6.80154) < 1e-9
+    assert entity.extra_state_attributes["normalization_quality"] == "complete"
+    assert abs(
+        entity.extra_state_attributes["observed_ev_power_kw"] - 10.53246
+    ) < 1e-9
+
+
+def test_tesla_home_load_sensor_still_fails_closed_for_distinct_missing_ev():
+    """A Tesla direct meter must not cover a separate unavailable charger."""
+    sensor = _sensor_module()
+    ev_load = importlib.import_module("power_sync.ev_load")
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "home_load")
+    vin_key = "vehicle:5yjtest0000000001"
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+    coordinator = SimpleNamespace(
+        data={
+            "load_power": None,
+            "raw_home_load_power": 19.734,
+            "ev_power": 13.2,
+            "ev_power_fallback_by_physical_key": {vin_key: 10.8},
+        }
+    )
+    incomplete = ev_load.ObservedEvLoadSnapshot(
+        power_kw=10.8,
+        components=(
+            ev_load.EvLoadObservation(
+                physical_load_key=vin_key,
+                source_key="tesla_wall_connector",
+                power_kw=10.8,
+                observed_at=datetime(2026, 5, 3, 12, 0, tzinfo=timezone.utc),
+                active=True,
+                measurement_kind=ev_load.EvMeasurementKind.LOADPOINT_METER,
+            ),
+        ),
+        observed_at=datetime(2026, 5, 3, 12, 0, tzinfo=timezone.utc),
+        quality=ev_load.EvLoadQuality.INCOMPLETE,
+        unavailable_active_keys=("ocpp:garage:1",),
+    )
+    entity = sensor.TeslaEnergySensor(coordinator, desc, entry)
+    entity.hass = SimpleNamespace(
+        config=SimpleNamespace(currency="AUD"),
+        data={
+            sensor.DOMAIN: {
+                "entry-1": {"observed_ev_load_snapshot": incomplete}
+            }
+        },
+    )
+
+    assert entity.native_value is None
+    assert entity.extra_state_attributes["normalization_quality"] == "incomplete"
+
+
 def test_grid_status_sensor_requires_provider_reported_status():
     sensor = _sensor_module()
     desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "grid_status")

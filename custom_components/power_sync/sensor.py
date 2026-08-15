@@ -3066,11 +3066,23 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
             EvMeasurementKind,
             ObservedEvLoadSnapshot,
             aggregate_ev_load,
+            reconcile_ev_load_snapshot,
         )
 
         now = dt_util.utcnow()
         entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
         snapshot = entry_data.get("observed_ev_load_snapshot")
+        coordinator_data = self.coordinator.data or {}
+        physical_fallbacks = coordinator_data.get(
+            "ev_power_fallback_by_physical_key"
+        )
+        if physical_fallbacks:
+            return reconcile_ev_load_snapshot(
+                snapshot if isinstance(snapshot, ObservedEvLoadSnapshot) else None,
+                at=now,
+                fallback_power_kw=coordinator_data.get("ev_power", 0.0),
+                fallback_by_physical_key=physical_fallbacks,
+            )
         if isinstance(snapshot, ObservedEvLoadSnapshot):
             age = now - snapshot.observed_at
             if timedelta(0) <= age <= timedelta(seconds=90):
@@ -3086,7 +3098,6 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
                     ) or snapshot.unavailable_active_keys,
                 )
 
-        coordinator_data = self.coordinator.data or {}
         embedded_ev = coordinator_data.get("ev_power")
         if embedded_ev is not None:
             try:
