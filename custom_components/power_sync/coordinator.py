@@ -2161,9 +2161,16 @@ def _fresh_site_ev_load(
     hass: HomeAssistant,
     entry_id: str,
     fallback_power_kw: float,
+    *,
+    fallback_by_physical_key: dict[str, float] | None = None,
 ) -> tuple[float, bool]:
     """Return the fresh provider-neutral EV total, or a backend fallback."""
     try:
+        fallback_by_physical_key = {
+            str(key): float(value or 0.0)
+            for key, value in (fallback_by_physical_key or {}).items()
+            if key
+        }
         snapshot = hass.data.get(DOMAIN, {}).get(entry_id, {}).get(
             "observed_ev_load_snapshot"
         )
@@ -2173,6 +2180,24 @@ def _fresh_site_ev_load(
         now = dt_util.utcnow()
         age = now - observed_at
         if not timedelta(0) <= age <= timedelta(seconds=90):
+            stale_keys = {
+                str(getattr(component, "physical_load_key", "") or "")
+                for component in getattr(snapshot, "components", ())
+            }
+            stale_keys.update(
+                str(key)
+                for key in getattr(snapshot, "unavailable_active_keys", ())
+                if key
+            )
+            stale_keys.discard("")
+            if (
+                stale_keys
+                and fallback_by_physical_key
+                and stale_keys <= fallback_by_physical_key.keys()
+            ):
+                return sum(
+                    fallback_by_physical_key[key] for key in stale_keys
+                ), True
             had_observed_loadpoints = bool(
                 getattr(snapshot, "components", ())
                 or getattr(snapshot, "unavailable_active_keys", ())
@@ -2181,6 +2206,23 @@ def _fresh_site_ev_load(
         quality = getattr(snapshot, "quality", None)
         quality_value = getattr(quality, "value", quality)
         if quality_value != "complete":
+            unavailable_keys = {
+                str(key)
+                for key in getattr(snapshot, "unavailable_active_keys", ())
+                if key
+            }
+            if (
+                unavailable_keys
+                and fallback_by_physical_key
+                and unavailable_keys <= fallback_by_physical_key.keys()
+            ):
+                observed_power_kw = float(
+                    getattr(snapshot, "power_kw", 0.0) or 0.0
+                )
+                return observed_power_kw + sum(
+                    fallback_by_physical_key[key]
+                    for key in unavailable_keys
+                ), True
             return float(getattr(snapshot, "power_kw", 0.0) or 0.0), False
         return float(getattr(snapshot, "power_kw", 0.0) or 0.0), True
     except (AttributeError, TypeError, ValueError):
@@ -2796,6 +2838,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             # Extract EV charging power from Tesla Wall Connectors
             ev_power_kw = 0.0
             wall_connector_power_reported = False
+            wall_connector_power_by_load_key: dict[str, float] = {}
             idle_wall_connector_reported = False
             idle_wall_connector_vehicle_ids: set[str] = set()
             wall_connectors_raw = live_status.get("wall_connectors")
@@ -2825,6 +2868,36 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                         # An explicit zero is a valid stopped-charging sample.
                         # Do not replace it with a stale Fleet/BLE vehicle value.
                         wall_connector_power_reported = True
+                        connector_vehicle_id = (
+                            wc.get("vin") or wc.get("vehicle_vin")
+                        )
+                        if connector_vehicle_id:
+                            physical_load_key = "vehicle:" + re.sub(
+                                r"[^a-z0-9]+",
+                                "",
+                                str(connector_vehicle_id).lower(),
+                            )
+                        else:
+                            connector_id = (
+                                wc.get("wall_connector_id")
+                                or wc.get("id")
+                                or wc.get("din")
+                                or wc.get("serial_number")
+                            )
+                            physical_load_key = (
+                                f"tesla:wall_connector_{connector_id}"
+                                if connector_id is not None
+                                else ""
+                            )
+                        if physical_load_key:
+                            wall_connector_power_by_load_key[
+                                physical_load_key
+                            ] = max(
+                                wall_connector_power_by_load_key.get(
+                                    physical_load_key, 0.0
+                                ),
+                                wc_power / 1000,
+                            )
                         if wc_power > 0:
                             ev_power_kw += wc_power / 1000
                         elif _finite_float(wc.get("wall_connector_state")) in (
@@ -2877,6 +2950,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 self.hass,
                 self._entry_id,
                 ev_power_kw,
+                fallback_by_physical_key=wall_connector_power_by_load_key,
             )
 
             # Map Teslemetry API response to our data structure
@@ -3032,6 +3106,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 "battery_level": soc_pct,
                 "grid_status": grid_status,
                 "ev_power": ev_power_kw,
+                "wall_connectors_raw": wall_connectors_raw,
                 "last_update": stream_created_at or dt_util.utcnow(),
                 "energy_summary": self._energy_acc.as_dict(),
                 "firmware": self._firmware,

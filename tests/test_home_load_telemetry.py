@@ -161,6 +161,91 @@ def test_stale_site_ev_load_fails_closed_instead_of_using_partial_fallback():
     assert _fresh_site_ev_load(hass, "entry-1", 7.2) == (7.2, False)
 
 
+def test_stale_site_ev_load_uses_same_vehicle_direct_meter_fallback():
+    """A current direct meter can replace its stale canonical vehicle reading."""
+    vehicle_key = "vehicle:5yjtest0000000001"
+    snapshot = types.SimpleNamespace(
+        power_kw=10.2,
+        observed_at=datetime(2026, 7, 8, 0, 58, 0),
+        quality=types.SimpleNamespace(value="complete"),
+        components=(
+            types.SimpleNamespace(
+                physical_load_key=vehicle_key,
+                power_kw=10.2,
+                active=True,
+            ),
+        ),
+        unavailable_active_keys=(),
+    )
+    hass = types.SimpleNamespace(
+        data={DOMAIN: {"entry-1": {"observed_ev_load_snapshot": snapshot}}}
+    )
+
+    assert _fresh_site_ev_load(
+        hass,
+        "entry-1",
+        10.8,
+        fallback_by_physical_key={vehicle_key: 10.8},
+    ) == (10.8, True)
+
+
+def test_incomplete_site_ev_load_uses_same_vehicle_direct_meter_fallback():
+    """A direct meter can fill its own missing vehicle without hiding another EV."""
+    snapshot = types.SimpleNamespace(
+        power_kw=2.4,
+        observed_at=datetime(2026, 7, 8, 0, 59, 30),
+        quality=types.SimpleNamespace(value="incomplete"),
+        components=(
+            types.SimpleNamespace(
+                physical_load_key="ocpp:garage:1",
+                power_kw=2.4,
+                active=True,
+            ),
+        ),
+        unavailable_active_keys=("vehicle:5yjtest0000000001",),
+    )
+    hass = types.SimpleNamespace(
+        data={DOMAIN: {"entry-1": {"observed_ev_load_snapshot": snapshot}}}
+    )
+
+    power_kw, complete = _fresh_site_ev_load(
+        hass,
+        "entry-1",
+        10.8,
+        fallback_by_physical_key={"vehicle:5yjtest0000000001": 10.8},
+    )
+
+    assert power_kw == pytest.approx(13.2)
+    assert complete is True
+
+
+def test_incomplete_site_ev_load_still_fails_closed_for_distinct_missing_ev():
+    """A Wall Connector reading must not cover a separate unmeasured charger."""
+    snapshot = types.SimpleNamespace(
+        power_kw=10.8,
+        observed_at=datetime(2026, 7, 8, 0, 59, 30),
+        quality=types.SimpleNamespace(value="incomplete"),
+        components=(
+            types.SimpleNamespace(
+                physical_load_key="vehicle:5yjtest0000000001",
+                power_kw=10.8,
+                active=True,
+            ),
+        ),
+        unavailable_active_keys=("ocpp:garage:1",),
+    )
+    hass = types.SimpleNamespace(
+        data={DOMAIN: {"entry-1": {"observed_ev_load_snapshot": snapshot}}}
+    )
+
+    assert _fresh_site_ev_load(
+        hass,
+        "entry-1",
+        10.8,
+        fallback_by_physical_key={"vehicle:5yjtest0000000001": 10.8},
+    ) == (10.8, False)
+
+
 def test_daily_home_energy_uses_the_same_site_ev_total():
     snapshot = types.SimpleNamespace(
         power_kw=2.0,
@@ -778,6 +863,54 @@ def test_tesla_explicit_zero_wall_connector_power_suppresses_vehicle_fallback(
     assert fallback_calls == []
     assert result["ev_power"] == pytest.approx(0.0)
     assert result["load_power"] == pytest.approx(3.077)
+
+
+def test_tesla_direct_wall_connector_fills_incomplete_same_vehicle_snapshot():
+    """Ticket #204: valid VIN-scoped Wall Connector power keeps Home Load numeric."""
+    coordinator = _new_stream_tesla_coordinator()
+
+    async def _request_refresh() -> None:
+        return None
+
+    coordinator.async_request_refresh = _request_refresh
+    vin = "5YJTEST0000000001"
+    coordinator.hass.data[DOMAIN]["stream-entry"][
+        "observed_ev_load_snapshot"
+    ] = types.SimpleNamespace(
+        power_kw=0.0,
+        observed_at=datetime(2026, 7, 8, 0, 59, 30),
+        quality=types.SimpleNamespace(value="incomplete"),
+        components=(),
+        unavailable_active_keys=(f"vehicle:{vin.lower()}",),
+    )
+    wall_connector = {
+        "din": "1529455-42-H--TEST",
+        "vin": vin,
+        "wall_connector_state": 1,
+        "wall_connector_power": 10532.46,
+    }
+    event = {
+        "createdAt": "2026-07-08T00:59:30.000Z",
+        "site_id": "12345",
+        "live_status": {
+            "solar_power": 1732,
+            "grid_power": 30677,
+            "battery_power": -15075,
+            "load_power": 17334,
+            "percentage_charged": 86.6,
+            "grid_status": "Active",
+            "wall_connectors": [wall_connector],
+        },
+    }
+
+    asyncio.run(coordinator._async_handle_teslemetry_stream_event(event))
+    result = asyncio.run(coordinator._async_update_data())
+
+    assert result["ev_power"] == pytest.approx(10.53246)
+    assert result["raw_home_load_power"] == pytest.approx(17.334)
+    assert result["load_power"] == pytest.approx(6.80154)
+    assert result["home_load_normalization_quality"] == "complete"
+    assert result["wall_connectors_raw"] == [wall_connector]
 
 
 def test_tesla_idle_wall_connector_keeps_distinct_mapped_umc_power(monkeypatch):
