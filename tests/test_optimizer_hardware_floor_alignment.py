@@ -1945,6 +1945,82 @@ def test_fixed_power_system_blocks_partial_quota_grid_charge(
 
 
 @pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_fixed_power_covau_quota_keeps_safe_prefix_charge(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+):
+    """Ticket #234: a partial free window must retain quota-safe whole slots."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, backend)
+    group_ids = (
+        ["2026-08-15"] * 23
+        + ["2026-08-16"] * 36
+        + ["2026-08-17"] * 13
+    )
+    interval_count = len(group_ids)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=30_400,
+        max_charge_w=10_600,
+        max_discharge_w=10_600,
+        efficiency=0.92,
+        backup_reserve=0.20,
+        hardware_reserve=0.10,
+        grid_charge_soc_cap=1.0,
+        interval_minutes=5,
+        horizon_hours=6,
+        terminal_weight=0.0,
+        target_charge_power_supported=False,
+    )
+    optimizer.set_quota_bonus_groups(
+        import_group_ids=group_ids,
+        import_caps_by_group={
+            "2026-08-15": 38.28,
+            "2026-08-16": 50.0,
+            "2026-08-17": 50.0,
+        },
+        export_group_ids=None,
+        export_caps_by_group=None,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.27478] * interval_count,
+        export_prices=[0.05] * interval_count,
+        solar_forecast=[0.0] * interval_count,
+        load_forecast=[10.5] * interval_count,
+        current_soc=0.557,
+        allow_battery_export=[False] * interval_count,
+        allow_grid_charge=True,
+        import_bonus_prices=[0.27478] * interval_count,
+        import_bonus_cap_kwh=138.28,
+    )
+
+    assert result.free_import_command_slots == (
+        [True] * 20
+        + [False] * 3
+        + [True] * 20
+        + [False] * 16
+        + [True] * 13
+    )
+    assert result.schedule.actions[0].action == "charge"
+    for day, quota_kwh in (
+        ("2026-08-15", 38.28),
+        ("2026-08-16", 50.0),
+        ("2026-08-17", 50.0),
+    ):
+        modeled_import_kwh = sum(
+            10.5 + (10.6 if command_slot else 0.0)
+            for command_slot, group in zip(
+                result.free_import_command_slots,
+                group_ids,
+                strict=True,
+            )
+            if group == day
+        ) / 12
+        assert modeled_import_kwh <= quota_kwh
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
 @pytest.mark.parametrize("solar_kw", [0.0, 3.0])
 @pytest.mark.parametrize(
     ("target_charge_power_supported", "expected_free_command"),

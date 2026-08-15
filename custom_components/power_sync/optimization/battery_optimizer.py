@@ -7251,6 +7251,8 @@ class BatteryOptimizer:
         )
         candidate_slots_by_group: dict[str, list[int]] = {}
         potential_import_by_group: dict[str, float] = {}
+        baseline_import_by_group: dict[str, float] = {}
+        command_increment_by_slot: dict[int, float] = {}
 
         for idx in range(n):
             try:
@@ -7307,9 +7309,18 @@ class BatteryOptimizer:
             potential_import_kwh = (
                 potential_site_import_kw * self.dt_hours
             )
+            baseline_import_kwh = net_home_kw * self.dt_hours
             potential_import_by_group[group] = (
                 potential_import_by_group.get(group, 0.0)
                 + potential_import_kwh
+            )
+            baseline_import_by_group[group] = (
+                baseline_import_by_group.get(group, 0.0)
+                + baseline_import_kwh
+            )
+            command_increment_by_slot[idx] = max(
+                0.0,
+                potential_import_kwh - baseline_import_kwh,
             )
             if not free_command_candidate:
                 continue
@@ -7317,11 +7328,36 @@ class BatteryOptimizer:
                 continue
             candidate_slots_by_group.setdefault(group, []).append(idx)
 
-        # Treat a capped bonus window as command-owned only when its quota can
-        # cover every remaining candidate interval at the maximum feasible site
-        # import. Otherwise leave the whole group to the ordinary LP, which can
-        # allocate a partial residual credit without an unbounded hardware mode.
+        # Fixed-power systems select chronological whole command slots that fit
+        # the residual quota. Target-power systems retain the all-or-nothing
+        # command mask; when it is false their ordinary LP can allocate a
+        # fractional residual credit to a bounded hardware power target.
         for group, candidate_slots in candidate_slots_by_group.items():
+            if not self.target_charge_power_supported:
+                # A fixed-power actuator can still use a partial free window as
+                # long as every emitted command is a whole, quota-safe slot.
+                # Reserve forecast home import for the complete tariff group,
+                # then spend only the remaining allowance on chronological
+                # full-rate commands. This keeps the active free window useful
+                # without asking hardware to honor a fractional power target.
+                remaining_command_kwh = max(
+                    0.0,
+                    quota_by_group.get(group, 0.0)
+                    - baseline_import_by_group.get(group, 0.0),
+                )
+                for idx in candidate_slots:
+                    command_increment_kwh = command_increment_by_slot.get(
+                        idx,
+                        0.0,
+                    )
+                    if command_increment_kwh > remaining_command_kwh + 1e-9:
+                        continue
+                    slots[idx] = True
+                    remaining_command_kwh = max(
+                        0.0,
+                        remaining_command_kwh - command_increment_kwh,
+                    )
+                continue
             if (
                 quota_by_group.get(group, 0.0) + 1e-9
                 < potential_import_by_group.get(group, 0.0)
