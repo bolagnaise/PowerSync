@@ -6,7 +6,7 @@ import asyncio
 import importlib
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1129,3 +1129,75 @@ def test_app_managed_tesla_power_is_zeroed_when_vehicle_is_in_named_zone(monkeyp
     assert snapshot.power_kw == 0.0
     assert len(snapshot.components) == 1
     assert snapshot.components[0].physical_load_key == f"vehicle:{vin.lower()}"
+
+
+def test_display_snapshot_timestamp_follows_active_zero_power_observation(monkeypatch):
+    """Fresh active telemetry must not become unavailable due to clock ordering."""
+    power_sync = _power_sync_module()
+    ev_load = importlib.import_module("power_sync.ev_load")
+    base = datetime(2026, 8, 15, 5, 42, 14, tzinfo=timezone.utc)
+    clock_calls = 0
+
+    def utcnow():
+        nonlocal clock_calls
+        current = base + timedelta(microseconds=clock_calls)
+        clock_calls += 1
+        return current
+
+    monkeypatch.setattr(power_sync.dt_util, "utcnow", utcnow)
+
+    async def get_ev_load_observations(hass, entry, vehicles):
+        return [
+            ev_load.EvLoadObservation(
+                physical_load_key="vehicle:5yjtest0000000001",
+                source_key="5YJTEST0000000001",
+                power_kw=0.0,
+                observed_at=power_sync.dt_util.utcnow(),
+                active=True,
+                measurement_kind=ev_load.EvMeasurementKind.VEHICLE,
+            )
+        ]
+
+    class LoadpointStatusView:
+        def __init__(self, hass, entry):
+            pass
+
+        async def _async_build_response(self, request, observed_vehicle_sink):
+            observed_vehicle_sink.append(
+                {
+                    "vehicle_id": "5YJTEST0000000001",
+                    "ev_power_kw": 0.0,
+                    "is_charging": True,
+                }
+            )
+            return SimpleNamespace(
+                status=200,
+                body=b'{"success": true, "site": {}, "loadpoints": []}',
+            )
+
+    monkeypatch.setattr(
+        power_sync,
+        "_get_ev_load_observations",
+        get_ev_load_observations,
+    )
+    monkeypatch.setattr(power_sync, "EVLoadpointStatusView", LoadpointStatusView)
+    tesla_coordinator = SimpleNamespace(
+        data={"load_power": 0.617, "ev_power": 0.0}
+    )
+    hass = _Hass([], entry_data={"tesla_coordinator": tesla_coordinator})
+
+    snapshot = asyncio.run(
+        power_sync._get_ev_display_coordinator(
+            hass,
+            _Entry(),
+        ).async_refresh(force=True)
+    )
+
+    observed = hass.data["power_sync"]["entry-1"][
+        "observed_ev_load_snapshot"
+    ]
+    assert snapshot["site"]["ev_power_kw"] == 0.0
+    assert snapshot["site"]["observation_quality"] == "complete"
+    assert observed.unavailable_active_keys == ()
+    assert tesla_coordinator.data["load_power"] == 0.617
+    assert tesla_coordinator.data["home_load_normalization_quality"] == "complete"

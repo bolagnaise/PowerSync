@@ -17439,12 +17439,17 @@ def _get_ev_display_coordinator(hass, entry):
         from .ev_load import aggregate_ev_load, normalize_energy_data
 
         entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
-        observed_at = dt_util.utcnow()
         observations = await _get_ev_load_observations(
             hass,
             entry,
             observed_vehicles,
         )
+        # Timestamp the aggregate after collection.  Observations produced by
+        # the collector use their own current timestamp, so capturing this
+        # boundary before the await makes fresh readings appear to come from
+        # the future.  An active zero-power loadpoint would then fail closed as
+        # unavailable and suppress Home Load while the loadpoint remained active.
+        observed_at = dt_util.utcnow()
         observed_load = aggregate_ev_load(observations, at=observed_at)
         entry_data["observed_ev_load_snapshot"] = observed_load
         site = payload.setdefault("site", {})
