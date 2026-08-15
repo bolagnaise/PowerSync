@@ -1776,11 +1776,8 @@ def test_dynamic_ocpp_update_leaves_energy_to_ocpp_session_poll(monkeypatch):
     assert manager.updates == []
 
 
-@pytest.mark.parametrize("battery_soc", (82.0, 95.2))
-def test_dynamic_battery_target_uses_grid_headroom_when_powerwall_tapers(
-    monkeypatch,
-    battery_soc,
-):
+def test_dynamic_battery_target_learns_early_powerwall_taper(monkeypatch):
+    """Two consistent samples can establish taper below a fixed SOC cutoff."""
     set_amps_calls: list[int] = []
 
     async def not_unplugged(*args, **kwargs):
@@ -1789,8 +1786,8 @@ def test_dynamic_battery_target_uses_grid_headroom_when_powerwall_tapers(
     async def fake_live_status(*args, **kwargs):
         return {
             "battery_power": -10000,
-            "grid_power": 12000,
-            "battery_soc": battery_soc,
+            "grid_power": 11000,
+            "battery_soc": 82.0,
         }
 
     async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
@@ -1802,6 +1799,55 @@ def test_dynamic_battery_target_uses_grid_headroom_when_powerwall_tapers(
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
 
     actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        "VIN123": {
+            "active": True,
+            "current_amps": 5,
+            "target_amps": 5,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "target_battery_charge_kw": 14.7,
+                "max_grid_import_kw": 16.0,
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+                "voltage": 230,
+                "phases": 1,
+            },
+        }
+    }
+
+    asyncio.run(actions._dynamic_ev_update(_Hass([]), _Entry(), "entry-1", "VIN123"))
+    asyncio.run(actions._dynamic_ev_update(_Hass([]), _Entry(), "entry-1", "VIN123"))
+
+    assert set_amps_calls == [6, 26]
+    state = actions._dynamic_ev_state["entry-1"]["VIN123"]
+    assert state["current_amps"] == 26
+    assert state["_battery_acceptance_learner"]["learned_kw"] == 10.0
+
+
+def test_dynamic_battery_target_uses_immediate_near_full_taper(monkeypatch):
+    set_amps_calls: list[int] = []
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_power": -10000,
+            "grid_power": 12000,
+            "battery_soc": 95.2,
+        }
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+
     actions._dynamic_ev_state["entry-1"] = {
         "VIN123": {
             "active": True,
@@ -1823,7 +1869,87 @@ def test_dynamic_battery_target_uses_grid_headroom_when_powerwall_tapers(
     asyncio.run(actions._dynamic_ev_update(_Hass([]), _Entry(), "entry-1", "VIN123"))
 
     assert set_amps_calls == [22]
-    assert actions._dynamic_ev_state["entry-1"]["VIN123"]["current_amps"] == 22
+
+
+def test_battery_acceptance_learner_rejects_a_single_transient_sample():
+    learner: dict = {}
+
+    first_reserve, first_learned = actions._effective_battery_charge_reserve_kw(
+        learner,
+        battery_power_kw=-9.7,
+        battery_soc=88,
+        target_battery_charge_kw=14.7,
+        grid_headroom_kw=3.0,
+    )
+    second_reserve, second_learned = actions._effective_battery_charge_reserve_kw(
+        learner,
+        battery_power_kw=-9.8,
+        battery_soc=88.2,
+        target_battery_charge_kw=14.7,
+        grid_headroom_kw=2.9,
+    )
+
+    assert first_reserve == 14.7
+    assert first_learned is False
+    assert second_reserve == pytest.approx(10.1)
+    assert second_learned is True
+
+
+def test_battery_acceptance_learner_reserves_recovered_demand_immediately():
+    learner = {
+        "target_kw": 14.7,
+        "last_soc": 90.0,
+        "learned_kw": 9.7,
+    }
+
+    reserve_kw, learned = actions._effective_battery_charge_reserve_kw(
+        learner,
+        battery_power_kw=-12.4,
+        battery_soc=90.2,
+        target_battery_charge_kw=14.7,
+        grid_headroom_kw=0.0,
+    )
+
+    assert reserve_kw == pytest.approx(12.7)
+    assert learned is True
+    assert learner["learned_kw"] == 12.4
+
+
+def test_battery_acceptance_learner_forgets_when_soc_falls():
+    learner = {
+        "target_kw": 14.7,
+        "last_soc": 91.0,
+        "learned_kw": 9.7,
+    }
+
+    reserve_kw, learned = actions._effective_battery_charge_reserve_kw(
+        learner,
+        battery_power_kw=-9.7,
+        battery_soc=88.0,
+        target_battery_charge_kw=14.7,
+        grid_headroom_kw=0.0,
+    )
+
+    assert reserve_kw == 14.7
+    assert learned is False
+    assert "learned_kw" not in learner
+
+
+def test_battery_acceptance_learner_needs_headroom_to_start_learning():
+    learner: dict = {}
+
+    for _ in range(3):
+        reserve_kw, learned = actions._effective_battery_charge_reserve_kw(
+            learner,
+            battery_power_kw=-9.7,
+            battery_soc=85.0,
+            target_battery_charge_kw=14.7,
+            grid_headroom_kw=0.0,
+        )
+
+    assert reserve_kw == 14.7
+    assert learned is False
+    assert "candidate_samples" not in learner
 
 
 def test_dynamic_tesla_resumes_after_site_headroom_returns(monkeypatch):
@@ -2038,6 +2164,77 @@ def test_dynamic_tesla_resumes_after_site_headroom_returns(monkeypatch):
         actions._dynamic_ev_state["entry-1"][vehicle_id]["params"]["owner_mode"]
         == "manual"
     )
+
+
+def test_dynamic_multi_tesla_group_learns_early_battery_taper(monkeypatch):
+    vehicle_ids = ("ble_tesla_yf88", "ble_tesla_flinn")
+    set_amps_calls: list[tuple[str, int]] = []
+    start_calls: list[tuple[str | None, int]] = []
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_power": -9600,
+            "grid_power": 8600,
+            "solar_power": 2600,
+            "ev_power": 0,
+            "battery_soc": 82.0,
+        }
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append((vehicle_id, amps))
+        return True
+
+    async def fake_start_charging(hass, config_entry, params, context=None):
+        start_calls.append((params.get("vehicle_vin"), params["amps"]))
+        return True
+
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start_charging)
+
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_id: {
+            "active": True,
+            "current_amps": 0,
+            "target_amps": 0,
+            "priority": 1,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_id,
+                "target_battery_charge_kw": 15,
+                "max_grid_import_kw": 12.5,
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+                "voltage": 230,
+                "phases": 3,
+            },
+        }
+        for vehicle_id in vehicle_ids
+    }
+
+    group_leader = "ble_tesla_flinn"
+    for _ in range(2):
+        asyncio.run(
+            actions._dynamic_ev_update(
+                _Hass([]),
+                _Entry(),
+                "entry-1",
+                group_leader,
+            )
+        )
+
+    assert set_amps_calls == [(group_leader, 5)]
+    assert start_calls == [(group_leader, 5)]
+    learner = actions._dynamic_ev_state["entry-1"][group_leader][
+        "_battery_acceptance_learner"
+    ]
+    assert learner["learned_kw"] == 9.6
 
 
 def test_dynamic_multi_tesla_site_headroom_is_not_granted_to_both(monkeypatch):
@@ -4618,6 +4815,8 @@ def test_dynamic_single_smart_schedule_start_uses_measured_battery_taper_headroo
     assert command_order == [("set_amps", 15), ("start", 15)]
     state = actions._dynamic_ev_state["entry-1"]["ble_tesla_yf88"]
     assert state["current_amps"] == 15
+    assert state["_battery_acceptance_learner"]["candidate_kw"] == 9.7
+    assert state["_battery_acceptance_learner"]["candidate_samples"] == 1
 
 
 def test_dynamic_single_smart_schedule_start_waits_for_live_site_status(monkeypatch):

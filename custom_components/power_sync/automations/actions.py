@@ -5027,6 +5027,10 @@ _BATTERY_FULL_RESERVE_BYPASS_SOC = 99.0
 _BATTERY_TAPER_BYPASS_SOC = 95.0
 _BATTERY_TARGET_SHORTFALL_KW = 0.2
 _SITE_HEADROOM_EPSILON_KW = 0.1
+_BATTERY_ACCEPTANCE_MATCH_KW = 0.5
+_BATTERY_ACCEPTANCE_MARGIN_KW = 0.3
+_BATTERY_ACCEPTANCE_STABLE_SAMPLES = 2
+_BATTERY_ACCEPTANCE_EMA_ALPHA = 0.35
 _ACTIVE_EV_POWER_EPSILON_KW = 0.05
 
 # Lock to prevent duplicate dynamic EV charging sessions from concurrent triggers
@@ -6780,6 +6784,7 @@ def _initial_smart_schedule_battery_target_amps(
     max_amps: int,
     voltage: float,
     phases: int,
+    acceptance_learner: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
     """Return a safe first Tesla rate from one usable live site sample."""
     if not isinstance(live_status, dict):
@@ -6832,16 +6837,18 @@ def _initial_smart_schedule_battery_target_amps(
         0.0,
         max_grid_import_kw - powers_kw["grid_power"],
     )
-    budget_kw = site_budget_kw
-    if (
-        target_battery_charge_kw > 0
-        and not _battery_target_can_release_site_headroom(
+    effective_battery_target_kw, _acceptance_learned = (
+        _effective_battery_charge_reserve_kw(
+            acceptance_learner,
             battery_power_kw=powers_kw["battery_power"],
             battery_soc=battery_soc,
             target_battery_charge_kw=target_battery_charge_kw,
             grid_headroom_kw=site_budget_kw,
+            allow_provisional=True,
         )
-    ):
+    )
+    budget_kw = site_budget_kw
+    if effective_battery_target_kw > 0:
         non_ev_home_kw = max(
             0.0,
             powers_kw["solar_power"]
@@ -6853,7 +6860,7 @@ def _initial_smart_schedule_battery_target_amps(
             max_grid_import_kw
             + powers_kw["solar_power"]
             - non_ev_home_kw
-            - target_battery_charge_kw,
+            - effective_battery_target_kw,
         )
         budget_kw = min(site_budget_kw, battery_target_budget_kw)
 
@@ -6862,21 +6869,24 @@ def _initial_smart_schedule_battery_target_amps(
     return safe_amps if safe_amps >= min_amps else 0
 
 
-def _battery_target_can_release_site_headroom(
+def _effective_battery_charge_reserve_kw(
+    learner: Optional[Dict[str, Any]],
     *,
     battery_power_kw: float,
     battery_soc: float,
     target_battery_charge_kw: float,
     grid_headroom_kw: float,
-) -> bool:
-    """Return whether live site headroom can safely be offered to the EV.
+    allow_provisional: bool = False,
+) -> tuple[float, bool]:
+    """Learn the battery's live acceptance and return its protected reserve.
 
-    A near-full battery is always allowed to taper naturally. Some batteries
-    begin tapering earlier, so also recognize a measured charge rate below the
-    configured target when the site meter proves that the missing power is not
-    being consumed: grid import still has headroom. The dynamic loop remains
-    site-capped and will shed EV current on the next sample if battery demand
-    rises again.
+    The configured target remains authoritative until a shortfall is first
+    observed with unused site-import headroom and then confirmed by a second
+    consistent sample. Once learned, reductions are smoothed while increases
+    are adopted immediately. This lets an EV use genuine BMS taper headroom at
+    any SOC without learning a temporary site constraint as battery behavior.
+    The learner is deliberately session-local so temperature or hardware
+    conditions from an old charge do not become a permanent capacity limit.
     """
     try:
         battery_power_kw = float(battery_power_kw)
@@ -6887,7 +6897,7 @@ def _battery_target_can_release_site_headroom(
         )
         grid_headroom_kw = float(grid_headroom_kw)
     except (TypeError, ValueError):
-        return False
+        return 0.0, False
     if not all(
         math.isfinite(value)
         for value in (
@@ -6897,17 +6907,119 @@ def _battery_target_can_release_site_headroom(
             grid_headroom_kw,
         )
     ):
-        return False
-    if battery_soc >= _BATTERY_TAPER_BYPASS_SOC:
-        return True
-    battery_charging_kw = max(0.0, -battery_power_kw)
-    return bool(
-        target_battery_charge_kw > 0
-        and battery_charging_kw > _ACTIVE_EV_POWER_EPSILON_KW
-        and target_battery_charge_kw - battery_charging_kw
+        return target_battery_charge_kw, False
+    if target_battery_charge_kw <= 0:
+        if learner is not None:
+            learner.clear()
+        return 0.0, battery_soc >= _BATTERY_TAPER_BYPASS_SOC
+
+    actual_charge_kw = max(0.0, -battery_power_kw)
+    if learner is None:
+        learner = {}
+
+    previous_target = learner.get("target_kw")
+    previous_soc = learner.get("last_soc")
+    if (
+        previous_target is not None
+        and abs(float(previous_target) - target_battery_charge_kw)
         > _BATTERY_TARGET_SHORTFALL_KW
+    ) or (
+        previous_soc is not None
+        and battery_soc < float(previous_soc) - 2.0
+    ):
+        learner.clear()
+    learner["target_kw"] = target_battery_charge_kw
+    learner["last_soc"] = battery_soc
+
+    # Meeting the configured request proves that any earlier taper estimate is
+    # stale. Restore the full reserve immediately.
+    if (
+        actual_charge_kw
+        >= target_battery_charge_kw - _BATTERY_TARGET_SHORTFALL_KW
+    ):
+        learner.pop("candidate_kw", None)
+        learner.pop("candidate_samples", None)
+        learner.pop("learned_kw", None)
+        return target_battery_charge_kw, False
+
+    # The long-standing near-full behavior remains immediate. Below this SOC,
+    # zero battery power is not treated as taper because a control transition
+    # or unavailable battery could otherwise give its whole reserve to the EV.
+    if battery_soc >= _BATTERY_TAPER_BYPASS_SOC:
+        learner["learned_kw"] = actual_charge_kw
+        learner.pop("candidate_kw", None)
+        learner.pop("candidate_samples", None)
+        return min(target_battery_charge_kw, actual_charge_kw), True
+
+    learned_kw = learner.get("learned_kw")
+    if learned_kw is not None:
+        learned_kw = max(0.0, min(target_battery_charge_kw, float(learned_kw)))
+        # Battery demand can recover quickly as operating conditions change;
+        # reserve that observed increase immediately before offering more to
+        # the EV. Lower acceptance needs spare grid headroom and confirmation.
+        if actual_charge_kw > learned_kw + _BATTERY_TARGET_SHORTFALL_KW:
+            learned_kw = actual_charge_kw
+            learner["learned_kw"] = learned_kw
+
+    candidate_kw = learner.get("candidate_kw")
+    candidate_samples = int(learner.get("candidate_samples", 0) or 0)
+    can_start_candidate = bool(
+        actual_charge_kw > _ACTIVE_EV_POWER_EPSILON_KW
         and grid_headroom_kw > _SITE_HEADROOM_EPSILON_KW
     )
+    can_continue_candidate = bool(
+        candidate_kw is not None
+        and actual_charge_kw > _ACTIVE_EV_POWER_EPSILON_KW
+        and abs(actual_charge_kw - float(candidate_kw))
+        <= _BATTERY_ACCEPTANCE_MATCH_KW
+    )
+    should_sample_lower = bool(
+        learned_kw is None
+        or actual_charge_kw < learned_kw - _BATTERY_TARGET_SHORTFALL_KW
+    )
+
+    if should_sample_lower and (can_start_candidate or can_continue_candidate):
+        if can_continue_candidate:
+            candidate_samples += 1
+            candidate_kw = (
+                float(candidate_kw) * (candidate_samples - 1)
+                + actual_charge_kw
+            ) / candidate_samples
+        else:
+            candidate_kw = actual_charge_kw
+            candidate_samples = 1
+        learner["candidate_kw"] = candidate_kw
+        learner["candidate_samples"] = candidate_samples
+        if candidate_samples >= _BATTERY_ACCEPTANCE_STABLE_SAMPLES:
+            if learned_kw is None:
+                learned_kw = candidate_kw
+            else:
+                learned_kw = (
+                    (1.0 - _BATTERY_ACCEPTANCE_EMA_ALPHA) * learned_kw
+                    + _BATTERY_ACCEPTANCE_EMA_ALPHA * candidate_kw
+                )
+            learner["learned_kw"] = learned_kw
+            learner.pop("candidate_kw", None)
+            learner.pop("candidate_samples", None)
+    elif candidate_kw is not None and not can_continue_candidate:
+        learner.pop("candidate_kw", None)
+        learner.pop("candidate_samples", None)
+
+    if learned_kw is not None:
+        reserve_kw = min(
+            target_battery_charge_kw,
+            max(learned_kw, actual_charge_kw)
+            + _BATTERY_ACCEPTANCE_MARGIN_KW,
+        )
+        return reserve_kw, True
+
+    if allow_provisional and can_start_candidate:
+        return min(
+            target_battery_charge_kw,
+            actual_charge_kw + _BATTERY_ACCEPTANCE_MARGIN_KW,
+        ), False
+
+    return target_battery_charge_kw, False
 
 
 def _smart_schedule_battery_target_states(
@@ -7198,9 +7310,7 @@ async def _update_smart_schedule_battery_target_group(
     )
 
     grid_power_kw = _live_status_power_kw(live_status, "grid_power")
-    solar_power_kw = _live_status_power_kw(live_status, "solar_power")
     battery_power_kw = _live_status_power_kw(live_status, "battery_power")
-    non_ev_home_kw = _non_ev_home_load_kw(live_status, effective_site_ev_kw)
     base_grid_kw = grid_power_kw - effective_site_ev_kw
     site_budget_kw = max(
         0.0,
@@ -7217,29 +7327,40 @@ async def _update_smart_schedule_battery_target_group(
     except (TypeError, ValueError):
         battery_soc = 0.0
     grid_headroom_kw = max_grid_import_kw - grid_power_kw
-    battery_target_released = _battery_target_can_release_site_headroom(
-        battery_power_kw=battery_power_kw,
-        battery_soc=battery_soc,
-        target_battery_charge_kw=target_battery_charge_kw,
-        grid_headroom_kw=grid_headroom_kw,
+    acceptance_learner = sessions[0][1].setdefault(
+        "_battery_acceptance_learner",
+        {},
+    )
+    effective_battery_target_kw, acceptance_learned = (
+        _effective_battery_charge_reserve_kw(
+            acceptance_learner,
+            battery_power_kw=battery_power_kw,
+            battery_soc=battery_soc,
+            target_battery_charge_kw=target_battery_charge_kw,
+            grid_headroom_kw=grid_headroom_kw,
+        )
     )
 
-    if (
-        target_battery_charge_kw > 0
-        and not battery_target_released
-    ):
+    if effective_battery_target_kw > 0:
+        actual_battery_charge_kw = max(0.0, -battery_power_kw)
+        battery_reserve_gap_kw = max(
+            0.0,
+            effective_battery_target_kw - actual_battery_charge_kw,
+        )
+        effective_group_ev_kw = max(
+            0.0,
+            effective_site_ev_kw - other_commanded_kw,
+        )
         budget_kw = min(
             site_budget_kw,
             max(
                 0.0,
-                max_grid_import_kw
-                + solar_power_kw
-                - non_ev_home_kw
-                - target_battery_charge_kw
-                - other_commanded_kw,
+                effective_group_ev_kw
+                + grid_headroom_kw
+                - battery_reserve_gap_kw,
             ),
         )
-    elif battery_target_released:
+    elif acceptance_learned:
         budget_kw = site_budget_kw
     else:
         target_battery_power_kw = -target_battery_charge_kw
@@ -7270,10 +7391,12 @@ async def _update_smart_schedule_battery_target_group(
 
     _LOGGER.debug(
         "Dynamic EV group: grid=%.1fkW max=%.1fkW base=%.1fkW "
-        "budget=%.1fkW targets=%s",
+        "battery_reserve=%.1fkW learned=%s budget=%.1fkW targets=%s",
         grid_power_kw,
         max_grid_import_kw,
         base_grid_kw,
+        effective_battery_target_kw,
+        acceptance_learned,
         budget_kw,
         targets,
     )
@@ -9048,9 +9171,9 @@ async def _dynamic_ev_update(
     # If target_battery_charge_kw = 5, we want battery_power = -5 kW
     target_battery_power_kw = -target_battery_charge_kw
 
-    # A battery near full, or measurably charging below its configured target
-    # while site headroom remains, is allowed to taper naturally. The EV uses
-    # only measured grid headroom and sheds current if battery demand returns.
+    # A battery near full, or one whose lower acceptance has been learned from
+    # consistent live samples, can taper naturally. The EV uses only the
+    # resulting site budget and sheds current if battery demand returns.
     battery_full = battery_soc >= _BATTERY_TAPER_BYPASS_SOC
 
     # Battery deficit: How much more the battery should be charging
@@ -9060,11 +9183,15 @@ async def _dynamic_ev_update(
 
     # Grid headroom: How much more we could import before hitting limit
     grid_headroom_kw = max_grid_import_kw - grid_power_kw
-    battery_target_released = _battery_target_can_release_site_headroom(
-        battery_power_kw=battery_power_kw,
-        battery_soc=battery_soc,
-        target_battery_charge_kw=target_battery_charge_kw,
-        grid_headroom_kw=grid_headroom_kw,
+    acceptance_learner = state.setdefault("_battery_acceptance_learner", {})
+    effective_battery_target_kw, acceptance_learned = (
+        _effective_battery_charge_reserve_kw(
+            acceptance_learner,
+            battery_power_kw=battery_power_kw,
+            battery_soc=battery_soc,
+            target_battery_charge_kw=target_battery_charge_kw,
+            grid_headroom_kw=grid_headroom_kw,
+        )
     )
 
     # Available power for EV adjustment:
@@ -9075,15 +9202,12 @@ async def _dynamic_ev_update(
     battery_depleted = False  # Track whether we bypassed no_grid_import due to battery depletion
     battery_charging_kw = max(0.0, -battery_power_kw)  # positive when battery is charging
     ev_relevant_grid_kw = grid_power_kw - battery_charging_kw
-    if target_battery_charge_kw > 0 and not battery_target_released:
-        target_ev_power_kw = max(
+    if effective_battery_target_kw > 0:
+        battery_reserve_gap_kw = max(
             0.0,
-            max_grid_import_kw
-            + solar_power_kw
-            - home_load_kw
-            - target_battery_charge_kw,
+            effective_battery_target_kw - battery_charging_kw,
         )
-        available_power_kw = target_ev_power_kw - current_ev_power_kw
+        available_power_kw = grid_headroom_kw - battery_reserve_gap_kw
     elif no_grid_import:
         # Exclude intentional home battery grid-charging from the grid import figure.
         # When the LP optimizer force-charges the home battery from grid, battery_power_kw
@@ -9126,13 +9250,16 @@ async def _dynamic_ev_update(
             # - inverter_headroom: proactive limit based on known capacity
             # - grid_reactive: reactive adjustment based on actual grid flow
             available_power_kw = min(inverter_headroom_kw, grid_reactive_kw + current_ev_power_kw) - current_ev_power_kw
-    elif battery_target_released:
-        # Battery taper/acceptance is measured, not a deficit. Use live grid
-        # headroom directly while keeping the configured site cap authoritative.
+    elif acceptance_learned:
         available_power_kw = grid_headroom_kw
         if scheduled_floor_active and current_amps > 0:
-            min_power_delta_kw = ((min_amps - current_amps) * voltage * phases) / 1000
-            available_power_kw = max(available_power_kw, min_power_delta_kw)
+            min_power_delta_kw = (
+                (min_amps - current_amps) * voltage * phases
+            ) / 1000
+            available_power_kw = max(
+                available_power_kw,
+                min_power_delta_kw,
+            )
     elif battery_deficit_kw > 0.1:
         # Battery has surplus beyond target — available for EV
         available_power_kw = battery_deficit_kw
@@ -9182,10 +9309,11 @@ async def _dynamic_ev_update(
         f"solar={solar_power_kw:.1f}kW, home_load={home_load_kw:.1f}kW, "
         f"deficit={battery_deficit_kw:.1f}kW, grid={grid_power_kw:.1f}kW (max={max_grid_import_kw:.1f}kW), "
         f"headroom={grid_headroom_kw:.1f}kW, available={available_power_kw:.1f}kW, "
+        f"battery_reserve={effective_battery_target_kw:.1f}kW, "
         f"current={current_amps}A, target={new_amps}A, no_grid_import={no_grid_import}"
         f"{', battery_depleted=True' if battery_depleted else ''}"
         f"{', battery_full=True' if battery_full else ''}"
-        f"{', battery_target_released=True' if battery_target_released else ''}"
+        f"{', battery_acceptance_learned=True' if acceptance_learned else ''}"
     )
 
     # Only update if change is >= 1 amp (avoid constant micro-adjustments)
@@ -10012,6 +10140,8 @@ async def _action_start_ev_charging_dynamic_locked(
     # Stop any existing dynamic charging for this vehicle
     await _action_stop_ev_charging_dynamic(hass, config_entry, {"vehicle_id": vehicle_id})
 
+    initial_battery_acceptance_learner: Dict[str, Any] = {}
+
     # For battery_target mode, start EV charging immediately
     # For solar_surplus mode, we wait for sufficient surplus before starting
     if dynamic_mode == "battery_target":
@@ -10059,6 +10189,7 @@ async def _action_start_ev_charging_dynamic_locked(
                     max_amps=max_charge_amps,
                     voltage=voltage,
                     phases=resolved_phases,
+                    acceptance_learner=initial_battery_acceptance_learner,
                 )
                 if initial_amps is None:
                     reason = "live site power is unavailable or invalid"
@@ -10403,6 +10534,7 @@ async def _action_start_ev_charging_dynamic_locked(
         "external_manual_override": False,
         "entity_max_rechecked": False,  # Re-check Tesla entity max after charging starts
         "allocated_surplus_kw": 0,
+        "_battery_acceptance_learner": initial_battery_acceptance_learner,
         "reason": (
             "Recovered Solar Surplus session after Home Assistant restart"
             if recovered_continuation
