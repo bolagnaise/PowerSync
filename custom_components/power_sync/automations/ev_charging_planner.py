@@ -141,6 +141,7 @@ def _should_force_deadline_max_rate(
     return bool(
         is_time_critical
         and source != "solar_surplus"
+        and source != "grid_free"
         and not limit_grid_import
         and not _is_free_grid_window(current_window)
     )
@@ -3544,12 +3545,13 @@ class ChargingPlanner:
         Real-time decision: should we charge right now?
 
         Strategy:
-        1. For time_critical mode: prioritize meeting deadline over all else
-        2. For other modes: respect home battery priority (min SoC)
-        3. If in a planned window from cost-optimized plan, charge
-        4. Opportunistic: charge on solar surplus (free)
-        5. Opportunistic: charge if current price is very cheap (< plan avg or < 10c)
-        6. Otherwise wait for planned windows or better prices
+        1. If grid energy is currently free, charge under site/battery control
+        2. For time_critical mode: prioritize meeting deadline over paid charging
+        3. For other modes: respect home battery priority (min SoC)
+        4. If in a planned window from cost-optimized plan, charge
+        5. Opportunistic: charge on solar surplus (free)
+        6. Opportunistic: charge if current price is very cheap (< plan avg or < 10c)
+        7. Otherwise wait for planned windows or better prices
 
         Args:
             vehicle_id: Vehicle identifier
@@ -3589,6 +3591,30 @@ class ChargingPlanner:
             except Exception as e:
                 _LOGGER.debug(f"Error parsing window time: {e}")
                 continue
+
+        # A partially usable free period may not appear in a time-critical
+        # plan when it cannot supply all energy required before departure.
+        # Still consume that guaranteed free energy now and leave the planner
+        # to recover any remainder in its later deadline windows.  Use a
+        # distinct source so execution retains battery-target/site-headroom
+        # control rather than forcing the EV to its maximum deadline rate.
+        free_grid_deadline_pending = True
+        if is_time_critical and plan.target_time:
+            target_time_local = _parse_forecast_hour_local_naive(
+                plan.target_time
+            )
+            free_grid_deadline_pending = bool(
+                target_time_local is not None and now < target_time_local
+            )
+        if (
+            current_price_cents <= FREE_GRID_PRICE_EPSILON_CENTS
+            and free_grid_deadline_pending
+        ):
+            return (
+                True,
+                f"Free grid power ({current_price_cents:.1f}c/kWh)",
+                "grid_free",
+            )
 
         # A fresh time-critical plan already exhausts every permitted interval
         # when the deadline is infeasible. Do not bypass its timestamps,
@@ -5759,8 +5785,12 @@ class AutoScheduleExecutor:
                 should_charge = False
                 reason = f"Grid price {current_price_cents:.0f}c > max {effective_max_price:.0f}c"
 
-            # Solar-only mode doesn't allow grid
-            elif effective_priority == ChargingPriority.SOLAR_ONLY:
+            # Solar-only blocks paid grid energy; the explicit free-grid
+            # policy applies across every Smart Schedule strategy.
+            elif (
+                effective_priority == ChargingPriority.SOLAR_ONLY
+                and source != "grid_free"
+            ):
                 should_charge = False
                 reason = "Solar-only mode - no grid charging"
 

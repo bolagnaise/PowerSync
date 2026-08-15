@@ -141,6 +141,81 @@ def test_free_deadline_window_keeps_battery_target_control():
         limit_grid_import=False,
         current_window=paid_window,
     )
+    assert not ev_planner._should_force_deadline_max_rate(
+        is_time_critical=True,
+        source="grid_free",
+        limit_grid_import=False,
+        current_window=None,
+    )
+
+
+def test_time_critical_uses_partial_free_period_before_paid_deadline(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 8, 15, 13, 18, tzinfo=brisbane_tz),
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    paid_window = ev_planner.PlannedChargingWindow(
+        start_time="2026-08-16T01:26:00",
+        end_time="2026-08-16T05:00:00",
+        source="grid_peak",
+        estimated_power_kw=2.3,
+        estimated_energy_kwh=7.8,
+        price_cents_kwh=31.0,
+        reason="target_deadline",
+    )
+    plan = SimpleNamespace(
+        windows=[paid_window],
+        target_time="2026-08-16T05:00:00",
+        can_meet_target=True,
+    )
+
+    should_charge, reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=0.0,
+            current_price_cents=0.0,
+            battery_soc=82.0,
+            is_time_critical=True,
+        )
+    )
+
+    assert should_charge is True
+    assert reason == "Free grid power (0.0c/kWh)"
+    assert source == "grid_free"
+
+
+def test_time_critical_does_not_use_free_period_after_departure(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 8, 16, 5, 1, tzinfo=brisbane_tz),
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    plan = SimpleNamespace(
+        windows=[],
+        target_time="2026-08-16T05:00:00",
+        can_meet_target=True,
+    )
+
+    should_charge, reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=0.0,
+            current_price_cents=0.0,
+            battery_soc=82.0,
+            is_time_critical=True,
+        )
+    )
+
+    assert should_charge is False
+    assert reason == "No current deadline charging window"
+    assert source == "waiting"
 
 
 def test_active_smart_schedule_solar_session_delegates_low_surplus_stop():
@@ -4395,6 +4470,102 @@ def test_auto_schedule_solar_uses_smart_schedule_battery_floor(monkeypatch, fake
 
     assert start_calls == ["solar_surplus"]
     assert state.last_decision == "started"
+
+
+@pytest.mark.parametrize(
+    ("priority", "demand_blocked", "expected_start"),
+    (
+        (ev_planner.ChargingPriority.TIME_CRITICAL, False, True),
+        (ev_planner.ChargingPriority.SOLAR_ONLY, False, True),
+        (ev_planner.ChargingPriority.TIME_CRITICAL, True, False),
+    ),
+)
+def test_auto_schedule_free_grid_overrides_priority_without_forcing_max_rate(
+    monkeypatch,
+    priority,
+    demand_blocked,
+    expected_start,
+):
+    start_calls: list[tuple[str, bool]] = []
+
+    async def at_home(*args, **kwargs):
+        return "home"
+
+    async def plugged_in(*args, **kwargs):
+        return True
+
+    async def vehicle_soc(self, vehicle_id):
+        return 71
+
+    async def start_charging(
+        self,
+        vehicle_id,
+        settings,
+        state,
+        source,
+        force_max_rate=False,
+    ):
+        start_calls.append((source, force_max_rate))
+        state.is_charging = True
+        return True
+
+    class FreeGridPlanner:
+        async def should_charge_now(self, **kwargs):
+            return True, "Free grid power (0.0c/kWh)", "grid_free"
+
+        def _is_grid_charging_blocked_at(self, when):
+            return demand_blocked
+
+    monkeypatch.setattr(ev_planner, "get_ev_location", at_home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+    monkeypatch.setattr(
+        ev_planner.AutoScheduleExecutor,
+        "_get_vehicle_soc",
+        vehicle_soc,
+    )
+    monkeypatch.setattr(
+        ev_planner.AutoScheduleExecutor,
+        "_start_charging",
+        start_charging,
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: SimpleNamespace(weekday=lambda: 0),
+    )
+
+    executor = ev_planner.AutoScheduleExecutor(
+        _FakeHass(),
+        _FakeConfigEntry(),
+        planner=FreeGridPlanner(),
+    )
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id=VIN,
+        display_name="TESSY",
+        target_soc=80,
+        priority=priority,
+    )
+    state = ev_planner.AutoScheduleState(vehicle_id=VIN)
+    state.current_plan = SimpleNamespace(windows=[])
+    state.last_plan_update = ev_planner.datetime.now()
+    executor._state[VIN] = state
+
+    asyncio.run(
+        executor._evaluate_vehicle(
+            VIN,
+            settings,
+            {
+                "battery_soc": 82,
+                "solar_power": 1100,
+                "load_power": 1800,
+                "grid_power": 13000,
+            },
+            current_price_cents=0,
+        )
+    )
+
+    assert start_calls == ([("grid_free", False)] if expected_start else [])
+    assert state.last_decision == ("started" if expected_start else "waiting")
 
 
 @pytest.mark.parametrize(

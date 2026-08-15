@@ -1776,7 +1776,11 @@ def test_dynamic_ocpp_update_leaves_energy_to_ocpp_session_poll(monkeypatch):
     assert manager.updates == []
 
 
-def test_dynamic_battery_target_uses_grid_headroom_when_powerwall_tapers(monkeypatch):
+@pytest.mark.parametrize("battery_soc", (82.0, 95.2))
+def test_dynamic_battery_target_uses_grid_headroom_when_powerwall_tapers(
+    monkeypatch,
+    battery_soc,
+):
     set_amps_calls: list[int] = []
 
     async def not_unplugged(*args, **kwargs):
@@ -1786,7 +1790,7 @@ def test_dynamic_battery_target_uses_grid_headroom_when_powerwall_tapers(monkeyp
         return {
             "battery_power": -10000,
             "grid_power": 12000,
-            "battery_soc": 95.2,
+            "battery_soc": battery_soc,
         }
 
     async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
@@ -4559,6 +4563,61 @@ def test_dynamic_single_smart_schedule_start_uses_safe_site_headroom(monkeypatch
     state = actions._dynamic_ev_state["entry-1"]["ble_tesla_yf88"]
     assert state["current_amps"] == 8
     assert state["params"]["max_grid_import_kw"] == 20
+
+
+def test_dynamic_single_smart_schedule_start_uses_measured_battery_taper_headroom(
+    monkeypatch,
+):
+    """A taper below 95% must not strand proven site import headroom."""
+    command_order: list[tuple[str, int | None]] = []
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_power": -9700,
+            "grid_power": 10800,
+            "solar_power": 1100,
+            "load_power": 2200,
+            "ev_power": 0,
+            "battery_soc": 82,
+        }
+
+    async def fake_start(hass, config_entry, params, context=None):
+        command_order.append(("start", params.get("amps")))
+        return True
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        command_order.append(("set_amps", amps))
+        return True
+
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+
+    actions._dynamic_ev_state.clear()
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            _Hass([]),
+            _Entry(),
+            {
+                "vehicle_vin": "ble_tesla_yf88",
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "target_battery_charge_kw": 14.7,
+                "max_grid_import_kw": 16,
+                "min_charge_amps": 5,
+                "max_charge_amps": 15,
+                "voltage": 230,
+                "phases": 1,
+            },
+            context=None,
+        )
+    )
+
+    assert result is True
+    assert command_order == [("set_amps", 15), ("start", 15)]
+    state = actions._dynamic_ev_state["entry-1"]["ble_tesla_yf88"]
+    assert state["current_amps"] == 15
 
 
 def test_dynamic_single_smart_schedule_start_waits_for_live_site_status(monkeypatch):

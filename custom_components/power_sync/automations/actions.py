@@ -5025,6 +5025,8 @@ async def _action_set_ev_charging_amps(
 _dynamic_ev_state: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _BATTERY_FULL_RESERVE_BYPASS_SOC = 99.0
 _BATTERY_TAPER_BYPASS_SOC = 95.0
+_BATTERY_TARGET_SHORTFALL_KW = 0.2
+_SITE_HEADROOM_EPSILON_KW = 0.1
 _ACTIVE_EV_POWER_EPSILON_KW = 0.05
 
 # Lock to prevent duplicate dynamic EV charging sessions from concurrent triggers
@@ -6833,7 +6835,12 @@ def _initial_smart_schedule_battery_target_amps(
     budget_kw = site_budget_kw
     if (
         target_battery_charge_kw > 0
-        and battery_soc < _BATTERY_TAPER_BYPASS_SOC
+        and not _battery_target_can_release_site_headroom(
+            battery_power_kw=powers_kw["battery_power"],
+            battery_soc=battery_soc,
+            target_battery_charge_kw=target_battery_charge_kw,
+            grid_headroom_kw=site_budget_kw,
+        )
     ):
         non_ev_home_kw = max(
             0.0,
@@ -6853,6 +6860,54 @@ def _initial_smart_schedule_battery_target_amps(
     unit_kw = voltage * phases / 1000.0
     safe_amps = min(max_amps, int((budget_kw + 1e-9) / unit_kw))
     return safe_amps if safe_amps >= min_amps else 0
+
+
+def _battery_target_can_release_site_headroom(
+    *,
+    battery_power_kw: float,
+    battery_soc: float,
+    target_battery_charge_kw: float,
+    grid_headroom_kw: float,
+) -> bool:
+    """Return whether live site headroom can safely be offered to the EV.
+
+    A near-full battery is always allowed to taper naturally. Some batteries
+    begin tapering earlier, so also recognize a measured charge rate below the
+    configured target when the site meter proves that the missing power is not
+    being consumed: grid import still has headroom. The dynamic loop remains
+    site-capped and will shed EV current on the next sample if battery demand
+    rises again.
+    """
+    try:
+        battery_power_kw = float(battery_power_kw)
+        battery_soc = float(battery_soc)
+        target_battery_charge_kw = max(
+            0.0,
+            float(target_battery_charge_kw),
+        )
+        grid_headroom_kw = float(grid_headroom_kw)
+    except (TypeError, ValueError):
+        return False
+    if not all(
+        math.isfinite(value)
+        for value in (
+            battery_power_kw,
+            battery_soc,
+            target_battery_charge_kw,
+            grid_headroom_kw,
+        )
+    ):
+        return False
+    if battery_soc >= _BATTERY_TAPER_BYPASS_SOC:
+        return True
+    battery_charging_kw = max(0.0, -battery_power_kw)
+    return bool(
+        target_battery_charge_kw > 0
+        and battery_charging_kw > _ACTIVE_EV_POWER_EPSILON_KW
+        and target_battery_charge_kw - battery_charging_kw
+        > _BATTERY_TARGET_SHORTFALL_KW
+        and grid_headroom_kw > _SITE_HEADROOM_EPSILON_KW
+    )
 
 
 def _smart_schedule_battery_target_states(
@@ -7161,10 +7216,17 @@ async def _update_smart_schedule_battery_target_group(
         battery_soc = float(live_status.get("battery_soc", 0) or 0)
     except (TypeError, ValueError):
         battery_soc = 0.0
+    grid_headroom_kw = max_grid_import_kw - grid_power_kw
+    battery_target_released = _battery_target_can_release_site_headroom(
+        battery_power_kw=battery_power_kw,
+        battery_soc=battery_soc,
+        target_battery_charge_kw=target_battery_charge_kw,
+        grid_headroom_kw=grid_headroom_kw,
+    )
 
     if (
         target_battery_charge_kw > 0
-        and battery_soc < _BATTERY_TAPER_BYPASS_SOC
+        and not battery_target_released
     ):
         budget_kw = min(
             site_budget_kw,
@@ -7177,12 +7239,11 @@ async def _update_smart_schedule_battery_target_group(
                 - other_commanded_kw,
             ),
         )
-    elif battery_soc >= _BATTERY_TAPER_BYPASS_SOC:
+    elif battery_target_released:
         budget_kw = site_budget_kw
     else:
         target_battery_power_kw = -target_battery_charge_kw
         battery_deficit_kw = target_battery_power_kw - battery_power_kw
-        grid_headroom_kw = max_grid_import_kw - grid_power_kw
         if battery_deficit_kw > 0.1:
             budget_kw = group_commanded_kw + battery_deficit_kw
         elif battery_deficit_kw < -0.2:
@@ -8987,8 +9048,9 @@ async def _dynamic_ev_update(
     # If target_battery_charge_kw = 5, we want battery_power = -5 kW
     target_battery_power_kw = -target_battery_charge_kw
 
-    # When a Powerwall is nearly full it tapers charge rate naturally before
-    # reaching 100%. Use grid headroom directly instead of penalizing the EV.
+    # A battery near full, or measurably charging below its configured target
+    # while site headroom remains, is allowed to taper naturally. The EV uses
+    # only measured grid headroom and sheds current if battery demand returns.
     battery_full = battery_soc >= _BATTERY_TAPER_BYPASS_SOC
 
     # Battery deficit: How much more the battery should be charging
@@ -8998,6 +9060,12 @@ async def _dynamic_ev_update(
 
     # Grid headroom: How much more we could import before hitting limit
     grid_headroom_kw = max_grid_import_kw - grid_power_kw
+    battery_target_released = _battery_target_can_release_site_headroom(
+        battery_power_kw=battery_power_kw,
+        battery_soc=battery_soc,
+        target_battery_charge_kw=target_battery_charge_kw,
+        grid_headroom_kw=grid_headroom_kw,
+    )
 
     # Available power for EV adjustment:
     # - In no_grid_import mode: limit to inverter capacity and prevent grid imports
@@ -9007,7 +9075,7 @@ async def _dynamic_ev_update(
     battery_depleted = False  # Track whether we bypassed no_grid_import due to battery depletion
     battery_charging_kw = max(0.0, -battery_power_kw)  # positive when battery is charging
     ev_relevant_grid_kw = grid_power_kw - battery_charging_kw
-    if target_battery_charge_kw > 0 and not battery_full:
+    if target_battery_charge_kw > 0 and not battery_target_released:
         target_ev_power_kw = max(
             0.0,
             max_grid_import_kw
@@ -9058,8 +9126,9 @@ async def _dynamic_ev_update(
             # - inverter_headroom: proactive limit based on known capacity
             # - grid_reactive: reactive adjustment based on actual grid flow
             available_power_kw = min(inverter_headroom_kw, grid_reactive_kw + current_ev_power_kw) - current_ev_power_kw
-    elif battery_full:
-        # Battery is full — taper is natural, not a deficit. Use grid headroom directly.
+    elif battery_target_released:
+        # Battery taper/acceptance is measured, not a deficit. Use live grid
+        # headroom directly while keeping the configured site cap authoritative.
         available_power_kw = grid_headroom_kw
         if scheduled_floor_active and current_amps > 0:
             min_power_delta_kw = ((min_amps - current_amps) * voltage * phases) / 1000
@@ -9116,6 +9185,7 @@ async def _dynamic_ev_update(
         f"current={current_amps}A, target={new_amps}A, no_grid_import={no_grid_import}"
         f"{', battery_depleted=True' if battery_depleted else ''}"
         f"{', battery_full=True' if battery_full else ''}"
+        f"{', battery_target_released=True' if battery_target_released else ''}"
     )
 
     # Only update if change is >= 1 amp (avoid constant micro-adjustments)
