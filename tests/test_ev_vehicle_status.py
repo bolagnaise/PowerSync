@@ -251,8 +251,84 @@ def test_ev_vehicle_status_ignores_stale_power_when_tesla_is_away_and_disconnect
         "ev_soc": 72,
         "is_connected": False,
         "is_charging": False,
+        "site_presence": "away",
     }]
     assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 0.0
+
+
+def test_ev_vehicle_status_excludes_named_zone_charging_from_home_site():
+    """Ticket #284: a named HA zone is away, not a home EV load."""
+    power_sync = _power_sync_module()
+    hass = _tesla_hass([
+        _State("sensor.primary_ev_charger_power_2", "2.0", {"unit_of_measurement": "kW"}),
+        _State("sensor.primary_ev_charging_2", "charging"),
+        _State("binary_sensor.primary_ev_charge_cable_2", "on"),
+        _State("device_tracker.primary_ev_location_2", "amma and appa's"),
+        _State("sensor.primary_ev_battery_level_2", "86", {"unit_of_measurement": "%"}),
+    ])
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+        data={
+            "wall_connectors_raw": [{
+                "din": "1529455-02-E--TEST",
+                "wall_connector_state": 2,
+                "wall_connector_power": 0,
+            }]
+        }
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+
+    away_vehicle = next(
+        vehicle for vehicle in vehicles
+        if vehicle.get("vehicle_id") == "5YJTEST0000000001"
+    )
+    assert away_vehicle == {
+        "vehicle_id": "5YJTEST0000000001",
+        "vehicle_name": "PRIMARY EV",
+        "ev_power_kw": 0.0,
+        "ev_soc": 86,
+        "is_connected": False,
+        "is_charging": False,
+        "site_presence": "away",
+    }
+    assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 0.0
+
+
+def test_named_zone_also_excludes_paired_ble_bridge_power():
+    """A paired BLE view of the remote charge must not restore site power."""
+    power_sync = _power_sync_module()
+    vin = "5YJTEST0000000001"
+    states = [
+        _State("sensor.primary_ev_charger_power", "2.0", {"unit_of_measurement": "kW"}),
+        _State("sensor.primary_ev_charging_state", "charging"),
+        _State("binary_sensor.primary_ev_charge_cable", "on"),
+        _State("device_tracker.primary_ev_location", "amma and appa's"),
+        _State("sensor.primary_ev_battery_level", "86"),
+        _State("binary_sensor.remote_ble_status", "on"),
+        _State("sensor.remote_ble_charging_state", "Charging"),
+        _State("binary_sensor.remote_ble_charge_flap", "on"),
+        _State("sensor.remote_ble_charge_power", "2.0", {"unit_of_measurement": "kW"}),
+        _State("sensor.remote_ble_charge_level", "86"),
+    ]
+    hass = _tesla_hass(states)
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": power_sync.EV_PROVIDER_BOTH,
+            "tesla_ble_entity_prefix": "remote_ble",
+            "tesla_ble_vehicle_mapping": f"{vin}=remote_ble",
+        },
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+
+    assert len(vehicles) == 1
+    assert vehicles[0]["vehicle_id"] == vin
+    assert vehicles[0]["ev_power_kw"] == 0.0
+    assert vehicles[0]["is_connected"] is False
+    assert vehicles[0]["is_charging"] is False
+    assert vehicles[0]["site_presence"] == "away"
 
 
 def test_ev_vehicle_status_keeps_real_charging_power_when_charging():
@@ -906,5 +982,55 @@ def test_app_managed_sequential_tesla_id_deduplicates_with_vehicle_vin(monkeypat
     snapshot = ev_load.aggregate_ev_load(observations)
 
     assert snapshot.power_kw == 7.2
+    assert len(snapshot.components) == 1
+    assert snapshot.components[0].physical_load_key == f"vehicle:{vin.lower()}"
+
+
+def test_app_managed_tesla_power_is_zeroed_when_vehicle_is_in_named_zone(monkeypatch):
+    """Ticket #284: configured vehicle power cannot restore a remote EV draw."""
+    power_sync = _power_sync_module()
+    planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+
+    async def no_sigenergy_state(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        power_sync,
+        "_read_sigenergy_charger_state_for_entry",
+        no_sigenergy_state,
+    )
+    vin = "5YJTEST0000000001"
+    settings = SimpleNamespace(
+        vehicle_id="1",
+        charger_type="tesla",
+        charger_power_entity="sensor.sequential_tesla_power",
+    )
+    executor = SimpleNamespace(
+        _settings={"1": settings},
+        _resolve_vehicle_vin=lambda vehicle_id: vin if vehicle_id == "1" else None,
+    )
+    monkeypatch.setattr(planner, "get_auto_schedule_executor", lambda: executor)
+    hass = _Hass([
+        _State(
+            "sensor.sequential_tesla_power",
+            "2.0",
+            {"unit_of_measurement": "kW"},
+        )
+    ])
+    vehicles = [{
+        "vehicle_id": vin,
+        "vehicle_name": "W3RT1E",
+        "ev_power_kw": 0.0,
+        "is_charging": False,
+        "site_presence": "away",
+    }]
+
+    observations = asyncio.run(
+        power_sync._get_ev_load_observations(hass, _Entry(), vehicles)
+    )
+    ev_load = importlib.import_module("power_sync.ev_load")
+    snapshot = ev_load.aggregate_ev_load(observations)
+
+    assert snapshot.power_kw == 0.0
     assert len(snapshot.components) == 1
     assert snapshot.components[0].physical_load_key == f"vehicle:{vin.lower()}"

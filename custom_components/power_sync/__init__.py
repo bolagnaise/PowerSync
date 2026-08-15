@@ -1188,12 +1188,21 @@ def _apply_wall_connector_observation(
                 update_vehicle(vehicle)
                 return True
 
+    # A connector without a VIN cannot be attributed to a Tesla that Home
+    # Assistant currently places outside the home zone.  Keep direct VIN
+    # matches authoritative, but do not let the single-vehicle heuristic turn
+    # a named-zone vehicle into a home loadpoint.
+    site_vehicles = [
+        vehicle
+        for vehicle in vehicles
+        if vehicle.get("site_presence") != "away"
+    ]
     charging_vehicles = [
-        vehicle for vehicle in vehicles
+        vehicle for vehicle in site_vehicles
         if bool(vehicle.get("is_charging")) or (vehicle.get("ev_power_kw") or 0) > 0.05
     ]
     connected_vehicles = [
-        vehicle for vehicle in vehicles
+        vehicle for vehicle in site_vehicles
         if bool(vehicle.get("is_connected"))
     ]
 
@@ -1203,8 +1212,8 @@ def _apply_wall_connector_observation(
     if not charging_vehicles and wc_connected and len(connected_vehicles) == 1:
         update_vehicle(connected_vehicles[0])
         return True
-    if len(vehicles) == 1 and not charging_vehicles and not connected_vehicles:
-        update_vehicle(vehicles[0])
+    if len(site_vehicles) == 1 and not charging_vehicles and not connected_vehicles:
+        update_vehicle(site_vehicles[0])
         return True
 
     return False
@@ -1481,7 +1490,10 @@ def _get_ev_vehicles_status(hass, entry) -> list:
 
             # Away vehicles cannot be contributing to home EV power.
             if domain == "device_tracker" and "_location" in eid:
-                if state.state == "not_home":
+                # HA device trackers use the zone name as their state.  Every
+                # known value except the literal home zone is away from this
+                # site's load; "unknown"/"unavailable" were filtered above.
+                if str(state.state).strip().lower() != "home":
                     away_from_home = True
                 continue
 
@@ -1537,14 +1549,17 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             ev_power_kw = measured_power_kw
             is_connected = True
 
-        vehicles.append({
+        vehicle_status = {
             "vehicle_id": vehicle_id,
             "vehicle_name": device.name or "Tesla EV",
             "ev_power_kw": ev_power_kw,
             "ev_soc": ev_soc,
             "is_connected": is_connected,
             "is_charging": is_charging and ev_power_kw > 0.05,
-        })
+        }
+        if away_from_home:
+            vehicle_status["site_presence"] = "away"
+        vehicles.append(vehicle_status)
 
     fleet_vehicle_ids = list(dict.fromkeys(
         str(vehicle.get("vehicle_id"))
@@ -1578,6 +1593,11 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         fleet_vehicle_ids,
         ble_prefixes,
     )
+    away_fleet_vehicle_ids = {
+        _vehicle_identity_key(vehicle.get("vehicle_id"))
+        for vehicle in vehicles
+        if vehicle.get("site_presence") == "away"
+    }
     for prefix in ble_prefixes:
         ble_vehicle_id = f"ble_{prefix}"
         if any(_vehicle_matches_identifier(vehicle, ble_vehicle_id) for vehicle in vehicles):
@@ -1609,6 +1629,18 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             ev_power_kw = power_kw
             is_connected = True
 
+        bridge_vehicle_id = paired_prefixes.get(prefix)
+        if (
+            bridge_vehicle_id
+            and _vehicle_identity_key(bridge_vehicle_id)
+            in away_fleet_vehicle_ids
+        ):
+            # The BLE bridge may still report charge power from a remote
+            # charger.  Preserve its identity/SOC merge but exclude that
+            # physical draw from the home site.
+            ev_power_kw = 0.0
+            is_connected = False
+
         soc_state = hass.states.get(TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=prefix))
         if soc_state and soc_state.state not in ("unknown", "unavailable"):
             try:
@@ -1624,8 +1656,10 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             "is_connected": is_connected,
             "is_charging": ev_power_kw > 0.05,
         }
-        if ev_provider == EV_PROVIDER_BOTH and prefix in paired_prefixes:
-            ble_observation["bridge_vehicle_id"] = paired_prefixes[prefix]
+        if ev_provider == EV_PROVIDER_BOTH and bridge_vehicle_id:
+            ble_observation["bridge_vehicle_id"] = bridge_vehicle_id
+            if _vehicle_identity_key(bridge_vehicle_id) in away_fleet_vehicle_ids:
+                ble_observation["site_presence"] = "away"
         vehicles.append(ble_observation)
 
     # Supplement with Wall Connector sensors for better detection.
@@ -1731,6 +1765,14 @@ async def _get_ev_load_observations(hass, entry, vehicles=None):
     entry_data = getattr(hass, "data", {}).get(DOMAIN, {}).get(entry.entry_id, {})
     observations = []
     vehicles = list(vehicles if vehicles is not None else _get_ev_vehicles_status(hass, entry))
+    away_vehicle_keys = {
+        _vehicle_identity_key(
+            vehicle.get("bridge_vehicle_id") or vehicle.get("vehicle_id")
+        )
+        for vehicle in vehicles
+        if vehicle.get("site_presence") == "away"
+    }
+    away_vehicle_keys.discard("")
 
     def _meter_physical_key(entity_id, charger_type="generic", settings=None):
         """Resolve an entity-backed meter to the same key as its native source."""
@@ -1823,8 +1865,13 @@ async def _get_ev_load_observations(hass, entry, vehicles=None):
                     if callable(resolve_vehicle_vin)
                     else None
                 )
-                physical_key = f"vehicle:{_vehicle_identity_key(resolved_vehicle_id or vehicle_id)}"
+                physical_vehicle_key = _vehicle_identity_key(
+                    resolved_vehicle_id or vehicle_id
+                )
+                physical_key = f"vehicle:{physical_vehicle_key}"
                 kind = EvMeasurementKind.VEHICLE
+                if physical_vehicle_key in away_vehicle_keys:
+                    power_kw = 0.0
             else:
                 physical_key = _meter_physical_key(
                     entity_id,
@@ -17559,6 +17606,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                     "vehicle_id": vehicle_id,
                     "vehicle_name": vehicle.get("vehicle_name"),
                     "bridge_vehicle_id": vehicle.get("bridge_vehicle_id"),
+                    "site_presence": vehicle.get("site_presence"),
                     "charger_type": "tesla",
                     "ev_power_kw": vehicle.get("ev_power_kw", 0),
                     "ev_soc": vehicle.get("ev_soc"),
