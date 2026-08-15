@@ -1205,7 +1205,11 @@ class PowerSyncForecastSummary extends HTMLElement {
     if (!this._config || !this._hass) return;
 
     const items = Array.isArray(this._config.items) ? this._config.items : [];
-    this.shadowRoot.innerHTML = `
+    // LEAK FIX: only touch the DOM when the rendered output actually changed.
+    // set hass fires on EVERY state change (constant with the 2s local poll);
+    // the old code rebuilt this whole subtree every time, orphaning ha-icon /
+    // DOM nodes that accumulated (~15k detached nodes/min in testing).
+    const html = `
       <style>
         ha-card {
           padding: 14px;
@@ -1299,6 +1303,9 @@ class PowerSyncForecastSummary extends HTMLElement {
         </div>
       </ha-card>
     `;
+    if (html === this._lastRenderedHtml) return;
+    this._lastRenderedHtml = html;
+    this.shadowRoot.innerHTML = html;
   }
 
   _renderMetric(item) {
@@ -1403,7 +1410,9 @@ class PowerSyncBatteryHealth extends HTMLElement {
     const hasFollower = packs.some(pack => pack.role === 'follower' || pack.isFollower);
     const available = Number.isFinite(displayHealth) || hasCapacity || packs.length > 0;
 
-    this.shadowRoot.innerHTML = `
+    // LEAK FIX: build HTML and only write the DOM when it changed (same as
+    // forecast-summary) — avoids rebuilding this subtree on every 2s hass update.
+    const html = `
       <style>
         ha-card {
           overflow: hidden;
@@ -1656,6 +1665,9 @@ class PowerSyncBatteryHealth extends HTMLElement {
         </div>
       </ha-card>
     `;
+    if (html === this._lastRenderedHtml) return;
+    this._lastRenderedHtml = html;
+    this.shadowRoot.innerHTML = html;
   }
 
   _packRows(attrs) {
