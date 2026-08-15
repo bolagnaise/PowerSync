@@ -329,6 +329,52 @@ def test_named_zone_also_excludes_paired_ble_bridge_power():
     assert vehicles[0]["is_connected"] is False
     assert vehicles[0]["is_charging"] is False
     assert vehicles[0]["site_presence"] == "away"
+    assert power_sync._get_ev_vehicle_status(hass, entry) == {
+        "ev_power_kw": 0.0,
+        "ev_soc": 86,
+    }
+
+
+def test_named_zone_does_not_suppress_unpaired_ble_outside_both_mode():
+    """A stale Fleet tracker cannot claim an unrelated BLE-only vehicle."""
+    power_sync = _power_sync_module()
+    vin = "5YJTEST0000000001"
+    hass = _tesla_hass([
+        _State(
+            "sensor.primary_ev_charger_power",
+            "2.0",
+            {"unit_of_measurement": "kW"},
+        ),
+        _State("sensor.primary_ev_charging_state", "charging"),
+        _State("binary_sensor.primary_ev_charge_cable", "on"),
+        _State("device_tracker.primary_ev_location", "amma and appa's"),
+        _State("sensor.primary_ev_battery_level", "86"),
+        _State("binary_sensor.remote_ble_status", "on"),
+        _State("sensor.remote_ble_charging_state", "Charging"),
+        _State("binary_sensor.remote_ble_charge_flap", "on"),
+        _State(
+            "sensor.remote_ble_charge_power",
+            "3.0",
+            {"unit_of_measurement": "kW"},
+        ),
+        _State("sensor.remote_ble_charge_level", "64"),
+    ])
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": power_sync.EV_PROVIDER_FLEET_API,
+            "tesla_ble_entity_prefix": "remote_ble",
+            "tesla_ble_vehicle_mapping": f"{vin}=remote_ble",
+        },
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+
+    assert len(vehicles) == 1
+    assert vehicles[0]["ev_power_kw"] == 3.0
+    assert power_sync._get_ev_vehicle_status(hass, entry)["ev_power_kw"] == 3.0
+    assert power_sync._get_external_tesla_ev_power_kw(hass, entry) == 3.0
 
 
 def test_ev_vehicle_status_keeps_real_charging_power_when_charging():
@@ -792,6 +838,55 @@ def test_aggregate_ev_status_ignores_teslemetry_bt_power_when_not_charging():
     status = power_sync._get_ev_vehicle_status(hass, _Entry())
 
     assert status == {"ev_power_kw": 0.0, "ev_soc": 72}
+
+
+def test_aggregate_ev_status_excludes_named_zone_power_from_site_fallback():
+    """Ticket #284: the no-Wall-Connector fallback must retain Home Load."""
+    power_sync = _power_sync_module()
+    hass = _tesla_hass([
+        _State(
+            "sensor.primary_ev_charger_power_2",
+            "2.0",
+            {"unit_of_measurement": "kW"},
+        ),
+        _State("sensor.primary_ev_charging_2", "charging"),
+        _State("binary_sensor.primary_ev_charge_cable_2", "on"),
+        _State("device_tracker.primary_ev_location_2", "amma and appa's"),
+        _State(
+            "sensor.primary_ev_battery_level_2",
+            "86",
+            {"unit_of_measurement": "%"},
+        ),
+    ])
+
+    status = power_sync._get_ev_vehicle_status(hass, _Entry())
+
+    assert status == {"ev_power_kw": 0.0, "ev_soc": None}
+    assert max(0.0, 0.206 - status["ev_power_kw"]) == 0.206
+
+
+def test_aggregate_ev_status_keeps_home_zone_power_in_site_fallback():
+    """The shared presence gate must retain literal-home charging power."""
+    power_sync = _power_sync_module()
+    hass = _tesla_hass([
+        _State(
+            "sensor.primary_ev_charger_power_2",
+            "2.0",
+            {"unit_of_measurement": "kW"},
+        ),
+        _State("sensor.primary_ev_charging_2", "charging"),
+        _State("binary_sensor.primary_ev_charge_cable_2", "on"),
+        _State("device_tracker.primary_ev_location_2", "home"),
+        _State(
+            "sensor.primary_ev_battery_level_2",
+            "86",
+            {"unit_of_measurement": "%"},
+        ),
+    ])
+
+    status = power_sync._get_ev_vehicle_status(hass, _Entry())
+
+    assert status == {"ev_power_kw": 2.0, "ev_soc": 86}
 
 
 def test_aggregate_ev_status_uses_configured_generic_charger_soc():

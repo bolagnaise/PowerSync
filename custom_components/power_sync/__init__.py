@@ -1126,6 +1126,16 @@ def _vehicle_identity_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value).lower())
 
 
+def _ev_tracker_site_presence(state: Any) -> str | None:
+    """Normalize a Home Assistant vehicle tracker state for site attribution."""
+    if state is None:
+        return None
+    value = str(getattr(state, "state", state) or "").strip().lower()
+    if not value or value in {"unknown", "unavailable"}:
+        return None
+    return "home" if value == "home" else "away"
+
+
 def _vehicle_identity_values(vehicle: dict) -> set[str]:
     values = {
         _vehicle_identity_key(vehicle.get("vehicle_id")),
@@ -1297,6 +1307,51 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
 
     config = {**entry.data, **entry.options}
     generic_ev_soc = None
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+
+    fleet_vehicle_ids = []
+    away_fleet_vehicle_ids = set()
+    for device in device_registry.devices.values():
+        vehicle_id = None
+        for identifier in device.identifiers:
+            if identifier[0] not in TESLA_INTEGRATIONS:
+                continue
+            potential_vin = str(identifier[1])
+            if len(potential_vin) == 17 and not potential_vin.isdigit():
+                vehicle_id = potential_vin
+            break
+        if not vehicle_id:
+            continue
+        fleet_vehicle_ids.append(vehicle_id)
+        for entity in entity_registry.entities.values():
+            if entity.device_id != device.id:
+                continue
+            if (
+                entity.domain != "device_tracker"
+                or "_location" not in entity.entity_id.lower()
+            ):
+                continue
+            if _ev_tracker_site_presence(hass.states.get(entity.entity_id)) == "away":
+                away_fleet_vehicle_ids.add(_vehicle_identity_key(vehicle_id))
+                break
+
+    ble_prefixes = _resolve_ble_prefixes(hass, config)
+    ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+    paired_ble_prefixes = (
+        ble_prefix_vehicle_pairs(
+            config,
+            fleet_vehicle_ids,
+            ble_prefixes,
+        )
+        if ev_provider == EV_PROVIDER_BOTH
+        else {}
+    )
+    away_ble_prefixes = {
+        prefix
+        for prefix, vehicle_id in paired_ble_prefixes.items()
+        if _vehicle_identity_key(vehicle_id) in away_fleet_vehicle_ids
+    }
 
     generic_observation = _generic_charger_observation_from_config(hass, config)
     if generic_observation:
@@ -1307,7 +1362,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
         )
 
     # Check Tesla BLE sensors (all configured prefixes)
-    for prefix in _resolve_ble_prefixes(hass, config):
+    for prefix in ble_prefixes:
         # Read SoC first so we can validate charging state
         ble_soc_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=prefix)
         ble_soc_state = hass.states.get(ble_soc_entity)
@@ -1329,6 +1384,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
             and ble_charging_state.state not in ("unknown", "unavailable")
             and ble_charging_state.state.lower() == "charging"
             and (ble_soc_value is None or ble_soc_value < 100)
+            and prefix not in away_ble_prefixes
         )
 
         ble_power_entity = TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix)
@@ -1345,7 +1401,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
         tbt_location = hass.states.get(
             TESLEMETRY_BT_DEVICE_TRACKER_LOCATION.format(prefix=tbt_prefix)
         )
-        if not (tbt_location and tbt_location.state == "not_home"):
+        if _ev_tracker_site_presence(tbt_location) != "away":
             tbt_charging_state = hass.states.get(
                 TESLEMETRY_BT_SENSOR_CHARGING_STATE.format(prefix=tbt_prefix)
             )
@@ -1371,8 +1427,6 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
                 pass
 
     # Check Fleet API vehicle sensors (charger_power, battery level)
-    entity_registry = er.async_get(hass)
-    device_registry = dr.async_get(hass)
     for device in device_registry.devices.values():
         is_tesla_vehicle = False
         for identifier in device.identifiers:
@@ -1391,7 +1445,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
                 continue
             if entity.domain == "device_tracker" and "_location" in entity.entity_id.lower():
                 loc_state = hass.states.get(entity.entity_id)
-                if loc_state and loc_state.state == "not_home":
+                if _ev_tracker_site_presence(loc_state) == "away":
                     skip_vehicle = True
                     break
         if skip_vehicle:
@@ -1490,10 +1544,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
 
             # Away vehicles cannot be contributing to home EV power.
             if domain == "device_tracker" and "_location" in eid:
-                # HA device trackers use the zone name as their state.  Every
-                # known value except the literal home zone is away from this
-                # site's load; "unknown"/"unavailable" were filtered above.
-                if str(state.state).strip().lower() != "home":
+                if _ev_tracker_site_presence(state) == "away":
                     away_from_home = True
                 continue
 
@@ -1588,10 +1639,14 @@ def _get_ev_vehicles_status(hass, entry) -> list:
 
     ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
     ble_prefixes = _resolve_ble_prefixes(hass, config)
-    paired_prefixes = ble_prefix_vehicle_pairs(
-        config,
-        fleet_vehicle_ids,
-        ble_prefixes,
+    paired_prefixes = (
+        ble_prefix_vehicle_pairs(
+            config,
+            fleet_vehicle_ids,
+            ble_prefixes,
+        )
+        if ev_provider == EV_PROVIDER_BOTH
+        else {}
     )
     away_fleet_vehicle_ids = {
         _vehicle_identity_key(vehicle.get("vehicle_id"))
