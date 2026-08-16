@@ -223,6 +223,28 @@ def test_loadpoint_status_merges_wall_connector_into_single_active_tesla():
     assert loadpoints[0]["status"] == "charging"
 
 
+def test_loadpoint_status_preserves_idle_state_with_auxiliary_power():
+    loadpoints = build_loadpoint_status(
+        {},
+        [
+            {
+                "vehicle_id": "5YJTEST0000000001",
+                "vehicle_name": "W3",
+                "charger_type": "tesla",
+                "ev_power_kw": 0.0,
+                "auxiliary_power_kw": 0.58,
+                "is_connected": True,
+                "is_charging": False,
+            }
+        ],
+    )
+
+    assert len(loadpoints) == 1
+    assert loadpoints[0]["status"] == "connected_idle"
+    assert loadpoints[0]["actual_charging"] is False
+    assert loadpoints[0]["current_power_kw"] == 0.0
+
+
 def test_loadpoint_status_keeps_wall_connector_when_tesla_match_is_ambiguous():
     loadpoints = build_loadpoint_status(
         {},

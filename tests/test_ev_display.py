@@ -89,6 +89,35 @@ def test_sensor_and_widgets_project_the_same_active_vehicle() -> None:
     assert sensor["observation_quality"] == "complete"
 
 
+def test_auxiliary_power_does_not_override_canonical_idle_state() -> None:
+    snapshot = {
+        "site": {
+            "ev_power_kw": 0.0,
+            "observed_ev_load_kw": 0.58,
+            "observation_quality": "complete",
+        },
+        "loadpoints": [
+            {
+                "loadpoint_id": "w3-id",
+                "vehicle_id": "w3-vin",
+                "vehicle_name": "W3",
+                "connected": True,
+                "actual_charging": False,
+                "status": "connected_idle",
+                "current_power_kw": 0.0,
+            }
+        ],
+    }
+
+    sensor = display_snapshot_to_sensor_data(snapshot)
+    widgets = display_snapshot_to_widgets(snapshot)
+
+    assert sensor["ev_power_kw"] == 0.0
+    assert sensor["is_charging"] is False
+    assert widgets[0]["current_power_kw"] == 0.0
+    assert widgets[0]["is_charging"] is False
+
+
 def test_display_coordinator_shares_one_refresh_with_all_consumers() -> None:
     calls = 0
 
@@ -210,6 +239,8 @@ def test_active_dashboard_paths_use_the_shared_display_coordinator() -> None:
     assert "_get_ev_display_coordinator" in sensor_source
     assert "observed_vehicle_sink=observed_vehicles" in display_factory_source
     assert "vehicles = _get_ev_vehicles_status" not in display_factory_source
+    assert "site['observed_ev_load_kw'] = observed_load.power_kw" in display_factory_source
+    assert "site['ev_power_kw'] = observed_load.power_kw" not in display_factory_source
 
 
 def test_ha_energy_flow_prefers_canonical_sensor_vehicle_attributes() -> None:

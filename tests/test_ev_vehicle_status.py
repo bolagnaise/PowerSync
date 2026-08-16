@@ -804,6 +804,53 @@ def test_ev_vehicle_status_drops_stale_power_for_connected_idle_state():
     assert vehicles[0]["is_charging"] is False
 
 
+def test_ev_vehicle_status_keeps_wall_connector_auxiliary_draw_idle():
+    power_sync = _power_sync_module()
+    vin = "5YJTEST0000000001"
+    hass = _tesla_hass([
+        _State("sensor.primary_ev_charger_power", "1", {"unit_of_measurement": "kW"}),
+        _State("sensor.primary_ev_charging", "stopped"),
+        _State("binary_sensor.primary_ev_charge_cable", "on"),
+        _State("device_tracker.primary_ev_location", "home"),
+        _State("sensor.primary_ev_battery_level", "72", {"unit_of_measurement": "%"}),
+    ])
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+        data={
+            "wall_connectors_raw": [
+                {
+                    "wall_connector_state": 11,
+                    "wall_connector_power": 579.5,
+                    "vin": vin,
+                }
+            ]
+        }
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+
+    assert vehicles == [{
+        "vehicle_id": vin,
+        "vehicle_name": "PRIMARY EV",
+        "ev_power_kw": 0.0,
+        "auxiliary_power_kw": 0.5795,
+        "ev_soc": 72,
+        "is_connected": True,
+        "is_charging": False,
+    }]
+
+    async def no_sigenergy_charger(*args, **kwargs):
+        return None
+
+    power_sync._read_sigenergy_charger_state_for_entry = no_sigenergy_charger
+    observations = asyncio.run(
+        power_sync._get_ev_load_observations(hass, _Entry(), vehicles)
+    )
+    assert len(observations) == 1
+    assert observations[0].power_kw == 0.5795
+    assert observations[0].active is False
+    assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 0.5795
+
+
 def test_ev_vehicle_status_uses_wall_connector_power_without_vehicle_sensors():
     power_sync = _power_sync_module()
     hass = _Hass([

@@ -11,6 +11,7 @@ from .ev_ownership import is_solar_surplus_owner_mode
 
 
 ACTIVE_POWER_THRESHOLD_KW = 0.05
+MIN_TESLA_CHARGING_POWER_KW = 1.4
 DEFAULT_LOADPOINT_KEYS = {"default", "genericev", "ev"}
 BRIDGE_LOADPOINT_KEYS = {"wallconnector", "teslaev"}
 BRIDGE_WIDGET_KEYS = BRIDGE_LOADPOINT_KEYS | {
@@ -204,7 +205,17 @@ def _merge_bridge_observation_status(target: dict[str, Any], source: Mapping[str
         target.get("ev_power_kw", target.get("current_power_kw")),
         0.0,
     )
-    if source_power > ACTIVE_POWER_THRESHOLD_KW or target_power <= ACTIVE_POWER_THRESHOLD_KW:
+    stopped_with_auxiliary_draw = (
+        bool(target.get("_charging_state_known"))
+        and not bool(target.get("is_charging"))
+        and ACTIVE_POWER_THRESHOLD_KW < source_power < MIN_TESLA_CHARGING_POWER_KW
+    )
+    if stopped_with_auxiliary_draw:
+        target["ev_power_kw"] = 0.0
+        target["current_power_kw"] = 0.0
+        target["auxiliary_power_kw"] = source_power
+    elif source_power > ACTIVE_POWER_THRESHOLD_KW or target_power <= ACTIVE_POWER_THRESHOLD_KW:
+        target.pop("auxiliary_power_kw", None)
         target["ev_power_kw"] = source_power
         target["current_power_kw"] = source_power
 
@@ -213,9 +224,9 @@ def _merge_bridge_observation_status(target: dict[str, Any], source: Mapping[str
         target["ev_soc"] = source_soc
         target["current_soc"] = source_soc
 
-    source_charging = (
-        bool(source.get("is_charging"))
-        or source_power > ACTIVE_POWER_THRESHOLD_KW
+    source_charging = bool(source.get("is_charging")) or (
+        source_power > ACTIVE_POWER_THRESHOLD_KW
+        and not stopped_with_auxiliary_draw
     )
     target["is_connected"] = (
         bool(target.get("is_connected"))
@@ -964,7 +975,10 @@ def _observed_loadpoint(
         observation.get("ev_power_kw", observation.get("current_power_kw")),
         0.0,
     )
-    actually_charging = bool(observation.get("is_charging")) or power_kw > ACTIVE_POWER_THRESHOLD_KW
+    if "is_charging" in observation:
+        actually_charging = bool(observation.get("is_charging"))
+    else:
+        actually_charging = power_kw > ACTIVE_POWER_THRESHOLD_KW
     connected = bool(observation.get("is_connected")) or actually_charging
     current_amps = _int_value(observation.get("current_amps"), 0)
     status = _loadpoint_status(connected, actually_charging, current_amps, False)

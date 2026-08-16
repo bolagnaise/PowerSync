@@ -1227,6 +1227,7 @@ async def is_ev_actively_charging(
         EV_PROVIDER_BOTH,
     )
     from homeassistant.helpers import entity_registry as er, device_registry as dr
+    from .loadpoint_status import charging_state_plugged_status
     import re as _re
 
     # Method 0: Teslemetry Bluetooth — sensor.{prefix}_charging_state
@@ -1243,10 +1244,14 @@ async def is_ev_actively_charging(
             continue
         if state.state and state.state.lower() == "charging":
             return True
+        charge_state_known = charging_state_plugged_status(state.state) is not None
         for suffix in ("_charger_power", "_charge_power"):
             power_state = hass.states.get(f"sensor.{candidate}{suffix}")
             power_w = _state_power_w(power_state)
-            if power_w is not None and power_w > 100:
+            if power_w is not None and power_w > 100 and (
+                not charge_state_known
+                or power_w >= MIN_CHARGING_POWER_KW * 1000
+            ):
                 _LOGGER.debug(
                     "EV active charging inferred from %s=%sW",
                     power_state.entity_id,
@@ -1261,6 +1266,9 @@ async def is_ev_actively_charging(
     for device, device_vin in _iter_tesla_vehicle_devices(device_registry):
         if vehicle_vin is not None and device_vin != vehicle_vin:
             continue
+        charge_state_known = False
+        charging_state_active = False
+        maximum_power_w = 0.0
         for entity in entity_registry.entities.values():
             if entity.device_id != device.id:
                 continue
@@ -1272,8 +1280,10 @@ async def is_ev_actively_charging(
                 and "charging_" not in eid_lower
             ):
                 s = hass.states.get(eid)
-                if s and s.state and s.state.lower() == "charging":
-                    return True
+                if s and charging_state_plugged_status(s.state) is not None:
+                    charge_state_known = True
+                    if s.state.lower() == "charging":
+                        charging_state_active = True
             if (
                 eid.startswith("sensor.")
                 and (
@@ -1285,12 +1295,18 @@ async def is_ev_actively_charging(
                 s = hass.states.get(eid)
                 power_w = _state_power_w(s)
                 if power_w is not None and power_w > 100:
-                    _LOGGER.debug(
-                        "EV active charging inferred from %s=%sW",
-                        eid,
-                        power_w,
-                    )
-                    return True
+                    maximum_power_w = max(maximum_power_w, power_w)
+        if charging_state_active:
+            return True
+        if maximum_power_w > 100 and (
+            not charge_state_known
+            or maximum_power_w >= MIN_CHARGING_POWER_KW * 1000
+        ):
+            _LOGGER.debug(
+                "EV active charging inferred from Tesla device power=%sW",
+                maximum_power_w,
+            )
+            return True
 
     # Method 2: Tesla BLE — switch.{prefix}_charger state
     config = {

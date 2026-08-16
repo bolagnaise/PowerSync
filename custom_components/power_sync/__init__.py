@@ -1170,6 +1170,9 @@ def _find_vehicle_status(vehicles: list[dict], *identifiers: Any) -> dict | None
     return None
 
 
+_MIN_TESLA_CHARGING_POWER_KW = 1.4
+
+
 def _apply_wall_connector_observation(
     vehicles: list[dict],
     wc_power_kw: float,
@@ -1182,14 +1185,29 @@ def _apply_wall_connector_observation(
         return False
 
     def update_vehicle(vehicle: dict) -> None:
-        if wc_power_kw > 0.05:
-            vehicle["ev_power_kw"] = wc_power_kw
         vehicle["is_connected"] = True
-        vehicle["is_charging"] = (
-            bool(vehicle.get("is_charging"))
-            or wc_charging
-            or wc_power_kw > 0.05
+        # A plugged-in Tesla can keep the Wall Connector contactor closed and
+        # draw roughly 0.5 kW for vehicle auxiliaries after charging stops.
+        # Preserve that real site load, but do not override a usable vehicle
+        # charging-state sensor unless power reaches the minimum viable AC
+        # charging rate. Higher power still wins when the cloud state is stale.
+        stopped_with_auxiliary_draw = (
+            bool(vehicle.get("_charging_state_known"))
+            and not bool(vehicle.get("is_charging"))
+            and wc_power_kw < _MIN_TESLA_CHARGING_POWER_KW
         )
+        if stopped_with_auxiliary_draw:
+            vehicle["ev_power_kw"] = 0.0
+            vehicle["auxiliary_power_kw"] = wc_power_kw
+        else:
+            vehicle.pop("auxiliary_power_kw", None)
+            if wc_power_kw > 0.05:
+                vehicle["ev_power_kw"] = wc_power_kw
+            vehicle["is_charging"] = (
+                bool(vehicle.get("is_charging"))
+                or wc_charging
+                or wc_power_kw > 0.05
+            )
 
     wc_vin_key = str(wc_vin or "").strip().lower()
     if wc_vin_key:
@@ -1529,6 +1547,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         ev_soc = None
         is_connected = False
         is_charging = False
+        charging_state_known = False
         hard_disconnected = False
         away_from_home = False
         measured_power_kw = 0.0
@@ -1562,6 +1581,8 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 and "power" not in eid
             ):
                 plugged = charging_state_plugged_status(state.state)
+                if plugged is not None:
+                    charging_state_known = True
                 if plugged is True:
                     is_connected = True
                     if state.state.lower() == "charging":
@@ -1607,6 +1628,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             "ev_soc": ev_soc,
             "is_connected": is_connected,
             "is_charging": is_charging and ev_power_kw > 0.05,
+            "_charging_state_known": charging_state_known,
         }
         if away_from_home:
             vehicle_status["site_presence"] = "away"
@@ -1799,7 +1821,10 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 "is_charging": wc_charging or wc_power > 0.05,
             })
 
-    return list(coalesce_vehicle_observations(vehicles))
+    coalesced = [dict(vehicle) for vehicle in coalesce_vehicle_observations(vehicles)]
+    for vehicle in coalesced:
+        vehicle.pop("_charging_state_known", None)
+    return coalesced
 
 
 async def _get_ev_load_observations(hass, entry, vehicles=None):
@@ -1885,7 +1910,10 @@ async def _get_ev_load_observations(hass, entry, vehicles=None):
             EvLoadObservation(
                 physical_load_key=physical_key,
                 source_key=charger_id or str(vehicle.get("vehicle_id") or vehicle_id),
-                power_kw=vehicle.get("ev_power_kw"),
+                power_kw=(
+                    float(vehicle.get("ev_power_kw") or 0.0)
+                    + float(vehicle.get("auxiliary_power_kw") or 0.0)
+                ),
                 observed_at=observed_at,
                 active=bool(vehicle.get("is_charging")),
                 measurement_kind=kind,
@@ -2073,10 +2101,19 @@ def _get_external_tesla_ev_power_kw(hass, entry) -> float:
 
     for vehicle in _get_ev_vehicles_status(hass, entry):
         try:
-            power_kw = max(0.0, float(vehicle.get("ev_power_kw") or 0.0))
+            auxiliary_power_kw = max(
+                0.0,
+                float(vehicle.get("auxiliary_power_kw") or 0.0),
+            )
+            power_kw = max(
+                0.0,
+                float(vehicle.get("ev_power_kw") or 0.0),
+            ) + auxiliary_power_kw
         except (TypeError, ValueError):
             continue
-        if power_kw <= 0.05 or not vehicle.get("is_charging"):
+        if power_kw <= 0.05 or (
+            not vehicle.get("is_charging") and auxiliary_power_kw <= 0.05
+        ):
             continue
 
         vehicle_id = str(vehicle.get("vehicle_id") or "").strip().lower()
@@ -17453,7 +17490,11 @@ def _get_ev_display_coordinator(hass, entry):
         observed_load = aggregate_ev_load(observations, at=observed_at)
         entry_data["observed_ev_load_snapshot"] = observed_load
         site = payload.setdefault("site", {})
-        site["ev_power_kw"] = observed_load.power_kw
+        # The aggregate includes real auxiliary load behind a connected EVSE
+        # so Home Load remains physically correct. The canonical EV display
+        # retains charging power from the normalized loadpoints instead.
+        site.setdefault("ev_power_kw", 0.0)
+        site["observed_ev_load_kw"] = observed_load.power_kw
         site["observation_quality"] = observed_load.quality.value
 
         coordinator_systems = {
@@ -17669,6 +17710,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                     "site_presence": vehicle.get("site_presence"),
                     "charger_type": "tesla",
                     "ev_power_kw": vehicle.get("ev_power_kw", 0),
+                    "auxiliary_power_kw": vehicle.get("auxiliary_power_kw", 0),
                     "ev_soc": vehicle.get("ev_soc"),
                     "is_connected": vehicle.get("is_connected", False),
                     "is_charging": vehicle.get("is_charging", False),

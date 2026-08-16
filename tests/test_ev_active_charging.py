@@ -120,6 +120,40 @@ def test_active_charging_inferred_from_teslemetry_bt_power():
     ) is True
 
 
+def test_stopped_teslemetry_bt_auxiliary_draw_is_not_active_charging():
+    _install_registry_stubs()
+    hass = _Hass([
+        _State(f"sensor.{VIN}_charging_state", "Stopped"),
+        _State(f"switch.{VIN}_charge", "off"),
+        _State(f"sensor.{VIN}_charger_power", "0.58", {"unit_of_measurement": "kW"}),
+    ])
+
+    assert asyncio.run(
+        ev_planner.is_ev_actively_charging(hass, _Entry(), vehicle_vin=VIN)
+    ) is False
+
+
+def test_stopped_fleet_auxiliary_draw_is_not_active_charging():
+    _install_registry_stubs()
+    device_id = "device-0"
+    states = [
+        _State("sensor.w3_charging", "Stopped"),
+        _State("sensor.w3_charger_power", "1", {"unit_of_measurement": "kW"}),
+    ]
+    entities = {
+        state.entity_id: SimpleNamespace(
+            entity_id=state.entity_id,
+            device_id=device_id,
+        )
+        for state in states
+    }
+    hass = _Hass(states, registry_entities=entities, devices=_fleet_devices(VIN))
+
+    assert asyncio.run(
+        ev_planner.is_ev_actively_charging(hass, _Entry(), vehicle_vin=VIN)
+    ) is False
+
+
 def _both_entry(prefixes: str = "ble_a,ble_b", mapping: str = "") -> _Entry:
     entry = _Entry()
     entry.options = {

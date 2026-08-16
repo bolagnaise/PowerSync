@@ -20,10 +20,12 @@ def _float_value(value: Any, default: float = 0.0) -> float:
 
 
 def _is_charging(loadpoint: dict[str, Any]) -> bool:
+    if "actual_charging" in loadpoint:
+        return bool(loadpoint.get("actual_charging"))
+    if "is_charging" in loadpoint:
+        return bool(loadpoint.get("is_charging"))
     return bool(
-        loadpoint.get("actual_charging")
-        or loadpoint.get("is_charging")
-        or loadpoint.get("status") == "charging"
+        loadpoint.get("status") == "charging"
         or _float_value(loadpoint.get("current_power_kw"))
         > ACTIVE_POWER_THRESHOLD_KW
     )
