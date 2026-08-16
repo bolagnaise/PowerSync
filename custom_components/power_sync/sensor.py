@@ -246,6 +246,7 @@ from .flow_power_pricing import (
     resolve_flow_power_pricing_context,
 )
 from .network_envelope import HANetworkEnvelopeManager, NetworkExportEnvelope
+from .tesla_alerts import powerwall_alert_attributes, split_powerwall_alerts
 from . import get_current_price_from_tariff_schedule
 
 _LOGGER = logging.getLogger(__name__)
@@ -3445,7 +3446,7 @@ class PowerwallCountSensor(_PowerwallLocalSensorBase):
 
 
 class PowerwallActiveAlertsSensor(_PowerwallLocalSensorBase):
-    """Count of active alerts; alert names + severities exposed as attributes."""
+    """Count actionable alerts while retaining informational alert details."""
 
     _attr_icon = "mdi:alert-circle"
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -3458,26 +3459,15 @@ class PowerwallActiveAlertsSensor(_PowerwallLocalSensorBase):
         snap = self._snap
         if snap is None or snap.alerts is None:
             return None
-        return len(snap.alerts)
+        actionable, _informational = split_powerwall_alerts(snap.alerts)
+        return len(actionable)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         snap = self._snap
         if snap is None or not snap.alerts:
             return {}
-        names = []
-        severities = {}
-        for alert in snap.alerts:
-            name = alert.get("name") or alert.get("alert_name") or "Unknown"
-            sev = alert.get("severity") or alert.get("alert_severity")
-            names.append(name)
-            if sev:
-                severities[name] = sev
-        return {
-            "alerts": names,
-            "severities": severities,
-            "alert_details": [dict(alert) for alert in snap.alerts],
-        }
+        return powerwall_alert_attributes(snap.alerts)
 
 
 class _PowerwallBlockSensorBase(SensorEntity):

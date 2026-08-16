@@ -25,6 +25,7 @@ from .const import (
     SENSOR_FAMILY_GRID_HOME,
     TESLA_CAPABILITY_WAIT_SECONDS,
 )
+from .tesla_alerts import powerwall_alert_attributes, split_powerwall_alerts
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -208,11 +209,12 @@ class ManualExportOverrideBinarySensor(_TeslaBinarySensorBase):
 
 
 class PowerwallCriticalAlertBinarySensor(_PowerwallLocalBinarySensorBase):
-    """True when at least one Powerwall alert is active.
+    """True when at least one actionable Powerwall alert is active.
 
-    Reads the local TEDAPI snapshot's ``alerts`` list. Severity strings vary
-    by firmware (``warning`` / ``critical`` / ``error``); we treat any active
-    entry as a problem rather than guessing the severity taxonomy.
+    Tesla mixes persistent informational records with actual faults in the
+    local TEDAPI ``alerts`` list. Known non-error records and explicitly
+    informational severities are retained as attributes but do not turn this
+    problem sensor on. Unknown alerts remain actionable.
     """
 
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
@@ -240,7 +242,8 @@ class PowerwallCriticalAlertBinarySensor(_PowerwallLocalBinarySensorBase):
         snap = coord.data
         if snap is None or snap.alerts is None:
             return None
-        return len(snap.alerts) > 0
+        actionable, _informational = split_powerwall_alerts(snap.alerts)
+        return bool(actionable)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -250,12 +253,7 @@ class PowerwallCriticalAlertBinarySensor(_PowerwallLocalBinarySensorBase):
         snap = getattr(coord, "data", None)
         if snap is None or not snap.alerts:
             return {}
-        return {
-            "alerts": [
-                a.get("name") or a.get("alert_name") or "Unknown" for a in snap.alerts
-            ],
-            "alert_details": [dict(alert) for alert in snap.alerts],
-        }
+        return powerwall_alert_attributes(snap.alerts)
 
 
 class PowerwallLocalPairedBinarySensor(_TeslaBinarySensorBase):
