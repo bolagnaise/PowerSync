@@ -2496,6 +2496,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ObservedEvLoadSnapshot,
             aggregate_ev_load,
             normalize_energy_data,
+            reconcile_ev_load_snapshot,
         )
 
         now = dt_util.utcnow()
@@ -2503,7 +2504,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             getattr(self._entry, "entry_id", ""), {}
         )
         ev_snapshot = entry_data.get("observed_ev_load_snapshot")
-        if isinstance(ev_snapshot, ObservedEvLoadSnapshot):
+        physical_fallbacks = data.get("ev_power_fallback_by_physical_key")
+        if physical_fallbacks:
+            ev_snapshot = reconcile_ev_load_snapshot(
+                (
+                    ev_snapshot
+                    if isinstance(ev_snapshot, ObservedEvLoadSnapshot)
+                    else None
+                ),
+                at=now,
+                fallback_power_kw=data.get("ev_power", 0.0),
+                fallback_by_physical_key=physical_fallbacks,
+            )
+        elif isinstance(ev_snapshot, ObservedEvLoadSnapshot):
             age = now - ev_snapshot.observed_at
             if not (timedelta(0) <= age <= timedelta(seconds=90)):
                 ev_snapshot = ObservedEvLoadSnapshot(

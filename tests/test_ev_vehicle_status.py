@@ -1248,3 +1248,164 @@ def test_display_snapshot_timestamp_follows_active_zero_power_observation(monkey
     assert observed.unavailable_active_keys == ()
     assert tesla_coordinator.data["load_power"] == 0.617
     assert tesla_coordinator.data["home_load_normalization_quality"] == "complete"
+
+
+def test_display_snapshot_reconciles_direct_same_vehicle_stop_and_restart(monkeypatch):
+    """Ticket #204: the canonical cache follows direct VIN-scoped edges."""
+    power_sync = _power_sync_module()
+    ev_load = importlib.import_module("power_sync.ev_load")
+    vehicle_key = "vehicle:5yjtest0000000001"
+    case = {}
+
+    async def get_ev_load_observations(hass, entry, vehicles):
+        observed_at = power_sync.dt_util.utcnow()
+        return [
+            ev_load.EvLoadObservation(
+                physical_load_key=vehicle_key,
+                source_key="cached_vehicle",
+                power_kw=case["cached_power_kw"],
+                observed_at=observed_at,
+                active=case["cached_power_kw"] > 0.05,
+                measurement_kind=ev_load.EvMeasurementKind.VEHICLE,
+            )
+        ]
+
+    class LoadpointStatusView:
+        def __init__(self, hass, entry):
+            pass
+
+        async def _async_build_response(self, request, observed_vehicle_sink):
+            observed_vehicle_sink.append(
+                {
+                    "vehicle_id": "5YJTEST0000000001",
+                    "ev_power_kw": case["cached_power_kw"],
+                    "is_charging": case["cached_power_kw"] > 0.05,
+                }
+            )
+            return SimpleNamespace(
+                status=200,
+                body=b'{"success": true, "site": {}, "loadpoints": []}',
+            )
+
+    monkeypatch.setattr(
+        power_sync,
+        "_get_ev_load_observations",
+        get_ev_load_observations,
+    )
+    monkeypatch.setattr(power_sync, "EVLoadpointStatusView", LoadpointStatusView)
+
+    for case in (
+        {
+            "cached_power_kw": 1.420654,
+            "direct_power_kw": 0.0,
+            "raw_load_kw": 1.395,
+            "expected_home_load_kw": 1.395,
+        },
+        {
+            "cached_power_kw": 0.0,
+            "direct_power_kw": 2.182647,
+            "raw_load_kw": 3.569,
+            "expected_home_load_kw": 1.386353,
+        },
+    ):
+        tesla_coordinator = SimpleNamespace(
+            data={
+                "load_power": case["expected_home_load_kw"],
+                "raw_home_load_power": case["raw_load_kw"],
+                "ev_power": case["direct_power_kw"],
+                "ev_power_fallback_by_physical_key": {
+                    vehicle_key: case["direct_power_kw"]
+                },
+            }
+        )
+        hass = _Hass([], entry_data={"tesla_coordinator": tesla_coordinator})
+
+        snapshot = asyncio.run(
+            power_sync._get_ev_display_coordinator(
+                hass,
+                _Entry(),
+            ).async_refresh(force=True)
+        )
+        observed = hass.data["power_sync"]["entry-1"][
+            "observed_ev_load_snapshot"
+        ]
+
+        assert observed.power_kw == case["direct_power_kw"]
+        assert observed.quality == ev_load.EvLoadQuality.COMPLETE
+        assert snapshot["site"]["observed_ev_load_kw"] == case["direct_power_kw"]
+        assert abs(
+            tesla_coordinator.data["load_power"]
+            - case["expected_home_load_kw"]
+        ) < 1e-9
+
+
+def test_display_snapshot_direct_meter_keeps_distinct_missing_ev_incomplete(
+    monkeypatch,
+):
+    """A direct Tesla meter must not hide a different unmeasured charger."""
+    power_sync = _power_sync_module()
+    ev_load = importlib.import_module("power_sync.ev_load")
+    observed_at = power_sync.dt_util.utcnow()
+    vehicle_key = "vehicle:5yjtest0000000001"
+
+    async def get_ev_load_observations(hass, entry, vehicles):
+        return [
+            ev_load.EvLoadObservation(
+                vehicle_key,
+                "cached_vehicle",
+                10.8,
+                observed_at,
+                True,
+                ev_load.EvMeasurementKind.VEHICLE,
+            ),
+            ev_load.EvLoadObservation(
+                "ocpp:garage:1",
+                "ocpp_meter",
+                None,
+                observed_at,
+                True,
+                ev_load.EvMeasurementKind.LOADPOINT_METER,
+            ),
+        ]
+
+    class LoadpointStatusView:
+        def __init__(self, hass, entry):
+            pass
+
+        async def _async_build_response(self, request, observed_vehicle_sink):
+            return SimpleNamespace(
+                status=200,
+                body=b'{"success": true, "site": {}, "loadpoints": []}',
+            )
+
+    monkeypatch.setattr(
+        power_sync,
+        "_get_ev_load_observations",
+        get_ev_load_observations,
+    )
+    monkeypatch.setattr(power_sync, "EVLoadpointStatusView", LoadpointStatusView)
+    tesla_coordinator = SimpleNamespace(
+        data={
+            "load_power": None,
+            "raw_home_load_power": 19.734,
+            "ev_power": 10.8,
+            "ev_power_fallback_by_physical_key": {vehicle_key: 10.8},
+        }
+    )
+    hass = _Hass([], entry_data={"tesla_coordinator": tesla_coordinator})
+
+    asyncio.run(
+        power_sync._get_ev_display_coordinator(
+            hass,
+            _Entry(),
+        ).async_refresh(force=True)
+    )
+    observed = hass.data["power_sync"]["entry-1"][
+        "observed_ev_load_snapshot"
+    ]
+
+    assert observed.power_kw == 10.8
+    assert observed.quality == ev_load.EvLoadQuality.INCOMPLETE
+    assert observed.unavailable_active_keys == ("ocpp:garage:1",)
+    assert tesla_coordinator.data["load_power"] is None
+    assert tesla_coordinator.data["home_load_normalization_quality"] == "incomplete"

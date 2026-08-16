@@ -2454,3 +2454,103 @@ def test_solar_nowcast_recovers_through_live_ratio_deadband(opt_module):
     assert coordinator._solar_nowcast_derate == pytest.approx(
         min(1.0, (7.76 / 8.8) + 0.10)
     )
+
+
+def _optimizer_with_ev_snapshot(opt_module, snapshot, coordinator_data):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._read_custom_energy_data = lambda: None
+    coordinator.energy_coordinator = SimpleNamespace(data=coordinator_data)
+    coordinator.hass = SimpleNamespace(
+        data={
+            "power_sync": {
+                "entry-1": {"observed_ev_load_snapshot": snapshot}
+            }
+        }
+    )
+    coordinator._entry = SimpleNamespace(entry_id="entry-1")
+    coordinator.battery_system = "tesla"
+    return coordinator
+
+
+def test_optimizer_energy_data_reconciles_direct_same_vehicle_edges(opt_module):
+    """Ticket #204: optimizer input follows direct VIN-scoped stop/restart."""
+    ev_load = importlib.import_module("power_sync.ev_load")
+    observed_at = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    vehicle_key = "vehicle:5yjtest0000000001"
+
+    for cached_power_kw, direct_power_kw, raw_load_kw, expected_home_load_kw in (
+        (1.420654, 0.0, 1.395, 1.395),
+        (0.0, 2.182647, 3.569, 1.386353),
+    ):
+        snapshot = ev_load.ObservedEvLoadSnapshot(
+            power_kw=cached_power_kw,
+            components=(
+                ev_load.EvLoadObservation(
+                    vehicle_key,
+                    "cached_vehicle",
+                    cached_power_kw,
+                    observed_at,
+                    cached_power_kw > 0.05,
+                    ev_load.EvMeasurementKind.VEHICLE,
+                ),
+            ),
+            observed_at=observed_at,
+            quality=ev_load.EvLoadQuality.COMPLETE,
+        )
+        coordinator = _optimizer_with_ev_snapshot(
+            opt_module,
+            snapshot,
+            {
+                "load_power": expected_home_load_kw,
+                "raw_home_load_power": raw_load_kw,
+                "ev_power": direct_power_kw,
+                "ev_power_fallback_by_physical_key": {
+                    vehicle_key: direct_power_kw
+                },
+            },
+        )
+
+        result = coordinator._get_energy_data()
+
+        assert result["observed_ev_power"] == direct_power_kw
+        assert result["load_power"] == pytest.approx(expected_home_load_kw)
+        assert result["home_load_normalization_quality"] == "complete"
+
+
+def test_optimizer_direct_meter_keeps_distinct_missing_ev_incomplete(opt_module):
+    """A direct Tesla meter must not make another missing EV solver-safe."""
+    ev_load = importlib.import_module("power_sync.ev_load")
+    observed_at = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    vehicle_key = "vehicle:5yjtest0000000001"
+    snapshot = ev_load.ObservedEvLoadSnapshot(
+        power_kw=10.8,
+        components=(
+            ev_load.EvLoadObservation(
+                vehicle_key,
+                "cached_vehicle",
+                10.8,
+                observed_at,
+                True,
+                ev_load.EvMeasurementKind.VEHICLE,
+            ),
+        ),
+        observed_at=observed_at,
+        quality=ev_load.EvLoadQuality.INCOMPLETE,
+        unavailable_active_keys=("ocpp:garage:1",),
+    )
+    coordinator = _optimizer_with_ev_snapshot(
+        opt_module,
+        snapshot,
+        {
+            "load_power": None,
+            "raw_home_load_power": 19.734,
+            "ev_power": 10.8,
+            "ev_power_fallback_by_physical_key": {vehicle_key: 10.8},
+        },
+    )
+
+    result = coordinator._get_energy_data()
+
+    assert result["observed_ev_power"] == 10.8
+    assert result["load_power"] is None
+    assert result["home_load_normalization_quality"] == "incomplete"

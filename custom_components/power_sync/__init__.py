@@ -17473,7 +17473,11 @@ def _get_ev_display_coordinator(hass, entry):
         payload = json.loads(response.body)
         if response.status >= 400 or not payload.get("success"):
             raise RuntimeError(payload.get("error") or "EV display snapshot unavailable")
-        from .ev_load import aggregate_ev_load, normalize_energy_data
+        from .ev_load import (
+            aggregate_ev_load,
+            normalize_energy_data,
+            reconcile_ev_load_snapshot,
+        )
 
         entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
         observations = await _get_ev_load_observations(
@@ -17488,6 +17492,18 @@ def _get_ev_display_coordinator(hass, entry):
         # unavailable and suppress Home Load while the loadpoint remained active.
         observed_at = dt_util.utcnow()
         observed_load = aggregate_ev_load(observations, at=observed_at)
+        tesla_coordinator = entry_data.get("tesla_coordinator")
+        tesla_data = getattr(tesla_coordinator, "data", None) or {}
+        physical_fallbacks = tesla_data.get(
+            "ev_power_fallback_by_physical_key"
+        )
+        if physical_fallbacks:
+            observed_load = reconcile_ev_load_snapshot(
+                observed_load,
+                at=observed_at,
+                fallback_power_kw=tesla_data.get("ev_power", 0.0),
+                fallback_by_physical_key=physical_fallbacks,
+            )
         entry_data["observed_ev_load_snapshot"] = observed_load
         site = payload.setdefault("site", {})
         # The aggregate includes real auxiliary load behind a connected EVSE
