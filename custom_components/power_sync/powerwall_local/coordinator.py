@@ -645,6 +645,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
                         at=datetime.now(timezone.utc),
                         fallback_power_kw=tesla_data.get("ev_power", 0.0),
                         fallback_by_physical_key=physical_fallbacks,
+                        fallback_observed_at=tesla_data.get("last_update"),
                     )
                 quality = getattr(snapshot, "quality", None)
                 quality_value = getattr(quality, "value", quality)

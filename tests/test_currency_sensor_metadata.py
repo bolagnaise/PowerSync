@@ -710,6 +710,7 @@ def test_tesla_home_load_sensor_keeps_direct_wall_connector_reconciliation():
             "raw_home_load_power": 17.334,
             "ev_power": 10.53246,
             "ev_power_fallback_by_physical_key": {vin_key: 10.53246},
+            "last_update": datetime(2026, 5, 3, 12, 0, tzinfo=timezone.utc),
             "home_load_basis": "excludes_ev",
             "home_load_normalization_quality": "complete",
         }
@@ -768,6 +769,7 @@ def test_tesla_home_load_sensor_tracks_direct_same_vehicle_stop_and_restart():
                 "ev_power_fallback_by_physical_key": {
                     vehicle_key: direct_power_kw
                 },
+                "last_update": observed_at,
                 "home_load_basis": "excludes_ev",
                 "home_load_normalization_quality": "complete",
             }
@@ -818,6 +820,7 @@ def test_tesla_home_load_sensor_still_fails_closed_for_distinct_missing_ev():
             "raw_home_load_power": 19.734,
             "ev_power": 13.2,
             "ev_power_fallback_by_physical_key": {vin_key: 10.8},
+            "last_update": datetime(2026, 5, 3, 12, 0, tzinfo=timezone.utc),
         }
     )
     incomplete = ev_load.ObservedEvLoadSnapshot(

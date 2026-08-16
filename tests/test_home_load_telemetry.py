@@ -192,6 +192,7 @@ def test_stale_site_ev_load_uses_same_vehicle_direct_meter_fallback():
         "entry-1",
         10.8,
         fallback_by_physical_key={vehicle_key: 10.8},
+        fallback_observed_at=datetime(2026, 7, 8, 1, 0, 0),
     ) == (10.8, True)
 
 
@@ -230,6 +231,7 @@ def test_fresh_complete_site_ev_load_uses_newer_same_vehicle_direct_meter(
         "entry-1",
         direct_power_kw,
         fallback_by_physical_key={vehicle_key: direct_power_kw},
+        fallback_observed_at=datetime(2026, 7, 8, 1, 0, 0),
     )
 
     assert power_kw == pytest.approx(direct_power_kw)
@@ -273,6 +275,7 @@ def test_fresh_complete_direct_meter_replaces_only_its_physical_load():
         "entry-1",
         0.0,
         fallback_by_physical_key={vehicle_key: 0.0},
+        fallback_observed_at=datetime(2026, 7, 8, 1, 0, 0),
     )
 
     assert power_kw == pytest.approx(3.0)
@@ -303,6 +306,7 @@ def test_incomplete_site_ev_load_uses_same_vehicle_direct_meter_fallback():
         "entry-1",
         10.8,
         fallback_by_physical_key={"vehicle:5yjtest0000000001": 10.8},
+        fallback_observed_at=datetime(2026, 7, 8, 1, 0, 0),
     )
 
     assert power_kw == pytest.approx(13.2)
@@ -333,6 +337,7 @@ def test_incomplete_site_ev_load_still_fails_closed_for_distinct_missing_ev():
         "entry-1",
         10.8,
         fallback_by_physical_key={"vehicle:5yjtest0000000001": 10.8},
+        fallback_observed_at=datetime(2026, 7, 8, 1, 0, 0),
     ) == (10.8, False)
 
 

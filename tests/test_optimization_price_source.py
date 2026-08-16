@@ -2507,6 +2507,7 @@ def test_optimizer_energy_data_reconciles_direct_same_vehicle_edges(opt_module):
                 "ev_power_fallback_by_physical_key": {
                     vehicle_key: direct_power_kw
                 },
+                "last_update": observed_at,
             },
         )
 
@@ -2515,6 +2516,45 @@ def test_optimizer_energy_data_reconciles_direct_same_vehicle_edges(opt_module):
         assert result["observed_ev_power"] == direct_power_kw
         assert result["load_power"] == pytest.approx(expected_home_load_kw)
         assert result["home_load_normalization_quality"] == "complete"
+
+
+def test_optimizer_newer_same_vehicle_snapshot_beats_stale_direct_meter(opt_module):
+    """Ticket #204: an older direct sample must not be restamped as current."""
+    ev_load = importlib.import_module("power_sync.ev_load")
+    observed_at = datetime(2026, 5, 3, 8, 29, 55, tzinfo=timezone.utc)
+    vehicle_key = "vehicle:5yjtest0000000001"
+    snapshot = ev_load.ObservedEvLoadSnapshot(
+        power_kw=0.0,
+        components=(
+            ev_load.EvLoadObservation(
+                vehicle_key,
+                "current_vehicle",
+                0.0,
+                observed_at,
+                False,
+                ev_load.EvMeasurementKind.VEHICLE,
+            ),
+        ),
+        observed_at=observed_at,
+        quality=ev_load.EvLoadQuality.COMPLETE,
+    )
+    coordinator = _optimizer_with_ev_snapshot(
+        opt_module,
+        snapshot,
+        {
+            "load_power": 0.0,
+            "raw_home_load_power": 6.604,
+            "ev_power": 11.0,
+            "ev_power_fallback_by_physical_key": {vehicle_key: 11.0},
+            "last_update": observed_at - timedelta(seconds=60),
+        },
+    )
+
+    result = coordinator._get_energy_data()
+
+    assert result["observed_ev_power"] == 0.0
+    assert result["load_power"] == pytest.approx(6.604)
+    assert result["home_load_normalization_quality"] == "complete"
 
 
 def test_optimizer_direct_meter_keeps_distinct_missing_ev_incomplete(opt_module):
@@ -2546,6 +2586,7 @@ def test_optimizer_direct_meter_keeps_distinct_missing_ev_incomplete(opt_module)
             "raw_home_load_power": 19.734,
             "ev_power": 10.8,
             "ev_power_fallback_by_physical_key": {vehicle_key: 10.8},
+            "last_update": observed_at,
         },
     )
 

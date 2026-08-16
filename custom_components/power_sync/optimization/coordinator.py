@@ -2515,6 +2515,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 at=now,
                 fallback_power_kw=data.get("ev_power", 0.0),
                 fallback_by_physical_key=physical_fallbacks,
+                fallback_observed_at=data.get("last_update"),
             )
         elif isinstance(ev_snapshot, ObservedEvLoadSnapshot):
             age = now - ev_snapshot.observed_at

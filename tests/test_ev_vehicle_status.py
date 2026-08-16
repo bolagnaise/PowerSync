@@ -166,10 +166,18 @@ def _power_sync_module():
 
 
 class _State:
-    def __init__(self, entity_id: str, state: str, attributes: dict | None = None) -> None:
+    def __init__(
+        self,
+        entity_id: str,
+        state: str,
+        attributes: dict | None = None,
+        last_updated: datetime | None = None,
+    ) -> None:
         self.entity_id = entity_id
         self.state = state
         self.attributes = attributes or {}
+        if last_updated is not None:
+            self.last_updated = last_updated
 
 
 class _States:
@@ -1250,10 +1258,100 @@ def test_display_snapshot_timestamp_follows_active_zero_power_observation(monkey
     assert tesla_coordinator.data["home_load_normalization_quality"] == "complete"
 
 
+def test_wall_connector_same_vehicle_edges_follow_source_timestamp():
+    """Ticket #204: source time decides same-VIN stop/restart ordering."""
+    power_sync = _power_sync_module()
+    vehicle_id = "5YJTEST0000000001"
+    current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
+
+    stale_vehicle = {
+        "vehicle_id": vehicle_id,
+        "ev_power_kw": 11.0,
+        "is_connected": True,
+        "is_charging": True,
+        "_charging_state_known": True,
+        "_observed_at": current - timedelta(seconds=60),
+    }
+    stale_duplicate = dict(stale_vehicle)
+    assert power_sync._apply_wall_connector_observation(
+        [stale_vehicle, stale_duplicate],
+        0.0,
+        True,
+        False,
+        vehicle_id,
+        current,
+    )
+    assert stale_vehicle["ev_power_kw"] == 0.0
+    assert stale_vehicle["is_charging"] is False
+    assert stale_vehicle["_observed_at"] == current
+    assert stale_duplicate["ev_power_kw"] == 0.0
+    assert stale_duplicate["is_charging"] is False
+    assert stale_duplicate["_observed_at"] == current
+
+    current_vehicle = {
+        "vehicle_id": vehicle_id,
+        "ev_power_kw": 0.0,
+        "is_connected": True,
+        "is_charging": False,
+        "_charging_state_known": True,
+        "_observed_at": current,
+    }
+    assert power_sync._apply_wall_connector_observation(
+        [current_vehicle],
+        11.0,
+        True,
+        True,
+        vehicle_id,
+        current - timedelta(seconds=60),
+    )
+    assert current_vehicle["ev_power_kw"] == 0.0
+    assert current_vehicle["is_charging"] is False
+    assert current_vehicle["_observed_at"] == current
+
+
+def test_ev_vehicle_status_rejects_older_same_vin_wall_connector_power():
+    """Ticket #204: stale site telemetry cannot revive stopped EV power."""
+    power_sync = _power_sync_module()
+    vehicle_id = "5YJTEST0000000001"
+    current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
+    hass = _tesla_hass([
+        _State(
+            "sensor.primary_ev_charger_power_2",
+            "0",
+            {"unit_of_measurement": "kW"},
+            current,
+        ),
+        _State("sensor.primary_ev_charging_2", "stopped", last_updated=current),
+        _State("binary_sensor.primary_ev_charge_cable_2", "on", last_updated=current),
+        _State("device_tracker.primary_ev_location_2", "home", last_updated=current),
+    ])
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+        data={
+            "wall_connectors_raw": [
+                {
+                    "wall_connector_state": 2,
+                    "wall_connector_power": 11000,
+                    "vin": vehicle_id,
+                }
+            ],
+            "last_update": current - timedelta(seconds=60),
+        }
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+
+    assert len(vehicles) == 1
+    assert vehicles[0]["ev_power_kw"] == 0.0
+    assert vehicles[0]["is_charging"] is False
+    assert vehicles[0]["_observed_at"] == current
+
+
 def test_display_snapshot_reconciles_direct_same_vehicle_stop_and_restart(monkeypatch):
     """Ticket #204: the canonical cache follows direct VIN-scoped edges."""
     power_sync = _power_sync_module()
     ev_load = importlib.import_module("power_sync.ev_load")
+    now = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(power_sync.dt_util, "utcnow", lambda: now)
     vehicle_key = "vehicle:5yjtest0000000001"
     case = {}
 
@@ -1316,6 +1414,7 @@ def test_display_snapshot_reconciles_direct_same_vehicle_stop_and_restart(monkey
                 "ev_power_fallback_by_physical_key": {
                     vehicle_key: case["direct_power_kw"]
                 },
+                "last_update": now,
             }
         )
         hass = _Hass([], entry_data={"tesla_coordinator": tesla_coordinator})
@@ -1390,6 +1489,7 @@ def test_display_snapshot_direct_meter_keeps_distinct_missing_ev_incomplete(
             "raw_home_load_power": 19.734,
             "ev_power": 10.8,
             "ev_power_fallback_by_physical_key": {vehicle_key: 10.8},
+            "last_update": observed_at,
         }
     )
     hass = _Hass([], entry_data={"tesla_coordinator": tesla_coordinator})

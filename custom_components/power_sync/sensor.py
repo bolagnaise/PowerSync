@@ -3082,6 +3082,7 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
                 at=now,
                 fallback_power_kw=coordinator_data.get("ev_power", 0.0),
                 fallback_by_physical_key=physical_fallbacks,
+                fallback_observed_at=coordinator_data.get("last_update"),
             )
         if isinstance(snapshot, ObservedEvLoadSnapshot):
             age = now - snapshot.observed_at

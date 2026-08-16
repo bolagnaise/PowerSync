@@ -2163,6 +2163,7 @@ def _fresh_site_ev_load(
     fallback_power_kw: float,
     *,
     fallback_by_physical_key: dict[str, float] | None = None,
+    fallback_observed_at: datetime | None = None,
 ) -> tuple[float, bool]:
     """Return the fresh provider-neutral EV total, or a backend fallback."""
     try:
@@ -2176,6 +2177,7 @@ def _fresh_site_ev_load(
             at=dt_util.utcnow(),
             fallback_power_kw=fallback_power_kw,
             fallback_by_physical_key=fallback_by_physical_key,
+            fallback_observed_at=fallback_observed_at,
         )
         return (
             reconciled.power_kw,
@@ -2791,6 +2793,8 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                     return local_energy_data
                 raise UpdateFailed("Tesla returned empty live_status response")
 
+            sample_observed_at = stream_created_at or dt_util.utcnow()
+
             # Extract EV charging power from Tesla Wall Connectors
             ev_power_kw = 0.0
             wall_connector_power_reported = False
@@ -2907,6 +2911,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 self._entry_id,
                 ev_power_kw,
                 fallback_by_physical_key=wall_connector_power_by_load_key,
+                fallback_observed_at=sample_observed_at,
             )
 
             # Map Teslemetry API response to our data structure
@@ -3066,7 +3071,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                     wall_connector_power_by_load_key
                 ),
                 "wall_connectors_raw": wall_connectors_raw,
-                "last_update": stream_created_at or dt_util.utcnow(),
+                "last_update": sample_observed_at,
                 "energy_summary": self._energy_acc.as_dict(),
                 "firmware": self._firmware,
                 # BMS ceiling for the mobile force-mode picker's Max chip

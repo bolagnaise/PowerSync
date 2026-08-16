@@ -157,6 +157,7 @@ def test_direct_exact_key_replacement_preserves_distinct_v2x_power():
         snapshot,
         at=NOW,
         fallback_by_physical_key={"vehicle:one": 0.0},
+        fallback_observed_at=NOW,
     )
 
     assert result.power_kw == -3.0
@@ -179,9 +180,30 @@ def test_unrelated_direct_key_does_not_duplicate_complete_snapshot():
         snapshot,
         at=NOW,
         fallback_by_physical_key={"vehicle:two": 2.0},
+        fallback_observed_at=NOW,
     )
 
     assert result.power_kw == 1.0
     assert tuple(item.physical_load_key for item in result.components) == (
         "vehicle:one",
     )
+
+
+def test_missing_direct_timestamp_does_not_override_current_snapshot():
+    snapshot = ObservedEvLoadSnapshot(
+        power_kw=0.0,
+        components=(obs("vehicle:one", "current", 0.0),),
+        observed_at=NOW,
+        quality=EvLoadQuality.COMPLETE,
+    )
+
+    result = reconcile_ev_load_snapshot(
+        snapshot,
+        at=NOW,
+        fallback_power_kw=11.0,
+        fallback_by_physical_key={"vehicle:one": 11.0},
+    )
+
+    assert result.power_kw == 0.0
+    assert result.quality == EvLoadQuality.COMPLETE
+    assert result.components == snapshot.components

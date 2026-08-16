@@ -786,6 +786,9 @@ def test_local_status_api_reconciles_direct_same_vehicle_stop_and_restart():
         coord.hass.data["power_sync"]["entry-1"]["tesla_coordinator"].data[
             "ev_power_fallback_by_physical_key"
         ] = {vehicle_key: direct_power_kw}
+        coord.hass.data["power_sync"]["entry-1"]["tesla_coordinator"].data[
+            "last_update"
+        ] = observed_at
 
         api = coord.snapshot_as_api()
 

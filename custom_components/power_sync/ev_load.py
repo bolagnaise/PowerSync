@@ -194,24 +194,56 @@ def reconcile_ev_load_snapshot(
     at: datetime | None = None,
     fallback_power_kw: Any = 0.0,
     fallback_by_physical_key: dict[str, Any] | None = None,
+    fallback_observed_at: datetime | None = None,
     max_age: timedelta = timedelta(seconds=90),
 ) -> ObservedEvLoadSnapshot:
     """Fill missing physical loads from current backend-scoped direct meters.
 
     The aggregate snapshot remains authoritative for every loadpoint it can
     measure. A backend fallback may only replace the exact physical keys it
-    owns; it must never make a distinct unmeasured charger look complete.
+    owns and only when its source timestamp is not older; it must never make a
+    distinct unmeasured charger look complete.
     """
     target = _as_utc(at or utc_now())
-    normalized_fallbacks: dict[str, float] = {}
+    fallback_keys: set[str] = set()
+    candidate_fallbacks: dict[str, float] = {}
     for key, value in (fallback_by_physical_key or {}).items():
         physical_key = str(key or "").strip()
         power_kw = normalize_power_kw(value, "kW")
         if physical_key and power_kw is not None:
-            normalized_fallbacks[physical_key] = power_kw
+            fallback_keys.add(physical_key)
+            candidate_fallbacks[physical_key] = power_kw
+
+    try:
+        direct_observed_at = (
+            _as_utc(fallback_observed_at)
+            if fallback_observed_at is not None
+            else None
+        )
+    except (AttributeError, TypeError, ValueError):
+        direct_observed_at = None
+    direct_age = (
+        target - direct_observed_at
+        if direct_observed_at is not None
+        else None
+    )
+    direct_is_current = bool(
+        direct_age is not None and timedelta(0) <= direct_age <= max_age
+    )
+    normalized_fallbacks = candidate_fallbacks if direct_is_current else {}
 
     fallback_power = normalize_power_kw(fallback_power_kw, "kW") or 0.0
+    if fallback_keys and not direct_is_current:
+        fallback_power = 0.0
     if snapshot is None:
+        if fallback_keys and not direct_is_current:
+            return ObservedEvLoadSnapshot(
+                power_kw=0.0,
+                components=(),
+                observed_at=target,
+                quality=EvLoadQuality.INCOMPLETE,
+                unavailable_active_keys=tuple(sorted(fallback_keys)),
+            )
         return ObservedEvLoadSnapshot(
             power_kw=fallback_power,
             components=(),
@@ -232,12 +264,13 @@ def reconcile_ev_load_snapshot(
         age = max_age + timedelta(seconds=1)
 
     def _fallback_observation(physical_key: str) -> EvLoadObservation:
+        assert direct_observed_at is not None
         power_kw = normalized_fallbacks[physical_key]
         return EvLoadObservation(
             physical_load_key=physical_key,
             source_key="backend_direct_meter",
             power_kw=power_kw,
-            observed_at=target,
+            observed_at=direct_observed_at,
             active=power_kw > 0.05,
             measurement_kind=EvMeasurementKind.LOADPOINT_METER,
         )
@@ -293,6 +326,19 @@ def reconcile_ev_load_snapshot(
             getattr(component, "physical_load_key", "") or ""
         ).strip()
         if physical_key not in normalized_fallbacks:
+            reconciled_components.append(component)
+            continue
+
+        try:
+            component_observed_at = _as_utc(
+                getattr(component, "observed_at", None)
+            )
+        except (AttributeError, TypeError, ValueError):
+            # Without both source timestamps there is no safe basis for
+            # replacing a current same-key observation.
+            reconciled_components.append(component)
+            continue
+        if direct_observed_at < component_observed_at:
             reconciled_components.append(component)
             continue
 
