@@ -649,6 +649,41 @@ def _new_stream_tesla_coordinator() -> TeslaEnergyCoordinator:
     return coordinator
 
 
+def test_teslemetry_stream_uses_background_task_bucket():
+    """The lifetime SSE reconnect loop must not block HA bootstrap."""
+
+    async def _run() -> None:
+        coordinator = _new_stream_tesla_coordinator()
+        coordinator._teslemetry_stream = None
+        coordinator.session = None
+        created: dict[str, list[str | None]] = {
+            "normal": [],
+            "background": [],
+        }
+
+        def _create_task(coroutine, *, name=None, **kwargs):
+            created["normal"].append(name)
+            return asyncio.create_task(coroutine, name=name)
+
+        def _create_background_task(coroutine, name, eager_start=True):
+            created["background"].append(name)
+            return asyncio.create_task(coroutine, name=name)
+
+        coordinator.hass.async_create_task = _create_task
+        coordinator.hass.async_create_background_task = _create_background_task
+
+        try:
+            coordinator.async_start_teslemetry_stream()
+            assert created["normal"] == []
+            assert created["background"] == [
+                "power_sync_teslemetry_sse_12345"
+            ]
+        finally:
+            await coordinator.async_shutdown()
+
+    asyncio.run(_run())
+
+
 def test_teslemetry_sse_snapshot_maps_directly_and_skips_repeat_rest_poll():
     coordinator = _new_stream_tesla_coordinator()
     refresh_count = 0

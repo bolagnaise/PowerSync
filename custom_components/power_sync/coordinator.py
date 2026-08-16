@@ -2455,7 +2455,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             connection_callback=self._set_teslemetry_stream_connected,
             user_agent=POWER_SYNC_USER_AGENT,
         )
-        self._teslemetry_stream.start(self.hass.async_create_task)
+        self._teslemetry_stream.start(self.hass.async_create_background_task)
 
     async def async_shutdown(self) -> None:
         """Stop the Teslemetry stream during config-entry unload."""
