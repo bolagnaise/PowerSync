@@ -129,6 +129,12 @@ from power_sync.const import (  # noqa: E402
     TESLA_PROVIDER_POWERSYNC,
     TESLA_PROVIDER_TESLEMETRY,
 )
+from power_sync.ev_load import (  # noqa: E402
+    EvLoadObservation,
+    EvLoadQuality,
+    EvMeasurementKind,
+    ObservedEvLoadSnapshot,
+)
 
 
 def test_fresh_site_ev_load_prefers_complete_provider_neutral_total():
@@ -187,6 +193,90 @@ def test_stale_site_ev_load_uses_same_vehicle_direct_meter_fallback():
         10.8,
         fallback_by_physical_key={vehicle_key: 10.8},
     ) == (10.8, True)
+
+
+@pytest.mark.parametrize(
+    ("cached_power_kw", "direct_power_kw"),
+    [(1.420654, 0.0), (0.0, 2.182647)],
+)
+def test_fresh_complete_site_ev_load_uses_newer_same_vehicle_direct_meter(
+    cached_power_kw,
+    direct_power_kw,
+):
+    """Ticket #204: charger-edge readings replace a fresh same-VIN cache."""
+    vehicle_key = "vehicle:5yjtest0000000001"
+    observed_at = datetime(2026, 7, 8, 0, 59, 30)
+    snapshot = ObservedEvLoadSnapshot(
+        power_kw=cached_power_kw,
+        components=(
+            EvLoadObservation(
+                physical_load_key=vehicle_key,
+                source_key="cached_vehicle",
+                power_kw=cached_power_kw,
+                observed_at=observed_at,
+                active=cached_power_kw > 0.05,
+                measurement_kind=EvMeasurementKind.VEHICLE,
+            ),
+        ),
+        observed_at=observed_at,
+        quality=EvLoadQuality.COMPLETE,
+    )
+    hass = types.SimpleNamespace(
+        data={DOMAIN: {"entry-1": {"observed_ev_load_snapshot": snapshot}}}
+    )
+
+    power_kw, complete = _fresh_site_ev_load(
+        hass,
+        "entry-1",
+        direct_power_kw,
+        fallback_by_physical_key={vehicle_key: direct_power_kw},
+    )
+
+    assert power_kw == pytest.approx(direct_power_kw)
+    assert complete is True
+
+
+def test_fresh_complete_direct_meter_replaces_only_its_physical_load():
+    """A same-VIN correction must preserve a distinct measured charger."""
+    vehicle_key = "vehicle:5yjtest0000000001"
+    other_key = "ocpp:garage:1"
+    observed_at = datetime(2026, 7, 8, 0, 59, 30)
+    snapshot = ObservedEvLoadSnapshot(
+        power_kw=4.420654,
+        components=(
+            EvLoadObservation(
+                vehicle_key,
+                "cached_vehicle",
+                1.420654,
+                observed_at,
+                active=True,
+                measurement_kind=EvMeasurementKind.VEHICLE,
+            ),
+            EvLoadObservation(
+                other_key,
+                "ocpp_meter",
+                3.0,
+                observed_at,
+                active=True,
+                measurement_kind=EvMeasurementKind.LOADPOINT_METER,
+            ),
+        ),
+        observed_at=observed_at,
+        quality=EvLoadQuality.COMPLETE,
+    )
+    hass = types.SimpleNamespace(
+        data={DOMAIN: {"entry-1": {"observed_ev_load_snapshot": snapshot}}}
+    )
+
+    power_kw, complete = _fresh_site_ev_load(
+        hass,
+        "entry-1",
+        0.0,
+        fallback_by_physical_key={vehicle_key: 0.0},
+    )
+
+    assert power_kw == pytest.approx(3.0)
+    assert complete is True
 
 
 def test_incomplete_site_ev_load_uses_same_vehicle_direct_meter_fallback():
@@ -949,6 +1039,83 @@ def test_tesla_direct_wall_connector_fills_incomplete_same_vehicle_snapshot():
         f"vehicle:{vin.lower()}": pytest.approx(10.53246)
     }
     assert result["wall_connectors_raw"] == [wall_connector]
+
+
+@pytest.mark.parametrize(
+    (
+        "cached_power_kw",
+        "direct_power_w",
+        "raw_load_w",
+        "expected_home_load_kw",
+    ),
+    [
+        (11.0, 0.0, 6604.0, 6.604),
+        (0.0, 2182.647, 3569.0, 1.386353),
+    ],
+)
+def test_tesla_direct_wall_connector_replaces_fresh_complete_same_vehicle_snapshot(
+    cached_power_kw,
+    direct_power_w,
+    raw_load_w,
+    expected_home_load_kw,
+):
+    """Ticket #204: coordinator output follows direct stop and restart edges."""
+    coordinator = _new_stream_tesla_coordinator()
+
+    async def _request_refresh() -> None:
+        return None
+
+    coordinator.async_request_refresh = _request_refresh
+    vin = "5YJTEST0000000001"
+    vehicle_key = f"vehicle:{vin.lower()}"
+    observed_at = datetime(2026, 7, 8, 0, 59, 30)
+    coordinator.hass.data[DOMAIN]["stream-entry"][
+        "observed_ev_load_snapshot"
+    ] = ObservedEvLoadSnapshot(
+        power_kw=cached_power_kw,
+        components=(
+            EvLoadObservation(
+                physical_load_key=vehicle_key,
+                source_key="cached_vehicle",
+                power_kw=cached_power_kw,
+                observed_at=observed_at,
+                active=cached_power_kw > 0.05,
+                measurement_kind=EvMeasurementKind.VEHICLE,
+            ),
+        ),
+        observed_at=observed_at,
+        quality=EvLoadQuality.COMPLETE,
+    )
+    wall_connector = {
+        "din": "1529455-42-H--TEST",
+        "vin": vin,
+        "wall_connector_state": 4 if direct_power_w == 0 else 1,
+        "wall_connector_power": direct_power_w,
+    }
+    event = {
+        "createdAt": "2026-07-08T00:59:30.000Z",
+        "site_id": "12345",
+        "live_status": {
+            "solar_power": 1000,
+            "grid_power": 0,
+            "battery_power": 0,
+            "load_power": raw_load_w,
+            "percentage_charged": 86.6,
+            "grid_status": "Active",
+            "wall_connectors": [wall_connector],
+        },
+    }
+
+    asyncio.run(coordinator._async_handle_teslemetry_stream_event(event))
+    result = asyncio.run(coordinator._async_update_data())
+
+    assert result["ev_power"] == pytest.approx(direct_power_w / 1000.0)
+    assert result["raw_home_load_power"] == pytest.approx(raw_load_w / 1000.0)
+    assert result["load_power"] == pytest.approx(expected_home_load_kw)
+    assert result["home_load_normalization_quality"] == "complete"
+    assert result["ev_power_fallback_by_physical_key"] == {
+        vehicle_key: pytest.approx(direct_power_w / 1000.0)
+    }
 
 
 def test_tesla_idle_wall_connector_keeps_distinct_mapped_umc_power(monkeypatch):

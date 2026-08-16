@@ -18,9 +18,11 @@ from power_sync_ev_load import (  # noqa: E402
     EvLoadObservation,
     EvLoadQuality,
     EvMeasurementKind,
+    ObservedEvLoadSnapshot,
     aggregate_ev_load,
     meter_physical_load_key,
     normalize_power_kw,
+    reconcile_ev_load_snapshot,
 )
 
 
@@ -138,3 +140,48 @@ def test_future_observation_is_not_applied_backwards():
     result = aggregate_ev_load([future], at=NOW)
     assert result.power_kw == 0
     assert result.quality == EvLoadQuality.INCOMPLETE
+
+
+def test_direct_exact_key_replacement_preserves_distinct_v2x_power():
+    snapshot = ObservedEvLoadSnapshot(
+        power_kw=-2.0,
+        components=(
+            obs("vehicle:one", "cached", 1.0),
+            obs("vehicle:v2x", "bidirectional", -3.0, v2x=True),
+        ),
+        observed_at=NOW,
+        quality=EvLoadQuality.COMPLETE,
+    )
+
+    result = reconcile_ev_load_snapshot(
+        snapshot,
+        at=NOW,
+        fallback_by_physical_key={"vehicle:one": 0.0},
+    )
+
+    assert result.power_kw == -3.0
+    assert result.quality == EvLoadQuality.COMPLETE
+    assert {item.physical_load_key for item in result.components} == {
+        "vehicle:one",
+        "vehicle:v2x",
+    }
+
+
+def test_unrelated_direct_key_does_not_duplicate_complete_snapshot():
+    snapshot = ObservedEvLoadSnapshot(
+        power_kw=1.0,
+        components=(obs("vehicle:one", "cached", 1.0),),
+        observed_at=NOW,
+        quality=EvLoadQuality.COMPLETE,
+    )
+
+    result = reconcile_ev_load_snapshot(
+        snapshot,
+        at=NOW,
+        fallback_by_physical_key={"vehicle:two": 2.0},
+    )
+
+    assert result.power_kw == 1.0
+    assert tuple(item.physical_load_key for item in result.components) == (
+        "vehicle:one",
+    )

@@ -755,6 +755,45 @@ def test_local_status_api_prefers_complete_site_ev_snapshot_over_zero_coordinato
     assert api["home_load_normalization_quality"] == "complete"
 
 
+def test_local_status_api_reconciles_direct_same_vehicle_stop_and_restart():
+    """Ticket #204: local status uses the same VIN-scoped direct observation."""
+    ev_load = _load_module(f"{PKG}.ev_load", ROOT / "ev_load.py")
+    vehicle_key = "vehicle:5yjtest0000000001"
+    observed_at = datetime.now(timezone.utc)
+
+    for cached_power_kw, direct_power_kw, expected_load_w in (
+        (7.1, 0.0, 10700.0),
+        (0.0, 7.1, 3600.0),
+    ):
+        coord = _coordinator_with_snapshot(ev_power_kw=direct_power_kw)
+        coord.hass.data["power_sync"]["entry-1"][
+            "observed_ev_load_snapshot"
+        ] = ev_load.ObservedEvLoadSnapshot(
+            power_kw=cached_power_kw,
+            components=(
+                ev_load.EvLoadObservation(
+                    physical_load_key=vehicle_key,
+                    source_key="cached_vehicle",
+                    power_kw=cached_power_kw,
+                    observed_at=observed_at,
+                    active=cached_power_kw > 0.05,
+                    measurement_kind=ev_load.EvMeasurementKind.VEHICLE,
+                ),
+            ),
+            observed_at=observed_at,
+            quality=ev_load.EvLoadQuality.COMPLETE,
+        )
+        coord.hass.data["power_sync"]["entry-1"]["tesla_coordinator"].data[
+            "ev_power_fallback_by_physical_key"
+        ] = {vehicle_key: direct_power_kw}
+
+        api = coord.snapshot_as_api()
+
+        assert api["load_w"] == expected_load_w
+        assert api["ev_power_w"] == direct_power_kw * 1000.0
+        assert api["home_load_normalization_quality"] == "complete"
+
+
 def test_local_status_api_load_never_goes_negative_after_ev_subtraction():
     coord = _coordinator_with_snapshot(ev_power_kw=12.0)
 

@@ -631,6 +631,21 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
             snapshot = entry_data.get("observed_ev_load_snapshot")
             if snapshot is not None:
+                tesla_data = getattr(
+                    entry_data.get("tesla_coordinator"), "data", None
+                ) or {}
+                physical_fallbacks = tesla_data.get(
+                    "ev_power_fallback_by_physical_key"
+                )
+                if physical_fallbacks:
+                    from ..ev_load import reconcile_ev_load_snapshot
+
+                    snapshot = reconcile_ev_load_snapshot(
+                        snapshot,
+                        at=datetime.now(timezone.utc),
+                        fallback_power_kw=tesla_data.get("ev_power", 0.0),
+                        fallback_by_physical_key=physical_fallbacks,
+                    )
                 quality = getattr(snapshot, "quality", None)
                 quality_value = getattr(quality, "value", quality)
                 return (

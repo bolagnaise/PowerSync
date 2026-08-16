@@ -738,6 +738,73 @@ def test_tesla_home_load_sensor_keeps_direct_wall_connector_reconciliation():
     ) < 1e-9
 
 
+def test_tesla_home_load_sensor_tracks_direct_same_vehicle_stop_and_restart():
+    """Ticket #204: paired-local Home Load follows direct VIN-scoped edges."""
+    sensor = _sensor_module()
+    ev_load = importlib.import_module("power_sync.ev_load")
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "home_load")
+    vehicle_key = "vehicle:5yjtest0000000001"
+    observed_at = datetime(2026, 5, 3, 12, 0, tzinfo=timezone.utc)
+
+    for cached_power_kw, direct_power_kw, raw_load_kw, expected_home_load_kw in (
+        (1.420654, 0.0, 1.395, 1.395),
+        (0.0, 2.182647, 3.569, 1.386353),
+    ):
+        entry = SimpleNamespace(
+            entry_id="entry-1",
+            data={sensor.CONF_POWERWALL_LOCAL_PAIRED: True},
+            options={},
+        )
+        local_coord = SimpleNamespace(
+            data=SimpleNamespace(load_w=raw_load_kw * 1000.0),
+            last_success_ts=time.time(),
+            last_success_monotonic=time.monotonic(),
+        )
+        coordinator = SimpleNamespace(
+            data={
+                "load_power": expected_home_load_kw,
+                "raw_home_load_power": raw_load_kw,
+                "ev_power": direct_power_kw,
+                "ev_power_fallback_by_physical_key": {
+                    vehicle_key: direct_power_kw
+                },
+                "home_load_basis": "excludes_ev",
+                "home_load_normalization_quality": "complete",
+            }
+        )
+        cached = ev_load.ObservedEvLoadSnapshot(
+            power_kw=cached_power_kw,
+            components=(
+                ev_load.EvLoadObservation(
+                    physical_load_key=vehicle_key,
+                    source_key="cached_vehicle",
+                    power_kw=cached_power_kw,
+                    observed_at=observed_at,
+                    active=cached_power_kw > 0.05,
+                    measurement_kind=ev_load.EvMeasurementKind.VEHICLE,
+                ),
+            ),
+            observed_at=observed_at,
+            quality=ev_load.EvLoadQuality.COMPLETE,
+        )
+        entity = sensor.TeslaEnergySensor(coordinator, desc, entry)
+        entity.hass = SimpleNamespace(
+            config=SimpleNamespace(currency="AUD"),
+            data={
+                sensor.DOMAIN: {
+                    "entry-1": {
+                        "powerwall_local": {"coordinator": local_coord},
+                        "observed_ev_load_snapshot": cached,
+                    }
+                }
+            },
+        )
+
+        assert abs(entity.native_value - expected_home_load_kw) < 1e-9
+        assert entity.extra_state_attributes["normalization_quality"] == "complete"
+        assert entity.extra_state_attributes["observed_ev_power_kw"] == direct_power_kw
+
+
 def test_tesla_home_load_sensor_still_fails_closed_for_distinct_missing_ev():
     """A Tesla direct meter must not cover a separate unavailable charger."""
     sensor = _sensor_module()

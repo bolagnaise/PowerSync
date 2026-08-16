@@ -278,28 +278,67 @@ def reconcile_ev_load_snapshot(
 
     quality = getattr(snapshot, "quality", None)
     quality_value = getattr(quality, "value", quality)
+
+    # A backend-direct meter is newer than the cached aggregate for the exact
+    # physical load it owns.  This is especially important at charger edges:
+    # the Wall Connector can report 0 W immediately while the independently
+    # refreshed vehicle snapshot still contains the previous charging power (or
+    # vice versa).  Preserve every unrelated component and only replace keys
+    # with an explicit identity match.
+    reconciled_components: list[EvLoadObservation] = []
+    reconciled_power = float(getattr(snapshot, "power_kw", 0.0) or 0.0)
+    replaced_keys: set[str] = set()
+    for component in components:
+        physical_key = str(
+            getattr(component, "physical_load_key", "") or ""
+        ).strip()
+        if physical_key not in normalized_fallbacks:
+            reconciled_components.append(component)
+            continue
+
+        old_power = normalize_power_kw(
+            getattr(component, "power_kw", None),
+            "kW",
+            supports_bidirectional_power=bool(
+                getattr(component, "supports_bidirectional_power", False)
+            ),
+        ) or 0.0
+        reconciled_power -= old_power
+        if physical_key not in replaced_keys:
+            replacement = _fallback_observation(physical_key)
+            reconciled_components.append(replacement)
+            reconciled_power += float(replacement.power_kw or 0.0)
+            replaced_keys.add(physical_key)
+
+    filled_unavailable_keys = unavailable_keys & normalized_fallbacks.keys()
+    for physical_key in sorted(filled_unavailable_keys - replaced_keys):
+        replacement = _fallback_observation(physical_key)
+        reconciled_components.append(replacement)
+        reconciled_power += float(replacement.power_kw or 0.0)
+
+    if replaced_keys or filled_unavailable_keys:
+        remaining_unavailable_keys = unavailable_keys - normalized_fallbacks.keys()
+        original_complete = quality_value == EvLoadQuality.COMPLETE.value
+        reconciled_complete = original_complete or (
+            bool(unavailable_keys) and not remaining_unavailable_keys
+        )
+        return ObservedEvLoadSnapshot(
+            power_kw=reconciled_power,
+            components=tuple(reconciled_components),
+            observed_at=target,
+            quality=(
+                EvLoadQuality.COMPLETE
+                if reconciled_complete
+                else EvLoadQuality.INCOMPLETE
+            ),
+            unavailable_active_keys=tuple(sorted(remaining_unavailable_keys)),
+        )
+
     if quality_value == EvLoadQuality.COMPLETE.value:
         return ObservedEvLoadSnapshot(
             power_kw=float(getattr(snapshot, "power_kw", 0.0) or 0.0),
             components=components,
             observed_at=_as_utc(observed_at),
-            quality=EvLoadQuality.COMPLETE,
-        )
-    if (
-        unavailable_keys
-        and normalized_fallbacks
-        and unavailable_keys <= normalized_fallbacks.keys()
-    ):
-        replacements = tuple(
-            _fallback_observation(key) for key in sorted(unavailable_keys)
-        )
-        return ObservedEvLoadSnapshot(
-            power_kw=(
-                float(getattr(snapshot, "power_kw", 0.0) or 0.0)
-                + sum(float(item.power_kw or 0.0) for item in replacements)
-            ),
-            components=components + replacements,
-            observed_at=target,
             quality=EvLoadQuality.COMPLETE,
         )
     return ObservedEvLoadSnapshot(
