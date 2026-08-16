@@ -169,7 +169,55 @@ def _is_physical_tesla_observation(observation: Mapping[str, Any]) -> bool:
     )
 
 
+def _observation_timestamp(
+    observation: Mapping[str, Any],
+    *fields: str,
+) -> datetime | None:
+    """Return the source time that determined an observation's power/state."""
+    value = None
+    for field in fields or ("_observed_at", "observed_at"):
+        value = observation.get(field)
+        if value is not None:
+            break
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _merge_observation_status(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    source_observed_at = _observation_timestamp(
+        source, "_observed_at", "observed_at"
+    )
+    target_observed_at = _observation_timestamp(
+        target, "_observed_at", "observed_at"
+    )
+    source_charging_at = _observation_timestamp(
+        source, "_charging_observed_at", "_observed_at", "observed_at"
+    )
+    target_charging_at = _observation_timestamp(
+        target, "_charging_observed_at", "_observed_at", "observed_at"
+    )
+    source_connected_at = _observation_timestamp(
+        source,
+        "_connected_observed_at",
+        "_charging_observed_at",
+        "_observed_at",
+        "observed_at",
+    )
+    target_connected_at = _observation_timestamp(
+        target,
+        "_connected_observed_at",
+        "_charging_observed_at",
+        "_observed_at",
+        "observed_at",
+    )
     source_power = _float_value(
         source.get("ev_power_kw", source.get("current_power_kw")),
         0.0,
@@ -178,17 +226,81 @@ def _merge_observation_status(target: dict[str, Any], source: Mapping[str, Any])
         target.get("ev_power_kw", target.get("current_power_kw")),
         0.0,
     )
-    if source_power > target_power:
+
+    def source_is_newer(
+        source_at: datetime | None,
+        target_at: datetime | None,
+    ) -> bool:
+        return source_at is not None and (
+            target_at is None or source_at > target_at
+        )
+
+    def target_is_newer(
+        source_at: datetime | None,
+        target_at: datetime | None,
+    ) -> bool:
+        return target_at is not None and (
+            source_at is None or target_at > source_at
+        )
+
+    source_power_is_newer = source_is_newer(
+        source_observed_at, target_observed_at
+    )
+    target_power_is_newer = target_is_newer(
+        source_observed_at, target_observed_at
+    )
+    if source_power_is_newer:
         target["ev_power_kw"] = source_power
         target["current_power_kw"] = source_power
+        target.pop("auxiliary_power_kw", None)
+        if source.get("auxiliary_power_kw") is not None:
+            target["auxiliary_power_kw"] = source.get("auxiliary_power_kw")
+        target["_observed_at"] = source_observed_at
+    elif not target_power_is_newer:
+        # Preserve the historical best-effort merge when neither source has a
+        # comparable timestamp (or both were sampled at exactly the same time).
+        if source_power > target_power:
+            target["ev_power_kw"] = source_power
+            target["current_power_kw"] = source_power
+            target.pop("auxiliary_power_kw", None)
+            if source.get("auxiliary_power_kw") is not None:
+                target["auxiliary_power_kw"] = source.get("auxiliary_power_kw")
+
+    source_charging_is_newer = source_is_newer(
+        source_charging_at, target_charging_at
+    )
+    target_charging_is_newer = target_is_newer(
+        source_charging_at, target_charging_at
+    )
+    if source_charging_is_newer:
+        target["is_charging"] = bool(source.get("is_charging"))
+        target["_charging_observed_at"] = source_charging_at
+    elif not target_charging_is_newer:
+        target["is_charging"] = bool(target.get("is_charging")) or bool(
+            source.get("is_charging")
+        )
+
+    source_connected_is_newer = source_is_newer(
+        source_connected_at, target_connected_at
+    )
+    target_connected_is_newer = target_is_newer(
+        source_connected_at, target_connected_at
+    )
+    if source_connected_is_newer:
+        target["is_connected"] = bool(source.get("is_connected"))
+        target["_connected_observed_at"] = source_connected_at
+    elif not target_connected_is_newer:
+        target["is_connected"] = bool(target.get("is_connected")) or bool(
+            source.get("is_connected")
+        )
 
     source_soc = source.get("ev_soc", source.get("current_soc"))
-    if source_soc is not None:
+    target_soc = target.get("ev_soc", target.get("current_soc"))
+    if source_soc is not None and (
+        target_soc is None or not target_power_is_newer
+    ):
         target["ev_soc"] = source_soc
         target["current_soc"] = source_soc
-
-    target["is_connected"] = bool(target.get("is_connected")) or bool(source.get("is_connected"))
-    target["is_charging"] = bool(target.get("is_charging")) or bool(source.get("is_charging"))
 
 
 def _merge_bridge_observation_status(target: dict[str, Any], source: Mapping[str, Any]) -> None:

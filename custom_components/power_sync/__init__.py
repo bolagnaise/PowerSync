@@ -1203,24 +1203,38 @@ def _apply_wall_connector_observation(
     wc_charging: bool,
     wc_vin: Any = None,
     wc_observed_at: datetime | None = None,
+    *,
+    allow_heuristic: bool = True,
 ) -> bool:
     """Attach Wall Connector telemetry only when it can be matched safely."""
-    if not (wc_connected or wc_charging or wc_power_kw > 0.05):
+    wc_vin_key = str(wc_vin or "").strip().lower()
+    if not (
+        wc_connected
+        or wc_charging
+        or wc_power_kw > 0.05
+        or wc_vin_key
+    ):
         return False
 
     def update_vehicle(vehicle: dict) -> None:
         direct_observed_at = _ev_observed_at(wc_observed_at)
-        vehicle_observed_at = _ev_observed_at(vehicle.get("_observed_at"))
-        if (
-            vehicle_observed_at is not None
-            and (
-                direct_observed_at is None
-                or direct_observed_at < vehicle_observed_at
-            )
-        ):
-            return
+        power_observed_at = _ev_observed_at(vehicle.get("_observed_at"))
+        charging_observed_at = (
+            _ev_observed_at(vehicle.get("_charging_observed_at"))
+            or power_observed_at
+        )
+        connected_observed_at = (
+            _ev_observed_at(vehicle.get("_connected_observed_at"))
+            or charging_observed_at
+            or power_observed_at
+        )
 
-        vehicle["is_connected"] = True
+        def direct_is_current(current: datetime | None) -> bool:
+            return current is None or (
+                direct_observed_at is not None
+                and direct_observed_at >= current
+            )
+
         # A plugged-in Tesla can keep the Wall Connector contactor closed and
         # draw roughly 0.5 kW for vehicle auxiliaries after charging stops.
         # Preserve that real site load, but do not override a usable vehicle
@@ -1232,34 +1246,56 @@ def _apply_wall_connector_observation(
             and not bool(vehicle.get("is_charging"))
             and wc_power_kw < _MIN_TESLA_CHARGING_POWER_KW
         )
-        if stopped_at_zero:
-            vehicle["ev_power_kw"] = 0.0
-            vehicle.pop("auxiliary_power_kw", None)
-            vehicle["is_charging"] = False
-        elif stopped_with_auxiliary_draw:
-            vehicle["ev_power_kw"] = 0.0
-            vehicle["auxiliary_power_kw"] = wc_power_kw
-        else:
-            vehicle.pop("auxiliary_power_kw", None)
-            if wc_power_kw > 0.05:
-                vehicle["ev_power_kw"] = wc_power_kw
-            vehicle["is_charging"] = (
-                bool(vehicle.get("is_charging"))
-                or wc_charging
-                or wc_power_kw > 0.05
-            )
-        if direct_observed_at is not None:
-            vehicle["_observed_at"] = direct_observed_at
+        if direct_is_current(power_observed_at):
+            if stopped_at_zero:
+                vehicle["ev_power_kw"] = 0.0
+                vehicle.pop("auxiliary_power_kw", None)
+            elif stopped_with_auxiliary_draw:
+                vehicle["ev_power_kw"] = 0.0
+                vehicle["auxiliary_power_kw"] = wc_power_kw
+            else:
+                vehicle.pop("auxiliary_power_kw", None)
+                if wc_power_kw > 0.05:
+                    vehicle["ev_power_kw"] = wc_power_kw
+            if direct_observed_at is not None:
+                vehicle["_observed_at"] = direct_observed_at
 
-    wc_vin_key = str(wc_vin or "").strip().lower()
+        if direct_is_current(charging_observed_at):
+            if stopped_at_zero or stopped_with_auxiliary_draw:
+                vehicle["is_charging"] = False
+            else:
+                vehicle["is_charging"] = (
+                    bool(vehicle.get("is_charging"))
+                    or wc_charging
+                    or wc_power_kw > 0.05
+                )
+            if direct_observed_at is not None:
+                vehicle["_charging_observed_at"] = direct_observed_at
+
+        if direct_is_current(connected_observed_at):
+            vehicle["is_connected"] = bool(
+                wc_connected or wc_charging or wc_power_kw > 0.05
+            )
+            if direct_observed_at is not None:
+                vehicle["_connected_observed_at"] = direct_observed_at
+
     if wc_vin_key:
         matched = False
         for vehicle in vehicles:
-            if _vehicle_matches_identifier(vehicle, wc_vin_key):
+            if (
+                vehicle.get("site_presence") != "away"
+                and _vehicle_matches_identifier(vehicle, wc_vin_key)
+            ):
                 update_vehicle(vehicle)
                 matched = True
         if matched:
             return True
+        # An explicit VIN that does not have an eligible exact match must not
+        # fall through to single-vehicle heuristics and claim another car.
+        return False
+
+    if not allow_heuristic:
+        return False
 
     # A connector without a VIN cannot be attributed to a Tesla that Home
     # Assistant currently places outside the home zone.  Keep direct VIN
@@ -1596,7 +1632,11 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         hard_disconnected = False
         away_from_home = False
         measured_power_kw = 0.0
-        vehicle_observed_at = None
+        measured_power_seen = False
+        measured_power_observed_at = None
+        charging_state_observed_at = None
+        connected_observed_at = None
+        forced_zero_observed_at = None
 
         for entity in entity_registry.entities.values():
             if entity.device_id != device.id:
@@ -1609,21 +1649,21 @@ def _get_ev_vehicles_status(hass, entry) -> list:
 
             # Away vehicles cannot be contributing to home EV power.
             if domain == "device_tracker" and "_location" in eid:
-                vehicle_observed_at = _latest_ev_observed_at(
-                    vehicle_observed_at,
-                    getattr(state, "last_updated", None),
-                )
                 if _ev_tracker_site_presence(state) == "away":
                     away_from_home = True
+                    forced_zero_observed_at = _latest_ev_observed_at(
+                        forced_zero_observed_at,
+                        getattr(state, "last_updated", None),
+                    )
                 continue
 
             if domain == "binary_sensor" and "located_at_home" in eid:
-                vehicle_observed_at = _latest_ev_observed_at(
-                    vehicle_observed_at,
-                    getattr(state, "last_updated", None),
-                )
                 if state.state == "off":
                     away_from_home = True
+                    forced_zero_observed_at = _latest_ev_observed_at(
+                        forced_zero_observed_at,
+                        getattr(state, "last_updated", None),
+                    )
                 continue
 
             # Check charging_state sensor for connected status
@@ -1635,40 +1675,67 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 and "power" not in eid
             ):
                 plugged = charging_state_plugged_status(state.state)
-                vehicle_observed_at = _latest_ev_observed_at(
-                    vehicle_observed_at,
+                charging_state_observed_at = _latest_ev_observed_at(
+                    charging_state_observed_at,
                     getattr(state, "last_updated", None),
                 )
                 if plugged is not None:
                     charging_state_known = True
+                    connected_observed_at = _latest_ev_observed_at(
+                        connected_observed_at,
+                        getattr(state, "last_updated", None),
+                    )
                 if plugged is True:
                     is_connected = True
                     if state.state.lower() == "charging":
                         is_charging = True
                 elif plugged is False:
                     hard_disconnected = True
+                    forced_zero_observed_at = _latest_ev_observed_at(
+                        forced_zero_observed_at,
+                        getattr(state, "last_updated", None),
+                    )
 
             # Check charge_cable / charge_flap binary sensors
             if domain == "binary_sensor" and ("charge_cable" in eid or "charge_flap" in eid):
-                vehicle_observed_at = _latest_ev_observed_at(
-                    vehicle_observed_at,
-                    getattr(state, "last_updated", None),
-                )
                 if state.state == "on":
                     is_connected = True
+                    connected_observed_at = _latest_ev_observed_at(
+                        connected_observed_at,
+                        getattr(state, "last_updated", None),
+                    )
                 elif state.state == "off":
                     hard_disconnected = True
+                    forced_zero_observed_at = _latest_ev_observed_at(
+                        forced_zero_observed_at,
+                        getattr(state, "last_updated", None),
+                    )
 
             if not entity.entity_id.startswith("sensor."):
                 continue
 
             if "charger_power" in eid or "charging_power" in eid or "charge_power" in eid:
-                vehicle_observed_at = _latest_ev_observed_at(
-                    vehicle_observed_at,
-                    getattr(state, "last_updated", None),
-                )
                 val = _kw_from_power_state(state)
-                if val > 0:
+                candidate_observed_at = _ev_observed_at(
+                    getattr(state, "last_updated", None)
+                )
+                if not measured_power_seen:
+                    measured_power_kw = val
+                    measured_power_observed_at = candidate_observed_at
+                    measured_power_seen = True
+                elif (
+                    candidate_observed_at is not None
+                    and (
+                        measured_power_observed_at is None
+                        or candidate_observed_at > measured_power_observed_at
+                    )
+                ):
+                    measured_power_kw = val
+                    measured_power_observed_at = candidate_observed_at
+                elif (
+                    candidate_observed_at == measured_power_observed_at
+                    and val > measured_power_kw
+                ):
                     measured_power_kw = max(measured_power_kw, val)
 
             if ev_soc is None and "battery" in eid and "range" not in eid and "heater" not in eid:
@@ -1683,9 +1750,35 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             is_connected = False
             is_charging = False
             ev_power_kw = 0.0
+            vehicle_observed_at = forced_zero_observed_at
+            charging_observed_at = forced_zero_observed_at
+            vehicle_connected_observed_at = forced_zero_observed_at
         elif is_charging:
             ev_power_kw = measured_power_kw
             is_connected = True
+            vehicle_observed_at = (
+                measured_power_observed_at or charging_state_observed_at
+            )
+            charging_observed_at = (
+                charging_state_observed_at or measured_power_observed_at
+            )
+            vehicle_connected_observed_at = _latest_ev_observed_at(
+                connected_observed_at,
+                charging_observed_at,
+            )
+        else:
+            # A stopped charging-state or explicit zero-power sample can
+            # determine the zero. Home-location and cable-on updates cannot.
+            vehicle_observed_at = _latest_ev_observed_at(
+                charging_state_observed_at if charging_state_known else None,
+                measured_power_observed_at,
+            )
+            charging_observed_at = (
+                charging_state_observed_at
+                if charging_state_known
+                else measured_power_observed_at
+            )
+            vehicle_connected_observed_at = connected_observed_at
 
         vehicle_status = {
             "vehicle_id": vehicle_id,
@@ -1696,6 +1789,8 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             "is_charging": is_charging and ev_power_kw > 0.05,
             "_charging_state_known": charging_state_known,
             "_observed_at": vehicle_observed_at,
+            "_charging_observed_at": charging_observed_at,
+            "_connected_observed_at": vehicle_connected_observed_at,
         }
         if away_from_home:
             vehicle_status["site_presence"] = "away"
@@ -1753,33 +1848,43 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         ev_power_kw = 0.0
         ev_soc = None
         is_connected = False
-        ble_observed_at = None
+        ble_state_observed_at = None
+        ble_power_observed_at = None
+        ble_connected_observed_at = None
 
         charge_state = hass.states.get(TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=prefix))
         if charge_state and charge_state.state not in ("unknown", "unavailable"):
-            ble_observed_at = _latest_ev_observed_at(
-                ble_observed_at,
+            ble_state_observed_at = _latest_ev_observed_at(
+                ble_state_observed_at,
                 getattr(charge_state, "last_updated", None),
             )
             plugged = charging_state_plugged_status(charge_state.state)
             if plugged is not None:
                 is_connected = plugged
+                ble_connected_observed_at = _latest_ev_observed_at(
+                    ble_connected_observed_at,
+                    getattr(charge_state, "last_updated", None),
+                )
 
         charge_flap = hass.states.get(TESLA_BLE_BINARY_CHARGE_FLAP.format(prefix=prefix))
         if charge_flap:
-            ble_observed_at = _latest_ev_observed_at(
-                ble_observed_at,
-                getattr(charge_flap, "last_updated", None),
-            )
             if charge_flap.state == "on":
                 is_connected = True
+                ble_connected_observed_at = _latest_ev_observed_at(
+                    ble_connected_observed_at,
+                    getattr(charge_flap, "last_updated", None),
+                )
             elif charge_flap.state == "off":
                 is_connected = False
+                ble_connected_observed_at = _latest_ev_observed_at(
+                    ble_connected_observed_at,
+                    getattr(charge_flap, "last_updated", None),
+                )
 
         power_state = hass.states.get(TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix))
         if power_state:
-            ble_observed_at = _latest_ev_observed_at(
-                ble_observed_at,
+            ble_power_observed_at = _latest_ev_observed_at(
+                ble_power_observed_at,
                 getattr(power_state, "last_updated", None),
             )
         power_kw = _kw_from_power_state(power_state)
@@ -1813,7 +1918,20 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             "ev_soc": ev_soc,
             "is_connected": is_connected,
             "is_charging": ev_power_kw > 0.05,
-            "_observed_at": ble_observed_at,
+            "_observed_at": (
+                ble_power_observed_at
+                or ble_state_observed_at
+            ),
+            "_charging_observed_at": (
+                ble_power_observed_at
+                if ev_power_kw > 0.05
+                else ble_state_observed_at or ble_power_observed_at
+            ),
+            "_connected_observed_at": (
+                ble_connected_observed_at
+                or ble_state_observed_at
+                or ble_power_observed_at
+            ),
         }
         if ev_provider == EV_PROVIDER_BOTH and bridge_vehicle_id:
             ble_observation["bridge_vehicle_id"] = bridge_vehicle_id
@@ -1921,6 +2039,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             wc_charging,
             wc_vin,
             wc_observed_at,
+            allow_heuristic=len(wc_observations) == 1,
         )
         if not matched:
             vehicles.append({
@@ -1929,16 +2048,23 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 "vehicle_name": "Wall Connector",
                 "ev_power_kw": wc_power,
                 "ev_soc": None,
-                "is_connected": True,
+                "is_connected": wc_connected,
                 "is_charging": wc_charging or wc_power > 0.05,
                 "_observed_at": wc_observed_at,
+                "_charging_observed_at": wc_observed_at,
+                "_connected_observed_at": wc_observed_at,
             })
 
     coalesced = [dict(vehicle) for vehicle in coalesce_vehicle_observations(vehicles)]
     for vehicle in coalesced:
         vehicle.pop("_charging_state_known", None)
-        if vehicle.get("_observed_at") is None:
-            vehicle.pop("_observed_at", None)
+        for timestamp_field in (
+            "_observed_at",
+            "_charging_observed_at",
+            "_connected_observed_at",
+        ):
+            if vehicle.get(timestamp_field) is None:
+                vehicle.pop(timestamp_field, None)
     return coalesced
 
 
