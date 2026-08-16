@@ -571,6 +571,58 @@ def test_tesla_physical_start_requires_fresh_state_and_measured_draw():
     assert "15.0A" in confirmed[1]
 
 
+def test_tesla_physical_start_allows_delayed_cloud_draw(monkeypatch):
+    """A real start must not be cancelled at the former 90-second boundary."""
+    hass, vin_a, _vin_b = _tesla_confirmation_hass()
+    command_started_at = datetime.now(timezone.utc)
+    baseline = actions._tesla_physical_charging_snapshot(
+        hass,
+        _Entry(),
+        vin_a,
+        {},
+    )
+    elapsed = [0.0]
+
+    class _Clock:
+        @staticmethod
+        def time():
+            return elapsed[0]
+
+    async def advance(seconds):
+        elapsed[0] += seconds
+        if elapsed[0] >= 100:
+            charging = hass.states.get("sensor.car_a_charging")
+            charging.state = "charging"
+            charging.last_updated = command_started_at + timedelta(
+                seconds=elapsed[0]
+            )
+        if elapsed[0] >= 120:
+            current = hass.states.get("sensor.car_a_charger_actual_current")
+            current.state = "10"
+            current.last_updated = command_started_at + timedelta(
+                seconds=elapsed[0]
+            )
+
+    monkeypatch.setattr(actions.asyncio, "get_running_loop", lambda: _Clock())
+    monkeypatch.setattr(actions.asyncio, "sleep", advance)
+
+    confirmed = asyncio.run(
+        actions._wait_for_tesla_physical_start(
+            hass,
+            _Entry(),
+            vin_a,
+            {},
+            baseline,
+            command_started_at,
+        )
+    )
+
+    assert actions._TESLA_START_CONFIRMATION_TIMEOUT_SECONDS == 150
+    assert confirmed[0] is True
+    assert "10.0A" in confirmed[1]
+    assert elapsed[0] == 120
+
+
 def test_tesla_physical_start_rejects_stale_and_other_vin_telemetry():
     hass, vin_a, vin_b = _tesla_confirmation_hass()
     command_started_at = datetime.now(timezone.utc)

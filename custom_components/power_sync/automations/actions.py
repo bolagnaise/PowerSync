@@ -926,7 +926,12 @@ _TESLA_NON_CHARGING_STATES = frozenset(
     }
 )
 _TESLA_RESTART_TELEMETRY_GRACE_SECONDS = 90
-_TESLA_START_CONFIRMATION_TIMEOUT_SECONDS = 90
+# Cloud-backed Tesla providers can acknowledge the start command before their
+# charging-state and measured-draw entities catch up. Production telemetry has
+# shown the physical transition arriving just after the old 90-second cutoff,
+# at which point the compensating stop cancelled a valid deadline charge. Keep
+# the VIN-scoped state-plus-draw requirement, but allow that telemetry to settle.
+_TESLA_START_CONFIRMATION_TIMEOUT_SECONDS = 150
 _TESLA_START_CONFIRMATION_POLL_SECONDS = 5
 
 
