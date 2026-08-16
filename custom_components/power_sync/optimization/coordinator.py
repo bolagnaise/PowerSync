@@ -34,6 +34,10 @@ from .cost_neutral import (
 from .schedule_reader import OptimizationSchedule, ScheduleAction
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
+from .manual_control import (
+    ManualControlProjection,
+    build_manual_control_projection,
+)
 from .solar_forecast_learning import SolarForecastLearner
 from .solar_provenance import derive_solar_forecast_provenance
 from .solar_export import SolarExportHoldController, resolve_solar_export_adapter
@@ -437,6 +441,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Built-in optimizer
         self._optimizer: BatteryOptimizer | None = None
         self._last_optimizer_result: OptimizerResult | None = None
+        self._last_manual_control_projection: dict[str, Any] = {
+            "active": False,
+        }
 
         # Data collection components
         self._load_estimator: LoadEstimator | None = None
@@ -5625,6 +5632,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._sync_grid_export_cap_to_optimizer()
             self._sync_optimizer_discharge_limits()
             schedule_timestamps = self._price_timestamps(len(import_prices))
+            manual_control_projection = build_manual_control_projection(
+                self._get_active_force_state(),
+                schedule_timestamps,
+                current_soc=soc,
+                capacity_wh=capacity,
+                max_charge_w=self._config.max_charge_w,
+                max_discharge_w=self._config.max_discharge_w,
+                hardware_reserve=getattr(
+                    self._optimizer,
+                    "hardware_reserve",
+                    self._config.backup_reserve,
+                ),
+                efficiency=getattr(self._optimizer, "efficiency", 1.0),
+                interval_minutes=self._config.interval_minutes,
+            )
+            self._last_manual_control_projection = (
+                manual_control_projection.status_payload()
+                if manual_control_projection is not None
+                else {"active": False}
+            )
+            manual_control_payload = (
+                manual_control_projection.optimizer_payload()
+                if manual_control_projection is not None
+                else None
+            )
             grid_export_limits_w: list[float | None] | None = None
             published_grid_export_limits_w: list[float | None] | None = None
             network_manager = self.hass.data.get("power_sync", {}).get(
@@ -5838,6 +5870,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         cost_neutral_fixed_cost_allowance,
                         cost_neutral_plan,
                         solar_export_slots or profit_max_solar_export_slots,
+                        manual_control_payload,
                     )
                 finally:
                     if reserve_floor is not None:
@@ -5907,6 +5940,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 schedule = self._apply_offgrid_overlay(
                     schedule, export_prices,
                 )
+            schedule = self._annotate_manual_control_schedule(
+                schedule,
+                manual_control_projection,
+            )
             result = self._optimizer.reconcile_result_with_schedule(
                 result,
                 schedule,
@@ -5932,6 +5969,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._restore_bridged_export_gap_provenance(
                 schedule,
                 result.schedule,
+            )
+            self._annotate_manual_control_schedule(
+                result.schedule,
+                manual_control_projection,
+            )
+            result.lp_stats["manual_control_projection_slots"] = (
+                manual_control_projection.slot_count
+                if manual_control_projection is not None
+                else 0
             )
             self._set_forecast_bridge_reserve_recommendation(
                 result,
@@ -5999,6 +6045,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     schedule = self._apply_offgrid_overlay(
                         schedule, export_prices,
                     )
+                schedule = self._annotate_manual_control_schedule(
+                    schedule,
+                    manual_control_projection,
+                )
                 result = self._optimizer.reconcile_result_with_schedule(
                     result,
                     schedule,
@@ -6024,6 +6074,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._restore_bridged_export_gap_provenance(
                     schedule,
                     result.schedule,
+                )
+                self._annotate_manual_control_schedule(
+                    result.schedule,
+                    manual_control_projection,
+                )
+                result.lp_stats["manual_control_projection_slots"] = (
+                    manual_control_projection.slot_count
+                    if manual_control_projection is not None
+                    else 0
                 )
                 final_recommendation = dict(
                     getattr(result, "reserve_recommendation", {}) or {}
@@ -7381,6 +7440,35 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         active.setdefault("source", "optimizer")
         active.setdefault("scope", "optimizer")
         return active
+
+    @staticmethod
+    def _annotate_manual_control_schedule(
+        schedule: OptimizationSchedule,
+        projection: ManualControlProjection | None,
+    ) -> OptimizationSchedule:
+        """Mark fixed manual slots without claiming hardware acknowledgement."""
+        if projection is None:
+            return schedule
+        projected_action = {
+            "charge": "charge",
+            "discharge": "export",
+            "export": "export",
+            "hold_soc": "idle",
+            "self_consumption": "self_consumption",
+        }.get(projection.control_type)
+        for idx, action in enumerate(schedule.actions or []):
+            if idx >= len(projection.active_slots) or not projection.active_slots[idx]:
+                continue
+            if projected_action is not None:
+                action.action = projected_action
+                if projected_action == "charge":
+                    action.power_w = action.battery_charge_w
+                elif projected_action == "idle":
+                    action.power_w = 0.0
+            action.reason = "manual_control_projection"
+            action.control_source = "manual"
+            action.control_action = projection.control_type
+        return schedule
 
     def get_active_force_state(self) -> dict[str, Any]:
         """Return the active force state, including optimizer-owned hardware force."""
@@ -16133,6 +16221,34 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             },
             "warnings": self._get_warnings(),
         }
+        active_force = self._get_active_force_state()
+        cached_manual_projection = dict(
+            getattr(
+                self,
+                "_last_manual_control_projection",
+                {"active": False},
+            )
+        )
+        if (
+            not active_force.get("active")
+            or active_force.get("source") == "optimizer"
+        ):
+            cached_manual_projection = {"active": False}
+        elif (
+            not cached_manual_projection.get("active")
+            or cached_manual_projection.get("control_type")
+            != active_force.get("type")
+        ):
+            expires_at = self._as_utc_datetime(active_force.get("expires_at"))
+            cached_manual_projection = {
+                "active": True,
+                "control_type": active_force.get("type"),
+                "control_source": "manual",
+                "projection": "pending",
+                "expires_at": expires_at.isoformat() if expires_at else None,
+                "projected_slots": 0,
+            }
+        data["manual_control_projection"] = cached_manual_projection
 
         energy_data = self._get_energy_data()
         if isinstance(energy_data, dict):
@@ -16381,6 +16497,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     and action_ranges[-1]["action"] == ad["action"]
                     and action_ranges[-1].get("action_detail")
                     == ad.get("action_detail")
+                    and action_ranges[-1].get("control_source")
+                    == ad.get("control_source")
+                    and action_ranges[-1].get("control_action")
+                    == ad.get("control_action")
                 ):
                     # Extend the current range — update end SOC
                     action_ranges[-1]["end_time"] = interval_end
@@ -16411,6 +16531,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         **(
                             {"planned_action": ad["planned_action"]}
                             if ad.get("planned_action")
+                            else {}
+                        ),
+                        **(
+                            {"control_source": ad["control_source"]}
+                            if ad.get("control_source")
+                            else {}
+                        ),
+                        **(
+                            {"control_action": ad["control_action"]}
+                            if ad.get("control_action")
                             else {}
                         ),
                         "timestamp": ad["timestamp"],

@@ -1775,6 +1775,47 @@ def test_self_consumption_service_is_timed_and_persisted():
     assert "auto_restore_self_consumption_persisted" in restore
 
 
+def test_external_force_mutations_schedule_immediate_optimizer_replan():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    persist = ast.get_source_segment(
+        source,
+        _find_function(tree, "persist_force_mode_state"),
+    )
+    replan = ast.get_source_segment(
+        source,
+        _find_function(tree, "_run_manual_control_replan"),
+    )
+
+    assert persist is not None
+    assert replan is not None
+    assert "_manual_projection_signature(state_to_save)" in persist
+    assert "_request_manual_control_replan()" in persist
+    assert 'get("optimization_coordinator")' in replan
+    assert "await coordinator.force_reoptimize()" in replan
+
+
+def test_automation_self_consumption_is_an_external_projected_control():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    handler = ast.get_source_segment(
+        source,
+        _find_function(tree, "handle_set_self_consumption"),
+    )
+    getter = ast.get_source_segment(
+        source,
+        _find_function(tree, "get_force_state"),
+    )
+
+    assert handler is not None
+    assert getter is not None
+    assert '"automation"' in handler
+    assert 'self_consumption_state["source"] = source' in handler
+    assert 'self_consumption_state.get("source", "user")' in getter
+    assert 'force_charge_state.get("power_w", 0)' in getter
+    assert 'force_discharge_state.get("power_w", 0)' in getter
+
+
 def test_self_consumption_service_schema_exposes_duration():
     source = SERVICES_PATH.read_text()
     section = source.split("set_self_consumption:", 1)[1].split(

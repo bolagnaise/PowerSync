@@ -44,6 +44,22 @@ cannot block an eligible export today.
 The battery's own backup reserve. PowerSync restores this value after temporary
 hold or force-control modes.
 
+### Timed manual controls in the Action Plan
+
+When an external PowerSync control is active — Force Charge, Force Discharge,
+Hold SoC, or timed Self-Consumption — Smart Optimization immediately rebuilds
+the forward plan. The control is fixed for the slots covered by its timer, its
+effect on forecast battery SOC is included, and the remaining horizon is then
+optimized from that projected state. Canceling, replacing, extending, or
+expiring the control triggers another plan rebuild.
+
+The Action Plan/API labels these slots with `control_source: manual`, the
+specific `control_action`, and `action_reason: manual_control_projection`.
+These fields describe planned projection, not a new hardware acknowledgement;
+the existing force-control state and device telemetry remain the evidence of
+what the battery actually accepted. Monitoring-only connection methods remain
+write-free.
+
 ### Allow grid charging
 
 When enabled, Smart Optimization may plan forced battery charging from grid

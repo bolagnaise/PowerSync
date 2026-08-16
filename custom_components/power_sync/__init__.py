@@ -27470,6 +27470,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "engaged_at": None,
         "expires_at": None,
         "duration": 0,
+        "source": "user",
         "cancel_expiry_timer": None,
     }
 
@@ -27563,6 +27564,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         self_consumption_state["engaged_at"] = None
         self_consumption_state["expires_at"] = None
         self_consumption_state["duration"] = 0
+        self_consumption_state["source"] = "user"
         self_consumption_state["cancel_expiry_timer"] = None
         if send_update:
             async_dispatcher_send(hass, f"{DOMAIN}_self_consumption_state", {
@@ -27837,6 +27839,74 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
         return configured_power_w
 
+    def _manual_projection_signature(state: dict[str, Any] | None) -> tuple | None:
+        """Return the optimizer-relevant identity of an external control."""
+        state = state or {}
+        if (
+            state.get("mode") not in (
+                "charge",
+                "discharge",
+                "hold_soc",
+                "self_consumption",
+            )
+            or state.get("source") == "optimizer"
+        ):
+            return None
+        return (
+            state.get("mode"),
+            state.get("source", "user"),
+            state.get("expires_at"),
+            state.get("power_w"),
+            state.get("locked_soc"),
+        )
+
+    _last_manual_projection_signature = [
+        _manual_projection_signature(persisted_force_state)
+    ]
+    _manual_replan_runtime: dict[str, Any] = {
+        "requested": False,
+        "task": None,
+    }
+
+    async def _run_manual_control_replan() -> None:
+        """Coalesce force mutations into fresh optimizer projections."""
+        try:
+            while _manual_replan_runtime["requested"]:
+                _manual_replan_runtime["requested"] = False
+                await asyncio.sleep(0)
+                coordinator = (
+                    hass.data.get(DOMAIN, {})
+                    .get(entry.entry_id, {})
+                    .get("optimization_coordinator")
+                )
+                if coordinator is None or not getattr(
+                    coordinator,
+                    "enabled",
+                    False,
+                ):
+                    continue
+                try:
+                    await coordinator.force_reoptimize()
+                except Exception as err:
+                    _LOGGER.warning(
+                        "Manual control changed but immediate optimizer replan failed: %s",
+                        err,
+                        exc_info=True,
+                    )
+        finally:
+            _manual_replan_runtime["task"] = None
+            if _manual_replan_runtime["requested"]:
+                _request_manual_control_replan()
+
+    def _request_manual_control_replan() -> None:
+        """Schedule a non-blocking replan after a manual control mutation."""
+        _manual_replan_runtime["requested"] = True
+        task = _manual_replan_runtime.get("task")
+        if task is None or task.done():
+            _manual_replan_runtime["task"] = hass.async_create_task(
+                _run_manual_control_replan()
+            )
+
     # Helper function to persist force mode state to storage
     async def persist_force_mode_state() -> None:
         """Persist current force charge/discharge/hold state to storage."""
@@ -27901,7 +27971,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "expires_at": self_consumption_state["expires_at"].isoformat() if self_consumption_state.get("expires_at") else None,
                 "duration": self_consumption_state.get("duration"),
                 "engaged_at": self_consumption_state["engaged_at"].isoformat() if self_consumption_state.get("engaged_at") else None,
-                "source": "user",
+                "source": self_consumption_state.get("source", "user"),
             }
 
         if state_to_save and state_to_save.get("mode") in ("charge", "discharge"):
@@ -27925,6 +27995,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             tesla_grid_charging_preferences
         )
         await store.async_save(stored_data)
+        try:
+            manual_signature = _manual_projection_signature(state_to_save)
+            if manual_signature != _last_manual_projection_signature[0]:
+                _last_manual_projection_signature[0] = manual_signature
+                _request_manual_control_replan()
+        except NameError:
+            # Source-extracted persistence tests intentionally execute this
+            # nested helper without its setup-entry closure.
+            pass
         if state_to_save:
             _LOGGER.debug(f"Persisted force mode state: {state_to_save['mode']} expires {state_to_save['expires_at']}")
         else:
@@ -28091,6 +28170,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     self_consumption_state["expires_at"] = expires_at
                     self_consumption_state["duration"] = duration or 0
                     self_consumption_state["engaged_at"] = engaged_at
+                    self_consumption_state["source"] = persisted_source
 
                     restore_completed = await _restore_persisted_normal(
                         {"source": "user"}
@@ -28116,6 +28196,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     self_consumption_state["expires_at"] = expires_at
                     self_consumption_state["duration"] = duration or int(remaining_minutes)
                     self_consumption_state["engaged_at"] = engaged_at or now
+                    self_consumption_state["source"] = persisted_source
 
                     _restore_gen_self_persisted = _command_generation[0]
 
@@ -35329,7 +35410,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 lambda _guarded_w: writer(),
             )
 
-        user_owned_override = source in ("user", "manual", "unknown")
+        user_owned_override = source in (
+            "user",
+            "manual",
+            "automation",
+            "unknown",
+        )
 
         if user_owned_override and (
             force_charge_state.get("active")
@@ -35358,6 +35444,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 self_consumption_state["engaged_at"] + timedelta(minutes=duration)
             )
             self_consumption_state["duration"] = duration
+            self_consumption_state["source"] = source
             _restore_gen_self = _command_generation[0]
 
             async def auto_restore_self_consumption(_now):
@@ -39916,6 +40003,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "active": True,
                         "type": "charge",
                         "expires_at": force_charge_state.get("expires_at"),
+                        "duration": force_charge_state.get("duration"),
+                        "power_w": force_charge_state.get("power_w", 0),
                         "source": force_charge_state.get("source", "user"),
                     }
                 if force_discharge_state.get("active"):
@@ -39923,6 +40012,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "active": True,
                         "type": "discharge",
                         "expires_at": force_discharge_state.get("expires_at"),
+                        "duration": force_discharge_state.get("duration"),
+                        "power_w": force_discharge_state.get("power_w", 0),
                         "source": force_discharge_state.get("source", "user"),
                     }
                 if hold_soc_state.get("active"):
@@ -39937,7 +40028,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "active": True,
                         "type": "self_consumption",
                         "expires_at": self_consumption_state.get("expires_at"),
-                        "source": "user",
+                        "duration": self_consumption_state.get("duration"),
+                        "engaged_at": self_consumption_state.get("engaged_at"),
+                        "source": self_consumption_state.get("source", "user"),
                     }
                 return {"active": False}
 
@@ -39957,6 +40050,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 self_consumption_state["active"] = False
                 self_consumption_state["expires_at"] = None
                 self_consumption_state["duration"] = 0
+                self_consumption_state["source"] = "user"
 
             # Load settings from config entry (persisted from previous sessions)
             # Prefer data so stale options from older API writes cannot override

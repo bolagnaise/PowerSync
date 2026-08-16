@@ -21,6 +21,8 @@ class ScheduleAction:
     battery_charge_w: float = 0.0
     battery_discharge_w: float = 0.0
     reason: str | None = None
+    control_source: str | None = None
+    control_action: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for API response."""
@@ -36,6 +38,12 @@ class ScheduleAction:
         if self.action == "solar_export":
             payload["action_detail"] = "solar_export"
             payload["action_reason"] = self.reason or "profit_max_solar_export"
+        elif self.reason:
+            payload["action_reason"] = self.reason
+        if self.control_source:
+            payload["control_source"] = self.control_source
+        if self.control_action:
+            payload["control_action"] = self.control_action
         return payload
 
 
@@ -105,6 +113,9 @@ class OptimizationSchedule:
             "battery_consume_w": self.battery_consume_w,
             "battery_export_w": self.battery_export_w,
             "soc": self.soc,
+            "control_source": [a.control_source for a in self.actions],
+            "control_action": [a.control_action for a in self.actions],
+            "action_reason": [a.reason for a in self.actions],
             "grid_import_w": [],
             "grid_export_w": [],
         }

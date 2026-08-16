@@ -181,6 +181,80 @@ def test_known_hardware_floor_is_the_lp_energy_bound_even_when_export_is_permitt
 
 
 @pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_manual_export_is_fixed_to_hardware_floor_and_later_slots_reoptimize(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+):
+    """Manual export bypasses the optimizer floor, then the horizon stays free."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, backend)
+    optimizer = _optimizer(module, horizon_hours=3)
+
+    result = optimizer.optimize(
+        import_prices=[0.50, 0.10, 0.50],
+        export_prices=[0.0, 0.0, 0.0],
+        solar_forecast=[0.0, 0.0, 0.0],
+        load_forecast=[0.0, 0.0, 1.0],
+        current_soc=0.40,
+        allow_battery_export=[False, False, False],
+        allow_grid_charge=True,
+        manual_control={
+            "mode_slots": ["export", None, None],
+            "required_charge_kw": [0.0, 0.0, 0.0],
+            "required_discharge_kw": [3.0, 0.0, 0.0],
+        },
+    )
+
+    first = result.schedule.actions[0]
+    assert first.action == "export"
+    assert first.battery_discharge_w == pytest.approx(3000.0, abs=0.1)
+    assert first.soc == pytest.approx(0.10, abs=1e-6)
+    assert result.schedule.actions[1].action == "charge"
+    assert result.schedule.actions[2].battery_discharge_w == pytest.approx(
+        1000.0,
+        abs=0.1,
+    )
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_manual_charge_is_fixed_when_optimizer_grid_charge_is_disabled(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+):
+    """An accepted manual charge is modeled even when LP grid charge is off."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, backend)
+    optimizer = _optimizer(
+        module,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        horizon_hours=2,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.50, 0.50],
+        export_prices=[0.0, 0.0],
+        solar_forecast=[0.0, 0.0],
+        load_forecast=[0.0, 1.0],
+        current_soc=0.10,
+        allow_battery_export=[False, False],
+        allow_grid_charge=False,
+        manual_control={
+            "mode_slots": ["charge", None],
+            "required_charge_kw": [2.0, 0.0],
+            "required_discharge_kw": [0.0, 0.0],
+        },
+    )
+
+    first = result.schedule.actions[0]
+    assert first.action == "charge"
+    assert first.battery_charge_w == pytest.approx(2000.0, abs=0.1)
+    assert first.soc == pytest.approx(0.30, abs=1e-6)
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
 def test_intentional_export_stops_at_optimizer_reserve_then_home_reaches_hardware_floor(
     battery_optimizer_module,
     monkeypatch,
