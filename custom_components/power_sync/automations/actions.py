@@ -85,6 +85,7 @@ PRE_CHARGE_WAKE_ENTITY_KEYS = (
 )
 OCPP_MIN_CHARGE_AMPS = 6
 TESLA_UNKNOWN_CHARGER_SAFE_AMPS = 5
+TESLA_CONNECTION_CONFLICT_FRESHNESS_SECONDS = 60
 FULL_EV_SOC = 100
 SIGENERGY_EVDC_DEFAULT_POWER_LIMIT_KW = 25.0
 PRE_CHARGE_WAKE_DURATION_KEYS = (
@@ -4632,8 +4633,19 @@ async def _action_stop_ev_charging(
         if charging_state and charging_state.state not in ("unavailable", "unknown"):
             state_lower = charging_state.state.lower()
             if state_lower and state_lower != "charging":
-                _LOGGER.info("EV is not charging (state: %s) - treating stop as complete", state_lower)
-                return True
+                if params.get("stop_untracked"):
+                    _LOGGER.info(
+                        "EV charging state is %s, but independent charging "
+                        "detection requested an untracked stop; sending the "
+                        "stop command",
+                        state_lower,
+                    )
+                else:
+                    _LOGGER.info(
+                        "EV is not charging (state: %s) - treating stop as complete",
+                        state_lower,
+                    )
+                    return True
 
     # Prefer the free, explicitly paired ESPHome BLE control path.
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
@@ -8600,12 +8612,67 @@ def _resolve_dynamic_max_charge_amps(
     return default, "default"
 
 
-def _tesla_source_connection_state(
+def _tesla_connection_observation_timestamp(state: Any) -> Optional[float]:
+    """Return a comparable HA observation timestamp when one is available."""
+    observed_at = getattr(state, "last_updated", None) or getattr(
+        state,
+        "last_changed",
+        None,
+    )
+    if observed_at is None:
+        return None
+    try:
+        return float(observed_at.timestamp())
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def _reconcile_tesla_connection_observations(
+    observations: list[tuple[bool, Optional[float]]],
+) -> tuple[Optional[bool], Optional[float]]:
+    """Resolve plug-state conflicts only when one observation is clearly newer."""
+    if not observations:
+        return None, None
+
+    values = {value for value, _observed_at in observations}
+    timestamps = [
+        observed_at
+        for _value, observed_at in observations
+        if observed_at is not None
+    ]
+    newest_timestamp = max(timestamps) if timestamps else None
+    if len(values) == 1:
+        return observations[0][0], newest_timestamp
+
+    # Missing timestamps or near-simultaneous disagreement must remain
+    # fail-closed. A clearly older provider state may be ignored during Tesla
+    # integration plug/unplug propagation, which is not atomic across sources.
+    if len(timestamps) != len(observations):
+        return None, newest_timestamp
+    newest_by_value = {
+        value: max(
+            observed_at
+            for observed_value, observed_at in observations
+            if observed_value == value and observed_at is not None
+        )
+        for value in values
+    }
+    newest_value = max(newest_by_value, key=newest_by_value.get)
+    oldest_value = min(newest_by_value, key=newest_by_value.get)
+    if (
+        newest_by_value[newest_value] - newest_by_value[oldest_value]
+        < TESLA_CONNECTION_CONFLICT_FRESHNESS_SECONDS
+    ):
+        return None, newest_timestamp
+    return newest_value, newest_by_value[newest_value]
+
+
+def _tesla_source_connection_observation(
     hass: HomeAssistant,
     entity_ids: list[str],
-) -> Optional[bool]:
-    """Return a definitive Tesla plug state for one telemetry source."""
-    observations: set[bool] = set()
+) -> tuple[Optional[bool], Optional[float]]:
+    """Return a Tesla plug state and source timestamp for one integration."""
+    observations: list[tuple[bool, Optional[float]]] = []
     for entity_id in entity_ids:
         state = hass.states.get(entity_id)
         if state is None or state.state in ("unknown", "unavailable", None):
@@ -8617,20 +8684,39 @@ def _tesla_source_connection_state(
             or "charge_flap" in entity_id_lower
         ):
             if state_value in ("on", "off"):
-                observations.add(state_value == "on")
+                observations.append(
+                    (
+                        state_value == "on",
+                        _tesla_connection_observation_timestamp(state),
+                    )
+                )
             continue
         if entity_id.startswith("sensor.") and re.search(
             r"_(?:charging|charging_state|charge_state)(?:_\d+)?$",
             entity_id_lower,
         ):
             if state_value in ("charging", "complete", "stopped", "full_charge"):
-                observations.add(True)
+                observations.append(
+                    (True, _tesla_connection_observation_timestamp(state))
+                )
             elif state_value in ("disconnected", "not_connected"):
-                observations.add(False)
+                observations.append(
+                    (False, _tesla_connection_observation_timestamp(state))
+                )
 
-    if len(observations) == 1:
-        return observations.pop()
-    return None
+    return _reconcile_tesla_connection_observations(observations)
+
+
+def _tesla_source_connection_state(
+    hass: HomeAssistant,
+    entity_ids: list[str],
+) -> Optional[bool]:
+    """Return a definitive Tesla plug state for one telemetry source."""
+    connection_state, _observed_at = _tesla_source_connection_observation(
+        hass,
+        entity_ids,
+    )
+    return connection_state
 
 
 def _tesla_source_capability(
@@ -8783,26 +8869,45 @@ async def _resolve_tesla_active_charger_capability(
             f"sensor.{paired_prefix}_charger_power",
         ])
 
-    connection_states: list[bool] = []
-    plugged_capabilities: list[dict[str, Any]] = []
+    connection_observations: list[
+        tuple[bool, Optional[float], dict[str, Any]]
+    ] = []
     for entity_ids in source_entity_ids:
-        connection_state = _tesla_source_connection_state(hass, entity_ids)
+        connection_state, observed_at = _tesla_source_connection_observation(
+            hass,
+            entity_ids,
+        )
         if connection_state is None:
             continue
-        connection_states.append(connection_state)
-        if connection_state:
-            plugged_capabilities.append(
-                _tesla_source_capability(hass, entity_ids)
+        connection_observations.append(
+            (
+                connection_state,
+                observed_at,
+                _tesla_source_capability(hass, entity_ids),
             )
+        )
 
-    if not connection_states or len(set(connection_states)) != 1:
-        if connection_states:
+    connection_state, _observed_at = _reconcile_tesla_connection_observations(
+        [
+            (source_state, source_observed_at)
+            for source_state, source_observed_at, _capability
+            in connection_observations
+        ]
+    )
+    if connection_state is None:
+        if connection_observations:
             result["max_charge_amps_source"] = "safe_ambiguous_charger"
         return result
-    if connection_states[0] is False:
+    if connection_state is False:
         result["max_charge_amps_source"] = "safe_unplugged"
         return result
 
+    plugged_capabilities = [
+        capability
+        for source_state, _source_observed_at, capability
+        in connection_observations
+        if source_state is True
+    ]
     result["association_known"] = True
     live_caps = [
         capability["max_amps"]

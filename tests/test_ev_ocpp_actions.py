@@ -381,6 +381,119 @@ def test_tesla_active_charger_capability_rejects_conflicting_sources_and_unknown
     assert unknown["max_charge_amps"] == 5
 
 
+def test_tesla_active_charger_capability_ignores_clearly_stale_plug_conflict():
+    now = datetime.now(timezone.utc)
+    hass, vin_a, _vin_b = _tesla_capability_hass(first_max=10)
+    hass.states.get("binary_sensor.car_a_charge_cable").last_changed = now
+    hass.states.get("binary_sensor.car_a_charge_cable").last_updated = now
+    hass.device_registry.devices["car-a-stale"] = SimpleNamespace(
+        id="car-a-stale",
+        identifiers={("tesla_fleet", vin_a)},
+    )
+    for entity_id in (
+        "binary_sensor.car_a_stale_charge_cable",
+        "number.car_a_stale_charge_current",
+    ):
+        hass.entity_registry.entities[entity_id] = SimpleNamespace(
+            entity_id=entity_id,
+            device_id="car-a-stale",
+        )
+    hass.states._states["binary_sensor.car_a_stale_charge_cable"] = _State(
+        "binary_sensor.car_a_stale_charge_cable",
+        "off",
+        last_updated=now - timedelta(minutes=10),
+    )
+    hass.states._states["number.car_a_stale_charge_current"] = _State(
+        "number.car_a_stale_charge_current",
+        "32",
+        {"min": 0, "max": 32},
+    )
+
+    capability = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+        )
+    )
+
+    assert capability["association_known"] is True
+    assert capability["capability_known"] is True
+    assert capability["max_charge_amps"] == 10
+    assert capability["max_charge_amps_source"] == "active_charger"
+
+
+def test_tesla_active_charger_capability_keeps_recent_conflict_fail_closed():
+    now = datetime.now(timezone.utc)
+    hass, vin_a, _vin_b = _tesla_capability_hass(first_max=10)
+    hass.states.get("binary_sensor.car_a_charge_cable").last_changed = now
+    hass.states.get("binary_sensor.car_a_charge_cable").last_updated = now
+    hass.device_registry.devices["car-a-conflict"] = SimpleNamespace(
+        id="car-a-conflict",
+        identifiers={("teslemetry", vin_a)},
+    )
+    hass.entity_registry.entities[
+        "binary_sensor.car_a_conflict_charge_cable"
+    ] = SimpleNamespace(
+        entity_id="binary_sensor.car_a_conflict_charge_cable",
+        device_id="car-a-conflict",
+    )
+    hass.states._states["binary_sensor.car_a_conflict_charge_cable"] = _State(
+        "binary_sensor.car_a_conflict_charge_cable",
+        "off",
+        last_updated=now - timedelta(seconds=30),
+    )
+
+    capability = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+        )
+    )
+
+    assert capability["association_known"] is False
+    assert capability["max_charge_amps"] == 5
+    assert capability["max_charge_amps_source"] == "safe_ambiguous_charger"
+
+
+def test_tesla_active_charger_capability_prefers_fresh_unplugged_state():
+    now = datetime.now(timezone.utc)
+    hass, vin_a, _vin_b = _tesla_capability_hass(
+        first_max=10,
+        first_cable="off",
+    )
+    hass.states.get("binary_sensor.car_a_charge_cable").last_changed = now
+    hass.states.get("binary_sensor.car_a_charge_cable").last_updated = now
+    hass.device_registry.devices["car-a-stale"] = SimpleNamespace(
+        id="car-a-stale",
+        identifiers={("teslemetry", vin_a)},
+    )
+    hass.entity_registry.entities[
+        "binary_sensor.car_a_stale_charge_cable"
+    ] = SimpleNamespace(
+        entity_id="binary_sensor.car_a_stale_charge_cable",
+        device_id="car-a-stale",
+    )
+    hass.states._states["binary_sensor.car_a_stale_charge_cable"] = _State(
+        "binary_sensor.car_a_stale_charge_cable",
+        "on",
+        last_updated=now - timedelta(minutes=10),
+    )
+
+    capability = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+        )
+    )
+
+    assert capability["association_known"] is False
+    assert capability["max_charge_amps"] == 5
+    assert capability["max_charge_amps_source"] == "safe_unplugged"
+
+
 def _tesla_confirmation_hass():
     vin_a = "5YJTEST00000000A1"
     vin_b = "5YJTEST00000000B2"
@@ -984,6 +1097,61 @@ def test_tesla_reconciliation_stop_bypasses_stale_stopped_and_away_guards(
     assert wake_calls == [vin_a]
     assert cancelled_stops == []
     assert actions._ev_scheduled_stop["entry-1"]["vehicle_vin"] == vin_b
+    assert hass.services.calls == [
+        ("switch", "turn_off", {"entity_id": "switch.car_a_charge"})
+    ]
+
+
+def test_tesla_untracked_stop_bypasses_stale_stopped_state_but_checks_location(
+    monkeypatch,
+):
+    vin = "5YJTEST00000000A1"
+    states = [
+        _State("sensor.car_a_charging", "stopped"),
+        _State("switch.car_a_charge", "on"),
+    ]
+    hass = _Hass(
+        states,
+        registry_entities={
+            state.entity_id: SimpleNamespace(
+                entity_id=state.entity_id,
+                device_id="car-a",
+            )
+            for state in states
+        },
+        registry_devices={
+            "car-a": SimpleNamespace(
+                id="car-a",
+                name="Car A",
+                identifiers={("tesla_fleet", vin)},
+            ),
+        },
+    )
+    _install_away_location_module(monkeypatch, None)
+    wake_calls: list[str] = []
+
+    async def wake_success(_hass, vehicle_vin):
+        wake_calls.append(vehicle_vin)
+        return True
+
+    monkeypatch.setattr(actions, "_wake_tesla_ev", wake_success)
+
+    result = asyncio.run(
+        actions._action_stop_ev_charging(
+            hass,
+            _tesla_entry(),
+            {
+                "charger_type": "tesla",
+                "vehicle_id": vin,
+                "vehicle_vin": vin,
+                "owner_mode": "smart_schedule",
+                "stop_untracked": True,
+            },
+        )
+    )
+
+    assert result is True
+    assert wake_calls == [vin]
     assert hass.services.calls == [
         ("switch", "turn_off", {"entity_id": "switch.car_a_charge"})
     ]
