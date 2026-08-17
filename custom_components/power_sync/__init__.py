@@ -1233,6 +1233,44 @@ def _latest_ev_site_presence(
     return presence, observed_at
 
 
+def _site_vehicle_candidates(vehicles: list[dict]) -> list[dict]:
+    """Return one onsite candidate per physical vehicle identity."""
+    grouped: dict[str, list[dict]] = {}
+    for index, vehicle in enumerate(vehicles):
+        charger_id = str(vehicle.get("charger_id") or "").lower()
+        if charger_id.startswith("wall_connector_"):
+            continue
+        identity = _vehicle_identity_key(
+            vehicle.get("bridge_vehicle_id")
+            or vehicle.get("vehicle_id")
+            or vehicle.get("vin")
+        )
+        grouped.setdefault(identity or f"row:{index}", []).append(vehicle)
+
+    candidates = []
+    for matching_vehicles in grouped.values():
+        site_presence, _ = _latest_ev_site_presence(
+            (
+                vehicle.get("site_presence"),
+                vehicle.get("_site_presence_observed_at"),
+            )
+            for vehicle in matching_vehicles
+        )
+        if site_presence == "away":
+            continue
+        candidates.append(
+            next(
+                (
+                    vehicle
+                    for vehicle in matching_vehicles
+                    if vehicle.get("site_presence") == "home"
+                ),
+                matching_vehicles[0],
+            )
+        )
+    return candidates
+
+
 def _apply_wall_connector_observation(
     vehicles: list[dict],
     wc_power_kw: float,
@@ -1354,11 +1392,7 @@ def _apply_wall_connector_observation(
     # Assistant currently places outside the home zone.  Keep direct VIN
     # matches authoritative, but do not let the single-vehicle heuristic turn
     # a named-zone vehicle into a home loadpoint.
-    site_vehicles = [
-        vehicle
-        for vehicle in vehicles
-        if vehicle.get("site_presence") != "away"
-    ]
+    site_vehicles = _site_vehicle_candidates(vehicles)
     charging_vehicles = [
         vehicle for vehicle in site_vehicles
         if bool(vehicle.get("is_charging")) or (vehicle.get("ev_power_kw") or 0) > 0.05
@@ -2259,6 +2293,19 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 # left.  Retain a separate row for topology, but zero power plus
                 # authoritative away presence must not render a vehicle onsite.
                 if site_presence == "away":
+                    connector_connected = False
+                    connector_charging = False
+            elif not wc_vin and wc_power <= 0.05:
+                # A DIN/serial-only state can lag after the site's only known
+                # physical Tesla leaves.  Resolve duplicate VIN presence
+                # before deciding whether that unidentified zero-power row can
+                # represent an onsite vehicle.  Positive measured connectors
+                # remain independent physical loads.
+                has_away_vehicle = any(
+                    vehicle.get("site_presence") == "away"
+                    for vehicle in vehicles
+                )
+                if has_away_vehicle and not _site_vehicle_candidates(vehicles):
                     connector_connected = False
                     connector_charging = False
             vehicles.append({

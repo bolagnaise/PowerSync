@@ -1736,6 +1736,174 @@ def test_away_vehicle_fences_zero_power_charging_connector_display_contract():
     assert sensor["is_charging"] is False
 
 
+def test_vinless_zero_power_connector_cannot_revive_only_away_vehicle():
+    """Ticket #204: a DIN-only idle connector cannot invent onsite presence."""
+    power_sync = _power_sync_module()
+    loadpoint_status = importlib.import_module(
+        "power_sync.automations.loadpoint_status"
+    )
+    ev_display = importlib.import_module("power_sync.ev_display")
+    vehicle_id = "5YJTEST0000000001"
+    current = datetime(2026, 8, 17, 5, 47, 19, tzinfo=timezone.utc)
+
+    for device_order in (
+        ("away",),
+        ("away", "duplicate"),
+        ("duplicate", "away"),
+    ):
+        devices = {}
+        for kind in device_order:
+            device_id = f"device-{kind}"
+            devices[device_id] = SimpleNamespace(
+                id=device_id,
+                name="TL",
+                identifiers={("teslemetry", vehicle_id)},
+            )
+        tracker = _State(
+            "device_tracker.tl_location",
+            "work",
+            last_updated=current,
+        )
+        battery = _State(
+            "sensor.tl_battery_level",
+            "64",
+            last_updated=current,
+        )
+        hass = _Hass(
+            [tracker, battery],
+            {
+                tracker.entity_id: _entity(tracker.entity_id, "device-away"),
+                battery.entity_id: _entity(battery.entity_id, "device-away"),
+            },
+            devices,
+            entry_data={
+                "tesla_coordinator": SimpleNamespace(data={
+                    "wall_connectors_raw": [{
+                        "wall_connector_state": 2,
+                        "wall_connector_power": 0,
+                        "din": "1529455-42-H--PGT26089015211",
+                    }],
+                    "last_update": current,
+                })
+            },
+        )
+
+        vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+        loadpoints = loadpoint_status.build_loadpoint_status({}, vehicles)
+        sensor = ev_display.display_snapshot_to_sensor_data({
+            "site": {
+                "ev_power_kw": 0.0,
+                "observation_quality": "complete",
+            },
+            "loadpoints": loadpoints,
+        })
+
+        assert [loadpoint["vehicle_name"] for loadpoint in loadpoints] == ["TL"]
+        assert loadpoints[0]["site_presence"] == "away"
+        assert loadpoints[0]["connected"] is False
+        assert loadpoints[0]["actual_charging"] is False
+        assert sensor["vehicle_id"] == vehicle_id
+        assert sensor["vehicle_count"] == 1
+        assert sensor["loadpoint_count"] == 1
+        assert sensor["site_presence"] == "away"
+        assert sensor["is_connected"] is False
+        assert sensor["is_charging"] is False
+
+
+def test_vinless_positive_connector_remains_distinct_from_away_vehicle():
+    """A measured unidentified connector remains a separate physical load."""
+    power_sync = _power_sync_module()
+    vehicle_id = "5YJTEST0000000001"
+    current = datetime(2026, 8, 17, 5, 47, 19, tzinfo=timezone.utc)
+    tracker = _State(
+        "device_tracker.tl_location",
+        "work",
+        last_updated=current,
+    )
+    hass = _Hass(
+        [tracker],
+        {tracker.entity_id: _entity(tracker.entity_id, "device-away")},
+        {
+            "device-away": SimpleNamespace(
+                id="device-away",
+                name="TL",
+                identifiers={("teslemetry", vehicle_id)},
+            )
+        },
+        entry_data={
+            "tesla_coordinator": SimpleNamespace(data={
+                "wall_connectors_raw": [{
+                    "wall_connector_state": 2,
+                    "wall_connector_power": 7000,
+                    "din": "1529455-42-H--PGT26089015211",
+                }],
+                "last_update": current,
+            })
+        },
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    connector = next(
+        vehicle for vehicle in vehicles
+        if vehicle.get("charger_id")
+        == "wall_connector_1529455-42-H--PGT26089015211"
+    )
+
+    assert connector["ev_power_kw"] == 7.0
+    assert connector["is_connected"] is True
+    assert connector["is_charging"] is True
+
+
+def test_vinless_connector_accepts_newer_home_presence_for_same_vehicle():
+    """A newer home transition must reopen the DIN-only attribution path."""
+    power_sync = _power_sync_module()
+    vehicle_id = "5YJTEST0000000001"
+    current = datetime(2026, 8, 17, 5, 47, 19, tzinfo=timezone.utc)
+    states = []
+    entities = {}
+    devices = {}
+    for kind, presence, observed_at in (
+        ("away", "work", current),
+        ("home", "home", current + timedelta(seconds=60)),
+    ):
+        device_id = f"device-{kind}"
+        tracker = _State(
+            f"device_tracker.tl_location_{kind}",
+            presence,
+            last_updated=observed_at,
+        )
+        states.append(tracker)
+        entities[tracker.entity_id] = _entity(tracker.entity_id, device_id)
+        devices[device_id] = SimpleNamespace(
+            id=device_id,
+            name="TL",
+            identifiers={("teslemetry", vehicle_id)},
+        )
+    hass = _Hass(
+        states,
+        entities,
+        devices,
+        entry_data={
+            "tesla_coordinator": SimpleNamespace(data={
+                "wall_connectors_raw": [{
+                    "wall_connector_state": 2,
+                    "wall_connector_power": 0,
+                    "din": "1529455-42-H--PGT26089015211",
+                }],
+                "last_update": current + timedelta(seconds=90),
+            })
+        },
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+
+    assert len(vehicles) == 1
+    assert vehicles[0]["vehicle_id"] == vehicle_id
+    assert vehicles[0]["site_presence"] == "home"
+    assert vehicles[0]["is_connected"] is True
+    assert vehicles[0]["is_charging"] is True
+
+
 def test_duplicate_same_vin_newer_home_tracker_allows_exact_wall_connector():
     """A newer home observation restores exact-VIN attribution after travel."""
     power_sync = _power_sync_module()
