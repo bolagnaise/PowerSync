@@ -5043,6 +5043,62 @@ def test_auto_schedule_deadline_preserves_lower_active_tesla_limit(
     assert "reports a 15A limit" in caplog.text
 
 
+def test_auto_schedule_deadline_preserves_exact_wall_connector_override(
+    monkeypatch,
+    fake_actions,
+):
+    """Deadline mode must retain the guarded stale BLE max override."""
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: SimpleNamespace(weekday=lambda: 0),
+    )
+
+    executor = ev_planner.AutoScheduleExecutor(
+        _FakeHass(),
+        _FakeConfigEntry(),
+        planner=SimpleNamespace(),
+    )
+    executor._resolve_effective_charger_capability = AsyncMock(
+        return_value={
+            "association_known": True,
+            "capability_known": True,
+            "max_charge_amps": 32,
+            "max_charge_amps_source": "active_wall_connector_vehicle",
+            "voltage": 230,
+            "phases": 1,
+            "allow_stale_entity_max_override": True,
+            "prefer_vin_scoped_current_control": True,
+        }
+    )
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id=VIN,
+        display_name="Model 3",
+        max_charge_amps=32,
+        limit_grid_import=False,
+    )
+    state = ev_planner.AutoScheduleState(vehicle_id=VIN)
+
+    assert asyncio.run(
+        executor._start_charging(
+            VIN,
+            settings,
+            state,
+            "grid_deadline",
+            force_max_rate=True,
+        )
+    ) is True
+
+    params = fake_actions._action_start_ev_charging_dynamic.await_args.args[2]
+    assert params["configured_max_charge_amps"] == 32
+    assert params["max_charge_amps"] == 32
+    assert params["start_amps"] == 32
+    assert params["fixed_charge_amps"] == 32
+    assert params["allow_stale_entity_max_override"] is True
+    assert params["prefer_vin_scoped_current_control"] is True
+
+
 def test_auto_schedule_unconfirmed_tesla_start_replans_and_uses_backoff(
     monkeypatch,
     fake_actions,

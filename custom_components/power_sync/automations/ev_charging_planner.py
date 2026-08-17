@@ -4479,6 +4479,7 @@ class AutoScheduleExecutor:
             "vehicle_vin": vehicle_vin,
             "amps": target_amps,
             "min_charge_amps": settings.min_charge_amps,
+            "configured_max_charge_amps": settings.max_charge_amps,
             "max_charge_amps": effective_max_amps,
             "max_charge_amps_source": (
                 active_charger["max_charge_amps_source"]
@@ -4487,7 +4488,14 @@ class AutoScheduleExecutor:
             ),
             "voltage": effective_voltage,
             "phases": effective_phases,
-            "allow_stale_entity_max_override": False,
+            "allow_stale_entity_max_override": bool(
+                active_charger
+                and active_charger.get("allow_stale_entity_max_override")
+            ),
+            "prefer_vin_scoped_current_control": bool(
+                active_charger
+                and active_charger.get("prefer_vin_scoped_current_control")
+            ),
             "charger_type": charger_type,
             "charger_switch_entity": settings.charger_switch_entity,
             "charger_amps_entity": settings.charger_amps_entity,
@@ -5385,6 +5393,7 @@ class AutoScheduleExecutor:
             self.hass,
             self.config_entry,
             vehicle_vin,
+            configured_max_amps=settings.max_charge_amps,
             configured_voltage=settings.voltage,
             configured_phases=settings.phases,
         )
@@ -7031,6 +7040,7 @@ class AutoScheduleExecutor:
             "owner_mode": "smart_schedule_solar_surplus" if source == "solar_surplus" else "smart_schedule",
             "allow_ownership_takeover": True,
             "min_charge_amps": settings.min_charge_amps,
+            "configured_max_charge_amps": settings.max_charge_amps,
             "max_charge_amps": effective_max_amps,
             "max_charge_amps_source": (
                 active_charger["max_charge_amps_source"]
@@ -7039,6 +7049,14 @@ class AutoScheduleExecutor:
             ),
             "voltage": effective_voltage,
             "phases": effective_phases,
+            "allow_stale_entity_max_override": bool(
+                active_charger
+                and active_charger.get("allow_stale_entity_max_override")
+            ),
+            "prefer_vin_scoped_current_control": bool(
+                active_charger
+                and active_charger.get("prefer_vin_scoped_current_control")
+            ),
             "charger_type": charger_type,
             "require_physical_start_confirmation": charger_type == "tesla",
             "min_battery_soc": settings.get_effective_min_battery_to_start(dt_util.now().weekday()),
@@ -7080,7 +7098,6 @@ class AutoScheduleExecutor:
                 "start_amps": effective_max_amps,
                 "fixed_charge_amps": effective_max_amps,
                 "target_battery_charge_kw": 0,
-                "allow_stale_entity_max_override": False,
             })
 
         try:

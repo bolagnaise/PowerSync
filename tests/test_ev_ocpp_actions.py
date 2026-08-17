@@ -378,6 +378,7 @@ def _tesla_capability_hass(
         state.entity_id: SimpleNamespace(
             entity_id=state.entity_id,
             device_id="car-a" if "car_a" in state.entity_id else "car-b",
+            platform="tesla_fleet",
         )
         for state in states
     }
@@ -466,6 +467,329 @@ def test_tesla_active_charger_capability_applies_lower_site_limit():
 
     assert capability["max_charge_amps"] == 20
     assert capability["max_charge_amps_source"] == "active_charger_and_site_limit"
+
+
+def test_tesla_active_charger_capability_uses_exact_wall_connector_over_stale_ble(
+    monkeypatch,
+):
+    """An exact Wall Connector VIN fences out a prior BLE pilot limit."""
+    hass, vin_a, _vin_b = _tesla_capability_hass(first_max=32)
+    hass.states._states.update({
+        "binary_sensor.teslable_charge_flap": _State(
+            "binary_sensor.teslable_charge_flap",
+            "on",
+        ),
+        "number.teslable_charging_amps": _State(
+            "number.teslable_charging_amps",
+            "5",
+            {"min": 0, "max": 15},
+        ),
+    })
+    monkeypatch.setattr(
+        actions,
+        "_resolve_ble_prefix_for_vehicle",
+        lambda _hass, _entry, _vin: "teslable",
+    )
+
+    stale_ble_only = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+            configured_max_amps=32,
+        )
+    )
+    assert stale_ble_only["max_charge_amps"] == 15
+    assert stale_ble_only["max_charge_amps_source"] == "active_charger"
+
+    hass.states._states.update({
+        "binary_sensor.tesla_wall_connector_vehicle_connected": _State(
+            "binary_sensor.tesla_wall_connector_vehicle_connected",
+            "on",
+        ),
+        "sensor.wall_connector_vehicle_2": _State(
+            "sensor.wall_connector_vehicle_2",
+            vin_a,
+        ),
+        "sensor.wall_connector_teslemetry_vehicle": _State(
+            "sensor.wall_connector_teslemetry_vehicle",
+            vin_a,
+        ),
+    })
+    hass.entity_registry.entities.update({
+        "binary_sensor.tesla_wall_connector_vehicle_connected": SimpleNamespace(
+            entity_id="binary_sensor.tesla_wall_connector_vehicle_connected",
+            device_id="wall-connector-local",
+            platform="tesla_wall_connector",
+        ),
+        "sensor.wall_connector_vehicle_2": SimpleNamespace(
+            entity_id="sensor.wall_connector_vehicle_2",
+            device_id="wall-connector-fleet",
+            platform="tesla_fleet",
+        ),
+        "sensor.wall_connector_teslemetry_vehicle": SimpleNamespace(
+            entity_id="sensor.wall_connector_teslemetry_vehicle",
+            device_id="wall-connector-teslemetry",
+            platform="teslemetry",
+        ),
+    })
+    hass.device_registry.devices.update({
+        "wall-connector-local": SimpleNamespace(
+            id="wall-connector-local",
+            identifiers={("tesla_wall_connector", "WC-SERIAL-A")},
+            serial_number="WC-SERIAL-A",
+        ),
+        "wall-connector-fleet": SimpleNamespace(
+            id="wall-connector-fleet",
+            identifiers={("tesla_fleet", "wall-connector-a")},
+            serial_number="WC-SERIAL-A",
+        ),
+        "wall-connector-teslemetry": SimpleNamespace(
+            id="wall-connector-teslemetry",
+            identifiers={("teslemetry", "wall-connector-a")},
+            serial_number="WC-SERIAL-A",
+        ),
+    })
+
+    hass.states._states[
+        "binary_sensor.tesla_wall_connector_vehicle_connected"
+    ].state = "off"
+    disconnected_wall_connector = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+            configured_max_amps=32,
+        )
+    )
+    assert disconnected_wall_connector["max_charge_amps"] == 15
+    assert "allow_stale_entity_max_override" not in disconnected_wall_connector
+
+    hass.states._states[
+        "binary_sensor.tesla_wall_connector_vehicle_connected"
+    ].state = "on"
+    exact_wall_connector = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+            configured_max_amps=32,
+        )
+    )
+
+    assert exact_wall_connector == {
+        "association_known": True,
+        "capability_known": True,
+        "max_charge_amps": 32,
+        "max_charge_amps_source": "active_wall_connector_vehicle",
+        "voltage": 240,
+        "phases": 3,
+        "allow_stale_entity_max_override": True,
+        "prefer_vin_scoped_current_control": True,
+    }
+
+    configured_limit = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+            configured_max_amps=24,
+        )
+    )
+    assert configured_limit["max_charge_amps"] == 24
+    assert configured_limit["max_charge_amps_source"] == (
+        "active_wall_connector_vehicle_and_configured_limit"
+    )
+    assert configured_limit["allow_stale_entity_max_override"] is True
+
+
+def test_tesla_active_charger_capability_keeps_ble_cap_for_conflicting_connector_vins(
+    monkeypatch,
+):
+    """Conflicting Wall Connector identities cannot lift the BLE cap."""
+    hass, vin_a, vin_b = _tesla_capability_hass(first_max=32)
+    hass.states._states.update({
+        "binary_sensor.teslable_charge_flap": _State(
+            "binary_sensor.teslable_charge_flap",
+            "on",
+        ),
+        "number.teslable_charging_amps": _State(
+            "number.teslable_charging_amps",
+            "5",
+            {"min": 0, "max": 15},
+        ),
+        "binary_sensor.tesla_wall_connector_vehicle_connected": _State(
+            "binary_sensor.tesla_wall_connector_vehicle_connected",
+            "on",
+        ),
+        "sensor.wall_connector_vehicle_2": _State(
+            "sensor.wall_connector_vehicle_2",
+            vin_a,
+        ),
+        "sensor.wall_connector_teslemetry_vehicle": _State(
+            "sensor.wall_connector_teslemetry_vehicle",
+            vin_b,
+        ),
+    })
+    hass.entity_registry.entities.update({
+        "binary_sensor.tesla_wall_connector_vehicle_connected": SimpleNamespace(
+            entity_id="binary_sensor.tesla_wall_connector_vehicle_connected",
+            device_id="wall-connector-local",
+            platform="tesla_wall_connector",
+        ),
+        "sensor.wall_connector_vehicle_2": SimpleNamespace(
+            entity_id="sensor.wall_connector_vehicle_2",
+            device_id="wall-connector-fleet",
+            platform="tesla_fleet",
+        ),
+        "sensor.wall_connector_teslemetry_vehicle": SimpleNamespace(
+            entity_id="sensor.wall_connector_teslemetry_vehicle",
+            device_id="wall-connector-teslemetry",
+            platform="teslemetry",
+        ),
+    })
+    hass.device_registry.devices.update({
+        "wall-connector-local": SimpleNamespace(
+            id="wall-connector-local",
+            identifiers={("tesla_wall_connector", "WC-SERIAL-A")},
+            serial_number="WC-SERIAL-A",
+        ),
+        "wall-connector-fleet": SimpleNamespace(
+            id="wall-connector-fleet",
+            identifiers={("tesla_fleet", "wall-connector-a")},
+            serial_number="WC-SERIAL-A",
+        ),
+        "wall-connector-teslemetry": SimpleNamespace(
+            id="wall-connector-teslemetry",
+            identifiers={("teslemetry", "wall-connector-a")},
+            serial_number="WC-SERIAL-A",
+        ),
+    })
+    monkeypatch.setattr(
+        actions,
+        "_resolve_ble_prefix_for_vehicle",
+        lambda _hass, _entry, _vin: "teslable",
+    )
+
+    capability = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+            configured_max_amps=32,
+        )
+    )
+
+    assert capability["max_charge_amps"] == 15
+    assert capability["max_charge_amps_source"] == "active_charger"
+    assert "allow_stale_entity_max_override" not in capability
+
+
+def test_tesla_active_charger_capability_supports_multiple_wall_connectors(
+    monkeypatch,
+):
+    """Each connected Wall Connector is associated by its physical serial."""
+    hass, vin_a, vin_b = _tesla_capability_hass(first_max=32, second_max=32)
+    hass.states._states.update({
+        "binary_sensor.garage_wall_connector_vehicle_connected": _State(
+            "binary_sensor.garage_wall_connector_vehicle_connected",
+            "on",
+        ),
+        "binary_sensor.driveway_wall_connector_vehicle_connected": _State(
+            "binary_sensor.driveway_wall_connector_vehicle_connected",
+            "on",
+        ),
+        "sensor.garage_wall_connector_vehicle": _State(
+            "sensor.garage_wall_connector_vehicle",
+            vin_a,
+        ),
+        "sensor.driveway_wall_connector_vehicle": _State(
+            "sensor.driveway_wall_connector_vehicle",
+            vin_b,
+        ),
+        "binary_sensor.teslable_charge_flap": _State(
+            "binary_sensor.teslable_charge_flap",
+            "on",
+        ),
+        "number.teslable_charging_amps": _State(
+            "number.teslable_charging_amps",
+            "5",
+            {"min": 0, "max": 15},
+        ),
+    })
+    hass.entity_registry.entities.update({
+        "binary_sensor.garage_wall_connector_vehicle_connected": SimpleNamespace(
+            entity_id="binary_sensor.garage_wall_connector_vehicle_connected",
+            device_id="garage-wall-connector-local",
+            platform="tesla_wall_connector",
+        ),
+        "binary_sensor.driveway_wall_connector_vehicle_connected": SimpleNamespace(
+            entity_id="binary_sensor.driveway_wall_connector_vehicle_connected",
+            device_id="driveway-wall-connector-local",
+            platform="tesla_wall_connector",
+        ),
+        "sensor.garage_wall_connector_vehicle": SimpleNamespace(
+            entity_id="sensor.garage_wall_connector_vehicle",
+            device_id="garage-wall-connector-fleet",
+            platform="tesla_fleet",
+        ),
+        "sensor.driveway_wall_connector_vehicle": SimpleNamespace(
+            entity_id="sensor.driveway_wall_connector_vehicle",
+            device_id="driveway-wall-connector-fleet",
+            platform="tesla_fleet",
+        ),
+    })
+    hass.device_registry.devices.update({
+        "garage-wall-connector-local": SimpleNamespace(
+            id="garage-wall-connector-local",
+            identifiers={("tesla_wall_connector", "WC-SERIAL-A")},
+            serial_number="WC-SERIAL-A",
+        ),
+        "driveway-wall-connector-local": SimpleNamespace(
+            id="driveway-wall-connector-local",
+            identifiers={("tesla_wall_connector", "WC-SERIAL-B")},
+            serial_number="WC-SERIAL-B",
+        ),
+        "garage-wall-connector-fleet": SimpleNamespace(
+            id="garage-wall-connector-fleet",
+            identifiers={("tesla_fleet", "wall-connector-a")},
+            serial_number="WC-SERIAL-A",
+        ),
+        "driveway-wall-connector-fleet": SimpleNamespace(
+            id="driveway-wall-connector-fleet",
+            identifiers={("tesla_fleet", "wall-connector-b")},
+            serial_number="WC-SERIAL-B",
+        ),
+    })
+    monkeypatch.setattr(
+        actions,
+        "_resolve_ble_prefix_for_vehicle",
+        lambda _hass, _entry, _vin: "teslable",
+    )
+
+    first = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+            configured_max_amps=32,
+        )
+    )
+    second = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_b,
+            configured_max_amps=32,
+        )
+    )
+
+    assert first["max_charge_amps"] == 32
+    assert second["max_charge_amps"] == 32
+    assert first["max_charge_amps_source"] == "active_wall_connector_vehicle"
+    assert second["max_charge_amps_source"] == "active_wall_connector_vehicle"
+    assert first["prefer_vin_scoped_current_control"] is True
+    assert second["prefer_vin_scoped_current_control"] is True
 
 
 def test_tesla_active_charger_capability_fails_closed_when_unplugged_or_unavailable():
@@ -5686,6 +6010,68 @@ def test_dynamic_deadline_start_uses_live_active_charger_cap(monkeypatch):
     assert state["params"]["fixed_charge_amps"] == 10
 
 
+def test_dynamic_deadline_start_preserves_exact_wall_connector_override(monkeypatch):
+    """An exact Wall Connector association can command above stale BLE max."""
+    vehicle_vin = "5YJTEST00000000C3"
+    set_amps_calls: list[tuple[int, bool]] = []
+
+    async def active_charger(*args, **kwargs):
+        assert kwargs["configured_max_amps"] == 32
+        return {
+            "association_known": True,
+            "capability_known": True,
+            "max_charge_amps": 32,
+            "max_charge_amps_source": "active_wall_connector_vehicle",
+            "voltage": 240,
+            "phases": 1,
+            "allow_stale_entity_max_override": True,
+            "prefer_vin_scoped_current_control": True,
+        }
+
+    async def fake_start(*args, **kwargs):
+        return True
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(
+            (amps, params["allow_stale_entity_max_override"])
+        )
+        return True
+
+    monkeypatch.setattr(
+        actions,
+        "_resolve_tesla_active_charger_capability",
+        active_charger,
+    )
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    actions._dynamic_ev_state.clear()
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            _Hass([]),
+            _Entry(),
+            {
+                "vehicle_vin": vehicle_vin,
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "max_charge_amps": 32,
+                "fixed_charge_amps": 32,
+            },
+            context=None,
+        )
+    )
+
+    state = actions._dynamic_ev_state["entry-1"][vehicle_vin]
+    assert result is True
+    assert set_amps_calls == [(32, True)]
+    assert state["params"]["configured_max_charge_amps"] == 32
+    assert state["params"]["max_charge_amps"] == 32
+    assert state["params"]["fixed_charge_amps"] == 32
+    assert state["params"]["allow_stale_entity_max_override"] is True
+    assert state["params"]["prefer_vin_scoped_current_control"] is True
+
+
 def test_dynamic_session_follows_active_charger_cap_changes(monkeypatch):
     vehicle_vin = "5YJTEST00000000C3"
     set_amps_calls: list[int] = []
@@ -6441,7 +6827,10 @@ def test_solar_surplus_tesla_set_amps_falls_back_after_range_rejection(monkeypat
         async def async_call(self, domain: str, service: str, data: dict, blocking: bool = True):
             self.calls.append((domain, service, data))
             if len(self.calls) == 1:
-                raise Exception("out_of_range")
+                raise Exception(
+                    "Value 30.0 for number.car_charging_amps is outside valid "
+                    "range 5.0 - 16.0"
+                )
 
     monkeypatch.setattr(actions, "_get_tesla_ev_entity", fake_get_tesla_ev_entity)
     monkeypatch.setattr(actions, "_wake_tesla_ev", fake_wake)
@@ -6464,6 +6853,142 @@ def test_solar_surplus_tesla_set_amps_falls_back_after_range_rejection(monkeypat
         ("number", "set_value", {"entity_id": "number.car_charging_amps", "value": 16}),
     ]
     assert params["max_charge_amps"] == 16
+
+
+def test_exact_wall_connector_range_fallback_continues_to_vin_provider(monkeypatch):
+    """A stale BLE range may pulse safely before the exact-VIN 32A write."""
+    async def awake(*args, **kwargs):
+        return True
+
+    async def fleet_current_entity(*args, **kwargs):
+        return "number.car_charging_amps"
+
+    class _RejectBleOverrideServices(_Services):
+        async def async_call(
+            self,
+            domain: str,
+            service: str,
+            data: dict,
+            blocking: bool = True,
+        ):
+            self.calls.append((domain, service, data))
+            if data == {
+                "entity_id": "number.teslable_charging_amps",
+                "value": 32,
+            }:
+                raise Exception(
+                    "Value 32.0 for number.teslable_charging_amps is outside "
+                    "valid range 0.0 - 15.0"
+                )
+
+    monkeypatch.setattr(
+        actions,
+        "_get_ev_config",
+        lambda _entry: {"ev_provider": actions.EV_PROVIDER_BOTH},
+    )
+    monkeypatch.setattr(
+        actions,
+        "_resolve_ble_prefix_for_vehicle",
+        lambda *_args, **_kwargs: "teslable",
+    )
+    monkeypatch.setattr(actions, "_is_ble_available", lambda *_args: True)
+    monkeypatch.setattr(actions, "_wake_tesla_ble", awake)
+    monkeypatch.setattr(
+        actions,
+        "_resolve_teslemetry_bt_prefix",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_is_teslemetry_bt_available",
+        lambda *_args: False,
+    )
+    monkeypatch.setattr(actions, "_is_api_credit_available", lambda *_args: True)
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", fleet_current_entity)
+    monkeypatch.setattr(actions, "_wake_tesla_ev", awake)
+
+    hass = _Hass([
+        _State(
+            "number.teslable_charging_amps",
+            "5",
+            {"min": 0, "max": 15},
+        ),
+        _State(
+            "number.car_charging_amps",
+            "15",
+            {"min": 0, "max": 32},
+        ),
+    ])
+    hass.services = _RejectBleOverrideServices()
+    params = {
+        "charger_type": "tesla",
+        "max_charge_amps": 32,
+        "allow_stale_entity_max_override": True,
+        "prefer_vin_scoped_current_control": True,
+    }
+
+    result = asyncio.run(
+        actions._set_vehicle_amps_unchecked(
+            hass,
+            _Entry(),
+            "5YJTEST00000000C3",
+            32,
+            params,
+        )
+    )
+
+    assert result is True
+    assert hass.services.calls == [
+        (
+            "number",
+            "set_value",
+            {"entity_id": "number.teslable_charging_amps", "value": 32},
+        ),
+        (
+            "number",
+            "set_value",
+            {"entity_id": "number.teslable_charging_amps", "value": 15},
+        ),
+        (
+            "number",
+            "set_value",
+            {"entity_id": "number.car_charging_amps", "value": 32},
+        ),
+    ]
+    assert params["max_charge_amps"] == 32
+    assert "_tesla_entity_range_fallback_amps" not in params
+    assert actions._phase_applied_amps(params, 32) == 32
+
+    hass.services = _RejectBleOverrideServices()
+    conservative_params = {
+        "charger_type": "tesla",
+        "max_charge_amps": 32,
+        "allow_stale_entity_max_override": True,
+    }
+    conservative_result = asyncio.run(
+        actions._set_vehicle_amps_unchecked(
+            hass,
+            _Entry(),
+            "5YJTEST00000000C3",
+            32,
+            conservative_params,
+        )
+    )
+    assert conservative_result is True
+    assert hass.services.calls == [
+        (
+            "number",
+            "set_value",
+            {"entity_id": "number.teslable_charging_amps", "value": 32},
+        ),
+        (
+            "number",
+            "set_value",
+            {"entity_id": "number.teslable_charging_amps", "value": 15},
+        ),
+    ]
+    assert conservative_params["max_charge_amps"] == 15
+    assert actions._phase_applied_amps(conservative_params, 32) == 15
 
 
 def test_dynamic_start_is_blocked_by_manual_owner():

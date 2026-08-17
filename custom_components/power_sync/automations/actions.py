@@ -149,7 +149,14 @@ def _is_api_credit_error(error_message: str) -> bool:
 def _is_number_range_error(error_message: str) -> bool:
     """Return true when HA rejected a number.set_value write as out of range."""
     error_lower = str(error_message).lower()
-    return "out_of_range" in error_lower or "out of range" in error_lower
+    return any(
+        pattern in error_lower
+        for pattern in (
+            "out_of_range",
+            "out of range",
+            "outside valid range",
+        )
+    )
 
 
 def _generic_charger_entity_bounds(
@@ -1926,6 +1933,7 @@ async def _set_ev_charging_amps_ble(
                 )
                 if params is not None:
                     params["max_charge_amps"] = fallback_amps
+                    params["_tesla_entity_range_fallback_amps"] = fallback_amps
                 return True
             except Exception as fallback_error:
                 _LOGGER.error(
@@ -2052,6 +2060,10 @@ async def _set_ev_charging_amps_teslemetry_bt(
             {"entity_id": entity_id, "value": capped},
             blocking=True,
         )
+        if params is not None:
+            params.pop("_tesla_entity_range_fallback_amps", None)
+            if configured_max_amps is not None:
+                params["max_charge_amps"] = configured_max_amps
         _LOGGER.info(f"Set EV charging amps to {capped}A via Teslemetry BT: {entity_id}")
         return True
     except Exception as e:
@@ -2079,6 +2091,7 @@ async def _set_ev_charging_amps_teslemetry_bt(
                 )
                 if params is not None:
                     params["max_charge_amps"] = fallback_amps
+                    params["_tesla_entity_range_fallback_amps"] = fallback_amps
                 return True
             except Exception as fallback_error:
                 _LOGGER.error(
@@ -4864,6 +4877,7 @@ async def _action_set_ev_charging_amps(
         return False
 
     # Tesla charger: existing logic below
+    params.pop("_tesla_entity_range_fallback_amps", None)
     ev_config = _get_ev_config(config_entry)
     ev_provider = ev_config["ev_provider"]
     vehicle_vin = params.get("vehicle_vin")
@@ -4891,7 +4905,22 @@ async def _action_set_ev_charging_amps(
                 configured_max_amps=configured_max_amps,
                 params=params,
             )
-            if result or ev_provider == EV_PROVIDER_TESLA_BLE:
+            range_fallback_applied = (
+                params.get("_tesla_entity_range_fallback_amps") is not None
+            )
+            if (
+                result
+                and range_fallback_applied
+                and ev_provider == EV_PROVIDER_BOTH
+                and params.get("prefer_vin_scoped_current_control")
+            ):
+                params["max_charge_amps"] = configured_max_amps
+                _LOGGER.info(
+                    "Tesla BLE accepted a temporary entity-range fallback; "
+                    "trying the VIN-scoped provider for %dA",
+                    amps,
+                )
+            elif result or ev_provider == EV_PROVIDER_TESLA_BLE:
                 return result
 
     # Teslemetry Bluetooth is the next local, vehicle-specific fallback.
@@ -4911,7 +4940,22 @@ async def _action_set_ev_charging_amps(
                 configured_max_amps=configured_max_amps,
                 params=params,
             )
-            if result or ev_provider == EV_PROVIDER_TESLEMETRY_BT:
+            range_fallback_applied = (
+                params.get("_tesla_entity_range_fallback_amps") is not None
+            )
+            if (
+                result
+                and range_fallback_applied
+                and ev_provider == EV_PROVIDER_BOTH
+                and params.get("prefer_vin_scoped_current_control")
+            ):
+                params["max_charge_amps"] = configured_max_amps
+                _LOGGER.info(
+                    "Teslemetry BT accepted a temporary entity-range fallback; "
+                    "trying the VIN-scoped provider for %dA",
+                    amps,
+                )
+            elif result or ev_provider == EV_PROVIDER_TESLEMETRY_BT:
                 return result
 
     # Use Fleet API
@@ -4996,6 +5040,9 @@ async def _action_set_ev_charging_amps(
                 {"entity_id": charging_amps_entity, "value": amps},
                 blocking=True,
             )
+            params.pop("_tesla_entity_range_fallback_amps", None)
+            if configured_max_amps is not None:
+                params["max_charge_amps"] = configured_max_amps
             _LOGGER.info(f"Set EV charging amps to {amps}A via {charging_amps_entity}")
             return True
         except Exception as e:
@@ -5017,6 +5064,7 @@ async def _action_set_ev_charging_amps(
                         blocking=True,
                     )
                     params["max_charge_amps"] = fallback_amps
+                    params["_tesla_entity_range_fallback_amps"] = fallback_amps
                     _LOGGER.info(
                         "Set EV charging amps to %dA via %s after entity range fallback",
                         fallback_amps,
@@ -6243,7 +6291,8 @@ async def _set_vehicle_amps_unchecked(
                     return False
         if amps == 0:
             return await _action_stop_ev_charging(hass, config_entry, {"vehicle_vin": vehicle_id})
-        return await _action_set_ev_charging_amps(hass, config_entry, {
+        command_params = {
+            **params,
             "amps": amps,
             "vehicle_vin": vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None,
             "max_charge_amps": params.get("max_charge_amps"),
@@ -6251,7 +6300,19 @@ async def _set_vehicle_amps_unchecked(
                 "allow_stale_entity_max_override",
                 False,
             ),
-        })
+        }
+        success = await _action_set_ev_charging_amps(
+            hass,
+            config_entry,
+            command_params,
+        )
+        params["max_charge_amps"] = command_params.get("max_charge_amps")
+        fallback_key = "_tesla_entity_range_fallback_amps"
+        if fallback_key in command_params:
+            params[fallback_key] = command_params[fallback_key]
+        else:
+            params.pop(fallback_key, None)
+        return success
 
     elif charger_type == "ocpp":
         ocpp_charger_id = params.get("ocpp_charger_id")
@@ -7686,6 +7747,13 @@ async def _refresh_dynamic_tesla_charger_capability(
         hass,
         config_entry,
         vehicle_id,
+        configured_max_amps=_coerce_positive_int(
+            params.get(
+                "configured_max_charge_amps",
+                params.get("max_charge_amps"),
+            ),
+            32,
+        ),
         configured_voltage=_coerce_positive_int(
             params.get("voltage"),
             240,
@@ -7715,7 +7783,12 @@ async def _refresh_dynamic_tesla_charger_capability(
             "active_charger_capability_known": active_charger[
                 "capability_known"
             ],
-            "allow_stale_entity_max_override": False,
+            "allow_stale_entity_max_override": bool(
+                active_charger.get("allow_stale_entity_max_override")
+            ),
+            "prefer_vin_scoped_current_control": bool(
+                active_charger.get("prefer_vin_scoped_current_control")
+            ),
         }
     )
     ev_provider = _get_ev_config(config_entry)["ev_provider"]
@@ -8842,7 +8915,15 @@ def _phase_applied_amps(params: Mapping[str, Any], requested_amps: int) -> int:
     try:
         return max(
             0,
-            int(params.get("_phase_load_management_applied_amps", requested_amps)),
+            int(
+                params.get(
+                    "_tesla_entity_range_fallback_amps",
+                    params.get(
+                        "_phase_load_management_applied_amps",
+                        requested_amps,
+                    ),
+                )
+            ),
         )
     except (TypeError, ValueError):
         return max(0, int(requested_amps))
@@ -9197,21 +9278,109 @@ def _tesla_source_capability(
     }
 
 
+def _tesla_wall_connector_serial(device: Any) -> Optional[str]:
+    """Return a normalized Wall Connector serial from an HA device."""
+    serial = str(getattr(device, "serial_number", "") or "").strip().upper()
+    return serial or None
+
+
+def _exact_tesla_wall_connector_vehicle_vins(
+    hass: HomeAssistant,
+    entity_registry: Any,
+    device_registry: Any,
+) -> set[str]:
+    """Return VINs uniquely paired to their own connected Wall Connector.
+
+    Fleet/Teslemetry and the local Wall Connector integration create separate
+    HA devices, but expose the same connector serial. Correlating on that
+    physical identifier keeps multiple Wall Connectors independent while
+    rejecting conflicting VIN observations for any individual connector.
+    """
+    try:
+        sensor_states = hass.states.async_all("sensor")
+        binary_states = hass.states.async_all("binary_sensor")
+    except (AttributeError, TypeError):
+        return set()
+
+    connected_serials: set[str] = set()
+    for state in binary_states:
+        entity_id = str(getattr(state, "entity_id", "") or "").lower()
+        if (
+            "wall_connector" not in entity_id
+            or "vehicle_connected" not in entity_id
+            or str(getattr(state, "state", "") or "").strip().lower() != "on"
+        ):
+            continue
+        registered = entity_registry.entities.get(state.entity_id)
+        device = (
+            device_registry.devices.get(getattr(registered, "device_id", None))
+            if registered is not None
+            else None
+        )
+        identifiers = getattr(device, "identifiers", ()) or ()
+        if not any(
+            len(identifier) >= 1 and identifier[0] == "tesla_wall_connector"
+            for identifier in identifiers
+        ):
+            continue
+        serial = _tesla_wall_connector_serial(device)
+        if serial:
+            connected_serials.add(serial)
+    if not connected_serials:
+        return set()
+
+    identified_vins_by_serial: dict[str, set[str]] = {}
+    for state in sensor_states:
+        entity_id = str(getattr(state, "entity_id", "") or "").lower()
+        if "wall_connector" not in entity_id or "vehicle" not in entity_id:
+            continue
+        registered = entity_registry.entities.get(state.entity_id)
+        if (
+            registered is None
+            or getattr(registered, "platform", None)
+            not in TESLA_EV_INTEGRATIONS
+        ):
+            continue
+        device = device_registry.devices.get(
+            getattr(registered, "device_id", None)
+        )
+        serial = _tesla_wall_connector_serial(device)
+        if not serial or serial not in connected_serials:
+            continue
+        candidate = str(getattr(state, "state", "") or "").strip().upper()
+        if re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", candidate):
+            identified_vins_by_serial.setdefault(serial, set()).add(candidate)
+
+    serial_by_vin: dict[str, set[str]] = {}
+    for serial, identified_vins in identified_vins_by_serial.items():
+        if len(identified_vins) != 1:
+            continue
+        vin = next(iter(identified_vins))
+        serial_by_vin.setdefault(vin, set()).add(serial)
+    return {
+        vin
+        for vin, serials in serial_by_vin.items()
+        if len(serials) == 1
+    }
+
+
 async def _resolve_tesla_active_charger_capability(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     vehicle_vin: Optional[str],
     *,
+    configured_max_amps: Optional[int] = None,
     configured_voltage: int = 240,
     configured_phases: int = 1,
 ) -> dict[str, Any]:
     """Resolve the charger currently attached to one VIN without guessing.
 
     Tesla's VIN-scoped charge-current entity exposes the live EVSE pilot limit.
-    An explicitly paired BLE bridge is the only non-VIN source accepted. Direct
-    charger devices are deliberately ignored because they do not identify the
-    connected vehicle. Unknown, unavailable, or conflicting associations use a
-    conservative planning cap and never authorize an entity-range override.
+    An explicitly paired BLE bridge is the only anonymous source accepted. If
+    connected Wall Connector sensors uniquely identify this vehicle, use the
+    VIN-scoped capability instead of a paired bridge that can retain the prior
+    EVSE's pilot after a charger swap. Unknown or conflicting associations keep
+    the conservative path.
     """
     site_max = _get_home_power_max_charge_amps(hass, config_entry)
     fallback_max = TESLA_UNKNOWN_CHARGER_SAFE_AMPS
@@ -9234,7 +9403,7 @@ async def _resolve_tesla_active_charger_capability(
 
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
-    source_entity_ids: list[list[str]] = []
+    source_entity_ids: list[tuple[list[str], str]] = []
     normalized_vin = vehicle_vin.upper()
     for device in device_registry.devices.values():
         matches_vin = any(
@@ -9245,11 +9414,11 @@ async def _resolve_tesla_active_charger_capability(
         )
         if not matches_vin:
             continue
-        source_entity_ids.append([
+        source_entity_ids.append(([
             entity.entity_id
             for entity in entity_registry.entities.values()
             if entity.device_id == device.id
-        ])
+        ], "vin"))
 
     paired_prefix = _resolve_ble_prefix_for_vehicle(
         hass,
@@ -9257,7 +9426,7 @@ async def _resolve_tesla_active_charger_capability(
         vehicle_vin,
     )
     if paired_prefix:
-        source_entity_ids.append([
+        source_entity_ids.append(([
             f"binary_sensor.{paired_prefix}_charge_flap",
             f"sensor.{paired_prefix}_charging_state",
             f"number.{paired_prefix}_charging_amps",
@@ -9268,12 +9437,20 @@ async def _resolve_tesla_active_charger_capability(
             f"sensor.{paired_prefix}_charge_current",
             f"sensor.{paired_prefix}_charge_power",
             f"sensor.{paired_prefix}_charger_power",
-        ])
+        ], "paired_ble"))
+
+    exact_wall_connector_vehicle = normalized_vin in (
+        _exact_tesla_wall_connector_vehicle_vins(
+            hass,
+            entity_registry,
+            device_registry,
+        )
+    )
 
     connection_observations: list[
-        tuple[bool, Optional[float], dict[str, Any]]
+        tuple[bool, Optional[float], dict[str, Any], str]
     ] = []
-    for entity_ids in source_entity_ids:
+    for entity_ids, source_kind in source_entity_ids:
         connection_state, observed_at = _tesla_source_connection_observation(
             hass,
             entity_ids,
@@ -9285,13 +9462,14 @@ async def _resolve_tesla_active_charger_capability(
                 connection_state,
                 observed_at,
                 _tesla_source_capability(hass, entity_ids),
+                source_kind,
             )
         )
 
     connection_state, _observed_at = _reconcile_tesla_connection_observations(
         [
             (source_state, source_observed_at)
-            for source_state, source_observed_at, _capability
+            for source_state, source_observed_at, _capability, _source_kind
             in connection_observations
         ]
     )
@@ -9303,11 +9481,21 @@ async def _resolve_tesla_active_charger_capability(
         result["max_charge_amps_source"] = "safe_unplugged"
         return result
 
+    ignored_paired_ble_capability = exact_wall_connector_vehicle and any(
+        source_state is True
+        and source_kind == "paired_ble"
+        and capability.get("max_amps") is not None
+        for source_state, _source_observed_at, capability, source_kind
+        in connection_observations
+    )
     plugged_capabilities = [
         capability
-        for source_state, _source_observed_at, capability
+        for source_state, _source_observed_at, capability, source_kind
         in connection_observations
         if source_state is True
+        and not (
+            exact_wall_connector_vehicle and source_kind == "paired_ble"
+        )
     ]
     result["association_known"] = True
     live_caps = [
@@ -9320,15 +9508,26 @@ async def _resolve_tesla_active_charger_capability(
         return result
 
     effective_max = min(live_caps)
-    source = "active_charger"
+    source = (
+        "active_wall_connector_vehicle"
+        if ignored_paired_ble_capability
+        else "active_charger"
+    )
+    configured_max = _coerce_positive_int(configured_max_amps)
+    if configured_max is not None and configured_max < effective_max:
+        effective_max = configured_max
+        source += "_and_configured_limit"
     if site_max is not None and site_max < effective_max:
         effective_max = site_max
-        source = "active_charger_and_site_limit"
+        source += "_and_site_limit"
     result.update({
         "capability_known": True,
         "max_charge_amps": effective_max,
         "max_charge_amps_source": source,
     })
+    if ignored_paired_ble_capability:
+        result["allow_stale_entity_max_override"] = True
+        result["prefer_vin_scoped_current_control"] = True
 
     live_voltages = [
         capability["voltage"]
@@ -10159,10 +10358,18 @@ async def _action_start_ev_charging_dynamic_locked(
         and len(str(vehicle_id)) == 17
         and str(vehicle_id).isalnum()
     ):
+        configured_max_charge_amps = _coerce_positive_int(
+            params.get(
+                "configured_max_charge_amps",
+                params.get("max_charge_amps"),
+            ),
+            32,
+        ) or 32
         active_charger = await _resolve_tesla_active_charger_capability(
             hass,
             config_entry,
             vehicle_id,
+            configured_max_amps=configured_max_charge_amps,
             configured_voltage=_coerce_positive_int(
                 params.get("voltage"),
                 240,
@@ -10175,6 +10382,7 @@ async def _action_start_ev_charging_dynamic_locked(
         )
         params = {
             **params,
+            "configured_max_charge_amps": configured_max_charge_amps,
             "max_charge_amps": active_charger["max_charge_amps"],
             "max_charge_amps_source": active_charger[
                 "max_charge_amps_source"
@@ -10187,7 +10395,12 @@ async def _action_start_ev_charging_dynamic_locked(
             "active_charger_capability_known": active_charger[
                 "capability_known"
             ],
-            "allow_stale_entity_max_override": False,
+            "allow_stale_entity_max_override": bool(
+                active_charger.get("allow_stale_entity_max_override")
+            ),
+            "prefer_vin_scoped_current_control": bool(
+                active_charger.get("prefer_vin_scoped_current_control")
+            ),
         }
         ev_provider = _get_ev_config(config_entry)["ev_provider"]
         charge_current_entity = await _resolve_tesla_charge_current_entity(
@@ -10838,8 +11051,9 @@ async def _action_start_ev_charging_dynamic_locked(
                 amps_success = await _set_vehicle_amps(
                     hass, config_entry, vehicle_id, start_amps, params
                 )
-                if amps_success:
-                    start_amps = _phase_applied_amps(params, start_amps)
+                applied_start_amps = _phase_applied_amps(params, start_amps)
+                if amps_success or applied_start_amps != start_amps:
+                    start_amps = applied_start_amps
                 if not amps_success:
                     # This is expected - Tesla reports lower max amps until charging actually starts
                     _LOGGER.debug(f"Dynamic EV: Could not set initial amps to {start_amps}A (will adjust once charging starts)")
@@ -10962,9 +11176,16 @@ async def _action_start_ev_charging_dynamic_locked(
         "vehicle_vin": params.get("vehicle_vin"),
         "vehicle_name": params.get("vehicle_name"),
         "min_charge_amps": min_charge_amps,
+        "configured_max_charge_amps": params.get(
+            "configured_max_charge_amps",
+            params.get("max_charge_amps"),
+        ),
         "max_charge_amps": max_charge_amps,
         "max_charge_amps_source": max_charge_amps_source,
         "allow_stale_entity_max_override": allow_stale_entity_max_override,
+        "prefer_vin_scoped_current_control": bool(
+            params.get("prefer_vin_scoped_current_control")
+        ),
         "voltage": voltage,
         "phases": _get_phases_from_config(hass, config_entry, params),
         "stop_outside_window": stop_outside_window,
