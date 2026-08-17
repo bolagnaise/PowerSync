@@ -143,10 +143,17 @@ ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner
 
 
 class _FakeState:
-    def __init__(self, entity_id: str, state: str, last_updated: datetime) -> None:
+    def __init__(
+        self,
+        entity_id: str,
+        state: str,
+        last_updated: datetime,
+        attributes: dict[str, Any] | None = None,
+    ) -> None:
         self.entity_id = entity_id
         self.state = state
         self.last_updated = last_updated
+        self.attributes = attributes or {}
 
 
 class _FakeStates:
@@ -228,6 +235,25 @@ def test_load_profile_weekend_flag_uses_local_weekday():
         ev_planner.LoadProfileEstimator.DEFAULT_WEEKEND_PROFILE[23]
     )
     assert weekend_profile[23] != pytest.approx(2.5)
+
+
+def test_load_profile_preserves_kw_sensor_units():
+    """Recorder states already expressed in kW must not be divided twice."""
+    utc_instant = datetime(2026, 8, 17, 22, 0, tzinfo=timezone.utc)
+    state = _FakeState(
+        LOAD_ENTITY,
+        "1.514",
+        utc_instant,
+        {"unit_of_measurement": "kW"},
+    )
+    hass = _FakeHass(LOAD_ENTITY, [state])
+
+    estimator = ev_planner.LoadProfileEstimator(hass)
+    _run(estimator.update_from_history(days=14))
+
+    # 22:00 UTC is 08:00 local on the following weekday. Before the fix this
+    # became 0.001514 kW, fabricating early-morning solar surplus for EV plans.
+    assert estimator._load_history["weekday"][8] == pytest.approx(1.514)
 
 
 # --- HD-16: dual EV-load overlays must not stack ---------------------------

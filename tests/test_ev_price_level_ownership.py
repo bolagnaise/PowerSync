@@ -218,6 +218,44 @@ def test_time_critical_does_not_use_free_period_after_departure(monkeypatch):
     assert source == "waiting"
 
 
+def test_cost_optimized_waits_for_planned_free_window(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 8, 18, 1, 0, tzinfo=brisbane_tz),
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    plan = SimpleNamespace(
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time="2026-08-18T10:00:00",
+                end_time="2026-08-18T14:00:00",
+                source="grid_free",
+                estimated_power_kw=2.3,
+                estimated_energy_kwh=9.2,
+                price_cents_kwh=0.0,
+                reason="lowest_cost",
+            )
+        ]
+    )
+
+    should_charge, reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=0.0,
+            current_price_cents=15.0,
+            battery_soc=72.0,
+            is_time_critical=False,
+        )
+    )
+
+    assert should_charge is False
+    assert reason == "Waiting for 10:00 (9.0h, 0c)"
+    assert source == "waiting"
+
+
 def test_active_smart_schedule_solar_session_delegates_low_surplus_stop():
     assert not ev_planner._should_block_smart_schedule_solar_start(
         current_surplus_kw=3.0,

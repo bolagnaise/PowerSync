@@ -1557,7 +1557,9 @@ class LoadProfileEstimator:
                 if state.state in ("unknown", "unavailable"):
                     continue
                 try:
-                    power_w = float(state.state)
+                    power_w = _state_power_w(state)
+                    if power_w is None:
+                        continue
                     power_kw = power_w / 1000
                     local_last_updated = dt_util.as_local(state.last_updated)
                     hour = local_last_updated.hour
@@ -3676,13 +3678,13 @@ class ChargingPlanner:
         if current_surplus_kw >= 1.5:
             return True, f"Solar surplus ({current_surplus_kw:.1f}kW)", "solar_surplus"
 
-        # Calculate average planned price for comparison
+        # Keep free planned windows in the comparison.  Dropping zero prices
+        # makes an all-free plan look like a default 30c plan, which can start
+        # opportunistic paid charging before the planned free period.
         if plan.windows:
-            planned_prices = [w.price_cents_kwh for w in plan.windows if w.price_cents_kwh > 0]
-            avg_planned_price = sum(planned_prices) / len(planned_prices) if planned_prices else 30
-            min_planned_price = min(planned_prices) if planned_prices else 30
+            planned_prices = [w.price_cents_kwh for w in plan.windows]
+            min_planned_price = min(planned_prices)
         else:
-            avg_planned_price = 30
             min_planned_price = 30
 
         # Opportunistic: if current price is better than our best planned window, charge now
@@ -3710,6 +3712,7 @@ class ChargingPlanner:
 
         # Check how far away the next planned window is
         next_window_start = None
+        next_window_price = None
         for window in sorted(plan.windows, key=lambda w: w.start_time):
             try:
                 window_start, _window_end, comparison_now = (
@@ -3722,13 +3725,14 @@ class ChargingPlanner:
                 if window_start > comparison_now:
                     next_window_start = window_start
                     next_window_now = comparison_now
+                    next_window_price = window.price_cents_kwh
                     break
             except:
                 continue
 
         if next_window_start:
             hours_until = (next_window_start - next_window_now).total_seconds() / 3600
-            return False, f"Waiting for {next_window_start.strftime('%H:%M')} ({hours_until:.1f}h, {min_planned_price:.0f}c)", "waiting"
+            return False, f"Waiting for {next_window_start.strftime('%H:%M')} ({hours_until:.1f}h, {next_window_price:.0f}c)", "waiting"
 
         return False, f"Waiting for better rates (current: {current_price_cents:.0f}c)", "waiting"
 
