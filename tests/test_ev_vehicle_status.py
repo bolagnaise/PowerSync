@@ -1602,7 +1602,11 @@ def test_duplicate_same_vin_away_tracker_fences_exact_wall_connector():
     current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
 
     for device_order in (("away", "duplicate"), ("duplicate", "away")):
-        for wall_connector_state, wall_connector_power in ((11, 0), (2, 11000)):
+        for wall_connector_state, wall_connector_power in (
+            (11, 0),
+            (2, 0),
+            (2, 11000),
+        ):
             devices = {}
             for kind in device_order:
                 device_id = f"device-{kind}"
@@ -1657,7 +1661,79 @@ def test_duplicate_same_vin_away_tracker_fences_exact_wall_connector():
             assert away["is_charging"] is False
             assert connector["ev_power_kw"] == wall_connector_power / 1000
             assert connector["is_connected"] is (wall_connector_power > 0)
-            assert connector["is_charging"] is (wall_connector_state == 2)
+            assert connector["is_charging"] is (wall_connector_power > 0)
+
+
+def test_away_vehicle_fences_zero_power_charging_connector_display_contract():
+    """Ticket #204: a stale state-2 connector cannot render an away EV onsite."""
+    power_sync = _power_sync_module()
+    loadpoint_status = importlib.import_module(
+        "power_sync.automations.loadpoint_status"
+    )
+    ev_display = importlib.import_module("power_sync.ev_display")
+    vehicle_id = "5YJTEST0000000001"
+    current = datetime(2026, 8, 17, 5, 26, tzinfo=timezone.utc)
+
+    tracker = _State(
+        "device_tracker.tl_location",
+        "work",
+        last_updated=current,
+    )
+    battery = _State(
+        "sensor.tl_battery_level",
+        "64",
+        last_updated=current,
+    )
+    hass = _Hass(
+        [tracker, battery],
+        {
+            tracker.entity_id: _entity(tracker.entity_id, "device-away"),
+            battery.entity_id: _entity(battery.entity_id, "device-away"),
+        },
+        {
+            "device-away": SimpleNamespace(
+                id="device-away",
+                name="TL",
+                identifiers={("teslemetry", vehicle_id)},
+            ),
+            "device-duplicate": SimpleNamespace(
+                id="device-duplicate",
+                name="TL",
+                identifiers={("teslemetry", vehicle_id)},
+            ),
+        },
+        entry_data={
+            "tesla_coordinator": SimpleNamespace(data={
+                "wall_connectors_raw": [{
+                    "wall_connector_state": 2,
+                    "wall_connector_power": 0,
+                    "wall_connector_id": "garage",
+                    "vin": vehicle_id,
+                }],
+                "last_update": current + timedelta(seconds=30),
+            })
+        },
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    loadpoints = loadpoint_status.build_loadpoint_status({}, vehicles)
+    snapshot = {
+        "site": {
+            "ev_power_kw": 0.0,
+            "observation_quality": "complete",
+        },
+        "loadpoints": loadpoints,
+    }
+    sensor = ev_display.display_snapshot_to_sensor_data(snapshot)
+
+    assert [loadpoint["vehicle_name"] for loadpoint in loadpoints] == ["TL"]
+    assert loadpoints[0]["site_presence"] == "away"
+    assert loadpoints[0]["connected"] is False
+    assert loadpoints[0]["actual_charging"] is False
+    assert sensor["vehicle_name"] == "TL"
+    assert sensor["site_presence"] == "away"
+    assert sensor["is_connected"] is False
+    assert sensor["is_charging"] is False
 
 
 def test_duplicate_same_vin_newer_home_tracker_allows_exact_wall_connector():

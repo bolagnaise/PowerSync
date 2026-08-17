@@ -2241,6 +2241,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         )
         if not matched:
             connector_connected = wc_connected
+            connector_charging = wc_charging or wc_power > 0.05
             if wc_vin and wc_power <= 0.05:
                 matching_vehicles = [
                     vehicle
@@ -2259,6 +2260,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 # authoritative away presence must not render a vehicle onsite.
                 if site_presence == "away":
                     connector_connected = False
+                    connector_charging = False
             vehicles.append({
                 "vehicle_id": f"wall_connector_{wc_id}",
                 "charger_id": f"wall_connector_{wc_id}",
@@ -2266,7 +2268,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 "ev_power_kw": wc_power,
                 "ev_soc": None,
                 "is_connected": connector_connected,
-                "is_charging": wc_charging or wc_power > 0.05,
+                "is_charging": connector_charging,
                 "_observed_at": wc_observed_at,
                 "_charging_observed_at": wc_observed_at,
                 "_connected_observed_at": wc_observed_at,
