@@ -6740,6 +6740,7 @@ class EVStatusSensor(SensorEntity):
         for key in (
             "vehicle_id",
             "vehicle_name",
+            "site_presence",
             "is_connected",
             "is_charging",
             "is_discharging",

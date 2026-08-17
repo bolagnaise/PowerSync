@@ -9,7 +9,7 @@ import logging
 import math
 import pathlib
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
@@ -1196,6 +1196,38 @@ def _latest_ev_observed_at(
     return current_at
 
 
+def _latest_ev_site_presence(
+    observations: Iterable[tuple[Any, Any]],
+) -> tuple[str | None, datetime | None]:
+    """Resolve duplicate home/away observations by source time, failing closed."""
+    presence = None
+    observed_at = None
+    untimestamped_away = False
+    for candidate, candidate_observed_at in observations:
+        candidate_presence = str(candidate or "").strip().lower()
+        if candidate_presence not in {"home", "away"}:
+            continue
+        candidate_at = _ev_observed_at(candidate_observed_at)
+        if candidate_at is None and candidate_presence == "away":
+            untimestamped_away = True
+            continue
+        if (
+            presence is None
+            or (candidate_at is not None and (
+                observed_at is None or candidate_at > observed_at
+            ))
+            or (
+                candidate_at == observed_at
+                and candidate_presence == "away"
+            )
+        ):
+            presence = candidate_presence
+            observed_at = candidate_at
+    if untimestamped_away:
+        return "away", None
+    return presence, observed_at
+
+
 def _apply_wall_connector_observation(
     vehicles: list[dict],
     wc_power_kw: float,
@@ -1280,12 +1312,28 @@ def _apply_wall_connector_observation(
                 vehicle["_connected_observed_at"] = direct_observed_at
 
     if wc_vin_key:
+        matching_vehicles = [
+            vehicle
+            for vehicle in vehicles
+            if _vehicle_matches_identifier(vehicle, wc_vin_key)
+        ]
+        site_presence, _ = _latest_ev_site_presence(
+            (
+                vehicle.get("site_presence"),
+                vehicle.get("_site_presence_observed_at"),
+            )
+            for vehicle in matching_vehicles
+        )
+        # HA can expose duplicate registry devices for one physical VIN.  A
+        # connector must not bypass an away observation merely because another
+        # duplicate lacks a tracker.  Keep the connector as its own site load
+        # until a newer observation establishes that VIN at home.
+        if site_presence == "away":
+            return False
+
         matched = False
-        for vehicle in vehicles:
-            if (
-                vehicle.get("site_presence") != "away"
-                and _vehicle_matches_identifier(vehicle, wc_vin_key)
-            ):
+        for vehicle in matching_vehicles:
+            if vehicle.get("site_presence") != "away":
                 update_vehicle(vehicle)
                 matched = True
         if matched:
@@ -1410,7 +1458,10 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
     device_registry = dr.async_get(hass)
 
     fleet_vehicle_ids = []
-    away_fleet_vehicle_ids = set()
+    fleet_site_presence_observations: dict[
+        str,
+        list[tuple[str | None, datetime | None]],
+    ] = {}
     for device in device_registry.devices.values():
         vehicle_id = None
         for identifier in device.identifiers:
@@ -1423,17 +1474,46 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
         if not vehicle_id:
             continue
         fleet_vehicle_ids.append(vehicle_id)
+        vehicle_key = _vehicle_identity_key(vehicle_id)
         for entity in entity_registry.entities.values():
             if entity.device_id != device.id:
                 continue
+            state = hass.states.get(entity.entity_id)
+            candidate_presence = None
             if (
-                entity.domain != "device_tracker"
-                or "_location" not in entity.entity_id.lower()
+                entity.domain == "device_tracker"
+                and "_location" in entity.entity_id.lower()
             ):
-                continue
-            if _ev_tracker_site_presence(hass.states.get(entity.entity_id)) == "away":
-                away_fleet_vehicle_ids.add(_vehicle_identity_key(vehicle_id))
-                break
+                candidate_presence = _ev_tracker_site_presence(state)
+            elif (
+                entity.domain == "binary_sensor"
+                and "located_at_home" in entity.entity_id.lower()
+                and state is not None
+            ):
+                candidate_presence = (
+                    "away" if state.state == "off"
+                    else "home" if state.state == "on"
+                    else None
+                )
+            if candidate_presence is not None:
+                fleet_site_presence_observations.setdefault(
+                    vehicle_key,
+                    [],
+                ).append((
+                    candidate_presence,
+                    getattr(state, "last_updated", None),
+                ))
+
+    fleet_vehicle_ids = list(dict.fromkeys(fleet_vehicle_ids))
+    fleet_site_presence = {
+        vehicle_key: _latest_ev_site_presence(observations)[0]
+        for vehicle_key, observations in fleet_site_presence_observations.items()
+    }
+    away_fleet_vehicle_ids = {
+        vehicle_key
+        for vehicle_key, site_presence in fleet_site_presence.items()
+        if site_presence == "away"
+    }
 
     ble_prefixes = _resolve_ble_prefixes(hass, config)
     ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
@@ -1525,47 +1605,74 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
             except (ValueError, TypeError):
                 pass
 
-    # Check Fleet API vehicle sensors (charger_power, battery level)
+    # Check Fleet API vehicle sensors (charger_power, battery level). Resolve
+    # duplicate provider devices by physical VIN and source time before they
+    # contribute to the aggregate fallback.
+    fleet_power_by_vehicle_id: dict[
+        str,
+        tuple[float, datetime | None],
+    ] = {}
     for device in device_registry.devices.values():
-        is_tesla_vehicle = False
+        vehicle_id = None
         for identifier in device.identifiers:
             if identifier[0] in TESLA_INTEGRATIONS:
                 potential_vin = str(identifier[1])
                 if len(potential_vin) == 17 and not potential_vin.isdigit():
-                    is_tesla_vehicle = True
+                    vehicle_id = potential_vin
                 break
-        if not is_tesla_vehicle:
+        if not vehicle_id:
             continue
 
-        # Check if vehicle is at home — skip vehicles that are away
-        skip_vehicle = False
-        for entity in entity_registry.entities.values():
-            if entity.device_id != device.id:
-                continue
-            if entity.domain == "device_tracker" and "_location" in entity.entity_id.lower():
-                loc_state = hass.states.get(entity.entity_id)
-                if _ev_tracker_site_presence(loc_state) == "away":
-                    skip_vehicle = True
-                    break
-        if skip_vehicle:
+        # Apply location to the physical VIN, not one registry row. Duplicate
+        # provider devices cannot reintroduce remote charging power merely
+        # because one of them lacks the tracker entity.
+        if _vehicle_identity_key(vehicle_id) in away_fleet_vehicle_ids:
             continue
 
-        # First pass: check if vehicle is actively charging
+        # First pass: check the newest usable charging state for this device.
         is_fleet_charging = False
+        charging_state_seen = False
+        charging_state_observed_at = None
         for entity in entity_registry.entities.values():
             if entity.device_id != device.id:
                 continue
             eid = entity.entity_id.lower()
             if not entity.entity_id.startswith("sensor."):
                 continue
-            if ("charging" in eid or "charge_state" in eid) and "limit" not in eid and "rate" not in eid and "power" not in eid:
-                state = hass.states.get(entity.entity_id)
-                if state and state.state not in ("unknown", "unavailable"):
-                    if state.state.lower() == "charging":
-                        is_fleet_charging = True
-                        break
+            if not (
+                ("charging" in eid or "charge_state" in eid)
+                and "limit" not in eid
+                and "rate" not in eid
+                and "power" not in eid
+            ):
+                continue
+            state = hass.states.get(entity.entity_id)
+            if not state or state.state in ("unknown", "unavailable"):
+                continue
+            candidate_at = _ev_observed_at(
+                getattr(state, "last_updated", None)
+            )
+            candidate_charging = state.state.lower() == "charging"
+            if (
+                not charging_state_seen
+                or (
+                    candidate_at is not None
+                    and (
+                        charging_state_observed_at is None
+                        or candidate_at > charging_state_observed_at
+                    )
+                )
+            ):
+                charging_state_seen = True
+                charging_state_observed_at = candidate_at
+                is_fleet_charging = candidate_charging
+            elif candidate_at == charging_state_observed_at:
+                is_fleet_charging = is_fleet_charging or candidate_charging
 
-        # Second pass: read power (only if charging) and SOC
+        # Second pass: read the newest power sample and SOC for this device.
+        measured_power_kw = 0.0
+        measured_power_seen = False
+        measured_power_observed_at = None
         for entity in entity_registry.entities.values():
             if entity.device_id != device.id:
                 continue
@@ -1576,10 +1683,32 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
             if not state or state.state in ("unknown", "unavailable"):
                 continue
 
-            if is_fleet_charging and ("charger_power" in eid or "charging_power" in eid or "charge_power" in eid):
-                val = _kw_from_power_state(state)
-                if val > 0:
-                    ev_power_kw = max(ev_power_kw, val)
+            if (
+                "charger_power" in eid
+                or "charging_power" in eid
+                or "charge_power" in eid
+            ):
+                candidate_power_kw = _kw_from_power_state(state)
+                candidate_at = _ev_observed_at(
+                    getattr(state, "last_updated", None)
+                )
+                if (
+                    not measured_power_seen
+                    or (
+                        candidate_at is not None
+                        and (
+                            measured_power_observed_at is None
+                            or candidate_at > measured_power_observed_at
+                        )
+                    )
+                    or (
+                        candidate_at == measured_power_observed_at
+                        and candidate_power_kw > measured_power_kw
+                    )
+                ):
+                    measured_power_seen = True
+                    measured_power_observed_at = candidate_at
+                    measured_power_kw = candidate_power_kw
 
             # Read battery level (e.g. sensor.primary_ev_battery_level)
             if ev_soc is None and "battery" in eid and "range" not in eid and "heater" not in eid:
@@ -1589,6 +1718,48 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
                         ev_soc = int(val)
                 except (ValueError, TypeError):
                     pass
+
+        device_power_kw = (
+            measured_power_kw
+            if is_fleet_charging and measured_power_seen
+            else 0.0
+        )
+        device_observed_at = (
+            measured_power_observed_at
+            if is_fleet_charging and measured_power_seen
+            else charging_state_observed_at or measured_power_observed_at
+        )
+        vehicle_key = _vehicle_identity_key(vehicle_id)
+        existing = fleet_power_by_vehicle_id.get(vehicle_key)
+        if existing is None:
+            fleet_power_by_vehicle_id[vehicle_key] = (
+                device_power_kw,
+                device_observed_at,
+            )
+        else:
+            existing_power_kw, existing_observed_at = existing
+            if (
+                device_observed_at is not None
+                and (
+                    existing_observed_at is None
+                    or device_observed_at > existing_observed_at
+                )
+            ):
+                fleet_power_by_vehicle_id[vehicle_key] = (
+                    device_power_kw,
+                    device_observed_at,
+                )
+            elif device_observed_at == existing_observed_at:
+                fleet_power_by_vehicle_id[vehicle_key] = (
+                    max(existing_power_kw, device_power_kw),
+                    existing_observed_at,
+                )
+
+    if fleet_power_by_vehicle_id:
+        ev_power_kw = max(
+            ev_power_kw,
+            *(power_kw for power_kw, _ in fleet_power_by_vehicle_id.values()),
+        )
 
     if generic_ev_soc is not None:
         ev_soc = int(generic_ev_soc)
@@ -1630,7 +1801,8 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         is_charging = False
         charging_state_known = False
         hard_disconnected = False
-        away_from_home = False
+        site_presence = None
+        site_presence_observed_at = None
         measured_power_kw = 0.0
         measured_power_seen = False
         measured_power_observed_at = None
@@ -1649,8 +1821,14 @@ def _get_ev_vehicles_status(hass, entry) -> list:
 
             # Away vehicles cannot be contributing to home EV power.
             if domain == "device_tracker" and "_location" in eid:
-                if _ev_tracker_site_presence(state) == "away":
-                    away_from_home = True
+                candidate_presence = _ev_tracker_site_presence(state)
+                site_presence, site_presence_observed_at = (
+                    _latest_ev_site_presence((
+                        (site_presence, site_presence_observed_at),
+                        (candidate_presence, getattr(state, "last_updated", None)),
+                    ))
+                )
+                if candidate_presence == "away":
                     forced_zero_observed_at = _latest_ev_observed_at(
                         forced_zero_observed_at,
                         getattr(state, "last_updated", None),
@@ -1658,8 +1836,18 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 continue
 
             if domain == "binary_sensor" and "located_at_home" in eid:
-                if state.state == "off":
-                    away_from_home = True
+                candidate_presence = (
+                    "away" if state.state == "off"
+                    else "home" if state.state == "on"
+                    else None
+                )
+                site_presence, site_presence_observed_at = (
+                    _latest_ev_site_presence((
+                        (site_presence, site_presence_observed_at),
+                        (candidate_presence, getattr(state, "last_updated", None)),
+                    ))
+                )
+                if candidate_presence == "away":
                     forced_zero_observed_at = _latest_ev_observed_at(
                         forced_zero_observed_at,
                         getattr(state, "last_updated", None),
@@ -1746,6 +1934,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 except (ValueError, TypeError):
                     pass
 
+        away_from_home = site_presence == "away"
         if away_from_home or hard_disconnected:
             is_connected = False
             is_charging = False
@@ -1792,8 +1981,12 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             "_charging_observed_at": charging_observed_at,
             "_connected_observed_at": vehicle_connected_observed_at,
         }
-        if away_from_home:
-            vehicle_status["site_presence"] = "away"
+        if site_presence is not None:
+            vehicle_status["site_presence"] = site_presence
+        if site_presence_observed_at is not None:
+            vehicle_status["_site_presence_observed_at"] = (
+                site_presence_observed_at
+            )
         vehicles.append(vehicle_status)
 
     fleet_vehicle_ids = list(dict.fromkeys(
@@ -2062,6 +2255,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             "_observed_at",
             "_charging_observed_at",
             "_connected_observed_at",
+            "_site_presence_observed_at",
         ):
             if vehicle.get(timestamp_field) is None:
                 vehicle.pop(timestamp_field, None)
@@ -17970,6 +18164,9 @@ class EVLoadpointStatusView(HomeAssistantView):
                     "vehicle_name": vehicle.get("vehicle_name"),
                     "bridge_vehicle_id": vehicle.get("bridge_vehicle_id"),
                     "site_presence": vehicle.get("site_presence"),
+                    "_site_presence_observed_at": vehicle.get(
+                        "_site_presence_observed_at"
+                    ),
                     "charger_type": "tesla",
                     "ev_power_kw": vehicle.get("ev_power_kw", 0),
                     "auxiliary_power_kw": vehicle.get("auxiliary_power_kw", 0),

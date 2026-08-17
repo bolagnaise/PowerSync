@@ -1289,3 +1289,39 @@ def test_configured_idle_fleet_vehicle_survives_ble_bridge_coalescing():
         not str(loadpoint["loadpoint_id"]).startswith("ble_")
         for loadpoint in loadpoints
     )
+
+
+def test_duplicate_vin_presence_uses_newest_source_and_reaches_public_status():
+    """Canonical loadpoints preserve the resolved physical location contract."""
+    vin = "5YJTEST0000000001"
+    current = datetime(2026, 8, 17, 1, 9)
+    loadpoints = build_loadpoint_status(
+        {},
+        [
+            {
+                "vehicle_id": vin,
+                "vehicle_name": "TL",
+                "site_presence": "away",
+                "_site_presence_observed_at": current,
+                "ev_power_kw": 0.0,
+                "is_connected": False,
+                "is_charging": False,
+                "include_idle": True,
+            },
+            {
+                "vehicle_id": vin,
+                "vehicle_name": "TL",
+                "site_presence": "home",
+                "_site_presence_observed_at": current + timedelta(seconds=60),
+                "ev_power_kw": 0.0,
+                "is_connected": True,
+                "is_charging": False,
+                "include_idle": True,
+            },
+        ],
+    )
+
+    assert len(loadpoints) == 1
+    assert loadpoints[0]["vehicle_id"] == vin
+    assert loadpoints[0]["site_presence"] == "home"
+    assert loadpoints[0]["connected"] is True

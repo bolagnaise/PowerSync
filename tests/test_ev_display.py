@@ -49,6 +49,7 @@ def _two_vehicle_snapshot() -> dict:
                 "loadpoint_id": "w3-id",
                 "vehicle_id": "w3-vin",
                 "vehicle_name": "W3RT1E",
+                "site_presence": "home",
                 "connected": True,
                 "actual_charging": True,
                 "status": "charging",
@@ -72,6 +73,7 @@ def test_sensor_and_widgets_project_the_same_active_vehicle() -> None:
     assert active["vehicle_name"] == "W3RT1E"
     assert sensor["vehicle_name"] == charging_widget["vehicle_name"] == "W3RT1E"
     assert sensor["vehicle_id"] == charging_widget["vehicle_id"] == "w3-vin"
+    assert sensor["site_presence"] == "home"
     assert sensor["ev_power_kw"] == charging_widget["current_power_kw"] == 7.67
     assert next(item for item in widgets if item["vehicle_name"] == "TESSY") == {
         "vehicle_name": "TESSY",

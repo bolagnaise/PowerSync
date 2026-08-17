@@ -67,6 +67,8 @@ def display_snapshot_to_sensor_data(snapshot: dict[str, Any]) -> dict[str, Any]:
             "is_discharging": _float_value(active.get("current_power_kw")) < -0.05,
         }
     )
+    if active.get("site_presence") in {"home", "away"}:
+        data["site_presence"] = active.get("site_presence")
     return data
 
 

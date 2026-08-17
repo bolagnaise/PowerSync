@@ -792,6 +792,7 @@ def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesl
         "ev_soc": 70,
         "is_connected": True,
         "is_charging": True,
+        "site_presence": "home",
     }]
     assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 3.4
 
@@ -844,6 +845,7 @@ def test_ev_vehicle_status_keeps_wall_connector_auxiliary_draw_idle():
         "ev_soc": 72,
         "is_connected": True,
         "is_charging": False,
+        "site_presence": "home",
     }]
 
     async def no_sigenergy_charger(*args, **kwargs):
@@ -1591,6 +1593,277 @@ def test_away_vin_match_keeps_home_wall_connector_as_separate_loadpoint():
     assert away["is_charging"] is False
     assert connector["ev_power_kw"] == 11.0
     assert connector["is_charging"] is True
+
+
+def test_duplicate_same_vin_away_tracker_fences_exact_wall_connector():
+    """Ticket #204: an unlocated duplicate cannot bypass the away VIN fence."""
+    power_sync = _power_sync_module()
+    vehicle_id = "5YJTEST0000000001"
+    current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
+
+    for device_order in (("away", "duplicate"), ("duplicate", "away")):
+        for wall_connector_state, wall_connector_power in ((11, 0), (2, 11000)):
+            devices = {}
+            for kind in device_order:
+                device_id = f"device-{kind}"
+                devices[device_id] = SimpleNamespace(
+                    id=device_id,
+                    name="TL",
+                    identifiers={("teslemetry", vehicle_id)},
+                )
+            tracker = _State(
+                "device_tracker.tl_location",
+                "work",
+                last_updated=current,
+            )
+            hass = _Hass(
+                [tracker],
+                {
+                    tracker.entity_id: _entity(
+                        tracker.entity_id,
+                        "device-away",
+                    )
+                },
+                devices,
+                entry_data={
+                    "tesla_coordinator": SimpleNamespace(data={
+                        "wall_connectors_raw": [{
+                            "wall_connector_state": wall_connector_state,
+                            "wall_connector_power": wall_connector_power,
+                            "wall_connector_id": "garage",
+                            "vin": vehicle_id,
+                        }],
+                        "last_update": current + timedelta(seconds=30),
+                    })
+                },
+            )
+
+            vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+            away = next(
+                vehicle
+                for vehicle in vehicles
+                if vehicle.get("vehicle_id") == vehicle_id
+            )
+            connector = next(
+                vehicle
+                for vehicle in vehicles
+                if vehicle.get("charger_id") == "wall_connector_garage"
+            )
+
+            assert away["site_presence"] == "away"
+            assert away["_site_presence_observed_at"] == current
+            assert away["ev_power_kw"] == 0.0
+            assert away["is_connected"] is False
+            assert away["is_charging"] is False
+            assert connector["ev_power_kw"] == wall_connector_power / 1000
+            assert connector["is_connected"] is True
+            assert connector["is_charging"] is (wall_connector_state == 2)
+
+
+def test_duplicate_same_vin_newer_home_tracker_allows_exact_wall_connector():
+    """A newer home observation restores exact-VIN attribution after travel."""
+    power_sync = _power_sync_module()
+    vehicle_id = "5YJTEST0000000001"
+    current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
+
+    for device_order in (("away", "home"), ("home", "away")):
+        devices = {}
+        states = []
+        entities = {}
+        for kind in device_order:
+            device_id = f"device-{kind}"
+            devices[device_id] = SimpleNamespace(
+                id=device_id,
+                name="TL",
+                identifiers={("teslemetry", vehicle_id)},
+            )
+            tracker = _State(
+                f"device_tracker.tl_{kind}_location",
+                "work" if kind == "away" else "home",
+                last_updated=(
+                    current
+                    if kind == "away"
+                    else current + timedelta(seconds=60)
+                ),
+            )
+            states.append(tracker)
+            entities[tracker.entity_id] = _entity(tracker.entity_id, device_id)
+        hass = _Hass(
+            states,
+            entities,
+            devices,
+            entry_data={
+                "tesla_coordinator": SimpleNamespace(data={
+                    "wall_connectors_raw": [{
+                        "wall_connector_state": 11,
+                        "wall_connector_power": 0,
+                        "wall_connector_id": "garage",
+                        "vin": vehicle_id,
+                    }],
+                    "last_update": current + timedelta(seconds=90),
+                })
+            },
+        )
+
+        vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+
+        assert len(vehicles) == 1
+        assert vehicles[0]["vehicle_id"] == vehicle_id
+        assert vehicles[0]["site_presence"] == "home"
+        assert vehicles[0]["_site_presence_observed_at"] == (
+            current + timedelta(seconds=60)
+        )
+        assert vehicles[0]["is_connected"] is True
+        assert vehicles[0]["is_charging"] is False
+        assert vehicles[0]["ev_power_kw"] == 0.0
+
+
+def test_duplicate_same_vin_untimestamped_away_presence_fails_closed():
+    """An unknown-age away observation needs a comparable home transition."""
+    power_sync = _power_sync_module()
+    vehicle_id = "5YJTEST0000000001"
+    current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
+    away_vehicle = {
+        "vehicle_id": vehicle_id,
+        "site_presence": "away",
+        "ev_power_kw": 0.0,
+        "is_connected": False,
+        "is_charging": False,
+    }
+    home_vehicle = {
+        "vehicle_id": vehicle_id,
+        "site_presence": "home",
+        "_site_presence_observed_at": current,
+        "ev_power_kw": 0.0,
+        "is_connected": False,
+        "is_charging": False,
+    }
+
+    matched = power_sync._apply_wall_connector_observation(
+        [home_vehicle, away_vehicle],
+        11.0,
+        True,
+        True,
+        vehicle_id,
+        current + timedelta(seconds=30),
+    )
+
+    assert matched is False
+    assert home_vehicle["ev_power_kw"] == 0.0
+    assert home_vehicle["is_connected"] is False
+
+
+def test_legacy_ev_status_applies_away_tracker_to_duplicate_physical_vin():
+    """The aggregate fallback cannot count an unlocated duplicate as home."""
+    power_sync = _power_sync_module()
+    vehicle_id = "5YJTEST0000000001"
+    current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
+
+    for device_order in (("away", "duplicate"), ("duplicate", "away")):
+        devices = {}
+        for kind in device_order:
+            device_id = f"device-{kind}"
+            devices[device_id] = SimpleNamespace(
+                id=device_id,
+                name="TL",
+                identifiers={("teslemetry", vehicle_id)},
+            )
+        states = [
+            _State(
+                "device_tracker.tl_location",
+                "work",
+                last_updated=current,
+            ),
+            _State(
+                "sensor.tl_duplicate_charging_state",
+                "charging",
+                last_updated=current + timedelta(seconds=30),
+            ),
+            _State(
+                "sensor.tl_duplicate_charger_power",
+                "7",
+                {"unit_of_measurement": "kW"},
+                current + timedelta(seconds=30),
+            ),
+        ]
+        entities = {
+            states[0].entity_id: _entity(states[0].entity_id, "device-away"),
+            states[1].entity_id: _entity(states[1].entity_id, "device-duplicate"),
+            states[2].entity_id: _entity(states[2].entity_id, "device-duplicate"),
+        }
+        hass = _Hass(states, entities, devices)
+
+        status = power_sync._get_ev_vehicle_status(hass, _Entry())
+
+        assert status["ev_power_kw"] == 0.0
+
+
+def test_legacy_ev_status_accepts_newer_home_for_duplicate_physical_vin():
+    """A newer home tracker re-enables physical-VIN aggregate telemetry."""
+    power_sync = _power_sync_module()
+    vehicle_id = "5YJTEST0000000001"
+    current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
+
+    for device_order in (("away", "home"), ("home", "away")):
+        devices = {}
+        states = []
+        entities = {}
+        for kind in device_order:
+            device_id = f"device-{kind}"
+            devices[device_id] = SimpleNamespace(
+                id=device_id,
+                name="TL",
+                identifiers={("teslemetry", vehicle_id)},
+            )
+            tracker = _State(
+                f"device_tracker.tl_{kind}_location",
+                "work" if kind == "away" else "home",
+                last_updated=(
+                    current
+                    if kind == "away"
+                    else current + timedelta(seconds=60)
+                ),
+            )
+            states.append(tracker)
+            entities[tracker.entity_id] = _entity(tracker.entity_id, device_id)
+        stale_charging = _State(
+            "sensor.tl_away_charging_state",
+            "charging",
+            last_updated=current + timedelta(seconds=30),
+        )
+        stale_power = _State(
+            "sensor.tl_away_charger_power",
+            "20",
+            {"unit_of_measurement": "kW"},
+            current + timedelta(seconds=30),
+        )
+        charging = _State(
+            "sensor.tl_home_charging_state",
+            "charging",
+            last_updated=current + timedelta(seconds=90),
+        )
+        power = _State(
+            "sensor.tl_home_charger_power",
+            "7",
+            {"unit_of_measurement": "kW"},
+            current + timedelta(seconds=90),
+        )
+        states.extend((stale_charging, stale_power, charging, power))
+        entities[stale_charging.entity_id] = _entity(
+            stale_charging.entity_id,
+            "device-away",
+        )
+        entities[stale_power.entity_id] = _entity(
+            stale_power.entity_id,
+            "device-away",
+        )
+        entities[charging.entity_id] = _entity(charging.entity_id, "device-home")
+        entities[power.entity_id] = _entity(power.entity_id, "device-home")
+        hass = _Hass(states, entities, devices)
+
+        status = power_sync._get_ev_vehicle_status(hass, _Entry())
+
+        assert status["ev_power_kw"] == 7.0
 
 
 def test_unmatched_explicit_vin_never_falls_through_to_another_vehicle():

@@ -218,6 +218,12 @@ def _merge_observation_status(target: dict[str, Any], source: Mapping[str, Any])
         "_observed_at",
         "observed_at",
     )
+    source_presence_at = _observation_timestamp(
+        source, "_site_presence_observed_at"
+    )
+    target_presence_at = _observation_timestamp(
+        target, "_site_presence_observed_at"
+    )
     source_power = _float_value(
         source.get("ev_power_kw", source.get("current_power_kw")),
         0.0,
@@ -301,6 +307,27 @@ def _merge_observation_status(target: dict[str, Any], source: Mapping[str, Any])
     ):
         target["ev_soc"] = source_soc
         target["current_soc"] = source_soc
+
+    source_presence = str(source.get("site_presence") or "").lower()
+    target_presence = str(target.get("site_presence") or "").lower()
+    if source_presence in {"home", "away"}:
+        source_presence_is_newer = source_is_newer(
+            source_presence_at, target_presence_at
+        )
+        target_presence_is_newer = target_is_newer(
+            source_presence_at, target_presence_at
+        )
+        if (
+            target_presence not in {"home", "away"}
+            or source_presence_is_newer
+            or (
+                not target_presence_is_newer
+                and source_presence == "away"
+            )
+        ):
+            target["site_presence"] = source_presence
+            if source_presence_at is not None:
+                target["_site_presence_observed_at"] = source_presence_at
 
 
 def _merge_bridge_observation_status(target: dict[str, Any], source: Mapping[str, Any]) -> None:
@@ -1033,6 +1060,12 @@ def _dynamic_loadpoint(
         "vehicle_id": observation_vehicle_id or vehicle_id,
         "vehicle_name": vehicle_name,
         "charger_type": charger_type,
+        **(
+            {"site_presence": observation.get("site_presence")}
+            if observation
+            and observation.get("site_presence") in {"home", "away"}
+            else {}
+        ),
         "connected": connected,
         "actual_charging": actually_charging,
         "status": status,
@@ -1100,6 +1133,11 @@ def _observed_loadpoint(
         "vehicle_id": observation.get("vehicle_id"),
         "vehicle_name": vehicle_name,
         "charger_type": observation.get("charger_type") or "ev",
+        **(
+            {"site_presence": observation.get("site_presence")}
+            if observation.get("site_presence") in {"home", "away"}
+            else {}
+        ),
         "connected": connected,
         "actual_charging": actually_charging,
         "status": status,
