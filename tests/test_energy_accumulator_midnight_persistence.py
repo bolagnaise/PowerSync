@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 from datetime import datetime
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -72,6 +73,7 @@ def _load_accumulator(clock: _Clock):
         "HomeAssistant": object,
         "ENERGY_ACC_SAVE_DELAY": 300,
         "dt_util": SimpleNamespace(now=clock.now),
+        "math": math,
         "_LOGGER": _Logger(),
     }
     exec(compile(module, str(COORDINATOR_PATH), "exec"), namespace)
@@ -149,3 +151,66 @@ def test_restore_marks_current_period_and_month_rollover_uses_year():
     restored.update(0.0, 0.0, 0.0, 0.0)
     assert restored.mtd_solar_kwh == 0.0
     assert restored._last_month == "2027-01"
+
+
+def test_missing_home_load_still_tracks_export_energy_and_earnings():
+    """Ticket #336: uncertain EV attribution must only withhold Home Load."""
+    clock = _Clock(datetime(2026, 8, 17, 17, 0, 0))
+    accumulator = _new_accumulator(clock)
+
+    accumulator.update(0.0, 0.0, 0.0, None, 0.53, 0.26)
+    clock.current = datetime(2026, 8, 17, 17, 5, 0)
+    accumulator.update(0.0, -12.0, 12.0, None, 0.53, 0.26)
+    summary = accumulator.as_dict()
+
+    assert summary["grid_export_today_kwh"] == 1.0
+    assert summary["export_earnings_today"] == 0.26
+    assert summary["export_earnings_coverage"] == "complete"
+    assert summary["load_today_kwh"] == 0.0
+    assert summary["avg_cost_per_kwh_today"] is None
+
+
+def test_missing_export_price_marks_earnings_as_partial():
+    clock = _Clock(datetime(2026, 8, 17, 17, 0, 0))
+    accumulator = _new_accumulator(clock)
+
+    accumulator.update(0.0, 0.0, 0.0, 1.0, 0.53, None)
+    clock.current = datetime(2026, 8, 17, 17, 5, 0)
+    accumulator.update(0.0, -12.0, 12.0, 1.0, 0.53, None)
+    summary = accumulator.as_dict()
+
+    assert summary["grid_export_today_kwh"] == 1.0
+    assert summary["export_earnings_today"] is None
+    assert summary["export_earnings_coverage"] == "partial"
+
+
+def test_nonfinite_export_price_marks_earnings_as_partial():
+    clock = _Clock(datetime(2026, 8, 17, 17, 0, 0))
+    accumulator = _new_accumulator(clock)
+
+    accumulator.update(0.0, 0.0, 0.0, 1.0, 0.53, float("nan"))
+    clock.current = datetime(2026, 8, 17, 17, 5, 0)
+    accumulator.update(0.0, -12.0, 12.0, 1.0, 0.53, float("nan"))
+    summary = accumulator.as_dict()
+
+    assert summary["grid_export_today_kwh"] == 1.0
+    assert summary["export_earnings_today"] is None
+    assert summary["export_earnings_coverage"] == "partial"
+
+
+def test_price_coverage_survives_same_day_restore():
+    clock = _Clock(datetime(2026, 8, 17, 17, 0, 0))
+    store = _Store()
+    accumulator = _new_accumulator(clock, store)
+    accumulator.update(0.0, 0.0, 0.0, 1.0, 0.53, 0.26)
+    clock.current = datetime(2026, 8, 17, 17, 5, 0)
+    accumulator.update(0.0, -12.0, 12.0, 1.0, 0.53, 0.26)
+    asyncio.run(accumulator.async_flush())
+
+    restored = _new_accumulator(clock, store)
+    asyncio.run(restored.async_restore())
+    summary = restored.as_dict()
+
+    assert summary["export_earnings_today"] == 0.26
+    assert summary["export_earnings_covered_kwh"] == 1.0
+    assert summary["export_earnings_coverage"] == "complete"

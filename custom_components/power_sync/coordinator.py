@@ -433,6 +433,9 @@ class EnergyAccumulator:
         self.load_kwh: float = 0.0
         self.import_cost_today: float = 0.0
         self.export_earnings_today: float = 0.0
+        self.import_cost_covered_kwh: float = 0.0
+        self.export_earnings_covered_kwh: float = 0.0
+        self._load_accounting_partial_today = False
         self.mtd_solar_kwh: float = 0.0
         self.mtd_grid_import_kwh: float = 0.0
         self.mtd_grid_export_kwh: float = 0.0
@@ -441,6 +444,9 @@ class EnergyAccumulator:
         self.mtd_load_kwh: float = 0.0
         self.mtd_import_cost: float = 0.0
         self.mtd_export_earnings: float = 0.0
+        self.mtd_import_cost_covered_kwh: float = 0.0
+        self.mtd_export_earnings_covered_kwh: float = 0.0
+        self._load_accounting_partial_mtd = False
         self._last_month: Any = None
         self._store: Store | None = None
         if hass and store_key:
@@ -473,6 +479,15 @@ class EnergyAccumulator:
             self.load_kwh = float(data.get("load_kwh", 0.0))
             self.import_cost_today = float(data.get("import_cost_today", 0.0))
             self.export_earnings_today = float(data.get("export_earnings_today", 0.0))
+            self.import_cost_covered_kwh = float(
+                data.get("import_cost_covered_kwh", 0.0)
+            )
+            self.export_earnings_covered_kwh = float(
+                data.get("export_earnings_covered_kwh", 0.0)
+            )
+            self._load_accounting_partial_today = bool(
+                data.get("load_accounting_partial_today", False)
+            )
             _LOGGER.info(
                 "Restored energy accumulator: solar=%.2f grid_in=%.2f grid_out=%.2f "
                 "charge=%.2f discharge=%.2f load=%.2f kWh, cost=$%.2f earn=$%.2f (date=%s)",
@@ -502,6 +517,15 @@ class EnergyAccumulator:
             self.mtd_load_kwh = float(data.get("mtd_load_kwh", 0.0))
             self.mtd_import_cost = float(data.get("mtd_import_cost", 0.0))
             self.mtd_export_earnings = float(data.get("mtd_export_earnings", 0.0))
+            self.mtd_import_cost_covered_kwh = float(
+                data.get("mtd_import_cost_covered_kwh", 0.0)
+            )
+            self.mtd_export_earnings_covered_kwh = float(
+                data.get("mtd_export_earnings_covered_kwh", 0.0)
+            )
+            self._load_accounting_partial_mtd = bool(
+                data.get("load_accounting_partial_mtd", False)
+            )
             # Persist the full year-month rather than only the numeric month;
             # January of a new year must not inherit December/January totals.
             self._last_month = current_month
@@ -543,6 +567,11 @@ class EnergyAccumulator:
             "load_kwh": round(self.load_kwh, 4),
             "import_cost_today": round(self.import_cost_today, 4),
             "export_earnings_today": round(self.export_earnings_today, 4),
+            "import_cost_covered_kwh": round(self.import_cost_covered_kwh, 4),
+            "export_earnings_covered_kwh": round(
+                self.export_earnings_covered_kwh, 4
+            ),
+            "load_accounting_partial_today": self._load_accounting_partial_today,
             "month": stored_month,
             "mtd_solar_kwh": round(self.mtd_solar_kwh, 4),
             "mtd_grid_import_kwh": round(self.mtd_grid_import_kwh, 4),
@@ -552,6 +581,13 @@ class EnergyAccumulator:
             "mtd_load_kwh": round(self.mtd_load_kwh, 4),
             "mtd_import_cost": round(self.mtd_import_cost, 4),
             "mtd_export_earnings": round(self.mtd_export_earnings, 4),
+            "mtd_import_cost_covered_kwh": round(
+                self.mtd_import_cost_covered_kwh, 4
+            ),
+            "mtd_export_earnings_covered_kwh": round(
+                self.mtd_export_earnings_covered_kwh, 4
+            ),
+            "load_accounting_partial_mtd": self._load_accounting_partial_mtd,
         }
 
     def update(
@@ -559,7 +595,7 @@ class EnergyAccumulator:
         solar_kw: float,
         grid_kw: float,
         battery_kw: float,
-        load_kw: float,
+        load_kw: float | None,
         buy_price_per_kwh: float | None = None,
         sell_price_per_kwh: float | None = None,
     ) -> None:
@@ -577,6 +613,16 @@ class EnergyAccumulator:
         """
         now = dt_util.now()  # Local time for midnight reset
 
+        def _finite_price(value: float | None) -> float | None:
+            try:
+                price = float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+            return price if price is not None and math.isfinite(price) else None
+
+        buy_price_per_kwh = _finite_price(buy_price_per_kwh)
+        sell_price_per_kwh = _finite_price(sell_price_per_kwh)
+
         # Reset MTD at month rollover
         current_month = now.strftime("%Y-%m")
         if self._last_month is not None and current_month != self._last_month:
@@ -588,6 +634,9 @@ class EnergyAccumulator:
             self.mtd_load_kwh = 0.0
             self.mtd_import_cost = 0.0
             self.mtd_export_earnings = 0.0
+            self.mtd_import_cost_covered_kwh = 0.0
+            self.mtd_export_earnings_covered_kwh = 0.0
+            self._load_accounting_partial_mtd = False
 
         # Reset at local midnight
         if self._last_date is not None and now.date() != self._last_date:
@@ -606,6 +655,9 @@ class EnergyAccumulator:
             self.load_kwh = 0.0
             self.import_cost_today = 0.0
             self.export_earnings_today = 0.0
+            self.import_cost_covered_kwh = 0.0
+            self.export_earnings_covered_kwh = 0.0
+            self._load_accounting_partial_today = False
 
         # Integrate power × time
         if self._last_update is not None:
@@ -616,24 +668,38 @@ class EnergyAccumulator:
                 self.grid_export_kwh += max(0, -grid_kw) * delta_h
                 self.battery_charge_kwh += max(0, -battery_kw) * delta_h
                 self.battery_discharge_kwh += max(0, battery_kw) * delta_h
-                self.load_kwh += max(0, load_kw) * delta_h
+                if load_kw is not None:
+                    self.load_kwh += max(0, load_kw) * delta_h
                 # Accumulate costs if prices available
                 if buy_price_per_kwh is not None:
-                    self.import_cost_today += max(0, grid_kw) * buy_price_per_kwh * delta_h
+                    import_kwh = max(0, grid_kw) * delta_h
+                    self.import_cost_today += import_kwh * buy_price_per_kwh
+                    self.import_cost_covered_kwh += import_kwh
                 if sell_price_per_kwh is not None:
-                    self.export_earnings_today += max(0, -grid_kw) * sell_price_per_kwh * delta_h
+                    export_kwh = max(0, -grid_kw) * delta_h
+                    self.export_earnings_today += export_kwh * sell_price_per_kwh
+                    self.export_earnings_covered_kwh += export_kwh
                 # MTD accumulation
                 self.mtd_solar_kwh += max(0, solar_kw) * delta_h
                 self.mtd_grid_import_kwh += max(0, grid_kw) * delta_h
                 self.mtd_grid_export_kwh += max(0, -grid_kw) * delta_h
                 self.mtd_battery_charge_kwh += max(0, -battery_kw) * delta_h
                 self.mtd_battery_discharge_kwh += max(0, battery_kw) * delta_h
-                self.mtd_load_kwh += max(0, load_kw) * delta_h
+                if load_kw is not None:
+                    self.mtd_load_kwh += max(0, load_kw) * delta_h
                 if buy_price_per_kwh is not None:
-                    self.mtd_import_cost += max(0, grid_kw) * buy_price_per_kwh * delta_h
+                    import_kwh = max(0, grid_kw) * delta_h
+                    self.mtd_import_cost += import_kwh * buy_price_per_kwh
+                    self.mtd_import_cost_covered_kwh += import_kwh
                 if sell_price_per_kwh is not None:
-                    self.mtd_export_earnings += max(0, -grid_kw) * sell_price_per_kwh * delta_h
+                    export_kwh = max(0, -grid_kw) * delta_h
+                    self.mtd_export_earnings += export_kwh * sell_price_per_kwh
+                    self.mtd_export_earnings_covered_kwh += export_kwh
                 self._schedule_save()
+
+        if load_kw is None:
+            self._load_accounting_partial_today = True
+            self._load_accounting_partial_mtd = True
 
         self._last_update = now
         self._last_date = now.date()
@@ -641,13 +707,57 @@ class EnergyAccumulator:
 
     def as_dict(self) -> dict:
         """Return accumulated totals as a dict for energy_summary."""
+        import_cost_complete = self._coverage_matches(
+            self.import_cost_covered_kwh,
+            self.grid_import_kwh,
+        )
+        export_earnings_complete = self._coverage_matches(
+            self.export_earnings_covered_kwh,
+            self.grid_export_kwh,
+        )
+        mtd_import_cost_complete = self._coverage_matches(
+            self.mtd_import_cost_covered_kwh,
+            self.mtd_grid_import_kwh,
+        )
+        mtd_export_earnings_complete = self._coverage_matches(
+            self.mtd_export_earnings_covered_kwh,
+            self.mtd_grid_export_kwh,
+        )
+        import_cost_today = (
+            round(self.import_cost_today, 4) if import_cost_complete else None
+        )
+        export_earnings_today = (
+            round(self.export_earnings_today, 4)
+            if export_earnings_complete
+            else None
+        )
+        mtd_import_cost = (
+            round(self.mtd_import_cost, 4) if mtd_import_cost_complete else None
+        )
+        mtd_export_earnings = (
+            round(self.mtd_export_earnings, 4)
+            if mtd_export_earnings_complete
+            else None
+        )
         avg_today = (
-            round((self.import_cost_today - self.export_earnings_today) / self.load_kwh, 4)
-            if self.load_kwh > 0 else None
+            round((import_cost_today - export_earnings_today) / self.load_kwh, 4)
+            if (
+                self.load_kwh > 0
+                and import_cost_today is not None
+                and export_earnings_today is not None
+                and not self._load_accounting_partial_today
+            )
+            else None
         )
         avg_mtd = (
-            round((self.mtd_import_cost - self.mtd_export_earnings) / self.mtd_load_kwh, 4)
-            if self.mtd_load_kwh > 0 else None
+            round((mtd_import_cost - mtd_export_earnings) / self.mtd_load_kwh, 4)
+            if (
+                self.mtd_load_kwh > 0
+                and mtd_import_cost is not None
+                and mtd_export_earnings is not None
+                and not self._load_accounting_partial_mtd
+            )
+            else None
         )
         return {
             "pv_today_kwh": round(self.solar_kwh, 3),
@@ -656,14 +766,35 @@ class EnergyAccumulator:
             "charge_today_kwh": round(self.battery_charge_kwh, 3),
             "discharge_today_kwh": round(self.battery_discharge_kwh, 3),
             "load_today_kwh": round(self.load_kwh, 3),
-            "import_cost_today": round(self.import_cost_today, 4),
-            "export_earnings_today": round(self.export_earnings_today, 4),
+            "import_cost_today": import_cost_today,
+            "export_earnings_today": export_earnings_today,
+            "import_cost_covered_kwh": round(self.import_cost_covered_kwh, 3),
+            "export_earnings_covered_kwh": round(
+                self.export_earnings_covered_kwh, 3
+            ),
+            "import_cost_coverage": (
+                "complete" if import_cost_complete else "partial"
+            ),
+            "export_earnings_coverage": (
+                "complete" if export_earnings_complete else "partial"
+            ),
             "avg_cost_per_kwh_today": avg_today,
-            "mtd_import_cost": round(self.mtd_import_cost, 4),
-            "mtd_export_earnings": round(self.mtd_export_earnings, 4),
+            "mtd_import_cost": mtd_import_cost,
+            "mtd_export_earnings": mtd_export_earnings,
             "mtd_load_kwh": round(self.mtd_load_kwh, 3),
             "avg_cost_per_kwh_mtd": avg_mtd,
         }
+
+    @staticmethod
+    def _coverage_matches(
+        covered_kwh: float,
+        total_kwh: float,
+        tolerance_kwh: float = 0.001,
+    ) -> bool:
+        """Return whether priced and measured energy cover the same intervals."""
+        covered = max(0.0, float(covered_kwh or 0.0))
+        total = max(0.0, float(total_kwh or 0.0))
+        return abs(covered - total) <= max(0.0, tolerance_kwh)
 
 
 def _flow_power_export_rate_dollars(config_entry: Any, state: str) -> float:
@@ -2195,22 +2326,20 @@ def _update_energy_accumulator_with_ev_load(
     grid_kw: float,
     battery_kw: float,
     raw_load_kw: float,
-    buy: float,
-    sell: float,
+    buy: float | None,
+    sell: float | None,
 ) -> bool:
-    """Integrate non-EV Home Load, withholding incomplete charger samples."""
+    """Integrate site metering while withholding uncertain Home Load only."""
     ev_power_kw, complete = _fresh_site_ev_load(hass, entry_id, 0.0)
-    if not complete:
-        return False
     accumulator.update(
         solar_kw,
         grid_kw,
         battery_kw,
-        max(0.0, raw_load_kw - ev_power_kw),
+        max(0.0, raw_load_kw - ev_power_kw) if complete else None,
         buy,
         sell,
     )
-    return True
+    return complete
 
 
 class TeslaEnergyCoordinator(DataUpdateCoordinator):
@@ -5765,8 +5894,11 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             # No daily PV register (e.g. FoxESS) — use energy accumulator
             summary["pv_today_kwh"] = self._energy_acc.solar_kwh
         # For import/export: prefer daily register → total delta → accumulator
+        import_source = "power_accumulator"
+        export_source = "power_accumulator"
         if daily_import is not None and daily_import > 0:
             summary["grid_import_today_kwh"] = daily_import
+            import_source = "sungrow_daily_register"
         else:
             # Daily register missing or 0 — derive from total register delta
             total_import = self._valid_daily_total(data.get("total_import"))
@@ -5774,10 +5906,12 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 derived = round(total_import - self._total_import_baseline, 2)
                 if derived >= 0:
                     summary["grid_import_today_kwh"] = derived
+                    import_source = "sungrow_lifetime_delta"
             # else: keep accumulator value (already in summary)
 
         if daily_export is not None and daily_export > 0:
             summary["grid_export_today_kwh"] = daily_export
+            export_source = "sungrow_daily_register"
         else:
             # Daily register missing or 0 — derive from total register delta
             total_export = self._valid_daily_total(data.get("total_export"))
@@ -5785,6 +5919,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 derived = round(total_export - self._total_export_baseline, 2)
                 if derived >= 0:
                     summary["grid_export_today_kwh"] = derived
+                    export_source = "sungrow_lifetime_delta"
             # else: keep accumulator value (already in summary)
         if daily_discharge is not None:
             summary["discharge_today_kwh"] = daily_discharge
@@ -5794,6 +5929,35 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         # Use the final (possibly corrected) import/export values for load calc
         final_import = summary.get("grid_import_today_kwh", 0)
         final_export = summary.get("grid_export_today_kwh", 0)
+        summary["grid_import_today_source"] = import_source
+        summary["grid_export_today_source"] = export_source
+
+        # Grid costs are accumulated from priced power samples.  Do not pair a
+        # partial accumulator value with a full-day Sungrow hardware counter:
+        # that can present an exact $0.00 beside substantial exported energy
+        # after an incomplete EV-load snapshot or a mid-day startup.
+        import_covered = summary.get("import_cost_covered_kwh")
+        if (
+            import_covered is not None
+            and not EnergyAccumulator._coverage_matches(
+                import_covered,
+                final_import,
+                max(0.05, float(final_import or 0.0) * 0.02),
+            )
+        ):
+            summary["import_cost_today"] = None
+            summary["import_cost_coverage"] = "partial"
+        export_covered = summary.get("export_earnings_covered_kwh")
+        if (
+            export_covered is not None
+            and not EnergyAccumulator._coverage_matches(
+                export_covered,
+                final_export,
+                max(0.05, float(final_export or 0.0) * 0.02),
+            )
+        ):
+            summary["export_earnings_today"] = None
+            summary["export_earnings_coverage"] = "partial"
 
         # Calculate daily load from energy balance (no register for this)
         if all(
@@ -5807,9 +5971,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
         # Recompute daily avg using possibly-overridden load from hardware registers
         load_kwh = summary.get("load_today_kwh", 0.0) or 0.0
-        if load_kwh > 0:
-            import_cost = summary.get("import_cost_today", 0.0) or 0.0
-            export_earn = summary.get("export_earnings_today", 0.0) or 0.0
+        import_cost = summary.get("import_cost_today")
+        export_earn = summary.get("export_earnings_today")
+        if load_kwh > 0 and import_cost is not None and export_earn is not None:
             summary["avg_cost_per_kwh_today"] = round((import_cost - export_earn) / load_kwh, 4)
         else:
             summary["avg_cost_per_kwh_today"] = None
@@ -7143,23 +7307,57 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         es2 = d2.get("energy_summary", {}) or {}
         combined_energy = {}
         for key in (
-            "pv_today_kwh", "grid_import_today_kwh", "grid_export_today_kwh",
-            "charge_today_kwh", "discharge_today_kwh", "load_today_kwh",
-            "import_cost_today", "export_earnings_today",
-            "mtd_import_cost", "mtd_export_earnings", "mtd_load_kwh",
+            "pv_today_kwh",
+            "charge_today_kwh",
+            "discharge_today_kwh",
+            "load_today_kwh",
+            "mtd_load_kwh",
         ):
             combined_energy[key] = round(
                 (es1.get(key, 0) or 0) + (es2.get(key, 0) or 0), 4
             )
+        # Grid metering is primary-only because the secondary inverter sits on
+        # the primary's backup port.  Preserve the primary's explicit partial
+        # cost state instead of summing or coercing it to an authoritative 0.
+        for key in (
+            "grid_import_today_kwh",
+            "grid_export_today_kwh",
+            "import_cost_today",
+            "export_earnings_today",
+            "import_cost_covered_kwh",
+            "export_earnings_covered_kwh",
+            "import_cost_coverage",
+            "export_earnings_coverage",
+            "grid_import_today_source",
+            "grid_export_today_source",
+            "mtd_import_cost",
+            "mtd_export_earnings",
+        ):
+            if key in es1:
+                combined_energy[key] = es1[key]
         load_today = combined_energy.get("load_today_kwh", 0) or 0
+        import_cost = combined_energy.get("import_cost_today")
+        export_earnings = combined_energy.get("export_earnings_today")
         combined_energy["avg_cost_per_kwh_today"] = (
-            round((combined_energy["import_cost_today"] - combined_energy["export_earnings_today"]) / load_today, 4)
-            if load_today > 0 else None
+            round((import_cost - export_earnings) / load_today, 4)
+            if (
+                load_today > 0
+                and import_cost is not None
+                and export_earnings is not None
+            )
+            else None
         )
         mtd_load = combined_energy.get("mtd_load_kwh", 0) or 0
+        mtd_import_cost = combined_energy.get("mtd_import_cost")
+        mtd_export_earnings = combined_energy.get("mtd_export_earnings")
         combined_energy["avg_cost_per_kwh_mtd"] = (
-            round((combined_energy["mtd_import_cost"] - combined_energy["mtd_export_earnings"]) / mtd_load, 4)
-            if mtd_load > 0 else None
+            round((mtd_import_cost - mtd_export_earnings) / mtd_load, 4)
+            if (
+                mtd_load > 0
+                and mtd_import_cost is not None
+                and mtd_export_earnings is not None
+            )
+            else None
         )
         charge_limit_w = self._combined_power_limit_w("charge")
         discharge_limit_w = self._combined_power_limit_w("discharge")

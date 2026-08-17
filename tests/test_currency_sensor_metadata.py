@@ -206,6 +206,32 @@ def test_daily_cost_uses_restored_numeric_state_while_energy_summary_is_missing(
     assert entity.native_value == 4.56
 
 
+def test_daily_earnings_partial_coverage_does_not_restore_stale_value():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "daily_export_earnings")
+    entity = sensor.TeslaEnergySensor(
+        SimpleNamespace(
+            data={
+                "energy_summary": {
+                    "export_earnings_today": None,
+                    "export_earnings_coverage": "partial",
+                    "export_earnings_covered_kwh": 0.12,
+                    "grid_export_today_source": "sungrow_daily_register",
+                }
+            }
+        ),
+        desc,
+        _entry("agl"),
+    )
+    entity.hass = _hass("AUD")
+    entity._restored_native_value = 4.56
+
+    assert entity.native_value is None
+    assert entity.extra_state_attributes["coverage"] == "partial"
+    assert entity.extra_state_attributes["priced_energy_kwh"] == 0.12
+    assert entity.extra_state_attributes["energy_source"] == "sungrow_daily_register"
+
+
 def test_flow_power_import_price_uses_restored_state_before_coordinator_data():
     sensor = _sensor_module()
     entity = sensor.FlowPowerPriceSensor(

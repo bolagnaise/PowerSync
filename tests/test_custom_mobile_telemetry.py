@@ -53,13 +53,22 @@ def _custom_coordinator_namespace() -> dict[str, Any]:
         if isinstance(node, ast.FunctionDef)
         and node.name == "normalize_custom_power_kw"
     )
+    accumulator_update_node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_update_energy_accumulator_with_ev_load"
+    )
     class_node = next(
         node
         for node in tree.body
         if isinstance(node, ast.ClassDef)
         and node.name == "CustomEntityEnergyCoordinator"
     )
-    module = ast.Module(body=[normalize_node, class_node], type_ignores=[])
+    module = ast.Module(
+        body=[normalize_node, accumulator_update_node, class_node],
+        type_ignores=[],
+    )
     ast.fix_missing_locations(module)
     namespace: dict[str, Any] = {
         "Any": Any,
@@ -75,6 +84,7 @@ def _custom_coordinator_namespace() -> dict[str, Any]:
             utcnow=lambda: datetime(2026, 7, 17, 7, 30, tzinfo=timezone.utc)
         ),
         "_get_current_prices": lambda _hass, _entry_id: (0.25, 0.08),
+        "_fresh_site_ev_load": lambda *_args, **_kwargs: (0.0, True),
         "_LOGGER": SimpleNamespace(
             debug=lambda *_args, **_kwargs: None,
             warning=lambda *_args, **_kwargs: None,

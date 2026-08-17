@@ -57,6 +57,7 @@ def _install_const_stub() -> None:
     const.CONF_TESLA_BLE_VEHICLE_MAPPING = "tesla_ble_vehicle_mapping"
     const.DEFAULT_TESLA_BLE_ENTITY_PREFIX = "tesla_ble"
     const.EV_PROVIDER_BOTH = "both"
+    const.EV_PROVIDER_TESLA_BLE = "tesla_ble"
     const.TESLA_SITE_INFO_CACHE_TTL_SECONDS = 3600
     const.CONF_SIGENERGY_CHARGER_ENABLED = "sigenergy_charger_enabled"
     const.CONF_SIGENERGY_CHARGER_HOST = "sigenergy_charger_host"
@@ -1049,6 +1050,178 @@ def test_sungrow_daily_grid_totals_survive_same_day_reload():
     assert first["grid_export_today_kwh"] == pytest.approx(0.3)
     assert second["grid_import_today_kwh"] == pytest.approx(0.2)
     assert second["grid_export_today_kwh"] == pytest.approx(0.5)
+
+
+def test_sungrow_daily_earnings_reject_partial_accumulator_coverage():
+    """Ticket #336: never pair full-day hardware export with partial $0."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class PartialAccumulator(_FakeEnergyAccumulator):
+        def as_dict(self):
+            data = super().as_dict()
+            data.update(
+                {
+                    "grid_import_today_kwh": 23.58,
+                    "grid_export_today_kwh": 0.12,
+                    "import_cost_today": 3.84,
+                    "export_earnings_today": 0.0,
+                    "import_cost_covered_kwh": 23.58,
+                    "export_earnings_covered_kwh": 0.12,
+                    "import_cost_coverage": "complete",
+                    "export_earnings_coverage": "complete",
+                }
+            )
+            return data
+
+    try:
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator._energy_acc = PartialAccumulator()
+        summary = coordinator._build_energy_summary(
+            {
+                "daily_import": 26.8,
+                "daily_export": 11.8,
+                "daily_pv_generation": 17.7,
+                "daily_battery_charge": 34.4,
+                "daily_battery_discharge": 34.8,
+            }
+        )
+    finally:
+        restore()
+
+    assert summary["grid_export_today_kwh"] == 11.8
+    assert summary["grid_export_today_source"] == "sungrow_daily_register"
+    assert summary["export_earnings_today"] is None
+    assert summary["export_earnings_coverage"] == "partial"
+    assert summary["avg_cost_per_kwh_today"] is None
+
+
+def test_sungrow_daily_earnings_keep_matching_reward_window_coverage():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class CompleteAccumulator(_FakeEnergyAccumulator):
+        def as_dict(self):
+            data = super().as_dict()
+            data.update(
+                {
+                    "grid_import_today_kwh": 26.7,
+                    "grid_export_today_kwh": 11.72,
+                    "import_cost_today": 4.0,
+                    "export_earnings_today": 3.0472,
+                    "import_cost_covered_kwh": 26.7,
+                    "export_earnings_covered_kwh": 11.72,
+                    "import_cost_coverage": "complete",
+                    "export_earnings_coverage": "complete",
+                }
+            )
+            return data
+
+    try:
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator._energy_acc = CompleteAccumulator()
+        summary = coordinator._build_energy_summary(
+            {
+                "daily_import": 26.8,
+                "daily_export": 11.8,
+                "daily_pv_generation": 17.7,
+                "daily_battery_charge": 34.4,
+                "daily_battery_discharge": 34.8,
+            }
+        )
+    finally:
+        restore()
+
+    assert summary["export_earnings_today"] == pytest.approx(3.0472)
+    assert summary["export_earnings_coverage"] == "complete"
+
+
+def test_dual_sungrow_keeps_primary_grid_cost_coverage():
+    """The backup-port inverter must not hide primary partial accounting."""
+    DualSungrowCoordinator, restore = _load_dual_sungrow_coordinator()
+
+    class Child:
+        def __init__(self, data):
+            self.data = data
+
+        def startup_control_ready(self):
+            return True
+
+    primary = Child(
+        {
+            "solar_power": 2.0,
+            "grid_power": -1.0,
+            "battery_power": 1.0,
+            "load_power": 2.0,
+            "battery_level": 50.0,
+            "energy_summary": {
+                "pv_today_kwh": 10.0,
+                "grid_import_today_kwh": 26.8,
+                "grid_export_today_kwh": 11.8,
+                "charge_today_kwh": 4.0,
+                "discharge_today_kwh": 5.0,
+                "load_today_kwh": 20.0,
+                "import_cost_today": None,
+                "export_earnings_today": None,
+                "import_cost_covered_kwh": 23.58,
+                "export_earnings_covered_kwh": 0.12,
+                "import_cost_coverage": "partial",
+                "export_earnings_coverage": "partial",
+                "grid_import_today_source": "sungrow_daily_register",
+                "grid_export_today_source": "sungrow_daily_register",
+                "mtd_import_cost": None,
+                "mtd_export_earnings": None,
+                "mtd_load_kwh": 20.0,
+            },
+        }
+    )
+    secondary = Child(
+        {
+            "solar_power": 1.0,
+            "grid_power": -99.0,
+            "battery_power": 0.5,
+            "load_power": 1.0,
+            "battery_level": 60.0,
+            "energy_summary": {
+                "pv_today_kwh": 5.0,
+                "grid_import_today_kwh": 99.0,
+                "grid_export_today_kwh": 99.0,
+                "charge_today_kwh": 2.0,
+                "discharge_today_kwh": 3.0,
+                "load_today_kwh": 10.0,
+                "import_cost_today": 9.0,
+                "export_earnings_today": 10.0,
+                "mtd_import_cost": 9.0,
+                "mtd_export_earnings": 10.0,
+                "mtd_load_kwh": 10.0,
+            },
+        }
+    )
+
+    async def run_update():
+        coordinator = DualSungrowCoordinator.__new__(DualSungrowCoordinator)
+        coordinator._coord1 = primary
+        coordinator._coord2 = secondary
+        coordinator._soc_cap = 100
+        coordinator._cap1 = 10.0
+        coordinator._cap2 = 10.0
+        return await coordinator._async_update_data()
+
+    try:
+        data = asyncio.run(run_update())
+    finally:
+        restore()
+
+    summary = data["energy_summary"]
+    assert data["grid_power"] == -1.0
+    assert summary["grid_export_today_kwh"] == 11.8
+    assert summary["export_earnings_today"] is None
+    assert summary["export_earnings_coverage"] == "partial"
+    assert summary["avg_cost_per_kwh_today"] is None
 
 
 def test_sungrow_daily_grid_baselines_initialize_and_persist_independently():

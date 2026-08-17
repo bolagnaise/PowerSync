@@ -369,6 +369,43 @@ def test_daily_home_energy_uses_the_same_site_ev_total():
     assert calls == [(4.0, 1.0, 0.0, 3.0, 0.3, 0.1)]
 
 
+def test_incomplete_ev_load_withholds_only_home_load_accounting():
+    """Ticket #336: stale EV identity must not stop grid earnings metering."""
+    snapshot = types.SimpleNamespace(
+        power_kw=0.0,
+        observed_at=datetime(2026, 7, 8, 0, 58, 0),
+        quality=types.SimpleNamespace(value="complete"),
+        components=(
+            types.SimpleNamespace(
+                physical_load_key="vehicle:ble_tesla_ble",
+                power_kw=0.0,
+                active=False,
+            ),
+        ),
+        unavailable_active_keys=(),
+    )
+    hass = types.SimpleNamespace(
+        data={DOMAIN: {"entry-1": {"observed_ev_load_snapshot": snapshot}}}
+    )
+    calls = []
+    accumulator = types.SimpleNamespace(update=lambda *args: calls.append(args))
+
+    complete = _update_energy_accumulator_with_ev_load(
+        accumulator,
+        hass,
+        "entry-1",
+        0.0,
+        -12.0,
+        12.0,
+        0.0,
+        0.53,
+        0.26,
+    )
+
+    assert complete is False
+    assert calls == [(0.0, -12.0, 12.0, None, 0.53, 0.26)]
+
+
 class _FakeEnergyAccumulator:
     def update(self, *args) -> None:
         return None

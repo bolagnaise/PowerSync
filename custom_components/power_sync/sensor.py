@@ -511,6 +511,13 @@ _RESTORED_NUMERIC_SENSOR_KEYS = {
     SENSOR_TYPE_MTD_AVG_COST_PER_KWH,
 }
 
+_ENERGY_SUMMARY_VALUE_KEYS = {
+    SENSOR_TYPE_DAILY_IMPORT_COST: "import_cost_today",
+    SENSOR_TYPE_DAILY_EXPORT_EARNINGS: "export_earnings_today",
+    SENSOR_TYPE_DAILY_AVG_COST_PER_KWH: "avg_cost_per_kwh_today",
+    SENSOR_TYPE_MTD_AVG_COST_PER_KWH: "avg_cost_per_kwh_mtd",
+}
+
 
 def _restored_numeric_state_value(state: Any) -> float | None:
     """Return a numeric value from a restored HA state, if it is usable."""
@@ -3180,7 +3187,21 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
                 )
             ):
                 value += _sungrow_ac_inverter_power_kw(self._entry, self.hass)
-            return value if value is not None else self._restored_numeric_value(self.entity_description.key)
+            if value is not None:
+                return value
+            summary_key = _ENERGY_SUMMARY_VALUE_KEYS.get(
+                self.entity_description.key
+            )
+            summary = (energy_data or {}).get("energy_summary")
+            if (
+                summary_key is not None
+                and isinstance(summary, dict)
+                and summary_key in summary
+            ):
+                # A current explicit None means accounting coverage is partial;
+                # do not mask that state with a restored historical number.
+                return None
+            return self._restored_numeric_value(self.entity_description.key)
         return None
 
     async def async_added_to_hass(self) -> None:
@@ -3245,6 +3266,33 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
                     "observed_ev_power_kw": energy_data.get("observed_ev_power"),
                     "normalization_quality": energy_data.get(
                         "home_load_normalization_quality"
+                    ),
+                }
+            )
+        energy_summary = energy_data.get("energy_summary") or {}
+        if self.entity_description.key == SENSOR_TYPE_DAILY_IMPORT_COST:
+            attrs.update(
+                {
+                    "coverage": energy_summary.get("import_cost_coverage"),
+                    "priced_energy_kwh": energy_summary.get(
+                        "import_cost_covered_kwh"
+                    ),
+                    "energy_source": energy_summary.get(
+                        "grid_import_today_source"
+                    ),
+                }
+            )
+        elif self.entity_description.key == SENSOR_TYPE_DAILY_EXPORT_EARNINGS:
+            attrs.update(
+                {
+                    "coverage": energy_summary.get(
+                        "export_earnings_coverage"
+                    ),
+                    "priced_energy_kwh": energy_summary.get(
+                        "export_earnings_covered_kwh"
+                    ),
+                    "energy_source": energy_summary.get(
+                        "grid_export_today_source"
                     ),
                 }
             )
