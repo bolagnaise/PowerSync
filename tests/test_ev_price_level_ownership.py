@@ -1161,6 +1161,55 @@ def test_time_critical_impossible_plan_only_charges_in_permitted_current_window(
     assert source == ("grid_offpeak" if expected_should_charge else "waiting")
 
 
+def test_time_critical_keeps_final_minutes_before_deadline(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    now = datetime(2026, 8, 18, 5, 55, tzinfo=brisbane_tz)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+
+    plan = asyncio.run(
+        planner._plan_time_critical(
+            vehicle_id=VIN,
+            current_soc=70,
+            target_soc=80,
+            target_time=datetime(2026, 8, 18, 6, 0),
+            energy_needed_kwh=8.67,
+            charger_power_kw=7.36,
+            surplus_forecast=[],
+            price_forecast=[
+                ev_planner.PriceForecast(
+                    hour="2026-08-18T05:00:00",
+                    import_cents=31.0,
+                    export_cents=0.0,
+                    period="offpeak",
+                )
+            ],
+        )
+    )
+
+    assert [(window.start_time, window.end_time) for window in plan.windows] == [
+        ("2026-08-18T05:55:00", "2026-08-18T06:00:00")
+    ]
+    should_charge, _reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=0.0,
+            current_price_cents=31.0,
+            battery_soc=70.0,
+            is_time_critical=True,
+        )
+    )
+    assert should_charge is True
+    assert source == "grid_offpeak"
+
+
 def test_forecast_hour_key_preserves_repeated_dst_hours():
     first = ev_planner._forecast_hour_key("2026-11-01T01:00:00-04:00")
     second = ev_planner._forecast_hour_key("2026-11-01T01:00:00-05:00")

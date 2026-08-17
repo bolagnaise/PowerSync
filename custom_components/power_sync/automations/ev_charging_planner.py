@@ -3465,8 +3465,8 @@ class ChargingPlanner:
                 bounded_end - bounded_start
             ).total_seconds() / 3600
             usable_hours = max(0.0, min(1.0, usable_hours))
-            if usable_hours < 0.1:
-                continue  # Less than 6 minutes usable — skip
+            if usable_hours <= 0:
+                continue
 
             # Use one consistent power for capacity, timestamps, publication,
             # and downstream optimizer demand.

@@ -1094,7 +1094,7 @@ def _tesla_physical_charging_snapshot(
     updated_after: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """Read VIN-scoped physical charging evidence, excluding control limits."""
-    charging = False
+    charging_observations: list[tuple[Optional[datetime], str, bool]] = []
     measurements: set[str] = set()
     fresh_measurements: set[str] = set()
 
@@ -1115,7 +1115,14 @@ def _tesla_physical_charging_snapshot(
             r"_(?:charging|charging_state|charge_state)(?:_\d+)?$",
             entity_id_lower,
         ):
-            charging = charging or value == "charging"
+            updated_at = getattr(state, "last_updated", None) or getattr(
+                state,
+                "last_changed",
+                None,
+            )
+            charging_observations.append(
+                (updated_at, entity_id, value == "charging")
+            )
             continue
 
         measurement = None
@@ -1149,6 +1156,53 @@ def _tesla_physical_charging_snapshot(
         ):
             fresh_measurements.add(measurement)
 
+    # Fleet, Teslemetry, and a paired BLE bridge can all publish the same
+    # vehicle's charging state at different cadences.  Treating those values
+    # as a boolean OR lets an older cloud "charging" sample overrule a newer
+    # local/BLE "stopped" sample.  A Smart Schedule restart then incorrectly
+    # recovers an already-stopped car without sending a physical start command.
+    # Prefer the newest usable observation; if providers updated inside the
+    # existing connection-conflict window disagree, fail closed and require
+    # the normal confirmed-start path.
+    timestamped_observations = [
+        observation
+        for observation in charging_observations
+        if isinstance(observation[0], datetime)
+    ]
+    if timestamped_observations:
+        def _observation_timestamp(
+            observation: tuple[Optional[datetime], str, bool],
+        ) -> float:
+            observed_at = observation[0]
+            assert isinstance(observed_at, datetime)
+            try:
+                return observed_at.timestamp()
+            except (OSError, OverflowError, ValueError):
+                return float("-inf")
+
+        newest_timestamp = max(
+            _observation_timestamp(observation)
+            for observation in timestamped_observations
+        )
+        newest_observations = [
+            observation
+            for observation in timestamped_observations
+            if (
+                newest_timestamp - _observation_timestamp(observation)
+                < TESLA_CONNECTION_CONFLICT_FRESHNESS_SECONDS
+            )
+        ]
+        charging = bool(newest_observations) and all(
+            observation[2] for observation in newest_observations
+        )
+    else:
+        # Lightweight test doubles and legacy HA states may omit timestamps.
+        # Preserve the single-source behavior, while still refusing an exact
+        # same-snapshot disagreement.
+        charging = bool(charging_observations) and all(
+            observation[2] for observation in charging_observations
+        )
+
     return {
         "charging": charging,
         "measurements": frozenset(measurements),
@@ -1177,9 +1231,6 @@ async def _wait_for_tesla_physical_start(
             params,
             updated_after=command_started_at,
         )
-        state_transitioned = (
-            snapshot["charging"] and not baseline.get("charging", False)
-        )
         measurement_appeared = bool(
             snapshot["measurements"] - baseline.get("measurements", frozenset())
         )
@@ -1188,8 +1239,7 @@ async def _wait_for_tesla_physical_start(
             snapshot["charging"]
             and snapshot["measurements"]
             and (
-                state_transitioned
-                or measurement_appeared
+                measurement_appeared
                 or measurement_refreshed
             )
         ):

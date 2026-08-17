@@ -1159,6 +1159,110 @@ def test_tesla_physical_start_rejects_stale_and_other_vin_telemetry():
     assert stale[0] is False
 
 
+def test_tesla_physical_start_rejects_fresh_state_with_stale_draw():
+    hass, vin_a, _vin_b = _tesla_confirmation_hass()
+    now = datetime.now(timezone.utc)
+    stale_current = hass.states.get("sensor.car_a_charger_actual_current")
+    stale_current.state = "32"
+    stale_current.last_updated = now - timedelta(minutes=2)
+    baseline = actions._tesla_physical_charging_snapshot(
+        hass,
+        _Entry(),
+        vin_a,
+        {},
+    )
+
+    charging = hass.states.get("sensor.car_a_charging")
+    charging.state = "charging"
+    charging.last_updated = now + timedelta(seconds=1)
+
+    confirmed = asyncio.run(
+        actions._wait_for_tesla_physical_start(
+            hass,
+            _Entry(),
+            vin_a,
+            {},
+            baseline,
+            now,
+            timeout_seconds=0,
+        )
+    )
+
+    assert confirmed[0] is False
+
+
+def test_tesla_physical_snapshot_prefers_fresh_stopped_provider():
+    """A stale cloud charging sample must not suppress a required restart."""
+    hass, vin_a, _vin_b = _tesla_confirmation_hass()
+    now = datetime.now(timezone.utc)
+
+    stale_charging = hass.states.get("sensor.car_a_charging")
+    stale_charging.state = "charging"
+    stale_charging.last_updated = now - timedelta(seconds=30)
+    stale_current = hass.states.get("sensor.car_a_charger_actual_current")
+    stale_current.state = "32"
+    stale_current.last_updated = now - timedelta(seconds=30)
+
+    hass.device_registry.devices["car-a-fresh"] = SimpleNamespace(
+        id="car-a-fresh",
+        identifiers={("teslemetry", vin_a)},
+    )
+    for entity_id, value in (
+        ("sensor.car_a_fresh_charging", "stopped"),
+        ("sensor.car_a_fresh_charger_actual_current", "0"),
+    ):
+        hass.entity_registry.entities[entity_id] = SimpleNamespace(
+            entity_id=entity_id,
+            device_id="car-a-fresh",
+        )
+        hass.states._states[entity_id] = _State(
+            entity_id,
+            value,
+            last_updated=now - timedelta(seconds=1),
+        )
+
+    snapshot = actions._tesla_physical_charging_snapshot(
+        hass,
+        _Entry(),
+        vin_a,
+        {},
+    )
+
+    assert snapshot["charging"] is False
+    assert "sensor.car_a_charger_actual_current=32.0A" in snapshot["measurements"]
+
+
+def test_tesla_physical_snapshot_fails_closed_on_recent_provider_conflict():
+    hass, vin_a, _vin_b = _tesla_confirmation_hass()
+    now = datetime.now(timezone.utc)
+    older_stopped = hass.states.get("sensor.car_a_charging")
+    older_stopped.last_updated = now - timedelta(seconds=30)
+
+    hass.device_registry.devices["car-a-fresh"] = SimpleNamespace(
+        id="car-a-fresh",
+        identifiers={("teslemetry", vin_a)},
+    )
+    fresh_charging_id = "sensor.car_a_fresh_charging"
+    hass.entity_registry.entities[fresh_charging_id] = SimpleNamespace(
+        entity_id=fresh_charging_id,
+        device_id="car-a-fresh",
+    )
+    hass.states._states[fresh_charging_id] = _State(
+        fresh_charging_id,
+        "charging",
+        last_updated=now,
+    )
+
+    snapshot = actions._tesla_physical_charging_snapshot(
+        hass,
+        _Entry(),
+        vin_a,
+        {},
+    )
+
+    assert snapshot["charging"] is False
+
+
 def test_unconfirmed_tesla_dynamic_start_creates_no_runtime_or_ownership(
     monkeypatch,
 ):
