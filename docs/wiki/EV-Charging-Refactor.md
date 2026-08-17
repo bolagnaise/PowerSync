@@ -145,6 +145,30 @@ Unmapped or ambiguous vehicles stay on Fleet control so telemetry and commands c
   last decision, last command result, and session ID.
 - After vehicle or charger deletion, force refresh and hide stale dynamic state.
 
+## Per-Phase Mains Protection
+
+Home Power Setup can optionally apply a final per-phase clamp to every
+PowerSync-owned EV charging rate. The feature is disabled by default so existing
+installations retain the aggregate site-import behaviour until explicitly
+enabled.
+
+For a three-phase site, configure the main breaker rating, a safety margin, and
+one Home Assistant current entity for each of L1, L2, and L3. These entities
+must report electric current and remain fresh. A three-phase charger consumes
+the same allocated amps on every phase; a single-phase charger with no known
+phase assignment is conservatively counted against every monitored phase.
+
+The controller subtracts only fresh, observed current attributable to a
+PowerSync-owned loadpoint from the site phase readings. It never credits a
+requested setpoint. All owned loadpoints share one serialized allocation so
+they cannot claim the same headroom, and reductions are applied before
+increases. The existing aggregate import limit remains an additional cap.
+
+Missing, invalid, unavailable, wrong-unit, or stale required telemetry blocks
+new starts and increases. Once telemetry is stale, active PowerSync-owned
+charging is stopped. Manual and externally managed charging is never altered;
+its measured current continues to consume the available phase budget.
+
 ## Acceptance Tests
 
 - When price-level charging is disabled and an EV is externally charging,

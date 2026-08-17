@@ -28,6 +28,11 @@ from .tesla_calibration import (
     dispatch_calibration_state,
     set_calibration_source,
 )
+from .automations.ev_phase_allocator import (
+    PHASE_LOAD_MANAGEMENT_SCHEMA_VERSION,
+    normalize_home_power_settings,
+    validate_home_power_settings,
+)
 
 # Module-level state for alert cooldowns (keyed by entry_id)
 _last_discrepancy_alert: dict[str, datetime] = {}
@@ -18418,6 +18423,25 @@ class EVLoadpointStatusView(HomeAssistantView):
             price_level = get_price_level_executor()
             scheduled = get_scheduled_charging_executor()
 
+            phase_status = entry_data.get("phase_load_management_status")
+            if not isinstance(phase_status, dict):
+                stored_home_power = {}
+                automation_store = entry_data.get("automation_store")
+                if automation_store:
+                    stored_home_power = (
+                        getattr(automation_store, "_data", {}) or {}
+                    ).get("home_power_settings", {})
+                phase_status = {
+                    "enabled": bool(
+                        normalize_home_power_settings(stored_home_power).get(
+                            "phase_load_management_enabled"
+                        )
+                    ),
+                    "available": None,
+                    "reason": "awaiting_control_cycle",
+                }
+            site["phase_load_management"] = phase_status
+
             payload = {
                 "success": True,
                 "site": site,
@@ -19356,22 +19380,20 @@ class HomePowerSettingsView(HomeAssistantView):
         """Get home power settings."""
         try:
             store = self._get_store()
-            settings = {
-                "phase_type": "single",
-                "max_charge_speed_enabled": False,
-                "max_amps_per_phase": 32,
-                "max_grid_import_amps": 0,
-                "default_voltage": 240,
-            }
+            settings = normalize_home_power_settings()
 
             if store:
                 stored_data = getattr(store, '_data', {}) or {}
                 stored_settings = stored_data.get("home_power_settings", {})
-                settings.update(stored_settings)
+                settings = normalize_home_power_settings(stored_settings)
 
             return web.json_response({
                 "success": True,
                 "settings": settings,
+                "phase_load_management_supported": True,
+                "phase_load_management_schema_version": (
+                    PHASE_LOAD_MANAGEMENT_SCHEMA_VERSION
+                ),
             })
 
         except Exception as e:
@@ -19394,13 +19416,9 @@ class HomePowerSettingsView(HomeAssistantView):
                 }, status=503)
 
             stored_data = getattr(store, '_data', {}) or {}
-            settings = stored_data.get("home_power_settings", {
-                "phase_type": "single",
-                "max_charge_speed_enabled": False,
-                "max_amps_per_phase": 32,
-                "max_grid_import_amps": 0,
-                "default_voltage": 240,
-            })
+            settings = normalize_home_power_settings(
+                stored_data.get("home_power_settings")
+            )
 
             # Update with provided values
             for key in [
@@ -19409,19 +19427,44 @@ class HomePowerSettingsView(HomeAssistantView):
                 "max_amps_per_phase",
                 "max_grid_import_amps",
                 "default_voltage",
+                "phase_load_management_enabled",
+                "phase_current_entity_l1",
+                "phase_current_entity_l2",
+                "phase_current_entity_l3",
+                "phase_current_safety_margin_amps",
             ]:
                 if key in data:
                     settings[key] = data[key]
 
+            settings = normalize_home_power_settings(settings)
+            validation_error = validate_home_power_settings(settings)
+            if validation_error:
+                return web.json_response({
+                    "success": False,
+                    "error": validation_error,
+                }, status=400)
+
             stored_data["home_power_settings"] = settings
             store._data = stored_data
             await store.async_save()
+
+            from .automations.actions import reset_phase_load_management_runtime
+
+            reset_phase_load_management_runtime(
+                self._hass,
+                self._config_entry.entry_id,
+                enabled=settings["phase_load_management_enabled"],
+            )
 
             _LOGGER.info(f"Home power settings updated: phase_type={settings.get('phase_type')}")
 
             return web.json_response({
                 "success": True,
                 "settings": settings,
+                "phase_load_management_supported": True,
+                "phase_load_management_schema_version": (
+                    PHASE_LOAD_MANAGEMENT_SCHEMA_VERSION
+                ),
             })
 
         except Exception as e:

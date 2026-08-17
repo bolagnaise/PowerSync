@@ -4474,6 +4474,8 @@ class AutoScheduleExecutor:
         opts = {**self.config_entry.data, **self.config_entry.options}
         charger_type = _effective_auto_schedule_charger_type(settings, opts)
         params = {
+            "owner_mode": "smart_schedule",
+            "current_charge_amps": current_amps,
             "vehicle_vin": vehicle_vin,
             "amps": target_amps,
             "min_charge_amps": settings.min_charge_amps,

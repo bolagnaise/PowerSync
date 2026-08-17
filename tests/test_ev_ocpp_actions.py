@@ -105,6 +105,8 @@ def _reset_ev_action_module_state():
     mutable_state = (
         actions._dynamic_ev_state,
         actions._dynamic_ev_update_locks,
+        actions._phase_load_management_locks,
+        actions._phase_load_management_targets,
         actions._ev_wake_lock,
         actions._ev_scheduled_stop,
     )
@@ -113,6 +115,170 @@ def _reset_ev_action_module_state():
     yield
     for state in mutable_state:
         state.clear()
+
+
+def _phase_managed_hass(*, currents=(20, 18, 17), age_seconds=1):
+    now = datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc)
+    states = [
+        _State(
+            f"sensor.grid_l{index}_current",
+            str(current),
+            {"unit_of_measurement": "A"},
+            last_updated=now - timedelta(seconds=age_seconds),
+        )
+        for index, current in enumerate(currents, 1)
+    ]
+    hass = _Hass(states)
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
+        _data={
+            "home_power_settings": {
+                "phase_type": "three",
+                "max_grid_import_amps": 32,
+                "phase_load_management_enabled": True,
+                "phase_current_entity_l1": "sensor.grid_l1_current",
+                "phase_current_entity_l2": "sensor.grid_l2_current",
+                "phase_current_entity_l3": "sensor.grid_l3_current",
+                "phase_current_safety_margin_amps": 2,
+            }
+        }
+    )
+    return hass, now
+
+
+def test_phase_management_clamps_owned_initial_target_to_worst_phase(monkeypatch):
+    hass, now = _phase_managed_hass(currents=(20, 18, 17))
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+    params = {
+        "owner_mode": "scheduled",
+        "charger_type": "generic",
+        "phases": 3,
+        "min_charge_amps": 6,
+        "max_charge_amps": 32,
+    }
+
+    target = asyncio.run(actions._phase_load_managed_target_amps(
+        hass, _Entry(), "charger", 16, params
+    ))
+
+    assert target == 10
+    status = hass.data["power_sync"]["entry-1"]["phase_load_management_status"]
+    assert status["limiting_phase"] == "l1"
+    assert status["allocated_amps"] == 10
+
+
+def test_phase_management_stale_data_stops_active_owned_charging(monkeypatch):
+    hass, now = _phase_managed_hass(age_seconds=120)
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+    params = {
+        "owner_mode": "scheduled",
+        "charger_type": "generic",
+        "phases": 3,
+        "min_charge_amps": 6,
+        "max_charge_amps": 32,
+    }
+    actions._dynamic_ev_state["entry-1"] = {
+        "charger": {
+            "active": True,
+            "current_amps": 16,
+            "target_amps": 16,
+            "params": params,
+        }
+    }
+    commanded: list[int] = []
+
+    async def record_command(hass, entry, vehicle_id, amps, command_params):
+        commanded.append(amps)
+        return True
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps_unchecked", record_command)
+
+    assert asyncio.run(
+        actions._set_vehicle_amps(hass, _Entry(), "charger", 16, params)
+    ) is True
+    assert commanded == [0]
+    status = hass.data["power_sync"]["entry-1"]["phase_load_management_status"]
+    assert status["available"] is False
+    assert "stale" in status["telemetry_reason"]
+
+
+def test_phase_management_never_clamps_manual_or_external_command(monkeypatch):
+    hass, now = _phase_managed_hass(currents=(31, 31, 31))
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+    commanded: list[int] = []
+
+    async def record_command(hass, entry, vehicle_id, amps, command_params):
+        commanded.append(amps)
+        return True
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps_unchecked", record_command)
+
+    assert asyncio.run(actions._set_vehicle_amps(
+        hass,
+        _Entry(),
+        "charger",
+        16,
+        {"owner_mode": "manual", "charger_type": "generic"},
+    )) is True
+    assert asyncio.run(actions._set_vehicle_amps(
+        hass,
+        _Entry(),
+        "external",
+        20,
+        {"charger_type": "generic"},
+    )) is True
+    assert commanded == [16, 20]
+
+
+def test_phase_management_remembers_direct_owned_targets_without_meter_lag(monkeypatch):
+    hass, now = _phase_managed_hass(currents=(14, 14, 14))
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+    commanded: list[tuple[str, int]] = []
+
+    async def record_command(hass, entry, vehicle_id, amps, command_params):
+        commanded.append((vehicle_id, amps))
+        return True
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps_unchecked", record_command)
+    params = {
+        "owner_mode": "smart_schedule",
+        "charger_type": "generic",
+        "phases": 3,
+        "min_charge_amps": 6,
+        "max_charge_amps": 32,
+    }
+
+    assert asyncio.run(
+        actions._set_vehicle_amps(hass, _Entry(), "car-a", 10, dict(params))
+    ) is True
+    assert asyncio.run(
+        actions._set_vehicle_amps(hass, _Entry(), "car-b", 10, dict(params))
+    ) is True
+
+    assert commanded == [("car-a", 10), ("car-b", 6)]
+    assert sum(
+        target["amps"]
+        for target in actions._phase_load_management_targets["entry-1"].values()
+    ) == 16
+
+
+def test_phase_management_settings_change_clears_remembered_targets():
+    hass, _now = _phase_managed_hass()
+    actions._phase_load_management_targets["entry-1"] = {
+        "car-a": {"amps": 10, "params": {"owner_mode": "scheduled"}}
+    }
+
+    actions.reset_phase_load_management_runtime(
+        hass,
+        "entry-1",
+        enabled=False,
+    )
+
+    assert "entry-1" not in actions._phase_load_management_targets
+    assert hass.data["power_sync"]["entry-1"]["phase_load_management_status"] == {
+        "enabled": False,
+        "available": None,
+        "reason": "disabled",
+    }
 
 
 class _State:

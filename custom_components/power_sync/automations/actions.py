@@ -68,6 +68,14 @@ from ..tesla_ble_mapping import (
     resolve_ble_prefixes,
     vehicle_ble_prefix,
 )
+from .ev_phase_allocator import (
+    PHASE_CURRENT_FRESHNESS_SECONDS,
+    LoadpointRequest,
+    PhaseSample,
+    allocate_phase_currents,
+    normalize_home_power_settings,
+    required_phases,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -5053,6 +5061,8 @@ _ACTIVE_EV_POWER_EPSILON_KW = 0.05
 # Lock to prevent duplicate dynamic EV charging sessions from concurrent triggers
 _start_dynamic_lock = asyncio.Lock()
 _dynamic_ev_update_locks: Dict[str, asyncio.Lock] = {}
+_phase_load_management_locks: Dict[str, asyncio.Lock] = {}
+_phase_load_management_targets: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
 # Global storage for regular EV charging scheduled stop (for stop_outside_window)
 _ev_scheduled_stop: Dict[str, Any] = {}
@@ -5103,6 +5113,8 @@ def cleanup_dynamic_ev_entry(hass: HomeAssistant, entry_id: str) -> None:
 
     _dynamic_ev_state.pop(entry_id, None)
     _dynamic_ev_update_locks.pop(entry_id, None)
+    _phase_load_management_locks.pop(entry_id, None)
+    _phase_load_management_targets.pop(entry_id, None)
 
     entry_data = (
         hass.data.get(DOMAIN, {}).get(entry_id)
@@ -5111,6 +5123,23 @@ def cleanup_dynamic_ev_entry(hass: HomeAssistant, entry_id: str) -> None:
     )
     if isinstance(entry_data, dict):
         entry_data.pop("dynamic_ev_state", None)
+
+
+def reset_phase_load_management_runtime(
+    hass: HomeAssistant,
+    entry_id: str,
+    *,
+    enabled: bool,
+) -> None:
+    """Discard remembered allocations after Home Power settings change."""
+    _phase_load_management_targets.pop(entry_id, None)
+    entry_data = hass.data.get(DOMAIN, {}).get(entry_id)
+    if isinstance(entry_data, dict):
+        entry_data["phase_load_management_status"] = {
+            "enabled": enabled,
+            "available": None,
+            "reason": "awaiting_control_cycle" if enabled else "disabled",
+        }
 
 # Internal charger type for HA-native charger integrations that expose their
 # own service domains rather than the generic switch/number model.
@@ -6119,6 +6148,58 @@ async def _solar_surplus_switch_to_next_vehicle(
 
 
 async def _set_vehicle_amps(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry | None,
+    vehicle_id: str,
+    amps: int,
+    params: dict,
+) -> bool:
+    """Apply the final per-phase clamp to an owned rate command."""
+    if not _phase_load_management_applies(hass, config_entry, params):
+        return await _set_vehicle_amps_unchecked(
+            hass, config_entry, vehicle_id, amps, params
+        )
+
+    entry_id = config_entry.entry_id
+    lock = _phase_load_management_locks.setdefault(entry_id, asyncio.Lock())
+    async with lock:
+        applied_amps = await _phase_load_managed_target_amps(
+            hass,
+            config_entry,
+            vehicle_id,
+            amps,
+            params,
+        )
+        params["_phase_load_management_applied_amps"] = applied_amps
+        active_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
+        current_amps = int(
+            (active_state or {}).get(
+                "current_amps", params.get("current_charge_amps", 0)
+            )
+            or 0
+        )
+        if amps > 0 and applied_amps <= 0 and current_amps <= 0:
+            _LOGGER.info(
+                "EV phase load management blocked the managed start for %s",
+                vehicle_id,
+            )
+            return False
+        success = await _set_vehicle_amps_unchecked(
+            hass, config_entry, vehicle_id, applied_amps, params
+        )
+        if success:
+            entry_targets = _phase_load_management_targets.setdefault(entry_id, {})
+            if applied_amps > 0:
+                entry_targets[vehicle_id] = {
+                    "amps": applied_amps,
+                    "params": dict(params),
+                }
+            else:
+                entry_targets.pop(vehicle_id, None)
+        return success
+
+
+async def _set_vehicle_amps_unchecked(
     hass: HomeAssistant,
     config_entry: ConfigEntry | None,
     vehicle_id: str,
@@ -7432,6 +7513,7 @@ async def _update_smart_schedule_battery_target_group(
             target_amps,
             params,
         )
+        target_amps = _phase_applied_amps(params, target_amps)
         if not _plan_still_owns_vehicle(vehicle_id):
             return False
 
@@ -8384,7 +8466,7 @@ async def _dynamic_ev_update_surplus(
         if _session_was_replaced("amp adjustment"):
             return
         if success:
-            applied_amps = new_amps
+            applied_amps = _phase_applied_amps(params, new_amps)
             max_after_set = _coerce_positive_int(params.get("max_charge_amps"))
             if max_after_set is not None and applied_amps > 0:
                 applied_amps = min(applied_amps, max_after_set)
@@ -8450,6 +8532,320 @@ def _get_home_power_settings(hass, config_entry) -> dict:
     except Exception:
         pass
     return {}
+
+
+def _phase_load_management_applies(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry | None,
+    params: Mapping[str, Any],
+) -> bool:
+    """Return whether this is an owned command covered by phase management."""
+    if config_entry is None:
+        return False
+    settings = normalize_home_power_settings(
+        _get_home_power_settings(hass, config_entry)
+    )
+    if not settings.get("phase_load_management_enabled"):
+        return False
+    owner_mode = params.get("owner_mode") or params.get("_phase_owner_mode")
+    if not owner_mode:
+        return False
+    try:
+        from .ev_ownership import owner_family
+
+        return owner_family(str(owner_mode)) != "manual"
+    except Exception:
+        return False
+
+
+def _phase_current_state_amps(state: Any) -> tuple[float | None, str | None, float]:
+    """Return a fresh current reading normalized to amps."""
+    if state is None:
+        return None, "entity is missing", math.inf
+    raw_state = str(getattr(state, "state", "") or "").strip().lower()
+    if raw_state in ("", "unknown", "unavailable", "none"):
+        return None, f"state is {raw_state or 'empty'}", math.inf
+    try:
+        value = float(raw_state)
+    except (TypeError, ValueError):
+        return None, "state is not numeric", math.inf
+    if not math.isfinite(value):
+        return None, "state is not finite", math.inf
+
+    attributes = getattr(state, "attributes", {}) or {}
+    unit = str(attributes.get("unit_of_measurement") or "").strip().lower()
+    if unit in ("a", "amp", "amps", "ampere", "amperes"):
+        multiplier = 1.0
+    elif unit in ("ma", "milliamp", "milliamps", "milliampere", "milliamperes"):
+        multiplier = 0.001
+    elif unit in ("ka", "kiloamp", "kiloamps", "kiloampere", "kiloamperes"):
+        multiplier = 1000.0
+    else:
+        return None, f"unit {unit or 'is missing'} is not electric current", math.inf
+
+    observed_at = (
+        getattr(state, "last_reported", None)
+        or getattr(state, "last_updated", None)
+    )
+    if observed_at is None:
+        return None, "reading timestamp is missing", math.inf
+    try:
+        now = dt_util.utcnow()
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=now.tzinfo)
+        age_seconds = max(0.0, (now - observed_at).total_seconds())
+    except (AttributeError, TypeError, ValueError):
+        return None, "reading timestamp is invalid", math.inf
+    if age_seconds > PHASE_CURRENT_FRESHNESS_SECONDS:
+        return None, f"reading is stale ({age_seconds:.0f}s)", age_seconds
+    return abs(value * multiplier), None, age_seconds
+
+
+def _phase_loadpoint_footprint(
+    params: Mapping[str, Any],
+    configured_phases: frozenset[str],
+) -> frozenset[str]:
+    """Return a safe phase footprint; unknown single-phase uses every phase."""
+    if int(params.get("phases", 1) or 1) == 3:
+        return configured_phases
+    assignment = str(
+        params.get("phase_assignment") or params.get("charging_phase") or ""
+    ).strip().lower()
+    if assignment in configured_phases:
+        return frozenset((assignment,))
+    return configured_phases
+
+
+async def _observed_owned_charge_amps(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+    params: Mapping[str, Any],
+) -> float | None:
+    """Return only a fresh, observed current attributable to one owned EV."""
+    current_entity_keys = (
+        "observed_charge_current_entity",
+        "charger_current_entity",
+        "ev_current_entity",
+    )
+    for key in current_entity_keys:
+        entity_id = str(params.get(key) or "").strip()
+        if not entity_id:
+            continue
+        amps, error, _age = _phase_current_state_amps(hass.states.get(entity_id))
+        if error is None:
+            return amps
+
+    power_entities = (
+        "observed_charge_power_entity",
+        "charger_power_entity",
+        "ev_power_entity",
+        "ev_power_sensor",
+        "power_entity",
+    )
+    entity_id = next(
+        (str(params.get(key) or "").strip() for key in power_entities if params.get(key)),
+        "",
+    )
+    if not entity_id and params.get("charger_type", "tesla") == "tesla" and vehicle_id != DEFAULT_VEHICLE_ID:
+        try:
+            entity_id = await _get_tesla_ev_entity(
+                hass,
+                r"sensor\..*(charger_power|charging_power|charge_power)(?:_\d+)?$",
+                vehicle_id,
+                warn_on_missing=False,
+            ) or ""
+        except Exception:
+            entity_id = ""
+    if not entity_id:
+        return None
+    state = hass.states.get(entity_id)
+    if state is None:
+        return None
+    observed_at = getattr(state, "last_reported", None) or getattr(state, "last_updated", None)
+    if observed_at is None:
+        return None
+    now = dt_util.utcnow()
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=now.tzinfo)
+    if (now - observed_at).total_seconds() > PHASE_CURRENT_FRESHNESS_SECONDS:
+        return None
+    power_kw, available = _power_state_kw_reading(state)
+    if not available or power_kw < 0:
+        return None
+    try:
+        voltage = max(1.0, float(params.get("voltage", 240) or 240))
+        phases = 3 if int(params.get("phases", 1) or 1) == 3 else 1
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, power_kw * 1000.0 / (voltage * phases))
+
+
+async def _phase_load_managed_target_amps(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+    requested_amps: int,
+    params: Mapping[str, Any],
+) -> int:
+    """Return the final site-wide phase-safe target for one owned command."""
+    settings = normalize_home_power_settings(
+        _get_home_power_settings(hass, config_entry)
+    )
+    if not settings.get("phase_load_management_enabled"):
+        return max(0, int(requested_amps))
+
+    samples: dict[str, PhaseSample] = {}
+    telemetry_error: str | None = None
+    for phase in required_phases(settings):
+        entity_id = settings[f"phase_current_entity_{phase}"]
+        amps, error, age_seconds = _phase_current_state_amps(
+            hass.states.get(entity_id)
+        )
+        if error:
+            telemetry_error = f"{phase.upper()} {entity_id}: {error}"
+            break
+        samples[phase] = PhaseSample(
+            phase=phase,
+            amps=amps or 0.0,
+            age_seconds=age_seconds,
+            entity_id=entity_id,
+        )
+
+    configured_phases = frozenset(required_phases(settings))
+    records: list[LoadpointRequest] = []
+    active_states = _dynamic_ev_state.get(config_entry.entry_id, {})
+    included_current = False
+    for active_vehicle_id, state in active_states.items():
+        if not state.get("active"):
+            continue
+        active_params = state.get("params") or {}
+        if not _phase_load_management_applies(hass, config_entry, active_params):
+            continue
+        is_current = active_vehicle_id == vehicle_id
+        target = requested_amps if is_current else int(
+            state.get("target_amps", state.get("current_amps", 0)) or 0
+        )
+        observed_amps = await _observed_owned_charge_amps(
+            hass, config_entry, active_vehicle_id, active_params
+        )
+        records.append(LoadpointRequest(
+            loadpoint_id=active_vehicle_id,
+            requested_amps=target,
+            min_amps=_effective_min_charge_amps(active_params, hass),
+            max_amps=_effective_max_charge_amps(active_params, hass),
+            phases=_phase_loadpoint_footprint(active_params, configured_phases),
+            current_amps=float(state.get("current_amps", 0) or 0),
+            observed_amps=observed_amps,
+            priority=int(state.get("priority", active_params.get("priority", 1)) or 1),
+        ))
+        included_current = included_current or is_current
+
+    included_ids = {record.loadpoint_id for record in records}
+    remembered_targets = _phase_load_management_targets.get(
+        config_entry.entry_id, {}
+    )
+    for remembered_vehicle_id, remembered in remembered_targets.items():
+        if remembered_vehicle_id in included_ids:
+            continue
+        remembered_params = remembered.get("params") or {}
+        if not _phase_load_management_applies(
+            hass, config_entry, remembered_params
+        ):
+            continue
+        is_current = remembered_vehicle_id == vehicle_id
+        remembered_amps = int(remembered.get("amps", 0) or 0)
+        target = requested_amps if is_current else remembered_amps
+        records.append(LoadpointRequest(
+            loadpoint_id=remembered_vehicle_id,
+            requested_amps=target,
+            min_amps=_effective_min_charge_amps(remembered_params, hass),
+            max_amps=_effective_max_charge_amps(remembered_params, hass),
+            phases=_phase_loadpoint_footprint(
+                remembered_params, configured_phases
+            ),
+            current_amps=remembered_amps,
+            observed_amps=await _observed_owned_charge_amps(
+                hass, config_entry, remembered_vehicle_id, remembered_params
+            ),
+            priority=int(remembered_params.get("priority", 1) or 1),
+        ))
+        included_current = included_current or is_current
+
+    if not included_current:
+        records.append(LoadpointRequest(
+            loadpoint_id=vehicle_id,
+            requested_amps=requested_amps,
+            min_amps=_effective_min_charge_amps(dict(params), hass),
+            max_amps=_effective_max_charge_amps(dict(params), hass),
+            phases=_phase_loadpoint_footprint(params, configured_phases),
+            current_amps=float(params.get("current_charge_amps", 0) or 0),
+            observed_amps=await _observed_owned_charge_amps(
+                hass, config_entry, vehicle_id, params
+            ),
+            priority=int(params.get("priority", 1) or 1),
+        ))
+
+    try:
+        breaker_amps = float(settings.get("max_grid_import_amps") or 0)
+        margin_amps = float(settings.get("phase_current_safety_margin_amps") or 0)
+    except (TypeError, ValueError):
+        breaker_amps = 0.0
+        margin_amps = 0.0
+        telemetry_error = telemetry_error or "breaker settings are invalid"
+    if breaker_amps <= 0 or margin_amps < 0 or margin_amps >= breaker_amps:
+        telemetry_error = telemetry_error or "breaker settings are invalid"
+
+    allocation = allocate_phase_currents(
+        samples=samples,
+        breaker_amps=breaker_amps,
+        safety_margin_amps=margin_amps,
+        loadpoints=records,
+        telemetry_reason=telemetry_error,
+    )
+    applied_amps = allocation.allocations.get(vehicle_id, 0)
+    status = {
+        "enabled": True,
+        "available": allocation.telemetry_valid,
+        "reason": allocation.reasons.get(vehicle_id),
+        "telemetry_reason": allocation.telemetry_reason,
+        "phase_readings_amps": allocation.phase_readings_amps,
+        "phase_budgets_amps": allocation.phase_budgets_amps,
+        "limiting_phase": allocation.limiting_phase,
+        "requested_amps": max(0, int(requested_amps)),
+        "allocated_amps": applied_amps,
+        "freshness_seconds": PHASE_CURRENT_FRESHNESS_SECONDS,
+    }
+    entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+    if isinstance(entry_data, dict):
+        entry_data["phase_load_management_status"] = status
+
+    if telemetry_error:
+        _LOGGER.warning(
+            "EV phase load management fail-closed for %s: %s",
+            vehicle_id,
+            telemetry_error,
+        )
+    elif applied_amps < max(0, int(requested_amps)):
+        _LOGGER.info(
+            "EV phase load management limited %s from %dA to %dA (%s)",
+            vehicle_id,
+            requested_amps,
+            applied_amps,
+            allocation.limiting_phase or "phase budget",
+        )
+    return applied_amps
+
+
+def _phase_applied_amps(params: Mapping[str, Any], requested_amps: int) -> int:
+    """Return the final amps most recently applied by the command wrapper."""
+    try:
+        return max(
+            0,
+            int(params.get("_phase_load_management_applied_amps", requested_amps)),
+        )
+    except (TypeError, ValueError):
+        return max(0, int(requested_amps))
 
 
 def _get_home_power_max_charge_amps(hass, config_entry) -> Optional[int]:
@@ -9254,7 +9650,9 @@ async def _dynamic_ev_update(
             )
             success = await _set_vehicle_amps(hass, config_entry, vehicle_id, fixed_amps, params)
             if success:
-                state["current_amps"] = fixed_amps
+                applied_amps = _phase_applied_amps(params, fixed_amps)
+                state["current_amps"] = applied_amps
+                state["target_amps"] = applied_amps
             else:
                 _LOGGER.warning(f"Dynamic EV: Failed to set fixed amps to {fixed_amps}A")
         return
@@ -9411,7 +9809,7 @@ async def _dynamic_ev_update(
             )
             success = await _set_vehicle_amps(hass, config_entry, vehicle_id, new_amps, params)
             if success:
-                state["current_amps"] = new_amps
+                state["current_amps"] = _phase_applied_amps(params, new_amps)
             return
 
     _LOGGER.debug(
@@ -9453,8 +9851,9 @@ async def _dynamic_ev_update(
             new_amps,
             params,
         )
+        applied_amps = _phase_applied_amps(params, new_amps)
         success = amps_set
-        if amps_set and tesla_restart_required:
+        if amps_set and tesla_restart_required and applied_amps > 0:
             if not _session_still_owns_vehicle():
                 _LOGGER.debug(
                     "Dynamic EV: Session changed while applying %sA to %s; "
@@ -9467,7 +9866,7 @@ async def _dynamic_ev_update(
             start_params["vehicle_vin"] = (
                 vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None
             )
-            start_params["amps"] = new_amps
+            start_params["amps"] = applied_amps
             success = await _action_start_ev_charging(
                 hass,
                 config_entry,
@@ -9477,10 +9876,11 @@ async def _dynamic_ev_update(
             if not success:
                 _LOGGER.warning(
                     "Dynamic EV: Failed to restart Tesla charging at %sA",
-                    new_amps,
+                    applied_amps,
                 )
         if success:
-            state["current_amps"] = new_amps
+            state["current_amps"] = applied_amps
+            state["target_amps"] = applied_amps
         elif not amps_set:
             _LOGGER.warning(f"Dynamic EV: Failed to set amps to {new_amps}A")
 
@@ -10247,6 +10647,29 @@ async def _action_start_ev_charging_dynamic_locked(
     time_window_end = context.get("time_window_end") if context else None
     timezone = context.get("timezone", "UTC") if context else "UTC"
 
+    # Validate and clamp the initial owned command before any physical start.
+    # The command wrapper repeats this calculation under the site lock so a
+    # concurrent trigger cannot double-spend the same phase headroom.
+    if dynamic_mode == "battery_target" and not defer_battery_target_start:
+        phase_safe_start_amps = await _phase_load_managed_target_amps(
+            hass,
+            config_entry,
+            vehicle_id,
+            start_amps,
+            params,
+        ) if _phase_load_management_applies(hass, config_entry, params) else start_amps
+        if start_amps > 0 and phase_safe_start_amps <= 0:
+            record_ev_command(
+                hass,
+                config_entry,
+                vehicle_id,
+                command=f"start_{owner_mode}",
+                success=False,
+                reason="per-phase mains headroom is unavailable",
+            )
+            return False
+        start_amps = phase_safe_start_amps
+
     # Stop any existing dynamic charging for this vehicle
     await _action_stop_ev_charging_dynamic(hass, config_entry, {"vehicle_id": vehicle_id})
 
@@ -10269,6 +10692,8 @@ async def _action_start_ev_charging_dynamic_locked(
             start_success = await _set_vehicle_amps(
                 hass, config_entry, vehicle_id, start_amps, start_params
             )
+            if start_success:
+                start_amps = _phase_applied_amps(start_params, start_amps)
             if not start_success:
                 _LOGGER.info(
                     "Dynamic EV: Could not set charger to %sA and start %s charging",
@@ -10342,6 +10767,8 @@ async def _action_start_ev_charging_dynamic_locked(
                     start_amps,
                     params,
                 )
+                if initial_amps_pre_set:
+                    start_amps = _phase_applied_amps(params, start_amps)
                 if not initial_amps_pre_set:
                     reason = (
                         f"could not pre-set the safe initial rate to {start_amps}A"
@@ -10411,6 +10838,8 @@ async def _action_start_ev_charging_dynamic_locked(
                 amps_success = await _set_vehicle_amps(
                     hass, config_entry, vehicle_id, start_amps, params
                 )
+                if amps_success:
+                    start_amps = _phase_applied_amps(params, start_amps)
                 if not amps_success:
                     # This is expected - Tesla reports lower max amps until charging actually starts
                     _LOGGER.debug(f"Dynamic EV: Could not set initial amps to {start_amps}A (will adjust once charging starts)")
