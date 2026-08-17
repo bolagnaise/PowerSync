@@ -35,6 +35,10 @@ from ..const import (
     TESLA_INTEGRATIONS,
 )
 from ..optimization.load_estimator import SolcastForecaster as SharedSolarForecaster
+from ..optimization.price_level_projection import (
+    PriceLevelVehicleSnapshot,
+    classify_price_level_policy,
+)
 from ..solar_surplus_config import (
     DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC,
     get_solar_surplus_min_battery_soc,
@@ -8974,6 +8978,361 @@ class PriceLevelChargingExecutor:
         except Exception:
             return False
 
+    def is_grid_charging_blocked_at(self, when: datetime) -> bool:
+        """Return whether Price-Level grid charging is blocked in a future slot."""
+        from ..const import CONF_DEMAND_ALLOW_GRID_CHARGING
+
+        entry_data = self.hass.data.get(self._domain, {}).get(
+            self.config_entry.entry_id, {}
+        )
+        dc_coord = entry_data.get("demand_charge_coordinator")
+        if not dc_coord or not dc_coord.enabled:
+            return False
+        allow_override = self.config_entry.options.get(
+            CONF_DEMAND_ALLOW_GRID_CHARGING,
+            self.config_entry.data.get(CONF_DEMAND_ALLOW_GRID_CHARGING, False),
+        )
+        if allow_override:
+            return False
+        try:
+            return bool(dc_coord._is_in_peak_period(when))
+        except Exception:
+            return False
+
+    async def collect_projection_snapshots(self) -> list[PriceLevelVehicleSnapshot]:
+        """Collect read-only loadpoint facts for the optimiser projection.
+
+        This method deliberately performs no ownership claims or charger actions.
+        It reuses the same discovery and identity helpers as live execution.
+        """
+        from .ev_ownership import (
+            get_active_ev_owner_mode,
+            manual_stop_hold_reason,
+            owner_family,
+        )
+
+        opts = {**self.config_entry.data, **self.config_entry.options}
+        entry_data = self.hass.data.get(self._domain, {}).get(
+            self.config_entry.entry_id, {}
+        )
+        store = entry_data.get("automation_store")
+        stored = getattr(store, "_data", {}) or {}
+        raw_configs = _safe_vehicle_charging_configs(
+            self.config_entry,
+            stored.get("vehicle_charging_configs", []),
+        )
+
+        try:
+            discovered = await discover_all_tesla_vehicles(
+                self.hass, self.config_entry
+            )
+        except Exception as err:
+            _LOGGER.debug(
+                "Price-Level projection vehicle discovery unavailable: %s", err
+            )
+            discovered = []
+        fleet_vins = [
+            str(vehicle.get("vin") or "")
+            for vehicle in discovered
+            if vehicle.get("vin") and not str(vehicle.get("vin")).startswith("ble_")
+        ]
+        resolved_prefixes = _configured_ble_prefixes(
+            self.config_entry, None, hass=self.hass
+        )
+        try:
+            configs = coalesce_paired_vehicle_configs(
+                opts,
+                raw_configs,
+                resolved_prefixes,
+            )
+        except Exception as err:
+            _LOGGER.debug(
+                "Price-Level projection identity coalescing unavailable: %s", err
+            )
+            configs = list(raw_configs)
+
+        # Preserve discovered vehicles even when the user has not opened the
+        # per-vehicle charger editor yet. Their charger capability remains
+        # unknown, so they can only produce conditional windows.
+        for vehicle in discovered:
+            vehicle_id = str(vehicle.get("vin") or "")
+            if not vehicle_id:
+                continue
+            physical_id = canonical_tesla_vehicle_id(
+                opts,
+                vehicle_id,
+                fleet_vins,
+                resolved_prefixes,
+            )
+            if any(
+                canonical_tesla_vehicle_id(
+                    opts,
+                    str(config.get("vehicle_id") or ""),
+                    fleet_vins,
+                    resolved_prefixes,
+                )
+                == physical_id
+                for config in configs
+            ):
+                continue
+            configs.append(
+                {
+                    "vehicle_id": vehicle_id,
+                    "display_name": vehicle.get("name") or vehicle_id,
+                    "provider_battery_capacity_kwh": vehicle.get(
+                        "provider_battery_capacity_kwh",
+                        vehicle.get("battery_capacity_kwh"),
+                    ),
+                    "vehicle_model": vehicle.get("model"),
+                    "vehicle_trim": vehicle.get("trim"),
+                    "charger_type": "tesla",
+                }
+            )
+
+        # Standalone non-Tesla chargers may predate vehicle_charging_configs.
+        if not configs:
+            charger_type = _configured_charger_type(opts)
+            if charger_type != "tesla":
+                params = _with_configured_charger_entities(
+                    self.hass,
+                    {"charger_type": charger_type},
+                    opts,
+                    charger_type,
+                )
+                loadpoint_id = _resolve_dynamic_loadpoint_id(
+                    charger_type, None, params
+                )
+                if loadpoint_id:
+                    configs.append(
+                        {
+                            "vehicle_id": loadpoint_id,
+                            "display_name": f"{charger_type.title()} charger",
+                            "charger_type": charger_type,
+                        }
+                    )
+
+        try:
+            home_battery_soc = await self._get_home_battery_soc()
+        except Exception as err:
+            _LOGGER.debug(
+                "Price-Level projection home-battery observation unavailable: %s",
+                err,
+            )
+            home_battery_soc = None
+        force_block_reason = None
+        optimizer = entry_data.get("optimization_coordinator")
+        if optimizer is not None:
+            try:
+                force_state = optimizer._get_active_force_state()
+                if force_state.get("active") and force_state.get("type") in {
+                    "charge",
+                    "discharge",
+                }:
+                    force_block_reason = (
+                        f"Manual force {force_state.get('type')} is active"
+                    )
+            except Exception:
+                pass
+
+        snapshots: list[PriceLevelVehicleSnapshot] = []
+        seen_loadpoints: set[str] = set()
+        auto_executor = get_auto_schedule_executor()
+        from ..const import CONF_EV_PROVIDER
+
+        for config in configs:
+            vehicle_id = str(config.get("vehicle_id") or "").strip()
+            if not vehicle_id:
+                continue
+            loadpoint_id = canonical_tesla_vehicle_id(
+                opts,
+                vehicle_id,
+                fleet_vins,
+                resolved_prefixes,
+            ) or vehicle_id
+            if loadpoint_id in seen_loadpoints:
+                continue
+            seen_loadpoints.add(loadpoint_id)
+
+            try:
+                charger_params = _get_vehicle_charger_params(
+                    self.hass,
+                    self._domain,
+                    self.config_entry,
+                    vehicle_id,
+                )
+            except Exception as err:
+                _LOGGER.debug(
+                    "Price-Level projection charger config unavailable for %s: %s",
+                    obfuscate_log_arg(vehicle_id),
+                    err,
+                )
+                charger_params = {}
+            charger_power_known = any(
+                config.get(key) is not None
+                for key in ("max_charge_amps", "max_amps")
+            )
+            if not charger_power_known and auto_executor is not None:
+                for settings_id, auto_settings in getattr(
+                    auto_executor, "_settings", {}
+                ).items():
+                    if _vehicle_config_matches(vehicle_id, settings_id):
+                        charger_power_known = all(
+                            float(value) > 0
+                            for value in (
+                                auto_settings.max_charge_amps,
+                                auto_settings.voltage,
+                                auto_settings.phases,
+                            )
+                        )
+                        break
+            try:
+                charger_power_w = (
+                    float(charger_params.get("max_charge_amps"))
+                    * float(charger_params.get("voltage"))
+                    * float(charger_params.get("phases"))
+                )
+            except (TypeError, ValueError):
+                charger_power_w = None
+
+            charger_type = str(
+                config.get("charger_type")
+                or charger_params.get("charger_type")
+                or "tesla"
+            )
+            anonymous = charger_type in {
+                "generic",
+                "ocpp",
+                "sigenergy",
+                "zaptec",
+            } and not (
+                len(vehicle_id) == 17
+                and vehicle_id.isalnum()
+                and not vehicle_id.isdigit()
+            )
+            try:
+                resolved_capacity = resolve_ev_battery_capacity(
+                    manual_capacity_kwh=(
+                        None if anonymous else config.get("battery_capacity_kwh")
+                    ),
+                    charger_fallback_capacity_kwh=config.get(
+                        "charger_fallback_battery_capacity_kwh",
+                        config.get("battery_capacity_kwh") if anonymous else None,
+                    ),
+                    provider_capacity_kwh=config.get(
+                        "provider_battery_capacity_kwh"
+                    ),
+                    model=config.get("vehicle_model", config.get("model")),
+                    trim=config.get("vehicle_trim", config.get("trim")),
+                    anonymous_loadpoint=anonymous,
+                )
+                capacity_source = resolved_capacity.battery_capacity_source
+                capacity_kwh = (
+                    None
+                    if capacity_source == CAPACITY_SOURCE_DEFAULT_ESTIMATE
+                    else resolved_capacity.effective_battery_capacity_kwh
+                )
+            except Exception as err:
+                _LOGGER.debug(
+                    "Price-Level projection capacity unavailable for %s: %s",
+                    obfuscate_log_arg(vehicle_id),
+                    err,
+                )
+                capacity_source = None
+                capacity_kwh = None
+
+            try:
+                location = await get_ev_location(
+                    self.hass, self.config_entry, vehicle_id
+                )
+            except Exception:
+                location = "unknown"
+            try:
+                plugged_in = await is_ev_plugged_in(
+                    self.hass, self.config_entry, vehicle_id
+                )
+            except Exception:
+                plugged_in = None
+            try:
+                ev_soc = await self._get_ev_soc(vehicle_id)
+            except Exception:
+                ev_soc = None
+            try:
+                owner_mode = get_active_ev_owner_mode(
+                    self.hass, self.config_entry, loadpoint_id
+                )
+            except Exception:
+                owner_mode = None
+            blocked_by = None
+            blocking_reason = None
+            try:
+                hold_reason = manual_stop_hold_reason(
+                    self.hass, self.config_entry, loadpoint_id
+                )
+            except Exception:
+                hold_reason = None
+            if hold_reason:
+                blocked_by = "manual_stop"
+                blocking_reason = hold_reason
+            elif force_block_reason:
+                blocked_by = "force_mode"
+                blocking_reason = force_block_reason
+            elif owner_mode and owner_family(owner_mode) != "price_level":
+                blocked_by = owner_family(owner_mode)
+                blocking_reason = f"{owner_mode} currently owns this loadpoint"
+
+            assumptions: list[str] = []
+            if location == "unknown":
+                assumptions.append("Vehicle must still be at home")
+            if plugged_in is not True:
+                assumptions.append("Vehicle must still be plugged in")
+            if capacity_kwh is None:
+                assumptions.append("Usable EV battery capacity is unavailable")
+            if not charger_power_known:
+                assumptions.append("Configured charger capability is unavailable")
+
+            snapshots.append(
+                PriceLevelVehicleSnapshot(
+                    vehicle_id=vehicle_id,
+                    loadpoint_id=loadpoint_id,
+                    display_name=str(
+                        config.get("display_name")
+                        or next(
+                            (
+                                vehicle.get("name")
+                                for vehicle in discovered
+                                if str(vehicle.get("vin") or "") == vehicle_id
+                            ),
+                            None,
+                        )
+                        or vehicle_id
+                    ),
+                    ev_soc_percent=float(ev_soc) if ev_soc is not None else None,
+                    location=str(location or "unknown"),
+                    plugged_in=bool(plugged_in) if plugged_in is not None else None,
+                    home_battery_soc_percent=home_battery_soc,
+                    charger_power_w=charger_power_w,
+                    charger_power_known=charger_power_known,
+                    battery_capacity_kwh=capacity_kwh,
+                    battery_capacity_source=capacity_source,
+                    provider=str(opts.get(CONF_EV_PROVIDER) or charger_type),
+                    observation_quality=(
+                        "high"
+                        if ev_soc is not None
+                        and location == "home"
+                        and plugged_in is True
+                        else "low"
+                    ),
+                    options=(
+                        ("charger_type", charger_type),
+                        ("capacity_source", capacity_source),
+                    ),
+                    blocked_by=blocked_by,
+                    blocking_reason=blocking_reason,
+                    assumptions=tuple(dict.fromkeys(assumptions)),
+                )
+            )
+        return snapshots
+
     def _get_or_create_vehicle_state(self, vehicle_vin: str) -> PriceLevelChargingState:
         """Get or create per-vehicle charging state."""
         if vehicle_vin not in self._vehicle_states:
@@ -9204,57 +9563,18 @@ class PriceLevelChargingExecutor:
         # case we still allow price-driven charging: opportunity price first,
         # then a conservative recovery-price fallback.
         ev_soc = await self._get_ev_soc()
-        soc_known = ev_soc is not None
-        if soc_known and ev_soc >= FULL_EV_SOC:
-            reason = f"EV {ev_soc}% >= {FULL_EV_SOC}%, already full"
-            self._state.last_decision = "waiting"
-            self._state.last_decision_reason = reason
-            return False, reason, ""
-
-        # Get price
-        if current_price_cents is None:
-            self._state.last_decision = "waiting"
-            self._state.last_decision_reason = "No price data available"
-            return False, "No price data available", ""
-
-        recovery_soc = settings.get("recovery_soc", 40)
-        recovery_price = settings.get("recovery_price_cents", 30)
-        opportunity_price = settings.get("opportunity_price_cents", 10)
-
-        # Recovery mode: Below recovery_soc, charge if price is low enough.
-        if soc_known and ev_soc < recovery_soc:
-            if current_price_cents <= recovery_price:
-                reason = f"Recovery: EV {ev_soc}% < {recovery_soc}%, price {current_price_cents:.1f}c <= {recovery_price}c"
-                self._state.last_decision = "wants_charge"
-                self._state.last_decision_reason = reason
-                return True, reason, "price_level_recovery"
-            else:
-                reason = f"Recovery: EV {ev_soc}% < {recovery_soc}%, but price {current_price_cents:.1f}c > {recovery_price}c"
-                self._state.last_decision = "waiting"
-                self._state.last_decision_reason = reason
-                return False, reason, ""
-
-        # Opportunity mode: Above recovery_soc OR SOC unknown, gate on the
-        # user's cheapest-price threshold first.
-        soc_label = f"{ev_soc}%" if soc_known else "unknown"
-        if current_price_cents <= opportunity_price:
-            reason = f"Opportunity: EV {soc_label}, price {current_price_cents:.1f}c <= {opportunity_price}c"
-            self._state.last_decision = "wants_charge"
-            self._state.last_decision_reason = reason
-            return True, reason, "price_level_opportunity"
-        elif not soc_known and current_price_cents <= recovery_price:
-            reason = f"Recovery fallback: EV SOC unknown, price {current_price_cents:.1f}c <= {recovery_price}c"
-            self._state.last_decision = "wants_charge"
-            self._state.last_decision_reason = reason
-            return True, reason, "price_level_recovery"
-        else:
-            if soc_known:
-                reason = f"EV {soc_label} >= {recovery_soc}%, price {current_price_cents:.1f}c > {opportunity_price}c"
-            else:
-                reason = f"EV SOC unknown, price {current_price_cents:.1f}c > recovery price {recovery_price}c"
-            self._state.last_decision = "waiting"
-            self._state.last_decision_reason = reason
-            return False, reason, ""
+        decision = classify_price_level_policy(
+            ev_soc_percent=ev_soc,
+            price_cents=current_price_cents,
+            recovery_soc=settings.get("recovery_soc", 40),
+            recovery_price_cents=settings.get("recovery_price_cents", 30),
+            opportunity_price_cents=settings.get("opportunity_price_cents", 10),
+        )
+        self._state.last_decision = (
+            "wants_charge" if decision.should_charge else "waiting"
+        )
+        self._state.last_decision_reason = decision.reason
+        return decision.should_charge, decision.reason, decision.mode
 
     async def evaluate(self, current_price_cents: Optional[float]) -> None:
         """
@@ -9340,57 +9660,18 @@ class PriceLevelChargingExecutor:
         # still allow price-driven charging: opportunity price first, then a
         # conservative recovery-price fallback.
         ev_soc = await self._get_ev_soc(vehicle_vin)
-        soc_known = ev_soc is not None
-        if soc_known and ev_soc >= FULL_EV_SOC:
-            reason = f"EV {ev_soc}% >= {FULL_EV_SOC}%, already full"
-            vehicle_state.last_decision = "waiting"
-            vehicle_state.last_decision_reason = reason
-            return False, reason, ""
-
-        # Get price
-        if current_price_cents is None:
-            vehicle_state.last_decision = "waiting"
-            vehicle_state.last_decision_reason = "No price data available"
-            return False, "No price data available", ""
-
-        recovery_soc = settings.get("recovery_soc", 40)
-        recovery_price = settings.get("recovery_price_cents", 30)
-        opportunity_price = settings.get("opportunity_price_cents", 10)
-
-        # Recovery mode: Below recovery_soc, charge if price is low enough.
-        if soc_known and ev_soc < recovery_soc:
-            if current_price_cents <= recovery_price:
-                reason = f"Recovery: EV {ev_soc}% < {recovery_soc}%, price {current_price_cents:.1f}c <= {recovery_price}c"
-                vehicle_state.last_decision = "wants_charge"
-                vehicle_state.last_decision_reason = reason
-                return True, reason, "price_level_recovery"
-            else:
-                reason = f"Recovery: EV {ev_soc}% < {recovery_soc}%, but price {current_price_cents:.1f}c > {recovery_price}c"
-                vehicle_state.last_decision = "waiting"
-                vehicle_state.last_decision_reason = reason
-                return False, reason, ""
-
-        # Opportunity mode: Above recovery_soc OR SOC unknown, gate on the
-        # user's cheapest-price threshold first.
-        soc_label = f"{ev_soc}%" if soc_known else "unknown"
-        if current_price_cents <= opportunity_price:
-            reason = f"Opportunity: EV {soc_label}, price {current_price_cents:.1f}c <= {opportunity_price}c"
-            vehicle_state.last_decision = "wants_charge"
-            vehicle_state.last_decision_reason = reason
-            return True, reason, "price_level_opportunity"
-        elif not soc_known and current_price_cents <= recovery_price:
-            reason = f"Recovery fallback: EV SOC unknown, price {current_price_cents:.1f}c <= {recovery_price}c"
-            vehicle_state.last_decision = "wants_charge"
-            vehicle_state.last_decision_reason = reason
-            return True, reason, "price_level_recovery"
-        else:
-            if soc_known:
-                reason = f"EV {soc_label} >= {recovery_soc}%, price {current_price_cents:.1f}c > {opportunity_price}c"
-            else:
-                reason = f"EV SOC unknown, price {current_price_cents:.1f}c > recovery price {recovery_price}c"
-            vehicle_state.last_decision = "waiting"
-            vehicle_state.last_decision_reason = reason
-            return False, reason, ""
+        decision = classify_price_level_policy(
+            ev_soc_percent=ev_soc,
+            price_cents=current_price_cents,
+            recovery_soc=settings.get("recovery_soc", 40),
+            recovery_price_cents=settings.get("recovery_price_cents", 30),
+            opportunity_price_cents=settings.get("opportunity_price_cents", 10),
+        )
+        vehicle_state.last_decision = (
+            "wants_charge" if decision.should_charge else "waiting"
+        )
+        vehicle_state.last_decision_reason = decision.reason
+        return decision.should_charge, decision.reason, decision.mode
 
     async def evaluate_all_vehicles(
         self,

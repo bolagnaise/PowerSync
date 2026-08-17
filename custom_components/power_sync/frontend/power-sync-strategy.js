@@ -2215,6 +2215,9 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         .window-row.export {
           border-left-color: #FFD54F;
         }
+        .window-row.price-level {
+          border-left-color: #7E57C2;
+        }
         .window-pill {
           display: inline-flex;
           align-items: center;
@@ -2239,6 +2242,22 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         .window-row.export .window-pill {
           color: #8A6A00;
           background: rgba(255, 213, 79, 0.22);
+        }
+        .window-row.price-level .window-pill {
+          color: #5E35B1;
+          background: rgba(126, 87, 194, 0.14);
+        }
+        .window-row.price-level.conditional {
+          border-style: dashed;
+        }
+        .window-row.price-level.suppressed {
+          opacity: 0.72;
+        }
+        .projection-note {
+          margin: 7px 0 10px;
+          color: var(--secondary-text-color);
+          font-size: 11px;
+          line-height: 1.35;
         }
         .window-main {
           min-width: 0;
@@ -2405,6 +2424,11 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         ${this._renderNotice(hasSchedule)}
         <div class="section-title">Planned Battery Windows</div>
         ${this._renderBatteryWindows(batteryWindows, priceMeta)}
+        ${model.priceLevelWindows.length ? `
+          <div class="section-title">Projected EV Price-Level Windows</div>
+          <div class="projection-note">Based on forecast prices and current settings. Actual charging still requires live home, plug, SOC, ownership, charger, battery-safety, and price checks.</div>
+          ${this._renderPriceLevelWindows(model.priceLevelWindows, priceMeta)}
+        ` : ''}
         ${hasSchedule ? `
           <div class="section-title">SOC and Battery Power</div>
           <div class="chart-wrap soc-power-chart">${this._renderPowerChart(model, compact)}<div class="chart-tooltip-line"></div><div class="chart-tooltip"></div></div>
@@ -2441,6 +2465,23 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const consume = detailed ? schedule.battery_consume_w : [];
     const exportPower = detailed ? schedule.battery_export_w : [];
     const ev = Array.isArray(schedule.ev_charging_w) ? schedule.ev_charging_w : [];
+    const projection = schedule.ev_charging_projection?.schema_version === 1
+      ? schedule.ev_charging_projection
+      : null;
+    const conditionalEv = Array.isArray(projection?.components?.price_level_conditional_cap_w)
+      ? projection.components.price_level_conditional_cap_w
+      : [];
+    const priceLevelWindows = Array.isArray(projection?.windows)
+      ? projection.windows.filter(window => {
+          const start = Date.parse(window?.start);
+          const end = Date.parse(window?.end);
+          return window?.source === 'price_level'
+            && ['expected', 'conditional', 'suppressed'].includes(window?.classification)
+            && Number.isFinite(start)
+            && Number.isFinite(end)
+            && end > start;
+        })
+      : [];
     const importPrice = Array.isArray(schedule.import_price) ? schedule.import_price : [];
     const exportPrice = Array.isArray(schedule.export_price) ? schedule.export_price : [];
     const gridExportLimit = Array.isArray(schedule.grid_export_limit_w)
@@ -2479,6 +2520,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         consumeKw: detailed ? this._kw(consume[i]) : 0,
         exportKw: detailed ? this._kw(exportPower[i]) : 0,
         evKw: this._kw(ev[i]),
+        conditionalEvKw: this._kw(conditionalEv[i]),
         importPrice: this._minorPrice(importPrice[i]),
         exportPrice: this._minorPrice(exportPrice[i]),
         gridExportLimitKw: this._kw(gridExportLimit[i]),
@@ -2498,7 +2540,15 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           { key: 'dischargeKw', label: 'Discharge', color: '#FF9800' },
         ];
     if (hasEv) {
-      powerSeries.push({ key: 'evKw', label: 'EV', color: '#7E57C2' });
+      powerSeries.push({ key: 'evKw', label: 'Planned EV load', color: '#7E57C2' });
+    }
+    if (points.some(point => point.conditionalEvKw > 0)) {
+      powerSeries.push({
+        key: 'conditionalEvKw',
+        label: 'Conditional Price-Level window',
+        color: '#AB8CE4',
+        dashed: true,
+      });
     }
     if (hasGridExportLimit) {
       powerSeries.push({
@@ -2509,6 +2559,13 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     }
     const reserve = this._optimizerReserve(data);
     const idleHold = this._idleHoldReserve(data);
+    const conditionalPriceLevelRanges = [];
+    for (let i = 0; i < points.length; i++) {
+      if (!(Number(points[i]?.conditionalEvKw) > 0)) continue;
+      const last = conditionalPriceLevelRanges[conditionalPriceLevelRanges.length - 1];
+      if (last && last.end === i - 1) last.end = i;
+      else conditionalPriceLevelRanges.push({ start: i, end: i });
+    }
 
     return {
       raw: data,
@@ -2529,6 +2586,8 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           ]
         : [],
       demandRanges: this._demandRanges(points, data?.demand_window),
+      conditionalPriceLevelRanges,
+      priceLevelWindows,
     };
   }
 
@@ -2594,6 +2653,12 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const ySoc = (value) => pad.top + chartH - (Math.max(0, Math.min(100, value)) / 100) * chartH;
     let svg = this._chartGrid(W, H, pad, model.points, compact, `${powerMax} kW`);
 
+    for (const range of model.conditionalPriceLevelRanges) {
+      const x1 = x(range.start);
+      const x2 = x(Math.min(model.points.length - 1, range.end + 1));
+      svg += `<rect x="${x1}" y="${pad.top}" width="${Math.max(3, x2 - x1)}" height="${chartH}" fill="#7E57C2" opacity="0.07" stroke="#7E57C2" stroke-width="1" stroke-dasharray="5,4"/>`;
+    }
+
     for (const range of model.demandRanges) {
       const x1 = x(range.start);
       const x2 = x(range.end);
@@ -2621,11 +2686,14 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     }
 
     for (const series of model.powerSeries) {
-      svg += `<path d="${this._stepPath(model.points, x, yPower, series.key)}" fill="none" stroke="${series.color}" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>`;
+      svg += `<path d="${this._stepPath(model.points, x, yPower, series.key)}" fill="none" stroke="${series.color}" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round" opacity="0.9"${series.dashed ? ' stroke-dasharray="6,4"' : ''}/>`;
     }
     svg += `<path d="${this._linePath(model.points, x, ySoc, 'soc')}" fill="none" stroke="#42A5F5" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
 
-    return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="24-hour optimizer SOC and power chart">${svg}</svg>`;
+    const conditionalLabel = model.conditionalPriceLevelRanges.length
+      ? ' including conditional Price-Level charging windows'
+      : '';
+    return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="24-hour optimizer SOC and power chart${conditionalLabel}">${svg}</svg>`;
   }
 
   _renderPriceChart(model, compact, priceMeta) {
@@ -2633,6 +2701,12 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const x = (i) => pad.left + (i / Math.max(1, model.points.length - 1)) * chartW;
     const y = (value) => pad.top + chartH - (Math.max(0, value) / maxPrice) * chartH;
     let svg = this._chartGrid(W, H, pad, model.points, compact, `${maxPrice} ${priceMeta.minorUnit}`);
+
+    for (const range of model.conditionalPriceLevelRanges) {
+      const x1 = x(range.start);
+      const x2 = x(Math.min(model.points.length - 1, range.end + 1));
+      svg += `<rect x="${x1}" y="${pad.top}" width="${Math.max(3, x2 - x1)}" height="${chartH}" fill="#7E57C2" opacity="0.07" stroke="#7E57C2" stroke-width="1" stroke-dasharray="5,4"/>`;
+    }
 
     for (const range of model.demandRanges) {
       const x1 = x(range.start);
@@ -2643,7 +2717,10 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       svg += `<path d="${this._stepPath(model.points, x, y, series.key)}" fill="none" stroke="${series.color}" stroke-width="2.05" stroke-linejoin="round" stroke-linecap="round"/>`;
     }
 
-    return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="24-hour import and export price chart">${svg}</svg>`;
+    const conditionalLabel = model.conditionalPriceLevelRanges.length
+      ? ' with conditional Price-Level charging windows highlighted'
+      : '';
+    return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="24-hour import and export price chart${conditionalLabel}">${svg}</svg>`;
   }
 
   _powerChartMetrics(model, compact) {
@@ -2717,11 +2794,18 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     return {
       ...metrics,
       points: model.points,
-      rows: (point) => model.priceSeries.map(series => ({
-        label: series.label,
-        color: series.color,
-        value: this._formatMinorPrice(point[series.key], priceMeta.minorUnit),
-      })),
+      rows: (point) => [
+        ...model.priceSeries.map(series => ({
+          label: series.label,
+          color: series.color,
+          value: this._formatMinorPrice(point[series.key], priceMeta.minorUnit),
+        })),
+        ...(point.conditionalEvKw > 0 ? [{
+          label: 'Price Level',
+          color: '#AB8CE4',
+          value: `Conditional - up to ${point.conditionalEvKw.toFixed(2)} kW`,
+        }] : []),
+      ],
     };
   }
 
@@ -2811,7 +2895,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
   _renderLegend(series, includeSoc = true) {
     return `<div class="legend">
       ${includeSoc ? '<div class="legend-item"><span class="swatch" style="background:#42A5F5"></span><span>SOC</span></div>' : ''}
-      ${series.map(s => `<div class="legend-item"><span class="swatch" style="background:${s.color}"></span><span>${this._escHtml(s.label)}</span></div>`).join('')}
+      ${series.map(s => `<div class="legend-item"><span class="swatch" style="${s.dashed ? `background:transparent;border:2px dashed ${s.color};box-sizing:border-box` : `background:${s.color}`}"></span><span>${this._escHtml(s.label)}</span></div>`).join('')}
     </div>`;
   }
 
@@ -2841,6 +2925,39 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         </div>
       `;
     }).join('')}${windows.length > 8 ? `<div class="empty">+${windows.length - 8} more battery window${windows.length - 8 === 1 ? '' : 's'}</div>` : ''}</div>`;
+  }
+
+  _renderPriceLevelWindows(windows, priceMeta) {
+    if (!windows.length) return '';
+    return `<div class="battery-windows">${windows.slice(0, 10).map(window => {
+      const classification = window.classification || 'conditional';
+      const badge = classification === 'expected'
+        ? 'Expected recovery load'
+        : (classification === 'suppressed' ? 'Suppressed' : 'Conditional - may charge');
+      const trigger = window.trigger === 'opportunity' ? 'Opportunity' : 'Recovery';
+      const expectedWh = Number(window.expected_energy_wh);
+      const powerW = Number(window.power_cap_w);
+      const energyPower = classification === 'expected' && Number.isFinite(expectedWh) && expectedWh > 0
+        ? `${(expectedWh / 1000).toFixed(2)} kWh expected${powerW > 0 ? ` at ${this._formatPower(powerW)}` : ''}`
+        : (powerW > 0 ? `up to ${this._formatPower(powerW)}` : 'live charger limit');
+      const threshold = Number(window.price_threshold_cents);
+      const details = [
+        window.display_name,
+        trigger,
+        Number.isFinite(threshold) ? `<= ${this._formatMinorPrice(threshold, priceMeta.minorUnit)}` : '',
+        energyPower,
+        window.blocking_reason || '',
+      ].filter(Boolean).join(' - ');
+      return `
+        <div class="window-row price-level ${this._escHtml(classification)}">
+          <div class="window-pill">${this._escHtml(badge)}</div>
+          <div class="window-main">
+            <div class="window-time">${this._escHtml(this._timeRange(window.start, window.end))}</div>
+            <div class="window-meta">${this._escHtml(details)}</div>
+          </div>
+        </div>
+      `;
+    }).join('')}${windows.length > 10 ? `<div class="empty">+${windows.length - 10} more Price-Level window${windows.length - 10 === 1 ? '' : 's'}</div>` : ''}</div>`;
   }
 
   _renderActions(actions, model, priceMeta) {
@@ -3108,6 +3225,17 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       const current = this._timestampClockMinutes(points[i].timestamp);
       const inWindow = end <= start ? current >= start || current < end : current >= start && current < end;
       if (!inWindow) continue;
+      const last = ranges[ranges.length - 1];
+      if (last && last.end === i - 1) last.end = i;
+      else ranges.push({ start: i, end: i });
+    }
+    return ranges;
+  }
+
+  _valueRanges(points, key) {
+    const ranges = [];
+    for (let i = 0; i < (points || []).length; i++) {
+      if (!(Number(points[i]?.[key]) > 0)) continue;
       const last = ranges[ranges.length - 1];
       if (last && last.end === i - 1) last.end = i;
       else ranges.push({ start: i, end: i });
@@ -4728,6 +4856,7 @@ class PowerSyncEVPanel extends HTMLElement {
             { key: 'recovery_price_cents', label: 'Recovery c/kWh', type: 'number', step: '0.1' },
             { key: 'opportunity_price_cents', label: 'Opportunity c/kWh', type: 'number', step: '0.1' },
           ],
+          'Upcoming eligible windows appear in the 24-hour optimiser plan. They are projections only; the live controller rechecks price, SOC, location, plug state, ownership, and safety before charging.',
         )}
         ${this._modeCard(
           'scheduled',
@@ -4759,7 +4888,7 @@ class PowerSyncEVPanel extends HTMLElement {
     return `${enabledModes.length} on: ${enabledModes.join(', ')}`;
   }
 
-  _modeCard(kind, title, icon, settings, fields) {
+  _modeCard(kind, title, icon, settings, fields, description = '') {
     const enabled = !!settings?.enabled;
     const saving = this._savingKey === `mode:${kind}`;
     return `
@@ -4769,6 +4898,7 @@ class PowerSyncEVPanel extends HTMLElement {
           <div class="mode-title">${this._escHtml(title)}</div>
           <div class="pill ${enabled ? 'on' : ''}">${enabled ? 'On' : 'Off'}</div>
         </div>
+        ${description ? `<div class="notice">${this._escHtml(description)}</div>` : ''}
         <div class="mode-fields">
           ${fields.map((field) => this._fieldHtml(kind, settings || {}, field)).join('')}
         </div>

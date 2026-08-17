@@ -17,6 +17,7 @@ import math
 import sys
 import textwrap
 import types
+from typing import Any
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -274,24 +275,63 @@ class _FakeOverlayCoordinator:
         self._external_forecast = external_forecast
         self._internal_forecast = internal_forecast
         self._ev_integration_enabled = ev_integration_enabled
+        self._config = SimpleNamespace(interval_minutes=5)
+        self.hass = SimpleNamespace(config=SimpleNamespace(time_zone="Australia/Brisbane"))
         self._last_planned_ev_load_forecast_w = None
+        self._last_effective_ev_load_forecast_w = None
+        self._last_smart_schedule_ev_load_w = None
+        self._last_price_level_expected_ev_load_w = None
+        self._last_price_level_projection = None
+        self._planned_ev_load_entity_id = "sensor.external" if external_forecast else None
         self._warned_dual_ev_overlay = False
 
     def _get_planned_ev_load_forecast(self, n_intervals: int) -> list[float] | None:
         return self._external_forecast
 
-    def _get_ev_planned_load(self, n_intervals: int) -> list[float] | None:
-        return self._internal_forecast
+    async def _build_price_level_projection(self, n_intervals: int):
+        return SimpleNamespace(
+            expected_w=tuple(0.0 for _ in range(n_intervals)),
+            expected_by_loadpoint={},
+            conditional_cap_w=tuple(0.0 for _ in range(n_intervals)),
+            windows=(),
+            warnings=(),
+            with_suppressed_expected=lambda **_kwargs: self._empty_projection(n_intervals),
+        )
+
+    def _empty_projection(self, n_intervals: int):
+        return SimpleNamespace(
+            expected_w=tuple(0.0 for _ in range(n_intervals)),
+            expected_by_loadpoint={},
+            conditional_cap_w=tuple(0.0 for _ in range(n_intervals)),
+            windows=(),
+            warnings=(),
+        )
+
+    def _get_ev_planned_load_components(self, n_intervals: int):
+        return {"ev": self._internal_forecast} if self._internal_forecast else {}
+
+    def _merge_internal_ev_load_components(
+        self, *, n_intervals, smart_components, price_components
+    ):
+        smart = list(next(iter(smart_components.values()), [0.0] * n_intervals))
+        price = list(next(iter(price_components.values()), [0.0] * n_intervals))
+        effective = [max(smart[i], price[i]) for i in range(n_intervals)]
+        marginal = [max(0.0, effective[i] - smart[i]) for i in range(n_intervals)]
+        return effective, smart, marginal
+
+    def _price_level_projection_payload(self, **_kwargs):
+        return {"schema_version": 1, "components": {}, "windows": []}
 
 
 def _run_overlay(coordinator: _FakeOverlayCoordinator, load: list[float]) -> list[float]:
+    source = _ev_overlay_block_source()
+    wrapped = "async def _run(load):\n" + textwrap.indent(source, "    ") + "\n    return load\n"
     namespace = {
         "self": coordinator,
-        "load": list(load),
         "_LOGGER": SimpleNamespace(warning=lambda *a, **k: None),
     }
-    exec(compile(_ev_overlay_block_source(), "<ev_overlay_block>", "exec"), namespace)
-    return namespace["load"]
+    exec(compile(wrapped, "<ev_overlay_block>", "exec"), namespace)
+    return asyncio.run(namespace["_run"](list(load)))
 
 
 def test_ev_overlay_external_entity_only_applies_external_forecast():
@@ -348,6 +388,7 @@ def _extract_coordinator_method(name: str):
         "timedelta": timedelta,
         "dt_util": _ha_dt,
         "math": math,
+        "Any": Any,
         "_LOGGER": SimpleNamespace(debug=lambda *args, **kwargs: None),
     }
     ast.fix_missing_locations(method)
@@ -415,11 +456,20 @@ def test_internal_ev_forecast_prorates_trimmed_time_critical_window():
     try:
         coordinator = SimpleNamespace(
             _config=SimpleNamespace(interval_minutes=5),
+            _price_timestamps=lambda count: [
+                now + timedelta(minutes=5 * index) for index in range(count)
+            ],
         )
-        ev_load = _extract_coordinator_method("_get_ev_planned_load")(
+        components = _extract_coordinator_method(
+            "_get_ev_planned_load_components"
+        )(
             coordinator,
             36,
         )
+        ev_load = [
+            sum(values[index] for values in components.values())
+            for index in range(36)
+        ] if components else None
     finally:
         _ha_dt.now = old_now
         ev_planner.set_auto_schedule_executor(old_executor)
@@ -503,13 +553,88 @@ def test_internal_ev_forecast_ignores_disabled_vehicle_beside_enabled_vehicle():
     try:
         coordinator = SimpleNamespace(
             _config=SimpleNamespace(interval_minutes=5),
+            _price_timestamps=lambda count: [
+                now + timedelta(minutes=5 * index) for index in range(count)
+            ],
         )
-        ev_load = _extract_coordinator_method("_get_ev_planned_load")(
+        components = _extract_coordinator_method(
+            "_get_ev_planned_load_components"
+        )(
             coordinator,
             24,
         )
+        ev_load = [
+            sum(values[index] for values in components.values())
+            for index in range(24)
+        ] if components else None
     finally:
         _ha_dt.now = old_now
         ev_planner.set_auto_schedule_executor(old_executor)
 
     assert ev_load == pytest.approx([2000.0] * 24)
+
+
+def test_internal_ev_arbitration_uses_max_for_one_loadpoint_and_sum_for_distinct():
+    """Smart and Price-Level candidates share a charger without stacking."""
+    merge = _extract_coordinator_method("_merge_internal_ev_load_components")
+    coordinator = SimpleNamespace(
+        _canonical_ev_loadpoint_ids=lambda identifiers: {
+            "fleet_vin": "physical_a",
+            "ble_alias": "physical_a",
+            "other": "physical_b",
+        },
+    )
+
+    effective, smart, price = merge(
+        coordinator,
+        n_intervals=2,
+        smart_components={"fleet_vin": [7000, 0]},
+        price_components={
+            "ble_alias": (3600, 7200),
+            "other": (2000, 2000),
+        },
+    )
+
+    assert effective == pytest.approx([9000, 9200])
+    assert smart == pytest.approx([7000, 0])
+    assert price == pytest.approx([2000, 9200])
+
+
+def test_price_level_projection_payload_is_versioned_and_array_aligned():
+    payload_method = _extract_coordinator_method("_price_level_projection_payload")
+    now = datetime(2026, 8, 17, 8, 0, tzinfo=timezone.utc)
+    old_now = _ha_dt.now
+    _ha_dt.now = lambda: now
+    try:
+        projection = SimpleNamespace(
+            conditional_cap_w=(0.0, 7400.0),
+            windows=(SimpleNamespace(to_dict=lambda: {"id": "window"}),),
+            warnings=("diagnostic",),
+        )
+        coordinator = SimpleNamespace(
+            hass=SimpleNamespace(config=SimpleNamespace(time_zone="Australia/Brisbane")),
+            _config=SimpleNamespace(interval_minutes=5),
+        )
+        payload = payload_method(
+            coordinator,
+            projection=projection,
+            effective_source="internal",
+            external_w=[0.0, 0.0],
+            smart_w=[7000.0, 0.0],
+            price_expected_w=[0.0, 7200.0],
+        )
+    finally:
+        _ha_dt.now = old_now
+
+    assert payload["schema_version"] == 1
+    assert payload["timezone"] == "Australia/Brisbane"
+    assert payload["interval_minutes"] == 5
+    assert payload["effective_source"] == "internal"
+    assert payload["components"] == {
+        "external_w": [0.0, 0.0],
+        "smart_schedule_w": [7000.0, 0.0],
+        "price_level_expected_w": [0.0, 7200.0],
+        "price_level_conditional_cap_w": [0.0, 7400.0],
+    }
+    assert payload["windows"] == [{"id": "window"}]
+    assert payload["warnings"] == ["diagnostic"]

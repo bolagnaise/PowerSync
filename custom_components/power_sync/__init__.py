@@ -18860,6 +18860,19 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
             store._data = stored_data
             await store.async_save()
 
+            # Refresh the advisory 24-hour projection after returning the saved
+            # settings.  The coordinator coalesces repeated updates and this
+            # does not run any EV charger command path.
+            entry_data = self._hass.data.get(DOMAIN, {}).get(
+                self._config_entry.entry_id, {}
+            )
+            opt_coordinator = entry_data.get("optimization_coordinator")
+            schedule_refresh = getattr(
+                opt_coordinator, "_schedule_settings_reoptimization", None
+            )
+            if schedule_refresh:
+                schedule_refresh()
+
             _LOGGER.info(
                 f"💰 Price-level charging settings updated: enabled={settings.get('enabled')}, "
                 f"recovery_soc={settings.get('recovery_soc')}%, "

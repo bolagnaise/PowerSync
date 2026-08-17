@@ -38,6 +38,10 @@ from .manual_control import (
     ManualControlProjection,
     build_manual_control_projection,
 )
+from .price_level_projection import (
+    PriceLevelProjection,
+    build_price_level_projection,
+)
 from .solar_forecast_learning import SolarForecastLearner
 from .solar_provenance import derive_solar_forecast_provenance
 from .solar_export import SolarExportHoldController, resolve_solar_export_adapter
@@ -508,6 +512,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._pending_price_timestamps: list[datetime] | None = None
         self._last_grid_export_limits_w: list[float | None] | None = None
         self._last_planned_ev_load_forecast_w: list[float] | None = None
+        self._last_effective_ev_load_forecast_w: list[float] | None = None
+        self._last_smart_schedule_ev_load_w: list[float] | None = None
+        self._last_price_level_expected_ev_load_w: list[float] | None = None
+        self._last_price_level_projection: dict[str, Any] | None = None
         self._last_zerohero_bonus_prices: list[float] | None = None
         self._last_zerohero_bonus_cap_kwh: float | None = None
         self._last_zerocharge_bonus_prices: list[float] | None = None
@@ -5420,28 +5428,89 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Overlay EV charging plan onto load forecast
             ev_peak_kw = 0.0
             self._last_planned_ev_load_forecast_w = None
-            external_ev_overlay_applied = False
+            self._last_effective_ev_load_forecast_w = None
+            self._last_smart_schedule_ev_load_w = None
+            self._last_price_level_expected_ev_load_w = None
+            self._last_price_level_projection = None
             if load:
-                planned_ev_load_w = self._get_planned_ev_load_forecast(len(load))
-                if planned_ev_load_w:
-                    load = [l + ev for l, ev in zip(load, planned_ev_load_w)]
-                    self._last_planned_ev_load_forecast_w = planned_ev_load_w
-                    ev_peak_kw = max(ev_peak_kw, max(planned_ev_load_w) / 1000)
-                    external_ev_overlay_applied = True
+                n_ev = len(load)
+                price_projection = await self._build_price_level_projection(n_ev)
+                smart_components = (
+                    self._get_ev_planned_load_components(n_ev)
+                    if self._ev_integration_enabled
+                    else {}
+                )
+                external_ev_load_w = self._get_planned_ev_load_forecast(n_ev)
+                zeros = [0.0] * n_ev
 
-            if load and self._ev_integration_enabled and not external_ev_overlay_applied:
-                ev_load_w = self._get_ev_planned_load(len(load))
-                if ev_load_w:
-                    load = [l + ev for l, ev in zip(load, ev_load_w)]
-                    ev_peak_kw = max(ev_peak_kw, max(ev_load_w) / 1000)
-            elif load and external_ev_overlay_applied and self._ev_integration_enabled:
-                if self._get_ev_planned_load(len(load)) and not self._warned_dual_ev_overlay:
+                if external_ev_load_w:
+                    effective_ev_load_w = list(external_ev_load_w)
+                    display_projection = price_projection.with_suppressed_expected(
+                        suppressed_by="external_planned_load",
+                        reason="External planned EV load is authoritative",
+                    )
+                    smart_w = zeros
+                    price_expected_w = zeros
+                    effective_source = "external"
+                    if (
+                        smart_components or any(price_projection.expected_w)
+                    ) and not self._warned_dual_ev_overlay:
+                        _LOGGER.warning(
+                            "Optimizer: planned_ev_load_entity is authoritative; "
+                            "ignoring internal Smart Schedule and Price-Level "
+                            "expected load to avoid double-counting EV demand."
+                        )
+                        self._warned_dual_ev_overlay = True
+                else:
+                    (
+                        effective_ev_load_w,
+                        smart_w,
+                        price_expected_w,
+                    ) = self._merge_internal_ev_load_components(
+                        n_intervals=n_ev,
+                        smart_components=smart_components,
+                        price_components=price_projection.expected_by_loadpoint,
+                    )
+                    display_projection = price_projection
+                    external_ev_load_w = zeros
+                    effective_source = "internal"
+
+                self._last_smart_schedule_ev_load_w = list(smart_w)
+                self._last_price_level_expected_ev_load_w = list(
+                    price_expected_w
+                )
+                self._last_price_level_projection = (
+                    self._price_level_projection_payload(
+                        projection=display_projection,
+                        effective_source=effective_source,
+                        external_w=list(external_ev_load_w),
+                        smart_w=list(smart_w),
+                        price_expected_w=list(price_expected_w),
+                    )
+                )
+
+                if any(value > 0 for value in effective_ev_load_w):
+                    load = [
+                        base + ev
+                        for base, ev in zip(load, effective_ev_load_w)
+                    ]
+                    self._last_planned_ev_load_forecast_w = list(
+                        effective_ev_load_w
+                    )
+                    self._last_effective_ev_load_forecast_w = list(
+                        effective_ev_load_w
+                    )
+                    ev_peak_kw = max(
+                        ev_peak_kw, max(effective_ev_load_w) / 1000
+                    )
+                elif (
+                    smart_components
+                    and not self._warned_dual_ev_overlay
+                    and self._planned_ev_load_entity_id
+                ):
                     _LOGGER.warning(
-                        "Optimizer: both planned_ev_load_entity and the internal EV "
-                        "charging plan are configured for this system. Using the "
-                        "external planned_ev_load_entity for load forecasting and "
-                        "ignoring the internal AutoScheduleExecutor plan to avoid "
-                        "double-counting EV demand."
+                        "Optimizer: planned_ev_load_entity has no usable future "
+                        "values; using the internal EV plan for this solve."
                     )
                     self._warned_dual_ev_overlay = True
 
@@ -13644,8 +13713,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return numeric
         return numeric * 1000.0
 
-    def _get_ev_planned_load(self, n_intervals: int) -> list[float] | None:
-        """Get EV planned charging load from AutoScheduleExecutor.
+    def _get_ev_planned_load_components(
+        self,
+        n_intervals: int,
+    ) -> dict[str, list[float]]:
+        """Get timestamp-aligned Smart Schedule load by physical loadpoint.
 
         Reads the selected charging windows from each vehicle's current plan
         and returns a per-interval power array in Watts matching the load
@@ -13655,23 +13727,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             n_intervals: Number of intervals in the load forecast.
 
         Returns:
-            List of EV load in Watts per interval, or None if no EV plan.
+            Mapping of loadpoint id to Watts per interval.
         """
         from ..automations.ev_charging_planner import get_auto_schedule_executor
 
         executor = get_auto_schedule_executor()
         if not executor:
-            return None
+            return {}
 
         # Access vehicle states directly for typed AutoScheduleState objects
         states = getattr(executor, "_state", {})
         if not states:
-            return None
+            return {}
 
         now = dt_util.now()
         interval_minutes = self._config.interval_minutes
-        ev_load = [0.0] * n_intervals
-        has_any_windows = False
+        timestamps = self._price_timestamps(n_intervals)
+        ev_load_by_vehicle: dict[str, list[float]] = {}
 
         for vehicle_id, state in states.items():
             configured_power_w = None
@@ -13696,6 +13768,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             plan = state.current_plan
             if not plan or not plan.windows:
                 continue
+
+            vehicle_load = ev_load_by_vehicle.setdefault(
+                str(vehicle_id), [0.0] * n_intervals
+            )
 
             for window in plan.windows:
                 try:
@@ -13726,23 +13802,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
                     power_w = min(power_w, configured_power_w)
 
-                # Map window to forecast indices
-                start_offset_min = (w_start - now).total_seconds() / 60
-                end_offset_min = (w_end - now).total_seconds() / 60
-
-                idx_start = math.floor(start_offset_min / interval_minutes)
-                idx_end = math.ceil(end_offset_min / interval_minutes)
-
-                # Clamp to valid range
-                idx_start = max(0, idx_start)
-                idx_end = min(n_intervals, idx_end)
-
-                for i in range(idx_start, idx_end):
-                    interval_start = now + timedelta(
-                        minutes=i * interval_minutes
-                    )
-                    interval_end = interval_start + timedelta(
-                        minutes=interval_minutes
+                # Map against the optimizer's absolute slot boundaries. This
+                # preserves repeated/missing local DST hours and provider grids.
+                for i, interval_start in enumerate(timestamps):
+                    interval_end = (
+                        timestamps[i + 1]
+                        if i + 1 < len(timestamps)
+                        else interval_start
+                        + timedelta(minutes=interval_minutes)
                     )
                     overlap_start = max(w_start, interval_start)
                     overlap_end = min(w_end, interval_end)
@@ -13751,16 +13818,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     ).total_seconds()
                     if overlap_seconds <= 0:
                         continue
-                    overlap_fraction = overlap_seconds / (
-                        interval_minutes * 60
-                    )
-                    ev_load[i] += power_w * overlap_fraction
-                    has_any_windows = True
+                    slot_seconds = (interval_end - interval_start).total_seconds()
+                    if slot_seconds <= 0:
+                        continue
+                    overlap_fraction = overlap_seconds / slot_seconds
+                    vehicle_load[i] += power_w * overlap_fraction
 
-        if not has_any_windows:
-            return None
+        ev_load_by_vehicle = {
+            vehicle_id: values
+            for vehicle_id, values in ev_load_by_vehicle.items()
+            if any(value > 0 for value in values)
+        }
+        if not ev_load_by_vehicle:
+            return {}
 
         # Log summary
+        ev_load = [
+            sum(values[index] for values in ev_load_by_vehicle.values())
+            for index in range(n_intervals)
+        ]
         peak_kw = max(ev_load) / 1000
         dt_h = interval_minutes / 60
         total_kwh = sum(ev_load) / 1000 * dt_h
@@ -13770,7 +13846,186 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             active_intervals, peak_kw, total_kwh,
         )
 
-        return ev_load
+        return ev_load_by_vehicle
+
+    def _get_ev_planned_load(self, n_intervals: int) -> list[float] | None:
+        """Return aggregate Smart Schedule load for compatibility callers."""
+        components = self._get_ev_planned_load_components(n_intervals)
+        if not components:
+            return None
+        return [
+            sum(values[index] for values in components.values())
+            for index in range(n_intervals)
+        ]
+
+    def _canonical_ev_loadpoint_ids(
+        self,
+        identifiers: list[str],
+    ) -> dict[str, str]:
+        """Resolve Fleet/BLE aliases onto one electrical loadpoint key."""
+        from ..tesla_ble_mapping import canonical_tesla_vehicle_id
+
+        opts = {
+            **getattr(self._entry, "data", {}),
+            **getattr(self._entry, "options", {}),
+        }
+        fleet_vins = [
+            identifier
+            for identifier in identifiers
+            if len(identifier) == 17
+            and identifier.isalnum()
+            and not identifier.isdigit()
+        ]
+        return {
+            identifier: canonical_tesla_vehicle_id(
+                opts,
+                identifier,
+                fleet_vins,
+            )
+            or identifier
+            for identifier in identifiers
+        }
+
+    def _merge_internal_ev_load_components(
+        self,
+        *,
+        n_intervals: int,
+        smart_components: dict[str, list[float]],
+        price_components: dict[str, tuple[float, ...]],
+    ) -> tuple[list[float], list[float], list[float]]:
+        """Union same-loadpoint plans and sum genuinely separate chargers."""
+        identifiers = [*smart_components, *price_components]
+        canonical = self._canonical_ev_loadpoint_ids(identifiers)
+        smart_by_loadpoint: dict[str, list[float]] = {}
+        price_by_loadpoint: dict[str, list[float]] = {}
+
+        for source, destination in (
+            (smart_components, smart_by_loadpoint),
+            (price_components, price_by_loadpoint),
+        ):
+            for identifier, values in source.items():
+                loadpoint = canonical.get(identifier, identifier)
+                target = destination.setdefault(loadpoint, [0.0] * n_intervals)
+                for index in range(min(n_intervals, len(values))):
+                    try:
+                        target[index] = max(target[index], float(values[index] or 0.0))
+                    except (TypeError, ValueError):
+                        continue
+
+        loadpoints = set(smart_by_loadpoint) | set(price_by_loadpoint)
+        effective = [0.0] * n_intervals
+        smart_effective = [0.0] * n_intervals
+        price_marginal = [0.0] * n_intervals
+        for loadpoint in loadpoints:
+            smart = smart_by_loadpoint.get(loadpoint, [0.0] * n_intervals)
+            price = price_by_loadpoint.get(loadpoint, [0.0] * n_intervals)
+            for index in range(n_intervals):
+                smart_value = smart[index]
+                price_value = price[index]
+                selected = max(smart_value, price_value)
+                effective[index] += selected
+                smart_effective[index] += smart_value
+                price_marginal[index] += max(0.0, selected - smart_value)
+        return effective, smart_effective, price_marginal
+
+    async def _build_price_level_projection(
+        self,
+        n_intervals: int,
+    ) -> PriceLevelProjection:
+        """Build a conservative projection from live facts and raw price slots."""
+        from ..automations.ev_charging_planner import get_price_level_executor
+
+        executor = get_price_level_executor()
+        if executor is None or n_intervals <= 0:
+            return PriceLevelProjection.empty(max(0, n_intervals))
+        settings = executor._get_settings()
+        display_prices = list(
+            getattr(self, "_last_display_import_prices", None) or []
+        )
+        timestamps = self._price_timestamps(n_intervals)
+        prices_cents: list[float | None] = []
+        valid_slots: list[bool] = []
+        for index in range(n_intervals):
+            if index >= len(display_prices):
+                prices_cents.append(None)
+                valid_slots.append(False)
+                continue
+            try:
+                value = float(display_prices[index]) * 100.0
+            except (TypeError, ValueError):
+                value = math.nan
+            prices_cents.append(value if math.isfinite(value) else None)
+            valid_slots.append(math.isfinite(value))
+
+        try:
+            snapshots = await executor.collect_projection_snapshots()
+            demand_blocked = [
+                executor.is_grid_charging_blocked_at(timestamp)
+                for timestamp in timestamps
+            ]
+            return build_price_level_projection(
+                timestamps=timestamps,
+                prices_cents=prices_cents,
+                vehicles=snapshots,
+                enabled=bool(settings.get("enabled", False)),
+                recovery_soc=float(settings.get("recovery_soc", 40)),
+                recovery_price_cents=float(
+                    settings.get("recovery_price_cents", 30)
+                ),
+                opportunity_price_cents=float(
+                    settings.get("opportunity_price_cents", 10)
+                ),
+                home_battery_minimum=float(
+                    settings.get("home_battery_minimum", 20)
+                ),
+                preserve_home_battery=bool(
+                    settings.get("preserve_home_battery", False)
+                ),
+                no_grid_import=bool(settings.get("no_grid_import", False)),
+                demand_blocked=demand_blocked,
+                valid_price_slots=valid_slots,
+                interval_minutes=self._config.interval_minutes,
+            )
+        except Exception as err:
+            _LOGGER.warning(
+                "Price-Level projection unavailable; keeping the existing EV plan: %s",
+                err,
+            )
+            return PriceLevelProjection.empty(
+                n_intervals,
+                "Projection unavailable; live Price-Level charging is unchanged",
+            )
+
+    def _price_level_projection_payload(
+        self,
+        *,
+        projection: PriceLevelProjection,
+        effective_source: str,
+        external_w: list[float],
+        smart_w: list[float],
+        price_expected_w: list[float],
+    ) -> dict[str, Any]:
+        timezone_name = getattr(getattr(self, "hass", None), "config", None)
+        timezone_name = getattr(timezone_name, "time_zone", None) or str(
+            dt_util.now().tzinfo
+        )
+        return {
+            "schema_version": 1,
+            "generated_at": dt_util.now().isoformat(),
+            "timezone": timezone_name,
+            "interval_minutes": self._config.interval_minutes,
+            "effective_source": effective_source,
+            "components": {
+                "external_w": list(external_w),
+                "smart_schedule_w": list(smart_w),
+                "price_level_expected_w": list(price_expected_w),
+                "price_level_conditional_cap_w": list(
+                    projection.conditional_cap_w
+                ),
+            },
+            "windows": [window.to_dict() for window in projection.windows],
+            "warnings": list(projection.warnings),
+        }
 
     async def _auto_detect_battery_specs(self) -> None:
         """Auto-detect battery capacity and power from Tesla site_info.
@@ -16430,27 +16685,36 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data["schedule"] = api_response
 
             # Add EV charging power overlay from the same source the LP uses
-            if self._ev_integration_enabled:
-                n_sched_pts = len(api_response["timestamps"])
-                ev_load_w = self._get_ev_planned_load(n_sched_pts)
-                if ev_load_w:
-                    api_response["ev_charging_w"] = ev_load_w
-                elif self._ev_coordinator and data.get("ev"):
-                    # Fallback: use EVCoordinator's real-time charging plan
-                    ev_power = [0.0] * n_sched_pts
-                    charging_plan = data["ev"].get("charging_plan", [])
-                    if charging_plan:
-                        from datetime import datetime as _dt
-                        for window in charging_plan:
-                            w_start = _dt.fromisoformat(window["start"])
-                            w_end = _dt.fromisoformat(window["end"])
-                            w_power = window.get("power_available_w", 0)
-                            for idx, ts_str in enumerate(api_response["timestamps"]):
-                                ts = _dt.fromisoformat(ts_str)
-                                if w_start <= ts < w_end:
-                                    ev_power[idx] = w_power
-                    if any(v > 0 for v in ev_power):
-                        api_response["ev_charging_w"] = ev_power
+            n_sched_pts = len(api_response["timestamps"])
+            effective_ev_load = getattr(
+                self, "_last_effective_ev_load_forecast_w", None
+            )
+            if effective_ev_load:
+                api_response["ev_charging_w"] = list(
+                    effective_ev_load[:n_sched_pts]
+                )
+            elif self._ev_coordinator and data.get("ev"):
+                # Backward-compatible fallback when no optimizer EV overlay exists.
+                ev_power = [0.0] * n_sched_pts
+                charging_plan = data["ev"].get("charging_plan", [])
+                if charging_plan:
+                    from datetime import datetime as _dt
+                    for window in charging_plan:
+                        w_start = _dt.fromisoformat(window["start"])
+                        w_end = _dt.fromisoformat(window["end"])
+                        w_power = window.get("power_available_w", 0)
+                        for idx, ts_str in enumerate(api_response["timestamps"]):
+                            ts = _dt.fromisoformat(ts_str)
+                            if w_start <= ts < w_end:
+                                ev_power[idx] = w_power
+                if any(v > 0 for v in ev_power):
+                    api_response["ev_charging_w"] = ev_power
+
+            projection_payload = getattr(
+                self, "_last_price_level_projection", None
+            )
+            if projection_payload:
+                api_response["ev_charging_projection"] = projection_payload
 
             daily_cost = self._get_daily_cost()
             daily_savings = self._get_daily_savings()

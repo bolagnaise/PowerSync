@@ -1526,6 +1526,27 @@ def test_optimizer_plan_charts_have_tooltips():
     assert "backdrop-filter: blur(10px) saturate(1.15);" not in chart_source
 
 
+def test_optimizer_plan_renders_versioned_price_level_projection_separately():
+    source = STRATEGY_PATH.read_text()
+    class_start = source.index("class PowerSyncOptimizationPlan extends HTMLElement")
+    class_end = source.index("if (!customElements.get('power-sync-optimization-plan'))")
+    card_source = source[class_start:class_end]
+
+    assert "schedule.ev_charging_projection?.schema_version === 1" in card_source
+    assert "Projected EV Price-Level Windows" in card_source
+    assert "Expected recovery load" in card_source
+    assert "Conditional - may charge" in card_source
+    assert "'Suppressed'" in card_source
+    assert "label: 'Planned EV load'" in card_source
+    assert "label: 'Conditional Price-Level window'" in card_source
+    assert 'stroke-dasharray="6,4"' in card_source
+    assert "conditional Price-Level charging windows" in card_source
+    assert card_source.index("Projected EV Price-Level Windows") < card_source.index(
+        "24-Hour Action Plan"
+    )
+    assert "Actual charging still requires live home, plug, SOC" in card_source
+
+
 def test_optimizer_plan_chart_tooltips_stay_inside_android_webview():
     """Android HA webview can render taller tooltip text, so keep it in bounds."""
     source = STRATEGY_PATH.read_text()
