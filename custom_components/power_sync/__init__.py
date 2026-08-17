@@ -2240,13 +2240,32 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             allow_heuristic=len(wc_observations) == 1,
         )
         if not matched:
+            connector_connected = wc_connected
+            if wc_vin and wc_power <= 0.05:
+                matching_vehicles = [
+                    vehicle
+                    for vehicle in vehicles
+                    if _vehicle_matches_identifier(vehicle, wc_vin)
+                ]
+                site_presence, _ = _latest_ev_site_presence(
+                    (
+                        vehicle.get("site_presence"),
+                        vehicle.get("_site_presence_observed_at"),
+                    )
+                    for vehicle in matching_vehicles
+                )
+                # The connector state can lag after the identified vehicle has
+                # left.  Retain a separate row for topology, but zero power plus
+                # authoritative away presence must not render a vehicle onsite.
+                if site_presence == "away":
+                    connector_connected = False
             vehicles.append({
                 "vehicle_id": f"wall_connector_{wc_id}",
                 "charger_id": f"wall_connector_{wc_id}",
                 "vehicle_name": "Wall Connector",
                 "ev_power_kw": wc_power,
                 "ev_soc": None,
-                "is_connected": wc_connected,
+                "is_connected": connector_connected,
                 "is_charging": wc_charging or wc_power > 0.05,
                 "_observed_at": wc_observed_at,
                 "_charging_observed_at": wc_observed_at,

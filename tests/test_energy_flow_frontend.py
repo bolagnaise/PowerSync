@@ -65,6 +65,14 @@ def test_energy_flow_treats_power_sync_ev_attributes_as_presence():
     assert "String(attrs.is_connected || '').toLowerCase() === 'true'" in source
 
 
+def test_energy_flow_fences_away_canonical_vehicle_presence():
+    source = ENERGY_FLOW_PATH.read_text()
+
+    assert "canonicalSitePresence === 'away'" in source
+    assert "const signedPower = canonicalSitePresence === 'away' ? 0 : rawSignedPower" in source
+    assert "present: canonicalSitePresence === 'away'" in source
+
+
 def test_energy_flow_does_not_treat_ev_power_as_battery_percent():
     source = ENERGY_FLOW_PATH.read_text()
 

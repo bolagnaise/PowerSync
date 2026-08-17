@@ -1656,7 +1656,7 @@ def test_duplicate_same_vin_away_tracker_fences_exact_wall_connector():
             assert away["is_connected"] is False
             assert away["is_charging"] is False
             assert connector["ev_power_kw"] == wall_connector_power / 1000
-            assert connector["is_connected"] is True
+            assert connector["is_connected"] is (wall_connector_power > 0)
             assert connector["is_charging"] is (wall_connector_state == 2)
 
 

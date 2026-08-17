@@ -1534,13 +1534,19 @@ import {
                 ? batteryState.attributes.is_charging
                 : null)
           );
+          const canonicalSitePresence = String(
+            powerState?.attributes?.site_presence ||
+            batteryState?.attributes?.site_presence ||
+            ''
+          ).trim().toLowerCase();
           const derivedLabel = (
             friendlyEntityName(powerState) ||
             friendlyEntityName(batteryState) ||
             friendlyEntityName(presenceState) ||
             friendlyEntityName(switchState)
           );
-          const signedPower = toWatt(powerState);
+          const rawSignedPower = toWatt(powerState);
+          const signedPower = canonicalSitePresence === 'away' ? 0 : rawSignedPower;
           return {
             key: slot.key,
             configured,
@@ -1550,11 +1556,16 @@ import {
             drawPower: Math.max(0, signedPower),
             supplyPower: Math.max(0, -signedPower),
             battery: Number.isFinite(batteryPct) ? batteryPct : 0,
-            switchOn: canonicalCharging ?? switchState?.state === 'on',
-            present: canonicalConnected ?? isTruthyPresenceState(presenceState),
+            switchOn: canonicalSitePresence === 'away'
+              ? false
+              : (canonicalCharging ?? switchState?.state === 'on'),
+            present: canonicalSitePresence === 'away'
+              ? false
+              : (canonicalConnected ?? isTruthyPresenceState(presenceState)),
             customLabel: String(slot.customLabel || '').trim(),
             canonicalLabel,
-            derivedLabel
+            derivedLabel,
+            sitePresence: canonicalSitePresence
           };
         })
         .filter((vehicle) => vehicle.configured);
