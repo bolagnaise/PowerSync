@@ -75,6 +75,7 @@ _SOLCAST_ESTIMATE_FIELDS = {
 
 ENERGY_ACC_STORE_VERSION = 1
 ENERGY_ACC_SAVE_DELAY = 300  # Flush at most every 5 minutes
+ENERGY_ACC_PRICE_COVERAGE_SCHEMA = 1
 SOLAREDGE_DAILY_TOTALS_STORE_VERSION = 1
 LIFETIME_TOTALS_STORE_VERSION = 1
 TESLA_OUTAGE_NOTIFY_FAILURES = 5
@@ -572,6 +573,7 @@ class EnergyAccumulator:
                 self.export_earnings_covered_kwh, 4
             ),
             "load_accounting_partial_today": self._load_accounting_partial_today,
+            "price_coverage_schema": ENERGY_ACC_PRICE_COVERAGE_SCHEMA,
             "month": stored_month,
             "mtd_solar_kwh": round(self.mtd_solar_kwh, 4),
             "mtd_grid_import_kwh": round(self.mtd_grid_import_kwh, 4),
@@ -784,6 +786,117 @@ class EnergyAccumulator:
             "mtd_load_kwh": round(self.mtd_load_kwh, 3),
             "avg_cost_per_kwh_mtd": avg_mtd,
         }
+
+    def reconcile_price_coverage(self, reference: dict[str, Any] | None) -> bool:
+        """Recover priced coverage from the independent optimizer cost ledger.
+
+        Coverage counters were added after the original accumulator store
+        schema had already shipped.  Older same-day payloads therefore restore
+        their finite costs but default the new counters to zero.  Only adopt
+        coverage when the optimizer independently persisted matching energy
+        *and* cost totals for the same local day; otherwise retain the
+        fail-closed partial state.
+        """
+        if not isinstance(reference, dict):
+            return False
+
+        now = dt_util.now()
+        today = now.strftime("%Y-%m-%d")
+        if reference.get("date") != today or self._last_date != now.date():
+            return False
+
+        def _finite(value: Any) -> float | None:
+            if isinstance(value, bool):
+                return None
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return number if math.isfinite(number) else None
+
+        def _close(left: Any, right: Any, tolerance: float) -> bool:
+            left_number = _finite(left)
+            right_number = _finite(right)
+            if left_number is None or right_number is None:
+                return False
+            return abs(left_number - right_number) <= tolerance
+
+        import_reference_matches = _close(
+            self.grid_import_kwh,
+            reference.get("import_kwh"),
+            0.001,
+        ) and _close(
+            self.import_cost_today,
+            reference.get("import_cost"),
+            0.0001,
+        )
+        export_reference_matches = _close(
+            self.grid_export_kwh,
+            reference.get("export_kwh"),
+            0.001,
+        ) and _close(
+            self.export_earnings_today,
+            reference.get("export_earnings"),
+            0.0001,
+        )
+
+        changed = False
+        if import_reference_matches and not self._coverage_matches(
+            self.import_cost_covered_kwh,
+            self.grid_import_kwh,
+        ):
+            self.import_cost_covered_kwh = self.grid_import_kwh
+            changed = True
+        if export_reference_matches and not self._coverage_matches(
+            self.export_earnings_covered_kwh,
+            self.grid_export_kwh,
+        ):
+            self.export_earnings_covered_kwh = self.grid_export_kwh
+            changed = True
+
+        # The optimizer reference is daily.  It can corroborate MTD coverage
+        # only when the MTD accumulator contains exactly the same energy and
+        # cost as the independently verified current day.
+        if (
+            import_reference_matches
+            and _close(
+                self.mtd_grid_import_kwh,
+                self.grid_import_kwh,
+                0.001,
+            )
+            and _close(
+                self.mtd_import_cost,
+                self.import_cost_today,
+                0.0001,
+            )
+            and not self._coverage_matches(
+                self.mtd_import_cost_covered_kwh,
+                self.mtd_grid_import_kwh,
+            )
+        ):
+            self.mtd_import_cost_covered_kwh = self.mtd_grid_import_kwh
+            changed = True
+        if (
+            export_reference_matches
+            and _close(
+                self.mtd_grid_export_kwh,
+                self.grid_export_kwh,
+                0.001,
+            )
+            and _close(
+                self.mtd_export_earnings,
+                self.export_earnings_today,
+                0.0001,
+            )
+            and not self._coverage_matches(
+                self.mtd_export_earnings_covered_kwh,
+                self.mtd_grid_export_kwh,
+            )
+        ):
+            self.mtd_export_earnings_covered_kwh = self.mtd_grid_export_kwh
+            changed = True
+
+        return changed
 
     @staticmethod
     def _coverage_matches(

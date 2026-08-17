@@ -72,6 +72,7 @@ def _load_accumulator(clock: _Clock):
         "Store": _Store,
         "HomeAssistant": object,
         "ENERGY_ACC_SAVE_DELAY": 300,
+        "ENERGY_ACC_PRICE_COVERAGE_SCHEMA": 1,
         "dt_util": SimpleNamespace(now=clock.now),
         "math": math,
         "_LOGGER": _Logger(),
@@ -214,3 +215,108 @@ def test_price_coverage_survives_same_day_restore():
     assert summary["export_earnings_today"] == 0.26
     assert summary["export_earnings_covered_kwh"] == 1.0
     assert summary["export_earnings_coverage"] == "complete"
+
+
+def test_legacy_daily_import_cost_recovers_from_matching_optimizer_totals():
+    """Ticket #314: a v2.12.1131 store must not become unknown on upgrade."""
+    clock = _Clock(datetime(2026, 8, 18, 8, 45, 0))
+    store = _Store(
+        {
+            "date": "2026-08-18",
+            "month": "2026-08",
+            "grid_import_kwh": 3.91,
+            "grid_export_kwh": 0.01,
+            "load_kwh": 3.90,
+            "import_cost_today": 0.94,
+            "export_earnings_today": 0.0,
+            "mtd_grid_import_kwh": 3.91,
+            "mtd_grid_export_kwh": 0.01,
+            "mtd_load_kwh": 3.90,
+            "mtd_import_cost": 0.94,
+            "mtd_export_earnings": 0.0,
+        }
+    )
+    restored = _new_accumulator(clock, store)
+    asyncio.run(restored.async_restore())
+
+    assert restored.as_dict()["import_cost_today"] is None
+    assert restored.reconcile_price_coverage(
+        {
+            "date": "2026-08-18",
+            "import_kwh": 3.91,
+            "export_kwh": 0.01,
+            "import_cost": 0.94,
+            "export_earnings": 0.0,
+        }
+    )
+    asyncio.run(restored.async_flush())
+
+    summary = restored.as_dict()
+    assert summary["import_cost_today"] == 0.94
+    assert summary["import_cost_covered_kwh"] == 3.91
+    assert summary["import_cost_coverage"] == "complete"
+    assert summary["mtd_import_cost"] == 0.94
+    assert store.data["price_coverage_schema"] == 1
+
+    reloaded = _new_accumulator(clock, store)
+    asyncio.run(reloaded.async_restore())
+    assert reloaded.as_dict()["import_cost_today"] == 0.94
+
+
+def test_legacy_daily_import_cost_stays_partial_when_reference_does_not_match():
+    clock = _Clock(datetime(2026, 8, 18, 8, 45, 0))
+    restored = _new_accumulator(
+        clock,
+        _Store(
+            {
+                "date": "2026-08-18",
+                "month": "2026-08",
+                "grid_import_kwh": 3.91,
+                "import_cost_today": 0.94,
+                "mtd_grid_import_kwh": 7.0,
+                "mtd_import_cost": 1.50,
+            }
+        ),
+    )
+    asyncio.run(restored.async_restore())
+
+    assert not restored.reconcile_price_coverage(
+        {
+            "date": "2026-08-18",
+            "import_kwh": 3.91,
+            "export_kwh": 0.0,
+            "import_cost": 0.50,
+            "export_earnings": 0.0,
+        }
+    )
+    summary = restored.as_dict()
+    assert summary["import_cost_today"] is None
+    assert summary["import_cost_coverage"] == "partial"
+    assert summary["mtd_import_cost"] is None
+
+
+def test_legacy_daily_import_cost_does_not_hide_small_unpriced_gap():
+    clock = _Clock(datetime(2026, 8, 18, 8, 45, 0))
+    restored = _new_accumulator(
+        clock,
+        _Store(
+            {
+                "date": "2026-08-18",
+                "month": "2026-08",
+                "grid_import_kwh": 3.91,
+                "import_cost_today": 0.94,
+            }
+        ),
+    )
+    asyncio.run(restored.async_restore())
+
+    assert not restored.reconcile_price_coverage(
+        {
+            "date": "2026-08-18",
+            "import_kwh": 3.84,
+            "export_kwh": 0.0,
+            "import_cost": 0.94,
+            "export_earnings": 0.0,
+        }
+    )
+    assert restored.as_dict()["import_cost_today"] is None

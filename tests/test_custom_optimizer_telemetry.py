@@ -44,6 +44,11 @@ def test_custom_battery_system_is_setup_stage_with_entities():
     assert "CONF_MONITORING_MODE: True" in config_flow_source
     assert "battery_system = BATTERY_SYSTEM_CUSTOM" in init_source
     assert "energy_coordinator = None" in init_source
+    assert (
+        "coverage_energy_coordinator = (\n"
+        "                energy_coordinator or custom_energy_coordinator\n"
+        "            )"
+    ) in init_source
 
 
 def test_custom_optimizer_telemetry_parser_reads_selected_entities():

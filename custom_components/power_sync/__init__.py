@@ -40810,6 +40810,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             # Set up the coordinator
             await optimization_coordinator.async_setup()
+
+            # Energy price-coverage counters were added after the persisted
+            # accumulator schema had already shipped.  Reconcile a same-day
+            # legacy payload only when the optimizer's independent cost ledger
+            # corroborates both its energy and cost totals, then persist the
+            # migrated counters before entities are set up.
+            coverage_energy_coordinator = (
+                energy_coordinator or custom_energy_coordinator
+            )
+            energy_accumulator = getattr(
+                coverage_energy_coordinator,
+                "_energy_acc",
+                None,
+            )
+            if energy_accumulator is not None and energy_accumulator.reconcile_price_coverage(
+                optimization_coordinator.get_daily_cost_coverage_reference()
+            ):
+                await energy_accumulator.async_flush()
+                _LOGGER.info(
+                    "Recovered energy price coverage from matching optimizer totals"
+                )
+
             await optimization_coordinator.async_config_entry_first_refresh()
 
             # Set cost function, interval, and backup reserve from saved settings

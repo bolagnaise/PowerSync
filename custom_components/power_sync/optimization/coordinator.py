@@ -14544,6 +14544,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             COST_STORE_SAVE_DELAY,
         )
 
+    def get_daily_cost_coverage_reference(self) -> dict[str, Any]:
+        """Return independently persisted daily totals for coverage recovery."""
+        return {
+            "date": self._last_cost_date,
+            "import_kwh": self._actual_import_kwh_today,
+            "export_kwh": self._actual_export_kwh_today,
+            "import_cost": self._actual_import_cost_today,
+            "export_earnings": self._actual_export_earnings_today,
+        }
+
     def _cost_data_to_save(self) -> dict:
         """Return cost data dict for Store serialization."""
         data = {
