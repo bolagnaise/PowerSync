@@ -5,7 +5,8 @@ Supports the following trigger types:
 - time: Trigger at specific time(s) of day
 - battery: Trigger based on battery state of charge
 - flow: Trigger based on power flow
-- grid_import_energy: Trigger after cumulative grid import reaches a window quota
+- grid_import_energy/grid_export_energy: Trigger after cumulative grid energy
+  reaches a window quota
 - price: Trigger based on electricity price thresholds
 - grid: Trigger when grid status changes
 - weather: Trigger based on weather conditions
@@ -72,7 +73,7 @@ def evaluate_trigger(
         else:
             # For other triggers, use sentinel value
             store.update_trigger_state(automation_id, OUTSIDE_WINDOW_SENTINEL)
-        if trigger_type == "grid_import_energy":
+        if trigger_type in {"grid_import_energy", "grid_export_energy"}:
             store.update_trigger_runtime(automation_id, None)
         return TriggerResult(triggered=False, reason="Outside time window")
 
@@ -89,12 +90,14 @@ def evaluate_trigger(
         return _evaluate_battery_trigger(trigger, current_state, last_evaluated_value, store, automation_id, just_entered_window)
     elif trigger_type == "flow":
         return _evaluate_flow_trigger(trigger, current_state, last_evaluated_value, store, automation_id, just_entered_window)
-    elif trigger_type == "grid_import_energy":
-        return _evaluate_grid_import_energy_trigger(
+    elif trigger_type in {"grid_import_energy", "grid_export_energy"}:
+        direction = "import" if trigger_type == "grid_import_energy" else "export"
+        return _evaluate_grid_energy_trigger(
             trigger,
             current_state,
             store,
             automation_id,
+            direction=direction,
         )
     elif trigger_type == "price":
         return _evaluate_price_trigger(trigger, current_state, last_evaluated_value, store, automation_id, just_entered_window)
@@ -113,7 +116,7 @@ def evaluate_trigger(
         return TriggerResult(triggered=False, reason=f"Unknown trigger type: {trigger_type}")
 
 
-def _grid_import_window_key(
+def _grid_energy_window_key(
     trigger: Dict[str, Any],
     current_time: datetime,
 ) -> str | None:
@@ -139,6 +142,14 @@ def _grid_import_window_key(
     return window_start.isoformat()
 
 
+def _grid_import_window_key(
+    trigger: Dict[str, Any],
+    current_time: datetime,
+) -> str | None:
+    """Backward-compatible alias for existing imports and focused tests."""
+    return _grid_energy_window_key(trigger, current_time)
+
+
 def _finite_non_negative(value: Any) -> float | None:
     """Return a finite non-negative float, or None for unavailable telemetry."""
     try:
@@ -150,41 +161,62 @@ def _finite_non_negative(value: Any) -> float | None:
     return result
 
 
-def _evaluate_grid_import_energy_trigger(
+def _evaluate_grid_energy_trigger(
     trigger: Dict[str, Any],
     current_state: Dict[str, Any],
     store: "AutomationStore",
     automation_id: int,
+    *,
+    direction: str,
 ) -> TriggerResult:
-    """Accumulate imported energy during one configured time window."""
+    """Accumulate imported or exported energy during one configured window."""
+    if direction not in {"import", "export"}:
+        return TriggerResult(triggered=False, reason="Grid energy direction unavailable")
+
+    label = f"Grid {direction}"
+    threshold_key = f"grid_{direction}_energy_threshold_kwh"
+    total_key = f"grid_{direction}_today_kwh"
+    power_key = f"grid_{direction}_energy_power_kw"
+    fallback_power_key = f"grid_{direction}_kw"
     threshold_kwh = _finite_non_negative(
-        trigger.get("grid_import_energy_threshold_kwh")
+        trigger.get(threshold_key)
     )
     if threshold_kwh is None or threshold_kwh <= 0:
         return TriggerResult(
             triggered=False,
-            reason="Grid import energy threshold must be greater than 0 kWh",
+            reason=f"{label} energy threshold must be greater than 0 kWh",
         )
 
     current_time = current_state.get("current_time", dt_util.now())
     if not isinstance(current_time, datetime):
         return TriggerResult(triggered=False, reason="Current time unavailable")
-    window_key = _grid_import_window_key(trigger, current_time)
+    window_key = _grid_energy_window_key(trigger, current_time)
     if window_key is None:
         return TriggerResult(
             triggered=False,
-            reason="Grid import energy trigger requires a valid time window",
+            reason=f"{label} energy trigger requires a valid time window",
         )
 
     runtime = store.get_trigger_runtime(automation_id)
-    if not isinstance(runtime, dict) or runtime.get("window_key") != window_key:
+    runtime_direction = runtime.get("direction") if isinstance(runtime, dict) else None
+    direction_matches = (
+        runtime_direction == direction
+        or (runtime_direction is None and direction == "import")
+    )
+    if (
+        not isinstance(runtime, dict)
+        or runtime.get("window_key") != window_key
+        or not direction_matches
+    ):
         runtime = {
+            "direction": direction,
             "window_key": window_key,
             "accumulated_kwh": 0.0,
             "last_total_kwh": None,
             "last_total_date": None,
             "counter_fallback_kwh": 0.0,
             "counter_fallback_date": None,
+            "pending_reset_total_kwh": None,
             "last_power_kw": None,
             "last_sample_at": None,
             "triggered": False,
@@ -192,17 +224,20 @@ def _evaluate_grid_import_energy_trigger(
 
     accumulated = _finite_non_negative(runtime.get("accumulated_kwh")) or 0.0
     daily_total = _finite_non_negative(
-        current_state.get("grid_import_today_kwh")
+        current_state.get(total_key)
     )
     current_power = _finite_non_negative(
         current_state.get(
-            "grid_import_energy_power_kw",
-            current_state.get("grid_import_kw"),
+            power_key,
+            current_state.get(fallback_power_key),
         )
     )
     last_total = _finite_non_negative(runtime.get("last_total_kwh"))
     counter_fallback = (
         _finite_non_negative(runtime.get("counter_fallback_kwh")) or 0.0
+    )
+    pending_reset_total = _finite_non_negative(
+        runtime.get("pending_reset_total_kwh")
     )
     last_power = _finite_non_negative(runtime.get("last_power_kw"))
     last_sample = None
@@ -259,6 +294,7 @@ def _evaluate_grid_import_energy_trigger(
     next_total_date = last_total_date
     next_counter_fallback = counter_fallback
     next_counter_fallback_date = counter_fallback_date
+    next_pending_reset_total = pending_reset_total
     if daily_total is not None:
         if last_total is not None:
             counter_day_changed = (
@@ -266,23 +302,33 @@ def _evaluate_grid_import_energy_trigger(
                 and last_total_date != current_date_key
             )
             if counter_day_changed:
-                # A daily counter reset can follow one or more unavailable
-                # samples across midnight. Count the bounded interval spanning
-                # midnight, then subtract only fallback energy already counted
-                # on the new local day from the recovered daily counter.
-                power_delta, current_day_power = power_delta_parts()
-                accumulated += power_delta
-                current_day_fallback = (
-                    counter_fallback
-                    if counter_fallback_date == current_date_key
-                    else 0.0
-                ) + current_day_power
-                covered = min(daily_total, current_day_fallback)
-                accumulated += daily_total - covered
+                if pending_reset_total is not None:
+                    # The source counter already reset before this automation's
+                    # local midnight. Its low value has therefore already been
+                    # covered by bounded power fallback. Promote the confirmed
+                    # new epoch without adding the low counter a second time.
+                    power_delta, _ = power_delta_parts()
+                    accumulated += power_delta
+                    next_counter_fallback = 0.0
+                else:
+                    # A daily counter reset can follow one or more unavailable
+                    # samples across midnight. Count the bounded interval
+                    # spanning midnight, then subtract fallback energy already
+                    # counted on the new local day from the recovered counter.
+                    power_delta, current_day_power = power_delta_parts()
+                    accumulated += power_delta
+                    current_day_fallback = (
+                        counter_fallback
+                        if counter_fallback_date == current_date_key
+                        else 0.0
+                    ) + current_day_power
+                    covered = min(daily_total, current_day_fallback)
+                    accumulated += daily_total - covered
+                    next_counter_fallback = current_day_fallback - covered
                 next_total = daily_total
                 next_total_date = current_date_key
-                next_counter_fallback = current_day_fallback - covered
                 next_counter_fallback_date = current_date_key
+                next_pending_reset_total = None
             elif daily_total >= last_total:
                 # Live power may already have covered part of this counter
                 # delta while the counter was unavailable. Add only the
@@ -299,11 +345,12 @@ def _evaluate_grid_import_energy_trigger(
                 next_total_date = current_date_key
                 next_counter_fallback = recoverable_fallback - covered
                 next_counter_fallback_date = current_date_key
+                next_pending_reset_total = None
             else:
                 # A same-day rollback may be a reset or a transient bad read.
-                # Keep the prior high-water baseline and use bounded live power
-                # until the counter reaches it again. Accepting the low value
-                # as a new baseline would turn recovery into a false spike.
+                # Keep the prior high-water and use bounded live power until
+                # either the counter recovers or the local-date transition
+                # confirms that the source started a new daily epoch.
                 power_delta, current_day_power = power_delta_parts()
                 accumulated += power_delta
                 if counter_fallback_date == current_date_key:
@@ -311,6 +358,7 @@ def _evaluate_grid_import_energy_trigger(
                 else:
                     next_counter_fallback = current_day_power
                 next_counter_fallback_date = current_date_key
+                next_pending_reset_total = daily_total
         else:
             # This is the first usable counter sample for the window (including
             # persisted runtime from older releases without a high-water).
@@ -322,6 +370,7 @@ def _evaluate_grid_import_energy_trigger(
             next_total_date = current_date_key
             next_counter_fallback = 0.0
             next_counter_fallback_date = current_date_key
+            next_pending_reset_total = None
     else:
         power_delta, current_day_power = power_delta_parts()
         accumulated += power_delta
@@ -335,12 +384,14 @@ def _evaluate_grid_import_energy_trigger(
 
     runtime.update(
         {
+            "direction": direction,
             "window_key": window_key,
             "accumulated_kwh": round(accumulated, 6),
             "last_total_kwh": next_total,
             "last_total_date": next_total_date,
             "counter_fallback_kwh": round(next_counter_fallback, 6),
             "counter_fallback_date": next_counter_fallback_date,
+            "pending_reset_total_kwh": next_pending_reset_total,
             "last_power_kw": current_power,
             "last_sample_at": current_time.isoformat(),
         }
@@ -354,7 +405,7 @@ def _evaluate_grid_import_energy_trigger(
         return TriggerResult(
             triggered=True,
             reason=(
-                f"Grid import reached {accumulated:.2f} kWh "
+                f"{label} reached {accumulated:.2f} kWh "
                 f"(quota: {threshold_kwh:.2f} kWh)"
             ),
         )
@@ -365,15 +416,47 @@ def _evaluate_grid_import_energy_trigger(
         return TriggerResult(
             triggered=False,
             reason=(
-                f"Grid import quota already triggered at {accumulated:.2f} kWh"
+                f"{label} quota already triggered at {accumulated:.2f} kWh"
             ),
         )
     return TriggerResult(
         triggered=False,
         reason=(
-            f"Grid import accumulated {accumulated:.2f} kWh "
+            f"{label} accumulated {accumulated:.2f} kWh "
             f"of {threshold_kwh:.2f} kWh"
         ),
+    )
+
+
+def _evaluate_grid_import_energy_trigger(
+    trigger: Dict[str, Any],
+    current_state: Dict[str, Any],
+    store: "AutomationStore",
+    automation_id: int,
+) -> TriggerResult:
+    """Accumulate imported energy during one configured time window."""
+    return _evaluate_grid_energy_trigger(
+        trigger,
+        current_state,
+        store,
+        automation_id,
+        direction="import",
+    )
+
+
+def _evaluate_grid_export_energy_trigger(
+    trigger: Dict[str, Any],
+    current_state: Dict[str, Any],
+    store: "AutomationStore",
+    automation_id: int,
+) -> TriggerResult:
+    """Accumulate exported energy during one configured time window."""
+    return _evaluate_grid_energy_trigger(
+        trigger,
+        current_state,
+        store,
+        automation_id,
+        direction="export",
     )
 
 

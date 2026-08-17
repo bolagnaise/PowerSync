@@ -132,7 +132,13 @@ def test_optimizer_plan_labels_next_day_ranges_as_tomorrow():
 
 
 def _render_optimizer_time_range(source: str, start: str, end: str) -> str:
-    method_names = ("_formatTime", "_planDayOffset", "_formatPlanTime", "_timeRange")
+    method_names = (
+        "_formatTime",
+        "_formatOptimizerAxisTime",
+        "_planDayOffset",
+        "_formatPlanTime",
+        "_timeRange",
+    )
     methods = []
     for index, name in enumerate(method_names):
         next_name = method_names[index + 1] if index + 1 < len(method_names) else "_clockMinutes"
@@ -158,6 +164,38 @@ def _render_optimizer_time_range(source: str, start: str, end: str) -> str:
         text=True,
     )
     return result.stdout
+
+
+def test_optimizer_chart_axes_use_scoped_twelve_hour_wall_clock_labels():
+    source = STRATEGY_PATH.read_text()
+    match = re.search(
+        r"  _formatOptimizerAxisTime\((?P<args>[^)]*)\) \{(?P<body>.*?)\n  \}\n\n  _planDayOffset\(",
+        source,
+        re.DOTALL,
+    )
+    assert match is not None
+    method = f"function axis({match.group('args')}) {{{match.group('body')}\n  }}"
+    runtime = """
+      const values = [
+        '2026-08-17T00:00:00+10:00',
+        '2026-08-17T12:00:00+10:00',
+        '2026-08-17T13:05:00+10:00',
+        '2026-04-05T02:30:00+11:00',
+        '2026-04-05T02:30:00+10:00',
+        '2026-08-17T24:00:00+10:00',
+      ];
+      process.stdout.write(JSON.stringify(values.map(axis)));
+    """
+    result = subprocess.run(
+        ["node", "-e", f"{method}\n{runtime}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == '["12:00 AM","12:00 PM","1:05 PM","2:30 AM","2:30 AM","--:--"]'
+    assert "this._formatOptimizerAxisTime(points[i]?.timestamp)" in source
+    assert "this._escHtml(this._formatTime(point.timestamp))" in source
 
 
 def test_dashboard_ai_explanation_is_explicit_safe_and_plan_isolated():

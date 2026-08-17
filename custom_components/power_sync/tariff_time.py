@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+import math
 from typing import Any
 
 
@@ -86,6 +87,91 @@ def period_entries(period_data: Any) -> Sequence[Mapping[str, Any]]:
     if isinstance(period_data, list):
         return [p for p in period_data if isinstance(p, Mapping)]
     return []
+
+
+def find_season_for_month(seasons: Mapping[str, Any], month: int) -> str:
+    """Return the configured tariff season for a calendar month."""
+    fallback = next(
+        (str(name) for name in seasons if str(name).casefold() == "all year"),
+        None,
+    )
+    for season_name, season_data in seasons.items():
+        if str(season_name).casefold() == "all year":
+            continue
+        if not isinstance(season_data, Mapping):
+            continue
+        from_month = int(season_data.get("fromMonth", 1) or 1)
+        to_month = int(season_data.get("toMonth", 12) or 12)
+        if from_month <= to_month:
+            if from_month <= month <= to_month:
+                return str(season_name)
+        elif month >= from_month or month <= to_month:
+            return str(season_name)
+    return fallback or next(iter(seasons), "All Year")
+
+
+def season_rate_maps(energy_charges: Any) -> dict[str, dict[str, float]]:
+    """Normalize direct and Tesla-nested tariff rates for every season."""
+    if not isinstance(energy_charges, Mapping):
+        return {}
+    normalized: dict[str, dict[str, float]] = {}
+    for season_name, season_data in energy_charges.items():
+        if not isinstance(season_data, Mapping):
+            continue
+        rates = season_data.get("rates", season_data)
+        if not isinstance(rates, Mapping):
+            continue
+        normalized[str(season_name)] = {
+            str(period): float(rate)
+            for period, rate in rates.items()
+            if isinstance(rate, (int, float))
+            and not isinstance(rate, bool)
+            and math.isfinite(float(rate))
+        }
+    return normalized
+
+
+def tariff_components_for_datetime(
+    tariff: Mapping[str, Any],
+    when: datetime,
+) -> tuple[Mapping[str, Any], Mapping[str, float], Mapping[str, float], str]:
+    """Return season-correct TOU periods and rates for one local timestamp."""
+    seasons = tariff.get("seasons", {})
+    if not isinstance(seasons, Mapping):
+        seasons = {}
+    season_name = find_season_for_month(seasons, when.month)
+    season_data = seasons.get(season_name, {})
+    if not isinstance(season_data, Mapping):
+        season_data = {}
+
+    tou_periods = season_data.get("tou_periods")
+    if not isinstance(tou_periods, Mapping) or not tou_periods:
+        tou_periods = tariff.get("tou_periods", {})
+    if not isinstance(tou_periods, Mapping):
+        tou_periods = {}
+
+    season_buy_rates = tariff.get("season_buy_rates", {})
+    season_sell_rates = tariff.get("season_sell_rates", {})
+    buy_rates = (
+        season_buy_rates.get(season_name)
+        if isinstance(season_buy_rates, Mapping)
+        else None
+    )
+    sell_rates = (
+        season_sell_rates.get(season_name)
+        if isinstance(season_sell_rates, Mapping)
+        else None
+    )
+    if not isinstance(buy_rates, Mapping):
+        buy_rates = tariff.get("buy_rates", {})
+    if not isinstance(sell_rates, Mapping):
+        sell_rates = tariff.get("sell_rates", {})
+    return (
+        tou_periods,
+        buy_rates if isinstance(buy_rates, Mapping) else {},
+        sell_rates if isinstance(sell_rates, Mapping) else {},
+        season_name,
+    )
 
 
 def tariff_period_priority(name: str) -> tuple[int, str]:

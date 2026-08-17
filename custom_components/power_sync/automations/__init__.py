@@ -531,6 +531,7 @@ class AutomationEngine:
 
     async def _async_get_current_state(self) -> Dict[str, Any]:
         """Get current state for automation evaluation."""
+        import math
         from ..const import DOMAIN, CONF_AEMO_REGION
         from zoneinfo import ZoneInfo
 
@@ -598,6 +599,8 @@ class AutomationEngine:
             "grid_import_energy_power_kw": None,
             "grid_import_today_kwh": None,
             "grid_export_kw": None,
+            "grid_export_energy_power_kw": None,
+            "grid_export_today_kwh": None,
             "home_usage_kw": None,
             "battery_charge_kw": None,
             "battery_discharge_kw": None,
@@ -629,22 +632,34 @@ class AutomationEngine:
             # All coordinators publish the same data keys (battery_level,
             # solar_power, battery_power, grid_power, load_power, etc.) so
             # picking the first one that has data works uniformly.
-            coordinator = (
-                data.get("tesla_coordinator")
-                or data.get("sigenergy_coordinator")
-                or data.get("sungrow_coordinator")
-                or data.get("foxess_coordinator")
-                or data.get("goodwe_coordinator")
-                or data.get("alphaess_coordinator")
-                or data.get("esy_sunhome_coordinator")
-                or data.get("solax_coordinator")
-                or data.get("esy_coordinator")
-                or data.get("saj_h2_coordinator")
-                or data.get("fronius_reserva_coordinator")
-                or data.get("neovolt_coordinator")
-                or data.get("solaredge_coordinator")
-                or data.get("anker_solix_coordinator")
-                or data.get("custom_energy_coordinator")
+            coordinator_candidates = (
+                data.get("tesla_coordinator"),
+                data.get("sigenergy_coordinator"),
+                data.get("sungrow_coordinator"),
+                data.get("foxess_coordinator"),
+                data.get("goodwe_coordinator"),
+                data.get("alphaess_coordinator"),
+                data.get("esy_sunhome_coordinator"),
+                data.get("solax_coordinator"),
+                data.get("esy_coordinator"),
+                data.get("saj_h2_coordinator"),
+                data.get("fronius_reserva_coordinator"),
+                data.get("neovolt_coordinator"),
+                data.get("solaredge_coordinator"),
+                data.get("anker_solix_coordinator"),
+                data.get("custom_energy_coordinator"),
+            )
+            coordinator = next(
+                (
+                    candidate
+                    for candidate in coordinator_candidates
+                    if candidate is not None
+                    and isinstance(getattr(candidate, "data", None), dict)
+                    and bool(candidate.data)
+                    and getattr(candidate, "last_update_success", True) is not False
+                    and candidate.data.get("telemetry_ready", True) is not False
+                ),
+                None,
             )
 
             if coordinator and coordinator.data:
@@ -658,22 +673,35 @@ class AutomationEngine:
                 # Power flows from battery coordinators are standardized to kW.
                 solar_kw = coord_data.get("solar_power", 0) or 0
                 battery_kw = coord_data.get("battery_power", 0) or 0
-                grid_kw = coord_data.get("grid_power", 0) or 0
+                grid_kw = coord_data.get("grid_power")
                 load_kw = coord_data.get("load_power", 0) or 0
 
                 state["solar_power_kw"] = solar_kw
                 state["home_usage_kw"] = load_kw
 
-                # Grid: positive = import, negative = export
-                if grid_kw >= 0:
-                    state["grid_import_kw"] = grid_kw
-                    # Preserve the dedicated value for cumulative energy
-                    # fallback consumers.
-                    state["grid_import_energy_power_kw"] = grid_kw
-                    state["grid_export_kw"] = 0
-                else:
-                    state["grid_import_kw"] = 0
-                    state["grid_export_kw"] = abs(grid_kw)
+                # Grid: positive = import, negative = export. Cumulative-energy
+                # fallbacks must fail closed when PCC telemetry is invalid;
+                # missing data is not a trustworthy zero-flow sample.
+                try:
+                    grid_kw = None if isinstance(grid_kw, bool) else float(grid_kw)
+                except (TypeError, ValueError):
+                    grid_kw = None
+                grid_power_valid = (
+                    grid_kw is not None
+                    and math.isfinite(grid_kw)
+                    and coord_data.get("grid_power_valid", True) is not False
+                )
+                if grid_power_valid and grid_kw is not None:
+                    if grid_kw >= 0:
+                        state["grid_import_kw"] = grid_kw
+                        state["grid_import_energy_power_kw"] = grid_kw
+                        state["grid_export_kw"] = 0.0
+                        state["grid_export_energy_power_kw"] = 0.0
+                    else:
+                        state["grid_import_kw"] = 0.0
+                        state["grid_import_energy_power_kw"] = 0.0
+                        state["grid_export_kw"] = -grid_kw
+                        state["grid_export_energy_power_kw"] = -grid_kw
 
                 energy_summary = coord_data.get("energy_summary")
                 if isinstance(energy_summary, dict):
@@ -686,9 +714,23 @@ class AutomationEngine:
                         grid_import_today = None
                     if (
                         grid_import_today is not None
+                        and math.isfinite(grid_import_today)
                         and grid_import_today >= 0
                     ):
                         state["grid_import_today_kwh"] = grid_import_today
+                    grid_export_today = energy_summary.get(
+                        "grid_export_today_kwh"
+                    )
+                    try:
+                        grid_export_today = float(grid_export_today)
+                    except (TypeError, ValueError):
+                        grid_export_today = None
+                    if (
+                        grid_export_today is not None
+                        and math.isfinite(grid_export_today)
+                        and grid_export_today >= 0
+                    ):
+                        state["grid_export_today_kwh"] = grid_export_today
 
                 # Battery: positive = discharge, negative = charge
                 if battery_kw >= 0:

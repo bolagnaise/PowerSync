@@ -16,6 +16,8 @@ sys.modules["power_sync"] = _ps
 
 from power_sync.tariff_time import (  # noqa: E402
     find_matching_tou_period,
+    season_rate_maps,
+    tariff_components_for_datetime,
     tesla_day_of_week,
     tou_period_matches,
 )
@@ -24,6 +26,93 @@ from power_sync.tariff_time import (  # noqa: E402
 def test_tesla_day_of_week_maps_sunday_to_zero():
     assert tesla_day_of_week(datetime(2026, 5, 3)) == 0
     assert tesla_day_of_week(datetime(2026, 5, 4)) == 1
+
+
+def test_tariff_components_reselect_year_spanning_season_per_timestamp():
+    all_day = {
+        "OFF_PEAK": {"periods": [{
+            "fromDayOfWeek": 0,
+            "toDayOfWeek": 6,
+            "fromHour": 0,
+            "toHour": 24,
+        }]},
+    }
+    summer = {
+        **all_day,
+        "PEAK": {"periods": [{
+            "fromDayOfWeek": 0,
+            "toDayOfWeek": 6,
+            "fromHour": 15,
+            "toHour": 21,
+        }]},
+    }
+    tariff = {
+        "tou_periods": all_day,
+        "buy_rates": {"OFF_PEAK": 0.21},
+        "sell_rates": {"OFF_PEAK": 0.05},
+        "seasons": {
+            "Shoulder": {"fromMonth": 9, "toMonth": 10, "tou_periods": all_day},
+            "Summer": {"fromMonth": 11, "toMonth": 3, "tou_periods": summer},
+        },
+        "season_buy_rates": {
+            "Shoulder": {"OFF_PEAK": 0.21},
+            "Summer": {"OFF_PEAK": 0.21, "PEAK": 0.54},
+        },
+        "season_sell_rates": {
+            "Shoulder": {"OFF_PEAK": 0.05},
+            "Summer": {"OFF_PEAK": 0.05, "PEAK": 0.05},
+        },
+    }
+
+    _, october_buy, _, october_season = tariff_components_for_datetime(
+        tariff,
+        datetime(2026, 10, 31, 15, 0, tzinfo=ZoneInfo("Australia/Sydney")),
+    )
+    november_tou, november_buy, _, november_season = tariff_components_for_datetime(
+        tariff,
+        datetime(2026, 11, 1, 15, 0, tzinfo=ZoneInfo("Australia/Sydney")),
+    )
+
+    assert october_season == "Shoulder"
+    assert october_buy["OFF_PEAK"] == 0.21
+    assert november_season == "Summer"
+    assert find_matching_tou_period(
+        november_tou,
+        datetime(2026, 11, 1, 15, 0, tzinfo=ZoneInfo("Australia/Sydney")),
+        buy_rates=november_buy,
+    ) == "PEAK"
+    assert november_buy["PEAK"] == 0.54
+
+
+def test_specific_season_precedes_all_year_catch_all():
+    tariff = {
+        "seasons": {
+            "All Year": {"fromMonth": 1, "toMonth": 12},
+            "Winter": {"fromMonth": 6, "toMonth": 8},
+        },
+        "season_buy_rates": {
+            "All Year": {"OFF_PEAK": 0.21},
+            "Winter": {"OFF_PEAK": 0.44},
+        },
+    }
+
+    _, buy_rates, _, season = tariff_components_for_datetime(
+        tariff,
+        datetime(2026, 7, 1, 12, 0),
+    )
+
+    assert season == "Winter"
+    assert buy_rates["OFF_PEAK"] == 0.44
+
+
+def test_season_rate_maps_accepts_direct_and_nested_tesla_rates():
+    assert season_rate_maps({
+        "Summer": {"rates": {"PEAK": 0.54}},
+        "Shoulder": {"OFF_PEAK": 0.21},
+    }) == {
+        "Summer": {"PEAK": 0.54},
+        "Shoulder": {"OFF_PEAK": 0.21},
+    }
 
 
 def test_matches_minutes_inside_half_hour_period():

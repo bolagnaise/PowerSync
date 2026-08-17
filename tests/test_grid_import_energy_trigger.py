@@ -1,4 +1,4 @@
-"""Regression coverage for cumulative grid-import automation triggers."""
+"""Regression coverage for cumulative grid import/export automation triggers."""
 
 from __future__ import annotations
 
@@ -45,9 +45,12 @@ def _trigger_namespace() -> dict[str, Any]:
     source = TRIGGERS_PATH.read_text()
     module = ast.parse(source)
     wanted = {
+        "_grid_energy_window_key",
         "_grid_import_window_key",
         "_finite_non_negative",
+        "_evaluate_grid_energy_trigger",
         "_evaluate_grid_import_energy_trigger",
+        "_evaluate_grid_export_energy_trigger",
     }
     namespace: dict[str, Any] = {
         "Any": Any,
@@ -77,6 +80,20 @@ def _evaluate(namespace, store, trigger, when, total, power=0.0):
             "grid_import_today_kwh": total,
             "grid_import_kw": power,
             "grid_import_energy_power_kw": power,
+        },
+        store,
+        1,
+    )
+
+
+def _evaluate_export(namespace, store, trigger, when, total, power=0.0):
+    return namespace["_evaluate_grid_export_energy_trigger"](
+        trigger,
+        {
+            "current_time": when,
+            "grid_export_today_kwh": total,
+            "grid_export_kw": power,
+            "grid_export_energy_power_kw": power,
         },
         store,
         1,
@@ -386,6 +403,29 @@ def test_same_day_counter_rollback_cannot_create_a_false_import_spike():
     assert store.runtime["accumulated_kwh"] == 11
 
 
+def test_repeated_low_counter_reads_do_not_turn_recovery_into_a_spike():
+    namespace = _trigger_namespace()
+    store = _Store()
+    trigger = {
+        "time_window_start": "11:00",
+        "time_window_end": "14:00",
+        "grid_import_energy_threshold_kwh": 50,
+    }
+
+    for minute, total in enumerate((100.0, 110.0, 0.0, 0.1, 50.0, 111.0)):
+        result = _evaluate(
+            namespace,
+            store,
+            trigger,
+            datetime(2026, 7, 30, 11, minute, tzinfo=timezone.utc),
+            total,
+            power=0,
+        )
+
+    assert result.triggered is False
+    assert store.runtime["accumulated_kwh"] == 11
+
+
 def test_overnight_counter_recovery_does_not_recount_post_midnight_power():
     namespace = _trigger_namespace()
     store = _Store()
@@ -416,11 +456,116 @@ def test_overnight_counter_recovery_does_not_recount_post_midnight_power():
     assert store.runtime["counter_fallback_kwh"] == 0
 
 
+def test_counter_reset_before_local_midnight_is_not_counted_twice():
+    namespace = _trigger_namespace()
+    store = _Store()
+    trigger = {
+        "time_window_start": "23:00",
+        "time_window_end": "01:00",
+        "grid_import_energy_threshold_kwh": 5,
+    }
+
+    for when, total in (
+        (datetime(2026, 7, 30, 23, 58, tzinfo=timezone.utc), 100.0),
+        (datetime(2026, 7, 30, 23, 59, tzinfo=timezone.utc), 0.1),
+        (datetime(2026, 7, 31, 0, 0, tzinfo=timezone.utc), 0.2),
+    ):
+        result = _evaluate(namespace, store, trigger, when, total, power=6.0)
+
+    assert result.triggered is False
+    assert store.runtime["accumulated_kwh"] == 0.2
+    assert store.runtime["last_total_kwh"] == 0.2
+
+
+def test_cumulative_grid_export_uses_export_only_and_triggers_once():
+    namespace = _trigger_namespace()
+    store = _Store()
+    trigger = {
+        "time_window_start": "09:00",
+        "time_window_end": "17:00",
+        "grid_export_energy_threshold_kwh": 1.0,
+    }
+
+    first = _evaluate_export(
+        namespace, store, trigger,
+        datetime(2026, 7, 30, 9, 0, tzinfo=timezone.utc), 10.0,
+    )
+    crossed = _evaluate_export(
+        namespace, store, trigger,
+        datetime(2026, 7, 30, 10, 0, tzinfo=timezone.utc), 11.2,
+    )
+    repeated = _evaluate_export(
+        namespace, store, trigger,
+        datetime(2026, 7, 30, 10, 1, tzinfo=timezone.utc), 11.3,
+    )
+
+    assert first.triggered is False
+    assert crossed.triggered is True
+    assert "Grid export reached 1.20 kWh" in crossed.reason
+    assert repeated.triggered is False
+    assert "already triggered" in repeated.reason
+
+
+def test_grid_export_power_fallback_does_not_count_positive_import():
+    namespace = _trigger_namespace()
+    store = _Store()
+    trigger = {
+        "time_window_start": "09:00",
+        "time_window_end": "17:00",
+        "grid_export_energy_threshold_kwh": 1.0,
+    }
+
+    _evaluate_export(
+        namespace, store, trigger,
+        datetime(2026, 7, 30, 9, 0, tzinfo=timezone.utc), None, power=0.0,
+    )
+    result = _evaluate_export(
+        namespace, store, trigger,
+        datetime(2026, 7, 30, 9, 1, tzinfo=timezone.utc), None, power=0.0,
+    )
+
+    assert result.triggered is False
+    assert store.runtime["accumulated_kwh"] == 0.0
+
+
+def test_switching_an_automation_from_import_to_export_resets_runtime():
+    namespace = _trigger_namespace()
+    store = _Store()
+    import_trigger = {
+        "time_window_start": "09:00",
+        "time_window_end": "17:00",
+        "grid_import_energy_threshold_kwh": 10,
+    }
+    export_trigger = {
+        "time_window_start": "09:00",
+        "time_window_end": "17:00",
+        "grid_export_energy_threshold_kwh": 10,
+    }
+
+    _evaluate(
+        namespace, store, import_trigger,
+        datetime(2026, 7, 30, 9, 0, tzinfo=timezone.utc), 100.0,
+    )
+    _evaluate(
+        namespace, store, import_trigger,
+        datetime(2026, 7, 30, 10, 0, tzinfo=timezone.utc), 105.0,
+    )
+    _evaluate_export(
+        namespace, store, export_trigger,
+        datetime(2026, 7, 30, 10, 1, tzinfo=timezone.utc), 20.0,
+    )
+
+    assert store.runtime["direction"] == "export"
+    assert store.runtime["accumulated_kwh"] == 0.0
+
+
 def test_automation_engine_exposes_and_persists_grid_import_energy_state():
     source = AUTOMATIONS_PATH.read_text()
 
     assert '"grid_import_today_kwh": None' in source
     assert '"grid_import_energy_power_kw": None' in source
+    assert '"grid_export_today_kwh": None' in source
+    assert '"grid_export_energy_power_kw": None' in source
     assert 'energy_summary.get(' in source
     assert '"grid_import_today_kwh"' in source
     assert '"trigger_runtime": None' in source

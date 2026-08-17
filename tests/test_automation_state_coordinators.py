@@ -141,6 +141,10 @@ def test_automation_current_state_consumes_coordinator_power_values_as_kw(monkey
                             "battery_power": -2.5,
                             "load_power": 17.5,
                             "grid_status": "Active",
+                            "energy_summary": {
+                                "grid_import_today_kwh": 4.5,
+                                "grid_export_today_kwh": 7.25,
+                            },
                         }
                     ),
                     # Prevent the extracted method from falling through to
@@ -160,6 +164,9 @@ def test_automation_current_state_consumes_coordinator_power_values_as_kw(monkey
     assert state["grid_import_kw"] == 10.0
     assert state["grid_import_energy_power_kw"] == 10.0
     assert state["grid_export_kw"] == 0
+    assert state["grid_export_energy_power_kw"] == 0
+    assert state["grid_import_today_kwh"] == 4.5
+    assert state["grid_export_today_kwh"] == 7.25
     assert state["battery_charge_kw"] == 2.5
     assert state["battery_discharge_kw"] == 0
 
@@ -191,9 +198,79 @@ def test_automation_current_state_consumes_coordinator_power_values_as_kw(monkey
     state = asyncio.run(engine._async_get_current_state())
 
     assert state["grid_import_kw"] == 0
+    assert state["grid_import_energy_power_kw"] == 0
     assert state["grid_export_kw"] == 10.0
+    assert state["grid_export_energy_power_kw"] == 10.0
     assert state["battery_charge_kw"] == 0
     assert state["battery_discharge_kw"] == 2.5
+
+    engine._hass.data["power_sync"]["entry"]["tesla_coordinator"].data[
+        "grid_power"
+    ] = True
+    state = asyncio.run(engine._async_get_current_state())
+
+    assert state["grid_import_kw"] is None
+    assert state["grid_import_energy_power_kw"] is None
+    assert state["grid_export_kw"] is None
+    assert state["grid_export_energy_power_kw"] is None
+
+
+def test_automation_current_state_skips_empty_or_failed_coordinators(monkeypatch):
+    """The first registered object must not hide a later healthy snapshot."""
+    power_sync = ModuleType("power_sync")
+    power_sync.__path__ = []
+    const = ModuleType("power_sync.const")
+    const.DOMAIN = "power_sync"
+    const.CONF_AEMO_REGION = "aemo_region"
+    monkeypatch.setitem(sys.modules, "power_sync", power_sync)
+    monkeypatch.setitem(sys.modules, "power_sync.const", const)
+
+    engine_class = _load_engine_method(
+        "_async_get_current_state",
+        {
+            "Any": Any,
+            "Dict": Dict,
+            "datetime": datetime,
+            "timezone": timezone,
+            "_LOGGER": logging.getLogger(__name__),
+            "__package__": "power_sync.automations",
+        },
+    )
+    engine = object.__new__(engine_class)
+    engine._config_entry = SimpleNamespace(entry_id="entry", options={}, data={})
+    engine._hass = SimpleNamespace(
+        config=SimpleNamespace(time_zone="UTC"),
+        data={
+            "power_sync": {
+                "entry": {
+                    "tesla_coordinator": SimpleNamespace(
+                        data={"grid_power": -99.0},
+                        last_update_success=False,
+                    ),
+                    "sigenergy_coordinator": SimpleNamespace(
+                        data={
+                            "battery_level": 60,
+                            "grid_power": -3.0,
+                            "solar_power": 4.0,
+                            "battery_power": 0.0,
+                            "load_power": 1.0,
+                            "energy_summary": {"grid_export_today_kwh": 8.0},
+                        },
+                        last_update_success=True,
+                    ),
+                    "amber_coordinator": SimpleNamespace(data={"current": []}),
+                    "force_charge_state": {},
+                    "force_discharge_state": {},
+                }
+            }
+        },
+    )
+
+    state = asyncio.run(engine._async_get_current_state())
+
+    assert state["grid_export_kw"] == 3.0
+    assert state["grid_export_energy_power_kw"] == 3.0
+    assert state["grid_export_today_kwh"] == 8.0
 
 
 def test_automation_current_state_normalizes_only_known_grid_statuses(monkeypatch):

@@ -82,7 +82,11 @@ from ..tariff_quota import (
     custom_tariff_quota_contract,
     custom_tariff_quota_hash,
 )
-from ..tariff_time import find_matching_tou_period, period_entries
+from ..tariff_time import (
+    find_matching_tou_period,
+    period_entries,
+    tariff_components_for_datetime,
+)
 from ..zerohero import (
     GLOBIRD_PLAN_NOT_ZEROHERO,
     ZeroHeroConfig,
@@ -13310,36 +13314,39 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         timestamps = self._interval_timestamps(now, n_steps, interval)
         for t, ts in enumerate(timestamps):
+            slot_tou_periods, slot_buy_rates, slot_sell_rates, _ = (
+                tariff_components_for_datetime(tariff, ts)
+            )
             matched_period = find_matching_tou_period(
-                tou_periods,
+                slot_tou_periods,
                 ts,
                 default="OFF_PEAK",
-                buy_rates=buy_rates,
-                sell_rates=sell_rates,
+                buy_rates=slot_buy_rates,
+                sell_rates=slot_sell_rates,
             )
 
             # buy_rates values are in $/kWh (e.g. 0.48 for 48c)
             # When the matched period isn't in buy_rates (e.g. GloBird gaps at 14-17, 21-24),
             # try common fallback period names, then use the median of available rates.
-            buy = buy_rates.get(matched_period)
+            buy = slot_buy_rates.get(matched_period)
             if buy is None:
                 for fallback in ("OFF_PEAK", "PARTIAL_PEAK", "SHOULDER"):
-                    if fallback in buy_rates:
-                        buy = buy_rates[fallback]
+                    if fallback in slot_buy_rates:
+                        buy = slot_buy_rates[fallback]
                         break
                 if buy is None:
                     # Use median of defined rates (better than arbitrary hardcoded default)
-                    defined = sorted(v for v in buy_rates.values() if isinstance(v, (int, float)))
+                    defined = sorted(v for v in slot_buy_rates.values() if isinstance(v, (int, float)))
                     buy = defined[len(defined) // 2] if defined else 0.30
 
-            sell = sell_rates.get(matched_period)
+            sell = slot_sell_rates.get(matched_period)
             if sell is None:
                 # Global FiT (ALL key) is the correct fallback for unmatched periods
-                sell = sell_rates.get("ALL")
+                sell = slot_sell_rates.get("ALL")
             if sell is None:
                 for fallback in ("OFF_PEAK", "PARTIAL_PEAK", "SHOULDER"):
-                    if fallback in sell_rates:
-                        sell = sell_rates[fallback]
+                    if fallback in slot_sell_rates:
+                        sell = slot_sell_rates[fallback]
                         break
             if sell is None:
                 sell = 0.0  # No sell rate configured — default to 0 (no export value)

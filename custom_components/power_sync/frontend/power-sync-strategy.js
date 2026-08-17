@@ -2887,7 +2887,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     for (let i = 0; i < points.length; i += labelEvery) {
       const x = pad.left + (i / Math.max(1, points.length - 1)) * chartW;
       svg += `<line x1="${x}" y1="${pad.top}" x2="${x}" y2="${pad.top + chartH}" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.35" opacity="0.55"/>`;
-      svg += `<text x="${x}" y="${H - pad.bottom + 21}" text-anchor="middle" font-size="${compact ? 9 : 10}" fill="var(--secondary-text-color, #888)">${this._escSvg(this._formatTime(points[i]?.timestamp))}</text>`;
+      svg += `<text x="${x}" y="${H - pad.bottom + 21}" text-anchor="middle" font-size="${compact ? 9 : 10}" fill="var(--secondary-text-color, #888)">${this._escSvg(this._formatOptimizerAxisTime(points[i]?.timestamp))}</text>`;
     }
     return svg;
   }
@@ -3436,6 +3436,21 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return '--:--';
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  _formatOptimizerAxisTime(value) {
+    const text = String(value || '');
+    const match = text.match(/(?:^|T)(\d{2}):(\d{2})(?::|$)/);
+    if (!match) return '--:--';
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (!Number.isInteger(hour) || hour < 0 || hour > 23 ||
+        !Number.isInteger(minute) || minute < 0 || minute > 59) {
+      return '--:--';
+    }
+    const suffix = hour < 12 ? 'AM' : 'PM';
+    const displayHour = hour % 12 || 12;
+    return `${displayHour}:${String(minute).padStart(2, '0')} ${suffix}`;
   }
 
   _planDayOffset(value) {

@@ -10750,6 +10750,10 @@ class ConfigView(HomeAssistantView):
                 **currency_metadata(currency_for_entry(entry, self._hass)),
                 "ev_provider": ev_provider,  # Tesla (fleet_api/tesla_ble/both) or None for OCPP-only
                 "features": features,
+                "automation_trigger_capabilities": {
+                    "grid_import_energy": True,
+                    "grid_export_energy": True,
+                },
                 "battery_health": battery_health,
                 "entity_ids": entity_ids,
                 "sigenergy": sigenergy_config,
@@ -12141,16 +12145,9 @@ async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -
 
         # Find current season
         seasons = tariff.get("seasons", {})
-        current_season = None
-        for season_name, season_data in seasons.items():
-            from_month = season_data.get("fromMonth", 0)
-            to_month = season_data.get("toMonth", 0)
-            if from_month and to_month:
-                if from_month <= now.month <= to_month:
-                    current_season = season_name
-                    break
-        if not current_season:
-            current_season = "Summer" if "Summer" in seasons else next(iter(seasons.keys()), None)
+        from .tariff_time import find_season_for_month, season_rate_maps
+
+        current_season = find_season_for_month(seasons, now.month)
 
         _LOGGER.debug("Current season: %s, local_time: %s", current_season, now.isoformat())
 
@@ -12160,22 +12157,14 @@ async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -
         # Get energy charges for current season
         # tariff_content format: energy_charges.Summer.ON_PEAK = 0.48 (no 'rates' key)
         energy_charges = tariff.get("energy_charges", {})
-        season_charges = energy_charges.get(current_season, {})
-
-        # Handle both formats: direct values or nested under 'rates'
-        if "rates" in season_charges:
-            buy_rates = season_charges.get("rates", {})
-        else:
-            buy_rates = {k: v for k, v in season_charges.items() if isinstance(v, (int, float))}
+        season_buy_rates = season_rate_maps(energy_charges)
+        buy_rates = season_buy_rates.get(current_season, {})
 
         # Get sell tariff
         sell_tariff = tariff.get("sell_tariff", {})
         sell_energy_charges = sell_tariff.get("energy_charges", {})
-        sell_season_charges = sell_energy_charges.get(current_season, {})
-        if "rates" in sell_season_charges:
-            sell_rates = sell_season_charges.get("rates", {})
-        else:
-            sell_rates = {k: v for k, v in sell_season_charges.items() if isinstance(v, (int, float))}
+        season_sell_rates = season_rate_maps(sell_energy_charges)
+        sell_rates = season_sell_rates.get(current_season, {})
         current_period = find_matching_tou_period(
             tou_periods,
             now,
@@ -12217,6 +12206,8 @@ async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -
             "sell_price": current_sell_cents,
             "buy_rates": buy_rates,
             "sell_rates": sell_rates,
+            "season_buy_rates": season_buy_rates,
+            "season_sell_rates": season_sell_rates,
             "tou_periods": tou_periods,  # Include full TOU schedule for planning
             "seasons": seasons,  # Include season definitions
             "utility": tariff.get("utility", "Unknown"),
@@ -12264,7 +12255,11 @@ def convert_custom_tariff_to_schedule(
         tariff_schedule dict with: current_period, current_season, buy_price, sell_price,
         buy_rates, sell_rates, tou_periods, seasons, utility, plan_name, last_sync
     """
-    from .tariff_time import find_matching_tou_period
+    from .tariff_time import (
+        find_matching_tou_period,
+        find_season_for_month,
+        season_rate_maps,
+    )
 
     try:
         tariff_currency = normalize_currency(
@@ -12278,23 +12273,7 @@ def convert_custom_tariff_to_schedule(
         seasons = custom_tariff.get("seasons", {})
 
         # Find current season
-        current_season = None
-        for season_name, season_data in seasons.items():
-            from_month = season_data.get("fromMonth", 1)
-            to_month = season_data.get("toMonth", 12)
-            # Handle year-spanning seasons (e.g., Nov-Feb)
-            if from_month <= to_month:
-                if from_month <= now.month <= to_month:
-                    current_season = season_name
-                    break
-            else:
-                if now.month >= from_month or now.month <= to_month:
-                    current_season = season_name
-                    break
-
-        if not current_season:
-            # Default to first season or "All Year"
-            current_season = "All Year" if "All Year" in seasons else next(iter(seasons.keys()), "All Year")
+        current_season = find_season_for_month(seasons, now.month)
 
         _LOGGER.debug("Custom tariff - current season=%s, local_time=%s", current_season, now.isoformat())
 
@@ -12303,30 +12282,14 @@ def convert_custom_tariff_to_schedule(
 
         # Get energy charges
         energy_charges = custom_tariff.get("energy_charges", {})
-        season_charges = energy_charges.get(current_season, {})
-        # Handle Tesla tariff_content format with nested "rates" key
-        if "rates" in season_charges and isinstance(season_charges["rates"], dict):
-            season_charges = season_charges["rates"]
-
-        # Build buy_rates dict ($/kWh)
-        buy_rates = {}
-        for period, rate in season_charges.items():
-            if isinstance(rate, (int, float)):
-                buy_rates[period] = rate
+        season_buy_rates = season_rate_maps(energy_charges)
+        buy_rates = season_buy_rates.get(current_season, {})
 
         # Get sell tariff / feed-in tariff
         sell_tariff = custom_tariff.get("sell_tariff", {})
         sell_energy_charges = sell_tariff.get("energy_charges", {})
-        sell_season_charges = sell_energy_charges.get(current_season, {})
-        # Handle Tesla tariff_content format with nested "rates" key
-        if "rates" in sell_season_charges and isinstance(sell_season_charges["rates"], dict):
-            sell_season_charges = sell_season_charges["rates"]
-
-        # Build sell_rates dict ($/kWh)
-        sell_rates = {}
-        for period, rate in sell_season_charges.items():
-            if isinstance(rate, (int, float)):
-                sell_rates[period] = rate
+        season_sell_rates = season_rate_maps(sell_energy_charges)
+        sell_rates = season_sell_rates.get(current_season, {})
         current_period = find_matching_tou_period(
             tou_periods,
             now,
@@ -12354,6 +12317,8 @@ def convert_custom_tariff_to_schedule(
             "sell_price": current_sell_cents,
             "buy_rates": buy_rates,
             "sell_rates": sell_rates,
+            "season_buy_rates": season_buy_rates,
+            "season_sell_rates": season_sell_rates,
             "tou_periods": tou_periods,
             "seasons": seasons,
             "utility": custom_tariff.get("utility", "Custom"),
@@ -12381,16 +12346,21 @@ def get_current_price_from_tariff_schedule(tariff_schedule: dict) -> tuple[float
     Returns:
         Tuple of (buy_price_cents, sell_price_cents, current_period)
     """
-    from .tariff_time import find_matching_tou_period
+    from .tariff_time import (
+        find_matching_tou_period,
+        tariff_components_for_datetime,
+    )
 
     try:
         now = dt_util.now()  # HA-configured timezone — naive datetime.now() returns UTC in containers
         current_hour = now.hour
 
-        # Get TOU periods and rates
-        tou_periods = tariff_schedule.get("tou_periods", {})
-        buy_rates = tariff_schedule.get("buy_rates", {})
-        sell_rates = tariff_schedule.get("sell_rates", {})
+        # Re-select the season for every call so long-running installations do
+        # not keep the tariff that was active when the integration loaded.
+        tou_periods, buy_rates, sell_rates, _ = tariff_components_for_datetime(
+            tariff_schedule,
+            now,
+        )
 
         # If no TOU periods, try PERIOD_HH_MM key format or fall back to cached
         if not tou_periods:
@@ -12562,6 +12532,51 @@ def should_fetch_tesla_tariff_on_startup(
     )
 
 
+_AUTOMATION_TRIGGER_TYPES = frozenset({
+    "time",
+    "battery",
+    "flow",
+    "grid_import_energy",
+    "grid_export_energy",
+    "price",
+    "grid",
+    "weather",
+    "solar_forecast",
+    "ev",
+    "ocpp",
+})
+
+
+def _automation_trigger_validation_error(trigger: Any) -> str | None:
+    """Return a user-facing validation error for an automation trigger."""
+    if not isinstance(trigger, dict):
+        return "Automation trigger must be an object"
+    trigger_type = trigger.get("trigger_type")
+    if trigger_type not in _AUTOMATION_TRIGGER_TYPES:
+        return f"Unsupported automation trigger type: {trigger_type}"
+    if trigger_type not in {"grid_import_energy", "grid_export_energy"}:
+        return None
+
+    direction = "import" if trigger_type == "grid_import_energy" else "export"
+    threshold_key = f"grid_{direction}_energy_threshold_kwh"
+    try:
+        threshold = float(trigger.get(threshold_key))
+    except (TypeError, ValueError):
+        threshold = None
+    if threshold is None or not math.isfinite(threshold) or threshold <= 0:
+        return f"Grid {direction} energy threshold must be greater than 0 kWh"
+
+    for key in ("time_window_start", "time_window_end"):
+        value = trigger.get(key)
+        if not isinstance(value, str):
+            return f"Grid {direction} energy trigger requires a valid time window"
+        try:
+            datetime.strptime(value, "%H:%M")
+        except ValueError:
+            return f"Grid {direction} energy trigger requires HH:MM window times"
+    return None
+
+
 class AutomationsView(HomeAssistantView):
     """HTTP view to manage automations for mobile app."""
 
@@ -12597,6 +12612,10 @@ class AutomationsView(HomeAssistantView):
                 "success": True,
                 "automations": automations,
                 "available_vehicles": available_vehicles,
+                "automation_trigger_capabilities": {
+                    "grid_import_energy": True,
+                    "grid_export_energy": True,
+                },
             })
         except Exception as e:
             _LOGGER.error(f"Error fetching automations: {e}", exc_info=True)
@@ -12619,6 +12638,14 @@ class AutomationsView(HomeAssistantView):
         try:
             data = await request.json()
             _LOGGER.debug(f"📱 Creating automation with data: name={data.get('name')}, actions={data.get('actions')}")
+            validation_error = _automation_trigger_validation_error(
+                data.get("trigger")
+            )
+            if validation_error:
+                return web.json_response(
+                    {"success": False, "error": validation_error},
+                    status=400,
+                )
             # Ensure store._data has required keys (recovery from corrupted state)
             if not hasattr(store, '_data') or store._data is None:
                 store._data = {}
@@ -12699,6 +12726,13 @@ class AutomationDetailView(HomeAssistantView):
             data = await request.json()
             trigger = data.get('trigger', {})
             _LOGGER.debug(f"📱 Updating automation {automation_id} with data: name={data.get('name')}, trigger={trigger}, actions={data.get('actions')}, conditions={data.get('conditions')}")
+            if "trigger" in data:
+                validation_error = _automation_trigger_validation_error(trigger)
+                if validation_error:
+                    return web.json_response(
+                        {"success": False, "error": validation_error},
+                        status=400,
+                    )
             automation = store.update(int(automation_id), data)
             if not automation:
                 return web.json_response(
@@ -40402,6 +40436,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_create_automation(call: ServiceCall) -> dict:
         """Create a new automation."""
         automation_data = dict(call.data)
+        validation_error = _automation_trigger_validation_error(
+            automation_data.get("trigger")
+        )
+        if validation_error:
+            return {"error": validation_error}
         automation = automation_store.create(automation_data)
         await automation_store.async_save()
         return {"automation": automation}
@@ -40410,6 +40449,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Update an existing automation."""
         automation_id = call.data.get("automation_id")
         automation_data = {k: v for k, v in call.data.items() if k != "automation_id"}
+        if "trigger" in automation_data:
+            validation_error = _automation_trigger_validation_error(
+                automation_data.get("trigger")
+            )
+            if validation_error:
+                return {"error": validation_error}
         automation = automation_store.update(automation_id, automation_data)
         if automation:
             await automation_store.async_save()
