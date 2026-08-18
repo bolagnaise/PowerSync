@@ -243,6 +243,8 @@ def test_active_dashboard_paths_use_the_shared_display_coordinator() -> None:
     assert "vehicles = _get_ev_vehicles_status" not in display_factory_source
     assert "site['observed_ev_load_kw'] = observed_load.power_kw" in display_factory_source
     assert "site['ev_power_kw'] = observed_load.power_kw" not in display_factory_source
+    assert "normalized_site = status_view._site_snapshot()" in display_factory_source
+    assert "site.update(normalized_site)" in display_factory_source
 
 
 def test_ha_energy_flow_prefers_canonical_sensor_vehicle_attributes() -> None:

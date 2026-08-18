@@ -102,10 +102,41 @@ def test_energy_flow_can_remove_generic_ev_draw_from_reported_home_load():
         [8000, 0, true, 8000],
         [5000, 7000, true, 0],
         [12000, 9000, true, 3000],
+        [null, 7000, true, null],
       ];
       for (const [raw, ev, included, expected] of cases) {
         const actual = displayedHomeLoadPower(raw, ev, included);
         if (actual !== expected) throw new Error(`${raw}/${ev}/${included}: ${actual}`);
+      }
+    """
+    subprocess.run(["node", "-e", f"{helper.group(0)}\n{checks}"], check=True)
+
+
+def test_energy_flow_keeps_unavailable_home_load_unknown():
+    """Missing Home telemetry must not be rendered as a measured zero."""
+    source = ENERGY_FLOW_PATH.read_text()
+    helper = re.search(
+        r"function toOptionalWatt\([^)]*\) \{.*?\n  \}",
+        source,
+        re.DOTALL,
+    )
+    assert helper is not None
+    dynamic = source[source.index("_renderDynamic()") :]
+    assert "toOptionalWatt(this._entityState(cfg.entities.load_power))" in dynamic
+    assert "loadPowerKnown ? this._formatKW(loadPower) : '--'" in dynamic
+
+    checks = """
+      const cases = [
+        [null, null],
+        [{ state: 'unknown', attributes: {} }, null],
+        [{ state: 'unavailable', attributes: {} }, null],
+        [{ state: 'not-a-number', attributes: {} }, null],
+        [{ state: '0', attributes: { unit_of_measurement: 'W' } }, 0],
+        [{ state: '2.5', attributes: { unit_of_measurement: 'kW' } }, 2500],
+      ];
+      for (const [entity, expected] of cases) {
+        const actual = toOptionalWatt(entity);
+        if (actual !== expected) throw new Error(`${entity?.state}: ${actual}`);
       }
     """
     subprocess.run(["node", "-e", f"{helper.group(0)}\n{checks}"], check=True)

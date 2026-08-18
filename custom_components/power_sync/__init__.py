@@ -18017,7 +18017,8 @@ def _get_ev_display_coordinator(hass, entry):
 
     async def async_load_snapshot():
         observed_vehicles = []
-        response = await EVLoadpointStatusView(hass, entry)._async_build_response(
+        status_view = EVLoadpointStatusView(hass, entry)
+        response = await status_view._async_build_response(
             None,
             observed_vehicle_sink=observed_vehicles,
         )
@@ -18093,6 +18094,36 @@ def _get_ev_display_coordinator(hass, entry):
             )
             if normalized is not None:
                 energy_coordinator.data = normalized
+
+        # The loadpoint response is assembled before EV observations are
+        # available. Refresh its site projection after normalizing the energy
+        # coordinator so an unavailable Home Load cannot be serialized as a
+        # measured zero (or leave the pre-normalized gross load in the payload).
+        normalized_site = status_view._site_snapshot()
+        site.update(normalized_site)
+        normalized_live_status = {
+            "solar_power": site["solar_power_kw"] * 1000,
+            "grid_power": site["grid_power_kw"] * 1000,
+            "battery_power": site["battery_power_kw"] * 1000,
+            "load_power": (
+                None
+                if site["load_power_kw"] is None
+                else site["load_power_kw"] * 1000
+            ),
+            "battery_soc": site["battery_soc"],
+            "is_curtailed": site["is_curtailed"],
+        }
+        from .automations.actions import _calculate_solar_surplus
+        from .solar_surplus_config import get_stored_solar_surplus_config
+
+        site["surplus_kw"] = round(
+            _calculate_solar_surplus(
+                normalized_live_status,
+                site.get("ev_power_kw", 0.0),
+                get_stored_solar_surplus_config(entry_data),
+            ),
+            2,
+        )
         return payload
 
     coordinator = EVDisplayCoordinator(async_load_snapshot)
@@ -18169,7 +18200,7 @@ class EVLoadpointStatusView(HomeAssistantView):
         solar_power_kw = 0.0
         grid_power_kw = 0.0
         battery_power_kw = 0.0
-        load_power_kw = 0.0
+        load_power_kw = None
         battery_soc = 0.0
         is_curtailed = False
 
@@ -18184,7 +18215,17 @@ class EVLoadpointStatusView(HomeAssistantView):
                 solar_power_kw = coordinator.data.get("solar_power", 0) or 0
                 grid_power_kw = coordinator.data.get("grid_power", 0) or 0
                 battery_power_kw = coordinator.data.get("battery_power", 0) or 0
-                load_power_kw = coordinator.data.get("load_power", 0) or 0
+                raw_load_power_kw = coordinator.data.get("load_power")
+                try:
+                    parsed_load_power_kw = float(raw_load_power_kw)
+                except (TypeError, ValueError):
+                    parsed_load_power_kw = None
+                load_power_kw = (
+                    parsed_load_power_kw
+                    if parsed_load_power_kw is not None
+                    and math.isfinite(parsed_load_power_kw)
+                    else None
+                )
                 battery_soc = coordinator.data.get("battery_level", 0) or 0
                 is_curtailed = coordinator.data.get("is_curtailed", False) is True
                 break
@@ -18262,7 +18303,11 @@ class EVLoadpointStatusView(HomeAssistantView):
                 "solar_power": site["solar_power_kw"] * 1000,
                 "grid_power": site["grid_power_kw"] * 1000,
                 "battery_power": site["battery_power_kw"] * 1000,
-                "load_power": site["load_power_kw"] * 1000,
+                "load_power": (
+                    None
+                    if site["load_power_kw"] is None
+                    else site["load_power_kw"] * 1000
+                ),
                 "battery_soc": site["battery_soc"],
                 "is_curtailed": site["is_curtailed"],
             }

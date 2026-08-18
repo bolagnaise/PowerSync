@@ -1075,7 +1075,24 @@ import {
     return raw;
   }
 
+  function toOptionalWatt(entityState) {
+    if (!entityState) return null;
+    const state = String(entityState.state ?? '').trim().toLowerCase();
+    if (!state || state === 'unknown' || state === 'unavailable') return null;
+    const raw = parseFloat(state);
+    if (!Number.isFinite(raw)) return null;
+    const unit = String(
+      entityState.attributes?.unit_of_measurement ||
+      entityState.attributes?.unit ||
+      'W'
+    ).trim().toLowerCase();
+    if (unit === 'kw') return raw * 1000;
+    if (unit === 'mw') return raw * 1000000;
+    return raw;
+  }
+
   function displayedHomeLoadPower(rawLoadPower, evDrawPower, loadIncludesEv) {
+    if (!Number.isFinite(rawLoadPower)) return null;
     if (!loadIncludesEv) return rawLoadPower;
     return Math.max(0, rawLoadPower - Math.max(0, evDrawPower));
   }
@@ -2169,7 +2186,7 @@ import {
       const roofBCurrent = safeNum(this._entityState(cfg.entities.roof_b_current)?.state, 0);
       let batteryPower = toWatt(this._entityState(cfg.entities.battery_power));
       if (cfg.battery_invert) batteryPower *= -1;
-      const rawLoadPower = toWatt(this._entityState(cfg.entities.load_power));
+      const rawLoadPower = toOptionalWatt(this._entityState(cfg.entities.load_power));
       const batteryLevel = toPct(this._entityState(cfg.entities.battery_level), 0);
       const batteryConfigured = !!(cfg.entities.battery_power || cfg.entities.battery_level);
       const evData = this._collectEvData();
@@ -2180,6 +2197,7 @@ import {
         evDrawPower,
         cfg.load_includes_ev,
       );
+      const loadPowerKnown = Number.isFinite(loadPower);
       const solarMin = this._flowThreshold('solar_min_w', FLOW_MIN_W);
       const gridMin = this._flowThreshold('grid_min_w', FLOW_MIN_W);
       const batteryMin = this._flowThreshold('battery_min_w', FLOW_MIN_W);
@@ -2238,7 +2256,7 @@ import {
       this._setText('#flow-roof-b-power', this._formatKW(roofBPower));
       this._setText('#flow-roof-b-voltage', `${Math.round(roofBVoltage)} V`);
       this._setText('#flow-roof-b-current', `${roofBCurrent.toFixed(1)} A`);
-      this._setText('#flow-load-power', this._formatKW(loadPower));
+      this._setText('#flow-load-power', loadPowerKnown ? this._formatKW(loadPower) : '--');
       this._setText('#flow-battery-power', batteryConfigured ? this._formatKW(batteryPower) : '');
       this._setText('#flow-battery-pct', batteryConfigured ? `${Math.round(batteryLevel)}%` : '');
       this._setText('#flow-ev-label', ev1.labelText || this._t('card.node.ev', 'EV'));
@@ -2306,7 +2324,7 @@ import {
 
       this._toggleNode('#node-solar-bg', solarPower > solarMin);
       this._toggleNode('#node-grid-bg', Math.abs(gridPower) > gridMin);
-      this._toggleNode('#node-load-bg', loadPower > homeMin);
+      this._toggleNode('#node-load-bg', loadPowerKnown && loadPower > homeMin);
       this._toggleNode('#node-battery-bg', batteryConfigured && Math.abs(batteryPower) > batteryMin);
       this._toggleNode('#node-ev-bg', Math.abs(ev1.power || 0) > 0 || ev1.switchOn || ev1.present);
       this._toggleNode('#node-ev2-bg', Math.abs(ev2.power || 0) > 0 || ev2.switchOn || ev2.present);
@@ -2314,7 +2332,7 @@ import {
       this._beginFlowUpdate();
 
       const solarPos = Math.max(0, solarPower);
-      const loadPos = Math.max(0, loadPower);
+      const loadPos = loadPowerKnown ? Math.max(0, loadPower) : 0;
       const gridImport = Math.max(0, gridPower);
       const gridExport = Math.max(0, -gridPower);
       const batteryCharge = Math.max(0, batteryPower);

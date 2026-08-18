@@ -2111,6 +2111,89 @@ def test_price_level_start_uses_vehicle_charger_config(fake_actions):
     assert params["allow_ownership_takeover"] is True
 
 
+def test_price_level_unconfirmed_tesla_start_stays_idle_and_uses_backoff(
+    monkeypatch,
+    fake_actions,
+):
+    """A Tesla command acknowledgement is not a physical Price Level start."""
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=False)
+    clock = [1_000.0]
+    monkeypatch.setattr(ev_planner.time, "time", lambda: clock[0])
+
+    executor = ev_planner.PriceLevelChargingExecutor(_FakeHass(), _FakeConfigEntry())
+
+    assert asyncio.run(
+        executor._start_charging(
+            "price_level_opportunity",
+            "Price 4.1c/kWh is at or below 5.0c/kWh threshold",
+            vehicle_vin=VIN,
+        )
+    ) is False
+
+    params = fake_actions._action_start_ev_charging_dynamic.await_args.args[2]
+    state = executor._get_or_create_vehicle_state(VIN)
+    assert params["require_physical_start_confirmation"] is True
+    assert state.is_charging is False
+    assert state.charging_mode == ""
+    assert state.consecutive_start_failures == 1
+    assert state.start_cooldown_until == clock[0] + 30
+    assert "physical start was not confirmed" in state.last_decision_reason.lower()
+
+    assert asyncio.run(
+        executor._start_charging(
+            "price_level_opportunity",
+            "Price remains eligible",
+            vehicle_vin=VIN,
+        )
+    ) is False
+    assert fake_actions._action_start_ev_charging_dynamic.await_count == 1
+
+    clock[0] += 31
+    assert asyncio.run(
+        executor._start_charging(
+            "price_level_opportunity",
+            "Price remains eligible after cooldown",
+            vehicle_vin=VIN,
+        )
+    ) is False
+    assert fake_actions._action_start_ev_charging_dynamic.await_count == 2
+    assert state.consecutive_start_failures == 2
+    assert state.start_cooldown_until == clock[0] + 60
+
+
+def test_price_level_zaptec_cooldown_is_not_labeled_as_tesla_confirmation(
+    monkeypatch,
+    fake_actions,
+):
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(
+        side_effect=RuntimeError("Zaptec API unavailable")
+    )
+    clock = [1_000.0]
+    monkeypatch.setattr(ev_planner.time, "time", lambda: clock[0])
+
+    class ZaptecEntry(_FakeConfigEntry):
+        options = {
+            "zaptec_standalone_enabled": True,
+            "zaptec_username": "user@example.com",
+            "zaptec_charger_id": "charger-1",
+        }
+
+    executor = ev_planner.PriceLevelChargingExecutor(_FakeHass(), ZaptecEntry())
+    for _ in range(3):
+        assert asyncio.run(
+            executor._start_charging(
+                "price_level_opportunity",
+                "Cheap price",
+                vehicle_vin="zaptec_standalone",
+            )
+        ) is False
+
+    state = executor._get_or_create_vehicle_state("zaptec_standalone")
+    assert state.start_cooldown_until == clock[0] + 300
+    assert "charger start cooling down" in state.last_decision_reason
+    assert "Tesla" not in state.last_decision_reason
+
+
 def test_vehicle_charger_params_accept_app_charge_amp_aliases(fake_actions):
     hass = _FakeHass()
     hass.data["power_sync"]["entry-1"]["automation_store"]._data[

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,7 +39,7 @@ def _extract_site_snapshot():
     method = _get_site_snapshot_method()
     module = ast.Module(body=[method], type_ignores=[])
     ast.fix_missing_locations(module)
-    namespace = {"DOMAIN": "power_sync"}
+    namespace = {"DOMAIN": "power_sync", "math": math}
     exec(compile(module, str(INIT_PATH), "exec"), namespace)
     return namespace["_site_snapshot"]
 
@@ -110,6 +111,34 @@ def test_loadpoint_status_preserves_curtailed_site_state_for_surplus_calculation
         )
 
         assert site_snapshot(view)["is_curtailed"] is expected
+
+
+def test_loadpoint_site_snapshot_preserves_unavailable_home_load():
+    site_snapshot = _extract_site_snapshot()
+    coordinator = SimpleNamespace(
+        data={
+            "solar_power": 7.27,
+            "grid_power": 10.0,
+            "battery_power": -7.8,
+            "load_power": None,
+            "battery_level": 53,
+        },
+    )
+    view = SimpleNamespace(
+        _hass=SimpleNamespace(
+            data={
+                "power_sync": {
+                    "entry-1": {"sungrow_coordinator": coordinator},
+                },
+            },
+        ),
+        _config_entry=SimpleNamespace(entry_id="entry-1"),
+    )
+
+    assert site_snapshot(view)["load_power_kw"] is None
+
+    coordinator.data["load_power"] = 0.0
+    assert site_snapshot(view)["load_power_kw"] == 0.0
 
 
 def test_hacs_ocpp_discovery_is_enabled_and_claim_filtered():

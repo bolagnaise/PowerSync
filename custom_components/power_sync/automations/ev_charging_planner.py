@@ -110,6 +110,8 @@ EXTERNAL_SCHEDULED_STOP_SUPPRESS_SECONDS = 15 * 60
 EXTERNAL_SMART_SCHEDULE_STOP_SUPPRESS_SECONDS = 15 * 60
 AUTO_SCHEDULE_START_RETRY_BASE_SECONDS = 30
 AUTO_SCHEDULE_START_RETRY_MAX_SECONDS = 15 * 60
+PRICE_LEVEL_START_RETRY_BASE_SECONDS = 30
+PRICE_LEVEL_START_RETRY_MAX_SECONDS = 15 * 60
 FREE_GRID_PRICE_EPSILON_CENTS = 0.001
 
 
@@ -7347,9 +7349,10 @@ class PriceLevelChargingState:
     last_decision: str = "idle"
     last_decision_reason: str = ""
     charging_mode: str = ""  # "recovery" or "opportunity"
-    # Circuit breaker for Zaptec API failures
+    # Circuit breaker for charger start failures
     consecutive_start_failures: int = 0
     start_cooldown_until: float = 0.0
+    start_retry_reason: str = ""
     consecutive_stop_failures: int = 0
     stop_cooldown_until: float = 0.0
     # Track whether PowerSync has paused the charger
@@ -8382,6 +8385,7 @@ async def _start_coordinated_charging(
     no_grid_import: bool = False,
     allow_ownership_takeover: bool = False,
     cooldown_state: Optional[Any] = None,
+    require_tesla_physical_start_confirmation: bool = False,
     log_prefix: str = "EV charging",
 ) -> bool:
     """Start charging through the configured dynamic charger action."""
@@ -8410,6 +8414,11 @@ async def _start_coordinated_charging(
         allow_ownership_takeover=allow_ownership_takeover,
     )
     charger_type = params.get("charger_type", _configured_charger_type(opts))
+    confirm_tesla_start = (
+        require_tesla_physical_start_confirmation and charger_type == "tesla"
+    )
+    if confirm_tesla_start:
+        params["require_physical_start_confirmation"] = True
     loadpoint_id = params.get("vehicle_id") or vehicle_vin
     try:
         from .ev_ownership import can_claim_ev_ownership, record_ev_command
@@ -8450,6 +8459,15 @@ async def _start_coordinated_charging(
         _LOGGER.debug("Zaptec start in cooldown (%.0fs remaining)", remaining)
         return False
 
+    if (
+        confirm_tesla_start
+        and cooldown_state is not None
+        and time.time() < getattr(cooldown_state, "start_cooldown_until", 0.0)
+    ):
+        remaining = getattr(cooldown_state, "start_cooldown_until", 0.0) - time.time()
+        _LOGGER.debug("Tesla physical start retry in cooldown (%.0fs remaining)", remaining)
+        return False
+
     from .actions import _action_start_ev_charging_dynamic
 
     try:
@@ -8462,10 +8480,54 @@ async def _start_coordinated_charging(
         if success and charger_type == "zaptec" and cooldown_state is not None:
             cooldown_state.consecutive_start_failures = 0
             cooldown_state.start_cooldown_until = 0.0
+            cooldown_state.start_retry_reason = ""
             if hasattr(cooldown_state, "managed_by_powersync"):
                 cooldown_state.managed_by_powersync = False
+        if success and confirm_tesla_start and cooldown_state is not None:
+            cooldown_state.consecutive_start_failures = 0
+            cooldown_state.start_cooldown_until = 0.0
+            cooldown_state.start_retry_reason = ""
+        elif not success and confirm_tesla_start and cooldown_state is not None:
+            cooldown_state.consecutive_start_failures += 1
+            cooldown_state.start_retry_reason = (
+                "Tesla physical start was not confirmed"
+            )
+            retry_delay = min(
+                PRICE_LEVEL_START_RETRY_BASE_SECONDS
+                * (
+                    2
+                    ** min(
+                        5,
+                        max(0, cooldown_state.consecutive_start_failures - 1),
+                    )
+                ),
+                PRICE_LEVEL_START_RETRY_MAX_SECONDS,
+            )
+            cooldown_state.start_cooldown_until = time.time() + retry_delay
+            _LOGGER.warning(
+                "%s: Tesla physical start was not confirmed; retrying in %ds",
+                log_prefix,
+                retry_delay,
+            )
         return success
     except Exception as err:
+        if confirm_tesla_start and cooldown_state is not None:
+            cooldown_state.consecutive_start_failures += 1
+            cooldown_state.start_retry_reason = (
+                "Tesla physical start was not confirmed"
+            )
+            retry_delay = min(
+                PRICE_LEVEL_START_RETRY_BASE_SECONDS
+                * (
+                    2
+                    ** min(
+                        5,
+                        max(0, cooldown_state.consecutive_start_failures - 1),
+                    )
+                ),
+                PRICE_LEVEL_START_RETRY_MAX_SECONDS,
+            )
+            cooldown_state.start_cooldown_until = time.time() + retry_delay
         if charger_type == "zaptec" and cooldown_state is not None:
             cooldown_state.consecutive_start_failures += 1
             if cooldown_state.consecutive_start_failures >= 3:
@@ -9442,13 +9504,18 @@ class PriceLevelChargingExecutor:
         """
         from .ev_ownership import manual_stop_hold_reason
 
+        state = (
+            self._get_or_create_vehicle_state(vehicle_vin)
+            if vehicle_vin
+            else self._state
+        )
+
         hold_reason = manual_stop_hold_reason(
             self.hass,
             self.config_entry,
             vehicle_vin,
         )
         if hold_reason:
-            state = self._get_or_create_vehicle_state(vehicle_vin or "_default")
             state.is_charging = False
             state.last_decision = "waiting"
             state.last_decision_reason = hold_reason
@@ -9469,26 +9536,37 @@ class PriceLevelChargingExecutor:
             vehicle_vin=vehicle_vin,
             no_grid_import=self._get_settings().get("no_grid_import", False),
             allow_ownership_takeover=True,
-            cooldown_state=self._get_or_create_vehicle_state("zaptec_standalone"),
+            cooldown_state=state,
+            require_tesla_physical_start_confirmation=True,
             log_prefix="Price-level charging",
         )
         if not success:
+            state.is_charging = False
+            state.charging_mode = ""
+            state.last_decision = "waiting"
+            if state.start_cooldown_until > time.time():
+                retry_seconds = max(1, round(state.start_cooldown_until - time.time()))
+                retry_reason = state.start_retry_reason or "charger start cooling down"
+                state.last_decision_reason = (
+                    f"{reason}; {retry_reason}, retrying in {retry_seconds}s"
+                )
+            else:
+                state.last_decision_reason = f"{reason}; start failed"
             await self.apply_preserve_home_battery(False, reason)
             _LOGGER.warning(f"Price-level charging: Failed to start - {reason}")
             return False
 
         if vehicle_vin:
-            state = self._get_or_create_vehicle_state(vehicle_vin)
             state.is_charging = True
             state.charging_mode = mode
             state.last_decision = "started"
             state.last_decision_reason = reason
             _LOGGER.info(f"Price-level charging: Started ({mode}) for VIN {vehicle_vin} - {reason}")
         else:
-            self._state.is_charging = True
-            self._state.charging_mode = mode
-            self._state.last_decision = "started"
-            self._state.last_decision_reason = reason
+            state.is_charging = True
+            state.charging_mode = mode
+            state.last_decision = "started"
+            state.last_decision_reason = reason
             _LOGGER.info(f"Price-level charging: Started ({mode}) - {reason}")
         await self.apply_preserve_home_battery(True, reason)
         return True
