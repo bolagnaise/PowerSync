@@ -10131,6 +10131,10 @@ class FroniusReservaEnergyCoordinator(
             "backup_reserve": status.get("backup_reserve"),
             "min_soc": status.get("min_soc"),
             "mode": status.get("mode"),
+            # Present only when the inverter's Export Limit Control soft limit
+            # is enabled and readable; None otherwise so the optimizer falls
+            # back to the configured site cap instead of inventing one.
+            "export_limit_kw": status.get("export_limit_kw"),
             "upstream_integration": status.get("upstream_integration", upstream),
             "energy_summary": self._energy_acc.as_dict(),
         }

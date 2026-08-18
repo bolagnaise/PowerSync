@@ -406,7 +406,7 @@
           "optimization_battery_capacity_wh": "Total usable battery capacity in kWh for the external battery system.",
           "optimization_max_charge_w": "Maximum charge power in kW that the planner may schedule.",
           "optimization_max_discharge_w": "Maximum battery/inverter discharge power in kW that the planner may schedule for loads and export.",
-          "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Leave blank to auto-detect where available; set 0 for zero-export sites. This does not limit battery power used by house loads.",
+          "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Auto-detected only when your inverter reports its own export limit; otherwise Profit Max solar export stays off until you set this. Set 0 for zero-export sites. This does not limit battery power used by house loads.",
           "optimization_max_grid_import_w": "Maximum site grid import in kW. Set 0 for no site import cap.",
           "optimization_allow_grid_charge": "When disabled, the planner will not schedule forced grid charging."
         },
@@ -468,7 +468,7 @@
           "optimization_battery_capacity_wh": "Total usable battery capacity in kWh. This should match the battery specs shown in the mobile app.",
           "optimization_max_charge_w": "Maximum grid charge power in kW that the LP optimizer may request.",
           "optimization_max_discharge_w": "Maximum battery/inverter discharge power in kW that the LP optimizer may request for loads and export.",
-          "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Leave blank to auto-detect where available; set 0 for zero-export sites. This does not limit battery power used by house loads.",
+          "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Auto-detected only when your inverter reports its own export limit; otherwise Profit Max solar export stays off until you set this. Set 0 for zero-export sites. This does not limit battery power used by house loads.",
           "optimization_max_grid_import_w": "Maximum total site grid import in kW. Set 0 for no site import cap; solar can still add charging power above this limit.",
           "optimization_max_grid_charge_price": "Advanced: never plan forced battery charging from grid import above this import price. Set 0 to disable the price cap.",
           "optimization_grid_charge_soc_cap": "Advanced: stop forced grid charging once forecast battery SOC reaches this cap. Solar surplus can still charge above the cap.",
@@ -1642,7 +1642,7 @@
               "optimization_allow_grid_charge": "When disabled, Smart Optimization can still charge from solar surplus but will not plan forced battery charging from grid import.",
               "optimization_max_grid_charge_price": "Advanced: never plan forced battery charging from grid import above this import price. Set 0 to disable the price cap.",
               "optimization_grid_charge_soc_cap": "Advanced: stop forced grid charging once forecast battery SOC reaches this cap. Solar surplus can still charge above the cap.",
-              "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Leave blank to auto-detect where available; set 0 for zero-export sites. This does not limit battery power used by house loads.",
+              "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Auto-detected only when your inverter reports its own export limit; otherwise Profit Max solar export stays off until you set this. Set 0 for zero-export sites. This does not limit battery power used by house loads.",
               "optimization_max_grid_import_w": "Maximum total site grid import in kW. Set 0 for no site import cap; solar can still add charging power above this limit."
             }
           },
@@ -1721,7 +1721,7 @@
           "optimization_battery_capacity_wh": "Total usable battery capacity in kWh. This should match the battery specs shown in the mobile app.",
           "optimization_max_charge_w": "Maximum grid charge power in kW that the LP optimizer may request.",
           "optimization_max_discharge_w": "Maximum battery/inverter discharge power in kW that the LP optimizer may request for loads and export.",
-          "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Leave blank to auto-detect where available; set 0 for zero-export sites. This does not limit battery power used by house loads.",
+          "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Auto-detected only when your inverter reports its own export limit; otherwise Profit Max solar export stays off until you set this. Set 0 for zero-export sites. This does not limit battery power used by house loads.",
           "optimization_max_grid_import_w": "Maximum total site grid import in kW. Set 0 for no site import cap; solar can still add charging power above this limit.",
           "optimization_max_grid_charge_price": "Advanced: never plan forced battery charging from grid import above this import price. Set 0 to disable the price cap.",
           "optimization_grid_charge_soc_cap": "Advanced: stop forced grid charging once forecast battery SOC reaches this cap. Solar surplus can still charge above the cap.",
@@ -2550,6 +2550,10 @@
     }
   },
   "issues": {
+    "solar_export_limit_not_configured": {
+      "title": "Set your maximum grid export for Profit Max solar export",
+      "description": "Profit Max can hold battery charging so high-priced solar exports instead, but it needs to know your site export cap first. Your battery connection does not report one, so PowerSync cannot auto-detect it. Open **Settings > Devices & Services > PowerSync > Configure > Smart Optimization > Grid & site constraints** and set **Maximum grid export** to your site/DNSP export cap in kW (for example 5 for a 5 kW limit). Until then every candidate slot falls back to self-consumption."
+    },
     "covau_plan_withdrawn": {
       "title": "CovaU SolarMax plan snapshot has been withdrawn",
       "description": "AER plan {plan_id} was withdrawn on {withdrawn_date}. PowerSync will keep using the cached immutable snapshot and will not move you to a successor automatically. Open Configure > Electricity pricing and confirm the exact plan on your current bill, or enter the validated manual tariff."

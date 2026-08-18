@@ -84,6 +84,14 @@ _READ_ENTITIES: dict[str, tuple[str, ...]] = {
         "battery_storage_soc_minimum",
         "reserva_soc_minimum",
     ),
+    # Fronius "Export Limit Control" soft limit, in watts. The upstream hub
+    # only creates this sensor when the fronius_modbus web API is configured,
+    # and publishes None whenever the soft limit is switched off, so a numeric
+    # reading is an authoritative site export cap rather than an inferred one.
+    "export_soft_limit": (
+        "export_soft_limit",
+        "reserva_export_soft_limit",
+    ),
     "storage_control_mode_sensor": (
         "core_storage_control_mode",
         "storage_control_mode",
@@ -324,6 +332,9 @@ class FroniusReservaBatteryController:
         max_charge_w = self._read_float("battery_max_charge_power_w") or self._max_charge_w
         max_discharge_w = self._read_float("battery_max_discharge_power_w") or self._max_discharge_w
         mode = self._read_state("storage_control_mode") or self._read_state("storage_control_mode_sensor")
+        export_limit_w = self._read_float("export_soft_limit")
+        if export_limit_w is not None and export_limit_w < 0:
+            export_limit_w = None
 
         return {
             "telemetry_ready": self.telemetry_ready(),
@@ -352,6 +363,10 @@ class FroniusReservaBatteryController:
             "backup_reserve": reserve,
             "min_soc": reserve,
             "mode": mode,
+            "export_limit_w": export_limit_w,
+            "export_limit_kw": (
+                export_limit_w / 1000.0 if export_limit_w is not None else None
+            ),
         }
 
     def telemetry_ready(self) -> bool:

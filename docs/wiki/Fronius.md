@@ -26,4 +26,12 @@ PowerSync reads Home Assistant entities exposed by `fronius_modbus`; it does not
 - Set backup reserve / minimum SOC
 - Smart Optimization dispatch
 
+## Site export limit
+
+Profit Max solar export needs a known finite site export cap before it will hold battery charging to push solar to the grid.
+
+PowerSync auto-detects it from the `fronius_modbus` **Export soft limit** sensor. That sensor only exists when the Fronius Web API is configured in the companion integration, and it only reports a value while Export Limit Control's soft limit is enabled on the inverter.
+
+If you do not have it, set **Maximum grid export** under Configure → Smart Optimization → Grid & site constraints to your site/DNSP export cap in kW. Leaving it blank keeps solar export permanently off; `sensor.power_sync_optimization_status` reports `profit_max_solar_export.capability.reason` as `export_limit_not_configured` and a repair is raised.
+
 If setup reports missing Fronius storage entities, confirm that the Fronius Modbus integration has created storage `sensor`, `select`, and `number` entities and that the battery system is online.

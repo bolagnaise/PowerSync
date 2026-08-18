@@ -24,37 +24,79 @@ _SPEC.loader.exec_module(_MODULE)
 resolve_solar_export_adapter = _MODULE.resolve_solar_export_adapter
 
 
-def _load_solar_export_capability_method(warnings: list[str]):
+_CAPABILITY_METHODS = (
+    "_solar_export_capability",
+    "_sync_solar_export_capability_notice",
+    "_sync_solar_export_limit_issue",
+)
+
+
+def _load_solar_export_capability_method(
+    warnings: list[str], notices: list[str] | None = None
+):
+    """Exec the capability methods standalone, without a real coordinator."""
     path = _PATH.with_name("coordinator.py")
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
     class_node = next(
         node
         for node in tree.body
         if isinstance(node, ast.ClassDef)
         and node.name == "OptimizationCoordinator"
     )
-    method = next(
+    methods = [
         node
         for node in class_node.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "_solar_export_capability"
-    )
+        if isinstance(node, ast.FunctionDef) and node.name in _CAPABILITY_METHODS
+    ]
+    assert {node.name for node in methods} == set(_CAPABILITY_METHODS)
+    module_constants = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id
+            in {"_SOLAR_EXPORT_LIMIT_REASONS", "_SOLAR_EXPORT_NOTICE_UNSYNCED"}
+            for target in node.targets
+        )
+    ]
+    recorded = notices if notices is not None else []
     namespace = {
         "Any": Any,
         "math": math,
+        "frozenset": frozenset,
         "_LOGGER": SimpleNamespace(
-            warning=lambda message, *args: warnings.append(message % args)
+            warning=lambda message, *args: (
+                warnings.append(message % args if args else message)
+            ),
+            info=lambda message, *args: (
+                recorded.append(message % args if args else message)
+            ),
+            debug=lambda message, *args: None,
         ),
     }
     exec(
         compile(
-            ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])),
+            ast.fix_missing_locations(
+                ast.Module(body=[*module_constants, *methods], type_ignores=[])
+            ),
             str(path),
             "exec",
         ),
         namespace,
     )
-    return namespace["_solar_export_capability"]
+
+    def _call(coordinator):
+        for name in _CAPABILITY_METHODS[1:]:
+            setattr(
+                coordinator,
+                name,
+                lambda *args, _fn=namespace[name]: _fn(coordinator, *args),
+            )
+        return namespace["_solar_export_capability"](coordinator)
+
+    return _call
 
 
 class _LimitController:
@@ -249,6 +291,8 @@ def test_upstream_outage_warning_is_deduplicated_and_resets_on_recovery():
         _config=SimpleNamespace(max_grid_export_w=5000),
         _monitoring_mode_active=lambda: False,
         _last_solar_export_upstream_outage=None,
+        hass=SimpleNamespace(data={}),
+        entry_id="entry-1",
     )
 
     capability_method(coordinator)
@@ -260,3 +304,39 @@ def test_upstream_outage_warning_is_deduplicated_and_resets_on_recovery():
     state["loaded"] = False
     capability_method(coordinator)
     assert len(warnings) == 2
+
+
+def test_missing_site_export_limit_warns_once_with_the_setting_name():
+    warnings: list[str] = []
+    notices: list[str] = []
+    capability_method = _load_solar_export_capability_method(warnings, notices)
+
+    coordinator = SimpleNamespace(
+        _solar_export_hold=SimpleNamespace(
+            capability=lambda: {
+                "supported": True,
+                "reason": "supported",
+                "adapter": "fronius_reserva.entity.block_charging.v1",
+            }
+        ),
+        _config=SimpleNamespace(max_grid_export_w=None),
+        _monitoring_mode_active=lambda: False,
+        _last_solar_export_upstream_outage=None,
+        hass=SimpleNamespace(data={}),
+        entry_id="entry-1",
+    )
+
+    first = capability_method(coordinator)
+    capability_method(coordinator)
+
+    assert first["supported"] is False
+    assert first["reason"] == "export_limit_not_configured"
+    assert len(warnings) == 1
+    assert "Maximum grid export" in warnings[0]
+
+    coordinator._config.max_grid_export_w = 0
+    zero = capability_method(coordinator)
+
+    assert zero["reason"] == "zero_export_site"
+    assert len(warnings) == 1
+    assert len(notices) == 1

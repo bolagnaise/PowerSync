@@ -120,6 +120,15 @@ _DECISION_LOGGER = logging.getLogger(f"{__name__}.decisions")
 if _DECISION_LOGGER.level == logging.NOTSET or _DECISION_LOGGER.level > logging.INFO:
     _DECISION_LOGGER.setLevel(logging.INFO)
 
+# Solar-export refusals that are a site setting rather than a hardware or
+# economic limit, so they are worth telling the user about directly.
+_SOLAR_EXPORT_LIMIT_REASONS = frozenset(
+    {"export_limit_not_configured", "zero_export_site"}
+)
+# Distinguishes "never synced this run" from "synced, currently clear", so the
+# first pass after a restart still clears a repair persisted by an earlier one.
+_SOLAR_EXPORT_NOTICE_UNSYNCED = object()
+
 CUSTOM_BATTERY_SYSTEM = "custom"
 CUSTOM_BATTERY_LEVEL_ENTITY = "custom_battery_level_entity"
 CUSTOM_BATTERY_POWER_ENTITY = "custom_battery_power_entity"
@@ -10598,21 +10607,50 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if status.get("supported") and not status.get("export_limit_kw"):
             limit_w = getattr(getattr(self, "_config", None), "max_grid_export_w", None)
             try:
-                limit_kw = float(limit_w) / 1000.0
+                limit_kw = None if limit_w is None else float(limit_w) / 1000.0
             except (TypeError, ValueError):
-                limit_kw = 0.0
-            if not math.isfinite(limit_kw) or limit_kw <= 0:
+                limit_kw = None
+            if limit_kw is not None and not math.isfinite(limit_kw):
+                limit_kw = None
+            if limit_kw is not None and limit_kw > 0:
+                status["export_limit_kw"] = limit_kw
+                status["export_limit_source"] = "site_setting"
+            else:
+                # A blank field and a deliberate 0 are different sites: one
+                # needs the setting filled in because nothing upstream reports
+                # a cap, the other can never export at all. Reporting both as
+                # one reason told zero-export users to set a limit they had
+                # already set, and told everyone else nothing actionable.
                 status = {
                     **status,
                     "supported": False,
-                    "reason": "finite_export_limit_required",
+                    "reason": (
+                        "zero_export_site"
+                        if limit_kw is not None
+                        else "export_limit_not_configured"
+                    ),
                 }
-            else:
-                status["export_limit_kw"] = limit_kw
+        elif status.get("export_limit_kw"):
+            status.setdefault("export_limit_source", "inverter_reported")
+        self._sync_solar_export_capability_notice(status)
+        self._solar_export_capability_status = status
+        return status
+
+    def _sync_solar_export_capability_notice(
+        self, status: dict[str, Any]
+    ) -> None:
+        """Surface capability refusals the user can act on, exactly once.
+
+        Without this the only trace of a blocked solar export was a nested
+        field on the optimization status sensor, so a site whose export cap is
+        simply unset looked identical to one where the economics never paid.
+        """
+        reason = str(status.get("reason") or "")
+
         outage = None
-        if status.get("reason") == "upstream_integration_not_loaded":
+        if reason == "upstream_integration_not_loaded":
             outage = (
-                str(status.get("reason")),
+                reason,
                 str(status.get("upstream_domain") or "upstream integration"),
                 str(status.get("upstream_state") or "unknown"),
             )
@@ -10624,8 +10662,51 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     *outage,
                 )
         self._last_solar_export_upstream_outage = outage
-        self._solar_export_capability_status = status
-        return status
+
+        notice = reason if reason in _SOLAR_EXPORT_LIMIT_REASONS else None
+        previous = getattr(
+            self, "_last_solar_export_limit_notice", _SOLAR_EXPORT_NOTICE_UNSYNCED
+        )
+        if notice == previous:
+            return
+        if notice == "export_limit_not_configured":
+            _LOGGER.warning(
+                "Profit Max solar export is disabled: no site export limit "
+                "is available. This battery connection does not report one, "
+                "so set Smart Optimization -> Grid & site constraints -> "
+                "Maximum grid export to your site/DNSP export cap in kW"
+            )
+        elif notice == "zero_export_site":
+            _LOGGER.info(
+                "Profit Max solar export is disabled: Maximum grid export "
+                "is set to 0 kW, so this site can never export solar"
+            )
+        self._last_solar_export_limit_notice = notice
+        self._sync_solar_export_limit_issue(
+            notice == "export_limit_not_configured"
+        )
+
+    def _sync_solar_export_limit_issue(self, active: bool) -> None:
+        """Raise or clear the repair that names the setting to fill in."""
+        try:
+            from homeassistant.helpers import issue_registry as ir
+
+            from ..const import DOMAIN
+
+            issue_id = f"solar_export_limit_not_configured_{self.entry_id}"
+            if active:
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    issue_id,
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="solar_export_limit_not_configured",
+                )
+            else:
+                ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+        except Exception as err:  # pragma: no cover - diagnostics only
+            _LOGGER.debug("Solar export limit repair sync skipped: %s", err)
 
     def _profit_max_solar_export_slots(
         self,
@@ -10658,6 +10739,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     {reason: max(1, n - 1)} if n else {}
                 ),
             }
+            # Nothing here is about the export limit, so drop any standing
+            # notice rather than leaving a repair up after Profit Max is off.
+            self._sync_solar_export_capability_notice({"reason": reason})
             return selected
         capability = self._solar_export_capability()
         if not capability.get("supported"):

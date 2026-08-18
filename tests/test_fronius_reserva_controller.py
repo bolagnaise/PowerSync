@@ -596,3 +596,49 @@ def test_force_charge_uses_callifo_byd_control_entities():
             {"entity_id": "number.fronius_battery_storage_grid_charge_power", "value": 4200},
         ),
     ]
+
+
+def test_status_reports_export_soft_limit_as_the_site_export_cap():
+    states = _reserva_states()
+    states.append(_FakeState("sensor.fronius_inverter_export_soft_limit", "5000"))
+    hass = _FakeHass(states)
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["export_limit_w"] == 5000.0
+    assert status["export_limit_kw"] == 5.0
+
+
+def test_status_reports_no_export_cap_when_soft_limit_is_absent():
+    hass = _FakeHass(_reserva_states())
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["export_limit_w"] is None
+    assert status["export_limit_kw"] is None
+
+
+def test_status_reports_no_export_cap_when_soft_limit_is_disabled():
+    states = _reserva_states()
+    # The upstream hub publishes None whenever Export Limit Control's soft
+    # limit is switched off, which surfaces as an unknown entity state.
+    states.append(_FakeState("sensor.fronius_inverter_export_soft_limit", "unknown"))
+    hass = _FakeHass(states)
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["export_limit_kw"] is None
+
+
+def test_missing_export_soft_limit_never_blocks_setup():
+    hass = _FakeHass(_callifo_byd_states())
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.connect())
+    assert "export_soft_limit" not in controller._entity_map

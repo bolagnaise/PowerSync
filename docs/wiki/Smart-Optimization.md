@@ -203,6 +203,18 @@ configured variant on every plan and again before control. A supported family
 therefore remains on normal control when its required entity, device, current
 normal value, or verification readback is unavailable.
 
+A solar-export hold also requires a known finite site export cap. PowerSync
+auto-detects one only where the battery connection reports its own limit —
+Sigenergy and AlphaESS from their configured export limit, and Fronius
+Reserva/GEN24 from the inverter's Export Limit Control soft limit when the
+`fronius_modbus` web API is configured and that soft limit is enabled. On every
+other path, and on Fronius sites without the soft limit, set **Maximum grid
+export** under Smart Optimization → Grid & site constraints. While it is blank,
+`profit_max_solar_export.capability.reason` reads `export_limit_not_configured`,
+a repair is raised naming the setting, and every candidate slot falls back to
+self-consumption. A deliberate 0 reports `zero_export_site` instead and raises no
+repair.
+
 PowerSync persists the exact control path, every target, and each target's normal
 value before changing hardware. It verifies all targets before reporting Solar
 Export. Any preparation, write, verification, or restoration failure immediately

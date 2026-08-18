@@ -11817,3 +11817,116 @@ def test_tesla_force_charge_reuploads_when_plan_extends_tariff_by_one_slot(opt_m
     asyncio.run(coordinator._execute_optimizer_action(actions[0]))
 
     assert battery.force_charge_calls == [(35, 20000.0, True)]
+
+
+def _solar_export_capability_coordinator(opt_module, capability):
+    """Coordinator whose adapter reports exactly the supplied capability."""
+    coordinator = _sigenergy_profit_max_coordinator(opt_module)
+    coordinator._solar_export_hold = SimpleNamespace(
+        capability=lambda: dict(capability)
+    )
+    return coordinator
+
+
+_SUPPORTED_WITHOUT_LIMIT = {
+    "supported": True,
+    "reason": "supported",
+    "adapter": "fronius_reserva.entity.block_charging.v1",
+}
+
+
+def test_blank_export_limit_is_reported_as_an_unset_setting(opt_module):
+    coordinator = _solar_export_capability_coordinator(
+        opt_module, _SUPPORTED_WITHOUT_LIMIT
+    )
+    coordinator._config.max_grid_export_w = None
+
+    status = coordinator._solar_export_capability()
+
+    assert status["supported"] is False
+    assert status["reason"] == "export_limit_not_configured"
+
+
+def test_zero_export_site_is_not_reported_as_a_missing_setting(opt_module):
+    coordinator = _solar_export_capability_coordinator(
+        opt_module, _SUPPORTED_WITHOUT_LIMIT
+    )
+    coordinator._config.max_grid_export_w = 0
+
+    status = coordinator._solar_export_capability()
+
+    assert status["supported"] is False
+    assert status["reason"] == "zero_export_site"
+
+
+def test_configured_export_limit_satisfies_the_capability(opt_module):
+    coordinator = _solar_export_capability_coordinator(
+        opt_module, _SUPPORTED_WITHOUT_LIMIT
+    )
+    coordinator._config.max_grid_export_w = 5000
+
+    status = coordinator._solar_export_capability()
+
+    assert status["supported"] is True
+    assert status["export_limit_kw"] == 5.0
+    assert status["export_limit_source"] == "site_setting"
+
+
+def test_inverter_reported_export_limit_needs_no_site_setting(opt_module):
+    coordinator = _solar_export_capability_coordinator(
+        opt_module,
+        {**_SUPPORTED_WITHOUT_LIMIT, "export_limit_kw": 4.5},
+    )
+    coordinator._config.max_grid_export_w = None
+
+    status = coordinator._solar_export_capability()
+
+    assert status["supported"] is True
+    assert status["export_limit_kw"] == 4.5
+    assert status["export_limit_source"] == "inverter_reported"
+
+
+def test_unset_export_limit_warns_once_and_clears_when_configured(
+    opt_module, caplog
+):
+    coordinator = _solar_export_capability_coordinator(
+        opt_module, _SUPPORTED_WITHOUT_LIMIT
+    )
+    coordinator._config.max_grid_export_w = None
+
+    with caplog.at_level(logging.WARNING, logger=opt_module.__name__):
+        coordinator._solar_export_capability()
+        coordinator._solar_export_capability()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Maximum grid export" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+
+    coordinator._config.max_grid_export_w = 5000
+    assert coordinator._solar_export_capability()["supported"] is True
+    assert coordinator._last_solar_export_limit_notice is None
+
+
+def test_unset_export_limit_rejects_every_slot_with_that_reason(opt_module):
+    coordinator = _solar_export_capability_coordinator(
+        opt_module, _SUPPORTED_WITHOUT_LIMIT
+    )
+    coordinator._config.max_grid_export_w = None
+
+    slots = coordinator._profit_max_solar_export_slots(
+        [0.40, 0.05],
+        [0.50, 0.05],
+        [5.0, 0.0],
+        [1.0, 1.0],
+        0.5,
+        [False, False],
+        [True, True],
+    )
+
+    assert slots == [False, False]
+    status = coordinator._solar_export_capability_status
+    assert status["reason"] == "export_limit_not_configured"
+    assert status["rejection_counts"] == {"export_limit_not_configured": 1}
