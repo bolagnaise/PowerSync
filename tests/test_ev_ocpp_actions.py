@@ -3673,6 +3673,38 @@ def test_direct_surplus_does_not_subtract_ev_from_normalized_home_load_twice():
     ) == 8.0
 
 
+def test_direct_surplus_fails_closed_when_home_load_is_unavailable():
+    live_status = {
+        "solar_power": 10_000,
+        "grid_power": -5_000,
+        "battery_power": 0,
+        "load_power": None,
+        "home_load_basis": "excludes_ev",
+    }
+
+    assert actions._calculate_solar_surplus(
+        live_status,
+        current_ev_power_kw=3.0,
+        config={"surplus_calculation": "direct", "household_buffer_kw": 0.0},
+    ) == 0.0
+
+
+def test_grid_based_surplus_does_not_require_home_load():
+    live_status = {
+        "solar_power": 10_000,
+        "grid_power": -5_000,
+        "battery_power": 0,
+        "load_power": None,
+        "home_load_basis": "excludes_ev",
+    }
+
+    assert actions._calculate_solar_surplus(
+        live_status,
+        current_ev_power_kw=3.0,
+        config={"surplus_calculation": "grid_based", "household_buffer_kw": 0.0},
+    ) == 8.0
+
+
 def test_non_ev_home_load_does_not_subtract_normalized_fallback_twice():
     live_status = {
         "load_power": 2_000,

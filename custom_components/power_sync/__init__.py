@@ -1187,6 +1187,15 @@ def _ev_observed_at(value: Any) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
+def _ev_power_observed_at(state: Any) -> datetime | None:
+    """Return when a power entity most recently reported its own value."""
+    if state is None:
+        return None
+    return _ev_observed_at(
+        getattr(state, "last_reported", None)
+    ) or _ev_observed_at(getattr(state, "last_updated", None))
+
+
 def _latest_ev_observed_at(
     current: datetime | None,
     candidate: Any,
@@ -1728,9 +1737,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
                 or "charge_power" in eid
             ):
                 candidate_power_kw = _kw_from_power_state(state)
-                candidate_at = _ev_observed_at(
-                    getattr(state, "last_updated", None)
-                )
+                candidate_at = _ev_power_observed_at(state)
                 if (
                     not measured_power_seen
                     or (
@@ -1943,9 +1950,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
 
             if "charger_power" in eid or "charging_power" in eid or "charge_power" in eid:
                 val = _kw_from_power_state(state)
-                candidate_observed_at = _ev_observed_at(
-                    getattr(state, "last_updated", None)
-                )
+                candidate_observed_at = _ev_power_observed_at(state)
                 if not measured_power_seen:
                     measured_power_kw = val
                     measured_power_observed_at = candidate_observed_at
@@ -2117,7 +2122,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         if power_state:
             ble_power_observed_at = _latest_ev_observed_at(
                 ble_power_observed_at,
-                getattr(power_state, "last_updated", None),
+                _ev_power_observed_at(power_state),
             )
         power_kw = _kw_from_power_state(power_state)
         if power_kw > 0:
@@ -2239,7 +2244,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             if "power" in eid:
                 wc_observed_at = _latest_ev_observed_at(
                     wc_observed_at,
-                    getattr(state_obj, "last_updated", None),
+                    _ev_power_observed_at(state_obj),
                 )
                 val = _kw_from_power_state(state_obj)
                 if val > 0:
@@ -2479,7 +2484,7 @@ async def _get_ev_load_observations(hass, entry, vehicles=None):
                     physical_load_key=physical_key,
                     source_key=entity_id,
                     power_kw=power_kw,
-                    observed_at=getattr(state, "last_updated", observed_at),
+                    observed_at=_ev_power_observed_at(state) or observed_at,
                     active=power_kw > 0.05,
                     measurement_kind=kind,
                 )
@@ -2555,7 +2560,7 @@ async def _get_ev_load_observations(hass, entry, vehicles=None):
                         physical_load_key=f"ocpp:{prefix}:1",
                         source_key=entity.entity_id,
                         power_kw=power_kw,
-                        observed_at=getattr(state, "last_updated", observed_at),
+                        observed_at=_ev_power_observed_at(state) or observed_at,
                         active=power_kw > 0.05,
                         measurement_kind=EvMeasurementKind.LOADPOINT_METER,
                     )

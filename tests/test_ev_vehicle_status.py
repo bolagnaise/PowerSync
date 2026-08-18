@@ -172,12 +172,15 @@ class _State:
         state: str,
         attributes: dict | None = None,
         last_updated: datetime | None = None,
+        last_reported: datetime | None = None,
     ) -> None:
         self.entity_id = entity_id
         self.state = state
         self.attributes = attributes or {}
         if last_updated is not None:
             self.last_updated = last_updated
+        if last_reported is not None:
+            self.last_reported = last_reported
 
 
 class _States:
@@ -383,6 +386,106 @@ def test_named_zone_does_not_suppress_unpaired_ble_outside_both_mode():
     assert vehicles[0]["ev_power_kw"] == 3.0
     assert power_sync._get_ev_vehicle_status(hass, entry)["ev_power_kw"] == 3.0
     assert power_sync._get_external_tesla_ev_power_kw(hass, entry) == 3.0
+
+
+def test_ble_steady_power_uses_its_own_last_reported_timestamp():
+    """A steady source report stays fresh without borrowing metadata time."""
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    stale_change = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("binary_sensor.yf88_status", "on", last_updated=now),
+        _State("sensor.yf88_charging_state", "Charging", last_updated=now),
+        _State("binary_sensor.yf88_charge_flap", "on", last_updated=now),
+        _State(
+            "sensor.yf88_charge_power",
+            "11.0",
+            {"unit_of_measurement": "kW"},
+            last_updated=stale_change,
+            last_reported=now,
+        ),
+        _State("sensor.yf88_charge_level", "30", last_updated=now),
+    ])
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"tesla_ble_entity_prefix": "yf88"},
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicle = next(item for item in vehicles if item["vehicle_id"] == "ble_yf88")
+    ev_load = importlib.import_module("power_sync.ev_load")
+    snapshot = ev_load.aggregate_ev_load(
+        [
+            ev_load.EvLoadObservation(
+                physical_load_key="vehicle:ble_yf88",
+                source_key="ble_yf88",
+                power_kw=vehicle["ev_power_kw"],
+                observed_at=vehicle["_observed_at"],
+                active=vehicle["is_charging"],
+            )
+        ],
+        at=now,
+    )
+    normalized = ev_load.normalize_energy_data(
+        {"load_power": 13.77},
+        battery_system="sungrow",
+        ev_load=snapshot,
+        at=now,
+    )
+
+    assert vehicle["ev_power_kw"] == 11.0
+    assert vehicle["is_charging"] is True
+    assert vehicle["_observed_at"] == now
+    assert snapshot.quality == ev_load.EvLoadQuality.COMPLETE
+    assert snapshot.power_kw == 11.0
+    assert round(normalized["load_power"], 2) == 2.77
+
+
+def test_ble_metadata_does_not_refresh_stale_power_measurement():
+    """Connection and charging state updates cannot freshen measured power."""
+    power_sync = _power_sync_module()
+    ev_load = importlib.import_module("power_sync.ev_load")
+    now = datetime.now(timezone.utc)
+    stale_power = now - timedelta(minutes=5)
+    hass = _Hass([
+        _State("binary_sensor.yf88_status", "on", last_updated=now),
+        _State("sensor.yf88_charging_state", "Charging", last_updated=now),
+        _State("binary_sensor.yf88_charge_flap", "on", last_updated=now),
+        _State(
+            "sensor.yf88_charge_power",
+            "11.0",
+            {"unit_of_measurement": "kW"},
+            last_updated=stale_power,
+        ),
+    ])
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"tesla_ble_entity_prefix": "yf88"},
+    )
+
+    vehicle = next(
+        item
+        for item in power_sync._get_ev_vehicles_status(hass, entry)
+        if item["vehicle_id"] == "ble_yf88"
+    )
+    snapshot = ev_load.aggregate_ev_load(
+        [
+            ev_load.EvLoadObservation(
+                physical_load_key="vehicle:ble_yf88",
+                source_key="ble_yf88",
+                power_kw=vehicle["ev_power_kw"],
+                observed_at=vehicle["_observed_at"],
+                active=vehicle["is_charging"],
+            )
+        ],
+        at=now,
+    )
+
+    assert vehicle["_observed_at"] == stale_power
+    assert snapshot.quality == ev_load.EvLoadQuality.INCOMPLETE
+    assert snapshot.unavailable_active_keys == ("vehicle:ble_yf88",)
 
 
 def test_ev_vehicle_status_keeps_real_charging_power_when_charging():

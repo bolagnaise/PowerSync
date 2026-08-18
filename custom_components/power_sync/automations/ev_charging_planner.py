@@ -5745,7 +5745,18 @@ class AutoScheduleExecutor:
         battery_soc = live_status.get("battery_soc", 0)
         solar_power_kw = live_status.get("solar_power", 0) / 1000
         grid_power_kw = live_status.get("grid_power", 0) / 1000
-        load_power_kw = live_status.get("load_power", 0) / 1000
+        load_power = live_status.get("load_power")
+        if load_power is None:
+            state.last_decision = "waiting"
+            state.last_decision_reason = "Home Load unavailable"
+            self._sync_active_charging_preserve_intent(
+                vehicle_id,
+                effective_preserve_home_battery,
+                state,
+                state.last_decision_reason,
+            )
+            return
+        load_power_kw = load_power / 1000
 
         # Calculate current surplus
         current_surplus_kw = max(0, solar_power_kw - load_power_kw)

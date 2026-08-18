@@ -63,9 +63,26 @@ def test_coordinator_data_to_ev_live_status_handles_missing_values():
     assert live_status["grid_power"] == 0.0
     assert live_status["solar_power"] == 0.0
     assert live_status["battery_power"] == 0.0
-    assert live_status["load_power"] == 0.0
+    assert live_status["load_power"] is None
+    assert live_status["site_load_power"] is None
     assert live_status["ev_power"] == 0.0
     assert live_status["is_curtailed"] is False
+
+
+def test_unavailable_normalized_home_load_is_not_serialized_as_zero():
+    live_status = coordinator_data_to_ev_live_status(
+        {
+            "solar_power": 15.45,
+            "grid_power": 13.32,
+            "battery_power": -15.0,
+            "load_power": None,
+            "site_load_power": 13.77,
+            "home_load_basis": "excludes_ev",
+        }
+    )
+
+    assert live_status["load_power"] is None
+    assert live_status["site_load_power"] == 13_770.0
 
 
 def test_ev_live_status_uses_combined_sungrow_site_solar():

@@ -5816,12 +5816,22 @@ def _calculate_solar_surplus(
     solar_kw = (live_status.get("solar_power") or 0) / 1000
     grid_kw = (live_status.get("grid_power") or 0) / 1000  # Positive = import, Negative = export
     battery_kw = (live_status.get("battery_power") or 0) / 1000  # Positive = discharge, Negative = charge
-    load_kw = (live_status.get("load_power") or 0) / 1000
     buffer_kw = config.get("household_buffer_kw", 0.5)
     if _curtailed_full_battery_active_ev(live_status, current_ev_power_kw):
         buffer_kw = 0.0
 
     method = config.get("surplus_calculation", "grid_based")
+
+    # The direct method cannot distinguish household consumption from solar
+    # without Home Load.  Fail closed instead of treating unavailable as a
+    # measured zero and potentially starting or increasing EV charging.
+    if method != "grid_based" and live_status.get("load_power") is None:
+        _LOGGER.debug(
+            "Surplus calc (direct): Home Load unavailable, no safe surplus"
+        )
+        return 0.0
+
+    load_kw = (live_status.get("load_power") or 0) / 1000
 
     if method == "grid_based":
         # AmpPilot style: what's being exported + EV power + battery charge
