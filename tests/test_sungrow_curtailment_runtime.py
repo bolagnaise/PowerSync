@@ -365,7 +365,14 @@ def test_should_curtail_live_status_await_does_not_recreate_runtime(replacement)
     assert replacement_entry_data["replacement_state"] == "untouched"
 
 
-def _run_fast_load_following_case(kind: str):
+def _run_fast_load_following_case(
+    kind: str,
+    *,
+    brand: str = "sungrow",
+    current_limit: int | None = None,
+    load_power: int = 100,
+    grid_power: float | None = None,
+):
     """Run the extracted timer callback against one generation lifecycle."""
     entry_id = "entry-id"
     old_generation = object()
@@ -384,7 +391,7 @@ def _run_fast_load_following_case(kind: str):
         "inverter_control_mode": "load_following",
         "inverter_last_state": "curtailed",
         "inverter_controller": controller,
-        "inverter_power_limit_w": None,
+        "inverter_power_limit_w": current_limit,
     }
     if kind == "stopping":
         live_entry_data["aemo_dispatch_stopping"] = True
@@ -399,7 +406,7 @@ def _run_fast_load_following_case(kind: str):
         options={},
         data={
             "ac_inverter_curtailment_enabled": True,
-            "inverter_brand": "sungrow",
+            "inverter_brand": brand,
             "inverter_host": "192.0.2.10",
         },
     )
@@ -409,7 +416,15 @@ def _run_fast_load_following_case(kind: str):
         await asyncio.sleep(0)
         if kind == "replacement":
             domain_data[entry_id] = replacement_entry_data
-        return {"load_power": 100, "battery_power": 0}
+        return {
+            "load_power": load_power,
+            "battery_power": 0,
+            "grid_power": grid_power,
+        }
+
+    def _record_state(*args, **kwargs):
+        state_calls.append(args)
+        replacement_entry_data["last_state_kwargs"] = kwargs
 
     namespace = {
         "Any": object,
@@ -417,9 +432,12 @@ def _run_fast_load_following_case(kind: str):
         "hass": hass,
         "entry": entry,
         "aemo_dispatch_generation": old_generation,
-        "_LOGGER": SimpleNamespace(debug=lambda *args, **kwargs: None),
+        "_LOGGER": SimpleNamespace(
+            debug=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+        ),
         "get_live_status": _get_live_status,
-        "_set_inverter_control_state": lambda *args, **kwargs: state_calls.append(args),
+        "_set_inverter_control_state": _record_state,
         "datetime": __import__("datetime").datetime,
         "timedelta": __import__("datetime").timedelta,
         "INVERTER_CONTROL_MODE_NORMAL": "normal",
@@ -470,6 +488,39 @@ def test_fronius_ac_inverter_uses_load_following_and_fast_refresh():
         refresh_source.index("if inverter_brand not in ("):
         refresh_source.index("if not inverter_host:")
     ]
+
+
+def test_fronius_matching_cached_target_reapplies_while_export_persists():
+    _result, status_calls, controller_calls, _state_calls, replacement = (
+        _run_fast_load_following_case(
+            "live",
+            brand="fronius",
+            current_limit=1_440,
+            load_power=1_440,
+            grid_power=-600.0,
+        )
+    )
+
+    assert status_calls == [True]
+    assert controller_calls == [1_440]
+    assert replacement["last_state_kwargs"] == {
+        "update_dpel_time": False,
+        "device_limit_confirmed": True,
+        "physical_converged": False,
+        "residual_export_w": 600.0,
+    }
+
+
+def test_fronius_initial_ack_reports_pending_until_site_converges():
+    source = _function_source("apply_inverter_curtailment")
+
+    assert 'if inverter_brand == "fronius" and home_load_w is not None:' in source
+    assert "Fronius limit confirmed at %dW; physical site" in source
+    assert "convergence remains pending%s" in source
+    assert "within the 100W convergence threshold" in source
+    assert "device_limit_confirmed=(" in source
+    assert "physical_converged=(" in source
+    assert "residual_export_w=(" in source
 
 
 def test_sungrow_restore_can_skip_verification_readback():

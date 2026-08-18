@@ -52,6 +52,17 @@ def test_cached_curtailed_state_is_only_trusted_for_fronius_simple_mode():
     assert "not fronius_load_following" in source
 
 
+def test_load_following_status_distinguishes_pending_physical_convergence():
+    native_value = _method_source("InverterStatusSensor", "native_value")
+    attributes = _method_source("InverterStatusSensor", "extra_state_attributes")
+
+    assert "inverter_curtailment_physical_converged" in native_value
+    assert "Load Following Pending" in native_value
+    assert "device_limit_confirmed" in attributes
+    assert "physical_converged" in attributes
+    assert "residual_export_w" in attributes
+
+
 def test_sleeping_inverter_keeps_same_day_daily_generation():
     merge = _function("_merge_inverter_status_attributes")
 

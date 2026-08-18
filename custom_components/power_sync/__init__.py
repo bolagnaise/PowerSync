@@ -8876,6 +8876,29 @@ class InverterStatusView(HomeAssistantView):
             elif inverter_last_state in ("normal", "running"):
                 state_dict["is_curtailed"] = False
 
+            control_mode = entry_data.get("inverter_control_mode")
+            physical_converged = entry_data.get(
+                "inverter_curtailment_physical_converged"
+            )
+            state_dict["control_mode"] = control_mode
+            state_dict["target_power_w"] = entry_data.get(
+                "inverter_power_limit_w"
+            )
+            state_dict["device_limit_confirmed"] = entry_data.get(
+                "inverter_curtailment_device_limit_confirmed"
+            )
+            state_dict["physical_converged"] = physical_converged
+            state_dict["residual_export_w"] = entry_data.get(
+                "inverter_curtailment_residual_export_w"
+            )
+            if (
+                control_mode == INVERTER_CONTROL_MODE_LOAD_FOLLOWING
+                and physical_converged is False
+            ):
+                state_dict["status"] = "curtailment_pending"
+                state_dict["is_curtailed"] = False
+                state_dict["is_curtailment_requested"] = True
+
             # Check if it's nighttime for sleep detection
             is_night = False
             try:
@@ -23239,6 +23262,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         target_power_w: int | None = None,
         *,
         update_dpel_time: bool = False,
+        device_limit_confirmed: bool | None = None,
+        physical_converged: bool | None = None,
+        residual_export_w: float | None = None,
     ) -> None:
         """Record the current AC inverter control mode for services and sensors."""
         entry_data = _aemo_dispatch_entry_data()
@@ -23252,6 +23278,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_data["inverter_power_limit_w"] = (
             None if mode == INVERTER_CONTROL_MODE_NORMAL else target_power_w
         )
+        if mode == INVERTER_CONTROL_MODE_NORMAL:
+            entry_data.pop("inverter_curtailment_device_limit_confirmed", None)
+            entry_data.pop("inverter_curtailment_physical_converged", None)
+            entry_data.pop("inverter_curtailment_residual_export_w", None)
+        else:
+            if device_limit_confirmed is not None:
+                entry_data["inverter_curtailment_device_limit_confirmed"] = (
+                    device_limit_confirmed
+                )
+            if physical_converged is not None:
+                entry_data["inverter_curtailment_physical_converged"] = (
+                    physical_converged
+                )
+            if residual_export_w is not None:
+                entry_data["inverter_curtailment_residual_export_w"] = round(
+                    max(0.0, residual_export_w),
+                    1,
+                )
         if update_dpel_time:
             entry_data["last_dpel_update_time"] = datetime.now()
         elif mode == INVERTER_CONTROL_MODE_NORMAL:
@@ -23685,8 +23729,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Use load-following curtailment for supported brands
                 # Limit = home load + battery charge rate (so we don't export but still charge battery)
                 home_load_w = None
+                curtail_live_status = None
                 if inverter_brand in ("zeversolar", "sigenergy", "sungrow", "enphase", "foxess", "huawei", "goodwe", "solax", "alphaess", "solaredge", "fronius"):
                     live_status = await get_live_status()
+                    curtail_live_status = live_status
                     if _aemo_dispatch_entry_data() is not entry_data:
                         return False
                     if live_status and live_status.get("load_power"):
@@ -23723,7 +23769,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if _aemo_dispatch_entry_data() is not entry_data:
                     return False
                 if success:
-                    if home_load_w is not None:
+                    if inverter_brand == "fronius" and home_load_w is not None:
+                        grid_power = (
+                            curtail_live_status.get("grid_power")
+                            if curtail_live_status
+                            else None
+                        )
+                        residual_export_w = (
+                            max(0.0, -float(grid_power))
+                            if grid_power is not None
+                            else None
+                        )
+                        if (
+                            residual_export_w is not None
+                            and residual_export_w <= 100.0
+                        ):
+                            _LOGGER.info(
+                                "Fronius limit confirmed at %dW and site export "
+                                "is within the 100W convergence threshold",
+                                home_load_w,
+                            )
+                        else:
+                            _LOGGER.warning(
+                                "Fronius limit confirmed at %dW; physical site "
+                                "convergence remains pending%s",
+                                home_load_w,
+                                (
+                                    f" ({residual_export_w:.0f}W residual export)"
+                                    if residual_export_w is not None
+                                    else " (site export unavailable)"
+                                ),
+                            )
+                    elif home_load_w is not None:
                         _LOGGER.info(f"✅ Inverter load-following curtailment to {home_load_w}W")
                     else:
                         _LOGGER.info(f"✅ Inverter curtailed successfully")
@@ -23732,6 +23809,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
                         home_load_w,
                         update_dpel_time=inverter_brand == "enphase",
+                        device_limit_confirmed=(
+                            True if inverter_brand == "fronius" else None
+                        ),
+                        physical_converged=(
+                            (
+                                float(curtail_live_status.get("grid_power"))
+                                >= -100.0
+                            )
+                            if inverter_brand == "fronius"
+                            and curtail_live_status
+                            and curtail_live_status.get("grid_power") is not None
+                            else None
+                        ),
+                        residual_export_w=(
+                            max(
+                                0.0,
+                                -float(curtail_live_status.get("grid_power")),
+                            )
+                            if inverter_brand == "fronius"
+                            and curtail_live_status
+                            and curtail_live_status.get("grid_power") is not None
+                            else None
+                        ),
                     )
                     if _aemo_dispatch_entry_data() is not entry_data:
                         return False
@@ -23741,6 +23841,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await _powerwall_curtailment_fallback(False, "inverter_took_over")
                 else:
                     _LOGGER.error(f"❌ Failed to curtail inverter")
+                    if inverter_brand == "fronius":
+                        entry_data[
+                            "inverter_curtailment_device_limit_confirmed"
+                        ] = False
+                        entry_data[
+                            "inverter_curtailment_physical_converged"
+                        ] = False
+                        if (
+                            curtail_live_status
+                            and curtail_live_status.get("grid_power") is not None
+                        ):
+                            entry_data[
+                                "inverter_curtailment_residual_export_w"
+                            ] = round(
+                                max(
+                                    0.0,
+                                    -float(curtail_live_status.get("grid_power")),
+                                ),
+                                1,
+                            )
                     # Inverter refused or errored — try the Powerwall off-grid
                     # path as the last-resort curtailment lever.
                     if _aemo_dispatch_entry_data() is not entry_data:
@@ -39876,13 +39996,47 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if battery_charge_w > 50:
                 home_load_w += battery_charge_w
 
+            grid_power = live_status.get("grid_power")
+            fronius_residual_export_w = (
+                max(0.0, -float(grid_power))
+                if inverter_brand == "fronius" and grid_power is not None
+                else None
+            )
+            fronius_physical_converged = (
+                fronius_residual_export_w <= 100.0
+                if fronius_residual_export_w is not None
+                else None
+            )
+
             # Get current power limit to avoid unnecessary updates
             current_limit = entry_data.get("inverter_power_limit_w")
 
             # For Enphase, always re-apply DPEL at least every 15 seconds since it may timeout
             # For other brands, only update if changed by more than 50W
             if not force_reapply and current_limit is not None and abs(home_load_w - current_limit) < 50:
-                return
+                if (
+                    inverter_brand == "fronius"
+                    and fronius_physical_converged is False
+                ):
+                    _LOGGER.warning(
+                        "Fronius load-following target still matches %dW but "
+                        "site export remains %.0fW; reapplying verified limit",
+                        current_limit,
+                        fronius_residual_export_w,
+                    )
+                else:
+                    if (
+                        inverter_brand == "fronius"
+                        and fronius_physical_converged is not None
+                    ):
+                        _set_inverter_control_state(
+                            INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
+                            current_limit,
+                            device_limit_confirmed=True,
+                            physical_converged=fronius_physical_converged,
+                            residual_export_w=fronius_residual_export_w,
+                        )
+                    return
 
             # Update power limit
             import inspect
@@ -39900,7 +40054,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
                             home_load_w,
                             update_dpel_time=inverter_brand == "enphase",
+                            device_limit_confirmed=(
+                                True if inverter_brand == "fronius" else None
+                            ),
+                            physical_converged=fronius_physical_converged,
+                            residual_export_w=fronius_residual_export_w,
                         )
+                    elif inverter_brand == "fronius":
+                        entry_data[
+                            "inverter_curtailment_device_limit_confirmed"
+                        ] = False
+                        entry_data[
+                            "inverter_curtailment_physical_converged"
+                        ] = False
+                        if fronius_residual_export_w is not None:
+                            entry_data[
+                                "inverter_curtailment_residual_export_w"
+                            ] = round(fronius_residual_export_w, 1)
         except Exception as err:
             _LOGGER.debug(f"Fast load-following update error (non-critical): {err}")
 

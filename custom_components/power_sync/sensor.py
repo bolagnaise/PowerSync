@@ -5660,6 +5660,13 @@ class InverterStatusSensor(RestoreEntity, SensorEntity):
 
         control_mode = self._control_mode()
         if control_mode == INVERTER_CONTROL_MODE_LOAD_FOLLOWING:
+            if (
+                self._entry_data().get(
+                    "inverter_curtailment_physical_converged"
+                )
+                is False
+            ):
+                return "Load Following Pending"
             return "Load Following"
         elif control_mode == INVERTER_CONTROL_MODE_SHUTDOWN:
             return "Shutdown"
@@ -5701,6 +5708,15 @@ class InverterStatusSensor(RestoreEntity, SensorEntity):
             "state": self._cached_state,
             "control_mode": control_mode,
             "target_power_w": target_power_w,
+            "device_limit_confirmed": self._entry_data().get(
+                "inverter_curtailment_device_limit_confirmed"
+            ),
+            "physical_converged": self._entry_data().get(
+                "inverter_curtailment_physical_converged"
+            ),
+            "residual_export_w": self._entry_data().get(
+                "inverter_curtailment_residual_export_w"
+            ),
         }
 
         # Add cached attributes from inverter polling
@@ -5711,7 +5727,11 @@ class InverterStatusSensor(RestoreEntity, SensorEntity):
         # Add description based on state after cached attrs so the public
         # dashboard text remains specific to PowerSync's active control mode.
         if control_mode == INVERTER_CONTROL_MODE_LOAD_FOLLOWING:
-            if target_power_w is not None and target_power_w > 0:
+            if attrs["physical_converged"] is False:
+                attrs["description"] = (
+                    "Inverter limit confirmed - waiting for physical site convergence"
+                )
+            elif target_power_w is not None and target_power_w > 0:
                 attrs["description"] = f"Inverter curtailed - load following at {target_power_w}W"
             else:
                 attrs["description"] = "Inverter curtailed - load following"

@@ -83,3 +83,17 @@ def test_sensor_polling_preserves_specific_control_modes():
     assert "INVERTER_CONTROL_MODE_SHUTDOWN" in sensor_source
     assert 'entry_data["inverter_last_state"] = "curtailed"' in sensor_source
     assert 'entry_data["inverter_control_mode"] = INVERTER_CONTROL_MODE_NORMAL' in sensor_source
+
+
+def test_inverter_status_api_reports_pending_separately_from_curtailment():
+    init_source = INIT_PATH.read_text()
+    status_section = init_source[
+        init_source.index("class InverterStatusView"):
+        init_source.index("class SigenergyTariffView")
+    ]
+
+    assert 'state_dict["device_limit_confirmed"]' in status_section
+    assert 'state_dict["physical_converged"]' in status_section
+    assert 'state_dict["residual_export_w"]' in status_section
+    assert 'state_dict["status"] = "curtailment_pending"' in status_section
+    assert 'state_dict["is_curtailed"] = False' in status_section

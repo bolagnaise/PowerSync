@@ -59,6 +59,9 @@ class FroniusController(InverterController):
 
     # Timeout for Modbus operations
     TIMEOUT_SECONDS = 10.0
+    CONTROL_VERIFY_ATTEMPTS = 3
+    CONTROL_VERIFY_DELAY_SECONDS = 0.25
+    CONTROL_VERIFY_RAW_TOLERANCE = 1
 
     def __init__(
         self,
@@ -82,6 +85,11 @@ class FroniusController(InverterController):
         super().__init__(host, port, slave_id, model)
         self._client: Optional[AsyncModbusTcpClient] = None
         self._lock = asyncio.Lock()
+        self._request_lock = self._get_endpoint_request_lock(
+            self.host,
+            self.port,
+            self.slave_id,
+        )
         # Track if slave was set in client constructor (pymodbus 3.6+)
         self._slave_in_client: bool = False
         # Load following mode (for users without 0W export profile)
@@ -310,7 +318,77 @@ class FroniusController(InverterController):
             _LOGGER.warning(f"Error detecting Fronius capacity: {e}")
             return None
 
+    async def _verify_power_limit_control(
+        self,
+        *,
+        expected_enabled: int,
+        expected_limit_value: int | None = None,
+        expected_revert_seconds: int | None = None,
+    ) -> bool:
+        """Require the writable SunSpec controls to match after an ACK."""
+        observed_enabled = None
+        observed_limit = None
+        observed_revert = None
+
+        for attempt in range(self.CONTROL_VERIFY_ATTEMPTS):
+            enabled = await self._read_register(self.REG_WMAXLIM_ENA, 1)
+            limit = (
+                await self._read_register(self.REG_WMAXLIMPCT, 1)
+                if expected_limit_value is not None
+                else None
+            )
+            revert = (
+                await self._read_register(self.REG_WMAXLIMPCT_RVRT, 1)
+                if expected_revert_seconds is not None
+                else None
+            )
+
+            observed_enabled = enabled[0] if enabled else None
+            observed_limit = limit[0] if limit else None
+            observed_revert = revert[0] if revert else None
+
+            enabled_matches = observed_enabled == expected_enabled
+            limit_matches = (
+                expected_limit_value is None
+                or (
+                    observed_limit is not None
+                    and abs(observed_limit - expected_limit_value)
+                    <= self.CONTROL_VERIFY_RAW_TOLERANCE
+                )
+            )
+            revert_matches = (
+                expected_revert_seconds is None
+                or observed_revert == expected_revert_seconds
+            )
+            if enabled_matches and limit_matches and revert_matches:
+                return True
+
+            if attempt + 1 < self.CONTROL_VERIFY_ATTEMPTS:
+                await asyncio.sleep(self.CONTROL_VERIFY_DELAY_SECONDS)
+
+        _LOGGER.error(
+            "Fronius limit readback did not verify: "
+            "enabled=%s (expected %s), limit=%s (expected %s), "
+            "revert=%s (expected %s)",
+            observed_enabled,
+            expected_enabled,
+            observed_limit,
+            expected_limit_value,
+            observed_revert,
+            expected_revert_seconds,
+        )
+        return False
+
     async def curtail(
+        self,
+        home_load_w: Optional[float] = None,
+        rated_capacity_w: Optional[float] = None,
+    ) -> bool:
+        """Serialize and verify one Fronius curtailment transaction."""
+        async with self._request_lock:
+            return await self._curtail_locked(home_load_w, rated_capacity_w)
+
+    async def _curtail_locked(
         self,
         home_load_w: Optional[float] = None,
         rated_capacity_w: Optional[float] = None,
@@ -357,7 +435,7 @@ class FroniusController(InverterController):
                 # Load following mode: Calculate power limit percentage based on home load
                 # This works for users without 0W soft export limit configured
                 target_percent = min(100, max(0, (home_load_w / rated_capacity_w) * 100))
-                target_value = int(target_percent * 100)  # SunSpec uses 0-10000 scale
+                target_value = round(target_percent * 100)  # SunSpec uses 0-10000 scale
 
                 _LOGGER.info(
                     f"Curtailing Fronius at {self.host} using load following mode: "
@@ -395,6 +473,13 @@ class FroniusController(InverterController):
                     _LOGGER.error("Failed to enable power limiting")
                     return False
 
+                if not await self._verify_power_limit_control(
+                    expected_enabled=1,
+                    expected_limit_value=target_value,
+                    expected_revert_seconds=0,
+                ):
+                    return False
+
             else:
                 # Simple mode: Disable power limiting to use soft export limit
                 # This only works if inverter has 0W soft export limit configured
@@ -409,7 +494,17 @@ class FroniusController(InverterController):
                     _LOGGER.error("Failed to disable power limiting")
                     return False
 
-            _LOGGER.info(f"Successfully curtailed Fronius inverter at {self.host}")
+
+                if not await self._verify_power_limit_control(
+                    expected_enabled=0,
+                ):
+                    return False
+
+            _LOGGER.info(
+                "Fronius curtailment control confirmed at %s; "
+                "physical site convergence is verified separately",
+                self.host,
+            )
             await asyncio.sleep(0.5)  # Brief delay for inverter to process
             return True
 
@@ -418,6 +513,11 @@ class FroniusController(InverterController):
             return False
 
     async def restore(self) -> bool:
+        """Serialize and verify restoration of unrestricted output."""
+        async with self._request_lock:
+            return await self._restore_locked()
+
+    async def _restore_locked(self) -> bool:
         """Restore normal operation of the Fronius inverter.
 
         Enables power limiting at 100% to allow full export.
@@ -460,7 +560,13 @@ class FroniusController(InverterController):
                 _LOGGER.error("Failed to enable power limiting")
                 return False
 
-            _LOGGER.info(f"Successfully restored Fronius inverter at {self.host}")
+            if not await self._verify_power_limit_control(
+                expected_enabled=1,
+                expected_limit_value=10000,
+            ):
+                return False
+
+            _LOGGER.info("Fronius normal-output controls confirmed at %s", self.host)
             await asyncio.sleep(0.5)
             return True
 
@@ -505,6 +611,11 @@ class FroniusController(InverterController):
         return attrs
 
     async def get_status(self) -> InverterState:
+        """Serialize a status snapshot with any concurrent control writes."""
+        async with self._request_lock:
+            return await self._get_status_locked()
+
+    async def _get_status_locked(self) -> InverterState:
         """Get current status of the Fronius inverter.
 
         Returns:
@@ -569,7 +680,10 @@ class FroniusController(InverterController):
             self._last_state = InverterState(
                 status=status,
                 is_curtailed=is_curtailed,
-                power_output_w=float(power_output) if power_output else None,
+                power_output_w=(
+                    float(power_output) if power_output is not None else None
+                ),
+                power_limit_percent=attrs.get("power_limit_percent"),
                 attributes=attrs,
             )
 
