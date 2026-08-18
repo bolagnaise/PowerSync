@@ -195,6 +195,17 @@ directly, then replenish the battery from a cheaper, reachable solar or
 grid-charge interval later in the 48-hour plan. This is an intrinsic Profit Max
 decision, not a separate switch or target SOC.
 
+The replenishment has to survive the solve, not just the estimate. A hold is
+selected before the plan is built, from the charge capacity each later interval
+could physically absorb, and on a charge-capacity-constrained day the rest of
+the plan may already need that capacity. PowerSync therefore re-checks every
+hold against the plan it actually produced: if the plan grid-charges later in
+the horizon at more than the feed-in price the hold was selling at, that hold is
+released and the plan is re-solved without it. Released holds are reported as
+`profit_max_solar_export.capability.post_solve_revision` with reason
+`grid_replenishment_costlier_than_export`, and holds whose feed-in price still
+beats the plan's own grid-charge cost are kept.
+
 The supported control paths are Sigenergy Modbus, Sungrow SH Modbus (including
 dual-inverter systems), FoxESS Modbus/entity/cloud variants with authoritative
 charge-limit readback, SolaX Modbus entities, Fronius Reserva/GEN24 Block

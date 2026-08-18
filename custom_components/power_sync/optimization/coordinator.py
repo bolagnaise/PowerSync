@@ -5993,6 +5993,91 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     charge_blocked_slots=hard_battery_charge_blocked,
                     solar_export_slots=[False] * len(import_prices),
                 )
+            if result.feasible and any(profit_max_solar_export_slots):
+                revised_solar_export_slots = self._revise_solar_export_holds(
+                    result,
+                    import_prices,
+                    export_prices,
+                    profit_max_solar_export_slots,
+                )
+                if revised_solar_export_slots != profit_max_solar_export_slots:
+                    dropped = sum(profit_max_solar_export_slots) - sum(
+                        revised_solar_export_slots
+                    )
+                    revised_charge_blocked = [
+                        bool(hard) or bool(profit)
+                        for hard, profit in zip(
+                            hard_battery_charge_blocked,
+                            revised_solar_export_slots,
+                            strict=False,
+                        )
+                    ]
+                    revised_result = await _run_optimizer_once(
+                        solve_reserve_override,
+                        charge_blocked_slots=revised_charge_blocked,
+                        solar_export_slots=revised_solar_export_slots,
+                    )
+                    if revised_result.feasible:
+                        # INFO, not WARNING: the selector re-proposes the same
+                        # holds every cycle, so an affected site would log this
+                        # on every solve. The plan it emits is already correct.
+                        _LOGGER.info(
+                            "Profit Max solar-export hold would be repaid by "
+                            "costlier grid charging; dropped %s of %s held "
+                            "slots and re-solved",
+                            dropped,
+                            sum(profit_max_solar_export_slots),
+                        )
+                        revision_reason = (
+                            "grid_replenishment_costlier_than_export"
+                        )
+                        previous_status = (
+                            getattr(self, "_solar_export_capability_status", {})
+                            or {}
+                        )
+                        current_slot_status = previous_status.get("current_slot")
+                        if (
+                            isinstance(current_slot_status, dict)
+                            and revised_solar_export_slots
+                            and not revised_solar_export_slots[0]
+                        ):
+                            current_slot_status = {
+                                **current_slot_status,
+                                "selected": False,
+                                "reason": revision_reason,
+                            }
+                        self._solar_export_capability_status = {
+                            **previous_status,
+                            "post_solve_revision": {
+                                "reason": revision_reason,
+                                "dropped_slots": dropped,
+                                "retained_slots": sum(revised_solar_export_slots),
+                            },
+                            "selected_slots": sum(revised_solar_export_slots),
+                            "current_slot": current_slot_status,
+                        }
+                        profit_max_solar_export_slots = revised_solar_export_slots
+                        battery_charge_blocked = revised_charge_blocked
+                        self._last_profit_max_solar_export_slots = list(
+                            profit_max_solar_export_slots
+                        )
+                        spread_import_blocked = [
+                            bool(blocked) or not bool(allowed)
+                            for blocked, allowed in zip(
+                                battery_charge_blocked,
+                                grid_charge_allowed,
+                                strict=False,
+                            )
+                        ]
+                        result = revised_result
+                    else:
+                        # Relaxing charge blocks cannot shrink the feasible
+                        # set, so this is defensive only: never trade a
+                        # working plan for an infeasible one.
+                        _LOGGER.warning(
+                            "Profit Max solar-export hold revision was "
+                            "infeasible; keeping the original solve"
+                        )
             used_reference_override = solve_reserve_override is not None
 
             schedule = result.schedule
@@ -10940,6 +11025,66 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "rejection_counts": rejection_counts,
         }
         return selected
+
+    def _revise_solar_export_holds(
+        self,
+        result: OptimizerResult,
+        import_prices: list[float],
+        export_prices: list[float],
+        solar_export_slots: list[bool],
+    ) -> list[bool]:
+        """Drop solar-export holds the solved plan repays with costlier grid.
+
+        ``_profit_max_solar_export_slots`` funds each deferral from the
+        cheapest future charge capacity it can find, but that capacity is raw
+        per-slot headroom: the selector cannot know how much of it the rest of
+        the plan already needs. When the plan is charge-capacity constrained
+        the same solar is counted twice — once as the charge it was always
+        going to do, once as the deferral's replenishment — and the solve makes
+        up the difference with priced grid import instead. The hold is a hard
+        pre-LP charge block, so the LP cannot reject it. Re-check each hold
+        against the grid charging the solve actually planned after it and drop
+        the ones that lose the round trip.
+        """
+        actions = getattr(getattr(result, "schedule", None), "actions", None) or []
+        n = min(
+            len(solar_export_slots),
+            len(import_prices),
+            len(export_prices),
+            len(actions),
+        )
+        if n <= 0:
+            return list(solar_export_slots)
+        efficiency = float(
+            getattr(getattr(self, "_optimizer", None), "efficiency", 0.92) or 0.92
+        )
+        efficiency = max(0.01, min(1.0, efficiency))
+        margin = 0.001  # Same anti-churn margin the selector applies.
+        # Worst grid-charge cost at or after each slot. Deferred solar can only
+        # displace grid charging planned later in the same horizon, and a
+        # rational plan would shave its most expensive grid charge first.
+        worst_later_charge_cost: list[float | None] = [None] * (n + 1)
+        for idx in range(n - 1, -1, -1):
+            worst = worst_later_charge_cost[idx + 1]
+            action = actions[idx]
+            if (
+                getattr(action, "action", None) == "charge"
+                and float(getattr(action, "battery_charge_w", 0.0) or 0.0) > 0.0
+            ):
+                cost = float(import_prices[idx]) / efficiency
+                worst = cost if worst is None else max(worst, cost)
+            worst_later_charge_cost[idx] = worst
+        revised = list(solar_export_slots)
+        for idx in range(n):
+            if not revised[idx]:
+                continue
+            replacement_cost = worst_later_charge_cost[idx + 1]
+            if (
+                replacement_cost is not None
+                and float(export_prices[idx]) <= replacement_cost + margin
+            ):
+                revised[idx] = False
+        return revised
 
     def _time_window_slots(
         self,

@@ -11930,3 +11930,95 @@ def test_unset_export_limit_rejects_every_slot_with_that_reason(opt_module):
     status = coordinator._solar_export_capability_status
     assert status["reason"] == "export_limit_not_configured"
     assert status["rejection_counts"] == {"export_limit_not_configured": 1}
+
+
+def _hold_revision_result(opt_module, actions):
+    """Minimal solved-result stand-in carrying only the labelled actions."""
+    return SimpleNamespace(
+        feasible=True,
+        schedule=SimpleNamespace(
+            actions=[
+                SimpleNamespace(action=action, battery_charge_w=charge_w)
+                for action, charge_w in actions
+            ]
+        ),
+    )
+
+
+def test_solar_export_hold_dropped_when_repaid_by_costlier_grid_charge(
+    opt_module,
+):
+    """#383 variant: morning solar sold at 2.4c, replenished from 9.64c grid."""
+    coordinator = _sigenergy_profit_max_coordinator(opt_module)
+    coordinator._config.interval_minutes = 5
+
+    import_prices = [0.1001, 0.1001, 0.0964, 0.0964]
+    export_prices = [0.0241, 0.0241, 0.0204, 0.0204]
+    held = [True, True, False, False]
+    result = _hold_revision_result(
+        opt_module,
+        [
+            ("solar_export", 0.0),
+            ("solar_export", 0.0),
+            ("charge", 25000.0),
+            ("charge", 25000.0),
+        ],
+    )
+
+    revised = coordinator._revise_solar_export_holds(
+        result, import_prices, export_prices, held
+    )
+
+    assert revised == [False, False, False, False]
+
+
+def test_solar_export_hold_kept_when_replenishment_is_genuinely_cheaper(
+    opt_module,
+):
+    """High feed-in morning funded by a genuinely cheap grid window survives."""
+    coordinator = _sigenergy_profit_max_coordinator(opt_module)
+    coordinator._config.interval_minutes = 5
+
+    import_prices = [0.35, 0.35, 0.05, 0.05]
+    export_prices = [0.33, 0.33, 0.03, 0.03]
+    held = [True, True, False, False]
+    result = _hold_revision_result(
+        opt_module,
+        [
+            ("solar_export", 0.0),
+            ("solar_export", 0.0),
+            ("charge", 25000.0),
+            ("charge", 25000.0),
+        ],
+    )
+
+    revised = coordinator._revise_solar_export_holds(
+        result, import_prices, export_prices, held
+    )
+
+    assert revised == held
+
+
+def test_solar_export_hold_ignores_grid_charging_before_the_hold(opt_module):
+    """Deferred solar cannot displace grid charging already behind it."""
+    coordinator = _sigenergy_profit_max_coordinator(opt_module)
+    coordinator._config.interval_minutes = 5
+
+    import_prices = [0.0964, 0.0964, 0.1001, 0.1001]
+    export_prices = [0.0204, 0.0204, 0.0241, 0.0241]
+    held = [False, False, True, True]
+    result = _hold_revision_result(
+        opt_module,
+        [
+            ("charge", 25000.0),
+            ("charge", 25000.0),
+            ("solar_export", 0.0),
+            ("solar_export", 0.0),
+        ],
+    )
+
+    revised = coordinator._revise_solar_export_holds(
+        result, import_prices, export_prices, held
+    )
+
+    assert revised == held
