@@ -677,6 +677,204 @@ def test_no_departure_solar_preferred_uses_free_grid_after_battery_allocation(
     assert plan.estimated_solar_kwh == 0
 
 
+def test_cost_optimized_respects_max_grid_price_and_waits_for_free_window(
+    monkeypatch,
+):
+    """Reported W3 case: an execution-only cap must not leak into the plan."""
+    brisbane_tz = timezone(timedelta(hours=10))
+    now = datetime(2026, 8, 18, 16, 20, tzinfo=brisbane_tz)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
+        "home_power_settings"
+    ] = {
+        "phase_type": "single",
+        "max_grid_import_amps": 67,
+        "default_voltage": 240,
+    }
+    battery_actions = [
+        {
+            "timestamp": f"2026-08-19T{hour:02d}:00:00+10:00",
+            "action": "charge",
+            "power_w": 14700,
+        }
+        for hour in range(10, 14)
+    ]
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = (
+        SimpleNamespace(
+            current_schedule=SimpleNamespace(
+                to_executor_schedule=lambda: battery_actions,
+            ),
+            _config=SimpleNamespace(max_grid_import_w=16000),
+        )
+    )
+    planner = ev_planner.ChargingPlanner(hass, _FakeConfigEntry())
+    planner.surplus_forecaster.forecast_surplus = AsyncMock(
+        return_value=[
+            ev_planner.SurplusForecast(
+                hour=hour,
+                solar_kw=0.0,
+                load_kw=1.0,
+                surplus_kw=0.0,
+                confidence=0.8,
+            )
+            for hour in (
+                "2026-08-18T16:00:00",
+                "2026-08-19T10:00:00",
+                "2026-08-19T11:00:00",
+                "2026-08-19T12:00:00",
+                "2026-08-19T13:00:00",
+            )
+        ]
+    )
+    planner.price_forecaster.get_price_forecast = AsyncMock(
+        return_value=[
+            ev_planner.PriceForecast(
+                hour="2026-08-18T16:00:00",
+                import_cents=31.0,
+                export_cents=5.0,
+                period="peak",
+            ),
+            *[
+                ev_planner.PriceForecast(
+                    hour=f"2026-08-19T{hour:02d}:00:00",
+                    import_cents=0.0,
+                    export_cents=0.0,
+                    period="super_off_peak",
+                )
+                for hour in range(10, 14)
+            ],
+        ]
+    )
+
+    plan = asyncio.run(
+        planner.plan_charging(
+            vehicle_id=VIN,
+            current_soc=68,
+            target_soc=80,
+            target_time=None,
+            resolved_capacity=ev_capacity.resolve_ev_battery_capacity(
+                manual_capacity_kwh=86,
+            ),
+            charger_power_kw=2.3,
+            priority=ev_planner.ChargingPriority.COST_OPTIMIZED,
+            max_grid_price_cents=25.0,
+            minimum_charging_power_kw=1.15,
+            charging_power_step_kw=0.23,
+        )
+    )
+
+    assert [window.start_time for window in plan.windows] == [
+        f"2026-08-19T{hour:02d}:00:00" for hour in range(10, 14)
+    ]
+    assert all(window.price_cents_kwh == 0 for window in plan.windows)
+    assert all(
+        window.estimated_power_kw == pytest.approx(1.38)
+        for window in plan.windows
+    )
+    assert plan.estimated_grid_kwh == pytest.approx(5.52)
+    assert plan.estimated_cost_cents == 0
+    assert plan.can_meet_target is False
+    assert "5.5kWh" in plan.warning
+    assert "11.5kWh" in plan.warning
+    assert plan.priority == "cost_optimized"
+    assert plan.max_grid_price_cents == 25.0
+
+    should_charge, _reason, _source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=0.0,
+            current_price_cents=31.0,
+            battery_soc=98.0,
+        )
+    )
+    assert should_charge is False
+
+
+def test_available_ev_power_uses_vehicle_minimum_and_other_ev_reservations():
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
+        "home_power_settings"
+    ] = {
+        "phase_type": "single",
+        "max_grid_import_amps": 67,
+        "default_voltage": 240,
+    }
+    planner = ev_planner.ChargingPlanner(hass, _FakeConfigEntry())
+    hour = "2026-08-19T11:00:00"
+
+    assert planner._get_available_ev_power(
+        hour,
+        2.3,
+        {hour: 14.7},
+        minimum_charging_power_kw=1.15,
+        charging_power_step_kw=0.23,
+    ) == pytest.approx(1.38)
+    assert planner._get_available_ev_power(
+        hour,
+        2.3,
+        {hour: 14.7},
+        reserved_ev_power_schedule={hour: 1.15},
+        minimum_charging_power_kw=1.15,
+        charging_power_step_kw=0.23,
+    ) == 0
+
+
+def test_cost_optimized_trims_partial_window_to_declared_energy(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 8, 18, 16, 0, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+
+    plan = asyncio.run(
+        planner._plan_cost_optimized(
+            vehicle_id=VIN,
+            current_soc=68,
+            target_soc=80,
+            target_time=None,
+            energy_needed_kwh=0.7,
+            charger_power_kw=2.3,
+            surplus_forecast=[],
+            price_forecast=[
+                ev_planner.PriceForecast(
+                    hour="2026-08-18T16:00:00",
+                    import_cents=10.0,
+                    export_cents=0.0,
+                    period="offpeak",
+                )
+            ],
+            max_grid_price_cents=25.0,
+        )
+    )
+
+    assert len(plan.windows) == 1
+    window = plan.windows[0]
+    duration_hours = (
+        datetime.fromisoformat(window.end_time)
+        - datetime.fromisoformat(window.start_time)
+    ).total_seconds() / 3600
+    assert window.estimated_power_kw * duration_hours == pytest.approx(
+        window.estimated_energy_kwh
+    )
+    assert window.estimated_energy_kwh == pytest.approx(0.7)
+
+
 def test_cheapest_uses_home_site_limit_during_concurrent_free_battery_charge(
     monkeypatch,
 ):

@@ -600,6 +600,74 @@ def test_internal_ev_forecast_ignores_disabled_vehicle_beside_enabled_vehicle():
     assert ev_load == pytest.approx([2000.0] * 24)
 
 
+def test_internal_ev_forecast_suppresses_price_blocked_plan_but_keeps_deadline():
+    """Cached non-executable windows must not become optimiser household load."""
+    brisbane_tz = timezone(timedelta(hours=10))
+    now = datetime(2026, 8, 18, 16, 0, tzinfo=brisbane_tz)
+    old_now = _ha_dt.now
+    old_executor = ev_planner.get_auto_schedule_executor()
+    _ha_dt.now = lambda: now
+
+    def plan(vehicle_id, priority):
+        return ev_planner.ChargingPlan(
+            vehicle_id=vehicle_id,
+            current_soc=60,
+            target_soc=80,
+            target_time=None,
+            energy_needed_kwh=2.3,
+            windows=[
+                ev_planner.PlannedChargingWindow(
+                    start_time=now.isoformat(),
+                    end_time=(now + timedelta(hours=1)).isoformat(),
+                    source="grid_peak",
+                    estimated_power_kw=2.3,
+                    estimated_energy_kwh=2.3,
+                    price_cents_kwh=31.0,
+                    reason="cached_plan",
+                )
+            ],
+            priority=priority,
+            max_grid_price_cents=25.0,
+        )
+
+    settings = SimpleNamespace(
+        enabled=True,
+        max_charge_amps=10,
+        voltage=230,
+        phases=1,
+    )
+    executor = SimpleNamespace(
+        _state={
+            "w3rt1e": SimpleNamespace(
+                current_plan=plan("w3rt1e", "cost_optimized")
+            ),
+            "tessy": SimpleNamespace(
+                current_plan=plan("tessy", "time_critical")
+            ),
+        },
+        _settings={"w3rt1e": settings, "tessy": settings},
+        _sync_charger_params_from_vehicle_configs=lambda *_args: None,
+    )
+    ev_planner.set_auto_schedule_executor(executor)
+
+    try:
+        coordinator = SimpleNamespace(
+            _config=SimpleNamespace(interval_minutes=5),
+            _price_timestamps=lambda count: [
+                now + timedelta(minutes=5 * index) for index in range(count)
+            ],
+        )
+        components = _extract_coordinator_method(
+            "_get_ev_planned_load_components"
+        )(coordinator, 12)
+    finally:
+        _ha_dt.now = old_now
+        ev_planner.set_auto_schedule_executor(old_executor)
+
+    assert set(components) == {"tessy"}
+    assert components["tessy"] == pytest.approx([2300.0] * 12)
+
+
 def test_internal_ev_arbitration_uses_max_for_one_loadpoint_and_sum_for_distinct():
     """Smart and Price-Level candidates share a charger without stacking."""
     merge = _extract_coordinator_method("_merge_internal_ev_load_components")

@@ -115,6 +115,29 @@ PRICE_LEVEL_START_RETRY_MAX_SECONDS = 15 * 60
 FREE_GRID_PRICE_EPSILON_CENTS = 0.001
 
 
+def is_smart_schedule_grid_price_allowed(
+    *,
+    source: str,
+    price_cents: Optional[float],
+    max_grid_price_cents: Optional[float],
+    priority: Any,
+) -> bool:
+    """Return whether a planned grid window is executable by price policy."""
+    if not str(source or "").startswith("grid"):
+        return True
+
+    priority_value = getattr(priority, "value", priority)
+    if str(priority_value or "").lower() == "time_critical":
+        return True
+    if max_grid_price_cents is None or price_cents is None:
+        return True
+
+    try:
+        return float(price_cents) <= float(max_grid_price_cents)
+    except (TypeError, ValueError):
+        return True
+
+
 def _format_price_log_value(price_cents: Optional[float]) -> str:
     if price_cents is None:
         return "unknown"
@@ -636,6 +659,8 @@ class ChargingPlan:
     # Status
     can_meet_target: bool = True
     warning: Optional[str] = None
+    priority: Optional[str] = None
+    max_grid_price_cents: Optional[float] = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for API response."""
@@ -668,6 +693,8 @@ class ChargingPlan:
             "confidence": round(self.confidence, 2),
             "can_meet_target": self.can_meet_target,
             "warning": self.warning,
+            "priority": self.priority,
+            "max_grid_price_cents": self.max_grid_price_cents,
         }
 
 
@@ -2613,6 +2640,9 @@ class ChargingPlanner:
         charger_max_kw: float,
         battery_power_schedule: Dict[str, float],
         solar_surplus_kw: float = 0,
+        reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
+        minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
+        charging_power_step_kw: Optional[float] = None,
     ) -> float:
         """Calculate available power for EV charging at a given hour.
 
@@ -2629,24 +2659,39 @@ class ChargingPlanner:
             Available power for EV in kW
         """
         battery_power = battery_power_schedule.get(hour, 0)
+        reserved_ev_power = (reserved_ev_power_schedule or {}).get(hour, 0)
         grid_capacity_kw = self._get_grid_capacity_kw()
 
         if solar_surplus_kw > 0:
             # Solar surplus available - EV can use surplus + remaining grid
             # Solar powers both battery and EV, only grid import is limited
             grid_needed_by_battery = max(0, battery_power - solar_surplus_kw)
-            available_grid = grid_capacity_kw - grid_needed_by_battery
+            available_grid = (
+                grid_capacity_kw - grid_needed_by_battery - reserved_ev_power
+            )
             available_solar = max(0, solar_surplus_kw - battery_power)
             total_available = available_grid + available_solar
         else:
             # No solar - share grid capacity with battery
-            total_available = grid_capacity_kw - battery_power
+            total_available = (
+                grid_capacity_kw - battery_power - reserved_ev_power
+            )
 
         # Clamp to charger limits and minimum charging threshold
         available = min(charger_max_kw, max(0, total_available))
 
-        # Minimum power to actually charge
-        if available < MIN_CHARGING_POWER_KW:
+        # Runtime charge-current controls use whole amps. Quantize the plan to
+        # the same physical step so a fractional residual is not published as
+        # executable power that the charger cannot actually request.
+        if charging_power_step_kw and charging_power_step_kw > 0:
+            available = (
+                math.floor((available + 1e-9) / charging_power_step_kw)
+                * charging_power_step_kw
+            )
+
+        # Use the vehicle's configured physical minimum when supplied. The
+        # historical 1.4 kW fallback remains for compatibility callers.
+        if available + 1e-9 < minimum_charging_power_kw:
             return 0
 
         return available
@@ -2660,6 +2705,10 @@ class ChargingPlanner:
         resolved_capacity: ResolvedEVBatteryCapacity,
         charger_power_kw: float = 7.0,
         priority: ChargingPriority = ChargingPriority.SOLAR_PREFERRED,
+        max_grid_price_cents: Optional[float] = None,
+        minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
+        charging_power_step_kw: Optional[float] = None,
+        reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
     ) -> ChargingPlan:
         """
         Create optimal charging plan.
@@ -2691,6 +2740,8 @@ class ChargingPlanner:
                 energy_needed_kwh=0,
                 **resolved_capacity.to_dict(),
                 can_meet_target=True,
+                priority=priority.value,
+                max_grid_price_cents=max_grid_price_cents,
             )
 
         energy_needed_kwh = (soc_delta / 100) * battery_capacity_kwh / self.CHARGING_EFFICIENCY
@@ -2733,6 +2784,9 @@ class ChargingPlanner:
                 energy_needed_kwh, charger_power_kw,
                 surplus_forecast,
                 battery_power_schedule=battery_power_schedule,
+                reserved_ev_power_schedule=reserved_ev_power_schedule,
+                minimum_charging_power_kw=minimum_charging_power_kw,
+                charging_power_step_kw=charging_power_step_kw,
             )
         elif (
             priority == ChargingPriority.SOLAR_PREFERRED
@@ -2743,13 +2797,24 @@ class ChargingPlanner:
                 energy_needed_kwh, charger_power_kw,
                 surplus_forecast, price_forecast,
                 battery_power_schedule=battery_power_schedule,
+                max_grid_price_cents=max_grid_price_cents,
+                reserved_ev_power_schedule=reserved_ev_power_schedule,
+                minimum_charging_power_kw=minimum_charging_power_kw,
+                charging_power_step_kw=charging_power_step_kw,
             )
-        elif priority == ChargingPriority.COST_OPTIMIZED:
+        elif priority in (
+            ChargingPriority.COST_OPTIMIZED,
+            ChargingPriority.SOLAR_PREFERRED,
+        ):
             plan = await self._plan_cost_optimized(
                 vehicle_id, current_soc, target_soc, target_time,
                 energy_needed_kwh, charger_power_kw,
                 surplus_forecast, price_forecast,
                 battery_power_schedule=battery_power_schedule,
+                max_grid_price_cents=max_grid_price_cents,
+                reserved_ev_power_schedule=reserved_ev_power_schedule,
+                minimum_charging_power_kw=minimum_charging_power_kw,
+                charging_power_step_kw=charging_power_step_kw,
             )
         else:  # TIME_CRITICAL
             plan = await self._plan_time_critical(
@@ -2757,6 +2822,9 @@ class ChargingPlanner:
                 energy_needed_kwh, charger_power_kw,
                 surplus_forecast, price_forecast,
                 battery_power_schedule=battery_power_schedule,
+                reserved_ev_power_schedule=reserved_ev_power_schedule,
+                minimum_charging_power_kw=minimum_charging_power_kw,
+                charging_power_step_kw=charging_power_step_kw,
             )
 
         plan.battery_capacity_kwh = resolved_capacity.battery_capacity_kwh
@@ -2764,6 +2832,8 @@ class ChargingPlanner:
             resolved_capacity.effective_battery_capacity_kwh
         )
         plan.battery_capacity_source = resolved_capacity.battery_capacity_source
+        plan.priority = priority.value
+        plan.max_grid_price_cents = max_grid_price_cents
         return plan
 
     async def _plan_solar_only(
@@ -2776,6 +2846,9 @@ class ChargingPlanner:
         charger_power_kw: float,
         surplus_forecast: List[SurplusForecast],
         battery_power_schedule: Dict[str, float] = None,
+        reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
+        minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
+        charging_power_step_kw: Optional[float] = None,
     ) -> ChargingPlan:
         """Plan charging using only solar surplus with dynamic power sharing."""
         windows = []
@@ -2813,19 +2886,33 @@ class ChargingPlanner:
                     charger_power_kw,
                     battery_power_schedule,
                     solar_surplus_kw=forecast.surplus_kw,
+                    reserved_ev_power_schedule=reserved_ev_power_schedule,
+                    minimum_charging_power_kw=minimum_charging_power_kw,
+                    charging_power_step_kw=charging_power_step_kw,
                 )
 
-                if available_power < MIN_CHARGING_POWER_KW:
+                if available_power < minimum_charging_power_kw:
                     continue
 
                 energy_this_hour = available_power * usable_fraction
 
                 # Don't over-allocate
                 energy_this_hour = min(energy_this_hour, energy_needed_kwh - energy_allocated)
+                planned_start = max(hour_dt, now)
+                planned_end = end_dt
+                if energy_this_hour + 1e-9 < available_power * usable_fraction:
+                    planned_end = planned_start + timedelta(
+                        hours=energy_this_hour / available_power
+                    )
+                display_start, display_end = _forecast_window_display_bounds(
+                    forecast.hour,
+                    planned_end,
+                    start_dt=planned_start,
+                )
 
                 windows.append(PlannedChargingWindow(
-                    start_time=hour_dt.isoformat(),
-                    end_time=end_dt.isoformat(),
+                    start_time=display_start,
+                    end_time=display_end,
                     source="solar_surplus",
                     estimated_power_kw=available_power,
                     estimated_energy_kwh=energy_this_hour,
@@ -2868,6 +2955,10 @@ class ChargingPlanner:
         surplus_forecast: List[SurplusForecast],
         price_forecast: List[PriceForecast],
         battery_power_schedule: Dict[str, float] = None,
+        max_grid_price_cents: Optional[float] = None,
+        reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
+        minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
+        charging_power_step_kw: Optional[float] = None,
     ) -> ChargingPlan:
         """Plan charging preferring solar, falling back to offpeak grid with dynamic power sharing."""
         windows = []
@@ -2911,19 +3002,33 @@ class ChargingPlanner:
                     charger_power_kw,
                     battery_power_schedule,
                     solar_surplus_kw=forecast.surplus_kw,
+                    reserved_ev_power_schedule=reserved_ev_power_schedule,
+                    minimum_charging_power_kw=minimum_charging_power_kw,
+                    charging_power_step_kw=charging_power_step_kw,
                 )
 
-                if available_power < MIN_CHARGING_POWER_KW:
+                if available_power < minimum_charging_power_kw:
                     continue
 
                 energy_this_hour = min(
                     available_power * usable_fraction,
                     energy_needed_kwh - solar_energy - grid_energy,
                 )
+                planned_start = max(hour_dt, now)
+                planned_end = end_dt
+                if energy_this_hour + 1e-9 < available_power * usable_fraction:
+                    planned_end = planned_start + timedelta(
+                        hours=energy_this_hour / available_power
+                    )
+                display_start, display_end = _forecast_window_display_bounds(
+                    forecast.hour,
+                    planned_end,
+                    start_dt=planned_start,
+                )
 
                 windows.append(PlannedChargingWindow(
-                    start_time=hour_dt.isoformat(),
-                    end_time=end_dt.isoformat(),
+                    start_time=display_start,
+                    end_time=display_end,
                     source="solar_surplus",
                     estimated_power_kw=available_power,
                     estimated_energy_kwh=energy_this_hour,
@@ -2972,24 +3077,47 @@ class ChargingPlanner:
                 if self._is_grid_charging_blocked_at(hour_dt):
                     continue
 
+                source = (
+                    f"grid_{price_data.period}"
+                    if price_data.period
+                    else "grid_cheap"
+                )
+                if not is_smart_schedule_grid_price_allowed(
+                    source=source,
+                    price_cents=price_data.import_cents,
+                    max_grid_price_cents=max_grid_price_cents,
+                    priority=ChargingPriority.SOLAR_PREFERRED,
+                ):
+                    continue
+
                 # Dynamic power sharing: cheap hours = battery charging too
                 available_power = self._get_available_ev_power(
                     hour_key,
                     charger_power_kw,
                     battery_power_schedule,
                     solar_surplus_kw=0,  # No solar during grid-only hours
+                    reserved_ev_power_schedule=reserved_ev_power_schedule,
+                    minimum_charging_power_kw=minimum_charging_power_kw,
+                    charging_power_step_kw=charging_power_step_kw,
                 )
 
-                if available_power < MIN_CHARGING_POWER_KW:
+                if available_power < minimum_charging_power_kw:
                     continue  # Not enough capacity, try next hour
 
                 energy_this_hour = min(
                     available_power * usable_fraction,
                     remaining_energy - grid_energy,
                 )
+                planned_start = max(hour_dt, now)
+                planned_end = end_dt
+                if energy_this_hour + 1e-9 < available_power * usable_fraction:
+                    planned_end = planned_start + timedelta(
+                        hours=energy_this_hour / available_power
+                    )
                 display_start, display_end = _forecast_window_display_bounds(
                     price_data.hour,
-                    end_dt,
+                    planned_end,
+                    start_dt=planned_start,
                     preserve_offset=(
                         hour_dt.replace(
                             minute=0,
@@ -3001,7 +3129,6 @@ class ChargingPlanner:
                 )
 
                 # Label source based on period type
-                source = f"grid_{price_data.period}" if price_data.period else "grid_cheap"
                 reason = "offpeak_rate" if price_data.period == "offpeak" else "cheap_rate"
 
                 windows.append(PlannedChargingWindow(
@@ -3063,6 +3190,10 @@ class ChargingPlanner:
         surplus_forecast: List[SurplusForecast],
         price_forecast: List[PriceForecast],
         battery_power_schedule: Dict[str, float] = None,
+        max_grid_price_cents: Optional[float] = None,
+        reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
+        minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
+        charging_power_step_kw: Optional[float] = None,
     ) -> ChargingPlan:
         """
         Plan charging to minimize cost while meeting departure deadline.
@@ -3178,6 +3309,9 @@ class ChargingPlanner:
                 charger_power_kw,
                 battery_power_schedule,
                 solar_surplus_kw=solar_available,
+                reserved_ev_power_schedule=reserved_ev_power_schedule,
+                minimum_charging_power_kw=minimum_charging_power_kw,
+                charging_power_step_kw=charging_power_step_kw,
             )
 
             # When grid is free (0c) or negative, use full charger power - don't reduce for solar
@@ -3193,14 +3327,36 @@ class ChargingPlanner:
             # Skip grid hours that fall inside a demand-charge peak window unless
             # the user has opted into grid charging during demand windows.
             grid_blocked = self._is_grid_charging_blocked_at(hour_dt)
+            grid_source = f"grid_{price.period}"
+            price_allowed = is_smart_schedule_grid_price_allowed(
+                source=grid_source,
+                price_cents=price.import_cents,
+                max_grid_price_cents=max_grid_price_cents,
+                priority=ChargingPriority.COST_OPTIMIZED,
+            )
 
-            if grid_power > 0.5 and not grid_blocked:  # At least 0.5kW from grid
+            if (
+                grid_power > 0.5
+                and not grid_blocked
+                and price_allowed
+            ):  # At least 0.5kW from grid
                 charging_options.append({
                     "hour": display_start,
                     "hour_dt": hour_dt,
+                    "bounded_start": max(hour_dt, now),
+                    "bounded_end": hour_end,
+                    "forecast_hour": price.hour,
+                    "preserve_offset": (
+                        hour_dt.replace(
+                            minute=0,
+                            second=0,
+                            microsecond=0,
+                        ).isoformat()
+                        in repeated_price_hours
+                    ),
                     "end_time": display_end,
                     "identity": option_identity,
-                    "source": f"grid_{price.period}",
+                    "source": grid_source,
                     "power_kw": grid_power,
                     "cost_cents": price.import_cents,
                     "actual_price": price.import_cents,
@@ -3297,10 +3453,22 @@ class ChargingPlanner:
             usable = option.get("usable_fraction", 1.0)
             energy_this_hour = min(option["power_kw"] * usable, energy_needed_kwh - energy_allocated)
             hour_dt = option["hour_dt"]
+            start_time = option["hour"]
             end_time = option["end_time"]
+            if energy_this_hour + 1e-9 < option["power_kw"] * usable:
+                bounded_start = option.get("bounded_start", max(hour_dt, now))
+                bounded_end = bounded_start + timedelta(
+                    hours=energy_this_hour / option["power_kw"]
+                )
+                start_time, end_time = _forecast_window_display_bounds(
+                    option.get("forecast_hour", option["hour"]),
+                    bounded_end,
+                    start_dt=bounded_start,
+                    preserve_offset=bool(option.get("preserve_offset", False)),
+                )
 
             windows.append(PlannedChargingWindow(
-                start_time=option["hour"],
+                start_time=start_time,
                 end_time=end_time,
                 source=option["source"],
                 estimated_power_kw=option["power_kw"],
@@ -3323,6 +3491,13 @@ class ChargingPlanner:
 
         # Calculate if we can meet target
         can_meet = energy_allocated >= energy_needed_kwh * 0.9
+        warning = None
+        if not can_meet:
+            warning = (
+                f"Planned {energy_allocated:.1f}kWh but need "
+                f"{energy_needed_kwh:.1f}kWh within configured price and "
+                "site limits"
+            )
 
         # Log the plan
         _LOGGER.info(
@@ -3350,6 +3525,7 @@ class ChargingPlanner:
             estimated_cost_cents=total_cost,
             confidence=0.8 if can_meet else 0.5,
             can_meet_target=can_meet,
+            warning=warning,
         )
 
         return plan
@@ -3365,6 +3541,9 @@ class ChargingPlanner:
         surplus_forecast: List[SurplusForecast],
         price_forecast: List[PriceForecast],
         battery_power_schedule: Dict[str, float] = None,
+        reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
+        minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
+        charging_power_step_kw: Optional[float] = None,
     ) -> ChargingPlan:
         """Plan charging to meet deadline, minimizing cost as secondary goal."""
         battery_power_schedule = battery_power_schedule or {}
@@ -3376,6 +3555,9 @@ class ChargingPlanner:
                 energy_needed_kwh, charger_power_kw,
                 surplus_forecast, price_forecast,
                 battery_power_schedule=battery_power_schedule,
+                reserved_ev_power_schedule=reserved_ev_power_schedule,
+                minimum_charging_power_kw=minimum_charging_power_kw,
+                charging_power_step_kw=charging_power_step_kw,
             )
 
         # If the target can be met entirely inside guaranteed free-grid
@@ -3393,6 +3575,9 @@ class ChargingPlanner:
             surplus_forecast,
             price_forecast,
             battery_power_schedule=battery_power_schedule,
+            reserved_ev_power_schedule=reserved_ev_power_schedule,
+            minimum_charging_power_kw=minimum_charging_power_kw,
+            charging_power_step_kw=charging_power_step_kw,
         )
         if (
             cost_plan.can_meet_target
@@ -5829,7 +6014,12 @@ class AutoScheduleExecutor:
         # Apply additional constraints based on priority mode
         if should_charge and source.startswith("grid"):
             # Check price constraint (but not for time_critical - deadline takes priority)
-            if current_price_cents > effective_max_price and not is_time_critical:
+            if not is_smart_schedule_grid_price_allowed(
+                source=source,
+                price_cents=current_price_cents,
+                max_grid_price_cents=effective_max_price,
+                priority=effective_priority,
+            ):
                 should_charge = False
                 reason = f"Grid price {current_price_cents:.0f}c > max {effective_max_price:.0f}c"
 
@@ -6103,6 +6293,45 @@ class AutoScheduleExecutor:
             reason,
         )
 
+    def _other_planned_ev_power_schedule(
+        self,
+        vehicle_id: str,
+    ) -> Dict[str, float]:
+        """Return hourly site capacity already reserved by other EV plans."""
+        reserved: Dict[str, float] = {}
+        for other_id, other_state in self._state.items():
+            if vehicle_ids_match(vehicle_id, other_id):
+                continue
+            other_settings = self._settings.get(other_id)
+            if other_settings is None or not other_settings.enabled:
+                continue
+            other_plan = other_state.current_plan
+            if other_plan is None:
+                continue
+
+            for window in other_plan.windows:
+                try:
+                    start = datetime.fromisoformat(window.start_time)
+                    end = datetime.fromisoformat(window.end_time)
+                    power_kw = float(window.estimated_power_kw)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(power_kw) or power_kw <= 0:
+                    continue
+                if start.tzinfo is not None:
+                    start = _as_ha_local_naive(start)
+                if end.tzinfo is not None:
+                    end = _as_ha_local_naive(end)
+                if end <= start:
+                    continue
+
+                hour = start.replace(minute=0, second=0, microsecond=0)
+                while hour < end:
+                    key = hour.isoformat()
+                    reserved[key] = reserved.get(key, 0.0) + power_kw
+                    hour += timedelta(hours=1)
+        return reserved
+
     async def _regenerate_plan(
         self,
         vehicle_id: str,
@@ -6169,16 +6398,24 @@ class AutoScheduleExecutor:
                     )
                 )
             charger_power_kw = settings.get_max_charge_power_kw()
+            charger_voltage = settings.voltage
+            charger_phases = settings.phases
             if charger_capability is not None:
+                charger_voltage = charger_capability["voltage"]
+                charger_phases = charger_capability["phases"]
                 charger_power_kw = (
                     charger_capability["max_charge_amps"]
-                    * charger_capability["voltage"]
-                    * charger_capability["phases"]
+                    * charger_voltage
+                    * charger_phases
                     / 1000.0
                 )
             # Use per-day priority based on the target departure day
-            effective_priority = settings.get_effective_priority(
+            planning_weekday = (
                 target_time.weekday() if target_time else now.weekday()
+            )
+            effective_priority = settings.get_effective_priority(planning_weekday)
+            charging_power_step_kw = (
+                charger_voltage * charger_phases / 1000.0
             )
             plan = await self.planner.plan_charging(
                 vehicle_id=vehicle_id,
@@ -6188,6 +6425,16 @@ class AutoScheduleExecutor:
                 resolved_capacity=resolved_capacity,
                 priority=effective_priority,
                 charger_power_kw=charger_power_kw,
+                max_grid_price_cents=settings.get_effective_max_grid_price(
+                    planning_weekday
+                ),
+                minimum_charging_power_kw=(
+                    settings.min_charge_amps * charging_power_step_kw
+                ),
+                charging_power_step_kw=charging_power_step_kw,
+                reserved_ev_power_schedule=(
+                    self._other_planned_ev_power_schedule(vehicle_id)
+                ),
             )
 
             state.current_plan = plan

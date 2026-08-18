@@ -13736,7 +13736,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Returns:
             Mapping of loadpoint id to Watts per interval.
         """
-        from ..automations.ev_charging_planner import get_auto_schedule_executor
+        from ..automations.ev_charging_planner import (
+            get_auto_schedule_executor,
+            is_smart_schedule_grid_price_allowed,
+        )
 
         executor = get_auto_schedule_executor()
         if not executor:
@@ -13795,6 +13798,47 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 # Skip windows entirely in the past
                 if w_end <= now:
+                    continue
+
+                plan_priority = getattr(plan, "priority", None)
+                if plan_priority is None:
+                    priority_getter = getattr(
+                        settings,
+                        "get_effective_priority",
+                        None,
+                    )
+                    plan_priority = (
+                        priority_getter(w_start.weekday())
+                        if callable(priority_getter)
+                        else getattr(settings, "priority", None)
+                    )
+                max_grid_price_cents = getattr(
+                    plan,
+                    "max_grid_price_cents",
+                    None,
+                )
+                if max_grid_price_cents is None:
+                    max_price_getter = getattr(
+                        settings,
+                        "get_effective_max_grid_price",
+                        None,
+                    )
+                    max_grid_price_cents = (
+                        max_price_getter(w_start.weekday())
+                        if callable(max_price_getter)
+                        else getattr(settings, "max_grid_price_cents", None)
+                    )
+                if not is_smart_schedule_grid_price_allowed(
+                    source=getattr(window, "source", ""),
+                    price_cents=getattr(window, "price_cents_kwh", None),
+                    max_grid_price_cents=max_grid_price_cents,
+                    priority=plan_priority,
+                ):
+                    _LOGGER.debug(
+                        "EV load overlay: skipping %s plan window above its "
+                        "Smart Schedule grid price limit",
+                        vehicle_id,
+                    )
                     continue
 
                 power_w = window.estimated_power_kw * 1000
