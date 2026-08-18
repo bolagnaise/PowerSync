@@ -3541,6 +3541,128 @@ def test_pre_export_solar_ceiling_does_not_force_discharge_for_headroom(
     assert min(action.soc for action in result.schedule.actions[:4]) >= 0.80
 
 
+def _next_day_charge_by_time_optimizer(module):
+    """Production geometry: 5-min slots over a 48 h horizon."""
+    return module.BatteryOptimizer(
+        capacity_wh=20_000,
+        max_charge_w=10_000,
+        max_discharge_w=10_000,
+        efficiency=1.0,
+        backup_reserve=0.05,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=48,
+        terminal_weight=0.0,
+    )
+
+
+def _next_day_charge_by_time_plan(
+    module,
+    *,
+    solar_kw: float,
+    night_price_delta: float = 0.0,
+):
+    """Solve an evening-armed Charge By Time target that lands the next day."""
+    n = 576
+    deadline = 210  # 17.5 h ahead: armed ~21:30 for a 15:00 next-day target
+    sunrise = 114  # 09:30 next day
+    solar = [solar_kw if sunrise <= idx < deadline else 0.0 for idx in range(n)]
+    import_prices = [
+        0.20 + (night_price_delta if idx < sunrise else 0.0) for idx in range(n)
+    ]
+
+    optimizer = _next_day_charge_by_time_optimizer(module)
+    optimizer.pre_window_slot = deadline
+    optimizer.pre_window_soc_target = 1.0
+
+    result = optimizer.optimize(
+        import_prices=import_prices,
+        export_prices=[0.03] * n,
+        solar_forecast=solar,
+        load_forecast=[0.0] * n,
+        current_soc=0.20,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=[False] * n,
+        allow_grid_charge=True,
+    )
+    dt_hours = 5 / 60
+    return {
+        "result": result,
+        "night_import_kwh": sum(result.grid_import_w[:sunrise]) / 1000 * dt_hours,
+        "day_import_kwh": sum(result.grid_import_w[sunrise:deadline]) / 1000 * dt_hours,
+        "soc_at_deadline": result.schedule.actions[deadline - 1].soc,
+        "cost": result.schedule.predicted_cost,
+    }
+
+
+def test_next_day_charge_by_time_waits_for_forecast_solar_under_flat_prices(
+    battery_optimizer_module,
+):
+    """A next-day deadline must not front-load the top-up across a solar day.
+
+    Charge By Time armed in the evening for the following afternoon leaves a
+    runway containing a whole forecast solar day. Under a flat import price the
+    placement of the grid top-up is a pure tie, so it belongs after sunrise
+    where a re-solve can still shrink it once solar over-delivers.
+    """
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    plan = _next_day_charge_by_time_plan(battery_optimizer_module, solar_kw=1.0)
+
+    assert plan["result"].feasible is True
+    # Forecast solar alone cannot reach the target, so a top-up is required...
+    assert plan["day_import_kwh"] > 1.0
+    # ...but none of it is bought before the sun is even up.
+    assert plan["night_import_kwh"] <= 0.05
+    assert plan["soc_at_deadline"] >= 0.99
+
+
+def test_next_day_charge_by_time_placement_moves_energy_without_changing_cost(
+    battery_optimizer_module,
+):
+    """The deferred top-up must be the same energy at the same cost."""
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    module = battery_optimizer_module
+    flat = _next_day_charge_by_time_plan(module, solar_kw=1.0)
+    # A cheaper night is a real price signal, not a tie: it must still win.
+    cheap_night = _next_day_charge_by_time_plan(
+        module, solar_kw=1.0, night_price_delta=-0.0001
+    )
+
+    assert cheap_night["night_import_kwh"] > 1.0
+    total_flat = flat["night_import_kwh"] + flat["day_import_kwh"]
+    total_cheap = cheap_night["night_import_kwh"] + cheap_night["day_import_kwh"]
+    assert total_flat == pytest.approx(total_cheap, abs=0.05)
+    assert flat["soc_at_deadline"] == pytest.approx(
+        cheap_night["soc_at_deadline"], abs=0.005
+    )
+    assert flat["cost"] == pytest.approx(cheap_night["cost"], abs=0.01)
+
+
+def test_deadline_without_forecast_solar_keeps_earliest_first_import(
+    battery_optimizer_module,
+):
+    """Guard the Flow Power Happy Hour fix: no solar means charge early."""
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    plan = _next_day_charge_by_time_plan(battery_optimizer_module, solar_kw=0.0)
+
+    assert plan["result"].feasible is True
+    assert plan["night_import_kwh"] > 1.0
+    assert plan["day_import_kwh"] <= 0.05
+    assert plan["soc_at_deadline"] >= 0.99
+    first_charge = next(
+        idx
+        for idx, action in enumerate(plan["result"].schedule.actions)
+        if action.battery_charge_w > 100
+    )
+    assert first_charge == 0
+
+
 def test_disallow_grid_charge_still_allows_solar_surplus_charging(
     battery_optimizer_module,
 ):

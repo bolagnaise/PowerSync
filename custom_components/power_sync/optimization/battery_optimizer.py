@@ -223,6 +223,11 @@ LP_POWER_SPLIT_THRESHOLD_KW = ACTION_THRESHOLD_W / 1000.0
 # the export window and keep a small SOC buffer for forecast error.
 PRE_WINDOW_SOLAR_CREDIT_FACTOR = 0.80
 PRE_WINDOW_SOLAR_BUFFER_SOC = 0.03
+# Deadline import bias: the earliest-first grid-import tie-break only starts
+# once the credited forecast solar still ahead of the deadline can no longer
+# move SOC by more than this. Below it, finishing early is worth more than the
+# option to let solar fill the battery for free.
+DEADLINE_IMPORT_BIAS_SOLAR_MIN_SOC = 0.03
 
 _UNSET = object()
 
@@ -1768,35 +1773,35 @@ class BatteryOptimizer:
                 return idx + 1 if period.end == base_slot else idx
         return len(periods)
 
-    def _pre_window_solar_prefill_ceilings(
+    def _pre_window_credited_solar_kwh(
         self,
         *,
         pre_window_boundary: int | None,
-        target_soc: float | None,
         solar: list[float],
         load: list[float],
         dt_hours: list[float],
-        reserve_floor: list[float],
-        current_soc: float,
         charge_pinned: list[bool] | None = None,
-    ) -> list[float | None]:
-        """Return SOC upper bounds that leave room for forecast solar."""
+    ) -> list[float] | None:
+        """Return credited storable solar energy remaining at each boundary.
+
+        Index ``b`` holds the forecast solar surplus, already discounted by the
+        configured or learned credit rules, that can still be stored between
+        boundary ``b`` and the pre-window deadline. ``None`` means no deadline
+        is active or solar crediting is switched off entirely.
+        """
         p_n = len(solar)
-        ceilings: list[float | None] = [None] * (p_n + 1)
         if (
             pre_window_boundary is None
-            or target_soc is None
             or pre_window_boundary <= 1
             or pre_window_boundary > p_n
             or self.capacity_kwh <= 0
             or self.max_charge_kw <= 0
         ):
-            return ceilings
+            return None
 
         legacy_credit_factor = max(
             0.0, min(1.0, self.pre_window_solar_credit_factor)
         )
-        legacy_buffer_soc = max(0.0, self.pre_window_solar_buffer_soc)
         learned_margin_kwh = self.pre_window_solar_error_margin_kwh
         learning_confidence = max(
             0.0, min(1.0, self.pre_window_solar_learning_confidence)
@@ -1807,7 +1812,7 @@ class BatteryOptimizer:
         else:
             learning_confidence = 0.0
         if legacy_credit_factor <= 0 and not learned_mode:
-            return ceilings
+            return None
 
         remaining_solar_kwh = [0.0] * (p_n + 1)
         for idx in range(pre_window_boundary - 1, -1, -1):
@@ -1823,9 +1828,8 @@ class BatteryOptimizer:
             stored_kwh = usable_kw * self.efficiency * dt_hours[idx]
             remaining_solar_kwh[idx] = remaining_solar_kwh[idx + 1] + stored_kwh
 
-        active_count = 0
-        min_ceiling = 1.0
-        for boundary in range(1, pre_window_boundary):
+        credited = [0.0] * (p_n + 1)
+        for boundary in range(pre_window_boundary):
             raw_remaining_kwh = remaining_solar_kwh[boundary]
             legacy_credited_kwh = raw_remaining_kwh * legacy_credit_factor
             if learned_mode:
@@ -1837,14 +1841,104 @@ class BatteryOptimizer:
                     raw_remaining_kwh
                     - ((learned_margin_kwh or 0.0) * self.efficiency),
                 )
-                credited_kwh = (
+                credited[boundary] = (
                     legacy_credited_kwh * (1.0 - learning_confidence)
                     + learned_credited_kwh * learning_confidence
                 )
-                buffer_soc = legacy_buffer_soc * (1.0 - learning_confidence)
             else:
-                credited_kwh = legacy_credited_kwh
-                buffer_soc = legacy_buffer_soc
+                credited[boundary] = legacy_credited_kwh
+        return credited
+
+    def _deadline_import_bias_start(
+        self,
+        *,
+        periods: list[_LpPeriod],
+        solar: list[float],
+        load: list[float],
+        dt_hours: list[float],
+        charge_pinned: list[bool] | None,
+        n: int,
+    ) -> int:
+        """Return the first period where the deadline import bias applies.
+
+        The earliest-first grid-import tie-break exists so a binding SOC
+        deadline finishes with slack. While credited forecast solar can still
+        reach that deadline, buying grid energy early is cost-neutral but
+        irreversible: it consumes the headroom solar would have filled for
+        free, and no later re-solve can cancel it. Keep the legacy prefer-later
+        tie-break until the credited solar still ahead of the deadline can no
+        longer move SOC by ``DEADLINE_IMPORT_BIAS_SOLAR_MIN_SOC``.
+        """
+        if self.pre_window_slot is None or not 0 < self.pre_window_slot <= n:
+            return 0
+        if getattr(self, "_relaxing", False):
+            return 0
+        credited = self._pre_window_credited_solar_kwh(
+            pre_window_boundary=self._period_index_for_base_slot(
+                periods, self.pre_window_slot
+            ),
+            solar=solar,
+            load=load,
+            dt_hours=dt_hours,
+            charge_pinned=charge_pinned,
+        )
+        if credited is None:
+            return 0
+        threshold_kwh = DEADLINE_IMPORT_BIAS_SOLAR_MIN_SOC * self.capacity_kwh
+        # `credited` is non-increasing, so the earliest-first region is the
+        # suffix beginning at the first period with no meaningful solar left.
+        for t in range(len(solar)):
+            if credited[t + 1] <= threshold_kwh:
+                return t
+        return len(solar)
+
+    def _pre_window_solar_prefill_ceilings(
+        self,
+        *,
+        pre_window_boundary: int | None,
+        target_soc: float | None,
+        solar: list[float],
+        load: list[float],
+        dt_hours: list[float],
+        reserve_floor: list[float],
+        current_soc: float,
+        charge_pinned: list[bool] | None = None,
+    ) -> list[float | None]:
+        """Return SOC upper bounds that leave room for forecast solar."""
+        p_n = len(solar)
+        ceilings: list[float | None] = [None] * (p_n + 1)
+        credited_remaining = self._pre_window_credited_solar_kwh(
+            pre_window_boundary=pre_window_boundary,
+            solar=solar,
+            load=load,
+            dt_hours=dt_hours,
+            charge_pinned=charge_pinned,
+        )
+        if target_soc is None or credited_remaining is None:
+            return ceilings
+        # `_pre_window_credited_solar_kwh` only returns a list once the
+        # boundary has passed the same validity guards.
+        boundary_count = pre_window_boundary or 0
+
+        legacy_credit_factor = max(
+            0.0, min(1.0, self.pre_window_solar_credit_factor)
+        )
+        legacy_buffer_soc = max(0.0, self.pre_window_solar_buffer_soc)
+        learned_margin_kwh = self.pre_window_solar_error_margin_kwh
+        learning_confidence = max(
+            0.0, min(1.0, self.pre_window_solar_learning_confidence)
+        )
+        learned_mode = learned_margin_kwh is not None and learning_confidence > 0
+        if learned_mode:
+            learned_margin_kwh = max(0.0, float(learned_margin_kwh or 0.0))
+        else:
+            learning_confidence = 0.0
+        buffer_soc = legacy_buffer_soc * (1.0 - learning_confidence)
+
+        active_count = 0
+        min_ceiling = 1.0
+        for boundary in range(1, boundary_count):
+            credited_kwh = credited_remaining[boundary]
             remaining_soc = credited_kwh / self.capacity_kwh
             if remaining_soc <= 1e-6:
                 continue
@@ -2883,6 +2977,23 @@ class BatteryOptimizer:
             and self.pre_window_slot > 0
             and self.pre_window_soc_target > 0.0
         )
+        # ...but only from the point where forecast solar can no longer help.
+        # A Charge By Time target armed in the evening resolves to the next
+        # day, so an unconditional earliest-first bias commits the whole grid
+        # top-up before an entire forecast solar day — at identical cost, yet
+        # no later re-solve can cancel it when solar over-delivers.
+        deadline_earliest_from = (
+            self._deadline_import_bias_start(
+                periods=periods,
+                solar=p_solar,
+                load=p_load,
+                dt_hours=p_dt,
+                charge_pinned=charge_pinned_periods,
+                n=n,
+            )
+            if deadline_mode
+            else 0
+        )
 
         # Pre-compute free charging bonus: use median non-free import price
         # so the LP sees free charging as "saving" that future import cost.
@@ -2900,9 +3011,13 @@ class BatteryOptimizer:
         )
 
         for t in range(p_n):
-            # Import/charge tie-breaker: prefer EARLIER when a deadline is
-            # binding, prefer LATER otherwise (see deadline_mode comment above).
-            import_eps = eps * (t if deadline_mode else (p_n - t))
+            # Import/charge tie-breaker: prefer EARLIER once a binding deadline
+            # can no longer be served by forecast solar, prefer LATER otherwise
+            # (see deadline_mode comment above).
+            prefer_earlier_import = (
+                deadline_mode and t >= deadline_earliest_from
+            )
+            import_eps = eps * (t if prefer_earlier_import else (p_n - t))
             c[grid_import_var(t)] = (p_import[t] + import_eps) * p_dt[t]
             # Prefer direct grid supply over a price-identical battery cycle.
             # This is only a deterministic tie-breaker (0.001 c/kWh per side),
