@@ -7615,19 +7615,22 @@ class BatteryOptimizer:
             net_home_kw = max(0.0, load_kw - solar_kw)
             free_command_candidate = base_price - bonus_price <= 0.001
             site_cap_safe = True
+            # Quota settlement and the site cap both apply to net grid import:
+            # household load plus battery charge, offset by concurrent solar.
             if self.target_charge_power_supported:
                 requested_charge_kw = self._charge_limit_kw(
                     load_kw,
                     solar_kw,
                     True,
                 )
-                potential_site_import_kw = (
-                    net_home_kw + requested_charge_kw
+                potential_site_import_kw = max(
+                    0.0,
+                    load_kw + requested_charge_kw - solar_kw,
                 )
             else:
                 fixed_command_site_import_kw = max(
                     0.0,
-                    load_kw + self.max_charge_kw,
+                    load_kw + self.max_charge_kw - solar_kw,
                 )
                 site_cap_safe = (
                     self.max_grid_import_kw is None

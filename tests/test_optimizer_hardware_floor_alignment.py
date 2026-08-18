@@ -2095,10 +2095,18 @@ def test_fixed_power_covau_quota_keeps_safe_prefix_charge(
 
 
 @pytest.mark.parametrize("backend", ["highs", "greedy"])
-@pytest.mark.parametrize("solar_kw", [0.0, 3.0])
 @pytest.mark.parametrize(
-    ("target_charge_power_supported", "expected_free_command"),
-    ((False, False), (True, True)),
+    (
+        "solar_kw",
+        "target_charge_power_supported",
+        "expected_free_command",
+    ),
+    (
+        (0.0, False, False),
+        (3.0, False, True),
+        (0.0, True, True),
+        (3.0, True, True),
+    ),
 )
 def test_quota_command_mask_matches_hardware_charge_capability(
     battery_optimizer_module,
@@ -2108,7 +2116,7 @@ def test_quota_command_mask_matches_hardware_charge_capability(
     target_charge_power_supported,
     expected_free_command,
 ):
-    """A site cap cannot make a fixed full-rate hardware command quota-safe."""
+    """Forecast solar can offset a fixed full-rate command under the site cap."""
     module = battery_optimizer_module
     _select_backend(module, monkeypatch, backend)
     optimizer = module.BatteryOptimizer(
@@ -2135,7 +2143,7 @@ def test_quota_command_mask_matches_hardware_charge_capability(
         allow_battery_export=[False, False, False],
         allow_grid_charge=True,
         import_bonus_prices=[0.3517, 0.3517, 0.3517],
-        import_bonus_cap_kwh=20.0,
+        import_bonus_cap_kwh=9.0,
     )
 
     assert result.free_import_command_slots == [expected_free_command] * 3
@@ -2145,6 +2153,57 @@ def test_quota_command_mask_matches_hardware_charge_capability(
         expected_action,
         expected_action,
     ]
+
+
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+def test_ticket_234_charge_by_time_uses_solar_offset_for_fixed_power(
+    battery_optimizer_module,
+    monkeypatch,
+    backend,
+):
+    """CovaU solar must leave fixed-rate free slots available to a SOC deadline."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, backend)
+    interval_count = 36
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=30_400,
+        max_charge_w=10_600,
+        max_discharge_w=10_600,
+        max_grid_import_w=10_600,
+        efficiency=0.92,
+        backup_reserve=0.20,
+        hardware_reserve=0.10,
+        grid_charge_soc_cap=1.0,
+        interval_minutes=5,
+        horizon_hours=3,
+        terminal_weight=0.0,
+        target_charge_power_supported=False,
+    )
+    optimizer.pre_window_slot = 34
+    optimizer.pre_window_soc_target = 1.0
+    optimizer.set_quota_bonus_groups(
+        import_group_ids=["2026-08-18"] * interval_count,
+        import_caps_by_group={"2026-08-18": 50.0},
+        export_group_ids=None,
+        export_caps_by_group=None,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.27478] * interval_count,
+        export_prices=[0.05] * interval_count,
+        solar_forecast=[5.4] * interval_count,
+        load_forecast=[1.8] * interval_count,
+        current_soc=0.234,
+        allow_battery_export=[False] * interval_count,
+        allow_grid_charge=True,
+        import_bonus_prices=[0.27478] * interval_count,
+        import_bonus_cap_kwh=50.0,
+    )
+
+    assert result.feasible is True
+    assert result.free_import_command_slots == [True] * interval_count
+    assert result.schedule.actions[0].action == "charge"
+    assert result.schedule.actions[33].soc >= 0.995
 
 
 def test_target_power_system_can_use_partial_quota_grid_charge(
