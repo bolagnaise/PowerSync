@@ -29,7 +29,9 @@ HOME_POWER_DEFAULTS: dict[str, Any] = {
 _ENTITY_ID_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 
 
-def normalize_home_power_settings(settings: Mapping[str, Any] | None) -> dict[str, Any]:
+def normalize_home_power_settings(
+    settings: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return a complete, backwards-compatible Home Power settings object."""
     normalized = dict(HOME_POWER_DEFAULTS)
     if isinstance(settings, Mapping):
