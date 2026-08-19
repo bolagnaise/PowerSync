@@ -8493,14 +8493,27 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 )
             )
         if battery_system == BATTERY_SYSTEM_SUNGROW:
-            schema_fields[
+            # An EntitySelector rejects "" and None, and voluptuous validates an
+            # Optional default even when the frontend omits the field.  A blank
+            # default therefore made this whole step unsubmittable with
+            # "Entity is neither a valid entity ID nor a valid UUID".  Only
+            # attach a default once a real entity id is stored; normalizing the
+            # stored value also neutralizes the None this step's own save path
+            # persists on existing installs.
+            stored_anchor = str(
+                self._get_option(CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY) or ""
+            ).strip()
+            anchor_key = (
                 vol.Optional(
                     CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY,
-                    default=self._get_option(
-                        CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY, ""
-                    ),
+                    default=stored_anchor,
                 )
-            ] = EntitySelector(EntitySelectorConfig(domain="sensor"))
+                if stored_anchor
+                else vol.Optional(CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY)
+            )
+            schema_fields[anchor_key] = EntitySelector(
+                EntitySelectorConfig(domain="sensor")
+            )
 
         return self.async_show_form(
             step_id="battery_connection_profile",
