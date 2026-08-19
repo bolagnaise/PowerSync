@@ -19,6 +19,11 @@ _NO_INDEPENDENT_BLOCK = {
     "custom": "no_safe_semantic_charge_block_configured",
 }
 
+# The mode values each adapter writes to hold charge at zero. They are foreign
+# modes on a site this entry does not hold, and its own baseline while it does.
+_FRONIUS_HOLD_MODE = "block charging"
+_NEOVOLT_HOLD_MODES = frozenset({"No Battery Charge", "Idle (No Dispatch)"})
+
 
 @dataclass(frozen=True)
 class SolarExportCapability:
@@ -122,8 +127,14 @@ class SolarExportChargeHoldAdapter:
         """Return whether this configured control plane has a known primitive."""
         return self.key is not None
 
-    def capability(self) -> SolarExportCapability:
-        """Resolve current availability without inferring it from object presence."""
+    def capability(self, *, held: bool = False) -> SolarExportCapability:
+        """Resolve current availability without inferring it from object presence.
+
+        ``held`` states that this entry already owns a verified hold, so the
+        adapter's own hold value is its baseline for this check rather than a
+        foreign mode. Without it a mode-readback adapter refuses because of the
+        very write it just made, and the hold tears itself down next solve.
+        """
         if not self.available:
             return SolarExportCapability(
                 False,
@@ -183,7 +194,10 @@ class SolarExportChargeHoldAdapter:
                 return SolarExportCapability(
                     False, "storage_mode_readback_unavailable", adapter=self.key
                 )
-            if "auto" not in str(mode).lower():
+            mode_text = str(mode).lower()
+            if "auto" not in mode_text and not (
+                held and _FRONIUS_HOLD_MODE in mode_text
+            ):
                 return SolarExportCapability(
                     False,
                     "storage_not_in_normal_auto_mode",
@@ -201,17 +215,18 @@ class SolarExportChargeHoldAdapter:
                     False, "dispatch_mode_readback_unavailable", adapter=self.key
                 )
             if any(
-                not {
-                    "No Battery Charge",
-                    "Idle (No Dispatch)",
-                }.intersection(set(c._dispatch_mode_options()))
+                not _NEOVOLT_HOLD_MODES.intersection(set(c._dispatch_mode_options()))
                 for c in controllers
                 if callable(getattr(c, "_dispatch_mode_options", None))
             ):
                 return SolarExportCapability(
                     False, "charge_block_option_unavailable", adapter=self.key
                 )
-            if any(str(mode) != "Normal" for mode in modes):
+            if any(
+                str(mode) != "Normal"
+                and not (held and str(mode) in _NEOVOLT_HOLD_MODES)
+                for mode in modes
+            ):
                 return SolarExportCapability(
                     False,
                     "dispatch_not_in_normal_mode",
@@ -324,11 +339,12 @@ class SolarExportChargeHoldAdapter:
         if len(current) != len(plan.get("targets", [])):
             return False
         if self.system == "fronius_reserva":
-            return all("block charging" in str(t.get("value", "")).lower() for t in current)
+            return all(
+                _FRONIUS_HOLD_MODE in str(t.get("value", "")).lower() for t in current
+            )
         if self.system == "neovolt":
             return all(
-                str(t.get("value")) in {"No Battery Charge", "Idle (No Dispatch)"}
-                for t in current
+                str(t.get("value")) in _NEOVOLT_HOLD_MODES for t in current
             )
         return all(abs(float(t.get("value", math.inf))) <= 0.001 for t in current)
 
@@ -520,9 +536,14 @@ class SolarExportHoldController:
 
     def capability(self) -> dict[str, Any]:
         """Return current provider capability unless cleanup owns the hardware."""
-        if self.active:
+        phase = self._state.get("phase")
+        if self.active and phase != "active":
+            # apply_pending and clear_pending mean the hardware is mid-flight or
+            # cleanup owns it. A verified active hold is the opposite: it proves
+            # the primitive works, so reporting it unsupported made the next
+            # solve drop solar export and tear the hold down every cycle.
             return {"supported": False, "reason": "cleanup_pending"}
-        return self._adapter.capability().as_dict()
+        return self._adapter.capability(held=(phase == "active")).as_dict()
 
     async def async_reconcile_startup(self) -> bool:
         """Clear any hold left by a restart before optimization resumes."""

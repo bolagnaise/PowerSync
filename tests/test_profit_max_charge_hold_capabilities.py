@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import importlib.util
 import math
 import sys
@@ -340,3 +341,112 @@ def test_missing_site_export_limit_warns_once_with_the_setting_name():
     assert zero["reason"] == "zero_export_site"
     assert len(warnings) == 1
     assert len(notices) == 1
+
+
+class _Store:
+    def __init__(self):
+        self.data: dict[str, Any] = {}
+
+    async def async_load(self):
+        return dict(self.data)
+
+    async def async_save(self, value):
+        self.data = dict(value)
+
+
+class _FroniusSite:
+    """Fronius control plane whose readback reflects the writes made to it."""
+
+    def __init__(self):
+        self.mode = "Auto"
+        self.writes: list[str] = []
+        self.data = {"export_limit_kw": 10.0}
+        self._controller = SimpleNamespace(
+            get_status=lambda: {"mode": self.mode},
+            block_charging=self._block_charging,
+        )
+
+    async def _block_charging(self):
+        self.mode = "Block Charging"
+        self.writes.append(self.mode)
+        return True
+
+    async def restore_normal(self):
+        self.mode = "Auto"
+        self.writes.append(self.mode)
+        return True
+
+
+def test_fronius_accepts_its_own_hold_mode_only_while_it_owns_the_hold():
+    controller = _FroniusController()
+    controller.get_status = lambda: {"mode": "Block Charging"}
+    coordinator = SimpleNamespace(_controller=controller, data={})
+    adapter = resolve_solar_export_adapter("fronius_reserva", coordinator)
+
+    unowned = adapter.capability()
+    assert not unowned.supported
+    assert unowned.reason == "storage_not_in_normal_auto_mode"
+
+    owned = adapter.capability(held=True)
+    assert owned.supported
+    assert owned.verification == "exact_mode_readback"
+
+
+def test_fronius_hold_owner_still_refuses_a_foreign_storage_mode():
+    controller = _FroniusController()
+    controller.get_status = lambda: {"mode": "Charge from Grid"}
+    coordinator = SimpleNamespace(_controller=controller, data={})
+
+    capability = resolve_solar_export_adapter(
+        "fronius_reserva", coordinator
+    ).capability(held=True)
+
+    assert not capability.supported
+    assert capability.reason == "storage_not_in_normal_auto_mode"
+
+
+def test_neovolt_accepts_its_own_hold_mode_only_while_it_owns_the_hold():
+    child = _NeovoltChild()
+    child.get_dispatch_mode = lambda: "No Battery Charge"
+    coordinator = SimpleNamespace(
+        _controller=SimpleNamespace(_controllers=[child]), data={}
+    )
+    adapter = resolve_solar_export_adapter("neovolt", coordinator)
+
+    assert adapter.capability().reason == "dispatch_not_in_normal_mode"
+    assert adapter.capability(held=True).supported
+
+    child.get_dispatch_mode = lambda: "Discharge to Grid"
+    foreign = adapter.capability(held=True)
+    assert not foreign.supported
+    assert foreign.reason == "dispatch_not_in_normal_mode"
+
+
+def test_verified_hold_survives_consecutive_solves_without_oscillating():
+    site = _FroniusSite()
+    hold = _MODULE.SolarExportHoldController(
+        _Store(), resolve_solar_export_adapter("fronius_reserva", site)
+    )
+    capability_method = _load_solar_export_capability_method([])
+    coordinator = SimpleNamespace(
+        _solar_export_hold=hold,
+        _config=SimpleNamespace(max_grid_export_w=10000),
+        _monitoring_mode_active=lambda: False,
+        _last_solar_export_upstream_outage=None,
+        hass=SimpleNamespace(data={}),
+        entry_id="entry-1",
+    )
+
+    reasons = []
+    for cycle in range(3):
+        capability = capability_method(coordinator)
+        reasons.append(capability.get("reason"))
+        if capability.get("supported"):
+            assert asyncio.run(hold.apply("entry-1", f"generation-{cycle}"))
+        else:
+            asyncio.run(hold.clear("transition_to_self_consumption"))
+
+    # The hold must not tear itself down: one hardware write, then steady state.
+    assert reasons == ["supported", "supported", "supported"]
+    assert site.writes == ["Block Charging"]
+    assert site.mode == "Block Charging"

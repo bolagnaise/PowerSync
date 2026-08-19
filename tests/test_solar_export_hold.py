@@ -5,6 +5,7 @@ import asyncio
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 _PATH = (
     Path(__file__).resolve().parent.parent
@@ -43,6 +44,17 @@ class _Adapter:
         self.exited = []
         self.restored = []
         self.held = False
+        self.capability_calls = []
+
+    def capability(self, *, held=False):
+        self.capability_calls.append(held)
+        return SimpleNamespace(
+            as_dict=lambda: {
+                "supported": True,
+                "reason": "supported",
+                "export_limit_kw": 5.0,
+            }
+        )
 
     async def prepare_charge_hold(self, owner, generation):
         return {
@@ -156,3 +168,36 @@ def test_dashboard_prefers_additive_solar_export_details():
     assert "data.current_action_detail || data.current_action" in dashboard
     assert "action: action.action_detail || action.action" in dashboard
     assert "solar_export: { label: 'Solar Export'" in dashboard
+
+
+def test_active_verified_hold_does_not_report_itself_as_cleanup_pending():
+    store = _Store()
+    adapter = _Adapter()
+    controller = SolarExportHoldController(store, adapter)
+
+    assert controller.capability()["supported"] is True
+    assert adapter.capability_calls == [False]
+
+    assert asyncio.run(controller.apply("entry", "generation"))
+    capability = controller.capability()
+
+    # A hold that applied and verified is the strongest evidence the primitive
+    # works, so the next solve must still be allowed to select solar export.
+    assert capability["supported"] is True
+    assert capability["reason"] == "supported"
+    assert adapter.capability_calls[-1] is True
+
+
+def test_pending_lifecycle_phases_still_report_cleanup_pending():
+    store = _Store()
+    adapter = _Adapter(clear=False)
+    controller = SolarExportHoldController(store, adapter)
+
+    assert asyncio.run(controller.apply("entry", "generation"))
+    assert not asyncio.run(controller.clear("transition"))
+    assert controller.status["phase"] == "clear_pending"
+
+    assert controller.capability() == {
+        "supported": False,
+        "reason": "cleanup_pending",
+    }
