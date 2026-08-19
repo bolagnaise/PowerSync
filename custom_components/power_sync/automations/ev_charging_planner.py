@@ -176,6 +176,19 @@ def _should_force_deadline_max_rate(
     )
 
 
+def _should_control_battery_target(source: str, force_max_rate: bool) -> bool:
+    """Return whether this session shares the import envelope with the battery.
+
+    Every non-solar source draws against the same grid import limit as an
+    optimizer-planned battery charge, so the battery-target controller must be
+    armed for all of them. Scoping this to ``grid_*`` sources previously left
+    other sessions reading the battery's own grid-charge draw as spare surplus.
+    ``force_max_rate`` deadline sessions opt out deliberately: they run at a
+    fixed rate with no dynamic balancing.
+    """
+    return bool(source != "solar_surplus" and not force_max_rate)
+
+
 def _should_block_smart_schedule_solar_start(
     current_surplus_kw: float,
     min_surplus_kw: float,
@@ -7271,9 +7284,9 @@ class AutoScheduleExecutor:
             )
 
         # Determine mode based on source
-        control_battery_target = (
-            source.startswith("grid")
-            and not force_max_rate
+        control_battery_target = _should_control_battery_target(
+            source,
+            force_max_rate,
         )
         battery_params = _get_optimizer_battery_params(
             self.hass,

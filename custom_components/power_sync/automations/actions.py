@@ -6994,6 +6994,68 @@ def _non_ev_home_load_kw(live_status: dict, current_ev_power_kw: float) -> float
     return max(0.0, load_power_kw - ev_kw)
 
 
+def _optimizer_planned_battery_charge_kw(hass, config_entry) -> Optional[float]:
+    """Return the LP's planned home-battery charge power for this interval.
+
+    ``None`` means the optimizer cannot answer (disabled, no schedule, stale
+    plan); callers then fall back to the session's start-time target. A live
+    plan of 0 kW is a real answer — the battery is not scheduled to charge, so
+    the EV may use the whole import envelope.
+    """
+    try:
+        from ..const import DOMAIN
+        entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+        coordinator = entry_data.get("optimization_coordinator")
+        if not coordinator or not getattr(coordinator, "_enabled", True):
+            return None
+        get_action = getattr(coordinator, "_get_current_action", None)
+        if not callable(get_action):
+            return None
+        action = get_action()
+        if action is None:
+            return None
+        charge_w = float(getattr(action, "battery_charge_w", 0.0) or 0.0)
+        if charge_w <= 0 and str(getattr(action, "action", "")) == "charge":
+            # Older schedule rows only carry the generic command power.
+            charge_w = float(getattr(action, "power_w", 0.0) or 0.0)
+        if not math.isfinite(charge_w):
+            return None
+        return max(0.0, charge_w / 1000.0)
+    except Exception as err:
+        _LOGGER.debug("Could not read planned battery charge power: %s", err)
+        return None
+
+
+def _resolve_battery_reservation_kw(
+    *,
+    session_target_kw: Any,
+    planned_charge_kw: Optional[float],
+    max_battery_charge_rate_kw: Any = None,
+) -> float:
+    """Return the battery charge reserve to protect from EV load.
+
+    The LP's planned charge power for the current interval wins over the
+    session's start-time target. That start-time value is the battery's
+    *hardware maximum*, and it is 0 whenever the session did not start inside
+    a grid window — which let the EV read the battery's own grid-charging draw
+    as spare surplus. The result feeds ``_effective_battery_charge_reserve_kw``,
+    so live BMS taper still releases headroom the battery cannot accept.
+    """
+    reservation = planned_charge_kw
+    if reservation is None:
+        try:
+            reservation = float(session_target_kw or 0.0)
+        except (TypeError, ValueError):
+            reservation = 0.0
+    if not math.isfinite(reservation) or reservation <= 0:
+        return 0.0
+
+    max_rate = _coerce_positive_float(max_battery_charge_rate_kw)
+    if max_rate is not None:
+        reservation = min(reservation, max_rate)
+    return max(0.0, reservation)
+
+
 def _initial_smart_schedule_battery_target_amps(
     live_status: dict,
     *,
@@ -7537,9 +7599,21 @@ async def _update_smart_schedule_battery_target_group(
     )
 
     params_list = [(state.get("params") or {}) for _vehicle_id, state in sessions]
-    target_battery_charge_kw = max(
-        float(params.get("target_battery_charge_kw", 0) or 0)
-        for params in params_list
+    # Same reservation rule as the single-vehicle path.
+    target_battery_charge_kw = _resolve_battery_reservation_kw(
+        session_target_kw=max(
+            float(params.get("target_battery_charge_kw", 0) or 0)
+            for params in params_list
+        ),
+        planned_charge_kw=_optimizer_planned_battery_charge_kw(hass, config_entry),
+        max_battery_charge_rate_kw=max(
+            (
+                _coerce_positive_float(params.get("max_battery_charge_rate_kw")) or 0.0
+                for params in params_list
+            ),
+            default=0.0,
+        )
+        or None,
     )
     try:
         battery_soc = float(live_status.get("battery_soc", 0) or 0)
@@ -9830,8 +9904,14 @@ async def _dynamic_ev_update(
     params = state.get("params") or {}
 
     # target_battery_charge_kw: How much we want the battery to charge (positive = charging into battery)
-    # e.g., 5.0 means we want 5kW going INTO the battery
-    target_battery_charge_kw = params.get("target_battery_charge_kw", 5.0)
+    # e.g., 5.0 means we want 5kW going INTO the battery. The optimizer's plan
+    # for this interval outranks the session's start-time value, which is the
+    # battery's hardware maximum and is 0 outside a grid-window start.
+    target_battery_charge_kw = _resolve_battery_reservation_kw(
+        session_target_kw=params.get("target_battery_charge_kw", 5.0),
+        planned_charge_kw=_optimizer_planned_battery_charge_kw(hass, config_entry),
+        max_battery_charge_rate_kw=params.get("max_battery_charge_rate_kw"),
+    )
     max_grid_import_kw = (
         await _resolve_max_grid_import_kw(hass, config_entry, params)
         or 12.5
@@ -10039,6 +10119,12 @@ async def _dynamic_ev_update(
         available_power_kw = battery_deficit_kw + grid_headroom_kw
     else:
         available_power_kw = grid_headroom_kw
+
+    # Hard ceiling for every branch above: never command EV load that pushes
+    # site import past the meter limit. The battery-surplus branch spends the
+    # battery's own grid-charging draw, which is not spare capacity. The
+    # scheduled minimum-rate floor below still overrides this at amp level.
+    available_power_kw = min(available_power_kw, grid_headroom_kw)
 
     # Convert available power to amps (P = V × I × phases for AC charging)
     available_amps = (available_power_kw * 1000) / (voltage * phases)
@@ -10992,7 +11078,16 @@ async def _action_start_ev_charging_dynamic_locked(
                 initial_amps = _initial_smart_schedule_battery_target_amps(
                     live_status,
                     max_grid_import_kw=mode_params["max_grid_import_kw"],
-                    target_battery_charge_kw=target_battery_charge_kw,
+                    target_battery_charge_kw=_resolve_battery_reservation_kw(
+                        session_target_kw=target_battery_charge_kw,
+                        planned_charge_kw=_optimizer_planned_battery_charge_kw(
+                            hass,
+                            config_entry,
+                        ),
+                        max_battery_charge_rate_kw=params.get(
+                            "max_battery_charge_rate_kw"
+                        ),
+                    ),
                     min_amps=min_charge_amps,
                     max_amps=max_charge_amps,
                     voltage=voltage,
