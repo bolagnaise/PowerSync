@@ -7067,3 +7067,63 @@ def test_solar_surplus_parallel_selects_only_available_inactive_vehicles(
     )
 
     assert [config["vehicle_id"] for config in selected] == [plugged_vin]
+
+
+def test_price_forecast_uses_the_configured_tariff_for_custom_tou(monkeypatch):
+    """#371: a fixed-TOU site planned its EV against a generic curve.
+
+    ``get_price_forecast()`` only reached the site's own tariff schedule for
+    five provider values. Every other site -- including every WA one, which
+    can only be configured as ``other`` -- fell through to a hard-coded
+    generic Australian curve, so a 09:00-15:00 super off-peak read as more
+    expensive than 06:00, and the car was scheduled before the cheap window.
+    """
+    perth_tz = timezone(timedelta(hours=8))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 8, 20, 6, 25, tzinfo=perth_tz),
+    )
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["tariff_schedule"] = {
+        # Synergy EV Add On shape: cheap 09:00-15:00, peak 15:00-21:00.
+        "buy_rates": {
+            "SUPER_OFF_PEAK": 0.085,
+            "ON_PEAK": 0.467,
+            "PARTIAL_PEAK": 0.239,
+        },
+        "sell_rates": {"ALL": 0},
+        "tou_periods": {
+            "SUPER_OFF_PEAK": {
+                "periods": [{"fromHour": 9, "toHour": 15, "toDayOfWeek": 6}]
+            },
+            "ON_PEAK": {
+                "periods": [{"fromHour": 15, "toHour": 21, "toDayOfWeek": 6}]
+            },
+            "PARTIAL_PEAK": {
+                "periods": [
+                    {"toHour": 9, "toDayOfWeek": 6},
+                    {"fromHour": 21, "toDayOfWeek": 6},
+                ]
+            },
+        },
+        "current_season": "Summer",
+    }
+    entry = _FakeConfigEntry()
+    entry.options = {"electricity_provider": "other"}
+    forecaster = ev_planner.PriceForecaster(hass, entry)
+
+    forecast = asyncio.run(forecaster.get_price_forecast(hours=10))
+
+    by_hour = {
+        datetime.fromisoformat(item.hour).hour: item.import_cents
+        for item in forecast
+    }
+    # The site's own rates, not the generic 15/25/45 c/kWh estimate.
+    assert by_hour[6] == 23.9
+    assert by_hour[9] == 8.5
+    assert by_hour[14] == 8.5
+    # And the ordering the planner sorts on is the real one: the super
+    # off-peak window is cheaper than now, so the car belongs in it.
+    assert min(by_hour.values()) == 8.5
+    assert by_hour[9] < by_hour[6]

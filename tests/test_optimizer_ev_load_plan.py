@@ -237,3 +237,91 @@ def test_a_deadline_already_past_leaves_no_window():
         )
         is None
     )
+
+
+def test_a_naive_deadline_is_read_on_the_schedule_clock():
+    """#371: the EV planner stores HA-local *naive* deadlines.
+
+    Comparing one directly against the optimizer's aware schedule timestamps
+    raises TypeError, which the coordinator's guard turned into "no EV plan".
+    A naive boundary means the same instant as the aware one on that clock.
+    """
+    from datetime import datetime, timezone
+
+    aware = ev_load_plan.ev_plan_from_demand(
+        vehicle_id="car",
+        energy_needed_kwh=14.0,
+        charger_power_kw=7.0,
+        schedule_timestamps=_timestamps(),
+        deadline=datetime(2026, 8, 20, 2, 0, tzinfo=timezone.utc),
+    )
+    naive = ev_load_plan.ev_plan_from_demand(
+        vehicle_id="car",
+        energy_needed_kwh=14.0,
+        charger_power_kw=7.0,
+        schedule_timestamps=_timestamps(),
+        deadline=datetime(2026, 8, 20, 2, 0),
+    )
+
+    assert naive is not None
+    assert aware is not None
+    assert naive.max_power_kw == aware.max_power_kw
+
+
+def test_a_naive_available_from_is_read_on_the_schedule_clock():
+    from datetime import datetime, timezone
+
+    aware = ev_load_plan.ev_plan_from_demand(
+        vehicle_id="car",
+        energy_needed_kwh=14.0,
+        charger_power_kw=7.0,
+        schedule_timestamps=_timestamps(),
+        available_from=datetime(2026, 8, 20, 0, 0, tzinfo=timezone.utc),
+    )
+    naive = ev_load_plan.ev_plan_from_demand(
+        vehicle_id="car",
+        energy_needed_kwh=14.0,
+        charger_power_kw=7.0,
+        schedule_timestamps=_timestamps(),
+        available_from=datetime(2026, 8, 20, 0, 0),
+    )
+
+    assert naive is not None
+    assert aware is not None
+    assert naive.max_power_kw == aware.max_power_kw
+    assert naive.max_power_kw[0] == 0.0
+
+
+def test_chart_series_prefers_the_load_overlay():
+    assert ev_load_plan.ev_chart_series([0.0, 7000.0, 0.0], [0.0, 0.0, 0.0], 3) == [
+        0.0,
+        7000.0,
+        0.0,
+    ]
+
+
+def test_chart_series_falls_back_to_the_solved_ev_power():
+    """#371: the overlay is zeroed whenever the LP co-optimizes the car.
+
+    Publishing only the overlay left the app's planned-EV-load chart empty for
+    exactly the sites whose EV the solver had placed.
+    """
+    assert ev_load_plan.ev_chart_series(None, [0.0, 0.0, 11040.0, 0.0], 4) == [
+        0.0,
+        0.0,
+        11040.0,
+        0.0,
+    ]
+    assert ev_load_plan.ev_chart_series([], [11040.0, 0.0], 2) == [11040.0, 0.0]
+
+
+def test_chart_series_is_absent_when_no_ev_is_planned():
+    assert ev_load_plan.ev_chart_series(None, [0.0, 0.0], 2) is None
+    assert ev_load_plan.ev_chart_series(None, None, 2) is None
+
+
+def test_chart_series_is_truncated_to_the_schedule_length():
+    assert ev_load_plan.ev_chart_series(None, [7000.0, 7000.0, 7000.0], 2) == [
+        7000.0,
+        7000.0,
+    ]

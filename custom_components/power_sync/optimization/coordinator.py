@@ -6884,6 +6884,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         deadline = dt_util.parse_datetime(str(raw_target))
                     except (TypeError, ValueError):
                         deadline = None
+                if deadline is not None and deadline.tzinfo is None:
+                    # _regenerate_plan() stamps target_time from an HA-local
+                    # *naive* clock, so ChargingPlan.target_time parses back
+                    # naive. Comparing it against an aware now() raised
+                    # TypeError straight into the except below, which returned
+                    # None -- silently disabling EV co-optimization for every
+                    # vehicle that has a departure time set.
+                    deadline = deadline.replace(
+                        tzinfo=dt_util.DEFAULT_TIME_ZONE
+                    )
                 if deadline is not None and deadline <= now:
                     continue
 
@@ -6912,7 +6922,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             return combine_ev_charge_plans(plans, len(schedule_timestamps))
         except Exception as err:
-            _LOGGER.debug("Could not build EV charge plan for the optimizer: %s", err)
+            # Keep the guard -- a broken EV plan must not stop the solve -- but
+            # not at debug level: this swallowed a plain TypeError for every
+            # deadline-bearing vehicle and nothing surfaced it.
+            _LOGGER.warning(
+                "Could not build EV charge plan for the optimizer: %s", err
+            )
             return None
 
     def _effective_runtime_action(
@@ -17088,10 +17103,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             effective_ev_load = getattr(
                 self, "_last_effective_ev_load_forecast_w", None
             )
-            if effective_ev_load:
-                api_response["ev_charging_w"] = list(
-                    effective_ev_load[:n_sched_pts]
-                )
+            from .ev_load_plan import ev_chart_series
+
+            ev_series = ev_chart_series(
+                effective_ev_load,
+                [
+                    getattr(action, "ev_charge_w", 0.0)
+                    for action in self._current_schedule.actions
+                ],
+                n_sched_pts,
+            )
+            if ev_series is not None:
+                api_response["ev_charging_w"] = ev_series
             elif self._ev_coordinator and data.get("ev"):
                 # Backward-compatible fallback when no optimizer EV overlay exists.
                 ev_power = [0.0] * n_sched_pts

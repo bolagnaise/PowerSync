@@ -140,6 +140,40 @@ def combine_ev_charge_plans(
     )
 
 
+def ev_chart_series(overlay_w, solved_ev_w, n_slots: int):
+    """Return the planned-EV-load series to publish, or None.
+
+    The load overlay and the LP's ``ev_charge`` decision variable model the
+    same demand and are mutually exclusive: whenever the solver co-optimizes
+    the car, the overlay is deliberately zeroed. Publishing only the overlay
+    therefore showed no planned EV load at all for exactly the sites whose car
+    the solver had placed.
+    """
+    if overlay_w:
+        return list(overlay_w[:n_slots])
+    solved = [float(value or 0.0) for value in (solved_ev_w or [])[:n_slots]]
+    if any(value > 0 for value in solved):
+        return solved
+    return None
+
+
+def _match_awareness(value, reference):
+    """Return ``value`` made comparable with ``reference``.
+
+    A naive boundary is read as being on the reference's own clock, which is
+    what the EV planner means by it: both are HA-local.
+    """
+    if value is None or reference is None:
+        return value
+    reference_tz = getattr(reference, "tzinfo", None)
+    value_tz = getattr(value, "tzinfo", None)
+    if reference_tz is not None and value_tz is None:
+        return value.replace(tzinfo=reference_tz)
+    if reference_tz is None and value_tz is not None:
+        return value.replace(tzinfo=None)
+    return value
+
+
 def ev_plan_from_demand(
     *,
     vehicle_id: str,
@@ -163,6 +197,13 @@ def ev_plan_from_demand(
     power_kw = max(0.0, _finite(charger_power_kw))
     if energy_kwh <= 1e-6 or power_kw <= 1e-6 or not schedule_timestamps:
         return None
+
+    # The EV planner stores its deadlines as HA-local *naive* times while the
+    # schedule timestamps are aware. Align them here so the availability
+    # comparisons below cannot raise TypeError on a caller that forgot to.
+    reference = schedule_timestamps[0]
+    deadline = _match_awareness(deadline, reference)
+    available_from = _match_awareness(available_from, reference)
 
     powers: list[float] = []
     for timestamp in schedule_timestamps:

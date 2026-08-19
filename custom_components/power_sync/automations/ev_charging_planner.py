@@ -2008,7 +2008,25 @@ class PriceForecaster:
         if sigenergy_forecast:
             return sigenergy_forecast
 
-        # Fall back to TOU estimation
+        # The site's own tariff schedule, whatever the provider. Gating this
+        # on a five-provider list left every fixed/custom TOU site planning
+        # against the generic curve below -- including every WA site, which
+        # cannot select a NEM retailer at all and can only be configured as
+        # "other". The EV was then scheduled against prices the site does not
+        # pay, so a real cheap window looked expensive and vice versa.
+        tariff_forecast = await self._get_tariff_forecast(hours)
+        if tariff_forecast:
+            return tariff_forecast
+
+        # Fall back to TOU estimation. This is a generic guess, not the site's
+        # tariff; log it, because falling through silently is what kept the
+        # gate above invisible.
+        _LOGGER.warning(
+            "EV price forecast: no tariff schedule available for provider "
+            "'%s'; planning against a generic time-of-use estimate, which may "
+            "not match your actual rates",
+            electricity_provider,
+        )
         return await self._estimate_tou_prices(hours)
 
     async def _get_amber_forecast(self, hours: int) -> Optional[List[PriceForecast]]:

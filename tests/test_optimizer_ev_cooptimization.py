@@ -297,3 +297,182 @@ def test_double_counting_would_halve_the_battery_plan(optimizer_module):
     peak_wrong = max(b for b, _ev in _flows(wrong))
     assert peak_correct == pytest.approx(8.6, abs=0.1)
     assert peak_wrong < peak_correct - 5.0
+
+
+# --------------------------------------------------------------------------
+# #371: the coordinator's hand-off of EV demand into the LP.
+#
+# _regenerate_plan() stamps ChargingPlan.target_time from an HA-local *naive*
+# clock. _build_ev_charge_plan() parsed it back naive and compared it against
+# an aware dt_util.now(), raising TypeError into its own broad guard -- so
+# every Smart Schedule vehicle with a departure time silently got no LP
+# co-optimization at all, and its planner-chosen windows were handed to the
+# solve as fixed load instead.
+#
+# Source-extracted (AGENTS.md pattern) so the published method body runs.
+# --------------------------------------------------------------------------
+
+_PERTH = timezone(timedelta(hours=8))
+_NOW = datetime(2026, 8, 20, 6, 25, tzinfo=_PERTH)
+
+
+def _extract_build_ev_charge_plan():
+    import ast
+
+    source = (COMPONENT_ROOT / "optimization" / "coordinator.py").read_text()
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name == "_build_ev_charge_plan"
+        ):
+            return ast.get_source_segment(source, node)
+    raise AssertionError("_build_ev_charge_plan not found in coordinator.py")
+
+
+@pytest.fixture()
+def build_ev_charge_plan():
+    """The real _build_ev_charge_plan, plus the log lines it swallows."""
+    names = _STUBS + (
+        "power_sync.automations",
+        "power_sync.automations.ev_charging_planner",
+        "power_sync.optimization._ev_plan_probe",
+    )
+    saved = {name: sys.modules.get(name, _SENTINEL) for name in names}
+    for name in names:
+        sys.modules.pop(name, None)
+
+    ha = types.ModuleType("homeassistant")
+    util = types.ModuleType("homeassistant.util")
+    dt = types.ModuleType("homeassistant.util.dt")
+    dt.now = lambda: _NOW
+    dt.utcnow = lambda: _NOW.astimezone(timezone.utc)
+    dt.UTC = timezone.utc
+    dt.DEFAULT_TIME_ZONE = _PERTH
+    dt.parse_datetime = lambda value: datetime.fromisoformat(value)
+    util.dt = dt
+    ha.util = util
+    sys.modules.update(
+        {"homeassistant": ha, "homeassistant.util": util, "homeassistant.util.dt": dt}
+    )
+
+    package = types.ModuleType("power_sync")
+    package.__path__ = [str(COMPONENT_ROOT)]
+    optimization = types.ModuleType("power_sync.optimization")
+    optimization.__path__ = [str(COMPONENT_ROOT / "optimization")]
+    automations = types.ModuleType("power_sync.automations")
+    planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+    holder: dict = {"executor": None}
+    planner.get_auto_schedule_executor = lambda: holder["executor"]
+    sys.modules.update(
+        {
+            "power_sync": package,
+            "power_sync.optimization": optimization,
+            "power_sync.automations": automations,
+            "power_sync.automations.ev_charging_planner": planner,
+        }
+    )
+
+    warnings: list[str] = []
+    probe = types.ModuleType("power_sync.optimization._ev_plan_probe")
+    probe.__package__ = "power_sync.optimization"
+    probe.dt_util = dt
+    probe.Any = object
+    probe._LOGGER = types.SimpleNamespace(
+        debug=lambda *args, **kwargs: None,
+        info=lambda *args, **kwargs: None,
+        warning=lambda message, *args: warnings.append(str(message) % args),
+        error=lambda *args, **kwargs: None,
+    )
+    sys.modules["power_sync.optimization._ev_plan_probe"] = probe
+    body = _extract_build_ev_charge_plan().splitlines()
+    wrapped = "def _outer():\n" + "\n".join(f"    {line}" for line in body)
+    wrapped += "\n    return _build_ev_charge_plan\n"
+    exec(compile(wrapped, "<extracted>", "exec"), probe.__dict__)
+    method = probe.__dict__["_outer"]()
+
+    try:
+        yield method, holder, warnings
+    finally:
+        for name, value in saved.items():
+            if value is _SENTINEL:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
+_ENTRY = types.SimpleNamespace(entry_id="entry-1")
+
+
+def _ev_executor(target_time):
+    plan = types.SimpleNamespace(
+        target_time=target_time,
+        energy_needed_kwh=13.75,
+    )
+    settings = types.SimpleNamespace(
+        enabled=True,
+        max_charge_amps=46,
+        voltage=240,
+        phases=1,
+        min_charge_amps=6,
+    )
+    return types.SimpleNamespace(
+        config_entry=_ENTRY,
+        _state={"veh-1": types.SimpleNamespace(current_plan=plan)},
+        _settings={"veh-1": settings},
+    )
+
+
+def _solve_timestamps(count=48):
+    return [_NOW + timedelta(minutes=30 * index) for index in range(count)]
+
+
+@pytest.mark.parametrize(
+    "target_time",
+    [
+        None,
+        "2026-08-20T15:00:00",           # HA-local naive: what is really stored
+        "2026-08-20T15:00:00+08:00",     # aware control
+    ],
+    ids=["no-deadline", "naive-deadline", "aware-deadline"],
+)
+def test_a_stored_departure_time_still_reaches_the_solver(
+    build_ev_charge_plan, target_time
+):
+    method, holder, warnings = build_ev_charge_plan
+    holder["executor"] = _ev_executor(target_time)
+
+    plan = method(
+        types.SimpleNamespace(config_entry=_ENTRY), _solve_timestamps()
+    )
+
+    assert plan is not None, warnings
+    assert plan.energy_needed_kwh == pytest.approx(13.75)
+    assert max(plan.max_power_kw) == pytest.approx(11.04, abs=0.01)
+    assert warnings == []
+
+
+def test_a_naive_deadline_bounds_the_window_like_an_aware_one(
+    build_ev_charge_plan,
+):
+    method, holder, _ = build_ev_charge_plan
+    coordinator = types.SimpleNamespace(config_entry=_ENTRY)
+    timestamps = _solve_timestamps()
+
+    holder["executor"] = _ev_executor("2026-08-20T15:00:00")
+    naive = method(coordinator, timestamps)
+    holder["executor"] = _ev_executor("2026-08-20T15:00:00+08:00")
+    aware = method(coordinator, timestamps)
+
+    assert naive.max_power_kw == aware.max_power_kw
+    # 06:25 -> 15:00 on 30-minute slots: the car is unavailable after that.
+    assert naive.max_power_kw[-1] == 0.0
+
+
+def test_a_deadline_already_past_is_still_skipped(build_ev_charge_plan):
+    method, holder, _ = build_ev_charge_plan
+    holder["executor"] = _ev_executor("2026-08-20T05:00:00")
+
+    assert (
+        method(types.SimpleNamespace(config_entry=_ENTRY), _solve_timestamps())
+        is None
+    )
