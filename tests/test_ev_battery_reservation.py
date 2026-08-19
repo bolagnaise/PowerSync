@@ -319,3 +319,60 @@ def test_start_path_uses_the_shared_arming_helper():
     source = (ROOT / "automations" / "ev_charging_planner.py").read_text()
 
     assert "control_battery_target = _should_control_battery_target(" in source
+
+
+# ---------------------------------------------------------------------------
+# Following the optimizer's co-planned EV power
+# ---------------------------------------------------------------------------
+
+
+def _ev_coordinator(*, ev_charge_w=0.0, enabled=True, has_field=True):
+    fields = {"action": "charge", "power_w": 0.0, "battery_charge_w": 0.0}
+    if has_field:
+        fields["ev_charge_w"] = ev_charge_w
+    return SimpleNamespace(
+        _enabled=enabled,
+        _get_current_action=lambda: SimpleNamespace(**fields),
+    )
+
+
+def test_planned_ev_power_is_read_from_the_current_action():
+    hass = _hass(_ev_coordinator(ev_charge_w=7000.0))
+
+    assert actions._optimizer_planned_ev_charge_kw(
+        hass, _Entry()
+    ) == pytest.approx(7.0)
+
+
+def test_no_ev_plan_leaves_the_controller_with_no_ceiling():
+    # A zero or absent plan must never strand a plugged-in car at 0 A; the EV
+    # planner keeps start/stop authority.
+    assert (
+        actions._optimizer_planned_ev_charge_kw(
+            _hass(_ev_coordinator(ev_charge_w=0.0)), _Entry()
+        )
+        is None
+    )
+    assert (
+        actions._optimizer_planned_ev_charge_kw(
+            _hass(_ev_coordinator(has_field=False)), _Entry()
+        )
+        is None
+    )
+    assert actions._optimizer_planned_ev_charge_kw(_hass(), _Entry()) is None
+
+
+def test_disabled_optimizer_offers_no_ev_ceiling():
+    assert (
+        actions._optimizer_planned_ev_charge_kw(
+            _hass(_ev_coordinator(ev_charge_w=7000.0, enabled=False)), _Entry()
+        )
+        is None
+    )
+
+
+def test_planned_ev_power_is_applied_as_a_ceiling_not_a_setpoint():
+    source = (ROOT / "automations" / "actions.py").read_text()
+
+    assert "planned_ev_charge_kw - current_ev_power_kw," in source
+    assert "available_power_kw = min(" in source

@@ -247,6 +247,7 @@ def _install_power_sync_stubs() -> None:
         soc: float | None = None
         battery_charge_w: float = 0.0
         battery_discharge_w: float = 0.0
+        ev_charge_w: float = 0.0
 
     @dataclass
     class _OptimizationSchedule:

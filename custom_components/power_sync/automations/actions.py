@@ -7026,6 +7026,36 @@ def _optimizer_planned_battery_charge_kw(hass, config_entry) -> Optional[float]:
         return None
 
 
+def _optimizer_planned_ev_charge_kw(hass, config_entry) -> Optional[float]:
+    """Return the EV charge power the LP planned for this interval.
+
+    ``None`` means the optimizer is not modeling EV demand, in which case the
+    EV controller keeps its own reactive rate control.
+    """
+    try:
+        from ..const import DOMAIN
+        entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+        coordinator = entry_data.get("optimization_coordinator")
+        if not coordinator or not getattr(coordinator, "_enabled", True):
+            return None
+        get_action = getattr(coordinator, "_get_current_action", None)
+        if not callable(get_action):
+            return None
+        action = get_action()
+        if action is None:
+            return None
+        planned_w = getattr(action, "ev_charge_w", None)
+        if planned_w is None:
+            return None
+        planned_kw = float(planned_w or 0.0) / 1000.0
+        if not math.isfinite(planned_kw) or planned_kw <= 0:
+            return None
+        return planned_kw
+    except Exception as err:
+        _LOGGER.debug("Could not read planned EV charge power: %s", err)
+        return None
+
+
 def _resolve_battery_reservation_kw(
     *,
     session_target_kw: Any,
@@ -10126,6 +10156,18 @@ async def _dynamic_ev_update(
     # scheduled minimum-rate floor below still overrides this at amp level.
     available_power_kw = min(available_power_kw, grid_headroom_kw)
 
+    # When the optimizer has co-planned the car against prices and the import
+    # limit, its figure for this interval is a ceiling. Deliberately a ceiling
+    # and not a setpoint: reactive control may still cut below it for live
+    # conditions, and a stale or absent plan can never strand a plugged-in car
+    # at zero. Start/stop stays with the EV planner.
+    planned_ev_charge_kw = _optimizer_planned_ev_charge_kw(hass, config_entry)
+    if planned_ev_charge_kw is not None:
+        available_power_kw = min(
+            available_power_kw,
+            planned_ev_charge_kw - current_ev_power_kw,
+        )
+
     # Convert available power to amps (P = V × I × phases for AC charging)
     available_amps = (available_power_kw * 1000) / (voltage * phases)
 
@@ -10163,6 +10205,7 @@ async def _dynamic_ev_update(
         f"deficit={battery_deficit_kw:.1f}kW, grid={grid_power_kw:.1f}kW (max={max_grid_import_kw:.1f}kW), "
         f"headroom={grid_headroom_kw:.1f}kW, available={available_power_kw:.1f}kW, "
         f"battery_reserve={effective_battery_target_kw:.1f}kW, "
+        f"ev_plan={('%.1fkW' % planned_ev_charge_kw) if planned_ev_charge_kw is not None else 'none'}, "
         f"current={current_amps}A, target={new_amps}A, no_grid_import={no_grid_import}"
         f"{', battery_depleted=True' if battery_depleted else ''}"
         f"{', battery_full=True' if battery_full else ''}"

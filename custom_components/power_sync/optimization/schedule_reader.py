@@ -21,6 +21,10 @@ class ScheduleAction:
     battery_charge_w: float = 0.0
     battery_discharge_w: float = 0.0
     reason: str | None = None
+    # Grid-side EV charging power the optimizer planned for this slot. Zero
+    # when no EV demand was modeled; the EV controller follows it so the car
+    # and the battery share one import envelope.
+    ev_charge_w: float = 0.0
     control_source: str | None = None
     control_action: str | None = None
 
@@ -40,6 +44,8 @@ class ScheduleAction:
             payload["action_reason"] = self.reason or "profit_max_solar_export"
         elif self.reason:
             payload["action_reason"] = self.reason
+        if self.ev_charge_w > 0:
+            payload["ev_charge_w"] = round(self.ev_charge_w, 1)
         if self.control_source:
             payload["control_source"] = self.control_source
         if self.control_action:

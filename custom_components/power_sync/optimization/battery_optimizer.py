@@ -30,6 +30,13 @@ from .battery_efficiency import (
     ResolvedOptimizerParameters,
 )
 from .cost_neutral import CostNeutralPlan
+from .ev_load_plan import (
+    EV_SHORTFALL_PENALTY_PER_KWH,
+    EVChargePlan,
+    ev_charge_bounds_kw,
+    expected_ev_load_kw,
+    normalize_ev_charge_plan,
+)
 from .schedule_reader import ScheduleAction, OptimizationSchedule
 
 _LOGGER = logging.getLogger(__name__)
@@ -601,6 +608,7 @@ class BatteryOptimizer:
         cost_neutral_plan: CostNeutralPlan | None = None,
         profit_max_solar_export_slots: bool | list[bool] | None = None,
         manual_control: dict[str, Any] | None = None,
+        ev_plan: EVChargePlan | None = None,
     ) -> OptimizerResult:
         """
         Run the LP optimization.
@@ -679,6 +687,10 @@ class BatteryOptimizer:
         )
         solar_forecast = self._pad_array(solar_forecast, n_steps, 0.0)
         load_forecast = self._pad_array(load_forecast, n_steps, 0.0)
+        # Pad/truncate the EV window to the solve horizon. A plan whose window
+        # falls entirely outside the horizon normalizes to None so every EV
+        # code path below is skipped and the model keeps its previous size.
+        ev_plan = normalize_ev_charge_plan(ev_plan, n_steps)
         allow_battery_export = self._normalize_battery_export_flags(
             allow_battery_export, n_steps
         )
@@ -865,6 +877,7 @@ class BatteryOptimizer:
                             manual_mode_slots,
                             manual_required_charge_kw,
                             manual_required_discharge_kw,
+                            ev_plan,
                         )
 
                     seeded_plan = cost_neutral_plan
@@ -1014,6 +1027,7 @@ class BatteryOptimizer:
                 manual_mode_slots,
                 manual_required_charge_kw,
                 manual_required_discharge_kw,
+                ev_plan,
             )
             result.solve_time_s = time.monotonic() - start_time
             result.modeled_backup_reserve = modeled_backup_reserve
@@ -2089,6 +2103,7 @@ class BatteryOptimizer:
         manual_mode_slots: list[str | None] | None = None,
         manual_required_charge_kw: list[float] | None = None,
         manual_required_discharge_kw: list[float] | None = None,
+        ev_plan: EVChargePlan | None = None,
     ) -> OptimizerResult:
         """
         Solve the LP formulation using the HiGHS solver (highspy).
@@ -2195,6 +2210,7 @@ class BatteryOptimizer:
                     manual_control_slots=fixed_manual_modes,
                     required_charge_kw=fixed_manual_charge,
                     required_discharge_kw=fixed_manual_discharge,
+                    ev_plan=ev_plan,
                 )
                 result.lp_stats["mode_iterations"] = iteration + 1
                 if result.solver_used != "highs":
@@ -2271,6 +2287,7 @@ class BatteryOptimizer:
                     manual_control_slots,
                     required_charge_kw,
                     required_discharge_kw,
+                    ev_plan,
                 )
             last_result.lp_stats = {
                 **last_result.lp_stats,
@@ -2450,6 +2467,7 @@ class BatteryOptimizer:
         manual_control_slots: list[str | None] | None = None,
         required_charge_kw: list[float] | None = None,
         required_discharge_kw: list[float] | None = None,
+        ev_plan: EVChargePlan | None = None,
     ) -> OptimizerResult:
         """Inner LP solver (separated for SOC-below-reserve guard in _solve_lp)."""
         formulation_start = time.monotonic()
@@ -2911,6 +2929,30 @@ class BatteryOptimizer:
             # physical RTE needs the legacy economic hurdle. Cold-start/default
             # solves retain the previous model size and exact objective.
             next_offset += p_n
+
+        # EV charging shares the site import limit with the battery. Modeling
+        # it as a decision variable lets the LP place the car in the cheapest
+        # slots instead of the battery plan silently over-committing headroom
+        # the car will take anyway. Solves with no EV demand keep the previous
+        # model size exactly.
+        p_ev_max_kw = (
+            ev_charge_bounds_kw(
+                ev_plan,
+                [(period.start, period.end) for period in periods],
+            )
+            if ev_plan is not None
+            else [0.0] * p_n
+        )
+        ev_charge_active = ev_plan is not None and any(
+            power > 1e-6 for power in p_ev_max_kw
+        )
+        ev_charge_offset = next_offset
+        if ev_charge_active:
+            next_offset += p_n
+        ev_shortfall_offset = next_offset
+        if ev_charge_active:
+            next_offset += 1
+
         energy_offset = next_offset
         num_vars = energy_offset + p_n + 1
 
@@ -2952,6 +2994,12 @@ class BatteryOptimizer:
 
         def battery_to_grid_var(t: int) -> int:
             return battery_to_grid_offset + t
+
+        def ev_charge_var(t: int) -> int:
+            return ev_charge_offset + t
+
+        def ev_shortfall_var() -> int:
+            return ev_shortfall_offset
 
         # === Objective function: cost minimization ===
         # minimize SUM(import_price * grid_import - export_price * grid_export) * dt
@@ -3174,6 +3222,13 @@ class BatteryOptimizer:
                 # Discharging removes SOC → add cost (penalize draining)
                 c[discharge_var(t)] += terminal_price * p_dt[t] / (eff * _terminal_unit_divisor)
 
+        if ev_charge_active:
+            # Undelivered EV energy is priced above any realistic import price
+            # so charging always wins where it is physically possible. The
+            # energy itself is already priced through grid_import, so the LP
+            # places the car in the cheapest feasible slots with no extra term.
+            c[ev_shortfall_var()] = EV_SHORTFALL_PENALTY_PER_KWH
+
         # === Equality constraints: power balance ===
         # solar[t] + grid_import[t] + battery_discharge[t] =
         # load[t] + grid_export[t] + battery_charge[t] + solar_curtail[t]
@@ -3189,6 +3244,10 @@ class BatteryOptimizer:
             A_eq[t, charge_var(t)] = -1.0
             A_eq[t, discharge_var(t)] = 1.0
             A_eq[t, curtail_var(t)] = -1.0
+            if ev_charge_active:
+                # EV charging is load: it consumes import, solar, or battery
+                # output exactly like the house does.
+                A_eq[t, ev_charge_var(t)] = -1.0
             b_eq[t] = p_load[t] - p_solar[t]
 
             # Energy transition: E[t+1] = E[t] + charge*eff*dt - discharge*dt/eff
@@ -3350,6 +3409,10 @@ class BatteryOptimizer:
                     max_reachable - reachability_margin,
                 )
                 A_ub_rows += 1
+
+        if ev_charge_active:
+            # One soft EV energy-delivery row.
+            A_ub_rows += 1
 
         A_ub = _LpMatrix((A_ub_rows, num_vars), dtype=float)
         b_ub: list[float] = []
@@ -3720,6 +3783,20 @@ class BatteryOptimizer:
             "acquisition_blocked_periods": acquisition_blocked_periods,
         }
 
+        if ev_charge_active:
+            # Deliver the requested EV energy by the end of its window.
+            # Deliberately soft: a hard row would make the whole solve
+            # infeasible whenever the car cannot physically finish in time,
+            # dropping every user to the greedy fallback over one vehicle.
+            # The shortfall price sits above any realistic import price, so
+            # the LP only leaves energy undelivered when it must.
+            for t in range(p_n):
+                A_ub[len(b_ub), ev_charge_var(t)] = (
+                    -p_dt[t] * ev_plan.charge_efficiency
+                )
+            A_ub[len(b_ub), ev_shortfall_var()] = -1.0
+            b_ub.append(-ev_plan.energy_needed_kwh)
+
         bounds = []
         for t in range(p_n):
             bounds.append((0, max_grid_kw))  # grid_import
@@ -3918,6 +3995,12 @@ class BatteryOptimizer:
                     ),
                 ))
 
+        if ev_charge_active:
+            for t in range(p_n):
+                bounds.append((0.0, p_ev_max_kw[t]))
+            # Shortfall can never exceed the energy that was requested.
+            bounds.append((0.0, ev_plan.energy_needed_kwh))
+
         bounds.append((soc_0 * cap, soc_0 * cap))
         for t in range(1, p_n + 1):
             upper_soc = solar_prefill_ceilings[t]
@@ -4074,6 +4157,7 @@ class BatteryOptimizer:
                 manual_control_slots,
                 required_charge_kw,
                 required_discharge_kw,
+                ev_plan,
             )
             greedy.lp_stats = {**lp_stats, "fallback_reason": "solver_failed"}
             return greedy
@@ -4103,6 +4187,21 @@ class BatteryOptimizer:
         battery_to_grid = self._expand_period_values(
             periods, period_battery_to_grid, n
         )
+        period_ev_charge = (
+            [x[ev_charge_var(t)] for t in range(p_n)]
+            if ev_charge_active
+            else [0.0] * p_n
+        )
+        ev_charge_kw = self._expand_period_values(periods, period_ev_charge, n)
+        if ev_charge_active:
+            unmet_kwh = max(0.0, x[ev_shortfall_var()])
+            if unmet_kwh > 0.01:
+                _LOGGER.info(
+                    "EV plan: %.2f kWh of %.2f kWh cannot be delivered in the "
+                    "available window within the site import limit",
+                    unmet_kwh,
+                    ev_plan.energy_needed_kwh,
+                )
         effective_export_prices = [
             export_prices[t] + export_bonus_prices[t]
             for t in range(n)
@@ -4128,6 +4227,7 @@ class BatteryOptimizer:
             free_import_command_slots,
             profit_max_solar_export_slots,
             manual_control_slots,
+            ev_charge_kw=ev_charge_kw,
         )
 
         provisional_grid_import, _ = self._grid_flows_from_schedule(
@@ -4658,14 +4758,27 @@ class BatteryOptimizer:
         manual_control_slots: list[str | None] | None = None,
         required_charge_kw: list[float] | None = None,
         required_discharge_kw: list[float] | None = None,
+        ev_plan: EVChargePlan | None = None,
     ) -> OptimizerResult:
         """
         Greedy fallback optimizer.
 
         Sort time steps by price spread and greedily assign charge/discharge
         while tracking SOC constraints.
+
+        The greedy heuristic cannot co-optimize the EV against the battery, so
+        it takes the conservative half of the LP's EV model: the car's
+        as-soon-as-possible draw is folded into the load array. That keeps the
+        battery plan from committing import headroom the car will take, which
+        is the failure the LP's ev_charge variable exists to prevent.
         """
         dt = self.dt_hours
+        ev_load_kw = expected_ev_load_kw(ev_plan, n, self.dt_hours)
+        if any(power > 1e-9 for power in ev_load_kw):
+            load = [
+                base + extra
+                for base, extra in zip(load, ev_load_kw)
+            ]
         eff = self.efficiency
         cap = self.capacity_kwh
         allow_battery_export = allow_battery_export or [True] * n
@@ -6012,6 +6125,7 @@ class BatteryOptimizer:
             free_import_command_slots,
             profit_max_solar_export_slots,
             manual_control_slots,
+            ev_charge_kw=ev_load_kw,
         )
 
         candidate_schedule = schedule
@@ -6275,6 +6389,7 @@ class BatteryOptimizer:
         free_import_command_slots: list[bool] | None = None,
         profit_max_solar_export_slots: list[bool] | None = None,
         manual_control_slots: list[str | None] | None = None,
+        ev_charge_kw: list[float] | None = None,
     ) -> OptimizationSchedule:
         """
         Map LP solution to battery actions.
@@ -6860,6 +6975,11 @@ class BatteryOptimizer:
                     "profit_max_solar_export"
                     if action == "solar_export"
                     else None
+                ),
+                ev_charge_w=round(
+                    max(0.0, (ev_charge_kw[t] if ev_charge_kw and t < len(ev_charge_kw) else 0.0))
+                    * 1000,
+                    1,
                 ),
             ))
 

@@ -291,6 +291,39 @@ home load leaves too little charging time or headroom. The 24-hour Action Plan a
 battery-power graph show those periods as self-consumption and battery-to-home
 power.
 
+## EV charging in the plan
+
+When Smart Schedule EV charging is configured, the optimizer plans the car and
+the home battery together against one grid import limit.
+
+The home-load forecast deliberately excludes EV charging, so before this the
+optimizer sized battery charge windows against the whole import limit while the
+car quietly consumed part of it. The battery was then throttled at runtime to
+keep the site under its meter limit and missed its charge target.
+
+Each vehicle with outstanding energy and a charging deadline contributes its
+*physical* charging envelope — from now until its deadline, at the charger's
+rate. The solver chooses the timing within that envelope, so the car moves to
+the cheapest slots that fit alongside the battery rather than simply charging
+as early as possible. Multiple vehicles combine into one site demand; per-car
+allocation stays with the EV controller, which already shares a site budget
+between loadpoints.
+
+Notes:
+
+- **Delivery is a soft target.** If the car cannot physically finish in its
+  window, the plan delivers as much as it can and logs the shortfall. It never
+  makes the whole solve infeasible.
+- **The plan is a ceiling, not a setpoint.** The EV controller may still charge
+  below the planned figure for live site conditions, and start/stop stays with
+  the EV planner — a stale or missing plan can never strand a plugged-in car at
+  zero amps.
+- **The greedy fallback still accounts for the car.** When the LP solver is
+  unavailable, the heuristic cannot co-optimize, so it treats the car as known
+  load charging as soon as its window allows. The battery plan is still correct;
+  only the cost-shifting is lost.
+- `ev_charge_w` appears on schedule slots that carry planned EV power.
+
 ## App and API fields
 
 Current settings use these keys:

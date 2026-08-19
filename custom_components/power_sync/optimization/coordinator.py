@@ -5924,6 +5924,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else None
             )
 
+            ev_charge_plan = self._build_ev_charge_plan(schedule_timestamps)
+            if ev_charge_plan is not None:
+                _LOGGER.debug(
+                    "EV demand in this solve: %.1f kWh for %s",
+                    ev_charge_plan.energy_needed_kwh,
+                    ev_charge_plan.vehicle_id,
+                )
+
             async def _run_optimizer_once(
                 reserve_floor: float | None = None,
                 export_reserve_floor: float | list[float] | None = None,
@@ -5967,6 +5975,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         cost_neutral_plan,
                         solar_export_slots or profit_max_solar_export_slots,
                         manual_control_payload,
+                        ev_charge_plan,
                     )
                 finally:
                     if reserve_floor is not None:
@@ -6814,6 +6823,79 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return True when no-idle mode should replace optimizer IDLE."""
         return bool(self._config.disable_idle_enabled)
 
+    def _build_ev_charge_plan(
+        self,
+        schedule_timestamps: list[datetime] | None,
+    ) -> Any | None:
+        """Return the site's EV demand for this solve, or None.
+
+        Every managed vehicle with outstanding energy and a charging deadline
+        contributes its physical charging envelope. The LP then places the car
+        against prices and the site import limit instead of the battery plan
+        assuming an import envelope the car will take anyway.
+        """
+        if not schedule_timestamps:
+            return None
+        try:
+            from ..automations.ev_charging_planner import (
+                get_auto_schedule_executor,
+            )
+            from .ev_load_plan import combine_ev_charge_plans, ev_plan_from_demand
+
+            executor = get_auto_schedule_executor()
+            if executor is None or getattr(
+                executor, "config_entry", None
+            ) is not self.config_entry:
+                return None
+
+            now = dt_util.now()
+            plans = []
+            for vehicle_id, state in (getattr(executor, "_state", {}) or {}).items():
+                charging_plan = getattr(state, "current_plan", None)
+                if charging_plan is None:
+                    continue
+                settings = (getattr(executor, "_settings", {}) or {}).get(vehicle_id)
+                if settings is None or not getattr(settings, "enabled", True):
+                    continue
+
+                deadline = None
+                raw_target = getattr(charging_plan, "target_time", None)
+                if raw_target:
+                    try:
+                        deadline = dt_util.parse_datetime(str(raw_target))
+                    except (TypeError, ValueError):
+                        deadline = None
+                if deadline is not None and deadline <= now:
+                    continue
+
+                charger_power_kw = (
+                    float(getattr(settings, "max_charge_amps", 0) or 0)
+                    * float(getattr(settings, "voltage", 240) or 240)
+                    * int(getattr(settings, "phases", 1) or 1)
+                    / 1000.0
+                )
+                plans.append(
+                    ev_plan_from_demand(
+                        vehicle_id=str(vehicle_id),
+                        energy_needed_kwh=getattr(
+                            charging_plan, "energy_needed_kwh", 0.0
+                        ),
+                        charger_power_kw=charger_power_kw,
+                        schedule_timestamps=schedule_timestamps,
+                        deadline=deadline,
+                        min_power_kw=(
+                            float(getattr(settings, "min_charge_amps", 0) or 0)
+                            * float(getattr(settings, "voltage", 240) or 240)
+                            * int(getattr(settings, "phases", 1) or 1)
+                            / 1000.0
+                        ),
+                    )
+                )
+            return combine_ev_charge_plans(plans, len(schedule_timestamps))
+        except Exception as err:
+            _LOGGER.debug("Could not build EV charge plan for the optimizer: %s", err)
+            return None
+
     def _effective_runtime_action(
         self,
         action_name: str | None,
@@ -6962,6 +7044,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             ),
                             battery_charge_w=action.battery_charge_w,
                             battery_discharge_w=action.battery_discharge_w,
+                            ev_charge_w=getattr(action, "ev_charge_w", 0.0),
                         )
                     )
                 soc_cursor = next_soc
@@ -6981,6 +7064,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     ),
                     battery_charge_w=0.0,
                     battery_discharge_w=discharge_w,
+                    ev_charge_w=getattr(action, "ev_charge_w", 0.0),
                 )
             )
 
@@ -10278,6 +10362,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         soc=round(soc_cursor, 4),
                         battery_charge_w=original.battery_charge_w,
                         battery_discharge_w=original.battery_discharge_w,
+                        ev_charge_w=getattr(original, "ev_charge_w", 0.0),
                     )
                     continue
                 target_w = spread_targets[pos]
@@ -10289,6 +10374,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         soc=original.soc,
                         battery_charge_w=target_w,
                         battery_discharge_w=0.0,
+                        ev_charge_w=getattr(original, "ev_charge_w", 0.0),
                     )
                 else:
                     new_actions[pos] = ScheduleAction(
@@ -10298,6 +10384,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         soc=original.soc,
                         battery_charge_w=0.0,
                         battery_discharge_w=0.0,
+                        ev_charge_w=getattr(original, "ev_charge_w", 0.0),
                     )
                 soc_cursor = _advance_soc(soc_cursor, new_actions[pos])
                 new_actions[pos].soc = round(soc_cursor, 4)
@@ -10620,6 +10707,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         soc=round(soc_after, 4) if soc_cursor is not None else original.soc,
                         battery_charge_w=0.0,
                         battery_discharge_w=battery_discharge_w,
+                        ev_charge_w=getattr(original, "ev_charge_w", 0.0),
                     )
                     if soc_cursor is not None:
                         soc_cursor = soc_after
@@ -10641,6 +10729,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         ),
                         battery_charge_w=0.0,
                         battery_discharge_w=battery_discharge_w,
+                        ev_charge_w=getattr(original, "ev_charge_w", 0.0),
                     )
                     if soc_cursor is not None:
                         soc_cursor = soc_after
@@ -15099,6 +15188,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     soc=slot.soc,
                     battery_charge_w=slot.battery_charge_w,
                     battery_discharge_w=slot.battery_discharge_w,
+                    ev_charge_w=getattr(slot, "ev_charge_w", 0.0),
                 )
 
         offgrid_count = sum(1 for s in result if s.action == "off_grid")

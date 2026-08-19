@@ -219,13 +219,15 @@ def _install_power_sync_stubs() -> None:
 
     class _ScheduleAction:
         def __init__(self, timestamp, action, power_w=0.0, soc=None,
-                     battery_charge_w=0.0, battery_discharge_w=0.0):
+                     battery_charge_w=0.0, battery_discharge_w=0.0,
+                     ev_charge_w=0.0):
             self.timestamp = timestamp
             self.action = action
             self.power_w = power_w
             self.soc = soc
             self.battery_charge_w = battery_charge_w
             self.battery_discharge_w = battery_discharge_w
+            self.ev_charge_w = ev_charge_w
 
     class _OptimizationSchedule:
         def __init__(self, actions, predicted_cost=0, predicted_savings=0,
