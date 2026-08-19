@@ -59,17 +59,38 @@ Manual, Boost, and quick-charge starts used to bypass the budget entirely:
 - `_arm_manual_quick_stop` armed its deadline in the `cancel_timer` slot, which
   would have cancelled any controller a manual session did have.
 
-With phase management enabled these now run as fixed-rate dynamic sessions
-(`dynamic_mode="battery_target"` with `fixed_charge_amps` pinned to the
-requested current) carrying `phase_load_management_required`. The user's chosen
-rate is unchanged, but every controller tick re-applies it through the
-phase-clamping command wrapper, so the current is reduced when the site is busy
-and restored when headroom returns. A manual or Boost start with no headroom at
-all is refused rather than energised and clamped afterwards. Quick-charge
-deadlines use a separate `quick_stop_timer` slot so they no longer cancel the
-controller. Boost also claims ownership through the `boost` arbitration family,
-which supersedes automated owners while still yielding to a later manual
+All three now take the same path as every other mode, **unconditionally** —
+routing through the dynamic controller is not gated on the phase-management
+setting. They run as fixed-rate dynamic sessions (`dynamic_mode="battery_target"`
+with `fixed_charge_amps` pinned to the requested current, which short-circuits
+the battery-target balancing) carrying `phase_load_management_required`. The
+user's chosen rate is unchanged, but every controller tick re-applies it through
+the command wrapper, which is where the phase clamp lives. With phase management
+on, the current is reduced when the site is busy and restored when headroom
+returns, and a start with no headroom at all is refused rather than energised
+and clamped afterwards. With it off, the wrapper passes the rate straight
+through and the session simply holds it.
+
+Only the *clamp* is behind the setting. `_phase_load_management_applies` is the
+single remaining flag check in `actions.py`; nothing else branches on it.
+
+Both manual entry points — `_start_manual_ev_charging` and
+`record_manual_ev_charging_session` — resolve their rate through the shared
+`_manual_session_target_amps()`: an explicit request wins, otherwise the rate
+the charger is already delivering (via `_observed_owned_charge_amps`), and only
+a genuinely idle charger falls back to the configured maximum. Without that
+middle step a session restored after a restart would be sped up to maximum.
+
+Quick-charge deadlines use a separate `quick_stop_timer` slot so they no longer
+cancel the controller. Boost claims ownership through the `boost` arbitration
+family, which supersedes automated owners while still yielding to a later manual
 command.
+
+One consequence of the single path: a manual start that *takes over* an existing
+PowerSync session now goes through the dynamic start's pre-start teardown, which
+sends a physical stop before the new start. The old manual path did a silent
+bookkeeping handoff with no stop command. This matches what every automated mode
+transition already did.
 
 An *uncontrolled* manual command still bypasses the clamp on purpose:
 `_phase_load_management_applies` only opts a manual-family session in when it

@@ -5453,6 +5453,46 @@ async def _stop_ha_native_charger(
         return False
 
 
+async def _manual_session_target_amps(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+    params: Mapping[str, Any],
+) -> int:
+    """Resolve the fixed rate a manual session should hold.
+
+    An explicit request wins.  Otherwise adopt the rate the charger is already
+    delivering — a manual start on an already-charging car, and a session
+    restored after a restart, must not be silently sped up to the configured
+    maximum.  Only a genuinely idle charger falls back to that maximum.
+    """
+    requested_amps = _coerce_positive_int(
+        params.get("phase_requested_amps")
+        or params.get("fixed_charge_amps")
+        or params.get("amps")
+        or params.get("charging_amps")
+    )
+    if requested_amps is not None:
+        return requested_amps
+
+    observed_amps = await _observed_owned_charge_amps(
+        hass,
+        config_entry,
+        vehicle_id,
+        params,
+    )
+    observed_int = _coerce_positive_int(observed_amps)
+    if observed_int is not None:
+        return min(observed_int, _effective_max_charge_amps(dict(params), hass))
+
+    resolved_amps, _amps_source = _resolve_dynamic_max_charge_amps(
+        hass,
+        config_entry,
+        dict(params),
+    )
+    return resolved_amps
+
+
 async def record_manual_ev_charging_session(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -5483,36 +5523,42 @@ async def record_manual_ev_charging_session(
         **(params or {}),
     }
 
-    # A manual session with no periodic controller never re-evaluates its rate,
-    # so it would hold whatever current the charger was left on and spend phase
-    # headroom the shared allocator cannot reclaim.  When phase management is
-    # enabled, run the session as a fixed-rate dynamic session instead: the
-    # rate stays the one the user asked for, but every tick re-applies it
-    # through the phase-clamping command wrapper.
-    phase_load_required = _phase_load_management_enabled(hass, config_entry)
-    requested_amps = _coerce_positive_int(
-        full_params.get("phase_requested_amps")
-        or full_params.get("fixed_charge_amps")
-        or full_params.get("amps")
-        or full_params.get("charging_amps")
+    # Manual sessions run through the same dynamic controller as every other
+    # mode.  Without one the session never re-evaluates its rate: it holds
+    # whatever current the charger was left on, and under phase management it
+    # spends headroom the shared allocator can never reclaim.  The rate stays
+    # the one the user asked for -- fixed_charge_amps short-circuits the
+    # battery-target balancing -- but every tick re-applies it through the
+    # command wrapper, which is where the phase clamp lives.
+    requested_amps = await _manual_session_target_amps(
+        hass,
+        config_entry,
+        resolved_vehicle_id,
+        full_params,
     )
-    if phase_load_required:
-        if requested_amps is None:
-            requested_amps, _amps_source = _resolve_dynamic_max_charge_amps(
-                hass,
-                config_entry,
-                full_params,
-            )
-        full_params.update(
-            {
-                "dynamic_mode": "battery_target",
-                "owner_mode": "manual",
-                "fixed_charge_amps": requested_amps,
-                "requested_fixed_charge_amps": requested_amps,
-                "phase_requested_amps": requested_amps,
-                "phase_load_management_required": True,
-            }
-        )
+    # dynamic_mode stays "manual": _dynamic_ev_update routes everything except
+    # solar_surplus through the battery-target logic, and fixed_charge_amps
+    # short-circuits that to "hold this rate".  Rewriting the mode would only
+    # lose the session's identity in status payloads.
+    full_params.update(
+        {
+            "owner_mode": "manual",
+            "fixed_charge_amps": requested_amps,
+            "requested_fixed_charge_amps": requested_amps,
+            "phase_requested_amps": requested_amps,
+            "phase_load_management_required": True,
+        }
+    )
+    # This function adopts a session that is already charging -- a takeover, or
+    # a restore after restart.  Reconciling the charger immediately is only
+    # warranted when there is a budget to enforce; otherwise the adoption stays
+    # silent, which is the documented contract (see
+    # test_manual_session_replaces_existing_owner_without_physical_stop).
+    reconcile_now = _phase_load_management_applies(
+        hass,
+        config_entry,
+        full_params,
+    )
 
     if entry_id not in _dynamic_ev_state:
         _dynamic_ev_state[entry_id] = {}
@@ -5530,18 +5576,15 @@ async def record_manual_ev_charging_session(
     except Exception as e:
         _LOGGER.debug("Manual EV: could not start session tracking: %s", e)
 
-    # current_amps stays 0: this controller has not commanded a rate yet, and
-    # the fixed-rate branch of _dynamic_ev_update only issues a command when the
-    # target differs from it.  Seeding it with the requested current would make
-    # the first tick a no-op and skip the phase clamp entirely.
-    initial_target_amps = (
-        requested_amps if phase_load_required and requested_amps else 0
-    )
+    # The fixed-rate branch of _dynamic_ev_update only commands when the target
+    # differs from current_amps.  When a clamp is due, seed 0 so the first pass
+    # actually re-applies the rate through the phase wrapper; otherwise seed the
+    # rate the charger is already on so the controller holds it silently.
     _dynamic_ev_state[entry_id][resolved_vehicle_id] = {
         "active": True,
         "params": full_params,
-        "current_amps": 0,
-        "target_amps": initial_target_amps,
+        "current_amps": 0 if reconcile_now else requested_amps,
+        "target_amps": requested_amps,
         "cancel_timer": None,
         "priority": 0,
         "paused": False,
@@ -5574,22 +5617,22 @@ async def record_manual_ev_charging_session(
     if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
         hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = _dynamic_ev_state[entry_id]
 
-    if phase_load_required:
-        async def periodic_update(_now) -> None:
-            await _dynamic_ev_update(
-                hass,
-                config_entry,
-                entry_id,
-                resolved_vehicle_id,
-            )
-
-        _dynamic_ev_state[entry_id][resolved_vehicle_id]["cancel_timer"] = (
-            async_track_time_interval(
-                hass,
-                periodic_update,
-                timedelta(seconds=30),
-            )
+    async def periodic_update(_now) -> None:
+        await _dynamic_ev_update(
+            hass,
+            config_entry,
+            entry_id,
+            resolved_vehicle_id,
         )
+
+    _dynamic_ev_state[entry_id][resolved_vehicle_id]["cancel_timer"] = (
+        async_track_time_interval(
+            hass,
+            periodic_update,
+            timedelta(seconds=30),
+        )
+    )
+    if reconcile_now:
         await _dynamic_ev_update(
             hass,
             config_entry,
@@ -5625,12 +5668,7 @@ async def _start_manual_ev_charging(
     params: Dict[str, Any],
     context: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """Start a manual session while serializing ownership handoff."""
-    from .ev_ownership import (
-        can_claim_ev_ownership,
-        record_ev_command,
-    )
-
+    """Start a manual session through the shared dynamic controller."""
     loadpoint_id = _ev_action_loadpoint_id(params)
     if params.get("charger_type", "tesla") == "tesla" and loadpoint_id == DEFAULT_VEHICLE_ID:
         # Resolve an anonymous Tesla manual start before ownership bookkeeping
@@ -5656,74 +5694,35 @@ async def _start_manual_ev_charging(
         }
         loadpoint_id = resolved_vehicle_id
 
-    # With phase management on, a manual start must be gated by the shared
-    # budget before the charger is energized, not clamped afterwards.  The
-    # dynamic path refuses the start outright when no phase headroom exists.
-    if _phase_load_management_enabled(hass, config_entry):
-        requested_amps = _coerce_positive_int(
-            params.get("amps")
-            or params.get("charging_amps")
-            or params.get("fixed_charge_amps")
-        )
-        if requested_amps is None:
-            requested_amps, _amps_source = _resolve_dynamic_max_charge_amps(
-                hass,
-                config_entry,
-                params,
-            )
-        return await _action_start_ev_charging_dynamic(
-            hass,
-            config_entry,
-            {
-                **params,
-                "vehicle_id": loadpoint_id,
-                "vehicle_vin": (
-                    None if loadpoint_id == DEFAULT_VEHICLE_ID else loadpoint_id
-                ),
-                "dynamic_mode": "battery_target",
-                "owner_mode": "manual",
-                "fixed_charge_amps": requested_amps,
-                "start_amps": requested_amps,
-                "phase_requested_amps": requested_amps,
-                "phase_load_management_required": True,
-                "reason": params.get("reason", "Manual automation start"),
-            },
-            context,
-        )
-
-    async with _start_dynamic_lock:
-        allowed, _lease_id, _lease, block_reason = can_claim_ev_ownership(
-            hass,
-            config_entry,
-            loadpoint_id,
-            owner_mode="manual",
-        )
-        if not allowed:
-            record_ev_command(
-                hass,
-                config_entry,
-                loadpoint_id,
-                command="start_manual",
-                success=False,
-                reason=block_reason or "another EV mode owns this loadpoint",
-            )
-            return False
-
-        success = await _action_start_ev_charging(
-            hass,
-            config_entry,
-            params,
-            context,
-        )
-        if success:
-            await record_manual_ev_charging_session(
-                hass,
-                config_entry,
-                loadpoint_id,
-                params,
-                reason=params.get("reason", "Manual automation start"),
-            )
-        return success
+    # Manual starts take the same dynamic path as every other mode.  That path
+    # already serializes on _start_dynamic_lock, claims ownership, and clamps
+    # the initial command, so a manual start is gated by the shared phase
+    # budget before the charger is energized rather than after.
+    requested_amps = await _manual_session_target_amps(
+        hass,
+        config_entry,
+        loadpoint_id,
+        params,
+    )
+    return await _action_start_ev_charging_dynamic(
+        hass,
+        config_entry,
+        {
+            **params,
+            "vehicle_id": loadpoint_id,
+            "vehicle_vin": (
+                None if loadpoint_id == DEFAULT_VEHICLE_ID else loadpoint_id
+            ),
+            "dynamic_mode": "battery_target",
+            "owner_mode": "manual",
+            "fixed_charge_amps": requested_amps,
+            "start_amps": requested_amps,
+            "phase_requested_amps": requested_amps,
+            "phase_load_management_required": True,
+            "reason": params.get("reason", "Manual automation start"),
+        },
+        context,
+    )
 
 
 async def stop_solar_surplus_ev_charging(

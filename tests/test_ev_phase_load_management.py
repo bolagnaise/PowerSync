@@ -185,38 +185,82 @@ def _actions_function(name: str) -> str:
     raise AssertionError(f"actions.{name} not found")
 
 
-def test_manual_starts_are_gated_by_the_shared_budget_before_energising():
+def test_manual_starts_take_the_same_dynamic_path_as_every_other_mode():
     start_manual = _actions_function("_start_manual_ev_charging")
 
-    # A raw _action_start_ev_charging would energise the charger first and only
-    # clamp afterwards; the dynamic path refuses the start with no headroom.
-    assert "_phase_load_management_enabled(hass, config_entry)" in start_manual
+    # One path, unconditionally: no feature-flag branch, and no surviving raw
+    # _action_start_ev_charging fallback that would energise the charger first
+    # and only clamp afterwards.
+    assert "_phase_load_management_enabled" not in start_manual
     assert "await _action_start_ev_charging_dynamic(" in start_manual
+    assert "await _action_start_ev_charging(" not in start_manual
     assert '"owner_mode": "manual"' in start_manual
     assert '"phase_load_management_required": True' in start_manual
-    # The reroute must happen before _start_dynamic_lock is taken, or the
-    # dynamic action would deadlock on the same non-reentrant lock.
-    assert start_manual.index("_action_start_ev_charging_dynamic") < start_manual.index(
-        "async with _start_dynamic_lock:"
-    )
+    # The dynamic action takes _start_dynamic_lock itself, so this caller must
+    # not hold it -- the lock is not reentrant.
+    assert "async with _start_dynamic_lock:" not in start_manual
 
 
-def test_manual_sessions_get_a_periodic_controller_under_phase_management():
+def test_manual_sessions_always_get_a_periodic_controller():
     record_manual = _actions_function("record_manual_ev_charging_session")
 
-    # Without a timer the session holds whatever current the charger was left
-    # on and spends phase headroom the allocator can never reclaim.
-    assert "phase_load_required = _phase_load_management_enabled(" in record_manual
+    # Without a timer the session never re-evaluates its rate: it holds
+    # whatever current the charger was left on, and under phase management it
+    # spends headroom the allocator can never reclaim.  Unconditional -- the
+    # controller is how manual sessions work, not a phase-management extra.
+    assert "_phase_load_management_enabled" not in record_manual
     assert "async_track_time_interval(" in record_manual
     assert '"cancel_timer"] = (' in record_manual
     assert "await _dynamic_ev_update(" in record_manual
     assert '"fixed_charge_amps": requested_amps' in record_manual
     assert '"phase_load_management_required": True' in record_manual
-    # The fixed-rate branch of _dynamic_ev_update only commands when the target
-    # differs from current_amps, so seeding current_amps with the requested
-    # current would make the first tick a no-op and skip the clamp entirely.
-    assert '"current_amps": 0,' in record_manual
-    assert '"target_amps": initial_target_amps,' in record_manual
+    # This path adopts a session that is already charging (takeover, or restore
+    # after a restart). Adoption stays silent unless there is a budget to
+    # enforce -- see test_manual_adoption_is_silent_without_a_budget.
+    assert "reconcile_now = _phase_load_management_applies(" in record_manual
+    assert '"current_amps": 0 if reconcile_now else requested_amps,' in record_manual
+    assert '"target_amps": requested_amps,' in record_manual
+    assert "if reconcile_now:" in record_manual
+    # The session keeps its own identity; only solar_surplus routes elsewhere
+    # in _dynamic_ev_update, so manual needs no mode rewrite.
+    assert '"dynamic_mode": "battery_target"' not in record_manual
+
+
+def test_manual_adoption_is_silent_without_a_budget():
+    """Taking over an already-charging session must not command the charger.
+
+    tests/test_ev_ocpp_actions.py pins the observable contract
+    (hass.services.calls == []); this pins the reason it holds, so the
+    immediate reconcile cannot be made unconditional by accident.
+    """
+    record_manual = _actions_function("record_manual_ev_charging_session")
+
+    before, sep, after = record_manual.partition("if reconcile_now:")
+    assert sep, "the immediate reconcile lost its guard"
+
+    # Exactly one immediate reconcile, and it is behind the guard.
+    assert after.count("await _dynamic_ev_update(") == 1
+    # The only other call is the periodic timer callback, which is what makes
+    # the session controller-managed in both cases.
+    assert before.count("await _dynamic_ev_update(") == 1
+    assert "async def periodic_update(" in before
+
+
+def test_manual_rate_adopts_the_live_current_before_falling_back_to_max():
+    resolver = _actions_function("_manual_session_target_amps")
+
+    # A restored session and a manual start on an already-charging car must not
+    # be silently sped up to the configured maximum.
+    assert "_observed_owned_charge_amps(" in resolver
+    assert "_resolve_dynamic_max_charge_amps(" in resolver
+    assert resolver.index("_observed_owned_charge_amps(") < resolver.index(
+        "_resolve_dynamic_max_charge_amps("
+    )
+    assert "_effective_max_charge_amps(" in resolver
+
+    # Both manual entry points resolve their rate the same way.
+    for name in ("record_manual_ev_charging_session", "_start_manual_ev_charging"):
+        assert "await _manual_session_target_amps(" in _actions_function(name), name
 
 
 def test_phase_management_covers_opted_in_manual_and_boost_sessions():

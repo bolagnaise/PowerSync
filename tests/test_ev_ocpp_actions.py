@@ -4745,7 +4745,10 @@ def test_direct_ev_start_action_records_manual_ownership(monkeypatch):
     assert result is True
     lease = hass.data["power_sync"]["entry-1"]["ev_ownership"]["generic_ev"]
     assert lease["owner_mode"] == "manual"
-    assert lease["last_command"]["command"] == "start"
+    # Manual starts run through the same dynamic controller as every other
+    # mode, so they record the same start_<owner_mode> label. Nothing branches
+    # on this value; it is surfaced through build_loadpoint_status.
+    assert lease["last_command"]["command"] == "start_manual"
 
 
 def test_direct_manual_start_preempts_solar_surplus_ownership(monkeypatch):
@@ -4830,14 +4833,19 @@ def test_solar_surplus_disable_cannot_release_concurrent_manual_takeover(
         start_entered = asyncio.Event()
         allow_start = asyncio.Event()
 
-        async def delayed_start(*args, **kwargs):
-            start_entered.set()
-            await allow_start.wait()
+        # A generic manual start reaches the charger through _set_vehicle_amps
+        # inside the dynamic controller's _start_dynamic_lock, so that is the
+        # in-critical-section point to stall on. Only the start (amps > 0) is
+        # held; the solar teardown's own 0A stop must stay free to proceed.
+        async def delayed_start(hass_, entry_, vehicle_id_, amps_, params_):
+            if amps_ > 0:
+                start_entered.set()
+                await allow_start.wait()
             return True
 
         monkeypatch.setattr(
             actions,
-            "_action_start_ev_charging",
+            "_set_vehicle_amps_unchecked",
             delayed_start,
         )
 
