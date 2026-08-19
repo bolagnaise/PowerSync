@@ -7,7 +7,7 @@ import math
 
 from homeassistant.util import dt as dt_util
 import logging
-from typing import Any
+from typing import Any, Dict
 
 from .currency import DEFAULT_CURRENCY, currency_for_provider
 from .const import (

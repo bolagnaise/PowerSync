@@ -2284,9 +2284,9 @@ class BatteryOptimizer:
                     cost_neutral_fixed_cost_allowance,
                     cost_neutral_plan,
                     profit_max_solar_export_slots,
-                    manual_control_slots,
-                    required_charge_kw,
-                    required_discharge_kw,
+                    manual_mode_slots,
+                    manual_required_charge_kw,
+                    manual_required_discharge_kw,
                     ev_plan,
                 )
             last_result.lp_stats = {
