@@ -114,6 +114,11 @@ PRICE_LEVEL_START_RETRY_BASE_SECONDS = 30
 PRICE_LEVEL_START_RETRY_MAX_SECONDS = 15 * 60
 FREE_GRID_PRICE_EPSILON_CENTS = 0.001
 
+# Executor decisions that mean no vehicle is physically on this loadpoint.
+# Their plans are retained to protect future demand, so any consumer that
+# models *present* demand must exclude them.
+AWAY_EV_DECISIONS = frozenset({"away", "unplugged"})
+
 
 def is_smart_schedule_grid_price_allowed(
     *,
@@ -6157,6 +6162,13 @@ class AutoScheduleExecutor:
             other_settings = self._settings.get(other_id)
             if other_settings is None or not other_settings.enabled:
                 continue
+            # An absent vehicle keeps its plan so the optimiser can protect its
+            # future demand, but it cannot compete for site import capacity
+            # right now. Counting it here throttles the car that IS on the
+            # charger -- symmetrically, so with two cars neither plans at the
+            # charger's real rate even when only one is home.
+            if other_state.last_decision in AWAY_EV_DECISIONS:
+                continue
             other_plan = other_state.current_plan
             if other_plan is None:
                 continue
@@ -6252,7 +6264,21 @@ class AutoScheduleExecutor:
             charger_power_kw = settings.get_max_charge_power_kw()
             charger_voltage = settings.voltage
             charger_phases = settings.phases
-            if charger_capability is not None:
+            # A live EVSE limit is a planning fact only once the resolver has
+            # actually identified the charger. Its unknown-charger result is
+            # the 5A command-path safety floor
+            # (TESLA_UNKNOWN_CHARGER_SAFE_AMPS), which is what an away,
+            # unplugged, or asleep vehicle reports -- and this plan is
+            # deliberately regenerated *before* the availability gates so an
+            # absent EV still protects its future demand in the optimiser.
+            # Planning at that floor forecasts 1.15kW single-phase (3.45kW on
+            # three phases) for a 32A loadpoint, under-reserving the real
+            # demand and stretching the plan across hours it does not need.
+            # The floor still governs the command path in _start_charging()
+            # and _set_vehicle_charge_rate(), where the EVSE is present.
+            if charger_capability is not None and charger_capability.get(
+                "capability_known"
+            ):
                 charger_voltage = charger_capability["voltage"]
                 charger_phases = charger_capability["phases"]
                 charger_power_kw = (
@@ -6260,6 +6286,14 @@ class AutoScheduleExecutor:
                     * charger_voltage
                     * charger_phases
                     / 1000.0
+                )
+            elif charger_capability is not None:
+                _LOGGER.debug(
+                    "Auto-schedule: planning %s at its configured %.1fkW; the "
+                    "live charger capability is unavailable (%s)",
+                    vehicle_id,
+                    charger_power_kw,
+                    charger_capability.get("max_charge_amps_source"),
                 )
             # Use per-day priority based on the target departure day
             planning_weekday = (
