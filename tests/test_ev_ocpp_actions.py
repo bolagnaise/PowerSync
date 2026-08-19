@@ -9563,3 +9563,207 @@ def test_automated_tesla_command_boundaries_block_explicit_away_location(monkeyp
     assert rate_result is False
     assert stop_result is True
     assert hass.services.calls == []
+
+
+def _handover_start_params(vin: str) -> dict:
+    """Price Level taking over a loadpoint Solar Surplus currently owns."""
+    return {
+        "vehicle_id": vin,
+        "vehicle_vin": vin,
+        "dynamic_mode": "battery_target",
+        "owner_mode": "price_level_opportunity",
+        "charger_type": "tesla",
+        "min_charge_amps": 1,
+        "max_charge_amps": 32,
+        "fixed_charge_amps": 32,
+        "require_physical_start_confirmation": True,
+        "allow_ownership_takeover": True,
+    }
+
+
+def _patch_handover_start(monkeypatch, *, start_calls, stop_calls, wait_result):
+    """Stub the Tesla start path with pre-stop telemetry that has not settled."""
+
+    async def active_capability(*args, **kwargs):
+        return {
+            "association_known": True,
+            "capability_known": True,
+            "max_charge_amps": 32,
+            "max_charge_amps_source": "active_charger",
+            "voltage": 240,
+            "phases": 1,
+        }
+
+    async def none_result(*args, **kwargs):
+        return None
+
+    async def true_result(*args, **kwargs):
+        return True
+
+    async def record_start(*args, **kwargs):
+        start_calls.append((args, kwargs))
+        return True
+
+    async def record_stop(hass, config_entry, params, *args, **kwargs):
+        stop_calls.append(params)
+        return True
+
+    async def wait_for_start(*args, **kwargs):
+        return wait_result
+
+    monkeypatch.setattr(
+        actions,
+        "_resolve_tesla_active_charger_capability",
+        active_capability,
+    )
+    monkeypatch.setattr(actions, "_resolve_tesla_charge_current_entity", none_result)
+    monkeypatch.setattr(actions, "_tesla_vehicle_away_location", none_result)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", record_start)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", record_stop)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", true_result)
+    monkeypatch.setattr(actions, "_send_expo_push", none_result)
+    # Cloud EV telemetry lags the stop command by a poll interval, so the
+    # baseline read straight after the teardown still says "charging".
+    monkeypatch.setattr(
+        actions,
+        "_tesla_physical_charging_snapshot",
+        lambda *args, **kwargs: {
+            "charging": True,
+            "measurements": frozenset({"sensor.n3bula_charger_current=26.0A"}),
+            "fresh_measurements": frozenset(),
+        },
+    )
+    monkeypatch.setattr(actions, "_wait_for_tesla_physical_start", wait_for_start)
+
+
+def test_handover_after_self_stop_still_issues_a_physical_start(monkeypatch):
+    """PowerSync's own stop must not read back as 'already charging'.
+
+    Solar Surplus → Price Level handover tears the previous session down with a
+    real charger stop.  Reading the pre-stop telemetry immediately afterwards
+    used to satisfy the already-charging recovery branch, which skipped the
+    start command entirely and then confirmed it from that same stale sample.
+    """
+    vin = "LRW3F7FS1NC484342"
+    start_calls: list[tuple] = []
+    stop_calls: list[dict] = []
+    timer_calls: list[tuple] = []
+
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {vin: _solar_surplus_state(current_amps=26)}
+
+    _patch_handover_start(
+        monkeypatch,
+        start_calls=start_calls,
+        stop_calls=stop_calls,
+        wait_result=(True, "sensor.n3bula_charger_current=26.0A"),
+    )
+    monkeypatch.setattr(
+        actions,
+        "async_track_time_interval",
+        lambda *args, **kwargs: timer_calls.append((args, kwargs)),
+    )
+
+    hass = _Hass([])
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            _handover_start_params(vin),
+        )
+    )
+
+    assert result is True
+    # Exactly one physical stop (the teardown) and one physical start.
+    assert len(stop_calls) == 1
+    assert len(start_calls) == 1
+    assert len(timer_calls) == 1
+    assert actions._dynamic_ev_state["entry-1"][vin]["active"] is True
+
+
+def test_handover_start_that_is_never_confirmed_creates_no_session_or_lease(
+    monkeypatch,
+):
+    """An unconfirmed handover start must fail closed, not block Solar Surplus."""
+    vin = "LRW3F7FS1NC484342"
+    start_calls: list[tuple] = []
+    stop_calls: list[dict] = []
+    timer_calls: list[tuple] = []
+
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {vin: _solar_surplus_state(current_amps=26)}
+
+    _patch_handover_start(
+        monkeypatch,
+        start_calls=start_calls,
+        stop_calls=stop_calls,
+        wait_result=(False, "no fresh VIN-scoped charging state and measured draw"),
+    )
+    monkeypatch.setattr(
+        actions,
+        "async_track_time_interval",
+        lambda *args, **kwargs: timer_calls.append((args, kwargs)),
+    )
+
+    hass = _Hass([])
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            _handover_start_params(vin),
+        )
+    )
+
+    assert result is False
+    assert len(start_calls) == 1
+    assert timer_calls == []
+    assert vin not in actions._dynamic_ev_state.get("entry-1", {})
+    ownership = hass.data["power_sync"]["entry-1"].get("ev_ownership", {})
+    assert ownership.get(vin, {}).get("owner_mode") != "price_level_opportunity"
+    # Teardown stop plus the compensating stop for the unconfirmed start.
+    assert len(stop_calls) == 2
+    assert stop_calls[-1].get("_force_tesla_stop_request") is True
+
+
+def test_self_stop_disqualification_is_scoped_to_the_stopped_vehicle(monkeypatch):
+    """A stop for one VIN must not suppress another VIN's genuine recovery."""
+    stopped_vin = "LRW3F7FS1NC484342"
+    other_vin = "5YJTEST00000000B2"
+    start_calls: list[tuple] = []
+    stop_calls: list[dict] = []
+    timer_calls: list[tuple] = []
+
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        stopped_vin: _solar_surplus_state(current_amps=26),
+    }
+
+    _patch_handover_start(
+        monkeypatch,
+        start_calls=start_calls,
+        stop_calls=stop_calls,
+        wait_result=(True, "sensor.car_b_charger_current=15.0A"),
+    )
+    monkeypatch.setattr(
+        actions,
+        "async_track_time_interval",
+        lambda *args, **kwargs: timer_calls.append((args, kwargs)),
+    )
+
+    hass = _Hass([])
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            _handover_start_params(other_vin),
+        )
+    )
+
+    assert result is True
+    # The other vehicle was never stopped, so its already-charging telemetry is
+    # still trustworthy and the recovery branch is preserved.
+    assert stop_calls == []
+    assert start_calls == []
+    assert len(timer_calls) == 1
+    assert actions._dynamic_ev_state["entry-1"][stopped_vin]["active"] is True
+    assert actions._dynamic_ev_state["entry-1"][other_vin]["active"] is True

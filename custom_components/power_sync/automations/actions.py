@@ -11230,8 +11230,22 @@ async def _action_start_ev_charging_dynamic_locked(
             return False
         start_amps = phase_safe_start_amps
 
-    # Stop any existing dynamic charging for this vehicle
-    await _action_stop_ev_charging_dynamic(hass, config_entry, {"vehicle_id": vehicle_id})
+    # Stop any existing dynamic charging for this vehicle.  Record whether that
+    # teardown actually commanded the charger off: cloud EV telemetry lags the
+    # command by a poll interval, so the not-yet-settled aftermath of our own
+    # stop must never read back as evidence that the car is already charging.
+    teardown_report: Dict[str, Any] = {}
+    await _action_stop_ev_charging_dynamic(
+        hass,
+        config_entry,
+        {
+            "vehicle_id": vehicle_id,
+            "_physical_stop_report": teardown_report,
+        },
+    )
+    self_stopped_during_teardown = bool(
+        teardown_report.get("physical_stop_vehicle_ids")
+    )
 
     initial_battery_acceptance_learner: Dict[str, Any] = {}
 
@@ -11366,9 +11380,18 @@ async def _action_start_ev_charging_dynamic_locked(
                     vehicle_id,
                     params,
                 )
+                # Adopting a car that is genuinely already charging skips the
+                # physical start *and* short-circuits this confirmation gate.
+                # That is only safe when PowerSync did not just command this
+                # charger off: after our own teardown stop the pre-stop
+                # telemetry still reads "charging", so the recovery branch
+                # would suppress the start command entirely and then confirm
+                # it from stale evidence.  Fail closed to the normal
+                # start-then-confirm path, which retries with bounded backoff.
                 already_physically_charging = bool(
                     confirmation_baseline["charging"]
                     and confirmation_baseline["measurements"]
+                    and not self_stopped_during_teardown
                 )
                 command_started_at = datetime.now().astimezone()
 
@@ -11963,6 +11986,16 @@ async def _action_stop_ev_charging_dynamic(
                 stop_params = {**v_params, **params}
                 stop_params["vehicle_vin"] = vid_to_stop
                 stop_success = await _action_stop_ev_charging(hass, config_entry, stop_params)
+            # Report the commanded stop to the caller whether or not the
+            # charger accepted it: either way the commanded state is off, so
+            # telemetry captured immediately afterwards is not evidence of
+            # charging.
+            physical_stop_report = params.get("_physical_stop_report")
+            if isinstance(physical_stop_report, dict):
+                physical_stop_report.setdefault(
+                    "physical_stop_vehicle_ids",
+                    set(),
+                ).add(vid_to_stop)
             if not stop_success:
                 physical_stop_failed = True
             if params.get("stop_untracked") and vid_to_stop not in released_vehicle_ids:
