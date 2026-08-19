@@ -4416,9 +4416,6 @@ class AutoScheduleExecutor:
         # Plan regeneration interval (regenerate every 5 minutes to match Amber/AEMO pricing)
         self._plan_update_interval = timedelta(minutes=5)
 
-        # Smart Optimization integration
-        self._use_ml_optimization = False  # Set via settings
-
         # Variable charge rate tracking (per vehicle)
         self._current_charge_amps: Dict[str, int] = {}  # {vehicle_id: current_amps}
         self._charge_rate_change_threshold = 2  # Only change rate if diff >= 2 amps
@@ -4516,52 +4513,6 @@ class AutoScheduleExecutor:
 
         _LOGGER.debug(f"Could not resolve vehicle_id {vehicle_id} to VIN/BLE identifier")
         return None
-
-    def _get_ml_ev_schedule(self, vehicle_id: str):
-        """
-        Get the optimization schedule for a vehicle if available.
-
-        Returns:
-            EVChargingSchedule or None if Smart Optimization is not enabled/available
-        """
-        if not self._use_ml_optimization:
-            return None
-
-        try:
-            from ..const import DOMAIN
-
-            # Get the optimization coordinator
-            domain_data = self.hass.data.get(DOMAIN, {})
-            entry_data = domain_data.get(self.config_entry.entry_id, {})
-            opt_coordinator = entry_data.get("optimization_coordinator")
-
-            if not opt_coordinator:
-                return None
-
-            # Check if EV integration is enabled in Smart Optimization
-            if not getattr(opt_coordinator, '_enable_ev', False):
-                return None
-
-            # Get EV schedules from the optimization coordinator
-            ev_schedules = getattr(opt_coordinator, '_ev_schedules', [])
-            if not ev_schedules:
-                return None
-
-            # Find schedule for this vehicle
-            for schedule in ev_schedules:
-                if schedule.vehicle_id == vehicle_id and schedule.success:
-                    return schedule
-
-            return None
-
-        except Exception as e:
-            _LOGGER.debug(f"Error getting ML EV schedule: {e}")
-            return None
-
-    def set_use_ml_optimization(self, enabled: bool) -> None:
-        """Enable or disable Smart Optimization for EV charging decisions."""
-        self._use_ml_optimization = enabled
-        _LOGGER.info(f"Smart Optimization for EV charging: {'enabled' if enabled else 'disabled'}")
 
     def _power_to_amps(
         self,
@@ -5815,119 +5766,7 @@ class AutoScheduleExecutor:
                 return
 
         # =====================================================================
-        # SMART OPTIMIZATION INTEGRATION
-        # When Smart Optimization is enabled, use its schedule instead of the
-        # built-in charging planner. The optimizer considers home battery,
-        # solar, prices, and EV charging jointly for whole-home optimization.
-        #
-        # VARIABLE CHARGE RATE: The optimizer outputs target power (kW) per
-        # interval. We convert this to amps and set the charge rate dynamically
-        # to match solar surplus, minimize costs, or maximize self-consumption.
-        # =====================================================================
-        ml_schedule = self._get_ml_ev_schedule(vehicle_id)
-        if ml_schedule is not None:
-            should_charge, power_w = ml_schedule.should_charge_at(now)
-
-            # Get next charging window for status display
-            next_start, next_end, next_power = ml_schedule.get_next_charging_window(now)
-
-            # Calculate target amps for logging (use per-vehicle max)
-            target_amps = self._power_to_amps_for_settings(power_w, settings) if power_w > 0 else 0
-
-            if should_charge:
-                reason = f"Smart Optimization: charge at {power_w/1000:.1f}kW ({target_amps}A)"
-                source = "ml_optimized"
-
-                if not state.is_charging:
-                    # Start charging
-                    started = await self._start_charging(
-                        vehicle_id,
-                        settings,
-                        state,
-                        source,
-                    )
-                    if started is False or not state.is_charging:
-                        state.last_decision = "waiting"
-                        state.last_decision_reason = (
-                            f"{reason}; start retry scheduled"
-                        )
-                        self._sync_active_charging_preserve_intent(
-                            vehicle_id,
-                            effective_preserve_home_battery,
-                            state,
-                            state.last_decision_reason,
-                        )
-                        return
-                    state.last_decision = "started"
-                    state.last_decision_reason = reason
-                    _LOGGER.info(f"🤖 ML EV Charging: Starting charge for {vehicle_id} at {power_w/1000:.1f}kW ({target_amps}A)")
-
-                # Set variable charge rate (whether just started or already charging)
-                # This allows ramping the charge rate based on solar/prices
-                await self._set_vehicle_charge_rate(vehicle_id, power_w, settings)
-                state.last_decision = "charging"
-                state.last_decision_reason = reason
-                self._sync_active_charging_preserve_intent(
-                    vehicle_id,
-                    effective_preserve_home_battery,
-                    state,
-                    reason,
-                )
-
-            else:
-                self._clear_start_failure(vehicle_id)
-                if next_start:
-                    reason = f"Smart Optimization: next window {next_start.strftime('%H:%M')} - {next_end.strftime('%H:%M')}"
-                else:
-                    reason = "Smart Optimization: no charging scheduled"
-
-                if state.is_charging:
-                    await self._stop_charging(
-                        vehicle_id,
-                        settings,
-                        state,
-                        reason=reason,
-                    )
-                    state.last_decision = "stopped"
-                    state.last_decision_reason = reason
-                    self._sync_active_charging_preserve_intent(
-                        vehicle_id,
-                        effective_preserve_home_battery,
-                        state,
-                        reason,
-                    )
-                    # Clear tracked charge rate
-                    self._current_charge_amps.pop(vehicle_id, None)
-                    _LOGGER.info(f"🤖 ML EV Charging: Stopping charge for {vehicle_id} - {reason}")
-                elif await self._stop_external_charging_if_needed(
-                    vehicle_id,
-                    settings,
-                    state,
-                    reason,
-                ):
-                    state.last_decision = "stopped"
-                    state.last_decision_reason = reason
-                    self._sync_active_charging_preserve_intent(
-                        vehicle_id,
-                        effective_preserve_home_battery,
-                        state,
-                        reason,
-                    )
-                else:
-                    state.last_decision = "waiting"
-                    state.last_decision_reason = reason
-                    self._sync_active_charging_preserve_intent(
-                        vehicle_id,
-                        effective_preserve_home_battery,
-                        state,
-                        reason,
-                    )
-
-            # Skip the normal planning logic when using Smart Optimization
-            return
-
-        # =====================================================================
-        # STANDARD CHARGING PLANNER (when Smart Optimization not available)
+        # STANDARD CHARGING PLANNER
         # =====================================================================
 
         if state.current_plan is None:

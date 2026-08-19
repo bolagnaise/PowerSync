@@ -309,7 +309,7 @@ def test_battery_target_control_arms_for_every_non_solar_source():
     should_control = _extract_planner_function("_should_control_battery_target")
 
     assert should_control("grid_offpeak", False) is True
-    assert should_control("ml_optimized", False) is True
+    assert should_control("price_level_charging", False) is True
     assert should_control("solar_surplus", False) is False
     assert should_control("grid_offpeak", True) is False
 

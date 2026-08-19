@@ -1046,7 +1046,7 @@ def test_stale_synthetic_ocpp_start_uses_configured_generic_backend(monkeypatch)
             "generic_ev",
             settings,
             state,
-            "ml_optimized",
+            "price_level_charging",
         )
     )
 
@@ -1090,7 +1090,7 @@ def test_failed_start_backoff_suppresses_immediate_retry(monkeypatch):
             "generic_ev",
             ev_planner.AutoScheduleSettings(vehicle_id="generic_ev"),
             ev_planner.AutoScheduleState(vehicle_id="generic_ev"),
-            "ml_optimized",
+            "price_level_charging",
         )
     )
 

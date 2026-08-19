@@ -14669,7 +14669,7 @@ class EVVehiclesView(HomeAssistantView):
 
                 from .sigenergy_charger import sigenergy_charger_state_to_vehicle
 
-                state = await _read_sigenergy_charger_state_for_entry(entry, hass)
+                state = await _read_sigenergy_charger_state_for_entry(entry, self._hass)
                 vehicles.append(
                     sigenergy_charger_state_to_vehicle(
                         state or configured_state,
@@ -14677,7 +14677,7 @@ class EVVehiclesView(HomeAssistantView):
                         online=state is not None,
                         capabilities=_configured_sigenergy_charger_capabilities(
                             entry,
-                            hass,
+                            self._hass,
                         ),
                     )
                 )
