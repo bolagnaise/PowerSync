@@ -372,7 +372,7 @@ def test_daily_cost_card_distinguishes_amber_metered_cost_from_estimate():
     """Today's partial Amber bill data should not replace the live estimate."""
     source = STRATEGY_PATH.read_text()
 
-    assert "hasE('daily_import_cost') || hasE('amber_usage_today_cost')" in source
+    assert "hasEntityE('daily_import_cost') || hasE('amber_usage_today_cost')" in source
     assert "Amber Metered Cost Today (Partial)" in source
     assert "Estimated Import Cost Today" in source
 
@@ -1642,3 +1642,121 @@ def test_dashboard_provider_cards_include_portal_account_metrics():
     assert "['fp_account_lwap', 'Portal LWAP']" in source
     assert "['fp_account_avg_usage', 'Average Demand']" in source
     assert "['fp_account_max_usage', 'Max Demand']" in source
+
+
+def test_chart_tooltip_clamp_uses_the_measured_tooltip_width():
+    """A hard-coded half-width pushed the value column outside the chart clip."""
+    source = STRATEGY_PATH.read_text()
+
+    # Both tooltip implementations must share the measured clamp.
+    assert "Math.max(cssX, 84), rect.width - 84" not in source
+    assert "Math.max(cssX, 78), rect.width - 78" not in source
+    assert source.count("_clampTooltipLeft(cssX, rect.width, tooltip.offsetWidth)") == 2
+
+    helper = re.search(
+        r"function _clampTooltipLeft\([^)]*\) \{.*?\n\}",
+        source,
+        re.DOTALL,
+    )
+    assert helper is not None
+
+    checks = """
+      const cases = [
+        // [cssX, availableWidth, tooltipWidth, expectedLeft]
+        [414, 434, 258, 297],   // right edge: box 168..426 inside 0..434
+        [20, 434, 258, 137],    // left edge:  box 8..266
+        [217, 434, 258, 217],   // mid-chart is untouched
+        [400, 434, 282, 285],   // widest theme font still fits
+      ];
+      for (const [cssX, avail, width, expected] of cases) {
+        const actual = _clampTooltipLeft(cssX, avail, width);
+        if (Math.abs(actual - expected) > 1e-9) {
+          throw new Error(`clamp(${cssX}, ${avail}, ${width}) = ${actual}, want ${expected}`);
+        }
+      }
+      // A tooltip wider than its chart is centred rather than inverted.
+      if (_clampTooltipLeft(10, 250, 300) !== 125) throw new Error('degenerate case not centred');
+      if (_clampTooltipLeft(240, 250, 300) !== 125) throw new Error('degenerate case not centred');
+      // Property: any tooltip that fits stays fully inside the chart.
+      for (let avail = 300; avail <= 1100; avail += 37) {
+        for (let width = 120; width <= avail; width += 29) {
+          for (const cssX of [0, avail / 2, avail, -50, avail + 50]) {
+            const left = _clampTooltipLeft(cssX, avail, width);
+            if (left - width / 2 < -1e-9 || left + width / 2 > avail + 1e-9) {
+              throw new Error(`overflow at avail=${avail} width=${width} cssX=${cssX}`);
+            }
+          }
+        }
+      }
+      // Degenerate inputs must not produce NaN.
+      for (const bad of [[NaN, 434, 258], [217, 0, 258], [217, 434, NaN]]) {
+        if (!Number.isFinite(_clampTooltipLeft(...bad))) {
+          throw new Error(`non-finite result for ${JSON.stringify(bad)}`);
+        }
+      }
+    """
+    inset = re.search(r"const CHART_TOOLTIP_EDGE_INSET_PX = \d+;", source)
+    assert inset is not None
+    subprocess.run(
+        ["node", "-e", f"{inset.group(0)}\n{helper.group(0)}\n{checks}"],
+        check=True,
+    )
+
+
+def test_daily_cost_rows_survive_an_unknown_monetary_value():
+    """Partial priced coverage must show Unknown, not delete the row."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "const hasEntityE = (name) => (hass.states || {})[e(name)] !== undefined;" in source
+    for name in (
+        "daily_import_cost",
+        "daily_export_earnings",
+        "daily_avg_cost_per_kwh",
+        "mtd_avg_cost_per_kwh",
+    ):
+        assert f"hasE('{name}')" not in source, name
+        assert f"hasEntityE('{name}')" in source, name
+
+    # Cards that are meaningless without a live value keep the availability test.
+    assert "const hasE = (name) => has(e(name));" in source
+
+    runtime = """
+      const isAvailableState = (id) => {
+        const s = (hass.states || {})[id];
+        return s && s.state !== 'unavailable' && s.state !== 'unknown';
+      };
+      const e = (name) => `sensor.power_sync_${name}`;
+      const hasE = (name) => isAvailableState(e(name));
+      const hasEntityE = (name) => (hass.states || {})[e(name)] !== undefined;
+      const rowsFor = (states) => {
+        hass = { states };
+        const rows = [];
+        if (hasEntityE('daily_import_cost') || hasE('amber_usage_today_cost')) {
+          if (hasEntityE('daily_import_cost')) rows.push('Estimated Import Cost Today');
+          if (hasEntityE('daily_export_earnings')) rows.push('Export Earnings Today');
+          if (hasEntityE('daily_avg_cost_per_kwh')) rows.push('Avg Cost per kWh (Today)');
+        }
+        return rows;
+      };
+      let hass = {};
+      const withValues = rowsFor({
+        'sensor.power_sync_daily_import_cost': { state: '1.20' },
+        'sensor.power_sync_daily_export_earnings': { state: '0.05' },
+        'sensor.power_sync_daily_avg_cost_per_kwh': { state: '0.31' },
+      });
+      if (withValues.length !== 3) throw new Error('healthy card lost a row');
+      const partial = rowsFor({
+        'sensor.power_sync_daily_import_cost': { state: '1.20' },
+        'sensor.power_sync_daily_export_earnings': { state: 'unknown' },
+        'sensor.power_sync_daily_avg_cost_per_kwh': { state: 'unavailable' },
+      });
+      if (!partial.includes('Export Earnings Today')) {
+        throw new Error('unknown export earnings deleted its row');
+      }
+      if (!partial.includes('Avg Cost per kWh (Today)')) {
+        throw new Error('unavailable average cost deleted its row');
+      }
+      const absent = rowsFor({});
+      if (absent.length !== 0) throw new Error('rows emitted for entities that do not exist');
+    """
+    subprocess.run(["node", "-e", runtime], check=True)

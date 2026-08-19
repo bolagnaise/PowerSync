@@ -21,6 +21,24 @@
 
 const OPTIMIZER_POWER_AXIS_EXPONENT = 0.7;
 const BATTERY_WINDOW_MERGE_GAP_MINUTES = 15;
+const CHART_TOOLTIP_EDGE_INSET_PX = 8;
+
+// Chart tooltips are centred on their `left` (translate(-50%, ...)) and are
+// clipped by a container with overflow:hidden, so the clamp must use half the
+// tooltip's *measured* width.  A hard-coded constant pushed the right-aligned
+// value column outside the chart whenever the rendered tooltip was wider than
+// twice that constant, which any long row label causes.
+function _clampTooltipLeft(cssX, availableWidth, tooltipWidth, inset = CHART_TOOLTIP_EDGE_INSET_PX) {
+  const width = Number.isFinite(availableWidth) && availableWidth > 0 ? availableWidth : 0;
+  const measured = Number.isFinite(tooltipWidth) && tooltipWidth > 0 ? tooltipWidth : 0;
+  const halfW = measured / 2 + inset;
+  // A tooltip wider than its chart cannot fit either edge; centre it instead
+  // of producing an inverted min/max clamp.
+  const minLeft = Math.min(halfW, width / 2);
+  const maxLeft = Math.max(width - halfW, width / 2);
+  const anchor = Number.isFinite(cssX) ? cssX : minLeft;
+  return Math.min(Math.max(anchor, minLeft), maxLeft);
+}
 
 class PowerSyncChart extends HTMLElement {
   constructor() {
@@ -762,7 +780,7 @@ class PowerSyncChart extends HTMLElement {
 
       line.style.left = `${cssX}px`;
       line.style.opacity = '0.75';
-      tooltip.style.left = `${Math.min(Math.max(cssX, 78), rect.width - 78)}px`;
+      tooltip.style.left = `${_clampTooltipLeft(cssX, rect.width, tooltip.offsetWidth)}px`;
       tooltip.style.top = `${Math.max(34, rect.height - pad.bottom - 8)}px`;
       tooltip.style.opacity = '1';
     };
@@ -2857,7 +2875,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       `;
       line.style.left = `${cssX}px`;
       line.style.opacity = '0.75';
-      tooltip.style.left = `${Math.min(Math.max(cssX, 84), rect.width - 84)}px`;
+      tooltip.style.left = `${_clampTooltipLeft(cssX, rect.width, tooltip.offsetWidth)}px`;
       const tooltipBottom = Math.max(34, rect.height - chart.pad.bottom - 8);
       if (tooltip.offsetHeight && tooltipBottom - tooltip.offsetHeight < 8) {
         tooltip.style.transform = 'translate(-50%, 0)';
@@ -6344,6 +6362,13 @@ class PowerSyncStrategy {
     // Shorthand: resolve then check
     const hasE = (name) => has(e(name));
 
+    // Existence-only check.  Monetary totals legitimately report `unknown`
+    // while priced coverage is incomplete; a row that exists must keep its
+    // place in the card and show Unknown rather than silently deleting the
+    // control the user is looking for.  Keep `hasE` for cards that are
+    // meaningless without a live value.
+    const hasEntityE = (name) => (hass.states || {})[e(name)] !== undefined;
+
     const findSensor = (nameOrNames) => {
       const names = (Array.isArray(nameOrNames) ? nameOrNames : [nameOrNames])
         .map((name) => String(name || '').trim())
@@ -6694,21 +6719,21 @@ class PowerSyncStrategy {
     }
 
     // --- Center Column: Daily Cost Tracking ---
-    if (hasE('daily_import_cost') || hasE('amber_usage_today_cost')) {
+    if (hasEntityE('daily_import_cost') || hasE('amber_usage_today_cost')) {
       const costEntities = [];
       if (hasE('amber_usage_today_cost')) {
         costEntities.push({ entity: e('amber_usage_today_cost'), name: 'Amber Metered Cost Today (Partial)', icon: 'mdi:cash-check' });
       }
-      if (hasE('daily_import_cost')) {
+      if (hasEntityE('daily_import_cost')) {
         costEntities.push({ entity: e('daily_import_cost'), name: 'Estimated Import Cost Today', icon: 'mdi:cash-minus' });
       }
-      if (hasE('daily_export_earnings')) {
+      if (hasEntityE('daily_export_earnings')) {
         costEntities.push({ entity: e('daily_export_earnings'), name: 'Export Earnings Today', icon: 'mdi:cash-plus' });
       }
-      if (hasE('daily_avg_cost_per_kwh')) {
+      if (hasEntityE('daily_avg_cost_per_kwh')) {
         costEntities.push({ entity: e('daily_avg_cost_per_kwh'), name: 'Avg Cost per kWh (Today)', icon: 'mdi:cash-clock' });
       }
-      if (hasE('mtd_avg_cost_per_kwh')) {
+      if (hasEntityE('mtd_avg_cost_per_kwh')) {
         costEntities.push({ entity: e('mtd_avg_cost_per_kwh'), name: 'Avg Cost per kWh (Month)', icon: 'mdi:calendar-month' });
       }
       center.push({
