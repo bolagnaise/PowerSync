@@ -24,6 +24,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import pin_power_sync_clock, pinned_sys_modules
+
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
 
@@ -137,6 +139,25 @@ if not hasattr(sys.modules.get("power_sync.const"), "TESLA_INTEGRATIONS"):
     sys.modules.pop("power_sync.const", None)
 
 ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+
+
+@pytest.fixture(autouse=True)
+def _pin_local_offset_clock():
+    """Hold this module's +10h local clock regardless of collection order."""
+    _ha_recorder.get_instance = lambda hass: getattr(hass, "_fake_recorder", None)
+    with pinned_sys_modules(
+        {
+            "homeassistant.util.dt": _ha_dt,
+            "homeassistant.components.recorder": _ha_recorder,
+            "homeassistant.components.recorder.history": _ha_recorder_history,
+        }
+    ), pin_power_sync_clock(
+        ev_planner,
+        now=lambda *args, **kwargs: datetime.now(timezone.utc) + LOCAL_OFFSET,
+        utcnow=lambda *args, **kwargs: datetime.now(timezone.utc),
+        as_local=lambda value: value + LOCAL_OFFSET,
+    ):
+        yield
 
 
 # --- Fakes ---------------------------------------------------------------

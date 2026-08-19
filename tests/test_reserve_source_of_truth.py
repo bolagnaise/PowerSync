@@ -643,7 +643,9 @@ def test_sigenergy_settings_view_post_syncs_restore_target_on_backup_reserve_cha
 
     source = _sigenergy_settings_view_post_source()
 
-    body_idx = source.index('"backup_reserve" in body')
+    # The handler validates the payload first, so the branch keys off
+    # `validated`, not the raw `body`.
+    body_idx = source.index('"backup_reserve" in validated')
     set_call_idx = source.index("controller.set_backup_reserve(val)", body_idx)
     results_idx = source.index('results["backup_reserve"] = success', set_call_idx)
 

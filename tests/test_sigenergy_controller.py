@@ -7,6 +7,7 @@ import ast
 import importlib
 import sys
 import types
+import typing
 from pathlib import Path
 
 import pytest
@@ -1330,7 +1331,18 @@ def test_sigenergy_token_refresh_persistence_skips_config_entry_reload():
         if isinstance(node, ast.AsyncFunctionDef)
         and node.name == "_persist_sigenergy_tokens"
     )
-    helper_module = ast.Module(body=[helper], type_ignores=[])
+    # The helper resolves live entry data through this sibling closure.  Extract
+    # the real one rather than stubbing it, so the generation check stays part of
+    # what this test exercises -- a name missing from the exec namespace would
+    # otherwise be swallowed by the helper's own except clause and read as
+    # "persisted nothing".
+    entry_data_getter = next(
+        node
+        for node in ast.walk(setup)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_aemo_dispatch_entry_data"
+    )
+    helper_module = ast.Module(body=[entry_data_getter, helper], type_ignores=[])
     ast.fix_missing_locations(helper_module)
 
     class FakeConfigEntries:
@@ -1353,14 +1365,17 @@ def test_sigenergy_token_refresh_persistence_skips_config_entry_reload():
         },
     )
     config_entries = FakeConfigEntries()
+    generation = object()
     hass = types.SimpleNamespace(
-        data={"power_sync": {"entry-1": {}}},
+        data={"power_sync": {"entry-1": {"aemo_dispatch_generation": generation}}},
         config_entries=config_entries,
     )
     namespace = {
         "hass": hass,
         "entry": entry,
         "DOMAIN": "power_sync",
+        "Any": typing.Any,
+        "aemo_dispatch_generation": generation,
         "CONF_SIGENERGY_ACCESS_TOKEN": "sigenergy_access_token",
         "CONF_SIGENERGY_REFRESH_TOKEN": "sigenergy_refresh_token",
         "CONF_SIGENERGY_TOKEN_EXPIRES_AT": "sigenergy_token_expires_at",

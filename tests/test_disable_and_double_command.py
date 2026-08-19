@@ -217,7 +217,16 @@ def _cached_action_coordinator(opt_module, action_name="charge", last_executed="
     coordinator._executor = SimpleNamespace(battery_controller=object())
     coordinator._optimization_lock = asyncio.Lock()
     coordinator._last_executed_action = last_executed
-    action = SimpleNamespace(action=action_name)
+    # A real ScheduleAction always carries a datetime timestamp -- it is the
+    # slot identity _record_boundary_execution/_boundary_execution_matches_action
+    # dedup forced actions on, and _get_current_action dereferences it
+    # unconditionally.  Without it the forced-action dedup can never match and
+    # the reentrancy guard reads as broken.
+    coordinator._config = SimpleNamespace(interval_minutes=5)
+    action = SimpleNamespace(
+        action=action_name,
+        timestamp=datetime(2026, 8, 19, 6, 0, tzinfo=timezone.utc),
+    )
     coordinator._get_current_action = lambda: action
     return coordinator
 

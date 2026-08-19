@@ -1543,18 +1543,34 @@ def test_flow_power_startup_populates_tariff_schedule_after_ha_started():
     assert "EVENT_HOMEASSISTANT_STARTED" in source
 
 
+def _named_function_source(source: str, name: str) -> str:
+    """Return one function's source, located by AST rather than text slicing.
+
+    Slicing between two literal anchors silently over-reads once either anchor
+    moves, and the over-read then matches unrelated code far below.
+    """
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+            and node.name == name
+        ):
+            segment = ast.get_source_segment(source, node)
+            assert segment is not None
+            return segment
+    raise AssertionError(f"{name} not found")
+
+
 def test_force_session_refreshes_display_tariff_before_upload_skip():
     source = (COMPONENT_ROOT / "__init__.py").read_text()
-    sync_start = source.index("async def _handle_sync_tou_internal")
-    sync_source = source[
-        sync_start:
-        source.index("hass.services.async_register(DOMAIN, SERVICE_SYNC_TOU", sync_start)
-    ]
+    sync_source = _named_function_source(source, "_handle_sync_tou_internal")
 
     assert "skip_battery_tariff_sync = False" in sync_source
     assert "refreshing display tariff schedule only" in sync_source
 
-    force_guard_pos = sync_source.index("if force_discharge_state.get(\"active\"):")
+    # The guard now also honours force_restore_sync_override, so match the
+    # condition rather than the whole line.
+    force_guard_pos = sync_source.index("if force_discharge_state.get(\"active\")")
     start_sync_pos = sync_source.index("_LOGGER.info(\"=== Starting TOU sync ===\")")
     display_store_pos = sync_source.index("[\"tariff_schedule\"] = {")
     upload_skip_pos = sync_source.index("if skip_battery_tariff_sync:")
@@ -1565,17 +1581,27 @@ def test_force_session_refreshes_display_tariff_before_upload_skip():
 
 def test_tesla_force_discharge_refresh_reuses_saved_states():
     source = (COMPONENT_ROOT / "__init__.py").read_text()
-    start = source.index("async def handle_force_discharge")
-    end = source.index("def _create_discharge_tariff", start)
-    discharge_source = source[start:end]
+    discharge_source = _named_function_source(source, "handle_force_discharge")
 
+    # A refresh must not re-read the tariff it already overwrote: saved_states
+    # is seeded from the existing force state, and the re-save only runs when
+    # this is not already a force-discharge session.  The per-site reuse used
+    # to be a saved_states.get(site_id) inside the loop; it is now the whole
+    # save block sitting behind the guard, which is equivalent and stricter.
     init_pos = discharge_source.index(
         'saved_states = force_discharge_state.get("saved_states") or {}'
     )
     save_guard_pos = discharge_source.index("if not was_already_force_discharging:")
-    backup_pos = discharge_source.index("site_state = saved_states.get(site_id, {})")
+    reset_pos = discharge_source.index("saved_states = {}", save_guard_pos)
+    store_pos = discharge_source.index("saved_states[site_id] = site_state", reset_pos)
+    publish_pos = discharge_source.index(
+        'force_discharge_state["saved_states"] = saved_states', store_pos
+    )
 
-    assert init_pos < save_guard_pos < backup_pos
+    assert init_pos < save_guard_pos < reset_pos < store_pos < publish_pos
+    # Everything that rewrites saved_states must sit inside the guard.
+    assert "saved_states = {}" not in discharge_source[:save_guard_pos]
+    assert "saved_states[site_id] = site_state" not in discharge_source[:save_guard_pos]
 
 
 def test_sigenergy_flow_power_sync_stores_canonical_tariff_schedule():

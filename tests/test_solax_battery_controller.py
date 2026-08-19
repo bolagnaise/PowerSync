@@ -55,6 +55,24 @@ def _install_stubs() -> None:
 
 _install_stubs()
 
+import pytest  # noqa: E402
+
+from conftest import pinned_sys_modules  # noqa: E402
+
+# Captured while this module's stub tree is live -- see the note in conftest.
+_OWNED_STUB_MODULES = {
+    name: module
+    for name, module in sys.modules.items()
+    if name.startswith("homeassistant")
+}
+
+
+@pytest.fixture(autouse=True)
+def _pin_owned_stub_modules():
+    with pinned_sys_modules(_OWNED_STUB_MODULES):
+        yield
+
+
 from power_sync.inverters.solax_battery import SolaxBatteryController  # noqa: E402
 
 

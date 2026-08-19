@@ -1899,6 +1899,9 @@ def test_failed_dynamic_replan_keeps_last_accepted_price_timestamp_pair(
     coordinator._optimization_lock = asyncio.Lock()
     coordinator._battery_specs_source = "config"
     coordinator._ev_integration_enabled = False
+    # __init__ always sets this (defaulting to None); object.__new__ skips it
+    # and _energy_telemetry_ready reads self.energy_coordinator directly.
+    coordinator.energy_coordinator = None
     coordinator._last_price_timestamps = accepted_timestamps
     coordinator._last_import_prices = accepted_import_prices
     coordinator._last_export_prices = accepted_export_prices
@@ -2017,6 +2020,9 @@ def test_dynamic_to_static_failed_replan_keeps_dynamic_price_timestamp_pair(
     coordinator._optimization_lock = asyncio.Lock()
     coordinator._battery_specs_source = "config"
     coordinator._ev_integration_enabled = False
+    # __init__ always sets this (defaulting to None); object.__new__ skips it
+    # and _energy_telemetry_ready reads self.energy_coordinator directly.
+    coordinator.energy_coordinator = None
     coordinator._last_price_timestamps = dynamic_timestamps
     coordinator._last_import_prices = dynamic_import_prices
     coordinator._last_export_prices = dynamic_export_prices

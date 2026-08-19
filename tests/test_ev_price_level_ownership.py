@@ -14,6 +14,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from conftest import pinned_sys_modules
+
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
 
@@ -97,6 +99,22 @@ if not hasattr(sys.modules.get("power_sync.const"), "TESLA_INTEGRATIONS"):
     sys.modules.pop("power_sync.const", None)
 
 ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+
+# Captured after this module's stub tree is live.  Product code imports some
+# helpers lazily inside a function, resolving sys.modules at call time, so a
+# later test file replacing an entry would otherwise hand these tests a foreign
+# stub -- an aiohttp_client whose session getter this file never patched.
+_OWNED_STUB_MODULES = {
+    name: module
+    for name, module in sys.modules.items()
+    if name.startswith("homeassistant")
+}
+
+
+@pytest.fixture(autouse=True)
+def _pin_owned_stub_modules():
+    with pinned_sys_modules(_OWNED_STUB_MODULES):
+        yield
 ev_pricing = importlib.import_module("power_sync.automations.ev_pricing")
 ev_capacity = importlib.import_module("power_sync.automations.ev_vehicle_capacity")
 

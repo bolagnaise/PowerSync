@@ -28,6 +28,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from conftest import pin_power_sync_clock, pinned_sys_modules
+
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
@@ -114,6 +116,15 @@ def _install_coordinator_stubs() -> None:
 
 
 _install_coordinator_stubs()
+
+# Captured while this module's stub tree is live.  Product code imports some
+# helpers lazily inside a function, so it resolves sys.modules at call time and
+# would otherwise pick up whichever test file was collected last.
+_OWNED_STUB_MODULES = {
+    name: module
+    for name, module in sys.modules.items()
+    if name.startswith("homeassistant")
+}
 sys.modules.pop("power_sync.coordinator", None)
 
 from power_sync.coordinator import (  # noqa: E402
@@ -135,6 +146,30 @@ from power_sync.ev_load import (  # noqa: E402
     EvMeasurementKind,
     ObservedEvLoadSnapshot,
 )
+
+# The module objects these imports came from.  Other test files pop and
+# re-import ``power_sync.coordinator``, so the sys.modules entry can end up
+# being a different object than the one holding the functions imported above --
+# pinning has to target these, not whatever sys.modules currently names.
+_PS_MODULES = (
+    sys.modules["power_sync.coordinator"],
+    sys.modules["power_sync.ev_load"],
+)
+
+
+
+@pytest.fixture(autouse=True)
+def _pin_frozen_clock():
+    """Hold this module's frozen 2026-07-08 clock regardless of collection order."""
+    from datetime import datetime as _dt
+
+    with pinned_sys_modules(_OWNED_STUB_MODULES), pin_power_sync_clock(
+        *_PS_MODULES,
+        utcnow=lambda: _dt(2026, 7, 8, 1, 0, 0),
+        now=lambda: _dt(2026, 7, 8, 12, 0, 0),
+    ):
+        yield
+
 
 
 def test_fresh_site_ev_load_prefers_complete_provider_neutral_total():

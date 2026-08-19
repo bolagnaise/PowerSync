@@ -21,6 +21,7 @@ against).
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 import types
 from datetime import datetime, timezone
@@ -40,6 +41,7 @@ _STUB_MODULE_NAMES = (
     "homeassistant.core",
     "homeassistant.exceptions",
     "homeassistant.helpers",
+    "homeassistant.helpers.aiohttp_client",
     "homeassistant.helpers.dispatcher",
     "homeassistant.helpers.event",
     "homeassistant.helpers.storage",
@@ -48,6 +50,10 @@ _STUB_MODULE_NAMES = (
     "homeassistant.util.dt",
     "power_sync",
     "power_sync.const",
+    # optimization.coordinator imports normalize_custom_power_kw from here.
+    # Without it in this list a stub left by another test file survives and
+    # the real symbol cannot be imported.
+    "power_sync.coordinator",
     "power_sync.optimization",
     "power_sync.optimization.battery_optimizer",
     "power_sync.optimization.coordinator",
@@ -63,11 +69,28 @@ _STUB_MODULE_NAMES = (
 _NOW = datetime(2026, 7, 8, 8, 30, tzinfo=timezone.utc)
 
 
+def _load_real_const() -> types.ModuleType:
+    """Load the real const module; the stub assignments below then override it.
+
+    const.py is stdlib-only, so it loads without the Home Assistant import
+    chain.  Starting from the real module means a newly imported constant
+    cannot silently break collection here, while the hand-written values below
+    still win where these tests need different ones.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "power_sync.const", COMPONENT_ROOT / "const.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _install_ha_stubs() -> None:
     ha_root = types.ModuleType("homeassistant")
     ha_core = types.ModuleType("homeassistant.core")
     ha_exceptions = types.ModuleType("homeassistant.exceptions")
     ha_helpers = types.ModuleType("homeassistant.helpers")
+    ha_aiohttp_client = types.ModuleType("homeassistant.helpers.aiohttp_client")
     ha_dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
     ha_event = types.ModuleType("homeassistant.helpers.event")
     ha_storage = types.ModuleType("homeassistant.helpers.storage")
@@ -92,8 +115,14 @@ def _install_ha_stubs() -> None:
 
     ha_core.HomeAssistant = type("HomeAssistant", (), {})
     ha_exceptions.ConfigEntryNotReady = type("ConfigEntryNotReady", (Exception,), {})
+    # coordinator.py imports this at module scope; without it the whole
+    # module fails to import and every test here errors at fixture setup.
+    ha_exceptions.ConfigEntryAuthFailed = type(
+        "ConfigEntryAuthFailed", (Exception,), {}
+    )
     ha_storage.Store = _Store
     ha_update.DataUpdateCoordinator = _DataUpdateCoordinator
+    ha_update.UpdateFailed = type("UpdateFailed", (Exception,), {})
     ha_dispatcher.async_dispatcher_send = lambda *args, **kwargs: None
     ha_event.async_track_point_in_utc_time = (
         lambda hass, callback, when: getattr(hass, "scheduled", []).append((callback, when)) or (lambda: None)
@@ -101,6 +130,10 @@ def _install_ha_stubs() -> None:
     ha_dt.now = lambda *args, **kwargs: _NOW
     ha_dt.utcnow = lambda *args, **kwargs: _NOW
     ha_dt.UTC = timezone.utc
+    # coordinator.py imports async_get_clientsession at module scope, so the
+    # submodule has to exist as a real sys.modules entry, not just an attribute.
+    ha_aiohttp_client.async_get_clientsession = lambda hass: None
+    ha_helpers.aiohttp_client = ha_aiohttp_client
     ha_helpers.storage = ha_storage
     ha_helpers.dispatcher = ha_dispatcher
     ha_helpers.event = ha_event
@@ -113,6 +146,7 @@ def _install_ha_stubs() -> None:
     sys.modules["homeassistant.core"] = ha_core
     sys.modules["homeassistant.exceptions"] = ha_exceptions
     sys.modules["homeassistant.helpers"] = ha_helpers
+    sys.modules["homeassistant.helpers.aiohttp_client"] = ha_aiohttp_client
     sys.modules["homeassistant.helpers.dispatcher"] = ha_dispatcher
     sys.modules["homeassistant.helpers.event"] = ha_event
     sys.modules["homeassistant.helpers.storage"] = ha_storage
@@ -130,7 +164,7 @@ def _install_power_sync_stubs() -> None:
     optimization_module.__path__ = [str(COMPONENT_ROOT / "optimization")]
     sys.modules["power_sync.optimization"] = optimization_module
 
-    const_module = types.ModuleType("power_sync.const")
+    const_module = _load_real_const()
     const_module.DOMAIN = "power_sync"
     const_module.TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
     const_module.CONF_ELECTRICITY_PROVIDER = "electricity_provider"

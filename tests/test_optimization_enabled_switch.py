@@ -310,7 +310,9 @@ def test_max_grid_import_setting_is_exposed_through_api_and_coordinator():
     assert '"grid_charge_soc_cap": int(' in coordinator_source
     assert '"max_grid_import_w": {' in metadata_source
     assert '"max_grid_export_w": {' in metadata_source
-    assert metadata_source.count('"owner": "site"') >= 2
+    # `owner` is now uniformly "optimizer"; the site-level grouping these two
+    # settings need moved to `section` (commit 5e254248).
+    assert metadata_source.count('"section": "grid_site_constraints"') >= 2
     assert '"max_grid_charge_price": {' in metadata_source
     assert '"grid_charge_soc_cap": {' in metadata_source
     assert '"settings_schema": optimizer_settings_schema()' in init_source

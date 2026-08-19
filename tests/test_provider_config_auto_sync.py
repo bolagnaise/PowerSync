@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import importlib.util
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 import textwrap
@@ -15,6 +17,44 @@ INIT_PATH = (
     / "power_sync"
     / "__init__.py"
 )
+
+
+def _handler_globals() -> dict:
+    """Real module globals the extracted handler resolves at call time.
+
+    ``const``, ``currency`` and ``zerohero`` are stdlib-only, so they load
+    standalone without the Home Assistant import chain.  Loading them beats
+    hand-listing names: the handler grows references over time, and anything
+    missing from this namespace surfaces as a NameError swallowed by the
+    view's own except clause -- an opaque HTTP 500 rather than a clear failure.
+
+    Deliberately not registered in ``sys.modules``: these are for this
+    namespace only and must not become the tree another test file imports.
+    """
+    globals_: dict = {}
+    for module_name in ("const", "currency", "zerohero"):
+        path = INIT_PATH.parent / f"{module_name}.py"
+        spec = importlib.util.spec_from_file_location(
+            f"_ps_standalone_{module_name}", path
+        )
+        module = importlib.util.module_from_spec(spec)
+        # dataclasses resolves sys.modules[cls.__module__] while building a
+        # frozen class, so the module has to be registered for the exec.  Drop
+        # it straight after: this tree is for this namespace only and must not
+        # become something another test file can import.
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.modules.pop(spec.name, None)
+        globals_.update(
+            {
+                name: value
+                for name, value in vars(module).items()
+                if not name.startswith("__")
+            }
+        )
+    return globals_
 
 
 def _provider_config_get():
@@ -47,23 +87,7 @@ def _provider_config_get():
     namespace = {
         "web": web,
         "_LOGGER": _Logger(),
-        "DOMAIN": "power_sync",
-        "CONF_BATTERY_SYSTEM": "battery_system",
-        "CONF_ELECTRICITY_PROVIDER": "electricity_provider",
-        "CONF_AUTO_SYNC_ENABLED": "auto_sync_enabled",
-        "CONF_DEMAND_CHARGE_ENABLED": "demand_charge_enabled",
-        "CONF_DEMAND_CHARGE_RATE": "demand_charge_rate",
-        "CONF_DEMAND_CHARGE_START_TIME": "demand_charge_start_time",
-        "CONF_DEMAND_CHARGE_END_TIME": "demand_charge_end_time",
-        "CONF_DEMAND_CHARGE_DAYS": "demand_charge_days",
-        "CONF_DEMAND_CHARGE_BILLING_DAY": "demand_charge_billing_day",
-        "CONF_PRICE_SPIKE_ALERT": "price_spike_alert",
-        "CONF_PRICE_SPIKE_IMPORT_THRESHOLD": "price_spike_import_threshold",
-        "CONF_PRICE_SPIKE_EXPORT_THRESHOLD": "price_spike_export_threshold",
-        "DEFAULT_PRICE_SPIKE_IMPORT_THRESHOLD": 100,
-        "DEFAULT_PRICE_SPIKE_EXPORT_THRESHOLD": 50,
-        "CONF_MONITORING_MODE": "monitoring_mode",
-        "BATTERY_SYSTEM_ANKER_SOLIX": "anker_solix",
+        **_handler_globals(),
     }
     exec(textwrap.dedent(method_source), namespace)
     return namespace["get"]

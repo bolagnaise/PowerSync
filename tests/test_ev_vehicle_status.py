@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import math
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -217,6 +218,31 @@ class _Hass:
         self.entity_registry = SimpleNamespace(entities=registry_entities or {})
         self.device_registry = SimpleNamespace(devices=devices or {})
         self.data = {"power_sync": {"entry-1": entry_data or {}}}
+
+
+def _fake_site_snapshot(hass) -> dict:
+    """Mirror ``EVLoadpointStatusView._site_snapshot`` for the stub views.
+
+    The display loader refreshes the site projection from the view *after*
+    normalizing the energy coordinator, so the stub has to read the
+    coordinator live rather than hand back a frozen dict.
+    """
+    entry_data = hass.data.get("power_sync", {}).get("entry-1", {})
+    data = getattr(entry_data.get("tesla_coordinator"), "data", None) or {}
+    try:
+        load_power_kw = float(data.get("load_power"))
+    except (TypeError, ValueError):
+        load_power_kw = None
+    if load_power_kw is not None and not math.isfinite(load_power_kw):
+        load_power_kw = None
+    return {
+        "battery_soc": data.get("battery_level", 0) or 0,
+        "solar_power_kw": data.get("solar_power", 0) or 0,
+        "grid_power_kw": data.get("grid_power", 0) or 0,
+        "battery_power_kw": data.get("battery_power", 0) or 0,
+        "load_power_kw": load_power_kw,
+        "is_curtailed": data.get("is_curtailed", False) is True,
+    }
 
 
 def _entity(entity_id: str, device_id: str):
@@ -1320,7 +1346,10 @@ def test_display_snapshot_timestamp_follows_active_zero_power_observation(monkey
 
     class LoadpointStatusView:
         def __init__(self, hass, entry):
-            pass
+            self._hass = hass
+
+        def _site_snapshot(self):
+            return _fake_site_snapshot(self._hass)
 
         async def _async_build_response(self, request, observed_vehicle_sink):
             observed_vehicle_sink.append(
@@ -2323,7 +2352,10 @@ def test_display_snapshot_reconciles_direct_same_vehicle_stop_and_restart(monkey
 
     class LoadpointStatusView:
         def __init__(self, hass, entry):
-            pass
+            self._hass = hass
+
+        def _site_snapshot(self):
+            return _fake_site_snapshot(self._hass)
 
         async def _async_build_response(self, request, observed_vehicle_sink):
             observed_vehicle_sink.append(
@@ -2422,7 +2454,10 @@ def test_display_snapshot_direct_meter_keeps_distinct_missing_ev_incomplete(
 
     class LoadpointStatusView:
         def __init__(self, hass, entry):
-            pass
+            self._hass = hass
+
+        def _site_snapshot(self):
+            return _fake_site_snapshot(self._hass)
 
         async def _async_build_response(self, request, observed_vehicle_sink):
             return SimpleNamespace(

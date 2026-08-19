@@ -574,6 +574,11 @@ def test_aemo_dispatch_tasks_are_generation_scoped_and_joined_on_unload():
     assert unload_source.index('"aemo_dispatch_stopping"') < unload_source.index(
         '"aemo_dispatch_unsub"'
     )
-    assert unload_source.index("task.cancel()") < unload_source.index(
-        "await asyncio.gather"
-    )
+    # Search for the join from the cancel onwards: unload now awaits an
+    # unrelated earlier gather (reserve writes), so a bare .index() finds that
+    # one instead of the dispatch join.  The invariant is that the dispatch
+    # tasks are cancelled, then joined, then the set is cleared.
+    cancel_pos = unload_source.index("task.cancel()")
+    join_pos = unload_source.index("await asyncio.gather", cancel_pos)
+    clear_pos = unload_source.index('entry_data["aemo_dispatch_tasks"] = set()')
+    assert cancel_pos < join_pos < clear_pos
