@@ -697,11 +697,15 @@ class EnergyAccumulator:
                     export_kwh = max(0, -grid_kw) * delta_h
                     self.mtd_export_earnings += export_kwh * sell_price_per_kwh
                     self.mtd_export_earnings_covered_kwh += export_kwh
+                if load_kw is None:
+                    # Only an interval that was actually integrated can leave a
+                    # hole in Home Load.  The first sample after a restart, and
+                    # any sample beyond the 6-minute staleness guard, integrate
+                    # nothing — latching on those poisoned the month-to-date
+                    # average until the next month rollover for no lost energy.
+                    self._load_accounting_partial_today = True
+                    self._load_accounting_partial_mtd = True
                 self._schedule_save()
-
-        if load_kw is None:
-            self._load_accounting_partial_today = True
-            self._load_accounting_partial_mtd = True
 
         self._last_update = now
         self._last_date = now.date()
@@ -2444,6 +2448,20 @@ def _update_energy_accumulator_with_ev_load(
 ) -> bool:
     """Integrate site metering while withholding uncertain Home Load only."""
     ev_power_kw, complete = _fresh_site_ev_load(hass, entry_id, 0.0)
+    if not complete:
+        # Withholding Home Load is silent otherwise, and it is what makes the
+        # daily/month-to-date average-cost sensors report no value.  Name it so
+        # a debug capture shows how often it happens and which loadpoint is
+        # responsible.
+        snapshot = hass.data.get(DOMAIN, {}).get(entry_id, {}).get(
+            "observed_ev_load_snapshot"
+        )
+        _LOGGER.debug(
+            "Home Load withheld from energy accounting: EV load attribution "
+            "incomplete (snapshot observed_at=%s, unavailable_active_keys=%s)",
+            getattr(snapshot, "observed_at", None),
+            getattr(snapshot, "unavailable_active_keys", None),
+        )
     accumulator.update(
         solar_kw,
         grid_kw,
@@ -6049,25 +6067,32 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         # partial accumulator value with a full-day Sungrow hardware counter:
         # that can present an exact $0.00 beside substantial exported energy
         # after an incomplete EV-load snapshot or a mid-day startup.
+        #
+        # Only *under*-coverage means the accumulator missed priced intervals.
+        # Priced energy at or above the hardware counter means every metered
+        # kWh carried a price; the residual is ordinary disagreement between
+        # integrated power samples and the inverter's own daily register, and
+        # on a small counter it easily exceeds the 0.05 kWh absolute floor.
+        # Treating that as a coverage gap suppressed the cost totals — and the
+        # average-price sensors derived from them — for the whole day.
+        def _priced_coverage_is_partial(
+            covered_kwh: float,
+            measured_kwh: float,
+        ) -> bool:
+            tolerance = max(0.05, abs(float(measured_kwh or 0.0)) * 0.02)
+            return float(covered_kwh) + tolerance < float(measured_kwh or 0.0)
+
         import_covered = summary.get("import_cost_covered_kwh")
-        if (
-            import_covered is not None
-            and not EnergyAccumulator._coverage_matches(
-                import_covered,
-                final_import,
-                max(0.05, float(final_import or 0.0) * 0.02),
-            )
+        if import_covered is not None and _priced_coverage_is_partial(
+            import_covered,
+            final_import,
         ):
             summary["import_cost_today"] = None
             summary["import_cost_coverage"] = "partial"
         export_covered = summary.get("export_earnings_covered_kwh")
-        if (
-            export_covered is not None
-            and not EnergyAccumulator._coverage_matches(
-                export_covered,
-                final_export,
-                max(0.05, float(final_export or 0.0) * 0.02),
-            )
+        if export_covered is not None and _priced_coverage_is_partial(
+            export_covered,
+            final_export,
         ):
             summary["export_earnings_today"] = None
             summary["export_earnings_coverage"] = "partial"

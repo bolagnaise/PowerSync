@@ -1140,6 +1140,61 @@ def test_sungrow_daily_earnings_keep_matching_reward_window_coverage():
     assert summary["export_earnings_coverage"] == "complete"
 
 
+def test_sungrow_daily_earnings_keep_small_import_over_coverage():
+    """Ticket #336: priced >= metered is full coverage, not a coverage gap.
+
+    The reported site had priced 0.26 kWh of import against a 0.10 kWh
+    hardware daily register.  The percentage tolerance term is meaningless on
+    a counter that small, so the 0.05 kWh absolute floor rejected it and both
+    Avg Cost per kWh sensors read Unknown all day, even though every imported
+    kWh carried a price.
+    """
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class OverCoveredAccumulator(_FakeEnergyAccumulator):
+        def as_dict(self):
+            data = super().as_dict()
+            data.update(
+                {
+                    "grid_import_today_kwh": 0.26,
+                    "grid_export_today_kwh": 22.30,
+                    "import_cost_today": 0.0787,
+                    "export_earnings_today": 0.2235,
+                    "import_cost_covered_kwh": 0.26,
+                    "export_earnings_covered_kwh": 22.362,
+                    "import_cost_coverage": "complete",
+                    "export_earnings_coverage": "complete",
+                }
+            )
+            return data
+
+    try:
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator._energy_acc = OverCoveredAccumulator()
+        summary = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.10,
+                "daily_export": 22.80,
+                "daily_pv_generation": 57.20,
+                "daily_battery_charge": 29.60,
+                "daily_battery_discharge": 6.60,
+            }
+        )
+    finally:
+        restore()
+
+    assert summary["grid_import_today_kwh"] == pytest.approx(0.10)
+    assert summary["import_cost_today"] == pytest.approx(0.0787)
+    assert summary["import_cost_coverage"] == "complete"
+    assert summary["export_earnings_today"] == pytest.approx(0.2235)
+    assert summary["export_earnings_coverage"] == "complete"
+    assert summary["load_today_kwh"] == pytest.approx(11.50)
+    assert summary["avg_cost_per_kwh_today"] == pytest.approx(-0.0126)
+
+
 def test_dual_sungrow_keeps_primary_grid_cost_coverage():
     """The backup-port inverter must not hide primary partial accounting."""
     DualSungrowCoordinator, restore = _load_dual_sungrow_coordinator()

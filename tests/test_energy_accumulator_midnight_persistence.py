@@ -320,3 +320,46 @@ def test_legacy_daily_import_cost_does_not_hide_small_unpriced_gap():
         }
     )
     assert restored.as_dict()["import_cost_today"] is None
+
+
+def test_non_integrating_sample_without_home_load_does_not_latch_the_month():
+    """Ticket #336: only an integrated interval can leave a Home Load hole.
+
+    The first sample after a restart, and any sample beyond the 6-minute
+    staleness guard, add nothing to the accumulators.  Latching on those set
+    _load_accounting_partial_mtd for the rest of the calendar month and left
+    Avg Cost per kWh (Month) reading Unknown until the next month rollover,
+    with no energy actually missing.
+    """
+    clock = _Clock(datetime(2026, 8, 19, 8, 0, 0))
+    accumulator = _new_accumulator(clock, _Store())
+
+    # First sample after a restart: no previous timestamp, nothing integrated.
+    accumulator.update(1.0, -1.0, 0.0, None, 0.30, 0.05)
+    assert accumulator._load_accounting_partial_today is False
+    assert accumulator._load_accounting_partial_mtd is False
+
+    # A gap wider than the 6-minute sanity guard also integrates nothing.
+    clock.current = datetime(2026, 8, 19, 8, 30, 0)
+    accumulator.update(1.0, -1.0, 0.0, None, 0.30, 0.05)
+    assert accumulator._load_accounting_partial_mtd is False
+
+    # A normal interval that genuinely lacks Home Load still fails closed.
+    clock.current = datetime(2026, 8, 19, 8, 31, 0)
+    accumulator.update(1.0, -1.0, 0.0, None, 0.30, 0.05)
+    assert accumulator._load_accounting_partial_today is True
+    assert accumulator._load_accounting_partial_mtd is True
+
+
+def test_complete_home_load_samples_publish_both_average_costs():
+    clock = _Clock(datetime(2026, 8, 19, 8, 0, 0))
+    accumulator = _new_accumulator(clock, _Store())
+
+    accumulator.update(0.0, 1.0, 0.0, 1.0, 0.30, 0.05)
+    for minute in range(1, 31):
+        clock.current = datetime(2026, 8, 19, 8, minute, 0)
+        accumulator.update(0.0, 1.0, 0.0, 1.0, 0.30, 0.05)
+
+    summary = accumulator.as_dict()
+    assert summary["avg_cost_per_kwh_today"] is not None
+    assert summary["avg_cost_per_kwh_mtd"] is not None
