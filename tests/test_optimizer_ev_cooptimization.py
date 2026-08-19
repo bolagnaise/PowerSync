@@ -259,3 +259,41 @@ def test_greedy_fallback_reports_the_ev_draw_it_assumed(optimizer_module):
         action.ev_charge_w / 1000.0 for action in greedy.schedule.actions
     )
     assert ev_kwh == pytest.approx(14.0, abs=0.05)
+
+
+def test_overlay_and_decision_variable_are_mutually_exclusive():
+    # Regression: the coordinator has always folded planned EV load into the
+    # load forecast. Adding the ev_charge decision variable without disabling
+    # that overlay counts the car twice and understates import headroom.
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "custom_components" / "power_sync" / "optimization" / "coordinator.py"
+    ).read_text()
+
+    assert "self._pending_ev_charge_plan = self._build_ev_charge_plan(" in source
+    assert "effective_ev_load_w = zeros" in source
+    # The solve must consume the plan decided at overlay time, not rebuild it
+    # after the overlay has already been applied to load.
+    assert 'ev_charge_plan = getattr(self, "_pending_ev_charge_plan", None)' in source
+
+
+def test_double_counting_would_halve_the_battery_plan(optimizer_module):
+    # Guards the arithmetic the exclusivity protects: if the car were counted
+    # in load *and* as a decision variable, the battery would be squeezed by
+    # twice the car's draw.
+    scenario = _kwargs(cheap_slots=(0, 1))
+    plan = _ev_plan(
+        optimizer_module,
+        max_power_kw=(7.0, 7.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        energy_needed_kwh=14.0,
+    )
+    correct = _optimizer(optimizer_module).optimize(**scenario, ev_plan=plan)
+
+    doubled = dict(scenario)
+    doubled["load_forecast"] = [0.5 + 7.0, 0.5 + 7.0] + [0.5] * 6
+    wrong = _optimizer(optimizer_module).optimize(**doubled, ev_plan=plan)
+
+    peak_correct = max(b for b, _ev in _flows(correct))
+    peak_wrong = max(b for b, _ev in _flows(wrong))
+    assert peak_correct == pytest.approx(8.6, abs=0.1)
+    assert peak_wrong < peak_correct - 5.0

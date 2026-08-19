@@ -7056,6 +7056,38 @@ def _optimizer_planned_ev_charge_kw(hass, config_entry) -> Optional[float]:
         return None
 
 
+def _battery_target_available_kw(
+    grid_headroom_kw: float,
+    effective_battery_target_kw: float,
+    battery_charging_kw: float,
+    *,
+    acceptance_learned: bool,
+) -> float:
+    """Return the EV power delta after reserving the battery's shortfall.
+
+    Once live acceptance is learned the reserve is the battery's observed
+    intake plus ``_BATTERY_ACCEPTANCE_MARGIN_KW`` of room to grow back into.
+    That margin may legitimately soak up spare headroom, but it must never
+    push the EV *below* its current rate: on an import-limited site the margin
+    never fills, so the car sheds an amp, the battery absorbs it, the reserve
+    rises with the new intake, and the identical gap reappears next cycle —
+    ratcheting the car to its minimum. A shortfall larger than the margin is
+    real and still reduces the EV.
+    """
+    gap_kw = max(
+        0.0,
+        float(effective_battery_target_kw) - float(battery_charging_kw),
+    )
+    available_kw = float(grid_headroom_kw) - gap_kw
+    if (
+        acceptance_learned
+        and available_kw < 0.0
+        and gap_kw <= _BATTERY_ACCEPTANCE_MARGIN_KW + 1e-9
+    ):
+        return 0.0
+    return available_kw
+
+
 def _resolve_battery_reservation_kw(
     *,
     session_target_kw: Any,
@@ -7666,10 +7698,6 @@ async def _update_smart_schedule_battery_target_group(
 
     if effective_battery_target_kw > 0:
         actual_battery_charge_kw = max(0.0, -battery_power_kw)
-        battery_reserve_gap_kw = max(
-            0.0,
-            effective_battery_target_kw - actual_battery_charge_kw,
-        )
         effective_group_ev_kw = max(
             0.0,
             effective_site_ev_kw - other_commanded_kw,
@@ -7679,8 +7707,12 @@ async def _update_smart_schedule_battery_target_group(
             max(
                 0.0,
                 effective_group_ev_kw
-                + grid_headroom_kw
-                - battery_reserve_gap_kw,
+                + _battery_target_available_kw(
+                    grid_headroom_kw,
+                    effective_battery_target_kw,
+                    actual_battery_charge_kw,
+                    acceptance_learned=acceptance_learned,
+                ),
             ),
         )
     elif acceptance_learned:
@@ -10080,11 +10112,12 @@ async def _dynamic_ev_update(
     battery_charging_kw = max(0.0, -battery_power_kw)  # positive when battery is charging
     ev_relevant_grid_kw = grid_power_kw - battery_charging_kw
     if effective_battery_target_kw > 0:
-        battery_reserve_gap_kw = max(
-            0.0,
-            effective_battery_target_kw - battery_charging_kw,
+        available_power_kw = _battery_target_available_kw(
+            grid_headroom_kw,
+            effective_battery_target_kw,
+            battery_charging_kw,
+            acceptance_learned=acceptance_learned,
         )
-        available_power_kw = grid_headroom_kw - battery_reserve_gap_kw
     elif no_grid_import:
         # Exclude intentional home battery grid-charging from the grid import figure.
         # When the LP optimizer force-charges the home battery from grid, battery_power_kw

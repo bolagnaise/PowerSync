@@ -478,6 +478,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._configured_load_entity_id: str | None = None
         self._planned_ev_load_entity_id: str | None = None
         self._warned_dual_ev_overlay = False
+        self._pending_ev_charge_plan: Any | None = None
         if self._entry:
             from ..const import (
                 CONF_OPTIMIZATION_EV_INTEGRATION,
@@ -5440,6 +5441,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Overlay EV charging plan onto load forecast
             ev_peak_kw = 0.0
+            self._pending_ev_charge_plan = None
             self._last_planned_ev_load_forecast_w = None
             self._last_effective_ev_load_forecast_w = None
             self._last_smart_schedule_ev_load_w = None
@@ -5501,6 +5503,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         price_expected_w=list(price_expected_w),
                     )
                 )
+
+                # The LP's ev_charge decision variable and this load overlay
+                # model the same demand. Running both would count the car
+                # twice, so they are mutually exclusive: prefer the decision
+                # variable, which chooses timing against prices and the import
+                # limit instead of fixing it to the planner's chosen windows.
+                self._pending_ev_charge_plan = self._build_ev_charge_plan(
+                    self._price_timestamps(n_ev)
+                )
+                if self._pending_ev_charge_plan is not None:
+                    _LOGGER.debug(
+                        "EV load overlay: superseded by LP co-optimization "
+                        "(%.1f kWh for %s)",
+                        self._pending_ev_charge_plan.energy_needed_kwh,
+                        self._pending_ev_charge_plan.vehicle_id,
+                    )
+                    effective_ev_load_w = zeros
 
                 if any(value > 0 for value in effective_ev_load_w):
                     load = [
@@ -5924,7 +5943,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else None
             )
 
-            ev_charge_plan = self._build_ev_charge_plan(schedule_timestamps)
+            ev_charge_plan = getattr(self, "_pending_ev_charge_plan", None)
             if ev_charge_plan is not None:
                 _LOGGER.debug(
                     "EV demand in this solve: %.1f kWh for %s",

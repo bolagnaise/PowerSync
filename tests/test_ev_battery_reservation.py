@@ -376,3 +376,58 @@ def test_planned_ev_power_is_applied_as_a_ceiling_not_a_setpoint():
 
     assert "planned_ev_charge_kw - current_ev_power_kw," in source
     assert "available_power_kw = min(" in source
+
+
+# ---------------------------------------------------------------------------
+# The import-limited ratchet
+# ---------------------------------------------------------------------------
+
+
+def test_speculative_margin_never_walks_the_car_down():
+    # The live failure: 16.1 kW limit with the site pinned at 15.9, battery
+    # accepting 13.9 against a learned reserve of 14.2. The 0.3 kW shortfall is
+    # entirely the learner's growth margin, which on an import-limited site
+    # never fills — so every cycle shed an amp, forever.
+    available = actions._battery_target_available_kw(
+        16.1 - 15.9, 14.2, 13.9, acceptance_learned=True
+    )
+
+    assert available == 0.0
+
+
+def test_margin_may_still_absorb_spare_headroom():
+    # With real headroom the margin is funded from it rather than from the car,
+    # so the EV simply gets less of the surplus - it is not pushed down.
+    available = actions._battery_target_available_kw(
+        5.0, 10.3, 10.0, acceptance_learned=True
+    )
+
+    assert available == pytest.approx(4.7)
+
+
+def test_a_real_shortfall_still_reduces_the_ev():
+    # 2.7 kW short is far beyond the speculative margin: genuine competition,
+    # and the car must yield.
+    available = actions._battery_target_available_kw(
+        0.2, 14.7, 12.0, acceptance_learned=True
+    )
+
+    assert available == pytest.approx(-2.5)
+
+
+def test_unlearned_reserve_is_never_treated_as_speculative():
+    # Before acceptance is learned the target is the real plan, not intake plus
+    # a margin, so even a small gap is genuine and still reduces the EV.
+    available = actions._battery_target_available_kw(
+        0.2, 14.2, 13.9, acceptance_learned=False
+    )
+
+    assert available == pytest.approx(-0.1)
+
+
+def test_battery_over_its_reserve_leaves_the_ev_the_whole_headroom():
+    available = actions._battery_target_available_kw(
+        1.5, 14.0, 14.6, acceptance_learned=True
+    )
+
+    assert available == pytest.approx(1.5)

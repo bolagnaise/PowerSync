@@ -310,9 +310,19 @@ class _FakeOverlayCoordinator:
         self._last_price_level_projection = None
         self._planned_ev_load_entity_id = "sensor.external" if external_forecast else None
         self._warned_dual_ev_overlay = False
+        self._ev_charge_plan = None
 
     def _get_planned_ev_load_forecast(self, n_intervals: int) -> list[float] | None:
         return self._external_forecast
+
+    def _price_timestamps(self, n: int) -> list:
+        return [None] * n
+
+    def _build_ev_charge_plan(self, schedule_timestamps):
+        # These cases cover the overlay's own internal/external merge, so LP
+        # co-optimization is off; when it is on the overlay is superseded and
+        # there is nothing here to merge.
+        return self._ev_charge_plan
 
     async def _build_price_level_projection(self, n_intervals: int):
         return SimpleNamespace(
@@ -354,7 +364,10 @@ def _run_overlay(coordinator: _FakeOverlayCoordinator, load: list[float]) -> lis
     wrapped = "async def _run(load):\n" + textwrap.indent(source, "    ") + "\n    return load\n"
     namespace = {
         "self": coordinator,
-        "_LOGGER": SimpleNamespace(warning=lambda *a, **k: None),
+        "_LOGGER": SimpleNamespace(
+            warning=lambda *a, **k: None,
+            debug=lambda *a, **k: None,
+        ),
     }
     exec(compile(wrapped, "<ev_overlay_block>", "exec"), namespace)
     return asyncio.run(namespace["_run"](list(load)))
@@ -732,3 +745,23 @@ def test_price_level_projection_payload_is_versioned_and_array_aligned():
     }
     assert payload["windows"] == [{"id": "window"}]
     assert payload["warnings"] == ["diagnostic"]
+
+
+def test_ev_overlay_is_suppressed_when_the_lp_co_optimizes():
+    """The decision variable supersedes the overlay; counting both doubles EV."""
+    coordinator = _FakeOverlayCoordinator(
+        external_forecast=None,
+        internal_forecast=[3000.0, 3000.0, 0.0, 0.0],
+        ev_integration_enabled=True,
+    )
+    coordinator._ev_charge_plan = SimpleNamespace(
+        energy_needed_kwh=6.0,
+        vehicle_id="car",
+    )
+
+    load = _run_overlay(coordinator, [2000.0, 2000.0, 2000.0, 2000.0])
+
+    # Load is untouched: the car is now the solver's decision variable.
+    assert load == [2000.0, 2000.0, 2000.0, 2000.0]
+    assert coordinator._last_planned_ev_load_forecast_w is None
+
