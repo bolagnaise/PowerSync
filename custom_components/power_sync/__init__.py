@@ -26559,36 +26559,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 except (TypeError, ValueError, OverflowError):
                     pass
 
+                # Entry guard only. Once curtailment is applied, zero export is
+                # the *result* of the command, so it must never be read back as
+                # evidence that curtailment is unnecessary — doing so restored
+                # export while the price was still uneconomic and re-curtailed
+                # on the next check, flapping every 5 minutes. Leaving the
+                # uneconomic window is owned solely by the price branch below.
                 if (
-                    _nonnegative_import_price
+                    current_state != "curtailed"
+                    and _nonnegative_import_price
                     and _grid_telemetry_usable
                     and _grid_export_w <= 250
                 ):
-                    if current_state == "curtailed":
-                        _LOGGER.info(
-                            "FoxESS curtailment RESTORED: import is non-negative "
-                            "and grid export stopped at %.1fW",
-                            _grid_export_w,
-                        )
-                        if hasattr(fc, "restore_curtailment"):
-                            success = await fc.restore_curtailment()
-                        else:
-                            success = await controller.restore()
-                        if success:
-                            entry_data["foxess_curtailment_state"] = "normal"
-                            entry_data.pop("_last_foxess_curtailment_reapply", None)
-                        else:
-                            _LOGGER.error("FoxESS restore() failed")
-                    else:
-                        _LOGGER.debug(
-                            "FoxESS curtailment skipped: import is non-negative "
-                            "and grid export is only %.1fW",
-                            _grid_export_w,
-                        )
+                    _LOGGER.debug(
+                        "FoxESS curtailment skipped: import is non-negative "
+                        "and grid export is only %.1fW",
+                        _grid_export_w,
+                    )
                     return
 
                 import time as _time_mod
-                _foxess_reapply_interval = 480  # Keep ahead of FoxESS 600s remote-control timeout
+                # Checks run every 5 minutes, so 240s makes the first eligible
+                # re-apply land at 300s — genuinely ahead of the FoxESS 600s
+                # remote-control timeout. At 480s the first eligible check was
+                # the one at 600s, i.e. racing the expiry it was meant to beat.
+                _foxess_reapply_interval = 240
                 _last_reapply = entry_data.get("_last_foxess_curtailment_reapply", 0)
                 _now = _time_mod.monotonic()
                 _elapsed_since_reapply = _now - _last_reapply

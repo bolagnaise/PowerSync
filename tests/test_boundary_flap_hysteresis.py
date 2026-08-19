@@ -25,6 +25,7 @@ import importlib.util
 import math
 import sys
 import textwrap
+import time
 import types
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -387,8 +388,9 @@ def test_foxess_curtailment_no_flap_while_export_earnings_hovers_at_boundary():
 def test_foxess_curtailment_gates_on_material_live_export():
     """Non-negative import plus negligible export must not activate curtailment.
 
-    A previously curtailed inverter is restored once export stops, while a
-    material live export still takes the existing curtailment path.
+    The gate is an *entry* guard only: an already-curtailed inverter holds the
+    curtailment while the price stays uneconomic, and a material live export
+    still takes the existing curtailment path.
     """
 
     with_hysteresis = _load_tariff_utils().with_hysteresis
@@ -410,20 +412,30 @@ def test_foxess_curtailment_gates_on_material_live_export():
         assert controller.calls == []
         assert entry_data["foxess_curtailment_state"] == "normal"
 
-        # (b) If the prior state was curtailed, stop curtailment through the
-        # same restore surface and clear the timer marker after success.
+        # (b) If the prior state was curtailed, the stopped export is the
+        # *result* of that curtailment, so it must not be read back as a reason
+        # to restore while the price is still uneconomic. Hold, and keep the
+        # re-apply marker so the timer keeps governing.
         entry_data["foxess_curtailment_state"] = "curtailed"
-        entry_data["_last_foxess_curtailment_reapply"] = 123.0
+        marker = time.monotonic()
+        entry_data["_last_foxess_curtailment_reapply"] = marker
         await handler(feedin_price=-0.5, import_price=5.0)
-        assert controller.calls == ["restore"]
-        assert entry_data["foxess_curtailment_state"] == "normal"
-        assert "_last_foxess_curtailment_reapply" not in entry_data
+        assert controller.calls == []
+        assert entry_data["foxess_curtailment_state"] == "curtailed"
+        assert entry_data["_last_foxess_curtailment_reapply"] == marker
 
         # (c) Material live export preserves the existing curtailment path.
         controller.data["grid_power"] = -0.3  # 300W export
         await handler(feedin_price=-0.5, import_price=5.0)
-        assert controller.calls == ["restore", "curtail"]
+        assert controller.calls == ["curtail"]
         assert entry_data["foxess_curtailment_state"] == "curtailed"
+
+        # (d) Only price recovery leaves the window, through the restore surface.
+        controller.data["grid_power"] = -0.02
+        await handler(feedin_price=-2.0, import_price=5.0)
+        assert controller.calls == ["curtail", "restore"]
+        assert entry_data["foxess_curtailment_state"] == "normal"
+        assert "_last_foxess_curtailment_reapply" not in entry_data
 
     asyncio.run(run())
 
@@ -549,7 +561,7 @@ def test_foxess_force_dispatch_guard_precedes_live_export_gate():
 
 
 def test_foxess_failed_restore_keeps_curtailment_ownership_and_timer():
-    """A failed no-export restore must remain marked for a later safe retry."""
+    """A failed price-recovery restore must remain marked for a later safe retry."""
     with_hysteresis = _load_tariff_utils().with_hysteresis
     controller = _FakeFoxessController(restore_success=False)
     handler, entry_data = _build_handle_foxess_curtailment(
@@ -564,11 +576,108 @@ def test_foxess_failed_restore_keeps_curtailment_ownership_and_timer():
     )
     entry_data["_last_foxess_curtailment_reapply"] = 123.0
 
-    asyncio.run(handler(feedin_price=-0.5, import_price=5.0))
+    # Export earnings +2.0c/kWh clear the 1.2c exit threshold, so this takes the
+    # price-recovery restore path — the only path that may leave the window.
+    asyncio.run(handler(feedin_price=-2.0, import_price=5.0))
 
     assert controller.calls == ["restore"]
     assert entry_data["foxess_curtailment_state"] == "curtailed"
     assert entry_data["_last_foxess_curtailment_reapply"] == 123.0
+
+
+def test_foxess_curtailment_does_not_restore_itself_while_price_stays_uneconomic():
+    """HD-366: a successful curtailment must not be read back as a reason to stop.
+
+    Reported variant: with a full battery the site's zero export is produced by
+    the curtailment itself, so the ``export <= 250W`` gate saw its own effect
+    and issued restore(), re-enabling uneconomic export until the next check
+    re-curtailed — a 5-minute Normal/Active flap that left the site exporting
+    for half of every negative-price window.
+    """
+
+    with_hysteresis = _load_tariff_utils().with_hysteresis
+
+    class _ResponsiveFoxessController(_FakeFoxessController):
+        """Curtail pins grid export to ~0; restore releases it back to 2.5kW."""
+
+        async def curtail(self):
+            self.calls.append("curtail")
+            self.data["grid_power"] = -0.02
+            self.data["last_update"] = datetime.now(timezone.utc)
+            return True
+
+        async def restore_curtailment(self):
+            self.calls.append("restore")
+            self.data["grid_power"] = -2.50
+            self.data["last_update"] = datetime.now(timezone.utc)
+            return self.restore_success
+
+    controller = _ResponsiveFoxessController()
+    handler, entry_data = _build_handle_foxess_curtailment(
+        with_hysteresis,
+        controller,
+        coordinator_data={
+            "grid_power": -2.50,  # 2.5kW export before any command
+            "grid_power_valid": True,
+            "telemetry_ready": True,
+        },
+    )
+
+    async def run():
+        # Eight consecutive 5-minute checks with the feed-in price held
+        # constant and deeply uneconomic (export earnings -5.00c/kWh).
+        for _ in range(8):
+            controller.data["last_update"] = datetime.now(timezone.utc)
+            await handler(feedin_price=5.0, import_price=19.2)
+
+        assert "restore" not in controller.calls, controller.calls
+        assert controller.calls == ["curtail"], controller.calls
+        assert entry_data["foxess_curtailment_state"] == "curtailed"
+
+        # The window ends exactly once, on price recovery.
+        await handler(feedin_price=-2.8, import_price=19.2)
+        assert controller.calls == ["curtail", "restore"], controller.calls
+        assert entry_data["foxess_curtailment_state"] == "normal"
+
+    asyncio.run(run())
+
+
+def test_foxess_reapply_interval_lands_ahead_of_the_remote_control_timeout():
+    """The re-apply must fire at the 300s check, not race the 600s expiry.
+
+    ``curtail()`` writes a 600s remote-control timeout and the curtailment
+    check runs every 5 minutes, so a 480s interval made the first eligible
+    check the one at 600s — level with the expiry it exists to beat.
+    """
+
+    with_hysteresis = _load_tariff_utils().with_hysteresis
+    controller = _FakeFoxessController()
+    handler, entry_data = _build_handle_foxess_curtailment(
+        with_hysteresis,
+        controller,
+        coordinator_data={
+            "grid_power": -0.02,  # curtailment is holding export at 20W
+            "grid_power_valid": True,
+            "telemetry_ready": True,
+        },
+        current_state="curtailed",
+    )
+
+    async def run():
+        # Just applied: the interval still governs, no duplicate command.
+        entry_data["_last_foxess_curtailment_reapply"] = time.monotonic()
+        await handler(feedin_price=-0.5, import_price=5.0)
+        assert controller.calls == []
+
+        # The next 5-minute check re-applies, well ahead of the 600s hardware
+        # timeout — and with enough margin that cron jitter cannot push the
+        # first eligible check out to 600s, which is what 480s did.
+        entry_data["_last_foxess_curtailment_reapply"] = time.monotonic() - 299.0
+        await handler(feedin_price=-0.5, import_price=5.0)
+        assert controller.calls == ["curtail"]
+        assert entry_data["foxess_curtailment_state"] == "curtailed"
+
+    asyncio.run(run())
 
 
 def test_brand_curtailment_handlers_use_hysteresis_not_raw_boundary():

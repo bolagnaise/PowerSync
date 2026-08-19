@@ -3897,7 +3897,7 @@ def test_foxess_dc_curtailment_reapplies_before_remote_timeout():
 
     assert handler_source is not None
     assert "_last_foxess_curtailment_reapply" in handler_source
-    assert "_foxess_reapply_interval = 480" in handler_source
+    assert "_foxess_reapply_interval = 240" in handler_source
     assert 'current_state != "curtailed" or _needs_reapply' in handler_source
     assert 'entry_data.pop("_last_foxess_curtailment_reapply", None)' in handler_source
 
