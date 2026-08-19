@@ -22423,6 +22423,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     force_mode_state = stored_data.get("force_mode_state")
     if force_mode_state:
         _LOGGER.info(f"Found persisted force mode state: {force_mode_state}")
+    pending_tesla_restore = stored_data.get("pending_tesla_restore")
+    if pending_tesla_restore:
+        _LOGGER.warning(
+            "Found an unfinished Tesla restore from a previous run: %s",
+            pending_tesla_restore.get("reason"),
+        )
 
     last_restorable_tesla_tariff = _select_restorable_tesla_tariff(
         stored_data.get("last_restorable_tesla_tariff")
@@ -22500,6 +22506,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "powerwall_bms_health_poll_cancel": None,  # 5-minute pack energy/BMS refresh timer
         "powerwall_solar_strings_poll_cancel": None,  # 30-second PW2/PW3 DC string voltage refresh timer
         "force_mode_state": force_mode_state,  # Restored force charge/discharge state
+        "pending_tesla_restore": pending_tesla_restore,  # Unfinished restore to complete at startup
         "last_restorable_tesla_tariff": last_restorable_tesla_tariff,
         "store": store,  # Reference to Store for saving updates
         "token_getter": token_getter,  # Function to get fresh Tesla API token
@@ -28194,6 +28201,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if persisted_force_state.get("source") == "optimizer":
         hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = True
 
+    # A restore whose Tesla writes failed schedules an in-process retry. That
+    # retry cannot run if the process is shutting down, and it self-skips once
+    # force state has been cleared — so without a persisted marker a failed
+    # restore is abandoned silently and the hardware is left unverified with
+    # nothing tracking it. This marker lets the next startup finish the job.
+    persisted_pending_restore = (
+        hass.data[DOMAIN][entry.entry_id].get("pending_tesla_restore") or {}
+    )
+
     # Storage for saved tariff and operation mode during force discharge
     force_discharge_state = {
         "active": False,
@@ -28696,6 +28712,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
 
     # Helper function to persist force mode state to storage
+    async def persist_pending_tesla_restore(
+        reason: str | None,
+        *,
+        skip_backup_reserve_restore: bool = False,
+    ) -> None:
+        """Record (or clear) a Tesla restore that did not finish.
+
+        An in-process retry timer cannot survive the process exiting, and it
+        self-skips once force state has been cleared. Persisting the intent
+        means the next startup can finish the restore instead of leaving the
+        hardware in a half-restored state with nothing tracking it.
+        """
+        stored_data = await store.async_load() or {}
+        marker = (
+            {
+                "reason": reason,
+                "recorded_at": dt_util.utcnow().isoformat(),
+                "_skip_backup_reserve_restore": bool(skip_backup_reserve_restore),
+            }
+            if reason
+            else None
+        )
+        stored_data["pending_tesla_restore"] = marker
+        await store.async_save(stored_data)
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if isinstance(entry_data, dict):
+            entry_data["pending_tesla_restore"] = marker
+        if marker:
+            _LOGGER.warning(
+                "Recorded an unfinished Tesla restore for completion at next "
+                "startup: %s",
+                reason,
+            )
+        else:
+            _LOGGER.debug("Cleared the unfinished Tesla restore marker")
+
     async def persist_force_mode_state() -> None:
         """Persist current force charge/discharge/hold state to storage."""
         stored_data = await store.async_load() or {}
@@ -28802,6 +28854,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Restore force charge/discharge state after HA restart."""
 
         if not persisted_force_state:
+            # No force state to re-arm, but a previous run may still owe a
+            # restore whose Tesla writes never verified. Finish it here: the
+            # in-process retry that was scheduled for it died with that
+            # process, and nothing else will ever pick it up.
+            if persisted_pending_restore:
+                _LOGGER.warning(
+                    "Completing an unfinished Tesla restore from a previous "
+                    "run (%s)",
+                    persisted_pending_restore.get("reason"),
+                )
+                try:
+                    await hass.services.async_call(
+                        DOMAIN,
+                        SERVICE_RESTORE_NORMAL,
+                        {
+                            "_allow_monitoring_restore": True,
+                            "_skip_backup_reserve_restore": bool(
+                                persisted_pending_restore.get(
+                                    "_skip_backup_reserve_restore"
+                                )
+                            ),
+                            "source": "startup_pending_restore",
+                        },
+                        blocking=True,
+                    )
+                except Exception as err:
+                    _LOGGER.error(
+                        "Could not complete the unfinished Tesla restore: %s",
+                        err,
+                    )
             return
 
         def _native_battery_control_coordinator() -> Any | None:
@@ -35656,6 +35738,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         )
 
             if tesla_restore_failed:
+                await persist_pending_tesla_restore(
+                    "one or more Tesla restore writes failed",
+                    skip_backup_reserve_restore=skip_backup_reserve_restore,
+                )
                 if _schedule_tesla_restore_retry("one or more Tesla restore writes failed"):
                     await persist_force_mode_state()
                 return
@@ -35689,6 +35775,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # keep presenting it as active.
             if restore_was_hold_soc:
                 _clear_hold_soc_state()
+
+            await persist_pending_tesla_restore(None)
 
             _LOGGER.info("NORMAL OPERATION RESTORED")
 
