@@ -1,10 +1,10 @@
-<!-- release: v2.12.1145 -->
+<!-- release: v2.12.1146 -->
 
 ## Fixes EV charging being slowly ratcheted down to nothing
 
 If your site sits at its grid import limit while the home battery is charging, PowerSync could walk your EV's charge rate down one amp every thirty seconds until it hit the minimum — never settling. On a live system this took a car from 25 A to 19 A in two minutes and would have kept going.
 
-**Update if you are on 2.12.1143 or 2.12.1144.**
+**Update if you are on 2.12.1143, 2.12.1144, or 2.12.1145.**
 
 ### What was happening
 
