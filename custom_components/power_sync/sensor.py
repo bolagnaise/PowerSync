@@ -5671,6 +5671,13 @@ class InverterStatusSensor(RestoreEntity, SensorEntity):
         elif control_mode == INVERTER_CONTROL_MODE_SHUTDOWN:
             return "Shutdown"
         elif control_mode == INVERTER_CONTROL_MODE_CURTAILED or self._cached_state == "curtailed":
+            if (
+                self._entry_data().get(
+                    "inverter_curtailment_physical_converged"
+                )
+                is False
+            ):
+                return "Curtailment Pending"
             return "Curtailed"
         elif self._cached_state == "running":
             return "Normal"
@@ -5738,7 +5745,12 @@ class InverterStatusSensor(RestoreEntity, SensorEntity):
         elif control_mode == INVERTER_CONTROL_MODE_SHUTDOWN:
             attrs["description"] = "Inverter curtailed - shutdown mode"
         elif self._cached_state == "curtailed":
-            attrs["description"] = "Inverter curtailed"
+            if attrs["physical_converged"] is False:
+                attrs["description"] = (
+                    "Inverter curtailment applied - site is still exporting"
+                )
+            else:
+                attrs["description"] = "Inverter curtailed"
         elif self._cached_state == "running":
             attrs["description"] = "Inverter operating normally"
         elif self._cached_state == "offline":

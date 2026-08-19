@@ -96,6 +96,12 @@ class FroniusController(InverterController):
         self._load_following = load_following
         self._rated_capacity_w: Optional[int] = None
         self._model_string: Optional[str] = None
+        # Records what the last successful curtail() actually wrote.  Simple
+        # mode only disables SunSpec throttling so the inverter falls back to
+        # its own soft export limit; it writes no power-limit register, so
+        # callers must not report a device limit for it.
+        self.last_curtail_mode: Optional[str] = None
+        self.last_curtail_limit_w: Optional[int] = None
 
     async def connect(self) -> bool:
         """Connect to the Fronius inverter via Modbus TCP."""
@@ -480,6 +486,11 @@ class FroniusController(InverterController):
                 ):
                     return False
 
+                applied_mode = "load_following"
+                applied_limit_w = int(
+                    round(target_value / 10000 * rated_capacity_w)
+                )
+
             else:
                 # Simple mode: Disable power limiting to use soft export limit
                 # This only works if inverter has 0W soft export limit configured
@@ -500,10 +511,18 @@ class FroniusController(InverterController):
                 ):
                     return False
 
+                # No power-limit register was written, so there is no device
+                # limit for callers to confirm or report.
+                applied_mode = "simple"
+                applied_limit_w = None
+
+            self.last_curtail_mode = applied_mode
+            self.last_curtail_limit_w = applied_limit_w
             _LOGGER.info(
-                "Fronius curtailment control confirmed at %s; "
+                "Fronius curtailment control confirmed at %s using %s mode; "
                 "physical site convergence is verified separately",
                 self.host,
+                applied_mode,
             )
             await asyncio.sleep(0.5)  # Brief delay for inverter to process
             return True
@@ -566,6 +585,8 @@ class FroniusController(InverterController):
             ):
                 return False
 
+            self.last_curtail_mode = None
+            self.last_curtail_limit_w = None
             _LOGGER.info("Fronius normal-output controls confirmed at %s", self.host)
             await asyncio.sleep(0.5)
             return True

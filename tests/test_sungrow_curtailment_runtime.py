@@ -372,6 +372,7 @@ def _run_fast_load_following_case(
     current_limit: int | None = None,
     load_power: int = 100,
     grid_power: float | None = None,
+    applied_device_limit_w: int | None = None,
 ):
     """Run the extracted timer callback against one generation lifecycle."""
     entry_id = "entry-id"
@@ -385,7 +386,13 @@ def _run_fast_load_following_case(
         controller_calls.append(home_load_w)
         return True
 
-    controller = SimpleNamespace(curtail=_curtail)
+    # Fronius only writes a power-limit register in load-following mode; the
+    # adapter records what it actually applied so the caller cannot report a
+    # device limit that was never sent.
+    controller = SimpleNamespace(
+        curtail=_curtail,
+        last_curtail_limit_w=applied_device_limit_w,
+    )
     live_entry_data = {
         "aemo_dispatch_generation": old_generation,
         "inverter_control_mode": "load_following",
@@ -491,18 +498,20 @@ def test_fronius_ac_inverter_uses_load_following_and_fast_refresh():
 
 
 def test_fronius_matching_cached_target_reapplies_while_export_persists():
-    _result, status_calls, controller_calls, _state_calls, replacement = (
+    _result, status_calls, controller_calls, state_calls, replacement = (
         _run_fast_load_following_case(
             "live",
             brand="fronius",
             current_limit=1_440,
             load_power=1_440,
             grid_power=-600.0,
+            applied_device_limit_w=1_440,
         )
     )
 
     assert status_calls == [True]
     assert controller_calls == [1_440]
+    assert state_calls == [("load_following", 1_440)]
     assert replacement["last_state_kwargs"] == {
         "update_dpel_time": False,
         "device_limit_confirmed": True,
@@ -511,16 +520,45 @@ def test_fronius_matching_cached_target_reapplies_while_export_persists():
     }
 
 
-def test_fronius_initial_ack_reports_pending_until_site_converges():
+def test_fronius_simple_mode_reapply_reports_no_device_limit():
+    """Ticket #226: simple mode writes no limit, so none may be reported."""
+    _result, status_calls, controller_calls, state_calls, replacement = (
+        _run_fast_load_following_case(
+            "live",
+            brand="fronius",
+            current_limit=None,
+            load_power=1_066,
+            grid_power=-8_477.0,
+            applied_device_limit_w=None,
+        )
+    )
+
+    assert status_calls == [True]
+    assert controller_calls == [1_066]
+    assert state_calls == [("curtailed", None)]
+    assert replacement["last_state_kwargs"] == {
+        "device_limit_confirmed": False,
+        "physical_converged": False,
+        "residual_export_w": 8_477.0,
+    }
+
+
+def test_fronius_initial_ack_does_not_claim_an_unwritten_limit():
     source = _function_source("apply_inverter_curtailment")
 
-    assert 'if inverter_brand == "fronius" and home_load_w is not None:' in source
-    assert "Fronius limit confirmed at %dW; physical site" in source
-    assert "convergence remains pending%s" in source
-    assert "within the 100W convergence threshold" in source
-    assert "device_limit_confirmed=(" in source
-    assert "physical_converged=(" in source
-    assert "residual_export_w=(" in source
+    # The apply path must distinguish the two Fronius modes...
+    assert "last_curtail_limit_w" in source
+    assert "Fronius simple-mode curtailment applied at %s" in source
+    assert "no device power limit is set" in source
+    assert "Fronius load-following limit of %dW applied at" in source
+    # ...and must never re-assert the old unconditional confirmation.
+    assert "Fronius limit confirmed at %dW" not in source
+    assert "within the 100W convergence threshold" not in source
+
+    # Physical convergence is owned by the 30s cycle, which re-reads live
+    # status; the apply path only has telemetry captured before the command.
+    success_branch = source[source.index("if success:"):]
+    assert "physical_converged=" not in success_branch.split("else:")[0]
 
 
 def test_sungrow_restore_can_skip_verification_readback():

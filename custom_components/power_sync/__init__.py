@@ -8895,7 +8895,11 @@ class InverterStatusView(HomeAssistantView):
                 "inverter_curtailment_residual_export_w"
             )
             if (
-                control_mode == INVERTER_CONTROL_MODE_LOAD_FOLLOWING
+                control_mode
+                in (
+                    INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
+                    INVERTER_CONTROL_MODE_CURTAILED,
+                )
                 and physical_converged is False
             ):
                 state_dict["status"] = "curtailment_pending"
@@ -23812,67 +23816,53 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if _aemo_dispatch_entry_data() is not entry_data:
                     return False
                 if success:
-                    if inverter_brand == "fronius" and home_load_w is not None:
-                        grid_power = (
-                            curtail_live_status.get("grid_power")
-                            if curtail_live_status
-                            else None
-                        )
-                        residual_export_w = (
-                            max(0.0, -float(grid_power))
-                            if grid_power is not None
-                            else None
-                        )
-                        if (
-                            residual_export_w is not None
-                            and residual_export_w <= 100.0
-                        ):
+                    # Only Fronius load-following mode writes a device power
+                    # limit.  Simple mode just disables SunSpec throttling so
+                    # the inverter falls back to its own soft export limit, so
+                    # there is no wattage to confirm and no target to record.
+                    fronius_applied_limit_w = (
+                        getattr(controller, "last_curtail_limit_w", None)
+                        if inverter_brand == "fronius"
+                        else None
+                    )
+                    if inverter_brand == "fronius":
+                        if fronius_applied_limit_w is None:
                             _LOGGER.info(
-                                "Fronius limit confirmed at %dW and site export "
-                                "is within the 100W convergence threshold",
-                                home_load_w,
+                                "Fronius simple-mode curtailment applied at %s; "
+                                "no device power limit is set (physical site "
+                                "convergence is checked on the next cycle)",
+                                inverter_host,
                             )
                         else:
-                            _LOGGER.warning(
-                                "Fronius limit confirmed at %dW; physical site "
-                                "convergence remains pending%s",
-                                home_load_w,
-                                (
-                                    f" ({residual_export_w:.0f}W residual export)"
-                                    if residual_export_w is not None
-                                    else " (site export unavailable)"
-                                ),
+                            _LOGGER.info(
+                                "Fronius load-following limit of %dW applied at "
+                                "%s (physical site convergence is checked on "
+                                "the next cycle)",
+                                fronius_applied_limit_w,
+                                inverter_host,
                             )
                     elif home_load_w is not None:
                         _LOGGER.info(f"✅ Inverter load-following curtailment to {home_load_w}W")
                     else:
                         _LOGGER.info(f"✅ Inverter curtailed successfully")
-                    # Store last state
+                    # Store last state.  Physical convergence is deliberately
+                    # not judged here: the only telemetry available predates
+                    # the command that was just issued.  The 30s load-following
+                    # cycle re-reads live status and owns that verdict.
                     _set_inverter_control_state(
-                        INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
-                        home_load_w,
+                        INVERTER_CONTROL_MODE_CURTAILED
+                        if (
+                            inverter_brand == "fronius"
+                            and fronius_applied_limit_w is None
+                        )
+                        else INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
+                        fronius_applied_limit_w
+                        if inverter_brand == "fronius"
+                        else home_load_w,
                         update_dpel_time=inverter_brand == "enphase",
                         device_limit_confirmed=(
-                            True if inverter_brand == "fronius" else None
-                        ),
-                        physical_converged=(
-                            (
-                                float(curtail_live_status.get("grid_power"))
-                                >= -100.0
-                            )
+                            fronius_applied_limit_w is not None
                             if inverter_brand == "fronius"
-                            and curtail_live_status
-                            and curtail_live_status.get("grid_power") is not None
-                            else None
-                        ),
-                        residual_export_w=(
-                            max(
-                                0.0,
-                                -float(curtail_live_status.get("grid_power")),
-                            )
-                            if inverter_brand == "fronius"
-                            and curtail_live_status
-                            and curtail_live_status.get("grid_power") is not None
                             else None
                         ),
                     )
@@ -40156,7 +40146,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _set_inverter_control_state(
                             INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
                             current_limit,
-                            device_limit_confirmed=True,
+                            device_limit_confirmed=(
+                                getattr(
+                                    controller, "last_curtail_limit_w", None
+                                )
+                                is not None
+                            ),
                             physical_converged=fronius_physical_converged,
                             residual_export_w=fronius_residual_export_w,
                         )
@@ -40173,17 +40168,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if _aemo_dispatch_entry_data() is not entry_data:
                         return
                     if success:
-                        _LOGGER.debug(f"⚡ Fast load-following update: {home_load_w}W")
-                        _set_inverter_control_state(
-                            INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
-                            home_load_w,
-                            update_dpel_time=inverter_brand == "enphase",
-                            device_limit_confirmed=(
-                                True if inverter_brand == "fronius" else None
-                            ),
-                            physical_converged=fronius_physical_converged,
-                            residual_export_w=fronius_residual_export_w,
+                        # Simple mode writes no power-limit register, so there
+                        # is no device limit to confirm and no target wattage.
+                        fronius_applied_limit_w = (
+                            getattr(controller, "last_curtail_limit_w", None)
+                            if inverter_brand == "fronius"
+                            else None
                         )
+                        if (
+                            inverter_brand == "fronius"
+                            and fronius_applied_limit_w is None
+                        ):
+                            if fronius_physical_converged is False:
+                                _LOGGER.warning(
+                                    "Fronius simple-mode curtailment is not "
+                                    "taking effect: site export remains %.0fW "
+                                    "and no device power limit is set. Set a "
+                                    "0W export limit on the inverter, or "
+                                    "enable Fronius load following in "
+                                    "PowerSync options.",
+                                    fronius_residual_export_w,
+                                )
+                            _set_inverter_control_state(
+                                INVERTER_CONTROL_MODE_CURTAILED,
+                                None,
+                                device_limit_confirmed=False,
+                                physical_converged=fronius_physical_converged,
+                                residual_export_w=fronius_residual_export_w,
+                            )
+                        else:
+                            _LOGGER.debug(f"⚡ Fast load-following update: {home_load_w}W")
+                            _set_inverter_control_state(
+                                INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
+                                fronius_applied_limit_w
+                                if inverter_brand == "fronius"
+                                else home_load_w,
+                                update_dpel_time=inverter_brand == "enphase",
+                                device_limit_confirmed=(
+                                    True if inverter_brand == "fronius" else None
+                                ),
+                                physical_converged=fronius_physical_converged,
+                                residual_export_w=fronius_residual_export_w,
+                            )
                     elif inverter_brand == "fronius":
                         entry_data[
                             "inverter_curtailment_device_limit_confirmed"
