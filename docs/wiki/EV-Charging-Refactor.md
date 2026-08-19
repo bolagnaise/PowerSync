@@ -18,6 +18,78 @@ state, and status consistency problems across Home Assistant and the mobile app.
   Teslemetry Bluetooth use the same control contract, with Sigenergy EVAC/EVDC
   chargers represented through the same loadpoint model.
 
+## Per-phase EV load management
+
+PowerSync can apply best-effort per-phase current limiting to the EV sessions it
+manages. Configure it under **PowerSync → Configure → EV load management**, or
+from the mobile app's Home Power screen; both write the same
+`home_power_settings` store and are validated by
+`automations/ev_phase_allocator.py`, the single implementation.
+
+The feature requires:
+
+- the continuous mains current limit for each phase;
+- a Home Assistant current sensor measured at the grid connection — L1 only for
+  a single-phase supply, all three for a three-phase supply; and
+- a safety margin retained below the configured mains limit.
+
+Settings are validated by `validate_home_power_settings()`, which returns a
+user-facing error string rather than raising. The config-flow step shows that
+string in its description; the `home_power_settings` HTTP endpoint returns it
+with HTTP 400.
+
+Every initial start and periodic current decision from Smart Schedule,
+Scheduled Charging, Price-Level, battery-target, Solar Surplus, manual
+charging, and Boost passes through one shared site allocator
+(`allocate_phase_currents`). The most heavily loaded phase sets the available
+headroom. Multiple PowerSync-managed EVs reserve from that same budget, active
+sessions keep priority over new starts, and observed per-EV current is
+subtracted from the meter reading so a charger's own draw is not double-counted
+as immovable background load. A single-phase charger whose circuit phase is not
+known is conservatively counted on every configured phase.
+
+### Manual and Boost sessions
+
+Manual, Boost, and quick-charge starts used to bypass the budget entirely:
+
+- `record_manual_ev_charging_session` stored `"cancel_timer": None`, so a manual
+  session had no periodic controller and never re-evaluated its rate.
+- `ChargingBoostView` issued raw `start_ev_charging` + `set_ev_charging_amps`
+  commands, which never ramp and never consult the allocator.
+- `_arm_manual_quick_stop` armed its deadline in the `cancel_timer` slot, which
+  would have cancelled any controller a manual session did have.
+
+With phase management enabled these now run as fixed-rate dynamic sessions
+(`dynamic_mode="battery_target"` with `fixed_charge_amps` pinned to the
+requested current) carrying `phase_load_management_required`. The user's chosen
+rate is unchanged, but every controller tick re-applies it through the
+phase-clamping command wrapper, so the current is reduced when the site is busy
+and restored when headroom returns. A manual or Boost start with no headroom at
+all is refused rather than energised and clamped afterwards. Quick-charge
+deadlines use a separate `quick_stop_timer` slot so they no longer cancel the
+controller. Boost also claims ownership through the `boost` arbitration family,
+which supersedes automated owners while still yielding to a later manual
+command.
+
+An *uncontrolled* manual command still bypasses the clamp on purpose:
+`_phase_load_management_applies` only opts a manual-family session in when it
+carries `phase_load_management_required`. Counting a session PowerSync cannot
+actually command as a reservation would over-allocate the remaining EVs.
+
+### Observability
+
+When enabled, a missing, unavailable, non-numeric, non-amp, or stale phase
+sensor produces a 0 A target. `PHASE_CURRENT_FRESHNESS_SECONDS` (90 s) is fixed
+and not user-configurable. The normalized loadpoint endpoint reports the
+measured phase currents, limiting phase, per-phase budgets, allocation, and any
+failure reason in `site.phase_load_management` and per-loadpoint in
+`load_management`.
+
+This is responsive software control over Home Assistant telemetry and is not a
+certified breaker-protection or EVSE load-management system. Sensor update and
+charger command latency still apply. Keep the site-approved over-current
+protection in place and choose a margin appropriate to that latency.
+
 ## Reported Failure Patterns
 
 - EV charging disabled, but PowerSync still stops charging started by another

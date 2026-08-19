@@ -5483,6 +5483,37 @@ async def record_manual_ev_charging_session(
         **(params or {}),
     }
 
+    # A manual session with no periodic controller never re-evaluates its rate,
+    # so it would hold whatever current the charger was left on and spend phase
+    # headroom the shared allocator cannot reclaim.  When phase management is
+    # enabled, run the session as a fixed-rate dynamic session instead: the
+    # rate stays the one the user asked for, but every tick re-applies it
+    # through the phase-clamping command wrapper.
+    phase_load_required = _phase_load_management_enabled(hass, config_entry)
+    requested_amps = _coerce_positive_int(
+        full_params.get("phase_requested_amps")
+        or full_params.get("fixed_charge_amps")
+        or full_params.get("amps")
+        or full_params.get("charging_amps")
+    )
+    if phase_load_required:
+        if requested_amps is None:
+            requested_amps, _amps_source = _resolve_dynamic_max_charge_amps(
+                hass,
+                config_entry,
+                full_params,
+            )
+        full_params.update(
+            {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "manual",
+                "fixed_charge_amps": requested_amps,
+                "requested_fixed_charge_amps": requested_amps,
+                "phase_requested_amps": requested_amps,
+                "phase_load_management_required": True,
+            }
+        )
+
     if entry_id not in _dynamic_ev_state:
         _dynamic_ev_state[entry_id] = {}
 
@@ -5499,11 +5530,18 @@ async def record_manual_ev_charging_session(
     except Exception as e:
         _LOGGER.debug("Manual EV: could not start session tracking: %s", e)
 
+    # current_amps stays 0: this controller has not commanded a rate yet, and
+    # the fixed-rate branch of _dynamic_ev_update only issues a command when the
+    # target differs from it.  Seeding it with the requested current would make
+    # the first tick a no-op and skip the phase clamp entirely.
+    initial_target_amps = (
+        requested_amps if phase_load_required and requested_amps else 0
+    )
     _dynamic_ev_state[entry_id][resolved_vehicle_id] = {
         "active": True,
         "params": full_params,
         "current_amps": 0,
-        "target_amps": 0,
+        "target_amps": initial_target_amps,
         "cancel_timer": None,
         "priority": 0,
         "paused": False,
@@ -5535,6 +5573,29 @@ async def record_manual_ev_charging_session(
 
     if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
         hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = _dynamic_ev_state[entry_id]
+
+    if phase_load_required:
+        async def periodic_update(_now) -> None:
+            await _dynamic_ev_update(
+                hass,
+                config_entry,
+                entry_id,
+                resolved_vehicle_id,
+            )
+
+        _dynamic_ev_state[entry_id][resolved_vehicle_id]["cancel_timer"] = (
+            async_track_time_interval(
+                hass,
+                periodic_update,
+                timedelta(seconds=30),
+            )
+        )
+        await _dynamic_ev_update(
+            hass,
+            config_entry,
+            entry_id,
+            resolved_vehicle_id,
+        )
 
     _LOGGER.info("Manual EV charging session recorded for %s", resolved_vehicle_id)
 
@@ -5594,6 +5655,41 @@ async def _start_manual_ev_charging(
             "vehicle_vin": resolved_vehicle_id,
         }
         loadpoint_id = resolved_vehicle_id
+
+    # With phase management on, a manual start must be gated by the shared
+    # budget before the charger is energized, not clamped afterwards.  The
+    # dynamic path refuses the start outright when no phase headroom exists.
+    if _phase_load_management_enabled(hass, config_entry):
+        requested_amps = _coerce_positive_int(
+            params.get("amps")
+            or params.get("charging_amps")
+            or params.get("fixed_charge_amps")
+        )
+        if requested_amps is None:
+            requested_amps, _amps_source = _resolve_dynamic_max_charge_amps(
+                hass,
+                config_entry,
+                params,
+            )
+        return await _action_start_ev_charging_dynamic(
+            hass,
+            config_entry,
+            {
+                **params,
+                "vehicle_id": loadpoint_id,
+                "vehicle_vin": (
+                    None if loadpoint_id == DEFAULT_VEHICLE_ID else loadpoint_id
+                ),
+                "dynamic_mode": "battery_target",
+                "owner_mode": "manual",
+                "fixed_charge_amps": requested_amps,
+                "start_amps": requested_amps,
+                "phase_requested_amps": requested_amps,
+                "phase_load_management_required": True,
+                "reason": params.get("reason", "Manual automation start"),
+            },
+            context,
+        )
 
     async with _start_dynamic_lock:
         allowed, _lease_id, _lease, block_reason = can_claim_ev_ownership(
@@ -8803,22 +8899,36 @@ def _get_home_power_settings(hass, config_entry) -> dict:
     return {}
 
 
+def _phase_load_management_enabled(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry | None,
+) -> bool:
+    """Return whether the opt-in per-phase EV load manager is configured on."""
+    if config_entry is None:
+        return False
+    settings = normalize_home_power_settings(
+        _get_home_power_settings(hass, config_entry)
+    )
+    return bool(settings.get("phase_load_management_enabled"))
+
+
 def _phase_load_management_applies(
     hass: HomeAssistant,
     config_entry: ConfigEntry | None,
     params: Mapping[str, Any],
 ) -> bool:
     """Return whether this is an owned command covered by phase management."""
-    if config_entry is None:
-        return False
-    settings = normalize_home_power_settings(
-        _get_home_power_settings(hass, config_entry)
-    )
-    if not settings.get("phase_load_management_enabled"):
+    if not _phase_load_management_enabled(hass, config_entry):
         return False
     owner_mode = params.get("owner_mode") or params.get("_phase_owner_mode")
     if not owner_mode:
         return False
+    # Manual and Boost starts opt in explicitly.  They only carry this flag once
+    # they run under the dynamic controller, which is what makes their current
+    # commandable; an uncontrolled manual command must still bypass the clamp
+    # rather than be counted as a reservation PowerSync cannot actually honour.
+    if params.get("phase_load_management_required"):
+        return True
     try:
         from .ev_ownership import owner_family
 
@@ -9088,6 +9198,21 @@ async def _phase_load_managed_target_amps(
     entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
     if isinstance(entry_data, dict):
         entry_data["phase_load_management_status"] = status
+
+    # Mirror the same decision onto every managed loadpoint so the normalized
+    # endpoint can report per-loadpoint allocation without re-deriving it.
+    for allocated_vehicle_id, allocated_amps in allocation.allocations.items():
+        loadpoint_state = _dynamic_ev_state.get(config_entry.entry_id, {}).get(
+            allocated_vehicle_id
+        )
+        if not isinstance(loadpoint_state, dict):
+            continue
+        loadpoint_status = dict(status)
+        loadpoint_status["reason"] = allocation.reasons.get(allocated_vehicle_id)
+        loadpoint_status["allocated_amps"] = allocated_amps
+        if allocated_vehicle_id != vehicle_id:
+            loadpoint_status.pop("requested_amps", None)
+        loadpoint_state["load_management"] = loadpoint_status
 
     if telemetry_error:
         _LOGGER.warning(
@@ -11447,6 +11572,13 @@ async def _action_start_ev_charging_dynamic_locked(
         "sigenergy_charger_discharge_power_limit_entity": params.get(
             "sigenergy_charger_discharge_power_limit_entity"
         ),
+        # Manual and Boost sessions opt into the shared phase budget explicitly;
+        # the periodic controller needs the flag on the stored params to keep
+        # clamping their rate on every later tick.
+        "phase_load_management_required": bool(
+            params.get("phase_load_management_required")
+        ),
+        "phase_requested_amps": params.get("phase_requested_amps"),
     }
     full_params = _with_sigenergy_charger_capabilities(config_entry, full_params, hass)
 

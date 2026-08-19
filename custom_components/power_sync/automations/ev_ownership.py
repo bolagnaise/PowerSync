@@ -50,6 +50,12 @@ def can_take_over_ev_ownership(
     if requested_family == "manual":
         return True
 
+    # Boost is an explicit user command and historically superseded automated
+    # charging owners. Keep that priority while the dynamic controller retains
+    # ownership and phase-load enforcement for the boost window.
+    if requested_family == "boost":
+        return True
+
     if existing_family == "manual":
         return False
 

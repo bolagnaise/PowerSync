@@ -156,3 +156,42 @@ def test_configured_vehicle_profiles_are_kept_as_idle_loadpoints():
 
     assert "stored_data.get('vehicle_charging_configs', [])" in source
     assert "'include_idle': any((vehicle_ids_match(configured_id, vehicle_id)" in source
+
+
+def _get_async_class_method(class_name: str, method_name: str) -> ast.AsyncFunctionDef:
+    tree = ast.parse(INIT_PATH.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for child in node.body:
+                if isinstance(child, ast.AsyncFunctionDef) and child.name == method_name:
+                    return child
+    raise AssertionError(f"{class_name}.{method_name} not found")
+
+
+def test_boost_runs_through_the_dynamic_controller_for_the_whole_window():
+    source = ast.unparse(_get_async_class_method("ChargingBoostView", "post"))
+
+    # The start must create a managed session, not a raw one-shot command.
+    assert "'action_type': 'start_ev_charging_dynamic'" in source
+    assert "'owner_mode': 'boost'" in source
+    assert "'fixed_charge_amps': 32" in source
+    assert "'phase_requested_amps': 32" in source
+    assert "'phase_load_management_required': True" in source
+    # The old raw path bypassed both the controller and the phase clamp.
+    assert "'action_type': 'start_ev_charging'" not in source
+    assert "'skip_ownership': True" not in source
+    # The expiry stop must tear the controller down rather than only sending a
+    # physical stop and releasing the lease by hand.
+    assert "'action_type': 'stop_ev_charging_dynamic'" in source
+    assert "'stop_charging': True" in source
+    assert "release_ev_ownership" not in source
+
+
+def test_boost_does_not_re_raise_current_past_the_phase_clamp():
+    source = ast.unparse(_get_async_class_method("ChargingBoostView", "post"))
+
+    # start_ev_charging_dynamic already commands the phase-safe current through
+    # _set_vehicle_amps. A follow-up raw set_ev_charging_amps would push the
+    # charger straight back to 32 A and undo the shared budget decision.
+    assert "'action_type': 'set_ev_charging_amps'" not in source
+    assert "applied_boost_amps" in source

@@ -1093,6 +1093,11 @@ def _dynamic_loadpoint(
         "duration_minutes": duration_minutes,
         "expires_at": expires_at,
         "quick_control": bool((ownership or {}).get("quick_control") or params.get("quick_control")),
+        "load_management": (
+            dict(state.get("load_management"))
+            if isinstance(state.get("load_management"), Mapping)
+            else None
+        ),
     }
 
 

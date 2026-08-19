@@ -342,3 +342,17 @@ def test_takeover_flag_only_replaces_solar_surplus_ownership():
         "price_level_opportunity",
         allow_takeover=True,
     )
+
+
+def test_explicit_boost_can_take_over_automated_or_manual_ownership():
+    assert ev_ownership.can_take_over_ev_ownership("smart_schedule", "boost")
+    assert ev_ownership.can_take_over_ev_ownership("manual", "boost")
+    assert ev_ownership.can_take_over_ev_ownership("solar_surplus", "boost")
+    assert ev_ownership.can_take_over_ev_ownership("scheduled", "boost")
+
+
+def test_boost_is_its_own_arbitration_family_and_yields_to_manual():
+    assert ev_ownership.owner_family("boost") == "boost"
+    # Boost supersedes automated owners, but a later manual command still wins.
+    assert ev_ownership.can_take_over_ev_ownership("boost", "manual")
+    assert not ev_ownership.can_take_over_ev_ownership("boost", "smart_schedule")

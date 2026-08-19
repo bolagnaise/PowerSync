@@ -1325,3 +1325,61 @@ def test_duplicate_vin_presence_uses_newest_source_and_reaches_public_status():
     assert loadpoints[0]["vehicle_id"] == vin
     assert loadpoints[0]["site_presence"] == "home"
     assert loadpoints[0]["connected"] is True
+
+
+def test_dynamic_loadpoint_exposes_phase_load_management_status():
+    loadpoints = build_loadpoint_status(
+        {
+            "VIN_PHASE": {
+                "active": True,
+                "current_amps": 12,
+                "target_amps": 12,
+                "charging_started": True,
+                "load_management": {
+                    "enabled": True,
+                    "available": True,
+                    "reason": "phase_limited",
+                    "limiting_phase": "l2",
+                    "allocated_amps": 12,
+                },
+                "params": {
+                    "dynamic_mode": "battery_target",
+                    "charger_type": "tesla",
+                    "voltage": 240,
+                    "phases": 3,
+                },
+            }
+        },
+        [],
+    )
+
+    assert loadpoints[0]["load_management"] == {
+        "enabled": True,
+        "available": True,
+        "reason": "phase_limited",
+        "limiting_phase": "l2",
+        "allocated_amps": 12,
+    }
+
+
+def test_dynamic_loadpoint_reports_null_load_management_when_unmanaged():
+    loadpoints = build_loadpoint_status(
+        {
+            "VIN_PLAIN": {
+                "active": True,
+                "current_amps": 12,
+                "target_amps": 12,
+                "charging_started": True,
+                "params": {
+                    "dynamic_mode": "battery_target",
+                    "charger_type": "tesla",
+                    "voltage": 240,
+                    "phases": 1,
+                },
+            }
+        },
+        [],
+    )
+
+    assert "load_management" in loadpoints[0]
+    assert loadpoints[0]["load_management"] is None

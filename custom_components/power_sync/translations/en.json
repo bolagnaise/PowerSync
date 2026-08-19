@@ -1157,7 +1157,9 @@
       "battery_integration_source_required": "Select the Home Assistant integration entry that owns this battery, or choose the required Sungrow anchor sensor.",
       "battery_integration_source_mismatch": "The selected integration does not match this connection method.",
       "battery_integration_missing_telemetry": "The selected integration does not currently expose all required battery SOC, battery power, grid power, solar power, and home load sensors.",
-      "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again."
+      "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again.",
+      "invalid_phase_load_management": "These phase-load management settings are not usable. The reason is shown above the form.",
+      "storage_unavailable": "PowerSync storage is not available. Reload the integration and try again."
     },
     "step": {
       "init": {
@@ -1183,6 +1185,7 @@
           "custom_battery": "Custom external controller",
           "optimization": "Smart Optimization",
           "ev_charging": "EV charging",
+          "ev_load_management": "EV load management",
           "solax_battery_options": "Solax connection",
           "advanced": "Advanced settings"
         }
@@ -2451,6 +2454,29 @@
           "sigenergy_charger_slave_id": "Modbus slave ID for the charger or inverter exposing the EV charger registers.",
           "sigenergy_charger_charge_power_limit_entity": "Optional HA number entity for EVDC max charging power in kW. Leave blank to auto-detect number.sigen_inverter_dc_charger_max_charging_power_limit.",
           "sigenergy_charger_discharge_power_limit_entity": "Optional HA number entity for EVDC max discharging power in kW. Stored for V2X capability visibility; PowerSync does not schedule EVDC discharge."
+        },
+        "submit": "Save"
+      },
+      "ev_load_management": {
+        "title": "EV phase load management",
+        "description": "Best-effort EV current limiting from Home Assistant phase-current sensors. This complements, but does not replace, certified breaker protection or an EVSE load-management system. Telemetry older than {freshness_seconds} seconds is treated as unsafe and drops PowerSync-managed EV charging to 0 A.\n\n{validation_error}",
+        "data": {
+          "phase_type": "Home electrical phases",
+          "phase_load_management_enabled": "Enable phase-aware EV load management",
+          "max_grid_import_amps": "Mains limit per phase",
+          "phase_current_safety_margin_amps": "Safety margin per phase",
+          "phase_current_entity_l1": "L1 grid current sensor",
+          "phase_current_entity_l2": "L2 grid current sensor",
+          "phase_current_entity_l3": "L3 grid current sensor"
+        },
+        "data_description": {
+          "phase_type": "Single-phase homes only need the L1 sensor; three-phase homes need all three.",
+          "phase_load_management_enabled": "When enabled, invalid, missing, or stale phase telemetry stops PowerSync-managed EV charging.",
+          "max_grid_import_amps": "Continuous current limit for each mains phase. Use the site-approved value.",
+          "phase_current_safety_margin_amps": "Headroom retained below the configured limit to allow for telemetry and command latency.",
+          "phase_current_entity_l1": "Sensor at the grid connection reporting L1 current in amps.",
+          "phase_current_entity_l2": "Sensor at the grid connection reporting L2 current in amps. Three-phase only.",
+          "phase_current_entity_l3": "Sensor at the grid connection reporting L3 current in amps. Three-phase only."
         },
         "submit": "Save"
       },

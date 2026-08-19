@@ -3126,3 +3126,68 @@ def test_globird_tariff_guidance_is_translated():
         assert "{threshold_hint}" in config_step["description"]
         assert options_step["title"] == "Globird / AEMO settings"
         assert "tariff source" in options_step["description"]
+
+
+def test_ev_phase_load_management_options_and_translations_are_complete():
+    source = CONFIG_FLOW_PATH.read_text()
+    init_source = ast.get_source_segment(
+        source,
+        _options_flow_method("async_step_init"),
+    )
+    step_source = ast.get_source_segment(
+        source,
+        _options_flow_method("async_step_ev_load_management"),
+    )
+
+    assert '"ev_load_management"' in init_source
+    for key in (
+        "phase_type",
+        "phase_load_management_enabled",
+        "max_grid_import_amps",
+        "phase_current_safety_margin_amps",
+    ):
+        assert f'"{key}"' in step_source, key
+    # The three per-phase sensor keys are derived from the allocator's own
+    # PHASES tuple so the form can never drift from the settings schema.
+    assert 'f"phase_current_entity_{phase}" for phase in PHASES' in step_source
+
+    # The step must reuse the single released allocator module, and its
+    # non-raising validation contract, rather than a second implementation.
+    assert "from .automations.ev_phase_allocator import" in step_source
+    assert "validate_home_power_settings(settings)" in step_source
+    assert "phase_load_safety_margin_amps" not in step_source
+    assert "phase_load_sensor_max_age_seconds" not in step_source
+    assert "await store.async_save()" in step_source
+    assert "reset_phase_load_management_runtime(" in step_source
+
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        data = json.loads(path.read_text())["options"]
+        assert data["step"]["init"]["menu_options"]["ev_load_management"]
+        step = data["step"]["ev_load_management"]
+        assert set(step["data"]) == {
+            "phase_type",
+            "phase_load_management_enabled",
+            "max_grid_import_amps",
+            "phase_current_safety_margin_amps",
+            "phase_current_entity_l1",
+            "phase_current_entity_l2",
+            "phase_current_entity_l3",
+        }
+        assert set(step["data_description"]) == set(step["data"])
+        assert "certified breaker protection" in step["description"]
+        assert "{validation_error}" in step["description"]
+        assert data["error"]["invalid_phase_load_management"]
+        assert data["error"]["storage_unavailable"]
+
+
+def test_ev_load_management_step_clears_removed_phase_sensors():
+    source = CONFIG_FLOW_PATH.read_text()
+    step_source = ast.get_source_segment(
+        source,
+        _options_flow_method("async_step_ev_load_management"),
+    )
+
+    # An EntitySelector that the user empties is simply absent from user_input,
+    # so a plain {**current, **user_input} merge could never clear a sensor.
+    assert '{**{key: "" for key in phase_entity_keys}, **user_input}' in step_source
+    assert "{**current, **submitted}" in step_source

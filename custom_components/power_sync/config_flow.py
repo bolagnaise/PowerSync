@@ -7925,6 +7925,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             [
                 "optimization",
                 "ev_charging",
+                "ev_load_management",
                 "advanced",
             ]
         )
@@ -14715,6 +14716,136 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             step_id="ev_charging",
             data_schema=vol.Schema(schema_dict),
             errors=errors,
+        )
+
+    async def async_step_ev_load_management(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure best-effort per-phase EV load management."""
+        from .automations.ev_phase_allocator import (
+            PHASE_CURRENT_FRESHNESS_SECONDS,
+            PHASES,
+            normalize_home_power_settings,
+            validate_home_power_settings,
+        )
+
+        phase_entity_keys = tuple(f"phase_current_entity_{phase}" for phase in PHASES)
+
+        entry_data = self.hass.data.get(DOMAIN, {}).get(
+            self.config_entry.entry_id,
+            {},
+        )
+        store = (
+            entry_data.get("automation_store")
+            if isinstance(entry_data, dict)
+            else None
+        )
+        stored_data = getattr(store, "_data", {}) or {}
+        current = normalize_home_power_settings(
+            stored_data.get("home_power_settings", {})
+        )
+        errors: dict[str, str] = {}
+        error_detail: str | None = None
+
+        # Every phase entity selector is always rendered, so an absent key means
+        # the user cleared it rather than left it untouched.
+        submitted = (
+            {**{key: "" for key in phase_entity_keys}, **user_input}
+            if user_input is not None
+            else {}
+        )
+
+        if user_input is not None:
+            if store is None:
+                errors["base"] = "storage_unavailable"
+            else:
+                settings = normalize_home_power_settings(
+                    {**current, **submitted}
+                )
+                # The allocator returns a user-facing string rather than
+                # raising, so surface it as the form's placeholder detail.
+                error_detail = validate_home_power_settings(settings)
+                if error_detail:
+                    errors["base"] = "invalid_phase_load_management"
+                else:
+                    stored_data["home_power_settings"] = settings
+                    store._data = stored_data
+                    await store.async_save()
+
+                    from .automations.actions import (
+                        reset_phase_load_management_runtime,
+                    )
+
+                    reset_phase_load_management_runtime(
+                        self.hass,
+                        self.config_entry.entry_id,
+                        enabled=settings["phase_load_management_enabled"],
+                    )
+                    return self.async_create_entry(
+                        title="",
+                        data=dict(self.config_entry.options),
+                    )
+
+        values = {**current, **submitted}
+        schema_dict: dict[vol.Marker, Any] = {
+            vol.Optional(
+                "phase_type",
+                default=str(values.get("phase_type") or "single"),
+            ): SelectSelector(SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value="single", label="Single phase"),
+                    SelectOptionDict(value="three", label="Three phase"),
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
+            vol.Optional(
+                "phase_load_management_enabled",
+                default=bool(
+                    values.get("phase_load_management_enabled", False)
+                ),
+            ): BooleanSelector(),
+            vol.Optional(
+                "max_grid_import_amps",
+                default=float(values.get("max_grid_import_amps", 0) or 0),
+            ): NumberSelector(NumberSelectorConfig(
+                min=0,
+                max=400,
+                step=1,
+                unit_of_measurement="A",
+                mode=NumberSelectorMode.BOX,
+            )),
+            vol.Optional(
+                "phase_current_safety_margin_amps",
+                default=float(
+                    values.get("phase_current_safety_margin_amps", 2) or 0
+                ),
+            ): NumberSelector(NumberSelectorConfig(
+                min=0,
+                max=100,
+                step=0.5,
+                unit_of_measurement="A",
+                mode=NumberSelectorMode.BOX,
+            )),
+        }
+        for key in phase_entity_keys:
+            entity_id = str(values.get(key) or "").strip()
+            schema_dict[
+                vol.Optional(
+                    key,
+                    description=(
+                        {"suggested_value": entity_id} if entity_id else None
+                    ),
+                )
+            ] = EntitySelector(EntitySelectorConfig(domain="sensor"))
+
+        return self.async_show_form(
+            step_id="ev_load_management",
+            data_schema=vol.Schema(schema_dict),
+            errors=errors,
+            description_placeholders={
+                "validation_error": error_detail or "",
+                "freshness_seconds": str(PHASE_CURRENT_FRESHNESS_SECONDS),
+            },
         )
 
     def _save_ev_options(self, ev_input: dict[str, Any]) -> FlowResult:

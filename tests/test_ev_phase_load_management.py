@@ -167,3 +167,98 @@ def test_normalize_home_power_settings_accepts_no_argument():
     allocator = _load_phase_allocator()
 
     assert allocator.normalize_home_power_settings()["phase_type"] == "single"
+
+
+def _actions_source() -> str:
+    return (ROOT / "custom_components/power_sync/automations/actions.py").read_text()
+
+
+def _actions_function(name: str) -> str:
+    source = _actions_source()
+    tree = ast.parse(source)
+    for node in tree.body:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        ):
+            return ast.get_source_segment(source, node)
+    raise AssertionError(f"actions.{name} not found")
+
+
+def test_manual_starts_are_gated_by_the_shared_budget_before_energising():
+    start_manual = _actions_function("_start_manual_ev_charging")
+
+    # A raw _action_start_ev_charging would energise the charger first and only
+    # clamp afterwards; the dynamic path refuses the start with no headroom.
+    assert "_phase_load_management_enabled(hass, config_entry)" in start_manual
+    assert "await _action_start_ev_charging_dynamic(" in start_manual
+    assert '"owner_mode": "manual"' in start_manual
+    assert '"phase_load_management_required": True' in start_manual
+    # The reroute must happen before _start_dynamic_lock is taken, or the
+    # dynamic action would deadlock on the same non-reentrant lock.
+    assert start_manual.index("_action_start_ev_charging_dynamic") < start_manual.index(
+        "async with _start_dynamic_lock:"
+    )
+
+
+def test_manual_sessions_get_a_periodic_controller_under_phase_management():
+    record_manual = _actions_function("record_manual_ev_charging_session")
+
+    # Without a timer the session holds whatever current the charger was left
+    # on and spends phase headroom the allocator can never reclaim.
+    assert "phase_load_required = _phase_load_management_enabled(" in record_manual
+    assert "async_track_time_interval(" in record_manual
+    assert '"cancel_timer"] = (' in record_manual
+    assert "await _dynamic_ev_update(" in record_manual
+    assert '"fixed_charge_amps": requested_amps' in record_manual
+    assert '"phase_load_management_required": True' in record_manual
+    # The fixed-rate branch of _dynamic_ev_update only commands when the target
+    # differs from current_amps, so seeding current_amps with the requested
+    # current would make the first tick a no-op and skip the clamp entirely.
+    assert '"current_amps": 0,' in record_manual
+    assert '"target_amps": initial_target_amps,' in record_manual
+
+
+def test_phase_management_covers_opted_in_manual_and_boost_sessions():
+    applies = _actions_function("_phase_load_management_applies")
+
+    # Uncontrolled manual commands must still bypass the clamp: counting them
+    # as reservations PowerSync cannot honour would over-allocate other EVs.
+    assert 'owner_family(str(owner_mode)) != "manual"' in applies
+    assert 'params.get("phase_load_management_required")' in applies
+
+
+def test_opted_in_flag_survives_into_the_stored_dynamic_params():
+    dynamic_start = _actions_function("_action_start_ev_charging_dynamic_locked")
+
+    # full_params is an explicit allow-list, so the flag has to be listed or
+    # the periodic controller stops clamping after the first tick.
+    assert '"phase_load_management_required": bool(' in dynamic_start
+    assert '"phase_requested_amps": params.get("phase_requested_amps")' in dynamic_start
+
+
+def test_quick_charge_timer_does_not_cancel_the_dynamic_controller():
+    init_source = (ROOT / "custom_components/power_sync/__init__.py").read_text()
+    tree = ast.parse(init_source)
+    arm = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_arm_manual_quick_stop":
+            arm = ast.get_source_segment(init_source, node)
+            break
+    assert arm is not None, "_arm_manual_quick_stop not found"
+
+    # "cancel_timer" is the dynamic controller's periodic update. A quick-charge
+    # deadline must use its own slot or it silently kills phase enforcement for
+    # the rest of the window.
+    assert 'state.get("cancel_timer")' not in arm
+    assert 'state["cancel_timer"]' not in arm
+    assert 'state["quick_stop_timer"] = async_track_point_in_utc_time(' in arm
+    assert '"fixed_charge_amps"' in arm
+    assert '"phase_requested_amps"' in arm
+
+
+def test_allocation_is_mirrored_onto_every_managed_loadpoint():
+    managed = _actions_function("_phase_load_managed_target_amps")
+
+    assert 'loadpoint_state["load_management"] = loadpoint_status' in managed
+    assert 'entry_data["phase_load_management_status"] = status' in managed

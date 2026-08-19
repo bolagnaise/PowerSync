@@ -15579,9 +15579,12 @@ class EVVehicleCommandView(HomeAssistantView):
         params["duration_minutes"] = duration_minutes
         params["expires_at"] = stops_at.isoformat()
 
-        if cancel_timer := state.get("cancel_timer"):
-            cancel_timer()
-            state["cancel_timer"] = None
+        # Use a dedicated slot: "cancel_timer" holds the dynamic controller's
+        # periodic update, which a phase-managed manual session needs to keep
+        # running for the whole quick-charge window.
+        if quick_stop_timer := state.get("quick_stop_timer"):
+            quick_stop_timer()
+            state["quick_stop_timer"] = None
 
         state["ownership"] = claim_ev_ownership(
             self._hass,
@@ -15605,6 +15608,8 @@ class EVVehicleCommandView(HomeAssistantView):
                         "vehicle_id",
                         "vehicle_vin",
                         "source_mode",
+                        "fixed_charge_amps",
+                        "phase_requested_amps",
                     )
                     if params.get(key) is not None
                 },
@@ -15629,7 +15634,7 @@ class EVVehicleCommandView(HomeAssistantView):
                 "Quick EV charge duration elapsed",
             )
 
-        state["cancel_timer"] = async_track_point_in_utc_time(
+        state["quick_stop_timer"] = async_track_point_in_utc_time(
             self._hass,
             _stop_manual_quick_charge,
             stops_at,
@@ -17558,12 +17563,12 @@ class ChargingBoostView(HomeAssistantView):
 
             from .automations.actions import execute_actions
 
-            # Execute start_ev_charging action with max amps
+            # Run Boost through the shared dynamic controller so phase-aware
+            # load management stays active for the whole boost window.
             boost_vehicle_id = vehicle_id if vehicle_id and vehicle_id != "_default" else "_default"
             action_vehicle_vin = None if boost_vehicle_id == "_default" else boost_vehicle_id
             action_params = {
                 "vehicle_vin": action_vehicle_vin,
-                "skip_ownership": True,
             }
             warnings: list[str] = []
 
@@ -17616,34 +17621,63 @@ class ChargingBoostView(HomeAssistantView):
                 warnings.append("EV charge limit not set because target SoC is below 50%")
 
             actions = [{
-                "action_type": "start_ev_charging",
+                "action_type": "start_ev_charging_dynamic",
                 "parameters": {
                     **action_params,
-                    "amps": 32,
+                    "dynamic_mode": "battery_target",
+                    "owner_mode": "boost",
+                    "fixed_charge_amps": 32,
+                    "start_amps": 32,
+                    "max_charge_amps": 32,
+                    "phase_requested_amps": 32,
+                    "phase_load_management_required": True,
                 }
             }]
 
             success = await execute_actions(self._hass, self._config_entry, actions)
 
             if success:
-                # Also set to max charging amps
-                amps_actions = [{
-                    "action_type": "set_ev_charging_amps",
-                    "parameters": {
-                        **action_params,
-                        "amps": 32,  # Max standard amps
-                    }
-                }]
-                amps_success = await execute_actions(self._hass, self._config_entry, amps_actions)
-                if not amps_success:
-                    warnings.append("Could not set EV charging amps before boost")
+                from .automations import actions as ev_actions
+
+                # A "_default" boost resolves to a concrete loadpoint inside the
+                # dynamic start; recover it so ownership and the stop command
+                # address the session that was actually created.
+                if boost_vehicle_id == "_default":
+                    boost_candidates = [
+                        vehicle_key
+                        for vehicle_key, state in ev_actions._dynamic_ev_state.get(
+                            self._config_entry.entry_id,
+                            {},
+                        ).items()
+                        if (
+                            state.get("active")
+                            and (state.get("params") or {}).get("owner_mode")
+                            == "boost"
+                        )
+                    ]
+                    if len(boost_candidates) == 1:
+                        boost_vehicle_id = boost_candidates[0]
+
+                # No raw set_ev_charging_amps follow-up: the dynamic start
+                # already commanded the phase-safe current through the clamping
+                # wrapper, and a direct write would push the charger back to a
+                # rate the shared budget just refused.
+                boost_state = ev_actions._dynamic_ev_state.get(
+                    self._config_entry.entry_id,
+                    {},
+                ).get(boost_vehicle_id)
+                applied_boost_amps = int((boost_state or {}).get("current_amps", 32) or 0)
+                if applied_boost_amps < 32:
+                    warnings.append(
+                        f"Boost limited to {applied_boost_amps}A by per-phase "
+                        "load management"
+                    )
 
                 from .automations.ev_ownership import (
                     claim_ev_ownership,
                     get_active_ev_owner_mode,
                     owner_family,
                     record_ev_command,
-                    release_ev_ownership,
                 )
 
                 entry_data = self._hass.data.setdefault(DOMAIN, {}).setdefault(
@@ -17654,7 +17688,7 @@ class ChargingBoostView(HomeAssistantView):
                     cancel_boost()
                     entry_data["ev_boost_cancel"] = None
 
-                claim_ev_ownership(
+                boost_ownership = claim_ev_ownership(
                     self._hass,
                     self._config_entry,
                     boost_vehicle_id,
@@ -17666,6 +17700,8 @@ class ChargingBoostView(HomeAssistantView):
                         "target_soc": target_soc_value,
                     },
                 )
+                if boost_state is not None:
+                    boost_state["ownership"] = boost_ownership
 
                 async def _stop_boost_when_elapsed(_now) -> None:
                     entry_data = self._hass.data.get(DOMAIN, {}).get(
@@ -17686,21 +17722,18 @@ class ChargingBoostView(HomeAssistantView):
                         )
                         return
 
+                    # stop_ev_charging_dynamic tears down the periodic controller
+                    # and releases the lease, so no separate release is needed.
                     stop_success = await execute_actions(self._hass, self._config_entry, [{
-                        "action_type": "stop_ev_charging",
+                        "action_type": "stop_ev_charging_dynamic",
                         "parameters": {
                             **action_params,
+                            "vehicle_id": boost_vehicle_id,
+                            "stop_charging": True,
+                            "stop_reason": "Boost duration elapsed",
                         },
                     }])
-                    if stop_success:
-                        release_ev_ownership(
-                            self._hass,
-                            self._config_entry,
-                            boost_vehicle_id,
-                            command="stop_boost",
-                            reason="Boost duration elapsed",
-                        )
-                    else:
+                    if not stop_success:
                         record_ev_command(
                             self._hass,
                             self._config_entry,
