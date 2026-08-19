@@ -3707,3 +3707,89 @@ def test_sungrow_coordinator_shutdown_waits_for_modbus_lock():
         restore()
 
     assert fake_controller.disconnect_calls == 1
+
+
+def test_sungrow_summary_keeps_cost_with_real_accumulator_gap():
+    """Ticket #384: drive the summary with a *real* EnergyAccumulator.
+
+    Every other coverage test here stubs as_dict() with a pre-filled finite
+    value, which is structurally why this defect was invisible: the register
+    cross-check can only ever downgrade a value to None, so a value the
+    accumulator had already blanked could never be restored by it.
+    """
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    try:
+        EnergyAccumulator = sys.modules["power_sync.coordinator"].EnergyAccumulator
+        accumulator = EnergyAccumulator(None)
+        # A ~23.6 Wh startup-race gap on a 35.57 kWh export day, plus the
+        # reporter's own import figures.
+        accumulator.grid_import_kwh = 0.20
+        accumulator.grid_export_kwh = 35.57
+        accumulator.import_cost_covered_kwh = 0.20
+        accumulator.export_earnings_covered_kwh = 35.5464
+        accumulator.import_cost_today = 0.05
+        accumulator.export_earnings_today = 1.74
+        accumulator.load_kwh = 13.61
+
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator._energy_acc = accumulator
+        summary = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.20,
+                "daily_export": 35.60,
+                "daily_pv_generation": 59.40,
+                "daily_battery_charge": 22.60,
+                "daily_battery_discharge": 11.20,
+            }
+        )
+    finally:
+        restore()
+
+    assert summary["grid_export_today_kwh"] == 35.60
+    assert summary["export_earnings_today"] is not None
+    assert summary["import_cost_today"] is not None
+    assert summary["export_earnings_coverage"] == "complete"
+    assert summary["avg_cost_per_kwh_today"] is not None
+    # The raw counter is reported as-is, never back-filled to look complete.
+    assert summary["export_earnings_covered_kwh"] == pytest.approx(35.546, abs=1e-3)
+
+
+def test_sungrow_summary_still_blanks_a_real_materially_partial_accumulator():
+    """The #336 protection must survive the shared-predicate refactor."""
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    try:
+        EnergyAccumulator = sys.modules["power_sync.coordinator"].EnergyAccumulator
+        accumulator = EnergyAccumulator(None)
+        accumulator.grid_import_kwh = 23.58
+        accumulator.grid_export_kwh = 11.8
+        accumulator.import_cost_covered_kwh = 23.58
+        accumulator.export_earnings_covered_kwh = 0.12
+        accumulator.import_cost_today = 3.84
+        accumulator.export_earnings_today = 0.0
+        accumulator.load_kwh = 20.0
+
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator._energy_acc = accumulator
+        summary = coordinator._build_energy_summary(
+            {
+                "daily_import": 26.8,
+                "daily_export": 11.8,
+                "daily_pv_generation": 17.7,
+                "daily_battery_charge": 34.4,
+                "daily_battery_discharge": 34.8,
+            }
+        )
+    finally:
+        restore()
+
+    assert summary["export_earnings_today"] is None
+    assert summary["export_earnings_coverage"] == "partial"
+    assert summary["avg_cost_per_kwh_today"] is None

@@ -1862,3 +1862,54 @@ def test_ev_status_sensor_exposes_idle_sigenergy_evac_presence():
     assert entity.extra_state_attributes["vehicle_id"] == "sigenergy_charger"
     assert entity.extra_state_attributes["is_connected"] is True
     assert entity.extra_state_attributes["is_charging"] is False
+
+
+def test_all_four_daily_cost_sensors_publish_tolerant_coverage_values():
+    """Ticket #384: a ~0.2 % coverage gap must reach the dashboard as a value.
+
+    All four Daily Cost Tracking rows read Unknown for this reporter.  Guard
+    the publishing direction of the sensor.py suppression branch, not only the
+    blanking direction the partial-coverage tests above already cover.
+    """
+    sensor = _sensor_module()
+    summary = {
+        "import_cost_today": 0.05,
+        "export_earnings_today": 1.74,
+        "avg_cost_per_kwh_today": -0.1242,
+        "avg_cost_per_kwh_mtd": -0.0833,
+        "import_cost_coverage": "complete",
+        "export_earnings_coverage": "complete",
+        "import_cost_covered_kwh": 0.20,
+        "export_earnings_covered_kwh": 35.546,
+        "grid_export_today_source": "sungrow_daily_register",
+    }
+    expected = {
+        "daily_import_cost": 0.05,
+        "daily_export_earnings": 1.74,
+        "daily_avg_cost_per_kwh": -0.1242,
+        "mtd_avg_cost_per_kwh": -0.0833,
+    }
+
+    for key, value in expected.items():
+        desc = next(d for d in sensor.ENERGY_SENSORS if d.key == key)
+        entity = sensor.TeslaEnergySensor(
+            SimpleNamespace(data={"energy_summary": dict(summary)}),
+            desc,
+            _entry("agl"),
+        )
+        entity.hass = _hass("AUD")
+        # A stale restored value must never be what surfaces here either.
+        entity._restored_native_value = 99.9
+        assert entity.native_value == value, key
+
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "daily_export_earnings")
+    entity = sensor.TeslaEnergySensor(
+        SimpleNamespace(data={"energy_summary": dict(summary)}),
+        desc,
+        _entry("agl"),
+    )
+    entity.hass = _hass("AUD")
+    attrs = entity.extra_state_attributes
+    assert attrs["coverage"] == "complete"
+    # priced_energy_kwh stays the raw counter, not the metered total.
+    assert attrs["priced_energy_kwh"] == 35.546

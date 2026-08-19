@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import ast
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import math
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 
 COORDINATOR_PATH = (
@@ -239,8 +241,11 @@ def test_legacy_daily_import_cost_recovers_from_matching_optimizer_totals():
     restored = _new_accumulator(clock, store)
     asyncio.run(restored.async_restore())
 
-    assert restored.as_dict()["import_cost_today"] is None
-    assert restored.reconcile_price_coverage(
+    # Ticket #384: restore itself now adopts coverage for a payload written
+    # before the counters existed, so the value is never unknown in the first
+    # place and the optimizer reconciliation has nothing left to recover.
+    assert restored.as_dict()["import_cost_today"] == 0.94
+    assert not restored.reconcile_price_coverage(
         {
             "date": "2026-08-18",
             "import_kwh": 3.91,
@@ -263,7 +268,14 @@ def test_legacy_daily_import_cost_recovers_from_matching_optimizer_totals():
     assert reloaded.as_dict()["import_cost_today"] == 0.94
 
 
-def test_legacy_daily_import_cost_stays_partial_when_reference_does_not_match():
+def test_legacy_daily_import_cost_recovers_without_a_matching_reference():
+    """Ticket #384: legacy recovery must not depend on the optimizer ledger.
+
+    The optimizer keeps an independent ledger that routinely disagrees with
+    the accumulator by more than its 0.001 kWh / $0.0001 match tolerance, so
+    gating legacy recovery on that match left real installs blanked.  The
+    strict reconciliation contract itself is unchanged — it still declines.
+    """
     clock = _Clock(datetime(2026, 8, 18, 8, 45, 0))
     restored = _new_accumulator(
         clock,
@@ -290,12 +302,19 @@ def test_legacy_daily_import_cost_stays_partial_when_reference_does_not_match():
         }
     )
     summary = restored.as_dict()
-    assert summary["import_cost_today"] is None
-    assert summary["import_cost_coverage"] == "partial"
-    assert summary["mtd_import_cost"] is None
+    assert summary["import_cost_today"] == 0.94
+    assert summary["import_cost_coverage"] == "complete"
+    assert summary["mtd_import_cost"] == 1.50
 
 
-def test_legacy_daily_import_cost_does_not_hide_small_unpriced_gap():
+def test_post_counter_payload_with_a_real_gap_is_not_migrated():
+    """A payload that carries real counters must be trusted, not overwritten.
+
+    v2.12.1132 shipped the counters one release before the
+    ``price_coverage_schema`` marker, so the marker cannot be the migration
+    signal — the counters' own absence is.  A genuinely short counter must
+    survive restore and keep failing closed.
+    """
     clock = _Clock(datetime(2026, 8, 18, 8, 45, 0))
     restored = _new_accumulator(
         clock,
@@ -305,21 +324,21 @@ def test_legacy_daily_import_cost_does_not_hide_small_unpriced_gap():
                 "month": "2026-08",
                 "grid_import_kwh": 3.91,
                 "import_cost_today": 0.94,
+                # No price_coverage_schema: written by v2.12.1132/1133.
+                "import_cost_covered_kwh": 0.12,
+                "mtd_grid_import_kwh": 3.91,
+                "mtd_import_cost": 0.94,
+                "mtd_import_cost_covered_kwh": 0.12,
             }
         ),
     )
     asyncio.run(restored.async_restore())
 
-    assert not restored.reconcile_price_coverage(
-        {
-            "date": "2026-08-18",
-            "import_kwh": 3.84,
-            "export_kwh": 0.0,
-            "import_cost": 0.94,
-            "export_earnings": 0.0,
-        }
-    )
-    assert restored.as_dict()["import_cost_today"] is None
+    assert restored.import_cost_covered_kwh == 0.12
+    summary = restored.as_dict()
+    assert summary["import_cost_today"] is None
+    assert summary["import_cost_coverage"] == "partial"
+    assert summary["import_cost_covered_kwh"] == 0.12
 
 
 def test_non_integrating_sample_without_home_load_does_not_latch_the_month():
@@ -363,3 +382,140 @@ def test_complete_home_load_samples_publish_both_average_costs():
     summary = accumulator.as_dict()
     assert summary["avg_cost_per_kwh_today"] is not None
     assert summary["avg_cost_per_kwh_mtd"] is not None
+
+
+def test_small_unpriced_interval_keeps_daily_cost_visible():
+    """Ticket #384: a startup-race gap of ~0.2 % must not blank the day.
+
+    The custom-tariff schedule registers a few seconds after the energy
+    coordinator's first refresh, so one integrated interval can carry no
+    price.  Priced and measured energy advance in the same branch, so the old
+    1 Wh absolute band was exact equality and that single interval blanked
+    Export Earnings Today and both average sensors for the rest of the day.
+    """
+    clock = _Clock(datetime(2026, 8, 19, 16, 0, 0))
+    accumulator = _new_accumulator(clock)
+
+    accumulator.update(6.0, -5.0, 0.0, 0.5, 0.37, 0.04)
+    # One interval integrated before the tariff schedule was registered.
+    clock.current = datetime(2026, 8, 19, 16, 0, 17)
+    accumulator.update(6.0, -5.0, 0.0, 0.5, None, None)
+    for step in range(1, 501):
+        clock.current = datetime(2026, 8, 19, 16, 0, 17) + timedelta(
+            seconds=17 * step
+        )
+        accumulator.update(6.0, -5.0, 0.0, 0.5, 0.37, 0.04)
+
+    summary = accumulator.as_dict()
+    exported = summary["grid_export_today_kwh"]
+    covered = summary["export_earnings_covered_kwh"]
+    # ~23.6 Wh unpriced out of ~11.8 kWh exported: 0.2 %, well inside the
+    # project's own max(0.05 kWh, 2 %) band.
+    assert 0.02 < exported - covered < 0.03
+    assert summary["export_earnings_today"] is not None
+    assert summary["export_earnings_coverage"] == "complete"
+    assert summary["avg_cost_per_kwh_today"] is not None
+    assert summary["avg_cost_per_kwh_mtd"] is not None
+    # The raw counter must stay raw: coverage is reported, not back-filled.
+    assert covered == pytest.approx(11.806, abs=1e-3)
+
+
+def test_materially_partial_coverage_still_blanks():
+    """Ticket #336 must not regress: no $0.00 beside a full day of export."""
+    clock = _Clock(datetime(2026, 8, 19, 16, 0, 0))
+    accumulator = _new_accumulator(clock)
+
+    accumulator.update(6.0, -5.0, 0.0, 0.5, 0.37, 0.04)
+    clock.current = datetime(2026, 8, 19, 16, 0, 17)
+    accumulator.update(6.0, -5.0, 0.0, 0.5, 0.37, 0.04)
+    # The rest of the day integrates with no price at all.
+    for step in range(1, 501):
+        clock.current = datetime(2026, 8, 19, 16, 0, 17) + timedelta(
+            seconds=17 * step
+        )
+        accumulator.update(6.0, -5.0, 0.0, 0.5, None, None)
+
+    summary = accumulator.as_dict()
+    assert summary["export_earnings_covered_kwh"] < 0.05
+    assert summary["grid_export_today_kwh"] > 11.0
+    assert summary["export_earnings_today"] is None
+    assert summary["export_earnings_coverage"] == "partial"
+    assert summary["avg_cost_per_kwh_today"] is None
+
+
+def test_legacy_payload_without_coverage_counters_adopts_coverage():
+    """Ticket #384: the reporter's own restored payload must report numbers."""
+    clock = _Clock(datetime(2026, 8, 19, 22, 18, 26))
+    store = _Store(
+        {
+            "date": "2026-08-19",
+            "month": "2026-08",
+            "solar_kwh": 64.74,
+            "grid_import_kwh": 0.20,
+            "grid_export_kwh": 35.57,
+            "battery_charge_kwh": 22.66,
+            "battery_discharge_kwh": 11.26,
+            "load_kwh": 13.61,
+            "import_cost_today": 0.05,
+            "export_earnings_today": 1.74,
+            "mtd_grid_import_kwh": 1.10,
+            "mtd_grid_export_kwh": 60.0,
+            "mtd_load_kwh": 30.0,
+            "mtd_import_cost": 0.30,
+            "mtd_export_earnings": 2.80,
+        }
+    )
+    restored = _new_accumulator(clock, store)
+    asyncio.run(restored.async_restore())
+
+    summary = restored.as_dict()
+    assert summary["import_cost_today"] == pytest.approx(0.05)
+    assert summary["export_earnings_today"] == pytest.approx(1.74)
+    assert summary["avg_cost_per_kwh_today"] is not None
+    assert summary["avg_cost_per_kwh_mtd"] is not None
+    assert summary["import_cost_coverage"] == "complete"
+    assert summary["export_earnings_coverage"] == "complete"
+    # Attributes stay self-consistent with the adopted counters.
+    assert summary["export_earnings_covered_kwh"] == pytest.approx(35.57)
+
+    # The migration persists, so it runs at most once per install.
+    asyncio.run(restored.async_flush())
+    assert store.data["price_coverage_schema"] == 1
+    assert store.data["export_earnings_covered_kwh"] == pytest.approx(35.57)
+    reloaded = _new_accumulator(clock, store)
+    asyncio.run(reloaded.async_restore())
+    assert reloaded.as_dict()["export_earnings_today"] == pytest.approx(1.74)
+
+
+def test_mtd_average_survives_upgrade_day():
+    """Ticket #384: an upgrade must not blank the month until the 1st.
+
+    reconcile_price_coverage can only corroborate MTD when the month contains
+    exactly the current day, i.e. only on the 1st.  Every other upgrade day
+    left Avg Cost per kWh (Month) unknown until the next rollover.
+    """
+    clock = _Clock(datetime(2026, 8, 19, 22, 18, 26))
+    restored = _new_accumulator(
+        clock,
+        _Store(
+            {
+                "date": "2026-08-19",
+                "month": "2026-08",
+                "grid_import_kwh": 0.20,
+                "grid_export_kwh": 35.57,
+                "load_kwh": 13.61,
+                "import_cost_today": 0.05,
+                "export_earnings_today": 1.74,
+                # Month-to-date is much larger than today, so the optimizer's
+                # daily ledger can never corroborate it.
+                "mtd_grid_import_kwh": 18.4,
+                "mtd_grid_export_kwh": 420.0,
+                "mtd_load_kwh": 260.0,
+                "mtd_import_cost": 6.30,
+                "mtd_export_earnings": 21.40,
+            }
+        ),
+    )
+    asyncio.run(restored.async_restore())
+
+    assert restored.as_dict()["avg_cost_per_kwh_mtd"] is not None

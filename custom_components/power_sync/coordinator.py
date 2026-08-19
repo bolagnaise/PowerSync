@@ -471,6 +471,7 @@ class EnergyAccumulator:
         stored_date = data.get("date")
         now = dt_util.now()
         today = now.strftime("%Y-%m-%d")
+        migrated_legacy_coverage = False
         if stored_date == today:
             self.solar_kwh = float(data.get("solar_kwh", 0.0))
             self.grid_import_kwh = float(data.get("grid_import_kwh", 0.0))
@@ -486,6 +487,28 @@ class EnergyAccumulator:
             self.export_earnings_covered_kwh = float(
                 data.get("export_earnings_covered_kwh", 0.0)
             )
+            # Migrate a same-day payload written before the priced-coverage
+            # counters shipped.  That code accumulated cost in the *same*
+            # branch as energy, so its stored cost already corresponds to the
+            # energy stored beside it; defaulting the counters to zero instead
+            # made a legacy payload indistinguishable from a total coverage
+            # hole and blanked the cost sensors for the rest of the day.
+            #
+            # Keyed on the counters being absent, not on the schema marker:
+            # the marker only shipped one release after the counters, so
+            # payloads from that gap carry real counters and must be trusted.
+            if (
+                "import_cost_covered_kwh" not in data
+                and "import_cost_today" in data
+            ):
+                self.import_cost_covered_kwh = self.grid_import_kwh
+                migrated_legacy_coverage = True
+            if (
+                "export_earnings_covered_kwh" not in data
+                and "export_earnings_today" in data
+            ):
+                self.export_earnings_covered_kwh = self.grid_export_kwh
+                migrated_legacy_coverage = True
             self._load_accounting_partial_today = bool(
                 data.get("load_accounting_partial_today", False)
             )
@@ -524,12 +547,41 @@ class EnergyAccumulator:
             self.mtd_export_earnings_covered_kwh = float(
                 data.get("mtd_export_earnings_covered_kwh", 0.0)
             )
+            # Same one-time migration for the month-to-date buckets.  Without
+            # it, Avg Cost per kWh (Month) stayed unknown until the next month
+            # rollover for every install that upgraded mid-month.
+            if (
+                "mtd_import_cost_covered_kwh" not in data
+                and "mtd_import_cost" in data
+            ):
+                self.mtd_import_cost_covered_kwh = self.mtd_grid_import_kwh
+                migrated_legacy_coverage = True
+            if (
+                "mtd_export_earnings_covered_kwh" not in data
+                and "mtd_export_earnings" in data
+            ):
+                self.mtd_export_earnings_covered_kwh = self.mtd_grid_export_kwh
+                migrated_legacy_coverage = True
             self._load_accounting_partial_mtd = bool(
                 data.get("load_accounting_partial_mtd", False)
             )
             # Persist the full year-month rather than only the numeric month;
             # January of a new year must not inherit December/January totals.
             self._last_month = current_month
+
+        if migrated_legacy_coverage:
+            _LOGGER.info(
+                "Migrated legacy energy accumulator payload to priced coverage: "
+                "import=%.3f/%.3f kWh export=%.3f/%.3f kWh "
+                "(mtd import=%.3f/%.3f kWh export=%.3f/%.3f kWh)",
+                self.import_cost_covered_kwh, self.grid_import_kwh,
+                self.export_earnings_covered_kwh, self.grid_export_kwh,
+                self.mtd_import_cost_covered_kwh, self.mtd_grid_import_kwh,
+                self.mtd_export_earnings_covered_kwh, self.mtd_grid_export_kwh,
+            )
+            # Persist the migrated counters so priced_energy_kwh stays
+            # self-consistent and the migration runs at most once per install.
+            self._schedule_save()
 
     async def async_flush(self) -> None:
         """Immediately write current energy data to persistent storage.
@@ -713,19 +765,26 @@ class EnergyAccumulator:
 
     def as_dict(self) -> dict:
         """Return accumulated totals as a dict for energy_summary."""
-        import_cost_complete = self._coverage_matches(
+        # Judge coverage with the proportional rule, not exact equality.
+        # Priced and measured energy advance in the same integration branch,
+        # so covered can never exceed measured and a 1 Wh absolute band was an
+        # equality test in practice: a single unpriced interval — or a stored
+        # payload written before the counters existed — blanked the cost
+        # sensors for the rest of the day and the averages for the rest of the
+        # month.  Materially short coverage still fails closed.
+        import_cost_complete = not self._priced_coverage_is_partial(
             self.import_cost_covered_kwh,
             self.grid_import_kwh,
         )
-        export_earnings_complete = self._coverage_matches(
+        export_earnings_complete = not self._priced_coverage_is_partial(
             self.export_earnings_covered_kwh,
             self.grid_export_kwh,
         )
-        mtd_import_cost_complete = self._coverage_matches(
+        mtd_import_cost_complete = not self._priced_coverage_is_partial(
             self.mtd_import_cost_covered_kwh,
             self.mtd_grid_import_kwh,
         )
-        mtd_export_earnings_complete = self._coverage_matches(
+        mtd_export_earnings_complete = not self._priced_coverage_is_partial(
             self.mtd_export_earnings_covered_kwh,
             self.mtd_grid_export_kwh,
         )
@@ -912,6 +971,25 @@ class EnergyAccumulator:
         covered = max(0.0, float(covered_kwh or 0.0))
         total = max(0.0, float(total_kwh or 0.0))
         return abs(covered - total) <= max(0.0, tolerance_kwh)
+
+    @staticmethod
+    def _priced_coverage_is_partial(
+        covered_kwh: float,
+        measured_kwh: float,
+    ) -> bool:
+        """Return whether priced energy is *materially* short of measured.
+
+        Only *under*-coverage means priced intervals were missed.  Priced
+        energy at or above the measured total means every metered kWh carried
+        a price; the residual is ordinary disagreement between integrated
+        power samples and a hardware daily register.
+
+        The same predicate must decide both the accumulator's own gating and
+        the Sungrow register cross-check, so the ``coverage`` attribute can
+        never disagree with the blanking decision.
+        """
+        tolerance = max(0.05, abs(float(measured_kwh or 0.0)) * 0.02)
+        return float(covered_kwh or 0.0) + tolerance < float(measured_kwh or 0.0)
 
 
 def _flow_power_export_rate_dollars(config_entry: Any, state: str) -> float:
@@ -6075,12 +6153,11 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         # on a small counter it easily exceeds the 0.05 kWh absolute floor.
         # Treating that as a coverage gap suppressed the cost totals — and the
         # average-price sensors derived from them — for the whole day.
-        def _priced_coverage_is_partial(
-            covered_kwh: float,
-            measured_kwh: float,
-        ) -> bool:
-            tolerance = max(0.05, abs(float(measured_kwh or 0.0)) * 0.02)
-            return float(covered_kwh) + tolerance < float(measured_kwh or 0.0)
+        #
+        # This re-check runs against the hardware register and can only ever
+        # downgrade a value to None.  It shares EnergyAccumulator's predicate
+        # so it cannot be stricter than the gate that produced the value.
+        _priced_coverage_is_partial = EnergyAccumulator._priced_coverage_is_partial
 
         import_covered = summary.get("import_cost_covered_kwh")
         if import_covered is not None and _priced_coverage_is_partial(
