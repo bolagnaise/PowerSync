@@ -2199,6 +2199,169 @@ def test_price_level_leaves_solar_surplus_owned_session_alone(monkeypatch, fake_
     assert "solar_surplus mode owns" in state.last_decision_reason
 
 
+def _suspended_solar_surplus_hass(state: dict) -> "_FakeHass":
+    """Return a hass whose lease and dynamic state match a live surplus session."""
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = {
+        VIN: {"owner": "powersync", "owner_mode": "solar_surplus"}
+    }
+    return hass
+
+
+def test_price_level_stops_charge_a_suspended_surplus_owner_no_longer_controls(
+    monkeypatch, fake_actions
+):
+    """Ticket #350: an adopted external start must not mask price-level policy.
+
+    Solar Surplus opens a session that commands nothing, then sets
+    external_manual_override for the car's own plug-in auto-start. It governs
+    nothing from that point, so price level must still enforce the user's
+    high-price policy.
+    """
+    fake_actions._dynamic_ev_state = {
+        "entry-1": {
+            VIN: {
+                "active": True,
+                "current_amps": 0,
+                "charging_started": False,
+                "external_manual_override": True,
+                "params": {
+                    "dynamic_mode": "solar_surplus",
+                    "owner_mode": "solar_surplus",
+                },
+            }
+        }
+    }
+
+    async def high_price_decision(self, vehicle_vin, current_price_cents):
+        return False, "EV 94% >= 40%, price 33.3c > 5c", ""
+
+    async def actively_charging(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _one_vehicle)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", actively_charging)
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "get_charging_decision_for_vehicle",
+        high_price_decision,
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(
+        _suspended_solar_surplus_hass(fake_actions._dynamic_ev_state),
+        _FakeConfigEntry(),
+    )
+    executor._stop_charging = AsyncMock(return_value=True)
+
+    asyncio.run(executor.evaluate_all_vehicles(33.3))
+
+    executor._stop_charging.assert_awaited_once()
+
+
+def test_price_level_still_defers_to_a_surplus_session_awaiting_sustained_surplus(
+    monkeypatch, fake_actions
+):
+    """A surplus session that has not yet allocated amps still owns the loadpoint."""
+    fake_actions._dynamic_ev_state = {
+        "entry-1": {
+            VIN: {
+                "active": True,
+                "current_amps": 0,
+                "charging_started": False,
+                "external_manual_override": False,
+                "params": {
+                    "dynamic_mode": "solar_surplus",
+                    "owner_mode": "solar_surplus",
+                },
+            }
+        }
+    }
+
+    async def high_price_decision(self, vehicle_vin, current_price_cents):
+        return False, "EV 94% >= 40%, price 33.3c > 5c", ""
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("price-level must not probe or stop another owned session")
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _one_vehicle)
+    monkeypatch.setattr(ev_planner, "is_ev_actively_charging", fail_if_called)
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "get_charging_decision_for_vehicle",
+        high_price_decision,
+    )
+
+    executor = ev_planner.PriceLevelChargingExecutor(
+        _suspended_solar_surplus_hass(fake_actions._dynamic_ev_state),
+        _FakeConfigEntry(),
+    )
+    executor._stop_charging = AsyncMock(return_value=True)
+
+    asyncio.run(executor.evaluate_all_vehicles(33.3))
+
+    executor._stop_charging.assert_not_awaited()
+    state = executor._get_or_create_vehicle_state(VIN)
+    assert "solar_surplus mode owns" in state.last_decision_reason
+
+
+def test_stop_gate_allows_the_stop_when_the_surplus_owner_suspended_control(fake_actions):
+    """The lease-backed ownership read must not swallow the resulting stop."""
+    fake_actions._dynamic_ev_state = {
+        "entry-1": {
+            VIN: {
+                "active": True,
+                "current_amps": 0,
+                "charging_started": False,
+                "external_manual_override": True,
+                "params": {
+                    "dynamic_mode": "solar_surplus",
+                    "owner_mode": "solar_surplus",
+                },
+            }
+        }
+    }
+
+    allowed = ev_planner._can_stop_loadpoint_for_mode(
+        _suspended_solar_surplus_hass(fake_actions._dynamic_ev_state),
+        _FakeConfigEntry(),
+        VIN,
+        expected_owner_mode="price_level",
+        command="stop",
+        allow_unowned=True,
+    )
+
+    assert allowed is True
+
+
+def test_stop_gate_still_blocks_a_rate_controlling_surplus_owner(fake_actions):
+    """A surplus session that is actually rate-controlling keeps the loadpoint."""
+    fake_actions._dynamic_ev_state = {
+        "entry-1": {
+            VIN: {
+                "active": True,
+                "current_amps": 10,
+                "charging_started": True,
+                "external_manual_override": False,
+                "params": {
+                    "dynamic_mode": "solar_surplus",
+                    "owner_mode": "solar_surplus",
+                },
+            }
+        }
+    }
+
+    allowed = ev_planner._can_stop_loadpoint_for_mode(
+        _suspended_solar_surplus_hass(fake_actions._dynamic_ev_state),
+        _FakeConfigEntry(),
+        VIN,
+        expected_owner_mode="price_level",
+        command="stop",
+        allow_unowned=True,
+    )
+
+    assert allowed is False
+
+
 def test_price_level_leaves_manual_session_alone(monkeypatch, fake_actions):
     fake_actions._dynamic_ev_state = {
         "entry-1": {

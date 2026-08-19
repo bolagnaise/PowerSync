@@ -7490,6 +7490,44 @@ def _get_active_dynamic_ev_mode(hass: "HomeAssistant", config_entry: "ConfigEntr
     return None
 
 
+def _dynamic_ev_owner_suspended_control(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+    vehicle_id: str,
+) -> bool:
+    """Return whether the dynamic owner has suspended its own rate control.
+
+    Solar Surplus adopts an externally started charge by setting
+    ``external_manual_override`` and returning before every downstream guard,
+    so from that point the session commands nothing. The ownership lease still
+    names it as the owner, which would otherwise mask the modes that are still
+    willing to act on the loadpoint.
+    """
+    try:
+        from .actions import DEFAULT_VEHICLE_ID, _dynamic_ev_state
+
+        entry_vehicles = _dynamic_ev_state.get(
+            getattr(config_entry, "entry_id", None), {}
+        )
+        candidate_ids = [vehicle_id]
+        if vehicle_id != DEFAULT_VEHICLE_ID:
+            candidate_ids.append(DEFAULT_VEHICLE_ID)
+        else:
+            candidate_ids.extend(
+                vid for vid in entry_vehicles if vid != DEFAULT_VEHICLE_ID
+            )
+
+        for candidate_id in candidate_ids:
+            state = entry_vehicles.get(candidate_id)
+            if not state or not state.get("active"):
+                continue
+            return bool(state.get("external_manual_override"))
+    except Exception as err:
+        _LOGGER.debug("Dynamic EV control-suspension check failed: %s", err)
+
+    return False
+
+
 def _paired_ble_aliases_for_fleet_vins(
     hass: "HomeAssistant",
     config_entry: "ConfigEntry",
@@ -7566,6 +7604,21 @@ def _can_stop_loadpoint_for_mode(
         active_mode = _get_active_dynamic_ev_mode(hass, config_entry, vehicle_id or "_default")
         if active_mode and owner_family(active_mode) == owner_family(expected_owner_mode):
             return True
+        if (
+            active_mode
+            and _dynamic_ev_owner_suspended_control(
+                hass, config_entry, vehicle_id or "_default"
+            )
+        ):
+            # The owner suspended its own rate control, so it is not governing
+            # this loadpoint and must not block another mode's stop.
+            _LOGGER.info(
+                "EV ownership for %s ignored: %s holds it but suspended its own "
+                "rate control",
+                vehicle_id,
+                active_mode,
+            )
+            active_mode = None
         if not active_mode and (allow_unowned or allow_no_owner):
             return True
 
@@ -10111,6 +10164,17 @@ class PriceLevelChargingExecutor:
                     await self._stop_charging(reason, vehicle_vin=vin)
                 else:
                     active_dynamic_mode = _get_active_dynamic_ev_mode(self.hass, self.config_entry, vin)
+                    if active_dynamic_mode and _dynamic_ev_owner_suspended_control(
+                        self.hass, self.config_entry, vin
+                    ):
+                        # That mode suspended its own rate control for an
+                        # externally started charge, so it governs nothing.
+                        _LOGGER.info(
+                            f"Price-level charging no longer deferring to "
+                            f"{active_dynamic_mode} for {name} ({vin}): that session "
+                            f"suspended its own rate control"
+                        )
+                        active_dynamic_mode = None
                     if active_dynamic_mode:
                         vehicle_state.last_decision = "waiting"
                         vehicle_state.last_decision_reason = (
