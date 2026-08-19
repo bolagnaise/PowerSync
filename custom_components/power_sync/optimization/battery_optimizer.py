@@ -1414,6 +1414,7 @@ class BatteryOptimizer:
         *,
         block_battery_charge: list[bool] | None = None,
         mode_slots: list[str | None] | None = None,
+        export_values: list[float] | None = None,
     ) -> list[float]:
         """Return stored kWh needed for later, higher-value household load.
 
@@ -1423,6 +1424,12 @@ class BatteryOptimizer:
         that cannot be replenished beforehand by forecast solar. Grid charging
         is deliberately not credited here: generic export may spend existing
         stored surplus, but this guard must not create a charge-then-export loop.
+
+        This guard only ever gates a battery *export* at period ``t``, so the
+        value being given up by holding a kWh back is that period's feed-in
+        value, not the import price the site is not paying while discharging.
+        Later load is therefore only worth reserving for when its import price
+        beats both the export value and the local import price.
         """
         if n <= 0:
             return []
@@ -1436,13 +1443,20 @@ class BatteryOptimizer:
             durations.extend([self.dt_hours] * (n - len(durations)))
         block_battery_charge = block_battery_charge or [False] * n
         mode_slots = mode_slots or [None] * n
+        export_value_slots = [
+            float(export_values[idx]) if export_values and idx < len(export_values)
+            else 0.0
+            for idx in range(n)
+        ]
 
         reservations = [0.0] * n
         eff = max(self.efficiency, 1e-9)
         cap = max(0.0, self.capacity_kwh)
         for t in range(n):
             required_stored_kwh = 0.0
-            threshold_price = import_prices[t] + 0.001
+            threshold_price = (
+                max(import_prices[t], export_value_slots[t]) + 0.001
+            )
             for idx in range(n - 1, t, -1):
                 duration = durations[idx]
                 net_load_kw = max(0.0, load[idx] - solar[idx])
@@ -2691,6 +2705,9 @@ class BatteryOptimizer:
                 p_dt,
                 block_battery_charge=p_block_charge,
                 mode_slots=p_mode,
+                export_values=[
+                    p_export[t] + p_export_bonus[t] for t in range(p_n)
+                ],
             )
         )
         grid_charge_soc_cap = max(
@@ -4928,6 +4945,7 @@ class BatteryOptimizer:
                 load,
                 dt,
                 block_battery_charge=block_battery_charge,
+                export_values=effective_export_prices,
             )
         )
 

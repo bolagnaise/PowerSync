@@ -4153,3 +4153,145 @@ def test_acquisition_cost_block_is_reported_separately_from_future_reservation(
     assert max(result.battery_to_grid_w) <= 1e-6
     assert guard["active_reasons"] == ["acquisition_cost"]
     assert guard["acquisition_blocked_periods"] > 0
+
+
+def _planned_export_window_optimizer(module):
+    """Optimizer for the #334 planned-evening-export-window regressions."""
+    return module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.20,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+
+
+def _solve_planned_export_window(module, later_import, later_load=6.0):
+    n = 36
+    export_slots = 18
+    return _planned_export_window_optimizer(module).optimize(
+        import_prices=[0.10] * export_slots + [later_import] * (n - export_slots),
+        export_prices=[0.40] * export_slots + [0.0] * (n - export_slots),
+        solar_forecast=[0.0] * n,
+        load_forecast=[0.0] * export_slots + [later_load] * 12 + [0.0] * 6,
+        current_soc=0.80,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=[True] * export_slots + [False] * (n - export_slots),
+    )
+
+
+def _planned_export_kwh(result):
+    return sum(result.battery_to_grid_w) / 1000.0 / 12.0
+
+
+def test_future_load_reservation_ignores_load_cheaper_than_the_feed_in(
+    battery_optimizer_module,
+):
+    """Later load below the feed-in price must not reserve stored energy.
+
+    Holding a kWh back from a 40 c/kWh export to serve 11 c/kWh household load
+    is a loss.  The guard used to compare that later load against the export
+    slot's own *import* price, which the battery is not paying while it
+    discharges, so it reserved the whole evening window anyway.
+    """
+    result = _solve_planned_export_window(battery_optimizer_module, 0.11)
+
+    guard = result.lp_stats["battery_export_constraints"]
+
+    assert result.solver_used == "highs"
+    assert guard["future_reserved_kwh"] == pytest.approx(0.0, abs=1e-6)
+    assert guard["future_reservation_active"] is False
+    assert "future_self_consumption_energy_reservation" not in guard[
+        "active_reasons"
+    ]
+    assert _planned_export_kwh(result) == pytest.approx(6.0, abs=0.02)
+
+
+def test_planned_export_window_survives_far_horizon_import_refresh(
+    battery_optimizer_module,
+):
+    """An ordinary price refresh must not delete an already-planned window.
+
+    A 0.06 c/kWh move on import prices hours after the export window used to
+    take the reservation from 0 kWh to the full usable capacity in one step,
+    zeroing the export budget and replacing every export slot with
+    self_consumption.
+    """
+    before = _solve_planned_export_window(battery_optimizer_module, 0.1005)
+    after = _solve_planned_export_window(battery_optimizer_module, 0.1011)
+
+    def _export_actions(result):
+        return sum(
+            1
+            for action in result.schedule.actions[:18]
+            if action.action == "export"
+        )
+
+    assert _planned_export_kwh(before) == pytest.approx(6.0, abs=0.02)
+    assert _planned_export_kwh(after) == pytest.approx(
+        _planned_export_kwh(before), abs=0.02
+    )
+    assert _export_actions(after) == _export_actions(before)
+    assert after.lp_stats["battery_export_constraints"][
+        "future_export_budget_kwh"
+    ] == pytest.approx(8.0, abs=1e-6)
+
+
+def test_future_load_reservation_still_holds_load_dearer_than_the_feed_in(
+    battery_optimizer_module,
+):
+    """The guard's genuine anti-arbitrage case must keep firing."""
+    result = _solve_planned_export_window(battery_optimizer_module, 0.41)
+
+    guard = result.lp_stats["battery_export_constraints"]
+
+    assert guard["future_reserved_kwh"] == pytest.approx(6.0, abs=1e-6)
+    assert guard["future_protected_energy_kwh"] == pytest.approx(8.0, abs=1e-6)
+    assert guard["future_export_budget_kwh"] == pytest.approx(0.0, abs=1e-6)
+    assert guard["active_reasons"] == [
+        "future_self_consumption_energy_reservation"
+    ]
+    assert _planned_export_kwh(result) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_greedy_future_load_reservation_uses_the_same_export_value_threshold(
+    battery_optimizer_module,
+):
+    """The greedy fallback must apply the same export-value threshold."""
+    n = 36
+    export_slots = 18
+    optimizer = _planned_export_window_optimizer(battery_optimizer_module)
+    common = dict(
+        allow_battery_export=[True] * export_slots + [False] * (n - export_slots),
+    )
+    cheap = optimizer._solve_greedy(
+        n,
+        [0.10] * export_slots + [0.11] * (n - export_slots),
+        [0.40] * export_slots + [0.0] * (n - export_slots),
+        [0.0] * n,
+        [0.0] * export_slots + [1.0] * 12 + [0.0] * 6,
+        0.80,
+        "cost",
+        **common,
+    )
+    dear = optimizer._solve_greedy(
+        n,
+        [0.10] * export_slots + [0.50] * (n - export_slots),
+        [0.40] * export_slots + [0.0] * (n - export_slots),
+        [0.0] * n,
+        [0.0] * export_slots + [1.0] * 12 + [0.0] * 6,
+        0.80,
+        "cost",
+        **common,
+    )
+
+    assert cheap.lp_stats["battery_export_constraints"][
+        "future_reserved_kwh"
+    ] == pytest.approx(0.0, abs=1e-6)
+    assert dear.lp_stats["battery_export_constraints"][
+        "future_reserved_kwh"
+    ] == pytest.approx(1.0, abs=1e-6)
