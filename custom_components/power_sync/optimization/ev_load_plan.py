@@ -49,6 +49,21 @@ class EVChargePlan:
     energy_needed_kwh: float
     charge_efficiency: float = 0.9
     min_power_kw: float = 0.0
+    # Time-indexed Smart Schedule policy. Empty tuples preserve the historical
+    # unconstrained source behaviour for callers that only provide physical
+    # capability; normalized plans always contain one value per base slot.
+    allow_grid: tuple[bool, ...] = ()
+    allow_solar: tuple[bool, ...] = ()
+    allow_battery: tuple[bool, ...] = ()
+    min_start_soc: tuple[float, ...] = ()
+    battery_floor_soc: tuple[float, ...] = ()
+    stop_at_battery_floor: tuple[bool, ...] = ()
+    preserve_home_battery: tuple[bool, ...] = ()
+    limit_grid_import: tuple[bool, ...] = ()
+    allow_min_start_solar_exception: tuple[bool, ...] = ()
+    solar_battery_reserve_kw: tuple[float, ...] = ()
+    window_source: tuple[str, ...] = ()
+    initially_charging: bool = False
     # Cumulative energy that must be delivered by a given slot, as
     # ``(last_usable_slot, kwh_by_then)`` sorted by slot. Empty means the one
     # implicit stage every single-vehicle plan has: all of its energy by its
@@ -104,6 +119,26 @@ def normalize_ev_charge_plan(
     if not 0.1 <= efficiency <= 1.0:
         efficiency = 0.9
 
+    def _bool_slots(values: Sequence[object], default: bool) -> tuple[bool, ...]:
+        normalized = [bool(value) for value in values[:n_slots]]
+        normalized.extend([default] * (n_slots - len(normalized)))
+        return tuple(normalized)
+
+    def _soc_slots(values: Sequence[object]) -> tuple[float, ...]:
+        normalized = [
+            max(0.0, min(1.0, _finite(value))) for value in values[:n_slots]
+        ]
+        normalized.extend([0.0] * (n_slots - len(normalized)))
+        return tuple(normalized)
+
+    def _power_slots(values: Sequence[object]) -> tuple[float, ...]:
+        normalized = [max(0.0, _finite(value)) for value in values[:n_slots]]
+        normalized.extend([0.0] * (n_slots - len(normalized)))
+        return tuple(normalized)
+
+    sources = [str(value or "") for value in plan.window_source[:n_slots]]
+    sources.extend([""] * (n_slots - len(sources)))
+
     # A stage whose deadline falls past the horizon is clamped to the last
     # slot rather than dropped: the energy is still required, and dropping it
     # would quietly relax the requirement to zero.
@@ -125,6 +160,20 @@ def normalize_ev_charge_plan(
         energy_needed_kwh=max(0.0, _finite(plan.energy_needed_kwh)),
         charge_efficiency=efficiency,
         min_power_kw=max(0.0, _finite(plan.min_power_kw)),
+        allow_grid=_bool_slots(plan.allow_grid, True),
+        allow_solar=_bool_slots(plan.allow_solar, True),
+        allow_battery=_bool_slots(plan.allow_battery, True),
+        min_start_soc=_soc_slots(plan.min_start_soc),
+        battery_floor_soc=_soc_slots(plan.battery_floor_soc),
+        stop_at_battery_floor=_bool_slots(plan.stop_at_battery_floor, True),
+        preserve_home_battery=_bool_slots(plan.preserve_home_battery, False),
+        limit_grid_import=_bool_slots(plan.limit_grid_import, False),
+        allow_min_start_solar_exception=_bool_slots(
+            plan.allow_min_start_solar_exception, False
+        ),
+        solar_battery_reserve_kw=_power_slots(plan.solar_battery_reserve_kw),
+        window_source=tuple(sources),
+        initially_charging=bool(plan.initially_charging),
         deadline_requirements=tuple(stages),
     )
     return normalized if normalized.active else None
@@ -186,6 +235,48 @@ def combine_ev_charge_plans(
         energy_needed_kwh=total_energy,
         charge_efficiency=weighted_efficiency,
         min_power_kw=min(plan.min_power_kw for plan in normalized),
+        allow_grid=tuple(
+            any(plan.allow_grid[index] for plan in normalized)
+            for index in range(n_slots)
+        ),
+        allow_solar=tuple(
+            any(plan.allow_solar[index] for plan in normalized)
+            for index in range(n_slots)
+        ),
+        allow_battery=tuple(
+            any(plan.allow_battery[index] for plan in normalized)
+            for index in range(n_slots)
+        ),
+        min_start_soc=tuple(
+            max(plan.min_start_soc[index] for plan in normalized)
+            for index in range(n_slots)
+        ),
+        battery_floor_soc=tuple(
+            max(plan.battery_floor_soc[index] for plan in normalized)
+            for index in range(n_slots)
+        ),
+        stop_at_battery_floor=tuple(
+            any(plan.stop_at_battery_floor[index] for plan in normalized)
+            for index in range(n_slots)
+        ),
+        preserve_home_battery=tuple(
+            any(plan.preserve_home_battery[index] for plan in normalized)
+            for index in range(n_slots)
+        ),
+        limit_grid_import=tuple(
+            any(plan.limit_grid_import[index] for plan in normalized)
+            for index in range(n_slots)
+        ),
+        allow_min_start_solar_exception=tuple(
+            any(plan.allow_min_start_solar_exception[index] for plan in normalized)
+            for index in range(n_slots)
+        ),
+        solar_battery_reserve_kw=tuple(
+            max(plan.solar_battery_reserve_kw[index] for plan in normalized)
+            for index in range(n_slots)
+        ),
+        window_source=tuple("combined" for _ in range(n_slots)),
+        initially_charging=any(plan.initially_charging for plan in normalized),
         deadline_requirements=tuple(stages),
     )
 
@@ -234,6 +325,19 @@ def ev_plan_from_demand(
     available_from=None,
     charge_efficiency: float = 0.9,
     min_power_kw: float = 0.0,
+    max_power_by_slot_kw: Sequence[float] | None = None,
+    allow_grid: Sequence[bool] = (),
+    allow_solar: Sequence[bool] = (),
+    allow_battery: Sequence[bool] = (),
+    min_start_soc: Sequence[float] = (),
+    battery_floor_soc: Sequence[float] = (),
+    stop_at_battery_floor: Sequence[bool] = (),
+    preserve_home_battery: Sequence[bool] = (),
+    limit_grid_import: Sequence[bool] = (),
+    allow_min_start_solar_exception: Sequence[bool] = (),
+    solar_battery_reserve_kw: Sequence[float] = (),
+    window_source: Sequence[str] = (),
+    initially_charging: bool = False,
 ) -> EVChargePlan | None:
     """Build one vehicle's LP demand from the EV planner's figures.
 
@@ -256,13 +360,19 @@ def ev_plan_from_demand(
     available_from = _match_awareness(available_from, reference)
 
     powers: list[float] = []
-    for timestamp in schedule_timestamps:
+    for index, timestamp in enumerate(schedule_timestamps):
         available = True
         if available_from is not None and timestamp < available_from:
             available = False
         if deadline is not None and timestamp >= deadline:
             available = False
-        powers.append(power_kw if available else 0.0)
+        slot_power = (
+            max(0.0, _finite(max_power_by_slot_kw[index]))
+            if max_power_by_slot_kw is not None
+            and index < len(max_power_by_slot_kw)
+            else power_kw
+        )
+        powers.append(min(power_kw, slot_power) if available else 0.0)
 
     return normalize_ev_charge_plan(
         EVChargePlan(
@@ -271,6 +381,20 @@ def ev_plan_from_demand(
             energy_needed_kwh=energy_kwh,
             charge_efficiency=_finite(charge_efficiency, 0.9),
             min_power_kw=max(0.0, _finite(min_power_kw)),
+            allow_grid=tuple(allow_grid),
+            allow_solar=tuple(allow_solar),
+            allow_battery=tuple(allow_battery),
+            min_start_soc=tuple(min_start_soc),
+            battery_floor_soc=tuple(battery_floor_soc),
+            stop_at_battery_floor=tuple(stop_at_battery_floor),
+            preserve_home_battery=tuple(preserve_home_battery),
+            limit_grid_import=tuple(limit_grid_import),
+            allow_min_start_solar_exception=tuple(
+                allow_min_start_solar_exception
+            ),
+            solar_battery_reserve_kw=tuple(solar_battery_reserve_kw),
+            window_source=tuple(window_source),
+            initially_charging=bool(initially_charging),
         ),
         len(schedule_timestamps),
     )
@@ -327,6 +451,84 @@ def expected_ev_load_kw(
             profile[index] += draw_kw
             remaining_kwh -= draw_kw * dt_hours * normalized.charge_efficiency
     return profile
+
+
+def expected_ev_policy_profile(
+    plan,
+    n_slots: int,
+    dt_hours: float,
+) -> dict[str, list]:
+    """Return the conservative fallback load plus its execution policy.
+
+    HiGHS uses exact source variables and charger binaries. Greedy/hold paths
+    cannot choose timing, so they take each car's ASAP profile and carry enough
+    policy alongside it to avoid inventing grid supply, battery consumption or
+    discharge below the configured EV floor.
+    """
+    plans = plan if isinstance(plan, (list, tuple)) else [plan]
+    total = [0.0] * max(0, n_slots)
+    grid_forbidden = [0.0] * max(0, n_slots)
+    battery_allowed = [0.0] * max(0, n_slots)
+    preserve = [False] * max(0, n_slots)
+    floor = [0.0] * max(0, n_slots)
+    stop = [False] * max(0, n_slots)
+    vehicles: list[dict] = []
+    for entry in plans:
+        normalized = normalize_ev_charge_plan(entry, n_slots)
+        if normalized is None:
+            continue
+        profile = expected_ev_load_kw(normalized, n_slots, dt_hours)
+        vehicles.append(
+            {
+                "vehicle_id": normalized.vehicle_id,
+                "load_kw": profile,
+                "allow_grid": list(normalized.allow_grid),
+                "allow_solar": list(normalized.allow_solar),
+                "allow_battery": list(normalized.allow_battery),
+                "min_start_soc": list(normalized.min_start_soc),
+                "battery_floor_soc": list(normalized.battery_floor_soc),
+                "stop_at_battery_floor": list(
+                    normalized.stop_at_battery_floor
+                ),
+                "preserve_home_battery": list(
+                    normalized.preserve_home_battery
+                ),
+                "limit_grid_import": list(normalized.limit_grid_import),
+                "allow_min_start_solar_exception": list(
+                    normalized.allow_min_start_solar_exception
+                ),
+                "solar_battery_reserve_kw": list(
+                    normalized.solar_battery_reserve_kw
+                ),
+                "initially_charging": normalized.initially_charging,
+            }
+        )
+        for index, power in enumerate(profile):
+            if power <= 1e-9:
+                continue
+            total[index] += power
+            if not normalized.allow_grid[index]:
+                grid_forbidden[index] += power
+            if normalized.allow_battery[index]:
+                battery_allowed[index] += power
+            preserve[index] = (
+                preserve[index] or normalized.preserve_home_battery[index]
+            )
+            floor[index] = max(
+                floor[index], normalized.battery_floor_soc[index]
+            )
+            stop[index] = (
+                stop[index] or normalized.stop_at_battery_floor[index]
+            )
+    return {
+        "load_kw": total,
+        "grid_forbidden_kw": grid_forbidden,
+        "battery_allowed_kw": battery_allowed,
+        "preserve_home_battery": preserve,
+        "battery_floor_soc": floor,
+        "stop_at_battery_floor": stop,
+        "vehicles": vehicles,
+    }
 
 
 def unmet_ev_energy_kwh(

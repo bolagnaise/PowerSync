@@ -106,6 +106,7 @@ LOCAL_OFFSET = timedelta(hours=10)
 _ha_dt.now = lambda *args, **kwargs: datetime.now(timezone.utc) + LOCAL_OFFSET
 _ha_dt.utcnow = lambda *args, **kwargs: datetime.now(timezone.utc)
 _ha_dt.as_local = lambda value: value + LOCAL_OFFSET
+_ha_dt.DEFAULT_TIME_ZONE = timezone(LOCAL_OFFSET)
 
 _ha_recorder.get_instance = lambda hass: getattr(hass, "_fake_recorder", None)
 _ha_recorder_history.get_significant_states = object()  # never actually called by the fake recorder
@@ -431,6 +432,21 @@ def test_ev_overlay_both_configured_does_not_double_count_ev_demand():
     assert result == [3000.0, 3000.0, 3000.0, 3000.0]
 
 
+def test_ev_overlay_external_entity_suppresses_internal_lp_plan():
+    """External EV demand and the internal LP variable are mutually exclusive."""
+    coordinator = _FakeOverlayCoordinator(
+        external_forecast=[1000.0, 1000.0, 1000.0, 1000.0],
+        internal_forecast=[500.0, 500.0, 500.0, 500.0],
+        ev_integration_enabled=True,
+    )
+    coordinator._ev_charge_plan = [object()]
+
+    result = _run_overlay(coordinator, [2000.0, 2000.0, 2000.0, 2000.0])
+
+    assert result == [3000.0, 3000.0, 3000.0, 3000.0]
+    assert coordinator._pending_ev_charge_plan is None
+
+
 def _extract_coordinator_method(name: str):
     tree = ast.parse(COORDINATOR_PATH.read_text())
     method = next(
@@ -661,15 +677,19 @@ def test_internal_ev_forecast_suppresses_price_blocked_plan_but_keeps_deadline()
                 )
             ],
             priority=priority,
-            max_grid_price_cents=25.0,
+            # Deliberately stale: current settings below are authoritative.
+            max_grid_price_cents=40.0,
         )
 
-    settings = SimpleNamespace(
+    def settings(priority):
+        return SimpleNamespace(
         enabled=True,
         max_charge_amps=10,
         voltage=230,
         phases=1,
-    )
+        get_effective_priority=lambda _weekday: priority,
+        get_effective_max_grid_price=lambda _weekday: 25.0,
+        )
     executor = SimpleNamespace(
         _state={
             "w3rt1e": SimpleNamespace(
@@ -679,7 +699,10 @@ def test_internal_ev_forecast_suppresses_price_blocked_plan_but_keeps_deadline()
                 current_plan=plan("tessy", "time_critical")
             ),
         },
-        _settings={"w3rt1e": settings, "tessy": settings},
+        _settings={
+            "w3rt1e": settings("cost_optimized"),
+            "tessy": settings("time_critical"),
+        },
         _sync_charger_params_from_vehicle_configs=lambda *_args: None,
     )
     ev_planner.set_auto_schedule_executor(executor)
@@ -700,6 +723,123 @@ def test_internal_ev_forecast_suppresses_price_blocked_plan_but_keeps_deadline()
 
     assert set(components) == {"tessy"}
     assert components["tessy"] == pytest.approx([2300.0] * 12)
+
+
+def test_internal_ev_forecast_applies_per_day_policy_across_midnight():
+    """Each slot uses its own local weekday, not the window start weekday."""
+    now = datetime(2026, 8, 17, 23, 30, tzinfo=timezone(LOCAL_OFFSET))
+    old_now = _ha_dt.now
+    old_executor = ev_planner.get_auto_schedule_executor()
+    _ha_dt.now = lambda: now
+
+    plan = ev_planner.ChargingPlan(
+        vehicle_id="ev",
+        current_soc=60,
+        target_soc=80,
+        target_time=None,
+        energy_needed_kwh=2.3,
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time=now.isoformat(),
+                end_time=(now + timedelta(hours=1)).isoformat(),
+                source="grid_peak",
+                estimated_power_kw=2.3,
+                estimated_energy_kwh=2.3,
+                price_cents_kwh=30.0,
+                reason="cross_midnight",
+            )
+        ],
+        priority="cost_optimized",
+    )
+    settings = SimpleNamespace(
+        enabled=True,
+        max_charge_amps=10,
+        voltage=230,
+        phases=1,
+        get_effective_priority=lambda _weekday: "cost_optimized",
+        get_effective_max_grid_price=lambda weekday: 40.0 if weekday == 0 else 20.0,
+    )
+    executor = SimpleNamespace(
+        _state={"ev": SimpleNamespace(current_plan=plan)},
+        _settings={"ev": settings},
+        _sync_charger_params_from_vehicle_configs=lambda *_args: None,
+    )
+    ev_planner.set_auto_schedule_executor(executor)
+
+    try:
+        coordinator = SimpleNamespace(
+            _config=SimpleNamespace(interval_minutes=5),
+            _price_timestamps=lambda count: [
+                now + timedelta(minutes=5 * index) for index in range(count)
+            ],
+        )
+        components = _extract_coordinator_method(
+            "_get_ev_planned_load_components"
+        )(coordinator, 12)
+    finally:
+        _ha_dt.now = old_now
+        ev_planner.set_auto_schedule_executor(old_executor)
+
+    assert components["ev"][:6] == pytest.approx([2300.0] * 6)
+    assert components["ev"][6:] == pytest.approx([0.0] * 6)
+
+
+def test_internal_ev_forecast_suppresses_grid_slots_blocked_by_demand_window():
+    brisbane_tz = timezone(timedelta(hours=10))
+    now = datetime(2026, 8, 18, 16, 0, tzinfo=brisbane_tz)
+    old_now = _ha_dt.now
+    old_executor = ev_planner.get_auto_schedule_executor()
+    _ha_dt.now = lambda: now
+    plan = ev_planner.ChargingPlan(
+        vehicle_id="car",
+        current_soc=60,
+        target_soc=80,
+        target_time=None,
+        energy_needed_kwh=2.3,
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time=now.isoformat(),
+                end_time=(now + timedelta(hours=1)).isoformat(),
+                source="grid_peak",
+                estimated_power_kw=2.3,
+                estimated_energy_kwh=2.3,
+                price_cents_kwh=10.0,
+                reason="cached_plan",
+            )
+        ],
+        priority="time_critical",
+        max_grid_price_cents=25.0,
+    )
+    settings = SimpleNamespace(
+        enabled=True,
+        max_charge_amps=10,
+        voltage=230,
+        phases=1,
+    )
+    executor = SimpleNamespace(
+        _state={"car": SimpleNamespace(current_plan=plan)},
+        _settings={"car": settings},
+        _sync_charger_params_from_vehicle_configs=lambda *_args: None,
+        planner=SimpleNamespace(
+            _is_grid_charging_blocked_at=lambda _timestamp: True
+        ),
+    )
+    ev_planner.set_auto_schedule_executor(executor)
+    try:
+        coordinator = SimpleNamespace(
+            _config=SimpleNamespace(interval_minutes=5),
+            _price_timestamps=lambda count: [
+                now + timedelta(minutes=5 * index) for index in range(count)
+            ],
+        )
+        components = _extract_coordinator_method(
+            "_get_ev_planned_load_components"
+        )(coordinator, 12)
+    finally:
+        _ha_dt.now = old_now
+        ev_planner.set_auto_schedule_executor(old_executor)
+
+    assert components == {}
 
 
 def test_internal_ev_arbitration_uses_max_for_one_loadpoint_and_sum_for_distinct():
@@ -789,3 +929,17 @@ def test_ev_overlay_is_suppressed_when_the_lp_co_optimizes():
     assert load == [2000.0, 2000.0, 2000.0, 2000.0]
     assert coordinator._last_planned_ev_load_forecast_w is None
 
+
+def test_policy_blocked_empty_ev_plan_suppresses_internal_overlay():
+    """An empty authoritative plan means every managed EV slot is blocked."""
+    coordinator = _FakeOverlayCoordinator(
+        external_forecast=None,
+        internal_forecast=[3000.0, 3000.0, 0.0, 0.0],
+        ev_integration_enabled=True,
+    )
+    coordinator._ev_charge_plan = []
+
+    load = _run_overlay(coordinator, [2000.0, 2000.0, 2000.0, 2000.0])
+
+    assert load == [2000.0, 2000.0, 2000.0, 2000.0]
+    assert coordinator._last_planned_ev_load_forecast_w is None

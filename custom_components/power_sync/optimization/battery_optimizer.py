@@ -35,6 +35,7 @@ from .ev_load_plan import (
     EVChargePlan,
     ev_charge_bounds_kw,
     expected_ev_load_kw,
+    expected_ev_policy_profile,
     normalize_ev_charge_plan,
 )
 from .schedule_reader import ScheduleAction, OptimizationSchedule
@@ -53,6 +54,181 @@ MODE_PROJECTION_SELF_USE_REL_TOL = 1e-4
 # self-use run between otherwise identical command-mode passes. Keep the bound
 # fixed rather than allowing it to grow with battery capacity or run length.
 MODE_PROJECTION_SELF_USE_ABS_TOL_KWH = 0.02
+
+
+def _fallback_ev_slot_policy(
+    vehicles: list[dict],
+    running: list[bool],
+    slot: int,
+    *,
+    soc: float,
+    solar_kw: float,
+    house_load_kw: float,
+    capacity_kwh: float,
+    efficiency: float,
+    dt_hours: float,
+    max_discharge_kw: float,
+    natural_floor_soc: float = 0.0,
+) -> dict[str, Any]:
+    """Apply per-vehicle EV policy to one non-LP fallback slot.
+
+    The fallback cannot move demand optimally, but it must preserve the same
+    start, source and floor safety rules as the MILP. Solar is allocated first,
+    then permitted battery energy, then grid. ``limit_grid_import`` blocks the
+    last source only while usable battery energy remains; at the floor it
+    deliberately matches the executor's grid-fallback behaviour.
+    """
+    solar_left = max(0.0, solar_kw - house_load_kw)
+    house_deficit_kw = max(0.0, house_load_kw - solar_kw)
+    house_battery_kw = min(
+        max_discharge_kw,
+        house_deficit_kw,
+        max(0.0, soc) * capacity_kwh * efficiency / max(dt_hours, 1e-9),
+    )
+    battery_left = max(0.0, max_discharge_kw - house_battery_kw)
+    total = 0.0
+    battery_allowed = 0.0
+    active_floor = 0.0
+    preserve = False
+    allocations: dict[str, dict[str, float]] = {}
+
+    for index, vehicle in enumerate(vehicles):
+        requested = max(0.0, float(vehicle["load_kw"][slot] or 0.0))
+        if requested <= 1e-9:
+            running[index] = False
+            continue
+
+        floor = max(0.0, float(vehicle["battery_floor_soc"][slot] or 0.0))
+        source_floor = max(floor, natural_floor_soc)
+        stop = bool(vehicle["stop_at_battery_floor"][slot])
+        if stop and floor > 0.0 and soc <= floor + 0.001:
+            running[index] = False
+            continue
+
+        strict_solar_exception = bool(
+            vehicle["allow_min_start_solar_exception"][slot]
+        ) and solar_left + 1e-9 >= requested + max(
+            0.0, float(vehicle["solar_battery_reserve_kw"][slot] or 0.0)
+        )
+        min_start = max(0.0, float(vehicle["min_start_soc"][slot] or 0.0))
+        if (
+            not running[index]
+            and soc + 1e-9 < min_start
+            and not strict_solar_exception
+        ):
+            continue
+
+        allow_solar = bool(vehicle["allow_solar"][slot])
+        allow_battery = bool(vehicle["allow_battery"][slot]) and not bool(
+            vehicle["preserve_home_battery"][slot]
+        )
+        allow_grid = bool(vehicle["allow_grid"][slot])
+        limit_grid = bool(vehicle["limit_grid_import"][slot]) and allow_battery
+
+        solar_part = min(requested, solar_left) if allow_solar else 0.0
+        remaining = requested - solar_part
+        battery_room = min(
+            battery_left,
+            max(0.0, soc - source_floor)
+            * capacity_kwh
+            * efficiency
+            / max(dt_hours, 1e-9)
+            - house_battery_kw,
+        )
+        battery_part = min(remaining, battery_room) if allow_battery else 0.0
+        remaining -= battery_part
+        # The executor re-enables grid once the home battery can no longer
+        # discharge. Above the configured floor, limit-grid sessions therefore
+        # consume their permitted battery budget before using grid.
+        battery_depleted = soc <= source_floor + 0.001
+        grid_part = (
+            remaining
+            if allow_grid and (not limit_grid or battery_depleted)
+            else 0.0
+        )
+        supplied = solar_part + battery_part + grid_part
+        if supplied <= 1e-9:
+            running[index] = False
+            continue
+
+        running[index] = True
+        solar_left -= solar_part
+        battery_left -= battery_part
+        total += supplied
+        battery_allowed += battery_part
+        active_floor = max(active_floor, floor)
+        preserve = preserve or bool(vehicle["preserve_home_battery"][slot])
+        vehicle_id = str(vehicle["vehicle_id"])
+        allocation = allocations.setdefault(
+            vehicle_id,
+            {"load": 0.0, "grid": 0.0, "solar": 0.0, "battery": 0.0},
+        )
+        allocation["load"] += supplied
+        allocation["grid"] += grid_part
+        allocation["solar"] += solar_part
+        allocation["battery"] += battery_part
+
+    return {
+        "load_kw": total,
+        "battery_allowed_kw": battery_allowed,
+        "battery_floor_soc": active_floor,
+        "preserve_home_battery": preserve,
+        "vehicles": allocations,
+    }
+
+
+def _fallback_ev_source_series(
+    ev_charge_by_vehicle_kw: dict[str, list[float]],
+    solar_kw: list[float],
+    house_load_kw: list[float],
+    battery_charge_kw: list[float],
+    battery_discharge_kw: list[float],
+) -> dict[str, dict[str, list[float]]]:
+    """Attribute final fallback EV load from the final physical dispatch."""
+    n = max(
+        (len(series) for series in ev_charge_by_vehicle_kw.values()),
+        default=len(solar_kw),
+    )
+    sources = {
+        vehicle_id: {
+            source: [0.0] * n for source in ("grid", "solar", "battery")
+        }
+        for vehicle_id in ev_charge_by_vehicle_kw
+    }
+    for slot in range(n):
+        slot_solar = solar_kw[slot] if slot < len(solar_kw) else 0.0
+        slot_house = house_load_kw[slot] if slot < len(house_load_kw) else 0.0
+        slot_charge = (
+            battery_charge_kw[slot] if slot < len(battery_charge_kw) else 0.0
+        )
+        slot_discharge = (
+            battery_discharge_kw[slot]
+            if slot < len(battery_discharge_kw)
+            else 0.0
+        )
+        solar_after_house = max(0.0, slot_solar - slot_house)
+        solar_left = max(
+            0.0,
+            solar_after_house
+            - min(solar_after_house, slot_charge),
+        )
+        house_deficit = max(0.0, slot_house - slot_solar)
+        battery_left = max(
+            0.0,
+            slot_discharge - min(slot_discharge, house_deficit),
+        )
+        for vehicle_id, series in ev_charge_by_vehicle_kw.items():
+            remaining = max(0.0, series[slot])
+            solar_part = min(remaining, solar_left)
+            solar_left -= solar_part
+            remaining -= solar_part
+            battery_part = min(remaining, battery_left)
+            battery_left -= battery_part
+            remaining -= battery_part
+            sources[vehicle_id]["solar"][slot] = solar_part
+            sources[vehicle_id]["battery"][slot] = battery_part
+            sources[vehicle_id]["grid"][slot] = remaining
+    return sources
 
 # Try to import the HiGHS solver; fall back to greedy if unavailable.
 try:
@@ -283,6 +459,9 @@ class OptimizerResult:
     # Per-vehicle EV draw the LP planned, W per slot, keyed by vehicle id.
     # The schedule's ev_charge_w carries the total; this keeps the identity.
     ev_charge_by_vehicle_w: dict[str, list[float]] = field(default_factory=dict)
+    ev_source_by_vehicle_w: dict[str, dict[str, list[float]]] = field(
+        default_factory=dict
+    )
     lp_stats: dict[str, Any] = field(default_factory=dict)
     reserve_recommendation: dict[str, Any] = field(default_factory=dict)
     modeled_backup_reserve: float | None = None
@@ -1582,6 +1761,7 @@ class BatteryOptimizer:
         required_discharge_kw: list[float] | None = None,
         cost_neutral_slots: list[bool] | None = None,
         cost_neutral_day_ids: list[str | None] | None = None,
+        ev_plan: EVChargePlan | list[EVChargePlan] | None = None,
     ) -> list[_LpPeriod]:
         """Aggregate base 5-minute slots into internal LP periods."""
         near_slots = int(LP_NEAR_HORIZON_HOURS * 60 / self.interval_minutes)
@@ -1599,6 +1779,30 @@ class BatteryOptimizer:
         required_discharge_kw = required_discharge_kw or [0.0] * n
         cost_neutral_slots = cost_neutral_slots or [False] * n
         cost_neutral_day_ids = cost_neutral_day_ids or [None] * n
+        ev_plans = (
+            list(ev_plan)
+            if isinstance(ev_plan, (list, tuple))
+            else ([ev_plan] if ev_plan is not None else [])
+        )
+
+        def _ev_signature(slot: int) -> tuple:
+            return tuple(
+                (
+                    round(plan.max_power_kw[slot], 6),
+                    plan.allow_grid[slot],
+                    plan.allow_solar[slot],
+                    plan.allow_battery[slot],
+                    round(plan.min_start_soc[slot], 6),
+                    round(plan.battery_floor_soc[slot], 6),
+                    plan.stop_at_battery_floor[slot],
+                    plan.preserve_home_battery[slot],
+                    plan.limit_grid_import[slot],
+                    plan.allow_min_start_solar_exception[slot],
+                    round(plan.solar_battery_reserve_kw[slot], 6),
+                    plan.window_source[slot],
+                )
+                for plan in ev_plans
+            )
         periods: list[_LpPeriod] = []
         idx = 0
 
@@ -1632,6 +1836,17 @@ class BatteryOptimizer:
                 cost_neutral_slots,
                 cost_neutral_day_ids,
             )
+
+            # Source permissions, battery floors and charger on/off state are
+            # exact execution policies, not values that can be averaged over a
+            # coarse far-horizon period. Keep every policy transition on an LP
+            # boundary; the public schedule remains at the base interval.
+            if ev_plans and end > idx + 1:
+                first_ev_signature = _ev_signature(idx)
+                for candidate in range(idx + 1, end):
+                    if _ev_signature(candidate) != first_ev_signature:
+                        end = candidate
+                        break
 
             # Keep the pre-window SOC deadline on an exact internal boundary.
             if self.pre_window_slot is not None and idx < self.pre_window_slot < end:
@@ -2585,6 +2800,7 @@ class BatteryOptimizer:
             required_discharge_kw,
             cost_neutral_slots,
             cost_neutral_day_ids,
+            ev_plan=ev_plan,
         )
         p_n = len(periods)
         p_import = [period.import_price for period in periods]
@@ -2976,10 +3192,12 @@ class BatteryOptimizer:
             self.physical_round_trip_efficiency
             > self.economic_round_trip_efficiency + 1e-9
         )
+        ev_source_tracking_requested = bool(ev_plan)
         battery_to_grid_active = (
             cost_neutral_active
             or economic_adjustment_active
             or future_reservation_active
+            or ev_source_tracking_requested
         )
         battery_to_grid_offset = next_offset
         if battery_to_grid_active:
@@ -3006,6 +3224,75 @@ class BatteryOptimizer:
             )
             for plan in ev_plans_lp
         ]
+        p_ev_min_power_by_vehicle = [
+            [
+                min(
+                    capability,
+                    max(0.0, float(plan.min_power_kw or 0.0)),
+                )
+                for capability in p_ev_max_by_vehicle[vehicle]
+            ]
+            for vehicle, plan in enumerate(ev_plans_lp)
+        ]
+        p_ev_allow_grid = [
+            [all(plan.allow_grid[period.start:period.end]) for period in periods]
+            for plan in ev_plans_lp
+        ]
+        p_ev_allow_solar = [
+            [all(plan.allow_solar[period.start:period.end]) for period in periods]
+            for plan in ev_plans_lp
+        ]
+        p_ev_allow_battery = [
+            [all(plan.allow_battery[period.start:period.end]) for period in periods]
+            for plan in ev_plans_lp
+        ]
+        p_ev_min_start_soc = [
+            [max(plan.min_start_soc[period.start:period.end], default=0.0) for period in periods]
+            for plan in ev_plans_lp
+        ]
+        p_ev_battery_floor_soc = [
+            [
+                max(
+                    plan.battery_floor_soc[period.start:period.end],
+                    default=0.0,
+                )
+                for period in periods
+            ]
+            for plan in ev_plans_lp
+        ]
+        p_ev_stop_at_floor = [
+            [any(plan.stop_at_battery_floor[period.start:period.end]) for period in periods]
+            for plan in ev_plans_lp
+        ]
+        p_ev_preserve_battery = [
+            [any(plan.preserve_home_battery[period.start:period.end]) for period in periods]
+            for plan in ev_plans_lp
+        ]
+        p_ev_limit_grid_import = [
+            [any(plan.limit_grid_import[period.start:period.end]) for period in periods]
+            for plan in ev_plans_lp
+        ]
+        p_ev_allow_min_start_solar_exception = [
+            [
+                any(
+                    plan.allow_min_start_solar_exception[
+                        period.start:period.end
+                    ]
+                )
+                for period in periods
+            ]
+            for plan in ev_plans_lp
+        ]
+        p_ev_solar_battery_reserve_kw = [
+            [
+                max(
+                    plan.solar_battery_reserve_kw[period.start:period.end],
+                    default=0.0,
+                )
+                for period in periods
+            ]
+            for plan in ev_plans_lp
+        ]
         usable = [
             index
             for index, capability in enumerate(p_ev_max_by_vehicle)
@@ -3013,6 +3300,29 @@ class BatteryOptimizer:
         ]
         ev_plans_lp = [ev_plans_lp[index] for index in usable]
         p_ev_max_by_vehicle = [p_ev_max_by_vehicle[index] for index in usable]
+        p_ev_min_power_by_vehicle = [
+            p_ev_min_power_by_vehicle[index] for index in usable
+        ]
+        p_ev_allow_grid = [p_ev_allow_grid[index] for index in usable]
+        p_ev_allow_solar = [p_ev_allow_solar[index] for index in usable]
+        p_ev_allow_battery = [p_ev_allow_battery[index] for index in usable]
+        p_ev_min_start_soc = [p_ev_min_start_soc[index] for index in usable]
+        p_ev_battery_floor_soc = [
+            p_ev_battery_floor_soc[index] for index in usable
+        ]
+        p_ev_stop_at_floor = [p_ev_stop_at_floor[index] for index in usable]
+        p_ev_preserve_battery = [
+            p_ev_preserve_battery[index] for index in usable
+        ]
+        p_ev_limit_grid_import = [
+            p_ev_limit_grid_import[index] for index in usable
+        ]
+        p_ev_allow_min_start_solar_exception = [
+            p_ev_allow_min_start_solar_exception[index] for index in usable
+        ]
+        p_ev_solar_battery_reserve_kw = [
+            p_ev_solar_battery_reserve_kw[index] for index in usable
+        ]
         # One delivery stage per (vehicle, deadline). Modeling vehicles
         # separately is the point: an aggregate block summed both chargers'
         # capability into every overlapping slot, so the solver could plan
@@ -3031,6 +3341,28 @@ class BatteryOptimizer:
         ev_shortfall_offset = next_offset
         if ev_charge_active:
             next_offset += len(ev_stages)
+
+        ev_grid_source_offset = next_offset
+        if ev_charge_active:
+            next_offset += n_ev_vehicles * p_n
+        ev_solar_source_offset = next_offset
+        if ev_charge_active:
+            next_offset += n_ev_vehicles * p_n
+        ev_battery_source_offset = next_offset
+        if ev_charge_active:
+            next_offset += n_ev_vehicles * p_n
+        ev_on_binary_offset = next_offset
+        if ev_charge_active:
+            next_offset += n_ev_vehicles * p_n
+        ev_start_binary_offset = next_offset
+        if ev_charge_active:
+            next_offset += n_ev_vehicles * p_n
+        ev_battery_available_binary_offset = next_offset
+        if ev_charge_active:
+            next_offset += n_ev_vehicles * p_n
+        ev_solar_exception_binary_offset = next_offset
+        if ev_charge_active:
+            next_offset += n_ev_vehicles * p_n
 
         energy_offset = next_offset
         num_vars = energy_offset + p_n + 1
@@ -3079,6 +3411,27 @@ class BatteryOptimizer:
 
         def ev_shortfall_var(stage: int = 0) -> int:
             return ev_shortfall_offset + stage
+
+        def ev_grid_source_var(vehicle: int, t: int) -> int:
+            return ev_grid_source_offset + vehicle * p_n + t
+
+        def ev_solar_source_var(vehicle: int, t: int) -> int:
+            return ev_solar_source_offset + vehicle * p_n + t
+
+        def ev_battery_source_var(vehicle: int, t: int) -> int:
+            return ev_battery_source_offset + vehicle * p_n + t
+
+        def ev_on_var(vehicle: int, t: int) -> int:
+            return ev_on_binary_offset + vehicle * p_n + t
+
+        def ev_start_var(vehicle: int, t: int) -> int:
+            return ev_start_binary_offset + vehicle * p_n + t
+
+        def ev_battery_available_var(vehicle: int, t: int) -> int:
+            return ev_battery_available_binary_offset + vehicle * p_n + t
+
+        def ev_solar_exception_var(vehicle: int, t: int) -> int:
+            return ev_solar_exception_binary_offset + vehicle * p_n + t
 
         def ev_stage_credit(stage_slot: int, t: int, efficiency: float) -> float:
             """Return period ``t``'s energy coefficient toward a stage.
@@ -3349,8 +3702,9 @@ class BatteryOptimizer:
         # Rearranged:
         # grid_import[t] - grid_export[t] - battery_charge[t]
         # + battery_discharge[t] - solar_curtail[t] = load[t] - solar[t]
-        A_eq = _LpMatrix((2 * p_n, num_vars), dtype=float)
-        b_eq = [0.0] * (2 * p_n)
+        ev_source_rows = n_ev_vehicles * p_n if ev_charge_active else 0
+        A_eq = _LpMatrix((2 * p_n + ev_source_rows, num_vars), dtype=float)
+        b_eq = [0.0] * (2 * p_n + ev_source_rows)
 
         for t in range(p_n):
             A_eq[t, grid_import_var(t)] = 1.0
@@ -3371,6 +3725,18 @@ class BatteryOptimizer:
             A_eq[row, energy_var(t)] = -1.0
             A_eq[row, charge_var(t)] = -eff * p_dt[t]
             A_eq[row, discharge_var(t)] = p_dt[t] / eff
+
+        if ev_charge_active:
+            # Attribute every vehicle kW to exactly one physical source. This
+            # is what makes solar-only, consume-battery and preserve-battery
+            # policies expressible without treating the whole house as the EV.
+            for vehicle in range(n_ev_vehicles):
+                for t in range(p_n):
+                    row = 2 * p_n + vehicle * p_n + t
+                    A_eq[row, ev_charge_var(vehicle, t)] = 1.0
+                    A_eq[row, ev_grid_source_var(vehicle, t)] = -1.0
+                    A_eq[row, ev_solar_source_var(vehicle, t)] = -1.0
+                    A_eq[row, ev_battery_source_var(vehicle, t)] = -1.0
 
         # Priority/provider status is permission, not a synthetic subsidy. When
         # export is below the modeled acquisition cost, allow it only when real
@@ -3528,6 +3894,10 @@ class BatteryOptimizer:
         if ev_charge_active:
             # One soft EV energy-delivery row per cumulative deadline stage.
             A_ub_rows += len(ev_stages)
+            # Five source-conservation rows per period plus seventeen exact
+            # charger/policy rows per vehicle-period (on, start, minimum
+            # power, minimum start SOC, consume floor and preserve mode).
+            A_ub_rows += 5 * p_n + 17 * n_ev_vehicles * p_n
 
         A_ub = _LpMatrix((A_ub_rows, num_vars), dtype=float)
         b_ub: list[float] = []
@@ -3582,12 +3952,28 @@ class BatteryOptimizer:
                 A_ub[len(b_ub), battery_to_grid_var(t)] = 1.0
                 A_ub[len(b_ub), grid_export_var(t)] = -1.0
                 b_ub.append(0.0)
-                A_ub[len(b_ub), discharge_var(t)] = 1.0
-                A_ub[len(b_ub), battery_to_grid_var(t)] = -1.0
-                b_ub.append(max(0.0, p_load[t] - p_solar[t]))
-                A_ub[len(b_ub), grid_export_var(t)] = 1.0
-                A_ub[len(b_ub), battery_to_grid_var(t)] = -1.0
-                b_ub.append(max(0.0, p_solar[t] - p_load[t]))
+                if ev_charge_active:
+                    # Residual battery output may serve the house or an EV
+                    # explicitly attributed to battery. Residual export may
+                    # be solar. The complete source-capacity rows below close
+                    # both balances without pretending EV load is house load.
+                    A_ub[len(b_ub), discharge_var(t)] = 1.0
+                    A_ub[len(b_ub), battery_to_grid_var(t)] = -1.0
+                    for vehicle in range(n_ev_vehicles):
+                        A_ub[
+                            len(b_ub), ev_battery_source_var(vehicle, t)
+                        ] = -1.0
+                    b_ub.append(max(0.0, p_load[t]))
+                    A_ub[len(b_ub), grid_export_var(t)] = 1.0
+                    A_ub[len(b_ub), battery_to_grid_var(t)] = -1.0
+                    b_ub.append(max(0.0, p_solar[t]))
+                else:
+                    A_ub[len(b_ub), discharge_var(t)] = 1.0
+                    A_ub[len(b_ub), battery_to_grid_var(t)] = -1.0
+                    b_ub.append(max(0.0, p_load[t] - p_solar[t]))
+                    A_ub[len(b_ub), grid_export_var(t)] = 1.0
+                    A_ub[len(b_ub), battery_to_grid_var(t)] = -1.0
+                    b_ub.append(max(0.0, p_solar[t] - p_load[t]))
 
             if direction_binary_active:
                 # y=1 selects import, y=0 selects export.  This conditional
@@ -3605,6 +3991,186 @@ class BatteryOptimizer:
                 A_ub[len(b_ub), grid_export_var(t)] = 1.0
                 A_ub[len(b_ub), grid_direction_var(t)] = slot_export_limit_kw
                 b_ub.append(slot_export_limit_kw)
+
+        if ev_charge_active:
+            for t in range(p_n):
+                # A compact exact source network. After these non-house uses
+                # are allocated, the main power-balance equality guarantees
+                # the non-negative residual of grid/solar/battery is exactly
+                # the house load.
+                for vehicle in range(n_ev_vehicles):
+                    A_ub[len(b_ub), ev_grid_source_var(vehicle, t)] = 1.0
+                A_ub[len(b_ub), grid_charge_var(t)] = 1.0
+                A_ub[len(b_ub), grid_import_var(t)] = -1.0
+                b_ub.append(0.0)
+
+                for vehicle in range(n_ev_vehicles):
+                    A_ub[len(b_ub), ev_battery_source_var(vehicle, t)] = 1.0
+                A_ub[len(b_ub), battery_to_grid_var(t)] = 1.0
+                A_ub[len(b_ub), discharge_var(t)] = -1.0
+                b_ub.append(0.0)
+
+                for vehicle in range(n_ev_vehicles):
+                    A_ub[len(b_ub), ev_solar_source_var(vehicle, t)] = 1.0
+                A_ub[len(b_ub), charge_var(t)] = 1.0
+                A_ub[len(b_ub), grid_charge_var(t)] = -1.0
+                A_ub[len(b_ub), grid_export_var(t)] = 1.0
+                A_ub[len(b_ub), battery_to_grid_var(t)] = -1.0
+                A_ub[len(b_ub), curtail_var(t)] = 1.0
+                b_ub.append(max(0.0, p_solar[t]))
+
+                A_ub[len(b_ub), grid_charge_var(t)] = 1.0
+                A_ub[len(b_ub), charge_var(t)] = -1.0
+                b_ub.append(0.0)
+
+                A_ub[len(b_ub), battery_to_grid_var(t)] = 1.0
+                A_ub[len(b_ub), grid_export_var(t)] = -1.0
+                b_ub.append(0.0)
+
+            for vehicle, plan in enumerate(ev_plans_lp):
+                initial_on = 1.0 if plan.initially_charging else 0.0
+                for t in range(p_n):
+                    capability = p_ev_max_by_vehicle[vehicle][t]
+                    minimum_power = p_ev_min_power_by_vehicle[vehicle][t]
+
+                    A_ub[len(b_ub), ev_charge_var(vehicle, t)] = 1.0
+                    A_ub[len(b_ub), ev_on_var(vehicle, t)] = -capability
+                    b_ub.append(0.0)
+
+                    A_ub[len(b_ub), ev_charge_var(vehicle, t)] = -1.0
+                    A_ub[len(b_ub), ev_on_var(vehicle, t)] = minimum_power
+                    b_ub.append(0.0)
+
+                    A_ub[len(b_ub), ev_on_var(vehicle, t)] = 1.0
+                    A_ub[len(b_ub), ev_start_var(vehicle, t)] = -1.0
+                    if t == 0:
+                        b_ub.append(initial_on)
+                    else:
+                        A_ub[len(b_ub), ev_on_var(vehicle, t - 1)] = -1.0
+                        b_ub.append(0.0)
+
+                    A_ub[len(b_ub), ev_start_var(vehicle, t)] = 1.0
+                    A_ub[len(b_ub), ev_on_var(vehicle, t)] = -1.0
+                    b_ub.append(0.0)
+
+                    A_ub[len(b_ub), ev_start_var(vehicle, t)] = 1.0
+                    if t == 0:
+                        b_ub.append(1.0 - initial_on)
+                    else:
+                        A_ub[len(b_ub), ev_on_var(vehicle, t - 1)] = 1.0
+                        b_ub.append(1.0)
+
+                    min_start = p_ev_min_start_soc[vehicle][t]
+                    A_ub[len(b_ub), energy_var(t)] = -1.0
+                    A_ub[len(b_ub), ev_start_var(vehicle, t)] = cap
+                    A_ub[
+                        len(b_ub), ev_solar_exception_var(vehicle, t)
+                    ] = -cap
+                    b_ub.append(cap - min_start * cap)
+
+                    raw_floor = p_ev_battery_floor_soc[vehicle][t]
+                    stop_floor = (
+                        min(1.0, raw_floor + 0.001)
+                        if raw_floor > 0.0
+                        and p_ev_stop_at_floor[vehicle][t]
+                        else 0.0
+                    )
+                    A_ub[len(b_ub), energy_var(t + 1)] = -1.0
+                    A_ub[len(b_ub), ev_on_var(vehicle, t)] = cap
+                    b_ub.append(cap - stop_floor * cap)
+
+                    # Stop-at-floor is evaluated by the runtime before any
+                    # new grid draw can lift SOC, so an EV cannot be on when
+                    # the period starts at that floor. With fallback enabled,
+                    # grid/solar may continue but battery-attributed EV power
+                    # is limited to energy that actually exists above it.
+                    A_ub[len(b_ub), energy_var(t)] = -1.0
+                    A_ub[len(b_ub), ev_on_var(vehicle, t)] = cap
+                    b_ub.append(cap - stop_floor * cap)
+
+                    # Classify whether usable battery energy exists above the
+                    # EV floor. This lets grid fallback remain feasible below
+                    # the floor while still preventing battery-attributed EV
+                    # draw from crossing it.
+                    floor_energy = raw_floor * cap
+                    floor_epsilon = min(0.001 * cap, 0.01)
+                    A_ub[len(b_ub), energy_var(t)] = 1.0
+                    A_ub[
+                        len(b_ub), ev_battery_available_var(vehicle, t)
+                    ] = -cap
+                    b_ub.append(floor_energy)
+
+                    A_ub[len(b_ub), energy_var(t)] = -1.0
+                    A_ub[
+                        len(b_ub), ev_battery_available_var(vehicle, t)
+                    ] = cap
+                    b_ub.append(cap - floor_energy - floor_epsilon)
+
+                    A_ub[
+                        len(b_ub), ev_battery_source_var(vehicle, t)
+                    ] = p_dt[t] / eff
+                    A_ub[len(b_ub), energy_var(t)] = -1.0
+                    A_ub[
+                        len(b_ub), ev_battery_available_var(vehicle, t)
+                    ] = cap
+                    b_ub.append(cap - floor_energy)
+
+                    A_ub[
+                        len(b_ub), ev_battery_source_var(vehicle, t)
+                    ] = 1.0
+                    A_ub[
+                        len(b_ub), ev_battery_available_var(vehicle, t)
+                    ] = -capability
+                    b_ub.append(0.0)
+
+                    # Limit-grid sessions use solar/battery while usable home
+                    # battery energy remains, then match the executor's grid
+                    # fallback once that battery reaches its configured floor.
+                    limit_grid = bool(
+                        p_ev_limit_grid_import[vehicle][t]
+                        and p_ev_allow_battery[vehicle][t]
+                    )
+                    A_ub[
+                        len(b_ub), ev_grid_source_var(vehicle, t)
+                    ] = 1.0
+                    if limit_grid:
+                        A_ub[
+                            len(b_ub), ev_battery_available_var(vehicle, t)
+                        ] = capability
+                    b_ub.append(capability)
+
+                    A_ub[
+                        len(b_ub), ev_solar_exception_var(vehicle, t)
+                    ] = 1.0
+                    A_ub[len(b_ub), ev_start_var(vehicle, t)] = -1.0
+                    b_ub.append(0.0)
+
+                    # The below-minimum start exception is solar-only even if
+                    # a low-level caller accidentally enables grid too.
+                    A_ub[len(b_ub), ev_charge_var(vehicle, t)] = 1.0
+                    A_ub[
+                        len(b_ub), ev_solar_source_var(vehicle, t)
+                    ] = -1.0
+                    A_ub[
+                        len(b_ub), ev_solar_exception_var(vehicle, t)
+                    ] = capability
+                    b_ub.append(capability)
+
+                    reserve_kw = p_ev_solar_battery_reserve_kw[vehicle][t]
+                    A_ub[
+                        len(b_ub), ev_solar_source_var(vehicle, t)
+                    ] = 1.0
+                    A_ub[
+                        len(b_ub), ev_solar_exception_var(vehicle, t)
+                    ] = reserve_kw
+                    b_ub.append(max(0.0, p_solar[t] - p_load[t]))
+
+                    A_ub[len(b_ub), discharge_var(t)] = 1.0
+                    if p_ev_preserve_battery[vehicle][t]:
+                        A_ub[len(b_ub), ev_on_var(vehicle, t)] = (
+                            self.max_discharge_kw
+                        )
+                    b_ub.append(self.max_discharge_kw)
 
         if future_reservation_active:
             # Across all protected generic-export periods, spend no more than
@@ -4004,7 +4570,19 @@ class BatteryOptimizer:
                 continue
             if p_mode[t] == "self_use":
                 net_load_kw = max(0.0, p_load[t] - p_solar[t])
-                upper = min(self.max_discharge_kw, net_load_kw)
+                ev_battery_capability = (
+                    sum(
+                        p_ev_max_by_vehicle[vehicle][t]
+                        for vehicle in range(n_ev_vehicles)
+                        if p_ev_allow_battery[vehicle][t]
+                    )
+                    if ev_charge_active
+                    else 0.0
+                )
+                upper = min(
+                    self.max_discharge_kw,
+                    net_load_kw + ev_battery_capability,
+                )
                 lower = min(
                     upper,
                     max(0.0, p_required_self_use[t]),
@@ -4031,7 +4609,16 @@ class BatteryOptimizer:
             if restrict_to_self_consumption:
                 # Allow discharge only for self-consumption (serving home load)
                 net_load_kw = max(0.0, p_load[t] - p_solar[t])
-                max_self_consumption = net_load_kw
+                ev_battery_capability = (
+                    sum(
+                        p_ev_max_by_vehicle[vehicle][t]
+                        for vehicle in range(n_ev_vehicles)
+                        if p_ev_allow_battery[vehicle][t]
+                    )
+                    if ev_charge_active
+                    else 0.0
+                )
+                max_self_consumption = net_load_kw + ev_battery_capability
                 bounds.append((0, min(self.max_discharge_kw, max_self_consumption)))
             elif self.max_battery_export_kw is not None:
                 # Target-export batteries receive a grid-export power command.
@@ -4050,7 +4637,7 @@ class BatteryOptimizer:
                 bounds.append((0, self.max_discharge_kw))  # battery_discharge
 
         for t in range(p_n):
-            if not grid_charge_cap_active:
+            if not grid_charge_cap_active and not ev_charge_active:
                 bounds.append((0, 0.0))
                 continue
             if p_manual_control[t] and p_mode[t] == "charge":
@@ -4059,7 +4646,11 @@ class BatteryOptimizer:
                     self._charge_limit_kw(p_load[t], p_solar[t], True),
                 ))
                 continue
-            if p_block_charge[t] or not p_grid_charge_allowed[t]:
+            if (
+                not allow_grid_charge
+                or p_block_charge[t]
+                or not p_grid_charge_allowed[t]
+            ):
                 bounds.append((0, 0.0))
             else:
                 bounds.append((
@@ -4122,6 +4713,48 @@ class BatteryOptimizer:
             # A stage's shortfall can never exceed the energy it asked for.
             for _vehicle, _stage_slot, stage_kwh in ev_stages:
                 bounds.append((0.0, stage_kwh))
+            for permissions in (
+                p_ev_allow_grid,
+                p_ev_allow_solar,
+                p_ev_allow_battery,
+            ):
+                for vehicle in range(n_ev_vehicles):
+                    capability = p_ev_max_by_vehicle[vehicle]
+                    for t in range(p_n):
+                        bounds.append(
+                            (0.0, capability[t] if permissions[vehicle][t] else 0.0)
+                        )
+            # Charger on.
+            for vehicle in range(n_ev_vehicles):
+                for t in range(p_n):
+                    bounds.append(
+                        (0.0, 1.0)
+                        if p_ev_max_by_vehicle[vehicle][t] > 1e-9
+                        else (0.0, 0.0)
+                    )
+            # Charger start.
+            for vehicle in range(n_ev_vehicles):
+                for t in range(p_n):
+                    bounds.append(
+                        (0.0, 1.0)
+                        if p_ev_max_by_vehicle[vehicle][t] > 1e-9
+                        else (0.0, 0.0)
+                    )
+            # Battery-above-floor classification must remain free even when
+            # this vehicle has no charging capability in the period: battery
+            # energy is a shared state and may still be above its EV floor.
+            for vehicle in range(n_ev_vehicles):
+                for t in range(p_n):
+                    bounds.append((0.0, 1.0))
+            # Strict-solar minimum-start exception.
+            for vehicle in range(n_ev_vehicles):
+                for t in range(p_n):
+                    bounds.append(
+                        (0.0, 1.0)
+                        if p_ev_max_by_vehicle[vehicle][t] > 1e-9
+                        and p_ev_allow_min_start_solar_exception[vehicle][t]
+                        else (0.0, 0.0)
+                    )
 
         bounds.append((soc_0 * cap, soc_0 * cap))
         for t in range(1, p_n + 1):
@@ -4175,6 +4808,33 @@ class BatteryOptimizer:
                 range(
                     future_reservation_binary_offset,
                     future_reservation_binary_offset + p_n,
+                )
+            )
+        if ev_charge_active:
+            integer_indices.extend(
+                range(
+                    ev_on_binary_offset,
+                    ev_on_binary_offset + n_ev_vehicles * p_n,
+                )
+            )
+            integer_indices.extend(
+                range(
+                    ev_start_binary_offset,
+                    ev_start_binary_offset + n_ev_vehicles * p_n,
+                )
+            )
+            integer_indices.extend(
+                range(
+                    ev_battery_available_binary_offset,
+                    ev_battery_available_binary_offset
+                    + n_ev_vehicles * p_n,
+                )
+            )
+            integer_indices.extend(
+                range(
+                    ev_solar_exception_binary_offset,
+                    ev_solar_exception_binary_offset
+                    + n_ev_vehicles * p_n,
                 )
             )
         if integer_indices:
@@ -4311,6 +4971,7 @@ class BatteryOptimizer:
             periods, period_battery_to_grid, n
         )
         ev_charge_kw_by_vehicle: dict[str, list[float]] = {}
+        ev_source_kw_by_vehicle: dict[str, dict[str, list[float]]] = {}
         if ev_charge_active:
             for vehicle in range(n_ev_vehicles):
                 period_values = [x[ev_charge_var(vehicle, t)] for t in range(p_n)]
@@ -4324,6 +4985,34 @@ class BatteryOptimizer:
                         )
                     ]
                 ev_charge_kw_by_vehicle[vehicle_id] = expanded
+                source_series = {
+                    "grid": self._expand_period_values(
+                        periods,
+                        [x[ev_grid_source_var(vehicle, t)] for t in range(p_n)],
+                        n,
+                    ),
+                    "solar": self._expand_period_values(
+                        periods,
+                        [x[ev_solar_source_var(vehicle, t)] for t in range(p_n)],
+                        n,
+                    ),
+                    "battery": self._expand_period_values(
+                        periods,
+                        [x[ev_battery_source_var(vehicle, t)] for t in range(p_n)],
+                        n,
+                    ),
+                }
+                if vehicle_id in ev_source_kw_by_vehicle:
+                    for source, series in source_series.items():
+                        ev_source_kw_by_vehicle[vehicle_id][source] = [
+                            previous + value
+                            for previous, value in zip(
+                                ev_source_kw_by_vehicle[vehicle_id][source],
+                                series,
+                            )
+                        ]
+                else:
+                    ev_source_kw_by_vehicle[vehicle_id] = source_series
         ev_charge_kw = (
             [
                 sum(series[t] for series in ev_charge_kw_by_vehicle.values())
@@ -4534,6 +5223,13 @@ class BatteryOptimizer:
             ev_charge_by_vehicle_w={
                 vehicle_id: [value * 1000 for value in series]
                 for vehicle_id, series in ev_charge_kw_by_vehicle.items()
+            },
+            ev_source_by_vehicle_w={
+                vehicle_id: {
+                    source: [value * 1000 for value in series]
+                    for source, series in sources.items()
+                }
+                for vehicle_id, sources in ev_source_kw_by_vehicle.items()
             },
         )
 
@@ -4762,13 +5458,28 @@ class BatteryOptimizer:
         # back in it would simulate a house that never charges an EV -- and
         # emit a schedule the EV controller reads as "no EV demand planned".
         # Same treatment as _solve_greedy: the as-soon-as-possible draw.
-        ev_load_kw = expected_ev_load_kw(ev_plan, n, self.dt_hours)
+        ev_policy = expected_ev_policy_profile(ev_plan, n, self.dt_hours)
+        ev_load_kw = list(ev_policy["load_kw"])
+        ev_running = [
+            bool(vehicle["initially_charging"])
+            for vehicle in ev_policy["vehicles"]
+        ]
+        ev_vehicle_ids = {
+            str(vehicle["vehicle_id"]) for vehicle in ev_policy["vehicles"]
+        }
+        ev_charge_by_vehicle_kw = {
+            vehicle_id: [0.0] * n for vehicle_id in ev_vehicle_ids
+        }
+        ev_source_by_vehicle_kw = {
+            vehicle_id: {
+                source: [0.0] * n for source in ("grid", "solar", "battery")
+            }
+            for vehicle_id in ev_vehicle_ids
+        }
         # ``load`` (folded) drives the hold's dispatch; the emitted schedule
         # gets house-only load plus ``ev_charge_kw``, the same contract as
         # every other _build_schedule caller.
         house_load = list(load)
-        if any(power > 1e-9 for power in ev_load_kw):
-            load = [base + extra for base, extra in zip(load, ev_load_kw)]
         export_bonus_prices = export_bonus_prices or [0.0] * n
         import_bonus_prices = import_bonus_prices or [0.0] * n
         block_battery_charge = block_battery_charge or [False] * n
@@ -4791,15 +5502,51 @@ class BatteryOptimizer:
         soc = soc_0
         for t in range(n):
             max_grid_export_kw = _max_grid_export_kw(t)
-            net_load = load[t] - solar[t]
+            ev_slot = _fallback_ev_slot_policy(
+                ev_policy["vehicles"],
+                ev_running,
+                t,
+                soc=soc,
+                solar_kw=solar[t],
+                house_load_kw=house_load[t],
+                capacity_kwh=cap,
+                efficiency=eff,
+                dt_hours=dt,
+                max_discharge_kw=self.max_discharge_kw,
+                natural_floor_soc=self_consumption_floor,
+            )
+            ev_power_kw = float(ev_slot["load_kw"])
+            for vehicle_id, allocation in ev_slot["vehicles"].items():
+                ev_charge_by_vehicle_kw[vehicle_id][t] = allocation["load"]
+                for source in ("grid", "solar", "battery"):
+                    ev_source_by_vehicle_kw[vehicle_id][source][t] = allocation[
+                        source
+                    ]
+            floor = float(ev_slot["battery_floor_soc"])
+            ev_load_kw[t] = ev_power_kw
+            net_load = house_load[t] + ev_power_kw - solar[t]
             charge_kw = 0.0
             discharge_kw = 0.0
-            if net_load > 0:
+            if net_load > 0 and not ev_slot["preserve_home_battery"]:
                 # Home needs power: discharge the battery to serve load only,
                 # bounded by the discharge rate and the energy available above
                 # the reserve floor.
-                discharge_room = max(0.0, soc - self_consumption_floor) * cap * eff / dt
-                discharge_kw = min(self.max_discharge_kw, net_load, discharge_room)
+                active_floor = max(
+                    self_consumption_floor,
+                    floor if ev_power_kw > 1e-9 else 0.0,
+                )
+                discharge_room = max(0.0, soc - active_floor) * cap * eff / dt
+                house_deficit_kw = max(0.0, house_load[t] - solar[t])
+                ev_battery_kw = min(
+                    ev_power_kw,
+                    float(ev_slot["battery_allowed_kw"]),
+                )
+                discharge_kw = min(
+                    self.max_discharge_kw,
+                    net_load,
+                    house_deficit_kw + ev_battery_kw,
+                    discharge_room,
+                )
             elif net_load < 0 and not block_battery_charge[t]:
                 # Solar surplus: charge from solar only (never from the grid).
                 surplus = -net_load
@@ -4824,6 +5571,7 @@ class BatteryOptimizer:
             soc += (charge_kw * eff - discharge_kw / eff) * dt / cap
             soc = max(self_consumption_floor, min(1.0, soc))
 
+        load = [base + extra for base, extra in zip(house_load, ev_load_kw)]
         free_import_command_slots = self._quota_backed_free_import_command_slots(
             import_prices,
             import_bonus_prices,
@@ -4889,6 +5637,17 @@ class BatteryOptimizer:
             grid_export_w=[v * 1000 for v in grid_export],
             reserve_recommendation={},
             free_import_command_slots=free_import_command_slots,
+            ev_charge_by_vehicle_w={
+                vehicle_id: [value * 1000 for value in series]
+                for vehicle_id, series in ev_charge_by_vehicle_kw.items()
+            },
+            ev_source_by_vehicle_w={
+                vehicle_id: {
+                    source: [value * 1000 for value in series]
+                    for source, series in sources.items()
+                }
+                for vehicle_id, sources in ev_source_by_vehicle_kw.items()
+            },
         )
 
     def _solve_greedy(
@@ -4936,7 +5695,24 @@ class BatteryOptimizer:
         is the failure the LP's ev_charge variable exists to prevent.
         """
         dt = self.dt_hours
-        ev_load_kw = expected_ev_load_kw(ev_plan, n, self.dt_hours)
+        ev_policy = expected_ev_policy_profile(ev_plan, n, self.dt_hours)
+        ev_load_kw = list(ev_policy["load_kw"])
+        ev_running = [
+            bool(vehicle["initially_charging"])
+            for vehicle in ev_policy["vehicles"]
+        ]
+        ev_vehicle_ids = {
+            str(vehicle["vehicle_id"]) for vehicle in ev_policy["vehicles"]
+        }
+        ev_charge_by_vehicle_kw = {
+            vehicle_id: [0.0] * n for vehicle_id in ev_vehicle_ids
+        }
+        ev_source_by_vehicle_kw = {
+            vehicle_id: {
+                source: [0.0] * n for source in ("grid", "solar", "battery")
+            }
+            for vehicle_id in ev_vehicle_ids
+        }
         # ``load`` (folded) drives the greedy placement; ``house_load`` is
         # what schedule-derived passes get, because they re-add the car from
         # the actions themselves.
@@ -6144,6 +6920,33 @@ class BatteryOptimizer:
         soc = soc_0
         for t in range(n):
             max_grid_export_kw = _max_grid_export_kw(t)
+            previous_ev_power_kw = ev_load_kw[t]
+            ev_slot = _fallback_ev_slot_policy(
+                ev_policy["vehicles"],
+                ev_running,
+                t,
+                soc=soc,
+                solar_kw=solar[t],
+                house_load_kw=house_load[t],
+                capacity_kwh=cap,
+                efficiency=eff,
+                dt_hours=dt,
+                max_discharge_kw=self.max_discharge_kw,
+                natural_floor_soc=self_consumption_floor,
+            )
+            ev_power_kw = float(ev_slot["load_kw"])
+            ev_floor = float(ev_slot["battery_floor_soc"])
+            for vehicle_id, allocation in ev_slot["vehicles"].items():
+                ev_charge_by_vehicle_kw[vehicle_id][t] = allocation["load"]
+                for source in ("grid", "solar", "battery"):
+                    ev_source_by_vehicle_kw[vehicle_id][source][t] = allocation[
+                        source
+                    ]
+            load[t] = max(
+                0.0,
+                load[t] - previous_ev_power_kw + ev_power_kw,
+            )
+            ev_load_kw[t] = ev_power_kw
             net_load = load[t] - solar[t]
             charge_kw, discharge_kw = actions.get(t, (0.0, 0.0))
             manual_mode = manual_control_slots[t]
@@ -6185,6 +6988,8 @@ class BatteryOptimizer:
             max_charge_room_kw = max(0.0, (1.0 - soc) * cap / (eff * dt))
             charge_kw = min(charge_kw, max_charge_room_kw)
             discharge_floor = self_consumption_floor
+            if ev_power_kw > 1e-9:
+                discharge_floor = max(discharge_floor, ev_floor)
             if manual_mode == "export":
                 discharge_floor = self._natural_self_consumption_floor(soc_0)
             if discharge_kw > 0:
@@ -6232,6 +7037,21 @@ class BatteryOptimizer:
                 0.0, (soc - discharge_floor) * cap * eff / dt
             )
             discharge_kw = min(discharge_kw, max_discharge_room_kw)
+            if ev_power_kw > 1e-9:
+                if ev_slot["preserve_home_battery"]:
+                    discharge_kw = 0.0
+                else:
+                    house_deficit_kw = max(
+                        0.0, house_load[t] - solar[t]
+                    )
+                    ev_battery_kw = min(
+                        ev_power_kw,
+                        float(ev_slot["battery_allowed_kw"]),
+                    )
+                    discharge_kw = min(
+                        discharge_kw,
+                        house_deficit_kw + ev_battery_kw,
+                    )
             if manual_mode is None and future_reservation_slots[t]:
                 net_home_kw = max(0.0, net_load)
                 discharge_kw = min(
@@ -6534,6 +7354,17 @@ class BatteryOptimizer:
                 else None
             ),
             free_import_command_slots=free_import_command_slots,
+            ev_charge_by_vehicle_w={
+                vehicle_id: [value * 1000 for value in series]
+                for vehicle_id, series in ev_charge_by_vehicle_kw.items()
+            },
+            ev_source_by_vehicle_w={
+                vehicle_id: {
+                    source: [value * 1000 for value in series]
+                    for source, series in sources.items()
+                }
+                for vehicle_id, sources in ev_source_by_vehicle_kw.items()
+            },
         )
 
     def _build_schedule(
@@ -7889,6 +8720,112 @@ class BatteryOptimizer:
         result.schedule = schedule
         result.grid_import_w = [value * 1000 for value in grid_import]
         result.grid_export_w = [value * 1000 for value in grid_export]
+        prior_by_vehicle = dict(result.ev_charge_by_vehicle_w or {})
+        reconciled_by_vehicle_w = {
+            vehicle_id: [0.0] * n for vehicle_id in prior_by_vehicle
+        }
+        for idx in range(n):
+            target_w = (
+                reconcile_ev_kw[idx] * 1000.0
+                if idx < len(reconcile_ev_kw)
+                else 0.0
+            )
+            prior_total_w = sum(
+                max(0.0, float(series[idx] or 0.0))
+                for series in prior_by_vehicle.values()
+                if idx < len(series)
+            )
+            if prior_total_w > 1e-9:
+                for vehicle_id, series in prior_by_vehicle.items():
+                    prior_w = (
+                        max(0.0, float(series[idx] or 0.0))
+                        if idx < len(series)
+                        else 0.0
+                    )
+                    reconciled_by_vehicle_w[vehicle_id][idx] = (
+                        target_w * prior_w / prior_total_w
+                    )
+            elif target_w > 1e-9:
+                reconciled_by_vehicle_w.setdefault("_combined", [0.0] * n)[
+                    idx
+                ] = target_w
+        result.ev_charge_by_vehicle_w = reconciled_by_vehicle_w
+        # Reconciliation may rescale a slot's EV draw after schedule spreading,
+        # but it must not reclassify the electricity source. The solver and
+        # fallbacks have already applied each vehicle's allow-grid/solar/
+        # battery policy; inferring sources again from aggregate site flow can
+        # invent a source that vehicle explicitly disallowed.
+        prior_sources_by_vehicle = dict(result.ev_source_by_vehicle_w or {})
+        reconciled_sources_by_vehicle_w = {
+            vehicle_id: {
+                source: [0.0] * n for source in ("grid", "solar", "battery")
+            }
+            for vehicle_id in reconciled_by_vehicle_w
+        }
+        unresolved_by_vehicle_w: dict[str, list[float]] = {}
+        for vehicle_id, target_series in reconciled_by_vehicle_w.items():
+            prior_sources = prior_sources_by_vehicle.get(vehicle_id, {}) or {}
+            for idx, target_w in enumerate(target_series):
+                target_w = max(0.0, float(target_w or 0.0))
+                if target_w <= 1e-9:
+                    continue
+                prior_total_w = sum(
+                    max(
+                        0.0,
+                        float(
+                            (prior_sources.get(source, []) or [])[idx]
+                            if idx < len(prior_sources.get(source, []) or [])
+                            else 0.0
+                        ),
+                    )
+                    for source in ("grid", "solar", "battery")
+                )
+                if prior_total_w <= 1e-9:
+                    unresolved_by_vehicle_w.setdefault(
+                        vehicle_id, [0.0] * n
+                    )[idx] = target_w
+                    continue
+                for source in ("grid", "solar", "battery"):
+                    prior_series = prior_sources.get(source, []) or []
+                    prior_w = (
+                        max(0.0, float(prior_series[idx] or 0.0))
+                        if idx < len(prior_series)
+                        else 0.0
+                    )
+                    reconciled_sources_by_vehicle_w[vehicle_id][source][idx] = (
+                        target_w * prior_w / prior_total_w
+                    )
+
+        if unresolved_by_vehicle_w:
+            unresolved_sources_kw = _fallback_ev_source_series(
+                {
+                    vehicle_id: [value / 1000.0 for value in series]
+                    for vehicle_id, series in unresolved_by_vehicle_w.items()
+                },
+                list(solar[:n]),
+                list(load[:n]),
+                [
+                    max(0.0, float(action.battery_charge_w or 0.0)) / 1000.0
+                    for action in schedule.actions[:n]
+                ],
+                [
+                    max(0.0, float(action.battery_discharge_w or 0.0)) / 1000.0
+                    for action in schedule.actions[:n]
+                ],
+            )
+            for vehicle_id, sources in unresolved_sources_kw.items():
+                target = reconciled_sources_by_vehicle_w.setdefault(
+                    vehicle_id,
+                    {
+                        source: [0.0] * n
+                        for source in ("grid", "solar", "battery")
+                    },
+                )
+                for source, series in sources.items():
+                    for idx, value_kw in enumerate(series[:n]):
+                        if value_kw > 0:
+                            target[source][idx] = value_kw * 1000.0
+        result.ev_source_by_vehicle_w = reconciled_sources_by_vehicle_w
         result.battery_to_grid_w = [
             max(
                 0.0,

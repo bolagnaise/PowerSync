@@ -153,6 +153,258 @@ def test_ev_charging_lands_in_the_cheapest_slots(optimizer_module):
     assert cheap_ev_kwh > expensive_ev_kwh
 
 
+def test_solar_only_ev_cannot_be_moved_to_a_cheaper_grid_slot(optimizer_module):
+    optimizer = _optimizer(optimizer_module)
+    kwargs = _kwargs(cheap_slots=(0, 1, 3, 4, 5, 6, 7))
+    kwargs["solar_forecast"] = [0.0, 0.0, 7.5, 0.0, 0.0, 0.0, 0.0, 0.0]
+    plan = _ev_plan(
+        optimizer_module,
+        energy_needed_kwh=7.0,
+        allow_grid=(False,) * 8,
+        allow_solar=(True,) * 8,
+        allow_battery=(False,) * 8,
+        window_source=("solar_surplus",) * 8,
+    )
+
+    result = optimizer.optimize(**kwargs, ev_plan=plan)
+
+    ev_kw = [action.ev_charge_w / 1000.0 for action in result.schedule.actions]
+    assert sum(ev_kw) == pytest.approx(7.0, abs=0.05)
+    assert ev_kw[2] == pytest.approx(7.0, abs=0.05)
+    assert max(result.ev_source_by_vehicle_w["car"]["grid"]) < 1.0
+    assert sum(result.ev_source_by_vehicle_w["car"]["solar"]) / 1000.0 == pytest.approx(
+        7.0, abs=0.05
+    )
+
+
+def test_consume_battery_stop_at_floor_blocks_grid_fallback_at_floor(
+    optimizer_module,
+):
+    optimizer = _optimizer(optimizer_module)
+    kwargs = _kwargs()
+    kwargs["current_soc"] = 0.30
+    kwargs["allow_grid_charge"] = False
+    plan = _ev_plan(
+        optimizer_module,
+        energy_needed_kwh=7.0,
+        allow_grid=(True,) * 8,
+        allow_battery=(True,) * 8,
+        battery_floor_soc=(0.30,) * 8,
+        stop_at_battery_floor=(True,) * 8,
+    )
+
+    result = optimizer.optimize(**kwargs, ev_plan=plan)
+
+    assert sum(action.ev_charge_w for action in result.schedule.actions) < 1.0
+
+
+def test_consume_battery_floor_with_grid_fallback_preserves_the_floor(
+    optimizer_module,
+):
+    optimizer = _optimizer(optimizer_module)
+    kwargs = _kwargs()
+    kwargs["current_soc"] = 0.30
+    plan = _ev_plan(
+        optimizer_module,
+        energy_needed_kwh=7.0,
+        allow_grid=(True,) * 8,
+        allow_battery=(True,) * 8,
+        battery_floor_soc=(0.30,) * 8,
+        stop_at_battery_floor=(False,) * 8,
+    )
+
+    result = optimizer.optimize(**kwargs, ev_plan=plan)
+
+    assert sum(action.ev_charge_w for action in result.schedule.actions) / 1000.0 == pytest.approx(
+        7.0, abs=0.05
+    )
+    assert max(result.ev_source_by_vehicle_w["car"]["battery"]) < 1.0
+    assert min(
+        action.soc
+        for action in result.schedule.actions
+        if action.ev_charge_w > 1.0
+    ) >= 0.30 - 1e-6
+
+
+def test_consume_battery_grid_fallback_remains_feasible_below_the_floor(
+    optimizer_module,
+):
+    kwargs = _kwargs()
+    kwargs["current_soc"] = 0.20
+    kwargs["allow_grid_charge"] = False
+    result = _optimizer(optimizer_module).optimize(
+        **kwargs,
+        ev_plan=_ev_plan(
+            optimizer_module,
+            energy_needed_kwh=7.0,
+            allow_grid=(True,) * 8,
+            allow_battery=(True,) * 8,
+            battery_floor_soc=(0.30,) * 8,
+            stop_at_battery_floor=(False,) * 8,
+        ),
+    )
+
+    assert result.feasible
+    assert sum(result.ev_source_by_vehicle_w["car"]["grid"]) / 1000.0 == pytest.approx(
+        7.0, abs=0.05
+    )
+    assert max(result.ev_source_by_vehicle_w["car"]["battery"]) < 1.0
+
+
+def test_limit_grid_import_uses_battery_then_grid_after_its_floor(
+    optimizer_module,
+):
+    plan = _ev_plan(
+        optimizer_module,
+        energy_needed_kwh=7.0,
+        allow_grid=(True,) * 8,
+        allow_battery=(True,) * 8,
+        battery_floor_soc=(0.30,) * 8,
+        stop_at_battery_floor=(False,) * 8,
+        limit_grid_import=(True,) * 8,
+    )
+    above_kwargs = _kwargs()
+    above_kwargs["current_soc"] = 0.50
+    above = _optimizer(optimizer_module).optimize(**above_kwargs, ev_plan=plan)
+    below_kwargs = _kwargs()
+    below_kwargs["current_soc"] = 0.20
+    below = _optimizer(optimizer_module).optimize(**below_kwargs, ev_plan=plan)
+
+    assert sum(above.ev_source_by_vehicle_w["car"]["grid"]) < 1.0
+    assert sum(above.ev_source_by_vehicle_w["car"]["battery"]) / 1000.0 == pytest.approx(
+        7.0, abs=0.05
+    )
+    assert sum(below.ev_source_by_vehicle_w["car"]["grid"]) / 1000.0 == pytest.approx(
+        7.0, abs=0.05
+    )
+
+
+def test_strict_solar_can_start_below_minimum_only_after_battery_reserve(
+    optimizer_module,
+):
+    kwargs = _kwargs()
+    kwargs["current_soc"] = 0.20
+    kwargs["solar_forecast"] = [8.0] + [0.0] * 7
+    policy = dict(
+        energy_needed_kwh=2.0,
+        max_power_kw=(2.0,) + (0.0,) * 7,
+        allow_grid=(False,) * 8,
+        allow_solar=(True,) * 8,
+        allow_battery=(False,) * 8,
+        min_start_soc=(0.30,) * 8,
+        solar_battery_reserve_kw=(5.0,) * 8,
+    )
+    blocked = _optimizer(optimizer_module).optimize(
+        **kwargs,
+        ev_plan=_ev_plan(optimizer_module, **policy),
+    )
+    allowed = _optimizer(optimizer_module).optimize(
+        **kwargs,
+        ev_plan=_ev_plan(
+            optimizer_module,
+            **policy,
+            allow_min_start_solar_exception=(True,) * 8,
+        ),
+    )
+
+    assert sum(action.ev_charge_w for action in blocked.schedule.actions) < 1.0
+    assert sum(action.ev_charge_w for action in allowed.schedule.actions) / 1000.0 == pytest.approx(
+        2.0, abs=0.05
+    )
+
+
+def test_low_level_solar_start_exception_cannot_be_supplied_by_grid(
+    optimizer_module,
+):
+    kwargs = _kwargs()
+    kwargs["current_soc"] = 0.20
+    kwargs["allow_grid_charge"] = False
+    result = _optimizer(optimizer_module).optimize(
+        **kwargs,
+        ev_plan=_ev_plan(
+            optimizer_module,
+            energy_needed_kwh=7.0,
+            allow_grid=(True,) * 8,
+            allow_solar=(True,) * 8,
+            min_start_soc=(0.30,) * 8,
+            allow_min_start_solar_exception=(True,) * 8,
+        ),
+    )
+
+    assert sum(action.ev_charge_w for action in result.schedule.actions) < 1.0
+
+
+def test_preserve_home_battery_prevents_discharge_while_ev_is_on(
+    optimizer_module,
+):
+    optimizer = _optimizer(optimizer_module)
+    kwargs = _kwargs()
+    kwargs["current_soc"] = 0.90
+    plan = _ev_plan(
+        optimizer_module,
+        energy_needed_kwh=7.0,
+        allow_grid=(True,) * 8,
+        allow_battery=(False,) * 8,
+        preserve_home_battery=(True,) * 8,
+    )
+
+    result = optimizer.optimize(**kwargs, ev_plan=plan)
+
+    for action in result.schedule.actions:
+        if action.ev_charge_w > 1.0:
+            assert action.battery_discharge_w < 1.0
+
+
+def test_minimum_home_battery_soc_blocks_only_a_new_ev_session(
+    optimizer_module,
+):
+    kwargs = _kwargs()
+    kwargs["current_soc"] = 0.20
+    kwargs["allow_grid_charge"] = False
+    plan = _ev_plan(
+        optimizer_module,
+        energy_needed_kwh=7.0,
+        min_start_soc=(0.30,) * 8,
+    )
+
+    blocked = _optimizer(optimizer_module).optimize(**kwargs, ev_plan=plan)
+    continuing = _optimizer(optimizer_module).optimize(
+        **kwargs,
+        ev_plan=_ev_plan(
+            optimizer_module,
+            energy_needed_kwh=7.0,
+            min_start_soc=(0.30,) * 8,
+            initially_charging=True,
+        ),
+    )
+
+    assert sum(action.ev_charge_w for action in blocked.schedule.actions) < 1.0
+    continuing_kwh = (
+        sum(action.ev_charge_w for action in continuing.schedule.actions)
+        / 1000.0
+    )
+    assert continuing_kwh == pytest.approx(7.0, abs=0.05)
+
+
+def test_ev_charger_minimum_power_is_not_relaxed_by_the_lp(optimizer_module):
+    result = _optimizer(optimizer_module).optimize(
+        **_kwargs(),
+        ev_plan=_ev_plan(
+            optimizer_module,
+            energy_needed_kwh=0.5,
+            min_power_kw=1.4,
+        ),
+    )
+
+    active_power_kw = [
+        action.ev_charge_w / 1000.0
+        for action in result.schedule.actions
+        if action.ev_charge_w > 1.0
+    ]
+    assert active_power_kw
+    assert min(active_power_kw) >= 1.4 - 0.01
+
+
 def test_battery_plan_shrinks_when_the_car_needs_the_same_headroom(
     optimizer_module,
 ):
@@ -270,7 +522,8 @@ def test_overlay_and_decision_variable_are_mutually_exclusive():
         / "custom_components" / "power_sync" / "optimization" / "coordinator.py"
     ).read_text()
 
-    assert "self._pending_ev_charge_plan = self._build_ev_charge_plan(" in source
+    assert 'if effective_source == "internal"' in source
+    assert "self._build_ev_charge_plan(self._price_timestamps(n_ev))" in source
     assert "effective_ev_load_w = zeros" in source
     # The solve must consume the plan decided at overlay time, not rebuild it
     # after the overlay has already been applied to load.
@@ -335,6 +588,8 @@ def build_ev_charge_plan():
     names = _STUBS + (
         "power_sync.automations",
         "power_sync.automations.ev_charging_planner",
+        "power_sync.const",
+        "power_sync.solar_surplus_config",
         "power_sync.optimization._ev_plan_probe",
     )
     saved = {name: sys.modules.get(name, _SENTINEL) for name in names}
@@ -361,14 +616,38 @@ def build_ev_charge_plan():
     optimization.__path__ = [str(COMPONENT_ROOT / "optimization")]
     automations = types.ModuleType("power_sync.automations")
     planner = types.ModuleType("power_sync.automations.ev_charging_planner")
-    holder: dict = {"executor": None}
+    holder: dict = {
+        "executor": None,
+        "solar_config": {
+            "allow_parallel_charging": False,
+            "max_battery_charge_rate_kw": 5.0,
+        },
+    }
     planner.get_auto_schedule_executor = lambda: holder["executor"]
+    planner.is_smart_schedule_grid_price_allowed = (
+        lambda *, source, price_cents, max_grid_price_cents, priority: (
+            not str(source).startswith("grid")
+            or str(getattr(priority, "value", priority) or "").lower()
+            == "time_critical"
+            or max_grid_price_cents is None
+            or price_cents is None
+            or float(price_cents) <= float(max_grid_price_cents)
+        )
+    )
+    const = types.ModuleType("power_sync.const")
+    const.DOMAIN = "power_sync"
+    solar_config = types.ModuleType("power_sync.solar_surplus_config")
+    solar_config.get_stored_solar_surplus_config = (
+        lambda _entry: holder["solar_config"]
+    )
     sys.modules.update(
         {
             "power_sync": package,
             "power_sync.optimization": optimization,
             "power_sync.automations": automations,
             "power_sync.automations.ev_charging_planner": planner,
+            "power_sync.const": const,
+            "power_sync.solar_surplus_config": solar_config,
         }
     )
 
@@ -477,8 +756,202 @@ def test_a_deadline_already_past_is_still_skipped(build_ev_charge_plan):
 
     assert (
         method(types.SimpleNamespace(config_entry=_ENTRY), _solve_timestamps())
-        is None
+        == []
     )
+
+
+def test_optimizer_plan_uses_smart_schedule_windows_and_policy(
+    build_ev_charge_plan,
+):
+    method, holder, warnings = build_ev_charge_plan
+    windows = [
+        types.SimpleNamespace(
+            start_time="2026-08-20T08:00:00+08:00",
+            end_time="2026-08-20T09:00:00+08:00",
+            source="grid_offpeak",
+            estimated_power_kw=7.0,
+        ),
+        types.SimpleNamespace(
+            start_time="2026-08-20T12:00:00+08:00",
+            end_time="2026-08-20T13:00:00+08:00",
+            source="solar_surplus",
+            estimated_power_kw=5.0,
+        ),
+    ]
+    charging_plan = types.SimpleNamespace(
+        target_time="2026-08-20T15:00:00+08:00",
+        energy_needed_kwh=13.75,
+        windows=windows,
+    )
+    settings = types.SimpleNamespace(
+        enabled=True,
+        max_charge_amps=46,
+        voltage=240,
+        phases=1,
+        min_charge_amps=6,
+        get_effective_consume_battery_level=lambda _weekday: 30,
+        get_effective_stop_at_battery_floor=lambda _weekday: True,
+        get_effective_preserve_home_battery=lambda _weekday: False,
+        get_effective_min_battery_to_start=lambda _weekday: 20,
+        get_effective_limit_grid_import=lambda _weekday: True,
+    )
+    holder["executor"] = types.SimpleNamespace(
+        config_entry=_ENTRY,
+        _state={
+            "veh-1": types.SimpleNamespace(
+                current_plan=charging_plan,
+                is_charging=False,
+            )
+        },
+        _settings={"veh-1": settings},
+    )
+
+    coordinator = types.SimpleNamespace(config_entry=_ENTRY)
+    plan = method(coordinator, _solve_timestamps())[0]
+
+    assert warnings == []
+    assert plan.charge_efficiency == 1.0
+    assert plan.energy_needed_kwh == pytest.approx(13.75)
+    grid_slots = [
+        index
+        for index, source in enumerate(plan.window_source)
+        if source == "grid_offpeak"
+    ]
+    solar_slots = [
+        index
+        for index, source in enumerate(plan.window_source)
+        if source == "solar_surplus"
+    ]
+    assert grid_slots and solar_slots
+    assert all(
+        plan.max_power_kw[index] == pytest.approx(11.04)
+        for index in grid_slots
+    )
+    assert all(
+        plan.max_power_kw[index] == pytest.approx(5.0)
+        for index in solar_slots
+    )
+    assert all(plan.allow_grid[index] for index in grid_slots)
+    assert all(plan.allow_battery[index] for index in grid_slots)
+    assert all(plan.battery_floor_soc[index] == pytest.approx(0.30) for index in grid_slots)
+    assert all(plan.min_start_soc[index] == pytest.approx(0.20) for index in grid_slots)
+    assert all(not plan.allow_grid[index] for index in solar_slots)
+    assert all(not plan.allow_battery[index] for index in solar_slots)
+    assert all(plan.min_start_soc[index] == pytest.approx(0.20) for index in solar_slots)
+    assert all(
+        not plan.allow_min_start_solar_exception[index]
+        for index in solar_slots
+    )
+    assert all(plan.limit_grid_import[index] for index in grid_slots + solar_slots)
+    policy_segments = coordinator._last_ev_optimizer_policy["veh-1"]["segments"]
+    assert {segment["window_source"] for segment in policy_segments} >= {
+        "grid_offpeak",
+        "solar_surplus",
+    }
+    assert all(
+        plan.max_power_kw[index] == 0.0
+        for index, source in enumerate(plan.window_source)
+        if not source
+    )
+
+
+def test_optimizer_rejects_a_stale_grid_window_above_current_price_cap(
+    build_ev_charge_plan,
+):
+    method, holder, warnings = build_ev_charge_plan
+    charging_plan = types.SimpleNamespace(
+        target_time="2026-08-20T15:00:00+08:00",
+        energy_needed_kwh=7.0,
+        priority="cost_optimized",
+        max_grid_price_cents=40.0,
+        windows=[
+            types.SimpleNamespace(
+                start_time="2026-08-20T06:00:00+08:00",
+                end_time="2026-08-20T10:00:00+08:00",
+                source="grid_offpeak",
+                estimated_power_kw=7.0,
+                price_cents_kwh=30.0,
+            )
+        ],
+    )
+    settings = types.SimpleNamespace(
+        enabled=True,
+        max_charge_amps=32,
+        voltage=240,
+        phases=1,
+        min_charge_amps=6,
+        get_effective_max_grid_price=lambda _weekday: 25.0,
+        get_effective_priority=lambda _weekday: "cost_optimized",
+    )
+    holder["executor"] = types.SimpleNamespace(
+        config_entry=_ENTRY,
+        _state={
+            "veh-1": types.SimpleNamespace(
+                current_plan=charging_plan,
+                is_charging=False,
+            )
+        },
+        _settings={"veh-1": settings},
+    )
+
+    coordinator = types.SimpleNamespace(config_entry=_ENTRY)
+    plans = method(coordinator, _solve_timestamps())
+
+    assert plans == []
+    assert warnings == []
+    assert any(
+        segment["constraint_reason"] == "price_blocked"
+        for segment in coordinator._last_ev_optimizer_policy["veh-1"][
+            "segments"
+        ]
+    )
+
+
+@pytest.mark.parametrize("decision", ["away", "unplugged"])
+def test_unavailable_vehicle_keeps_future_demand_but_zeros_current_slot(
+    build_ev_charge_plan,
+    decision,
+):
+    method, holder, warnings = build_ev_charge_plan
+    charging_plan = types.SimpleNamespace(
+        target_time="2026-08-20T15:00:00+08:00",
+        energy_needed_kwh=7.0,
+        windows=[
+            types.SimpleNamespace(
+                start_time="2026-08-20T06:00:00+08:00",
+                end_time="2026-08-20T10:00:00+08:00",
+                source="grid_offpeak",
+                estimated_power_kw=7.0,
+            )
+        ],
+    )
+    settings = types.SimpleNamespace(
+        enabled=True,
+        max_charge_amps=32,
+        voltage=240,
+        phases=1,
+        min_charge_amps=6,
+    )
+    holder["executor"] = types.SimpleNamespace(
+        config_entry=_ENTRY,
+        _state={
+            "veh-1": types.SimpleNamespace(
+                current_plan=charging_plan,
+                is_charging=False,
+                last_decision=decision,
+            )
+        },
+        _settings={"veh-1": settings},
+    )
+
+    plan = method(
+        types.SimpleNamespace(config_entry=_ENTRY), _solve_timestamps()
+    )[0]
+
+    assert warnings == []
+    assert plan.max_power_kw[0] == 0.0
+    assert plan.max_power_kw[1] > 0.0
+    assert plan.window_source[0] == "unavailable_now"
 
 
 def test_reconciliation_keeps_the_planned_ev_draw(optimizer_module):
@@ -513,6 +986,11 @@ def test_reconciliation_keeps_the_planned_ev_draw(optimizer_module):
         for action in reconciled.schedule.actions
     )
     assert reconciled_ev_kwh == pytest.approx(solved_ev_kwh, abs=0.05)
+    reconciled_source_kwh = sum(
+        sum(series)
+        for series in reconciled.ev_source_by_vehicle_w["car"].values()
+    ) / 1000.0
+    assert reconciled_source_kwh == pytest.approx(reconciled_ev_kwh, abs=0.05)
 
 
 def test_the_infeasible_hold_still_plans_for_the_car(optimizer_module):
@@ -545,6 +1023,102 @@ def test_the_infeasible_hold_still_plans_for_the_car(optimizer_module):
         for action in hold.schedule.actions
     )
     assert planned_ev_kwh == pytest.approx(plan.energy_needed_kwh, abs=0.05)
+    assert sum(hold.ev_charge_by_vehicle_w["car"]) / 1000.0 == pytest.approx(
+        plan.energy_needed_kwh, abs=0.05
+    )
+    source_kwh = sum(
+        sum(series)
+        for series in hold.ev_source_by_vehicle_w["car"].values()
+    ) / 1000.0
+    assert source_kwh == pytest.approx(plan.energy_needed_kwh, abs=0.05)
+
+
+@pytest.mark.parametrize("fallback", ["hold", "greedy"])
+def test_fallback_source_reporting_never_uses_a_policy_blocked_source(
+    optimizer_module,
+    fallback,
+):
+    """Fallback diagnostics retain the policy allocation, even with surplus."""
+    optimizer = _optimizer(optimizer_module)
+    kwargs = _kwargs()
+    kwargs["solar_forecast"] = [8.0] * 8
+    plan = _ev_plan(
+        optimizer_module,
+        allow_grid=(True,) * 8,
+        allow_solar=(False,) * 8,
+        allow_battery=(False,) * 8,
+    )
+    method = (
+        optimizer._solve_self_consumption_hold
+        if fallback == "hold"
+        else optimizer._solve_greedy
+    )
+
+    result = method(
+        len(kwargs["import_prices"]),
+        kwargs["import_prices"],
+        kwargs["export_prices"],
+        kwargs["solar_forecast"],
+        kwargs["load_forecast"],
+        kwargs["current_soc"],
+        "cost",
+        schedule_timestamps=kwargs["schedule_timestamps"],
+        ev_plan=plan,
+    )
+
+    result = optimizer.reconcile_result_with_schedule(
+        result,
+        result.schedule,
+        import_prices=kwargs["import_prices"],
+        export_prices=kwargs["export_prices"],
+        solar=kwargs["solar_forecast"],
+        load=kwargs["load_forecast"],
+        initial_soc=kwargs["current_soc"],
+    )
+
+    assert sum(result.ev_charge_by_vehicle_w["car"]) / 1000.0 == pytest.approx(
+        plan.energy_needed_kwh,
+        abs=0.05,
+    )
+    assert max(result.ev_source_by_vehicle_w["car"]["solar"]) < 1.0
+    assert max(result.ev_source_by_vehicle_w["car"]["battery"]) < 1.0
+    assert sum(result.ev_source_by_vehicle_w["car"]["grid"]) / 1000.0 == pytest.approx(
+        plan.energy_needed_kwh,
+        abs=0.05,
+    )
+
+
+def test_fallback_honours_minimum_start_soc_for_new_but_not_active_session(
+    optimizer_module,
+):
+    optimizer = _optimizer(optimizer_module)
+    kwargs = _kwargs()
+    kwargs["current_soc"] = 0.20
+
+    def _hold(initially_charging):
+        return optimizer._solve_self_consumption_hold(
+            len(kwargs["import_prices"]),
+            kwargs["import_prices"],
+            kwargs["export_prices"],
+            kwargs["solar_forecast"],
+            kwargs["load_forecast"],
+            kwargs["current_soc"],
+            "cost",
+            schedule_timestamps=kwargs["schedule_timestamps"],
+            ev_plan=_ev_plan(
+                optimizer_module,
+                min_start_soc=(0.30,) * 8,
+                initially_charging=initially_charging,
+            ),
+        )
+
+    blocked = _hold(False)
+    continuing = _hold(True)
+
+    assert sum(action.ev_charge_w for action in blocked.schedule.actions) < 1.0
+    assert sum(action.ev_charge_w for action in continuing.schedule.actions) / 1000.0 == pytest.approx(
+        14.0, abs=0.05
+    )
 
 
 def test_the_infeasible_hold_is_unchanged_without_a_car(optimizer_module):
@@ -899,3 +1473,23 @@ def test_per_vehicle_plans_cannot_stack_one_cars_slot_to_double_rate(
         assert stamped[i] == pytest.approx(
             by_vehicle["TESSY"][i] + by_vehicle["W3RT1E"][i], abs=1.0
         )
+
+
+def test_schedule_api_serializes_ev_load_before_flow_derivations(
+    optimizer_module,
+):
+    schedule = optimizer_module.OptimizationSchedule(
+        actions=[
+            optimizer_module.ScheduleAction(
+                timestamp=datetime(2026, 8, 21, 1, 30, tzinfo=timezone.utc),
+                action="self_consumption",
+                power_w=375.0,
+                battery_discharge_w=375.0,
+                ev_charge_w=7360.0,
+            )
+        ],
+        predicted_cost=0.0,
+        predicted_savings=0.0,
+    )
+
+    assert schedule.to_api_response()["ev_charging_w"] == [7360.0]

@@ -77,6 +77,11 @@ class OptimizationSchedule:
         return [a.battery_discharge_w for a in self.actions]
 
     @property
+    def ev_charging_w(self) -> list[float]:
+        """Get the EV charging load modeled in each schedule slot."""
+        return [max(0.0, float(a.ev_charge_w or 0.0)) for a in self.actions]
+
+    @property
     def battery_consume_w(self) -> list[float]:
         """Get battery-to-home consumption power schedule."""
         values: list[float] = []
@@ -116,6 +121,11 @@ class OptimizationSchedule:
             "timestamps": self.timestamps,
             "charge_w": self.charge_w,
             "discharge_w": self.discharge_w,
+            # Keep EV load inside the canonical schedule contract.  Adding it
+            # later as a chart-only overlay leaves downstream flow rebuilds
+            # with a house-only schedule and recreates impossible energy
+            # balances even though the LP modeled the car correctly.
+            "ev_charging_w": self.ev_charging_w,
             "battery_consume_w": self.battery_consume_w,
             "battery_export_w": self.battery_export_w,
             "soc": self.soc,

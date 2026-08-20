@@ -10361,6 +10361,29 @@ def test_schedule_display_grid_export_uses_post_processed_battery_export(opt_mod
     assert grid_export == [23000.0, 0.0, 1000.0]
 
 
+def test_schedule_display_grid_import_includes_planned_ev_load(opt_module):
+    """The final API flow rebuild must not drop the EV after the LP solve."""
+    coordinator = _coordinator(opt_module, "flow_power", profit_max=True)
+    coordinator._last_solar_forecast = [0.0]
+    coordinator._last_load_forecast = [0.375]
+    api_response = {
+        "timestamps": ["2026-08-21T01:30:00+10:00"],
+        "charge_w": [0.0],
+        "ev_charging_w": [7360.0],
+        "battery_consume_w": [375.0],
+        "battery_export_w": [0.0],
+    }
+
+    grid_import, grid_export = coordinator._display_grid_arrays_from_schedule(
+        api_response,
+        raw_grid_import_w=[7360.0],
+        raw_grid_export_w=[0.0],
+    )
+
+    assert grid_import == [7360.0]
+    assert grid_export == [0.0]
+
+
 def test_spread_export_schedule_uses_export_power_for_target_batteries(opt_module):
     coordinator = _coordinator(opt_module, "octopus")
     coordinator.battery_system = "goodwe"

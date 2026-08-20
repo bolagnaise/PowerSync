@@ -528,6 +528,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_planned_ev_load_forecast_w: list[float] | None = None
         self._last_effective_ev_load_forecast_w: list[float] | None = None
         self._last_ev_charge_by_vehicle_w: dict[str, list[float]] | None = None
+        self._last_ev_source_by_vehicle_w: dict[str, dict[str, list[float]]] | None = None
+        self._last_ev_optimizer_policy: dict[str, dict[str, Any]] | None = None
         self._last_smart_schedule_ev_load_w: list[float] | None = None
         self._last_price_level_expected_ev_load_w: list[float] | None = None
         self._last_price_level_projection: dict[str, Any] | None = None
@@ -5446,6 +5448,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_planned_ev_load_forecast_w = None
             self._last_effective_ev_load_forecast_w = None
             self._last_ev_charge_by_vehicle_w = None
+            self._last_ev_source_by_vehicle_w = None
+            self._last_ev_optimizer_policy = None
             self._last_smart_schedule_ev_load_w = None
             self._last_price_level_expected_ev_load_w = None
             self._last_price_level_projection = None
@@ -5511,10 +5515,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # twice, so they are mutually exclusive: prefer the decision
                 # variable, which chooses timing against prices and the import
                 # limit instead of fixing it to the planner's chosen windows.
-                self._pending_ev_charge_plan = self._build_ev_charge_plan(
-                    self._price_timestamps(n_ev)
+                # An explicitly configured planned-load entity is already an
+                # authoritative EV forecast. Do not also hand the internal
+                # Smart Schedule demand to the LP: that would add a second EV
+                # decision variable on top of the external load overlay.
+                self._pending_ev_charge_plan = (
+                    self._build_ev_charge_plan(self._price_timestamps(n_ev))
+                    if effective_source == "internal"
+                    else None
                 )
-                if self._pending_ev_charge_plan:
+                if self._pending_ev_charge_plan is not None:
                     _LOGGER.debug(
                         "EV load overlay: superseded by LP co-optimization "
                         "(%.1f kWh across %d vehicle(s))",
@@ -6864,6 +6874,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_ev_charge_by_vehicle_w = (
             dict(getattr(result, "ev_charge_by_vehicle_w", None) or {}) or None
         )
+        self._last_ev_source_by_vehicle_w = (
+            dict(getattr(result, "ev_source_by_vehicle_w", None) or {}) or None
+        )
         actions = getattr(getattr(result, "schedule", None), "actions", None) or []
         solved = [
             max(0.0, float(getattr(action, "ev_charge_w", 0.0) or 0.0))
@@ -6892,7 +6905,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             from ..automations.ev_charging_planner import (
                 get_auto_schedule_executor,
+                is_smart_schedule_grid_price_allowed,
             )
+            from ..const import DOMAIN
+            from ..solar_surplus_config import get_stored_solar_surplus_config
             from .ev_load_plan import ev_plan_from_demand
 
             executor = get_auto_schedule_executor()
@@ -6900,9 +6916,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 executor, "config_entry", None
             ) is not self.config_entry:
                 return None
+            hass_data = getattr(getattr(self, "hass", None), "data", {}) or {}
+            entry_data = hass_data.get(DOMAIN, {}).get(
+                self.config_entry.entry_id, {}
+            )
+            solar_surplus_config = get_stored_solar_surplus_config(entry_data)
 
             now = dt_util.now()
             plans = []
+            policy_diagnostics: dict[str, dict[str, Any]] = {}
             for vehicle_id, state in (getattr(executor, "_state", {}) or {}).items():
                 charging_plan = getattr(state, "current_plan", None)
                 if charging_plan is None:
@@ -6937,6 +6959,348 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     * int(getattr(settings, "phases", 1) or 1)
                     / 1000.0
                 )
+
+                # ChargingPlan.energy_needed_kwh is already AC-side energy:
+                # plan_charging() grosses the pack delta up by its 0.90
+                # charging efficiency. Passing the default 0.90 here applied
+                # that loss a second time and over-planned every car by 11%.
+                charge_efficiency = 1.0
+
+                # A generated Smart Schedule plan is the executable policy
+                # envelope. The old hand-off replaced it with the charger's
+                # physical envelope, letting the battery LP move solar-only,
+                # price-capped and demand-blocked charging into arbitrary
+                # slots. Tests and lightweight callers that predate planned
+                # windows keep the legacy physical-envelope fallback.
+                raw_windows = getattr(charging_plan, "windows", None)
+                power_by_slot = None
+                allow_grid = ()
+                allow_solar = ()
+                allow_battery = ()
+                min_start_soc = ()
+                battery_floor_soc = ()
+                stop_at_floor = ()
+                preserve_home_battery = ()
+                limit_grid_import = ()
+                allow_min_start_solar_exception = ()
+                solar_battery_reserve_kw = ()
+                window_sources = ()
+                if raw_windows is not None:
+                    power_values: list[float] = []
+                    grid_values: list[bool] = []
+                    solar_values: list[bool] = []
+                    battery_values: list[bool] = []
+                    start_values: list[float] = []
+                    floor_values: list[float] = []
+                    stop_values: list[bool] = []
+                    preserve_values: list[bool] = []
+                    limit_values: list[bool] = []
+                    solar_exception_values: list[bool] = []
+                    solar_reserve_values: list[float] = []
+                    source_values: list[str] = []
+
+                    parsed_windows = []
+                    for window in raw_windows:
+                        try:
+                            window_start = dt_util.parse_datetime(
+                                str(getattr(window, "start_time", ""))
+                            )
+                            window_end = dt_util.parse_datetime(
+                                str(getattr(window, "end_time", ""))
+                            )
+                        except (TypeError, ValueError):
+                            continue
+                        if window_start is None or window_end is None:
+                            continue
+                        if window_start.tzinfo is None:
+                            window_start = window_start.replace(
+                                tzinfo=dt_util.DEFAULT_TIME_ZONE
+                            )
+                        if window_end.tzinfo is None:
+                            window_end = window_end.replace(
+                                tzinfo=dt_util.DEFAULT_TIME_ZONE
+                            )
+                        parsed_windows.append((window_start, window_end, window))
+
+                    for timestamp in schedule_timestamps:
+                        comparison = timestamp
+                        if comparison.tzinfo is None:
+                            comparison = comparison.replace(
+                                tzinfo=dt_util.DEFAULT_TIME_ZONE
+                            )
+                        active_window = next(
+                            (
+                                window
+                                for window_start, window_end, window in parsed_windows
+                                if window_start <= comparison < window_end
+                            ),
+                            None,
+                        )
+                        source = str(
+                            getattr(active_window, "source", "") or ""
+                        ).lower()
+                        is_solar = source == "solar_surplus"
+                        weekday = comparison.astimezone(
+                            dt_util.DEFAULT_TIME_ZONE
+                        ).weekday()
+
+                        def _effective(method_name: str, attr_name: str, default):
+                            method = getattr(settings, method_name, None)
+                            if callable(method):
+                                return method(weekday)
+                            return getattr(settings, attr_name, default)
+
+                        if active_window is not None and not (
+                            is_smart_schedule_grid_price_allowed(
+                                source=source,
+                                price_cents=getattr(
+                                    active_window, "price_cents_kwh", None
+                                ),
+                                max_grid_price_cents=_effective(
+                                    "get_effective_max_grid_price",
+                                    "max_grid_price_cents",
+                                    getattr(
+                                        charging_plan,
+                                        "max_grid_price_cents",
+                                        None,
+                                    ),
+                                ),
+                                priority=_effective(
+                                    "get_effective_priority",
+                                    "priority",
+                                    getattr(charging_plan, "priority", None),
+                                ),
+                            )
+                        ):
+                            # Plans can survive a settings update until their
+                            # next regeneration. Fail closed against the
+                            # current per-day price policy here.
+                            active_window = None
+                            source = "price_blocked"
+                            is_solar = False
+                        planner = getattr(executor, "planner", None)
+                        demand_blocked = getattr(
+                            planner, "_is_grid_charging_blocked_at", None
+                        )
+                        if (
+                            active_window is not None
+                            and source.startswith("grid")
+                            and callable(demand_blocked)
+                            and demand_blocked(comparison)
+                        ):
+                            active_window = None
+                            source = "demand_blocked"
+                            is_solar = False
+
+                        consume_floor = max(
+                            0.0,
+                            min(
+                                1.0,
+                                float(
+                                    _effective(
+                                        "get_effective_consume_battery_level",
+                                        "consume_battery_level",
+                                        0,
+                                    )
+                                    or 0
+                                )
+                                / 100.0,
+                            ),
+                        )
+                        preserve = bool(
+                            _effective(
+                                "get_effective_preserve_home_battery",
+                                "preserve_home_battery",
+                                False,
+                            )
+                        )
+                        minimum_start = max(
+                            0.0,
+                            min(
+                                1.0,
+                                float(
+                                    _effective(
+                                        "get_effective_min_battery_to_start",
+                                        "min_battery_to_start",
+                                        0,
+                                    )
+                                    or 0
+                                )
+                                / 100.0,
+                            ),
+                        )
+                        limit_grid = bool(
+                            _effective(
+                                "get_effective_limit_grid_import",
+                                "limit_grid_import",
+                                False,
+                            )
+                        )
+                        stop_at_floor_value = bool(
+                            _effective(
+                                "get_effective_stop_at_battery_floor",
+                                "stop_at_battery_floor",
+                                True,
+                            )
+                        )
+                        solar_exception = bool(
+                            is_solar
+                            and solar_surplus_config.get(
+                                "allow_parallel_charging", False
+                            )
+                        )
+                        solar_reserve_kw = (
+                            max(
+                                0.0,
+                                float(
+                                    solar_surplus_config.get(
+                                        "max_battery_charge_rate_kw", 5.0
+                                    )
+                                    or 0.0
+                                ),
+                            )
+                            if solar_exception
+                            else 0.0
+                        )
+
+                        window_power_kw = 0.0
+                        if active_window is not None:
+                            planned_power_kw = max(
+                                0.0,
+                                float(
+                                    getattr(
+                                        active_window,
+                                        "estimated_power_kw",
+                                        charger_power_kw,
+                                    )
+                                    or charger_power_kw
+                                ),
+                            )
+                            # Grid-window power was pre-reduced against the
+                            # previous battery schedule. The joint LP owns that
+                            # sharing now, so expose the physical charger cap.
+                            # Solar windows remain capped by forecast surplus.
+                            window_power_kw = min(
+                                charger_power_kw,
+                                planned_power_kw if is_solar else charger_power_kw,
+                            )
+                        power_values.append(window_power_kw)
+                        grid_values.append(active_window is not None and not is_solar)
+                        solar_values.append(active_window is not None)
+                        battery_values.append(
+                            active_window is not None
+                            and not is_solar
+                            and (consume_floor > 0.0 or limit_grid)
+                            and not preserve
+                        )
+                        start_values.append(minimum_start)
+                        floor_values.append(consume_floor)
+                        stop_values.append(stop_at_floor_value)
+                        preserve_values.append(preserve)
+                        limit_values.append(limit_grid)
+                        solar_exception_values.append(solar_exception)
+                        solar_reserve_values.append(solar_reserve_kw)
+                        source_values.append(source)
+
+                    power_by_slot = power_values
+                    allow_grid = grid_values
+                    allow_solar = solar_values
+                    allow_battery = battery_values
+                    min_start_soc = start_values
+                    battery_floor_soc = floor_values
+                    stop_at_floor = stop_values
+                    preserve_home_battery = preserve_values
+                    limit_grid_import = limit_values
+                    allow_min_start_solar_exception = solar_exception_values
+                    solar_battery_reserve_kw = solar_reserve_values
+                    window_sources = source_values
+                    if (
+                        power_values
+                        and str(getattr(state, "last_decision", "")).lower()
+                        in {"away", "unplugged"}
+                    ):
+                        # Keep future demand protected: an away/unplugged car
+                        # can return before its deadline. Only the current slot
+                        # is known to be non-executable; the next rolling solve
+                        # will refresh this gate from live availability.
+                        power_values[0] = 0.0
+                        grid_values[0] = False
+                        solar_values[0] = False
+                        battery_values[0] = False
+                        source_values[0] = "unavailable_now"
+                if power_by_slot is not None:
+                    def _policy_at(index: int) -> dict[str, Any]:
+                        source = str(window_sources[index] or "")
+                        power = round(float(power_by_slot[index] or 0.0), 3)
+                        return {
+                            "window_source": source,
+                            "max_power_kw": power,
+                            "allow_grid": bool(allow_grid[index]),
+                            "allow_solar": bool(allow_solar[index]),
+                            "allow_battery": bool(allow_battery[index]),
+                            "min_start_soc_pct": round(
+                                float(min_start_soc[index]) * 100, 1
+                            ),
+                            "battery_floor_soc_pct": round(
+                                float(battery_floor_soc[index]) * 100, 1
+                            ),
+                            "stop_at_battery_floor": bool(
+                                stop_at_floor[index]
+                            ),
+                            "preserve_home_battery": bool(
+                                preserve_home_battery[index]
+                            ),
+                            "limit_grid_import": bool(
+                                limit_grid_import[index]
+                            ),
+                            "constraint_reason": (
+                                "eligible"
+                                if power > 1e-9
+                                else source or "outside_smart_schedule_window"
+                            ),
+                        }
+
+                    segments: list[dict[str, Any]] = []
+                    segment_start = 0
+                    previous = _policy_at(0)
+                    for index in range(1, len(schedule_timestamps) + 1):
+                        current = (
+                            _policy_at(index)
+                            if index < len(schedule_timestamps)
+                            else None
+                        )
+                        if current == previous:
+                            continue
+                        if (
+                            previous["max_power_kw"] > 0
+                            or previous["window_source"]
+                        ):
+                            end_time = (
+                                schedule_timestamps[index]
+                                if index < len(schedule_timestamps)
+                                else schedule_timestamps[-1]
+                                + (
+                                    schedule_timestamps[-1]
+                                    - schedule_timestamps[-2]
+                                    if len(schedule_timestamps) > 1
+                                    else timedelta(minutes=5)
+                                )
+                            )
+                            segments.append(
+                                {
+                                    "start": schedule_timestamps[
+                                        segment_start
+                                    ].isoformat(),
+                                    "end": end_time.isoformat(),
+                                    **previous,
+                                }
+                            )
+                        segment_start = index
+                        previous = current
+                    policy_diagnostics[str(vehicle_id)] = {
+                        "current": _policy_at(0),
+                        "segments": segments,
+                    }
                 plans.append(
                     ev_plan_from_demand(
                         vehicle_id=str(vehicle_id),
@@ -6946,11 +7310,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         charger_power_kw=charger_power_kw,
                         schedule_timestamps=schedule_timestamps,
                         deadline=deadline,
+                        charge_efficiency=charge_efficiency,
                         min_power_kw=(
                             float(getattr(settings, "min_charge_amps", 0) or 0)
                             * float(getattr(settings, "voltage", 240) or 240)
                             * int(getattr(settings, "phases", 1) or 1)
                             / 1000.0
+                        ),
+                        max_power_by_slot_kw=power_by_slot,
+                        allow_grid=allow_grid,
+                        allow_solar=allow_solar,
+                        allow_battery=allow_battery,
+                        min_start_soc=min_start_soc,
+                        battery_floor_soc=battery_floor_soc,
+                        stop_at_battery_floor=stop_at_floor,
+                        preserve_home_battery=preserve_home_battery,
+                        limit_grid_import=limit_grid_import,
+                        allow_min_start_solar_exception=(
+                            allow_min_start_solar_exception
+                        ),
+                        solar_battery_reserve_kw=solar_battery_reserve_kw,
+                        window_source=window_sources,
+                        initially_charging=bool(
+                            getattr(state, "is_charging", False)
                         ),
                     )
                 )
@@ -6960,7 +7342,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # window where only one car would really charge, and had no
             # per-vehicle identity to publish.
             plans = [plan for plan in plans if plan is not None]
-            return plans or None
+            self._last_ev_optimizer_policy = policy_diagnostics or None
+            # ``[]`` is an intentional sentinel: a valid Smart Schedule was
+            # evaluated but every managed EV slot is currently blocked. The
+            # caller must suppress the legacy fixed-load overlay in that case
+            # rather than resurrecting those rejected windows.
+            return plans
         except Exception as err:
             # Keep the guard -- a broken EV plan must not stop the solve -- but
             # not at debug level: this swallowed a plain TypeError for every
@@ -14237,47 +14624,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if w_end <= now:
                     continue
 
-                plan_priority = getattr(plan, "priority", None)
-                if plan_priority is None:
-                    priority_getter = getattr(
-                        settings,
-                        "get_effective_priority",
-                        None,
-                    )
-                    plan_priority = (
-                        priority_getter(w_start.weekday())
-                        if callable(priority_getter)
-                        else getattr(settings, "priority", None)
-                    )
-                max_grid_price_cents = getattr(
-                    plan,
-                    "max_grid_price_cents",
-                    None,
-                )
-                if max_grid_price_cents is None:
-                    max_price_getter = getattr(
-                        settings,
-                        "get_effective_max_grid_price",
-                        None,
-                    )
-                    max_grid_price_cents = (
-                        max_price_getter(w_start.weekday())
-                        if callable(max_price_getter)
-                        else getattr(settings, "max_grid_price_cents", None)
-                    )
-                if not is_smart_schedule_grid_price_allowed(
-                    source=getattr(window, "source", ""),
-                    price_cents=getattr(window, "price_cents_kwh", None),
-                    max_grid_price_cents=max_grid_price_cents,
-                    priority=plan_priority,
-                ):
-                    _LOGGER.debug(
-                        "EV load overlay: skipping %s plan window above its "
-                        "Smart Schedule grid price limit",
-                        vehicle_id,
-                    )
-                    continue
-
                 power_w = window.estimated_power_kw * 1000
                 if configured_power_w and configured_power_w > 0:
                     if power_w > configured_power_w:
@@ -14299,6 +14645,54 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         else interval_start
                         + timedelta(minutes=interval_minutes)
                     )
+                    local_weekday = interval_start.astimezone(
+                        dt_util.DEFAULT_TIME_ZONE
+                    ).weekday()
+                    priority_getter = getattr(
+                        settings,
+                        "get_effective_priority",
+                        None,
+                    )
+                    slot_priority = (
+                        priority_getter(local_weekday)
+                        if callable(priority_getter)
+                        else getattr(
+                            settings,
+                            "priority",
+                            getattr(plan, "priority", None),
+                        )
+                    )
+                    max_price_getter = getattr(
+                        settings,
+                        "get_effective_max_grid_price",
+                        None,
+                    )
+                    slot_max_grid_price_cents = (
+                        max_price_getter(local_weekday)
+                        if callable(max_price_getter)
+                        else getattr(
+                            settings,
+                            "max_grid_price_cents",
+                            getattr(plan, "max_grid_price_cents", None),
+                        )
+                    )
+                    if not is_smart_schedule_grid_price_allowed(
+                        source=getattr(window, "source", ""),
+                        price_cents=getattr(window, "price_cents_kwh", None),
+                        max_grid_price_cents=slot_max_grid_price_cents,
+                        priority=slot_priority,
+                    ):
+                        continue
+                    planner = getattr(executor, "planner", None)
+                    demand_blocked = getattr(
+                        planner, "_is_grid_charging_blocked_at", None
+                    )
+                    if (
+                        str(getattr(window, "source", "")).startswith("grid")
+                        and callable(demand_blocked)
+                        and demand_blocked(interval_start)
+                    ):
+                        continue
                     overlap_start = max(w_start, interval_start)
                     overlap_end = min(w_end, interval_end)
                     overlap_seconds = (
@@ -16192,6 +16586,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         timestamps = api_response.get("timestamps", [])
         n = len(timestamps)
         charge_w = api_response.get("charge_w", [])
+        ev_charging_w = api_response.get("ev_charging_w", [])
         consume_w = api_response.get("battery_consume_w", [])
         export_w = api_response.get("battery_export_w", [])
         display_import: list[float] = []
@@ -16230,6 +16625,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     0.0,
                     float(self._last_load_forecast[idx] or 0.0) * 1000.0,
                 )
+                # The load forecast is deliberately house-only.  The
+                # schedule's EV series is the other half of the canonical
+                # load contract and must be present before rebuilding display
+                # grid flows, not added later as a chart-only overlay.
+                ev_load_w = (
+                    max(0.0, float(ev_charging_w[idx] or 0.0))
+                    if idx < len(ev_charging_w)
+                    else 0.0
+                )
+                load_w += ev_load_w
                 display_export.append(
                     round(
                         max(0.0, solar_w + battery_export - load_w - battery_charge),
@@ -16575,6 +16980,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data["planned_ev_load_forecast_w"] = self._last_planned_ev_load_forecast_w
             data["planned_ev_load_peak_kw"] = max(planned_kw) if planned_kw else 0.0
             data["planned_ev_load_kwh"] = sum(planned_kw) * dt_h
+        ev_optimizer_policy = getattr(self, "_last_ev_optimizer_policy", None)
+        if ev_optimizer_policy:
+            data["ev_optimizer_policy_by_vehicle"] = ev_optimizer_policy
 
         # Use actual tariff prices for display (not LP-adjusted values)
         disp_import = self._last_display_import_prices or self._last_import_prices
@@ -17088,6 +17496,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 sum(self._last_planned_ev_load_forecast_w) / 1000.0 * dt_h,
                 3,
             )
+        ev_optimizer_policy = getattr(self, "_last_ev_optimizer_policy", None)
+        if ev_optimizer_policy:
+            data["ev_optimizer_policy_by_vehicle"] = ev_optimizer_policy
 
         # Add daily cost breakdown (actual + predicted remaining)
         pred_remaining, baseline_remaining = self._get_predicted_cost_to_midnight()
@@ -17222,6 +17633,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 ev_power[idx] = w_power
                 if any(v > 0 for v in ev_power):
                     api_response["ev_charging_w"] = ev_power
+            source_by_vehicle = getattr(
+                self, "_last_ev_source_by_vehicle_w", None
+            )
+            if source_by_vehicle:
+                api_response["ev_charging_source_by_vehicle_w"] = {
+                    vehicle_id: {
+                        source: list(series[:n_sched_pts])
+                        for source, series in sources.items()
+                    }
+                    for vehicle_id, sources in source_by_vehicle.items()
+                }
+            if ev_optimizer_policy:
+                api_response["ev_optimizer_policy_by_vehicle"] = (
+                    ev_optimizer_policy
+                )
 
             projection_payload = getattr(
                 self, "_last_price_level_projection", None
