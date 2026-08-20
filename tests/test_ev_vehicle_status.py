@@ -2637,3 +2637,99 @@ def test_display_snapshot_direct_meter_keeps_distinct_missing_ev_incomplete(
     assert observed.unavailable_active_keys == ("ocpp:garage:1",)
     assert tesla_coordinator.data["load_power"] is None
     assert tesla_coordinator.data["home_load_normalization_quality"] == "incomplete"
+
+
+def _dual_registered_devices():
+    """One car registered by two Tesla integrations, plus a Powerwall.
+
+    Exactly the shape of a site running Tesla Fleet and Teslemetry side by
+    side: both publish a device for the same VIN, and Teslemetry additionally
+    publishes the energy site under a non-VIN identifier.
+    """
+    return {
+        "device-fleet": SimpleNamespace(
+            id="device-fleet",
+            name="TESSY",
+            name_by_user=None,
+            identifiers={("tesla_fleet", "LRWYHCEK3PC907290")},
+        ),
+        "device-teslemetry": SimpleNamespace(
+            id="device-teslemetry",
+            name="TESSY",
+            name_by_user=None,
+            identifiers={("teslemetry", "LRWYHCEK3PC907290")},
+        ),
+        "device-second-car": SimpleNamespace(
+            id="device-second-car",
+            name="W3RT1E",
+            name_by_user=None,
+            identifiers={("tesla_fleet", "LRWYHCEK8TC828420")},
+        ),
+        "device-powerwall": SimpleNamespace(
+            id="device-powerwall",
+            name="POWERSYNC",
+            name_by_user="18 Parkside Drive-Teslemetry",
+            identifiers={("teslemetry", "2252397099082264")},
+        ),
+    }
+
+
+def test_one_car_registered_by_two_integrations_is_one_vehicle():
+    """Two provider rows for the same VIN are one car, not two loadpoints.
+
+    Running Tesla Fleet alongside Teslemetry registers each vehicle twice.
+    Discovery yielded both rows, so a two-car household reported three
+    vehicles and the duplicate became a phantom Smart Schedule loadpoint.
+    """
+    power_sync = _power_sync_module()
+    planner = importlib.import_module(
+        "power_sync.automations.ev_charging_planner"
+    )
+    hass = _Hass([], {}, _dual_registered_devices())
+
+    vehicles = asyncio.run(
+        planner.discover_all_tesla_vehicles(hass, _Entry())
+    )
+
+    vins = sorted(vehicle["vin"] for vehicle in vehicles)
+    assert vins == ["LRWYHCEK3PC907290", "LRWYHCEK8TC828420"]
+
+
+def test_a_powerwall_never_supplies_an_ev_battery_level():
+    """A Tesla-domain device with no VIN is not a vehicle.
+
+    The energy site registers under the same integration as the cars but with
+    a non-VIN identifier. It was mapped in with an empty VIN, which then read
+    as "matches every vehicle", so the home battery's state of charge could be
+    returned as a car's SoC.
+    """
+    power_sync = _power_sync_module()
+    planner = importlib.import_module(
+        "power_sync.automations.ev_charging_planner"
+    )
+    devices = _dual_registered_devices()
+    states = [
+        _State("sensor.18_parkside_drive_teslemetry_battery_charged", "37.619"),
+    ]
+    hass = _Hass(
+        states,
+        {
+            "sensor.18_parkside_drive_teslemetry_battery_charged": _entity(
+                "sensor.18_parkside_drive_teslemetry_battery_charged",
+                "device-powerwall",
+            ),
+        },
+        devices,
+    )
+
+    executor = planner.PriceLevelChargingExecutor.__new__(
+        planner.PriceLevelChargingExecutor
+    )
+    executor.hass = hass
+    executor.config_entry = _Entry()
+    executor._domain = "power_sync"
+
+    soc = asyncio.run(executor._get_ev_soc("LRWYHCEK3PC907290"))
+
+    assert soc != 37, "the home battery's SoC was returned as the car's"
+    assert soc is None

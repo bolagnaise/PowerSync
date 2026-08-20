@@ -928,18 +928,36 @@ async def discover_all_tesla_vehicles(
     # controllable by the configured provider and must not become phantom
     # Smart Schedule loadpoints.
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        # A car registered by two Tesla integrations at once -- Fleet API and
+        # Teslemetry side by side, say -- has one device row per integration
+        # but only one VIN. The VIN is the car, so collapse the rows: yielding
+        # both made a two-car household report three vehicles, and the
+        # duplicate became a phantom Smart Schedule loadpoint. Every row's
+        # device id is kept in ``device_ids`` so entity scans still see what
+        # each integration contributes.
+        by_vin: Dict[str, Dict[str, Any]] = {}
         for device, device_vin in _iter_tesla_vehicle_devices(device_registry):
-            vehicles.append({
+            merged = by_vin.get(device_vin)
+            if merged is not None:
+                merged["device_ids"].append(device.id)
+                _LOGGER.debug(
+                    f"Tesla vehicle {device_vin} is also registered as device "
+                    f"{device.id}; merged into the existing vehicle"
+                )
+                continue
+            by_vin[device_vin] = {
                 "vin": device_vin,
                 "name": device.name or device.name_by_user or device_vin,
                 "device_id": device.id,
                 "device": device,
+                "device_ids": [device.id],
                 "source": "fleet_api",
                 "ble_prefix": None,
-            })
+            }
             _LOGGER.debug(
                 f"Discovered Tesla vehicle: {device.name} (VIN: {device_vin})"
             )
+        vehicles.extend(by_vin.values())
 
     # Method 2 — ESPHome Tesla BLE fallback. BLE-only setups don't register a
     # Tesla-domain device in the HA registry (the ESPHome bridge registers under
@@ -9243,13 +9261,15 @@ class PriceLevelChargingExecutor:
                         domain = identifier[0]
                         id_str = str(identifier[1])
                         if domain in TESLA_INTEGRATIONS:
-                            # Check if identifier is a VIN (17 chars, not all digits)
+                            # Only a 17-char VIN identifies a vehicle. The
+                            # Powerwall and the Wall Connectors register under
+                            # these same integrations with non-VIN identifiers;
+                            # they used to be mapped in with an empty VIN,
+                            # which then read as "matches every vehicle" below
+                            # and let the home battery's state of charge be
+                            # returned as a car's SoC.
                             if len(id_str) == 17 and not id_str.isdigit():
                                 tesla_device_map[device.id] = id_str
-                            else:
-                                # Non-VIN identifier, use device.id as fallback
-                                if device.id not in tesla_device_map:
-                                    tesla_device_map[device.id] = ""
                             break
 
             # Search for battery level sensors
@@ -9259,7 +9279,7 @@ class PriceLevelChargingExecutor:
 
                 # If specific VIN requested, skip other vehicles
                 device_vin = tesla_device_map.get(entity.device_id, "")
-                if vehicle_vin is not None and device_vin and device_vin != vehicle_vin:
+                if vehicle_vin is not None and device_vin != vehicle_vin:
                     continue
 
                 entity_id = entity.entity_id

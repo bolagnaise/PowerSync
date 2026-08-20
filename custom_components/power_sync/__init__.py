@@ -14488,6 +14488,11 @@ class EVVehiclesView(HomeAssistantView):
                     vin = disc.get("vin")
                     if device is None or vin is None:
                         continue
+                    # One car can be registered by more than one Tesla
+                    # integration. Discovery merges those rows into a single
+                    # vehicle, so scan every device it was merged from -- the
+                    # telemetry a car exposes is split across them.
+                    device_ids = set(disc.get("device_ids") or ()) or {device.id}
                     vehicle_id += 1
 
                     battery_level = None
@@ -14501,7 +14506,7 @@ class EVVehiclesView(HomeAssistantView):
                     device_entities = []
                     sensor_entities = []
                     for entity in entity_registry.entities.values():
-                        if entity.device_id != device.id:
+                        if entity.device_id not in device_ids:
                             continue
                         device_entities.append(entity.entity_id)
 
