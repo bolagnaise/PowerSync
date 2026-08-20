@@ -1191,6 +1191,59 @@ def test_tesla_physical_start_rejects_fresh_state_with_stale_draw():
     assert confirmed[0] is False
 
 
+@pytest.mark.parametrize(
+    ("physical_key_vin", "power_kw", "observed_offset", "expected"),
+    [
+        ("target", 1.6, 1, True),
+        ("target", 1.6, -1, False),
+        ("other", 7.2, 1, False),
+        ("target", 0.58, 1, False),
+    ],
+)
+def test_tesla_physical_start_exact_wall_connector_power_is_fail_closed(
+    physical_key_vin,
+    power_kw,
+    observed_offset,
+    expected,
+):
+    hass, vin_a, vin_b = _tesla_confirmation_hass()
+    command_started_at = datetime.now(timezone.utc)
+    baseline = actions._tesla_physical_charging_snapshot(
+        hass,
+        _Entry(),
+        vin_a,
+        {},
+    )
+    keyed_vin = vin_a if physical_key_vin == "target" else vin_b
+    physical_key = "vehicle:" + keyed_vin.lower()
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+        data={
+            "ev_power_fallback_by_physical_key": {
+                physical_key: power_kw,
+            },
+            "last_update": command_started_at
+            + timedelta(seconds=observed_offset),
+        }
+    )
+
+    confirmed, evidence = asyncio.run(
+        actions._wait_for_tesla_physical_start(
+            hass,
+            _Entry(),
+            vin_a,
+            {},
+            baseline,
+            command_started_at,
+            timeout_seconds=0,
+        )
+    )
+
+    assert confirmed is expected
+    if expected:
+        assert physical_key in evidence
+        assert "1.60kW" in evidence
+
+
 def test_tesla_physical_snapshot_prefers_fresh_stopped_provider():
     """A stale cloud charging sample must not suppress a required restart."""
     hass, vin_a, _vin_b = _tesla_confirmation_hass()

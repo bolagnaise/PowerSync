@@ -591,6 +591,146 @@ def test_both_provider_ble_bridge_coalesces_without_hiding_fleet_only_vehicle():
     assert vehicles[1]["ev_power_kw"] == 2.4
 
 
+def test_overlapping_ble_prefixes_keep_both_vehicle_observations():
+    """A longer BLE prefix must not be hidden by a shorter substring prefix."""
+    power_sync = _power_sync_module()
+    tessy_vin = "5YJTEST0000000001"
+    w3_vin = "5YJTEST0000000002"
+    stale = datetime(2026, 8, 20, 3, 28, tzinfo=timezone.utc)
+    fresh = stale + timedelta(seconds=30)
+    short_prefix = "teslable"
+    long_prefix = "tesla_ble_second_car"
+    states = [
+        _State("sensor.tessy_battery_level", "62", last_updated=stale),
+        _State("sensor.tessy_charging_state", "charging", last_updated=stale),
+        _State("binary_sensor.tessy_charge_cable", "on", last_updated=stale),
+        _State(
+            "sensor.tessy_charger_power",
+            "7.2",
+            {"unit_of_measurement": "kW"},
+            last_updated=stale,
+        ),
+        _State("sensor.w3_battery_level", "70", last_updated=stale),
+        _State("sensor.w3_charging_state", "charging", last_updated=stale),
+        _State("binary_sensor.w3_charge_cable", "on", last_updated=stale),
+        _State(
+            "sensor.w3_charger_power",
+            "7.2",
+            {"unit_of_measurement": "kW"},
+            last_updated=stale,
+        ),
+        _State(f"binary_sensor.{short_prefix}_status", "on", last_updated=fresh),
+        _State(
+            f"sensor.{short_prefix}_charging_state",
+            "Charging",
+            last_updated=fresh,
+        ),
+        _State(
+            f"sensor.{short_prefix}_charge_power",
+            "7.2",
+            {"unit_of_measurement": "kW"},
+            last_updated=fresh,
+        ),
+        _State(f"binary_sensor.{long_prefix}_status", "on", last_updated=fresh),
+        _State(
+            f"sensor.{long_prefix}_charging_state",
+            "Disconnected",
+            last_updated=fresh,
+        ),
+        _State(
+            f"binary_sensor.{long_prefix}_charge_flap",
+            "on",
+            last_updated=fresh,
+        ),
+        _State(
+            f"sensor.{long_prefix}_charge_power",
+            "0",
+            {"unit_of_measurement": "kW"},
+            last_updated=fresh,
+        ),
+    ]
+    registry_entities = {
+        state.entity_id: _entity(
+            state.entity_id,
+            "tessy-device" if "tessy_" in state.entity_id else "w3-device",
+        )
+        for state in states[:8]
+    }
+    hass = _Hass(
+        states,
+        registry_entities,
+        {
+            "tessy-device": SimpleNamespace(
+                id="tessy-device",
+                name="TESSY",
+                identifiers={("teslemetry", tessy_vin)},
+            ),
+            "w3-device": SimpleNamespace(
+                id="w3-device",
+                name="W3",
+                identifiers={("tesla_fleet", w3_vin)},
+            ),
+        },
+    )
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": power_sync.EV_PROVIDER_BOTH,
+            "tesla_ble_entity_prefix": f"{short_prefix},{long_prefix}",
+            "tesla_ble_vehicle_mapping": (
+                f"{tessy_vin}={short_prefix},{w3_vin}={long_prefix}"
+            ),
+        },
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    by_id = {vehicle["vehicle_id"]: vehicle for vehicle in vehicles}
+
+    assert set(by_id) == {tessy_vin, w3_vin}
+    assert by_id[tessy_vin]["ev_power_kw"] == 7.2
+    assert by_id[tessy_vin]["is_charging"] is True
+    assert by_id[w3_vin]["ev_power_kw"] == 0.0
+    assert by_id[w3_vin]["is_connected"] is False
+    assert by_id[w3_vin]["is_charging"] is False
+
+
+def test_ble_disconnected_state_overrides_open_charge_flap():
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    prefix = "garage_ble"
+    hass = _Hass([
+        _State(f"binary_sensor.{prefix}_status", "on", last_updated=now),
+        _State(
+            f"sensor.{prefix}_charging_state",
+            "Disconnected",
+            last_updated=now,
+        ),
+        _State(
+            f"binary_sensor.{prefix}_charge_flap",
+            "on",
+            last_updated=now,
+        ),
+        _State(
+            f"sensor.{prefix}_charge_power",
+            "0",
+            {"unit_of_measurement": "kW"},
+            last_updated=now,
+        ),
+    ])
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"tesla_ble_entity_prefix": prefix},
+    )
+
+    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+
+    assert vehicle["is_connected"] is False
+    assert vehicle["is_charging"] is False
+    assert vehicle["ev_power_kw"] == 0.0
+
+
 def test_autodetected_ble_bridge_pairs_with_single_fleet_vehicle_and_commands():
     power_sync = _power_sync_module()
     vin = "5YJTEST0000000001"

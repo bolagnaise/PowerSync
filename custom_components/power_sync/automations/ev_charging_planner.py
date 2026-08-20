@@ -528,14 +528,9 @@ def _tesla_ble_plugged_in_status(
     )
     from .loadpoint_status import charging_state_plugged_status
 
-    charge_flap = hass.states.get(TESLA_BLE_BINARY_CHARGE_FLAP.format(prefix=prefix))
-    if charge_flap:
-        if charge_flap.state == "on":
-            _LOGGER.debug("Tesla BLE %s: charge flap open -> plugged in", prefix)
-            return True
-        if charge_flap.state == "off":
-            _LOGGER.debug("Tesla BLE %s: charge flap closed -> not plugged in", prefix)
-            return False
+    if _tesla_ble_charge_power_kw(hass, prefix) > 0.05:
+        _LOGGER.debug("Tesla BLE %s: charge power present -> plugged in", prefix)
+        return True
 
     charging_state = hass.states.get(TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=prefix))
     if _valid_state(charging_state):
@@ -549,9 +544,22 @@ def _tesla_ble_plugged_in_status(
             )
             return plugged
 
-    if _tesla_ble_charge_power_kw(hass, prefix) > 0.05:
-        _LOGGER.debug("Tesla BLE %s: charge power present -> plugged in", prefix)
-        return True
+    charge_flap = hass.states.get(TESLA_BLE_BINARY_CHARGE_FLAP.format(prefix=prefix))
+    if charge_flap:
+        if charge_flap.state == "on":
+            _LOGGER.debug(
+                "Tesla BLE %s: no definitive charging state; charge flap "
+                "open -> plugged in",
+                prefix,
+            )
+            return True
+        if charge_flap.state == "off":
+            _LOGGER.debug(
+                "Tesla BLE %s: no definitive charging state; charge flap "
+                "closed -> not plugged in",
+                prefix,
+            )
+            return False
 
     charger = hass.states.get(TESLA_BLE_SWITCH_CHARGER.format(prefix=prefix))
     if charger and charger.state == "on":
@@ -4455,6 +4463,7 @@ class AutoScheduleExecutor:
             str, Tuple[str, float]
         ] = {}
         self._start_failure_state: Dict[str, Tuple[int, float]] = {}
+        self._start_in_flight: set[str] = set()
 
     def _resolve_vehicle_vin(self, vehicle_id: str) -> Optional[str]:
         """Resolve sequential vehicle_id to actual VIN or BLE identifier.
@@ -7095,7 +7104,60 @@ class AutoScheduleExecutor:
         source: str,
         force_max_rate: bool = False,
     ) -> bool:
-        """Start dynamic charging for the vehicle."""
+        """Coalesce one full dynamic start transaction per physical vehicle."""
+        failure = getattr(self, "_start_failure_state", {}).get(vehicle_id)
+        if failure:
+            _count, retry_at = failure
+            retry_in = retry_at - time.monotonic()
+            if retry_in > 0:
+                _LOGGER.debug(
+                    "Auto-schedule: Start retry for %s deferred for %.0fs",
+                    vehicle_id,
+                    retry_in,
+                )
+                return False
+
+        resolved_vehicle_id = self._resolve_vehicle_vin(vehicle_id)
+        physical_vehicle_id = _canonical_auto_schedule_vehicle_id(
+            self.hass,
+            self.config_entry,
+            resolved_vehicle_id or vehicle_id,
+            getattr(self, "_fleet_vins", ()),
+            getattr(self, "_resolved_ble_prefixes", None),
+        )
+        starts_in_flight = getattr(self, "_start_in_flight", None)
+        if starts_in_flight is None:
+            starts_in_flight = set()
+            self._start_in_flight = starts_in_flight
+        if physical_vehicle_id in starts_in_flight:
+            _LOGGER.debug(
+                "Auto-schedule: Start already in flight for %s; deferring %s",
+                physical_vehicle_id,
+                vehicle_id,
+            )
+            return False
+
+        starts_in_flight.add(physical_vehicle_id)
+        try:
+            return await self._start_charging_transaction(
+                vehicle_id,
+                settings,
+                state,
+                source,
+                force_max_rate=force_max_rate,
+            )
+        finally:
+            starts_in_flight.discard(physical_vehicle_id)
+
+    async def _start_charging_transaction(
+        self,
+        vehicle_id: str,
+        settings: AutoScheduleSettings,
+        state: AutoScheduleState,
+        source: str,
+        force_max_rate: bool = False,
+    ) -> bool:
+        """Start dynamic charging after per-vehicle admission succeeds."""
         from .actions import (
             _action_start_ev_charging_dynamic,
             _resolve_max_grid_import_kw,

@@ -1170,6 +1170,12 @@ def _vehicle_matches_identifier(vehicle: dict, identifier: Any) -> bool:
     return False
 
 
+def _vehicle_has_exact_identifier(vehicle: dict, identifier: Any) -> bool:
+    """Return whether a vehicle exposes one exact normalized identifier."""
+    key = _vehicle_identity_key(identifier)
+    return bool(key and key in _vehicle_identity_values(vehicle))
+
+
 def _find_vehicle_status(vehicles: list[dict], *identifiers: Any) -> dict | None:
     for identifier in identifiers:
         for vehicle in vehicles:
@@ -2079,7 +2085,14 @@ def _get_ev_vehicles_status(hass, entry) -> list:
     }
     for prefix in ble_prefixes:
         ble_vehicle_id = f"ble_{prefix}"
-        if any(_vehicle_matches_identifier(vehicle, ble_vehicle_id) for vehicle in vehicles):
+        # Synthetic BLE IDs are complete identities, not embedded VIN payloads.
+        # Fuzzy substring matching here can collapse two configured prefixes
+        # when one prefix contains the other and suppress the second vehicle's
+        # fresh disconnected/zero-power observation.
+        if any(
+            _vehicle_has_exact_identifier(vehicle, ble_vehicle_id)
+            for vehicle in vehicles
+        ):
             continue
 
         if get_tesla_ble_status_state(hass, prefix) is None:
@@ -2091,6 +2104,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         ble_state_observed_at = None
         ble_power_observed_at = None
         ble_connected_observed_at = None
+        charging_state_plugged = None
 
         charge_state = hass.states.get(TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=prefix))
         if charge_state and charge_state.state not in ("unknown", "unavailable"):
@@ -2100,6 +2114,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             )
             plugged = charging_state_plugged_status(charge_state.state)
             if plugged is not None:
+                charging_state_plugged = plugged
                 is_connected = plugged
                 ble_connected_observed_at = _latest_ev_observed_at(
                     ble_connected_observed_at,
@@ -2107,7 +2122,10 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 )
 
         charge_flap = hass.states.get(TESLA_BLE_BINARY_CHARGE_FLAP.format(prefix=prefix))
-        if charge_flap:
+        # Charge-port flap position is only a fallback hint. An explicit
+        # charging-state plug semantic is authoritative when the flap remains
+        # open after the cable has been removed.
+        if charge_flap and charging_state_plugged is None:
             if charge_flap.state == "on":
                 is_connected = True
                 ble_connected_observed_at = _latest_ev_observed_at(
@@ -2131,6 +2149,10 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         if power_kw > 0:
             ev_power_kw = power_kw
             is_connected = True
+            ble_connected_observed_at = _latest_ev_observed_at(
+                ble_connected_observed_at,
+                ble_power_observed_at,
+            )
 
         bridge_vehicle_id = paired_prefixes.get(prefix)
         if (

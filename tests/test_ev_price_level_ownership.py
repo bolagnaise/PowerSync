@@ -5685,6 +5685,77 @@ def test_auto_schedule_unconfirmed_tesla_start_replans_and_uses_backoff(
     assert fake_actions._action_start_ev_charging_dynamic.await_count == 1
 
 
+def test_auto_schedule_coalesces_same_vehicle_start_but_not_other_vehicle(
+    monkeypatch,
+    fake_actions,
+):
+    vin_b = "5YJTEST00000000B2"
+    entered = {VIN: asyncio.Event(), vin_b: asyncio.Event()}
+    release = asyncio.Event()
+
+    async def pending_start(_hass, _entry, params, context=None):
+        entered[params["vehicle_vin"]].set()
+        await release.wait()
+        return False
+
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(
+        side_effect=pending_start
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: SimpleNamespace(weekday=lambda: 0),
+    )
+    executor = ev_planner.AutoScheduleExecutor(
+        _FakeHass(),
+        _FakeConfigEntry(),
+        planner=SimpleNamespace(),
+    )
+    settings_a = ev_planner.AutoScheduleSettings(vehicle_id=VIN)
+    settings_b = ev_planner.AutoScheduleSettings(vehicle_id=vin_b)
+    state_a = ev_planner.AutoScheduleState(vehicle_id=VIN)
+    state_b = ev_planner.AutoScheduleState(vehicle_id=vin_b)
+
+    async def run_scenario():
+        first_a = asyncio.create_task(
+            executor._start_charging(
+                VIN,
+                settings_a,
+                state_a,
+                "grid_deadline",
+            )
+        )
+        await entered[VIN].wait()
+
+        duplicate_a = await executor._start_charging(
+            VIN,
+            settings_a,
+            state_a,
+            "grid_deadline",
+        )
+        first_b = asyncio.create_task(
+            executor._start_charging(
+                vin_b,
+                settings_b,
+                state_b,
+                "grid_deadline",
+            )
+        )
+        await entered[vin_b].wait()
+        release.set()
+        return duplicate_a, await first_a, await first_b
+
+    duplicate_a, first_a, first_b = asyncio.run(run_scenario())
+
+    assert duplicate_a is False
+    assert first_a is False
+    assert first_b is False
+    assert [
+        call.args[2]["vehicle_vin"]
+        for call in fake_actions._action_start_ev_charging_dynamic.await_args_list
+    ] == [VIN, vin_b]
+
+
 def test_auto_schedule_rate_update_is_blocked_when_vehicle_moved_away(
     monkeypatch,
     fake_actions,
@@ -6073,6 +6144,33 @@ def test_tesla_ble_plug_detection_uses_charge_flap():
     assert asyncio.run(
         ev_planner.get_ev_location(hass, entry, vehicle_vin="ble_ble_phoenix")
     ) == "home"
+
+
+def test_tesla_ble_disconnected_state_overrides_open_charge_flap():
+    hass = _FakeHass()
+    hass.states = _FakeStates({
+        "binary_sensor.ble_phoenix_status": "on",
+        "switch.ble_phoenix_charger": "off",
+        "binary_sensor.ble_phoenix_charge_flap": "on",
+        "sensor.ble_phoenix_charging_state": "Disconnected",
+        "sensor.ble_phoenix_charge_power": "0",
+    })
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "ev_provider": "tesla_ble",
+            "tesla_ble_entity_prefix": "ble_phoenix",
+        },
+    )
+
+    assert asyncio.run(
+        ev_planner.is_ev_plugged_in(
+            hass,
+            entry,
+            vehicle_vin="ble_ble_phoenix",
+        )
+    ) is False
 
 
 def test_enabled_price_level_still_stops_external_high_price_charging(

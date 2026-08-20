@@ -94,6 +94,7 @@ PRE_CHARGE_WAKE_ENTITY_KEYS = (
 OCPP_MIN_CHARGE_AMPS = 6
 TESLA_UNKNOWN_CHARGER_SAFE_AMPS = 5
 TESLA_CONNECTION_CONFLICT_FRESHNESS_SECONDS = 60
+TESLA_MIN_CONFIRMED_CHARGING_POWER_KW = 1.4
 FULL_EV_SOC = 100
 SIGENERGY_EVDC_DEFAULT_POWER_LIMIT_KW = 25.0
 PRE_CHARGE_WAKE_DURATION_KEYS = (
@@ -1097,6 +1098,8 @@ def _tesla_physical_charging_snapshot(
     charging_observations: list[tuple[Optional[datetime], str, bool]] = []
     measurements: set[str] = set()
     fresh_measurements: set[str] = set()
+    direct_measurements: set[str] = set()
+    fresh_direct_measurements: set[str] = set()
 
     for entity_id in _tesla_start_confirmation_entity_ids(
         hass,
@@ -1156,6 +1159,53 @@ def _tesla_physical_charging_snapshot(
         ):
             fresh_measurements.add(measurement)
 
+    # Tesla's energy coordinator exposes Wall Connector readings by exact
+    # physical vehicle key. This is stronger start evidence than a lagging
+    # cloud charging-state sensor, but only when the sample is typed as power,
+    # is attributable to this exact VIN, exceeds viable charging draw, and was
+    # observed after the command. VIN-less connector totals are deliberately
+    # excluded from this safety-sensitive gate.
+    normalized_vin_key = re.sub(
+        r"[^a-z0-9]+",
+        "",
+        str(vehicle_vin or "").lower(),
+    )
+    if len(normalized_vin_key) == 17:
+        entry_data = (
+            getattr(hass, "data", {})
+            .get(DOMAIN, {})
+            .get(config_entry.entry_id, {})
+        )
+        coordinator = entry_data.get("tesla_coordinator")
+        coordinator_data = getattr(coordinator, "data", None)
+        if isinstance(coordinator_data, Mapping):
+            physical_key = f"vehicle:{normalized_vin_key}"
+            power_by_key = coordinator_data.get(
+                "ev_power_fallback_by_physical_key"
+            )
+            if isinstance(power_by_key, Mapping) and physical_key in power_by_key:
+                try:
+                    direct_power_kw = float(power_by_key[physical_key])
+                except (TypeError, ValueError, OverflowError):
+                    direct_power_kw = -1.0
+                if (
+                    math.isfinite(direct_power_kw)
+                    and direct_power_kw
+                    >= TESLA_MIN_CONFIRMED_CHARGING_POWER_KW
+                ):
+                    measurement = (
+                        f"tesla_coordinator:{physical_key}="
+                        f"{direct_power_kw:.2f}kW"
+                    )
+                    measurements.add(measurement)
+                    direct_measurements.add(measurement)
+                    if updated_after is not None and _datetime_is_after(
+                        coordinator_data.get("last_update"),
+                        updated_after,
+                    ):
+                        fresh_measurements.add(measurement)
+                        fresh_direct_measurements.add(measurement)
+
     # Fleet, Teslemetry, and a paired BLE bridge can all publish the same
     # vehicle's charging state at different cadences.  Treating those values
     # as a boolean OR lets an older cloud "charging" sample overrule a newer
@@ -1207,6 +1257,8 @@ def _tesla_physical_charging_snapshot(
         "charging": charging,
         "measurements": frozenset(measurements),
         "fresh_measurements": frozenset(fresh_measurements),
+        "direct_measurements": frozenset(direct_measurements),
+        "fresh_direct_measurements": frozenset(fresh_direct_measurements),
     }
 
 
@@ -1235,20 +1287,34 @@ async def _wait_for_tesla_physical_start(
             snapshot["measurements"] - baseline.get("measurements", frozenset())
         )
         measurement_refreshed = bool(snapshot["fresh_measurements"])
+        direct_physical_confirmation = bool(
+            snapshot.get("fresh_direct_measurements", frozenset())
+        )
         if (
-            snapshot["charging"]
-            and snapshot["measurements"]
-            and (
-                measurement_appeared
-                or measurement_refreshed
+            direct_physical_confirmation
+            or (
+                snapshot["charging"]
+                and snapshot["measurements"]
+                and (
+                    measurement_appeared
+                    or measurement_refreshed
+                )
             )
         ):
-            evidence = ", ".join(sorted(snapshot["measurements"]))
+            evidence_set = (
+                snapshot.get("fresh_direct_measurements", frozenset())
+                if direct_physical_confirmation
+                else snapshot["measurements"]
+            )
+            evidence = ", ".join(sorted(evidence_set))
             return True, evidence
 
         remaining = deadline - loop.time()
         if remaining <= 0:
-            return False, "no fresh VIN-scoped charging state and measured draw"
+            return False, (
+                "no fresh VIN-scoped charging state and measured draw or "
+                "fresh exact-VIN Wall Connector charging power"
+            )
         await asyncio.sleep(
             min(_TESLA_START_CONFIRMATION_POLL_SECONDS, remaining)
         )
