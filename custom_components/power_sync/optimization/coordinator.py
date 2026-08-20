@@ -7024,6 +7024,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 solar_forecast,
                 index,
             )
+            # A converted slot keeps its planned EV draw, and in
+            # self-consumption the inverter serves the car too.
+            if index < len(actions):
+                net_load_w += max(
+                    0.0,
+                    float(getattr(actions[index], "ev_charge_w", 0.0) or 0.0),
+                )
             if net_load_w <= 0 or max_discharge_w <= 0:
                 return 0.0
             if soc is None or capacity_wh <= 0:

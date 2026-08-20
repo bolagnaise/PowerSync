@@ -660,3 +660,176 @@ def test_combined_stages_are_cumulative(optimizer_module):
     combined = _staged_plans(optimizer_module, 24)
 
     assert combined.staged_requirements == ((10, 32.9), (23, 40.5))
+
+
+def _conservation_errors(result, kwargs, n):
+    """Per-slot power-balance error of the published plan, in kW.
+
+    grid_import - grid_export must equal (house load + EV draw) - solar
+    + battery_charge - battery_discharge. The LP enforces exactly this
+    balance, so any residual is introduced by post-solve rewriting.
+    """
+    errors = []
+    actions = result.schedule.actions
+    grid_import = [w / 1000.0 for w in (result.grid_import_w or [0] * n)]
+    grid_export = [w / 1000.0 for w in (result.grid_export_w or [0] * n)]
+    for t in range(n):
+        action = actions[t]
+        lhs = grid_import[t] - grid_export[t]
+        rhs = (
+            kwargs["load_forecast"][t]
+            + action.ev_charge_w / 1000.0
+            - kwargs["solar_forecast"][t]
+            + action.battery_charge_w / 1000.0
+            - action.battery_discharge_w / 1000.0
+        )
+        errors.append(lhs - rhs)
+    return errors
+
+
+def test_published_flows_conserve_energy_with_the_car(optimizer_module):
+    """The reconciled plan must balance with the EV it says it planned.
+
+    Post-solve passes recomputed grid flows, SOC and costs from
+    (solar, load) alone while the car's draw sat on the very actions they
+    were rewriting — so the published plan described a house with no car:
+    grid import missing the EV, and a battery serving the car clipped back
+    to house-only discharge with a flat SOC.
+    """
+    optimizer = _optimizer(optimizer_module)
+    kwargs = _kwargs()
+
+    result = optimizer.optimize(**kwargs, ev_plan=_ev_plan(optimizer_module))
+    reconciled = optimizer.reconcile_result_with_schedule(
+        result,
+        result.schedule,
+        import_prices=kwargs["import_prices"],
+        export_prices=kwargs["export_prices"],
+        solar=kwargs["solar_forecast"],
+        load=kwargs["load_forecast"],
+        initial_soc=kwargs["current_soc"],
+    )
+
+    ev_kwh = sum(
+        a.ev_charge_w / 1000.0 for a in reconciled.schedule.actions
+    )
+    assert ev_kwh > 1.0, "no EV draw survived reconciliation"
+    errors = _conservation_errors(reconciled, kwargs, 8)
+    worst = max(abs(e) for e in errors)
+    assert worst < 0.05, f"power balance broken by {worst:.2f} kW: {errors}"
+
+
+def test_battery_serving_the_car_keeps_its_discharge_and_soc(optimizer_module):
+    """A battery discharging into the car must not be clipped to house load.
+
+    Expensive grid all horizon and a nearly full battery: the LP serves the
+    car from the pack. In self-consumption the inverter physically does
+    exactly that — the car is home load. Reconciliation capped natural
+    discharge at (house - solar), erasing the car's share and restamping a
+    flat SOC over a battery that will really be draining hard.
+    """
+    optimizer = _optimizer(optimizer_module)
+    kwargs = _kwargs(cheap_slots=())          # every slot expensive
+    plan = _ev_plan(optimizer_module, energy_needed_kwh=10.0)
+
+    result = optimizer.optimize(**kwargs, ev_plan=plan)
+    # Re-solve context: battery starts high so discharge is the cheap source.
+    kwargs["current_soc"] = 0.90
+    result = optimizer.optimize(**kwargs, ev_plan=plan)
+    reconciled = optimizer.reconcile_result_with_schedule(
+        result,
+        result.schedule,
+        import_prices=kwargs["import_prices"],
+        export_prices=kwargs["export_prices"],
+        solar=kwargs["solar_forecast"],
+        load=kwargs["load_forecast"],
+        initial_soc=kwargs["current_soc"],
+    )
+
+    actions = reconciled.schedule.actions
+    ev_kwh = sum(a.ev_charge_w / 1000.0 for a in actions)
+    assert ev_kwh > 1.0
+    supplied_kwh = sum(
+        a.battery_discharge_w / 1000.0 for a in actions
+    ) + sum((w or 0.0) / 1000.0 for w in (reconciled.grid_import_w or []))
+    house_kwh = sum(kwargs["load_forecast"])
+    # Whoever supplies it, the car's energy has to come from somewhere.
+    assert supplied_kwh >= house_kwh + ev_kwh - 0.1
+    # And the SOC trajectory must reflect the drain, not a house-only hold.
+    socs = [a.soc for a in actions if a.soc is not None]
+    discharged_kwh = sum(a.battery_discharge_w / 1000.0 for a in actions)
+    if discharged_kwh > 1.0:
+        expected_drop = discharged_kwh / 0.95 / 40.0
+        assert socs[0] - socs[-1] >= expected_drop * 0.8
+
+
+def _fallback_conservation(result, kwargs, n):
+    """Conservation check for fallback paths, from the result's own flows."""
+    errors = []
+    actions = result.schedule.actions
+    for t in range(n):
+        action = actions[t]
+        lhs = (result.grid_import_w[t] - result.grid_export_w[t]) / 1000.0
+        rhs = (
+            kwargs["load_forecast"][t]
+            + action.ev_charge_w / 1000.0
+            - kwargs["solar_forecast"][t]
+            + action.battery_charge_w / 1000.0
+            - action.battery_discharge_w / 1000.0
+        )
+        errors.append(lhs - rhs)
+    return errors
+
+
+def test_the_greedy_fallback_balances_and_does_not_double_count(
+    optimizer_module,
+):
+    """Greedy folds the car into its placement load AND stamps ev_charge_w.
+
+    Once downstream physics re-adds the stamped draw, greedy must hand those
+    passes house-only load — otherwise the car is counted twice and the
+    fallback's grid flows inflate by the whole EV draw.
+    """
+    optimizer = _optimizer(optimizer_module)
+    kwargs = _kwargs()
+
+    result = optimizer._solve_greedy(
+        8,
+        kwargs["import_prices"],
+        kwargs["export_prices"],
+        kwargs["solar_forecast"],
+        kwargs["load_forecast"],
+        kwargs["current_soc"],
+        "cost",
+        schedule_timestamps=kwargs["schedule_timestamps"],
+        allow_grid_charge=True,
+        ev_plan=_ev_plan(optimizer_module),
+    )
+
+    assert sum(a.ev_charge_w for a in result.schedule.actions) > 0
+    errors = _fallback_conservation(result, kwargs, 8)
+    worst = max(abs(e) for e in errors)
+    assert worst < 0.05, f"greedy balance broken by {worst:.2f} kW: {errors}"
+
+
+def test_the_hold_fallback_balances_with_the_car(optimizer_module):
+    """Same invariant for the infeasible-solve hold."""
+    optimizer = _optimizer(optimizer_module)
+    kwargs = _kwargs()
+
+    hold = optimizer._solve_self_consumption_hold(
+        8,
+        kwargs["import_prices"],
+        kwargs["export_prices"],
+        kwargs["solar_forecast"],
+        kwargs["load_forecast"],
+        kwargs["current_soc"],
+        "cost",
+        schedule_timestamps=kwargs["schedule_timestamps"],
+        ev_plan=_ev_plan(optimizer_module),
+    )
+
+    assert sum(a.ev_charge_w for a in hold.schedule.actions) > 0
+    errors = _fallback_conservation(hold, kwargs, 8)
+    worst = max(abs(e) for e in errors)
+    assert worst < 0.05, f"hold balance broken by {worst:.2f} kW: {errors}"

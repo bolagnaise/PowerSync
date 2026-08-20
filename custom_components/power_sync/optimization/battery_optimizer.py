@@ -4300,7 +4300,8 @@ class BatteryOptimizer:
             import_bonus_prices,
             import_bonus_cap_kwh,
             solar,
-            load,
+            # The car draws through the same capped free-import quota.
+            [value + max(0.0, ev_charge_kw[t]) for t, value in enumerate(load)],
         )
 
         # Build schedule with action mapping
@@ -4387,7 +4388,8 @@ class BatteryOptimizer:
             import_prices,
             export_prices,
             solar,
-            load,
+            # The no-battery baseline still charges the car.
+            [value + max(0.0, ev_charge_kw[t]) for t, value in enumerate(load)],
             export_bonus_prices=export_bonus_prices,
             export_bonus_cap_kwh=export_bonus_cap_kwh,
             import_bonus_prices=import_bonus_prices,
@@ -4704,6 +4706,10 @@ class BatteryOptimizer:
         # emit a schedule the EV controller reads as "no EV demand planned".
         # Same treatment as _solve_greedy: the as-soon-as-possible draw.
         ev_load_kw = expected_ev_load_kw(ev_plan, n, self.dt_hours)
+        # ``load`` (folded) drives the hold's dispatch; the emitted schedule
+        # gets house-only load plus ``ev_charge_kw``, the same contract as
+        # every other _build_schedule caller.
+        house_load = list(load)
         if any(power > 1e-9 for power in ev_load_kw):
             load = [base + extra for base, extra in zip(load, ev_load_kw)]
         export_bonus_prices = export_bonus_prices or [0.0] * n
@@ -4770,7 +4776,7 @@ class BatteryOptimizer:
         )
         schedule = self._build_schedule(
             n, grid_import, grid_export, battery_charge, battery_discharge,
-            solar, load, soc_0, import_prices,
+            solar, house_load, soc_0, import_prices,
             [export_prices[t] + export_bonus_prices[t] for t in range(n)],
             block_battery_charge,
             schedule_timestamps,
@@ -4874,6 +4880,10 @@ class BatteryOptimizer:
         """
         dt = self.dt_hours
         ev_load_kw = expected_ev_load_kw(ev_plan, n, self.dt_hours)
+        # ``load`` (folded) drives the greedy placement; ``house_load`` is
+        # what schedule-derived passes get, because they re-add the car from
+        # the actions themselves.
+        house_load = list(load)
         if any(power > 1e-9 for power in ev_load_kw):
             load = [
                 base + extra
@@ -6216,7 +6226,7 @@ class BatteryOptimizer:
         )
         schedule = self._build_schedule(
             n, grid_import, grid_export, battery_charge, battery_discharge,
-            solar, load, soc_0, import_prices, effective_export_prices,
+            solar, house_load, soc_0, import_prices, effective_export_prices,
             block_battery_charge,
             schedule_timestamps,
             allow_grid_charge,
@@ -6235,7 +6245,7 @@ class BatteryOptimizer:
                 candidate_schedule,
                 export_prices=export_prices,
                 solar=solar,
-                load=load,
+                load=house_load,
                 earnings_cap=None,
                 cost_neutral_slots=cost_neutral_slots,
                 export_bonus_prices=export_bonus_prices,
@@ -6250,7 +6260,7 @@ class BatteryOptimizer:
             import_basis_schedule,
             n,
             solar,
-            load,
+            house_load,
         )
         effective_cost_neutral_caps = (
             self._cost_neutral_effective_earnings_caps_by_day(
@@ -6266,7 +6276,7 @@ class BatteryOptimizer:
             candidate_schedule,
             export_prices=export_prices,
             solar=solar,
-            load=load,
+            load=house_load,
             earnings_cap=None,
             cost_neutral_slots=cost_neutral_slots,
             export_bonus_prices=export_bonus_prices,
@@ -6282,7 +6292,7 @@ class BatteryOptimizer:
             schedule,
             n,
             solar,
-            load,
+            house_load,
         )
 
         # Calculate costs for first 24 hours only (display as daily cost)
@@ -6509,6 +6519,20 @@ class BatteryOptimizer:
         dt = self.dt_hours
         eff = self.efficiency
         cap = self.capacity_kwh
+        # The car is home load. The LP's grid_import already contains its
+        # draw, so classifying actions against house-only load misreads an
+        # importing car as grid charging, splits export/home service wrong,
+        # and walks the SOC of a battery that is really feeding the car as if
+        # it were idle. Fold the planned draw in here, once, so every use of
+        # ``load`` below is the effective home load. Callers therefore MUST
+        # pass house-only load alongside ``ev_charge_kw``.
+        if ev_charge_kw and any(value > 1e-9 for value in ev_charge_kw):
+            load = [
+                base + max(0.0, ev_charge_kw[index])
+                if index < len(ev_charge_kw)
+                else base
+                for index, base in enumerate(load)
+            ]
         # Prefer caller-supplied forecast timestamps so displayed actions stay
         # aligned with the price slots that produced them, even if solving
         # crosses a 5-minute boundary in the executor thread.
@@ -7122,6 +7146,9 @@ class BatteryOptimizer:
             discharge_kw = action.battery_discharge_w / 1000.0
             solar_kw = solar[t] if t < len(solar) else 0.0
             load_kw = load[t] if t < len(load) else 0.0
+            # The action carries the EV draw the LP planned for this slot;
+            # it is grid-side home load and belongs in the balance.
+            load_kw += max(0.0, float(getattr(action, "ev_charge_w", 0.0) or 0.0)) / 1000.0
             net_grid = (load_kw - solar_kw) + charge_kw - discharge_kw
             if net_grid > 0:
                 grid_import[t] = net_grid
@@ -7315,6 +7342,9 @@ class BatteryOptimizer:
             remaining = remaining_by_day[day]
             solar_w = max(0.0, float(solar[idx] if idx < len(solar) else 0.0)) * 1000
             load_w = max(0.0, float(load[idx] if idx < len(load) else 0.0)) * 1000
+            # Include the planned EV draw: it is home load, and leaving it out
+            # overstates the battery-export share this pass is valuing.
+            load_w += max(0.0, float(getattr(action, "ev_charge_w", 0.0) or 0.0))
             net_home_w = max(0.0, load_w - solar_w)
             charge_w = max(0.0, float(action.battery_charge_w or 0.0))
             discharge_w = max(0.0, float(action.battery_discharge_w or 0.0))
@@ -7589,6 +7619,12 @@ class BatteryOptimizer:
                     if idx < len(load)
                     else 0.0
                 )
+                # The car is home load: without it, a battery serving the car
+                # in self-consumption gets clipped to house-only discharge and
+                # restamped with a flat SOC it will not actually hold.
+                load_w += max(
+                    0.0, float(getattr(action, "ev_charge_w", 0.0) or 0.0)
+                )
                 net_home_w = max(0.0, load_w - solar_w)
                 solar_surplus_w = max(0.0, solar_w - load_w)
                 charge_w = max(0.0, float(action.battery_charge_w or 0.0))
@@ -7770,12 +7806,22 @@ class BatteryOptimizer:
             - export_bonus_prices[t] * bonus_export[t] * self.dt_hours
             for t in range(n_24h)
         )
+        # Baseline is "this house without a battery" -- the car still
+        # charges in that world, so the comparison keeps its draw. Without it
+        # the car's import cost reads as money the optimizer lost.
+        reconcile_ev_kw = [
+            max(0.0, float(getattr(a, "ev_charge_w", 0.0) or 0.0)) / 1000.0
+            for a in (schedule.actions or [])
+        ]
         baseline_cost = self._calculate_baseline_cost(
             n_24h,
             import_prices,
             export_prices,
             solar,
-            load,
+            [
+                value + (reconcile_ev_kw[t] if t < len(reconcile_ev_kw) else 0.0)
+                for t, value in enumerate(load)
+            ],
             export_bonus_prices=export_bonus_prices,
             export_bonus_cap_kwh=export_bonus_cap_kwh,
             import_bonus_prices=import_bonus_prices,
@@ -7795,7 +7841,11 @@ class BatteryOptimizer:
                     (
                         float(load[idx] if idx < len(load) else 0.0)
                         - float(solar[idx] if idx < len(solar) else 0.0)
-                    ) * 1000.0,
+                    ) * 1000.0
+                    + max(
+                        0.0,
+                        float(getattr(action, "ev_charge_w", 0.0) or 0.0),
+                    ),
                 ),
             )
             for idx, action in enumerate(schedule.actions[:n])
