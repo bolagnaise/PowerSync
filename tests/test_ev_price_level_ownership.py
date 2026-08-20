@@ -274,6 +274,94 @@ def test_cost_optimized_waits_for_planned_free_window(monkeypatch):
     assert source == "waiting"
 
 
+@pytest.mark.parametrize(
+    ("priority", "expected_should_charge", "expected_source"),
+    (
+        (ev_planner.ChargingPriority.COST_OPTIMIZED, False, "waiting"),
+        (ev_planner.ChargingPriority.SOLAR_PREFERRED, True, "solar_surplus"),
+        (ev_planner.ChargingPriority.SOLAR_ONLY, True, "solar_surplus"),
+    ),
+)
+def test_opportunistic_solar_respects_smart_schedule_priority(
+    monkeypatch,
+    priority,
+    expected_should_charge,
+    expected_source,
+):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 8, 18, 9, 0, tzinfo=brisbane_tz),
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    plan = SimpleNamespace(
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time="2026-08-18T10:00:00",
+                end_time="2026-08-18T14:00:00",
+                source="grid_free",
+                estimated_power_kw=7.36,
+                estimated_energy_kwh=29.44,
+                price_cents_kwh=0.0,
+                reason="lowest_cost",
+            )
+        ]
+    )
+
+    should_charge, _reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=3.5,
+            current_price_cents=31.0,
+            battery_soc=80.0,
+            priority=priority,
+        )
+    )
+
+    assert should_charge is expected_should_charge
+    assert source == expected_source
+
+
+def test_cost_optimized_still_executes_a_planned_solar_window(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 8, 18, 10, 30, tzinfo=brisbane_tz),
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    plan = SimpleNamespace(
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time="2026-08-18T10:00:00",
+                end_time="2026-08-18T11:00:00",
+                source="solar_surplus",
+                estimated_power_kw=3.5,
+                estimated_energy_kwh=3.5,
+                price_cents_kwh=0.0,
+                reason="cost_optimized",
+            )
+        ]
+    )
+
+    should_charge, reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=3.5,
+            current_price_cents=31.0,
+            battery_soc=80.0,
+            priority=ev_planner.ChargingPriority.COST_OPTIMIZED,
+        )
+    )
+
+    assert should_charge is True
+    assert reason == "In planned solar_surplus window (0c)"
+    assert source == "solar_surplus"
+
+
 def test_active_smart_schedule_solar_session_delegates_low_surplus_stop():
     assert not ev_planner._should_block_smart_schedule_solar_start(
         current_surplus_kw=3.0,

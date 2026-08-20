@@ -3811,6 +3811,7 @@ class ChargingPlanner:
         battery_soc: float,
         min_battery_soc: int = DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC,
         is_time_critical: bool = False,
+        priority: ChargingPriority = ChargingPriority.COST_OPTIMIZED,
     ) -> Tuple[bool, str, str]:
         """
         Real-time decision: should we charge right now?
@@ -3820,7 +3821,7 @@ class ChargingPlanner:
         2. For time_critical mode: prioritize meeting deadline over paid charging
         3. For other modes: respect home battery priority (min SoC)
         4. If in a planned window from cost-optimized plan, charge
-        5. Opportunistic: charge on solar surplus (free)
+        5. For solar-first modes, opportunistically charge on solar surplus
         6. Opportunistic: charge if current price is very cheap (< plan avg or < 10c)
         7. Otherwise wait for planned windows or better prices
 
@@ -3832,6 +3833,7 @@ class ChargingPlanner:
             battery_soc: Current home battery SoC
             min_battery_soc: Minimum home battery SoC before EV charging
             is_time_critical: If True, meeting deadline takes priority over battery/price
+            priority: Active Smart Schedule charging strategy
 
         Returns:
             Tuple of (should_charge, reason, source)
@@ -3923,8 +3925,18 @@ class ChargingPlanner:
                 )
             return False, "No current deadline charging window", "waiting"
 
-        # Check for opportunistic solar (always take free power)
-        if current_surplus_kw >= 1.5:
+        # Cost Optimized/Cheapest Period follows the windows selected by its
+        # cost plan.  Starting a separate Solar Surplus controller outside
+        # those windows bypasses that plan and can briefly draw from the home
+        # battery while the EV rate responds to changing solar.  Solar-first
+        # strategies retain the live-surplus opportunity; a planned solar
+        # window for Cost Optimized was already accepted above.
+        priority_value = getattr(priority, "value", priority)
+        opportunistic_solar_enabled = str(priority_value or "").lower() in {
+            ChargingPriority.SOLAR_ONLY.value,
+            ChargingPriority.SOLAR_PREFERRED.value,
+        }
+        if opportunistic_solar_enabled and current_surplus_kw >= 1.5:
             return True, f"Solar surplus ({current_surplus_kw:.1f}kW)", "solar_surplus"
 
         # Keep free planned windows in the comparison.  Dropping zero prices
@@ -5911,6 +5923,7 @@ class AutoScheduleExecutor:
             battery_soc=battery_soc,
             min_battery_soc=effective_home_min,
             is_time_critical=is_time_critical,
+            priority=effective_priority,
         )
 
         # Apply additional constraints based on priority mode
@@ -5963,10 +5976,10 @@ class AutoScheduleExecutor:
                             f"blocked by price-level policy: {pl_reason}"
                         )
 
-        # Check surplus constraint for solar charging
-        # Tesla requires minimum 5A to charge:
-        # - Single phase: 5A × 230V = 1.15kW
-        # - Three phase: 5A × 230V × 3 = 3.45kW
+        # Check the live surplus constraint for solar charging. The minimum is
+        # vehicle/path-specific: Tesla HA current entities commonly expose 0A
+        # as stop and 1A as their lowest positive command, while missing or
+        # invalid bounds retain the conservative 5A fallback.
         if should_charge and source == "solar_surplus":
             # Smart Schedule owns the home-battery start floor here. Solar
             # surplus settings still provide parallel-charge reserve behavior.
