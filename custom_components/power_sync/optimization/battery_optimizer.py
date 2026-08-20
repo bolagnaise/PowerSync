@@ -280,6 +280,9 @@ class OptimizerResult:
     grid_import_w: list[float] = field(default_factory=list)
     grid_export_w: list[float] = field(default_factory=list)
     battery_to_grid_w: list[float] = field(default_factory=list)
+    # Per-vehicle EV draw the LP planned, W per slot, keyed by vehicle id.
+    # The schedule's ev_charge_w carries the total; this keeps the identity.
+    ev_charge_by_vehicle_w: dict[str, list[float]] = field(default_factory=dict)
     lp_stats: dict[str, Any] = field(default_factory=dict)
     reserve_recommendation: dict[str, Any] = field(default_factory=dict)
     modeled_backup_reserve: float | None = None
@@ -690,7 +693,20 @@ class BatteryOptimizer:
         # Pad/truncate the EV window to the solve horizon. A plan whose window
         # falls entirely outside the horizon normalizes to None so every EV
         # code path below is skipped and the model keeps its previous size.
-        ev_plan = normalize_ev_charge_plan(ev_plan, n_steps)
+        # A list keeps one entry per vehicle: per-vehicle modeling is what
+        # stops the solver stacking two chargers' capability into one slot a
+        # single car is supposed to fill.
+        if isinstance(ev_plan, (list, tuple)):
+            normalized_ev_plans = [
+                normalized
+                for normalized in (
+                    normalize_ev_charge_plan(plan, n_steps) for plan in ev_plan
+                )
+                if normalized is not None
+            ]
+            ev_plan = normalized_ev_plans or None
+        else:
+            ev_plan = normalize_ev_charge_plan(ev_plan, n_steps)
         allow_battery_export = self._normalize_battery_export_flags(
             allow_battery_export, n_steps
         )
@@ -2978,26 +2994,40 @@ class BatteryOptimizer:
         # slots instead of the battery plan silently over-committing headroom
         # the car will take anyway. Solves with no EV demand keep the previous
         # model size exactly.
-        p_ev_max_kw = (
+        ev_plans_lp = (
+            [plan for plan in ev_plan if plan is not None]
+            if isinstance(ev_plan, (list, tuple))
+            else ([ev_plan] if ev_plan is not None else [])
+        )
+        p_ev_max_by_vehicle = [
             ev_charge_bounds_kw(
-                ev_plan,
+                plan,
                 [(period.start, period.end) for period in periods],
             )
-            if ev_plan is not None
-            else [0.0] * p_n
-        )
-        ev_charge_active = ev_plan is not None and any(
-            power > 1e-6 for power in p_ev_max_kw
-        )
-        # One cumulative delivery stage per distinct vehicle deadline. A single
-        # vehicle yields exactly one stage covering its whole window, so the
-        # model is bit-for-bit what it was before multi-vehicle staging.
-        ev_stages = list(ev_plan.staged_requirements) if ev_charge_active else []
-        if ev_charge_active and not ev_stages:
-            ev_charge_active = False
+            for plan in ev_plans_lp
+        ]
+        usable = [
+            index
+            for index, capability in enumerate(p_ev_max_by_vehicle)
+            if any(power > 1e-6 for power in capability)
+        ]
+        ev_plans_lp = [ev_plans_lp[index] for index in usable]
+        p_ev_max_by_vehicle = [p_ev_max_by_vehicle[index] for index in usable]
+        # One delivery stage per (vehicle, deadline). Modeling vehicles
+        # separately is the point: an aggregate block summed both chargers'
+        # capability into every overlapping slot, so the solver could plan
+        # 2x a single car's rate where only one car would really charge, and
+        # could satisfy one car's deadline with another car's charger.
+        ev_stages = [
+            (vehicle, stage_slot, stage_kwh)
+            for vehicle, plan in enumerate(ev_plans_lp)
+            for stage_slot, stage_kwh in plan.staged_requirements
+        ]
+        ev_charge_active = bool(ev_plans_lp) and bool(ev_stages)
+        n_ev_vehicles = len(ev_plans_lp) if ev_charge_active else 0
         ev_charge_offset = next_offset
         if ev_charge_active:
-            next_offset += p_n
+            next_offset += n_ev_vehicles * p_n
         ev_shortfall_offset = next_offset
         if ev_charge_active:
             next_offset += len(ev_stages)
@@ -3044,13 +3074,13 @@ class BatteryOptimizer:
         def battery_to_grid_var(t: int) -> int:
             return battery_to_grid_offset + t
 
-        def ev_charge_var(t: int) -> int:
-            return ev_charge_offset + t
+        def ev_charge_var(vehicle: int, t: int) -> int:
+            return ev_charge_offset + vehicle * p_n + t
 
         def ev_shortfall_var(stage: int = 0) -> int:
             return ev_shortfall_offset + stage
 
-        def ev_stage_credit(stage_slot: int, t: int) -> float:
+        def ev_stage_credit(stage_slot: int, t: int, efficiency: float) -> float:
             """Return period ``t``'s energy coefficient toward a stage.
 
             A period that straddles the stage's deadline counts only for the
@@ -3062,7 +3092,7 @@ class BatteryOptimizer:
             inside = max(0, min(period.end, stage_slot + 1) - period.start)
             if inside <= 0:
                 return 0.0
-            return p_dt[t] * (inside / span) * ev_plan.charge_efficiency
+            return p_dt[t] * (inside / span) * efficiency
 
         # === Objective function: cost minimization ===
         # minimize SUM(import_price * grid_import - export_price * grid_export) * dt
@@ -3331,7 +3361,8 @@ class BatteryOptimizer:
             if ev_charge_active:
                 # EV charging is load: it consumes import, solar, or battery
                 # output exactly like the house does.
-                A_eq[t, ev_charge_var(t)] = -1.0
+                for vehicle in range(n_ev_vehicles):
+                    A_eq[t, ev_charge_var(vehicle, t)] = -1.0
             b_eq[t] = p_load[t] - p_solar[t]
 
             # Energy transition: E[t+1] = E[t] + charge*eff*dt - discharge*dt/eff
@@ -3874,11 +3905,14 @@ class BatteryOptimizer:
             # dropping every user to the greedy fallback over one vehicle.
             # The shortfall price sits above any realistic import price, so
             # the LP only leaves energy undelivered when it must.
-            for stage, (stage_slot, stage_kwh) in enumerate(ev_stages):
+            for stage, (vehicle, stage_slot, stage_kwh) in enumerate(ev_stages):
+                plan = ev_plans_lp[vehicle]
                 for t in range(p_n):
-                    credit = ev_stage_credit(stage_slot, t)
+                    credit = ev_stage_credit(
+                        stage_slot, t, plan.charge_efficiency
+                    )
                     if credit > 0.0:
-                        A_ub[len(b_ub), ev_charge_var(t)] = -credit
+                        A_ub[len(b_ub), ev_charge_var(vehicle, t)] = -credit
                 A_ub[len(b_ub), ev_shortfall_var(stage)] = -1.0
                 b_ub.append(-stage_kwh)
 
@@ -4081,10 +4115,12 @@ class BatteryOptimizer:
                 ))
 
         if ev_charge_active:
-            for t in range(p_n):
-                bounds.append((0.0, p_ev_max_kw[t]))
+            for vehicle in range(n_ev_vehicles):
+                capability = p_ev_max_by_vehicle[vehicle]
+                for t in range(p_n):
+                    bounds.append((0.0, capability[t]))
             # A stage's shortfall can never exceed the energy it asked for.
-            for _stage_slot, stage_kwh in ev_stages:
+            for _vehicle, _stage_slot, stage_kwh in ev_stages:
                 bounds.append((0.0, stage_kwh))
 
         bounds.append((soc_0 * cap, soc_0 * cap))
@@ -4274,20 +4310,37 @@ class BatteryOptimizer:
         battery_to_grid = self._expand_period_values(
             periods, period_battery_to_grid, n
         )
-        period_ev_charge = (
-            [x[ev_charge_var(t)] for t in range(p_n)]
-            if ev_charge_active
-            else [0.0] * p_n
-        )
-        ev_charge_kw = self._expand_period_values(periods, period_ev_charge, n)
+        ev_charge_kw_by_vehicle: dict[str, list[float]] = {}
         if ev_charge_active:
-            for stage, (stage_slot, stage_kwh) in enumerate(ev_stages):
+            for vehicle in range(n_ev_vehicles):
+                period_values = [x[ev_charge_var(vehicle, t)] for t in range(p_n)]
+                expanded = self._expand_period_values(periods, period_values, n)
+                vehicle_id = str(ev_plans_lp[vehicle].vehicle_id)
+                if vehicle_id in ev_charge_kw_by_vehicle:
+                    expanded = [
+                        previous + value
+                        for previous, value in zip(
+                            ev_charge_kw_by_vehicle[vehicle_id], expanded
+                        )
+                    ]
+                ev_charge_kw_by_vehicle[vehicle_id] = expanded
+        ev_charge_kw = (
+            [
+                sum(series[t] for series in ev_charge_kw_by_vehicle.values())
+                for t in range(n)
+            ]
+            if ev_charge_kw_by_vehicle
+            else [0.0] * n
+        )
+        if ev_charge_active:
+            for stage, (vehicle, stage_slot, stage_kwh) in enumerate(ev_stages):
                 stage_unmet = max(0.0, x[ev_shortfall_var(stage)])
                 if stage_unmet > 0.01:
                     _LOGGER.info(
-                        "EV plan: %.2f kWh of the %.2f kWh due by slot %d "
+                        "EV plan: %.2f kWh of %s's %.2f kWh due by slot %d "
                         "cannot be delivered within the site import limit",
                         stage_unmet,
+                        ev_plans_lp[vehicle].vehicle_id,
                         stage_kwh,
                         stage_slot,
                     )
@@ -4478,6 +4531,10 @@ class BatteryOptimizer:
             ),
             free_import_command_slots=free_import_command_slots,
             solar_curtailment_w=[value * 1000 for value in solar_curtailment],
+            ev_charge_by_vehicle_w={
+                vehicle_id: [value * 1000 for value in series]
+                for vehicle_id, series in ev_charge_kw_by_vehicle.items()
+            },
         )
 
     def _build_reserve_recommendation(

@@ -527,6 +527,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_grid_export_limits_w: list[float | None] | None = None
         self._last_planned_ev_load_forecast_w: list[float] | None = None
         self._last_effective_ev_load_forecast_w: list[float] | None = None
+        self._last_ev_charge_by_vehicle_w: dict[str, list[float]] | None = None
         self._last_smart_schedule_ev_load_w: list[float] | None = None
         self._last_price_level_expected_ev_load_w: list[float] | None = None
         self._last_price_level_projection: dict[str, Any] | None = None
@@ -5444,6 +5445,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._pending_ev_charge_plan = None
             self._last_planned_ev_load_forecast_w = None
             self._last_effective_ev_load_forecast_w = None
+            self._last_ev_charge_by_vehicle_w = None
             self._last_smart_schedule_ev_load_w = None
             self._last_price_level_expected_ev_load_w = None
             self._last_price_level_projection = None
@@ -5512,12 +5514,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._pending_ev_charge_plan = self._build_ev_charge_plan(
                     self._price_timestamps(n_ev)
                 )
-                if self._pending_ev_charge_plan is not None:
+                if self._pending_ev_charge_plan:
                     _LOGGER.debug(
                         "EV load overlay: superseded by LP co-optimization "
-                        "(%.1f kWh for %s)",
-                        self._pending_ev_charge_plan.energy_needed_kwh,
-                        self._pending_ev_charge_plan.vehicle_id,
+                        "(%.1f kWh across %d vehicle(s))",
+                        sum(
+                            plan.energy_needed_kwh
+                            for plan in self._pending_ev_charge_plan
+                        ),
+                        len(self._pending_ev_charge_plan),
                     )
                     effective_ev_load_w = zeros
 
@@ -5944,11 +5949,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
             ev_charge_plan = getattr(self, "_pending_ev_charge_plan", None)
-            if ev_charge_plan is not None:
+            if ev_charge_plan:
                 _LOGGER.debug(
-                    "EV demand in this solve: %.1f kWh for %s",
-                    ev_charge_plan.energy_needed_kwh,
-                    ev_charge_plan.vehicle_id,
+                    "EV demand in this solve: %s",
+                    ", ".join(
+                        f"{plan.energy_needed_kwh:.1f} kWh for {plan.vehicle_id}"
+                        for plan in ev_charge_plan
+                    ),
                 )
 
             async def _run_optimizer_once(
@@ -6215,6 +6222,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             }
             self._current_schedule = result.schedule
             self._last_optimizer_result = result
+            self._adopt_solved_ev_series(result)
             self._commit_price_forecast_cache(import_prices, export_prices)
 
             reserve_changed = self._apply_auto_reserve_recommendation(result)
@@ -6308,6 +6316,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 result.reserve_recommendation = final_recommendation
                 self._current_schedule = result.schedule
                 self._last_optimizer_result = result
+                self._adopt_solved_ev_series(result)
                 self._last_update_time = dt_util.now()
             if cost_neutral_plan is not None:
                 effective_caps = {
@@ -6842,6 +6851,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return True when no-idle mode should replace optimizer IDLE."""
         return bool(self._config.disable_idle_enabled)
 
+    def _adopt_solved_ev_series(self, result: Any) -> None:
+        """Publish the solved EV draw everywhere the overlay used to go.
+
+        When the LP co-optimizes the car, the load overlay is deliberately
+        blanked -- but three surfaces (the schedule's ``planned_ev_load_w``
+        key, the optimization-status sensor attributes, and the planned-EV
+        summary) publish only the overlay, so co-optimizing sites showed no
+        vehicles in the plan at all. Adopt the solved series for them, and
+        keep the per-vehicle split for surfaces that can use identity.
+        """
+        self._last_ev_charge_by_vehicle_w = (
+            dict(getattr(result, "ev_charge_by_vehicle_w", None) or {}) or None
+        )
+        actions = getattr(getattr(result, "schedule", None), "actions", None) or []
+        solved = [
+            max(0.0, float(getattr(action, "ev_charge_w", 0.0) or 0.0))
+            for action in actions
+        ]
+        if not any(value > 0 for value in solved):
+            return
+        if not self._last_planned_ev_load_forecast_w:
+            self._last_planned_ev_load_forecast_w = list(solved)
+        if not self._last_effective_ev_load_forecast_w:
+            self._last_effective_ev_load_forecast_w = list(solved)
+
     def _build_ev_charge_plan(
         self,
         schedule_timestamps: list[datetime] | None,
@@ -6859,7 +6893,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             from ..automations.ev_charging_planner import (
                 get_auto_schedule_executor,
             )
-            from .ev_load_plan import combine_ev_charge_plans, ev_plan_from_demand
+            from .ev_load_plan import ev_plan_from_demand
 
             executor = get_auto_schedule_executor()
             if executor is None or getattr(
@@ -6920,7 +6954,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         ),
                     )
                 )
-            return combine_ev_charge_plans(plans, len(schedule_timestamps))
+            # Hand the solver one plan per vehicle. Combining them into a
+            # single block summed both chargers' capability into every
+            # overlapping slot, so the plan could show 2x one car's rate in a
+            # window where only one car would really charge, and had no
+            # per-vehicle identity to publish.
+            plans = [plan for plan in plans if plan is not None]
+            return plans or None
         except Exception as err:
             # Keep the guard -- a broken EV plan must not stop the solve -- but
             # not at debug level: this swallowed a plain TypeError for every
@@ -17160,6 +17200,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             if ev_series is not None:
                 api_response["ev_charging_w"] = ev_series
+            by_vehicle = getattr(self, "_last_ev_charge_by_vehicle_w", None)
+            if by_vehicle:
+                api_response["ev_charging_by_vehicle_w"] = {
+                    vehicle_id: list(series[:n_sched_pts])
+                    for vehicle_id, series in by_vehicle.items()
+                }
             elif self._ev_coordinator and data.get("ev"):
                 # Backward-compatible fallback when no optimizer EV overlay exists.
                 ev_power = [0.0] * n_sched_pts

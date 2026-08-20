@@ -775,10 +775,13 @@ def test_ev_overlay_is_suppressed_when_the_lp_co_optimizes():
         internal_forecast=[3000.0, 3000.0, 0.0, 0.0],
         ev_integration_enabled=True,
     )
-    coordinator._ev_charge_plan = SimpleNamespace(
-        energy_needed_kwh=6.0,
-        vehicle_id="car",
-    )
+    # _build_ev_charge_plan returns one plan per vehicle.
+    coordinator._ev_charge_plan = [
+        SimpleNamespace(
+            energy_needed_kwh=6.0,
+            vehicle_id="car",
+        )
+    ]
 
     load = _run_overlay(coordinator, [2000.0, 2000.0, 2000.0, 2000.0])
 

@@ -441,11 +441,14 @@ def test_a_stored_departure_time_still_reaches_the_solver(
     method, holder, warnings = build_ev_charge_plan
     holder["executor"] = _ev_executor(target_time)
 
-    plan = method(
+    plans = method(
         types.SimpleNamespace(config_entry=_ENTRY), _solve_timestamps()
     )
 
-    assert plan is not None, warnings
+    assert plans is not None, warnings
+    # One managed vehicle -> a one-entry per-vehicle list.
+    assert len(plans) == 1
+    plan = plans[0]
     assert plan.energy_needed_kwh == pytest.approx(13.75)
     assert max(plan.max_power_kw) == pytest.approx(11.04, abs=0.01)
     assert warnings == []
@@ -459,9 +462,9 @@ def test_a_naive_deadline_bounds_the_window_like_an_aware_one(
     timestamps = _solve_timestamps()
 
     holder["executor"] = _ev_executor("2026-08-20T15:00:00")
-    naive = method(coordinator, timestamps)
+    naive = method(coordinator, timestamps)[0]
     holder["executor"] = _ev_executor("2026-08-20T15:00:00+08:00")
-    aware = method(coordinator, timestamps)
+    aware = method(coordinator, timestamps)[0]
 
     assert naive.max_power_kw == aware.max_power_kw
     # 06:25 -> 15:00 on 30-minute slots: the car is unavailable after that.
@@ -833,3 +836,66 @@ def test_the_hold_fallback_balances_with_the_car(optimizer_module):
     errors = _fallback_conservation(hold, kwargs, 8)
     worst = max(abs(e) for e in errors)
     assert worst < 0.05, f"hold balance broken by {worst:.2f} kW: {errors}"
+
+
+def test_per_vehicle_plans_cannot_stack_one_cars_slot_to_double_rate(
+    optimizer_module,
+):
+    """The dashboard showed 14.7 kW EV charging — two chargers' capability
+    stacked into slots where only one car would really draw.
+
+    An aggregate block summed both cars' 7.36 kW envelopes, so the solver
+    could place 14.72 kW overnight: TESSY charging toward its deadline plus
+    W3's energy pushed through a second charger the runtime would never
+    start (its own plan holds it for the free window). Per-vehicle variables
+    cap each car at its own charger and pin each car's energy to its own
+    series.
+    """
+    n = 24
+    optimizer = _staged_optimizer(optimizer_module, n)
+    kwargs = _staged_kwargs(n)
+
+    tessy = optimizer_module.EVChargePlan(
+        vehicle_id="TESSY",
+        max_power_kw=tuple(7.36 if i <= 10 else 0.0 for i in range(n)),
+        energy_needed_kwh=32.9,
+        charge_efficiency=0.9,
+    )
+    w3 = optimizer_module.EVChargePlan(
+        vehicle_id="W3RT1E",
+        max_power_kw=(7.36,) * n,
+        energy_needed_kwh=7.6,
+        charge_efficiency=0.9,
+    )
+
+    result = optimizer.optimize(**kwargs, ev_plan=[tessy, w3])
+    assert result.feasible
+
+    by_vehicle = result.ev_charge_by_vehicle_w
+    assert set(by_vehicle) == {"TESSY", "W3RT1E"}
+
+    # Each car is capped at its own charger, every slot.
+    for vehicle_id, series in by_vehicle.items():
+        assert max(series) <= 7.36 * 1000 + 1, f"{vehicle_id} over its charger"
+
+    # TESSY's own charger delivers TESSY's own energy before its deadline.
+    tessy_kwh = sum(by_vehicle["TESSY"][:11]) / 1000.0 * 0.9
+    assert tessy_kwh == pytest.approx(32.9, abs=0.1)
+    assert max(by_vehicle["TESSY"][11:], default=0.0) == 0.0
+
+    # W3 takes the free window instead of riding TESSY's overnight slots at
+    # 31c — so overnight never exceeds one charger. This is the 14 kW fix.
+    total = [
+        (by_vehicle["TESSY"][i] + by_vehicle["W3RT1E"][i]) / 1000.0
+        for i in range(n)
+    ]
+    assert max(total[:11]) <= 7.36 + 0.01, f"overnight stacked: {total[:11]}"
+    w3_free_kwh = sum(by_vehicle["W3RT1E"][15:19]) / 1000.0 * 0.9
+    assert w3_free_kwh == pytest.approx(7.6, abs=0.1)
+
+    # The stamped total still matches the per-vehicle sum.
+    stamped = [a.ev_charge_w for a in result.schedule.actions]
+    for i in range(n):
+        assert stamped[i] == pytest.approx(
+            by_vehicle["TESSY"][i] + by_vehicle["W3RT1E"][i], abs=1.0
+        )

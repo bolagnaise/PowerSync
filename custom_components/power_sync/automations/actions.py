@@ -7187,11 +7187,16 @@ def _optimizer_planned_battery_charge_kw(hass, config_entry) -> Optional[float]:
         return None
 
 
-def _optimizer_planned_ev_charge_kw(hass, config_entry) -> Optional[float]:
+def _optimizer_planned_ev_charge_kw(
+    hass, config_entry, vehicle_id: Optional[str] = None
+) -> Optional[float]:
     """Return the EV charge power the LP planned for this interval.
 
     ``None`` means the optimizer is not modeling EV demand, in which case the
-    EV controller keeps its own reactive rate control.
+    EV controller keeps its own reactive rate control. With ``vehicle_id``
+    and a per-vehicle plan available, the figure is that car's own share --
+    the aggregate is a fleet total, and using it as one loadpoint's ceiling
+    let a single car ramp toward the sum of every charger on site.
     """
     try:
         from ..const import DOMAIN
@@ -7208,6 +7213,18 @@ def _optimizer_planned_ev_charge_kw(hass, config_entry) -> Optional[float]:
         planned_w = getattr(action, "ev_charge_w", None)
         if planned_w is None:
             return None
+        if vehicle_id:
+            by_vehicle = getattr(
+                coordinator, "_last_ev_charge_by_vehicle_w", None
+            )
+            series = (by_vehicle or {}).get(str(vehicle_id))
+            if series:
+                schedule = getattr(coordinator, "_current_schedule", None)
+                actions = getattr(schedule, "actions", None) or []
+                for index, candidate in enumerate(actions):
+                    if candidate is action and index < len(series):
+                        planned_w = series[index]
+                        break
         planned_kw = float(planned_w or 0.0) / 1000.0
         if not math.isfinite(planned_kw) or planned_kw <= 0:
             return None
@@ -10384,7 +10401,9 @@ async def _dynamic_ev_update(
     # and not a setpoint: reactive control may still cut below it for live
     # conditions, and a stale or absent plan can never strand a plugged-in car
     # at zero. Start/stop stays with the EV planner.
-    planned_ev_charge_kw = _optimizer_planned_ev_charge_kw(hass, config_entry)
+    planned_ev_charge_kw = _optimizer_planned_ev_charge_kw(
+        hass, config_entry, vehicle_id
+    )
     if planned_ev_charge_kw is not None:
         available_power_kw = min(
             available_power_kw,

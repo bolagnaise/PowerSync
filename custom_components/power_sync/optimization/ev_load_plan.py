@@ -295,7 +295,7 @@ def ev_charge_bounds_kw(
 
 
 def expected_ev_load_kw(
-    plan: EVChargePlan | None,
+    plan,
     n_slots: int,
     dt_hours: float,
 ) -> list[float]:
@@ -304,25 +304,28 @@ def expected_ev_load_kw(
     Used where the solver cannot co-optimize the car. Charging as early as the
     window allows is the conservative assumption for a battery plan: it never
     understates the import headroom the car will occupy while the battery is
-    trying to charge.
+    trying to charge. Accepts one plan or a list of per-vehicle plans; a list
+    yields the sum of each vehicle's own ASAP profile, so no vehicle's draw is
+    projected through another vehicle's charger.
     """
     profile = [0.0] * max(0, n_slots)
-    normalized = normalize_ev_charge_plan(plan, n_slots)
-    if normalized is None or dt_hours <= 0:
-        return profile
-
-    remaining_kwh = normalized.energy_needed_kwh
-    for index in range(n_slots):
-        if remaining_kwh <= 1e-9:
-            break
-        available_kw = normalized.max_power_kw[index]
-        if available_kw <= 1e-9:
+    plans = plan if isinstance(plan, (list, tuple)) else [plan]
+    for entry in plans:
+        normalized = normalize_ev_charge_plan(entry, n_slots)
+        if normalized is None or dt_hours <= 0:
             continue
-        # Grid-side kW needed to land ``remaining_kwh`` in the pack.
-        needed_kw = remaining_kwh / (dt_hours * normalized.charge_efficiency)
-        draw_kw = min(available_kw, needed_kw)
-        profile[index] = draw_kw
-        remaining_kwh -= draw_kw * dt_hours * normalized.charge_efficiency
+        remaining_kwh = normalized.energy_needed_kwh
+        for index in range(n_slots):
+            if remaining_kwh <= 1e-9:
+                break
+            available_kw = normalized.max_power_kw[index]
+            if available_kw <= 1e-9:
+                continue
+            # Grid-side kW needed to land ``remaining_kwh`` in the pack.
+            needed_kw = remaining_kwh / (dt_hours * normalized.charge_efficiency)
+            draw_kw = min(available_kw, needed_kw)
+            profile[index] += draw_kw
+            remaining_kwh -= draw_kw * dt_hours * normalized.charge_efficiency
     return profile
 
 
