@@ -978,8 +978,14 @@ def test_restore_normal_reserve_failure_prevents_native_handoff(sigenergy_module
     assert disabled_remote_ems is False
 
 
-def test_sigenergy_restore_preservation_propagates_only_optimizer_curtailment():
-    """All optimizer-owned Sigenergy restore routes honor cached curtailment."""
+def test_sigenergy_restore_preservation_propagates_cached_curtailment():
+    """Every non-native Sigenergy restore route honors cached curtailment.
+
+    Ticket #350: a user-sourced "Resume Auto" wrote the 5 kW safety cap to
+    register 40038 while PowerSync's own zero-export curtailment was active, so
+    the gate is no longer restricted to optimizer-owned restores. Only a
+    native/VPP handoff hands the export cap back.
+    """
     coordinator_source = (COMPONENT_ROOT / "coordinator.py").read_text()
     coordinator_tree = ast.parse(coordinator_source)
     sigenergy_coordinator = next(
@@ -1018,7 +1024,7 @@ def test_sigenergy_restore_preservation_propagates_only_optimizer_curtailment():
     )
     restore_source = ast.get_source_segment(init_source, restore)
     assert restore_source is not None
-    assert 'source in ("optimizer", "force_timer")' in restore_source
+    assert 'source in ("optimizer", "force_timer")' not in restore_source
     assert "not native_control" in restore_source
     assert "preserve_export_limit=" in restore_source
     assert (
@@ -1033,7 +1039,6 @@ def test_sigenergy_restore_preservation_propagates_only_optimizer_curtailment():
     )
     self_consumption_source = ast.get_source_segment(init_source, self_consumption)
     assert self_consumption_source is not None
-    assert "source == \"optimizer\"" in self_consumption_source
     assert "preserve_export_limit=" in self_consumption_source
     assert (
         'entry_data.get("sigenergy_curtailment_state")' in self_consumption_source

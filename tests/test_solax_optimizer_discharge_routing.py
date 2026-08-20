@@ -80,6 +80,7 @@ def test_optimizer_routes_total_discharge_only_for_solax():
         coordinator = SimpleNamespace(
             battery_system=battery_system,
             _network_export_guard=lambda: None,
+            _sigenergy_zero_export_curtailment_active=lambda: False,
         )
         result = asyncio.run(
             method(
@@ -111,6 +112,7 @@ def test_solax_total_tracks_a_network_clamped_export_target():
     coordinator = SimpleNamespace(
         battery_system="solax",
         _network_export_guard=lambda: _Guard(),
+        _sigenergy_zero_export_curtailment_active=lambda: False,
     )
     result = asyncio.run(
         method(
@@ -149,6 +151,7 @@ def test_repeated_solax_dispatch_keeps_total_nonzero():
     coordinator = SimpleNamespace(
         battery_system="solax",
         _network_export_guard=lambda: None,
+        _sigenergy_zero_export_curtailment_active=lambda: False,
     )
 
     for extend in (False, True):

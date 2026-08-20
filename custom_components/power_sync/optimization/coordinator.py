@@ -7801,6 +7801,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         entry_data = self.hass.data.get(DOMAIN, {}).get(self.entry_id, {})
         return entry_data.get("network_export_guard")
 
+    def _sigenergy_zero_export_curtailment_active(self) -> bool:
+        """Return True while PowerSync holds Sigenergy at zero grid export.
+
+        Sigenergy DC curtailment and a force discharge own the same register
+        (REG_GRID_EXPORT_LIMIT / 40038), so an export ceiling written while the
+        cached curtailment state is ``curtailed`` silently lifts a curtailment
+        the user asked for because export earnings are below the threshold.
+        """
+        from ..const import DOMAIN
+
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self.entry_id, {})
+        return entry_data.get("sigenergy_curtailment_state") == "curtailed"
+
     async def _force_discharge_through_export_guard(
         self,
         battery: Any,
@@ -7814,6 +7827,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         envelope snapshot, accounted for unmanaged PCC export and rechecked the
         snapshot version immediately before the actuator write.
         """
+        if self._sigenergy_zero_export_curtailment_active():
+            # Curtailment owns the export-limit register while it is active.
+            # Raising the ceiling here would export at a price the user's own
+            # curtailment threshold rejected, and nothing clears the cached
+            # curtailment state, so the site would keep reporting "curtailed".
+            _LOGGER.info(
+                "Optimizer: export command blocked — Sigenergy zero-export "
+                "curtailment is active (export earnings below threshold)"
+            )
+            force_state = getattr(self, "_optimizer_force_state", None)
+            if (
+                isinstance(force_state, dict)
+                and force_state.get("active")
+                and force_state.get("type") == "discharge"
+            ):
+                # An earlier force window is still armed in hardware; hand the
+                # inverter back to self-consumption. The optimizer-sourced
+                # restore reasserts the zero-export limit rather than the
+                # normal export cap (inverters/sigenergy.py restore_normal).
+                if hasattr(battery, "restore_normal"):
+                    await battery.restore_normal()
+                elif hasattr(battery, "set_self_consumption_mode"):
+                    await battery.set_self_consumption_mode()
+            return False, 0.0
+
         guard = self._network_export_guard()
         applied_w = 0.0
 
