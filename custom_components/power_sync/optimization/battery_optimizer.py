@@ -4193,6 +4193,7 @@ class BatteryOptimizer:
                     import_bonus_cap_kwh,
                     schedule_timestamps,
                     disable_idle=disable_idle,
+                    ev_plan=ev_plan,
                 )
                 hold.lp_stats = {**lp_stats, "fallback_reason": "infeasible_self_consumption_hold"}
                 return hold
@@ -4646,6 +4647,7 @@ class BatteryOptimizer:
         schedule_timestamps: list[datetime] | None = None,
         priority_export_slots: list[bool] | None = None,
         disable_idle: bool = False,
+        ev_plan: EVChargePlan | None = None,
     ) -> OptimizerResult:
         """Safe fallback when the LP is infeasible: hold in self-consumption.
 
@@ -4670,6 +4672,15 @@ class BatteryOptimizer:
         eff = self.efficiency
         cap = self.capacity_kwh
         dt = self.dt_hours
+        # The coordinator blanks its EV load overlay whenever it hands the
+        # solver an ev_plan, because the LP models the car as a decision
+        # variable. This hold has no such variable, so without folding the car
+        # back in it would simulate a house that never charges an EV -- and
+        # emit a schedule the EV controller reads as "no EV demand planned".
+        # Same treatment as _solve_greedy: the as-soon-as-possible draw.
+        ev_load_kw = expected_ev_load_kw(ev_plan, n, self.dt_hours)
+        if any(power > 1e-9 for power in ev_load_kw):
+            load = [base + extra for base, extra in zip(load, ev_load_kw)]
         export_bonus_prices = export_bonus_prices or [0.0] * n
         import_bonus_prices = import_bonus_prices or [0.0] * n
         block_battery_charge = block_battery_charge or [False] * n
@@ -4742,6 +4753,7 @@ class BatteryOptimizer:
             grid_charge_allowed,
             disable_idle=disable_idle,
             free_import_command_slots=free_import_command_slots,
+            ev_charge_kw=ev_load_kw,
         )
 
         n_24h = min(n, int(24 * 60 / self.interval_minutes))

@@ -510,3 +510,56 @@ def test_reconciliation_keeps_the_planned_ev_draw(optimizer_module):
         for action in reconciled.schedule.actions
     )
     assert reconciled_ev_kwh == pytest.approx(solved_ev_kwh, abs=0.05)
+
+
+def test_the_infeasible_hold_still_plans_for_the_car(optimizer_module):
+    """The self-consumption fallback must not lose the EV the way the LP path did.
+
+    The coordinator blanks its EV load overlay whenever it passes an
+    ``ev_plan``, so a fallback that ignores the plan emits a schedule with no
+    EV demand at all — the same blind spot, reached by a different route. The
+    hold has no ``ev_charge`` variable, so it takes the greedy path's
+    conservative assumption instead: the car's as-soon-as-possible draw.
+    """
+    optimizer = _optimizer(optimizer_module)
+    kwargs = _kwargs()
+    plan = _ev_plan(optimizer_module)
+
+    hold = optimizer._solve_self_consumption_hold(
+        len(kwargs["import_prices"]),
+        kwargs["import_prices"],
+        kwargs["export_prices"],
+        kwargs["solar_forecast"],
+        kwargs["load_forecast"],
+        kwargs["current_soc"],
+        "cost",
+        schedule_timestamps=kwargs["schedule_timestamps"],
+        ev_plan=plan,
+    )
+
+    planned_ev_kwh = sum(
+        (action.ev_charge_w or 0.0) / 1000.0
+        for action in hold.schedule.actions
+    )
+    assert planned_ev_kwh == pytest.approx(plan.energy_needed_kwh, abs=0.05)
+
+
+def test_the_infeasible_hold_is_unchanged_without_a_car(optimizer_module):
+    """No EV plan must leave the fallback's dispatch exactly as it was."""
+    optimizer = _optimizer(optimizer_module)
+    kwargs = _kwargs()
+
+    hold = optimizer._solve_self_consumption_hold(
+        len(kwargs["import_prices"]),
+        kwargs["import_prices"],
+        kwargs["export_prices"],
+        kwargs["solar_forecast"],
+        kwargs["load_forecast"],
+        kwargs["current_soc"],
+        "cost",
+        schedule_timestamps=kwargs["schedule_timestamps"],
+    )
+
+    assert all(
+        (action.ev_charge_w or 0.0) == 0.0 for action in hold.schedule.actions
+    )
