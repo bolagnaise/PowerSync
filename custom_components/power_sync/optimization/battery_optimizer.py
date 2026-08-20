@@ -3075,6 +3075,22 @@ class BatteryOptimizer:
             if _nonzero_prices else 0.0
         )
 
+        # The two tie-break branches below share one epsilon scale, so without
+        # an offset they interleave: the pre-bias branch costs eps*(p_n - t),
+        # which falls to eps*(p_n - deadline_earliest_from + 1) just before the
+        # bias start, while the post-bias branch costs eps*t there. Whenever
+        # the bias start sits past the midpoint of the period array - the
+        # normal case for an evening-armed next-day deadline, because tiered
+        # aggregation puts the boundary in the last third - the cheapest import
+        # period in the whole horizon is the one immediately *before* the bias
+        # start, so the LP packs the top-up backwards from it instead of
+        # forwards from it. Lifting the pre-bias branch clear of the post-bias
+        # range keeps both orderings but makes every post-bias period strictly
+        # cheaper than every pre-bias one, which is what the bias start means.
+        pre_bias_import_eps_offset = (
+            p_n if (deadline_mode and deadline_earliest_from > 0) else 0
+        )
+
         for t in range(p_n):
             # Import/charge tie-breaker: prefer EARLIER once a binding deadline
             # can no longer be served by forecast solar, prefer LATER otherwise
@@ -3082,7 +3098,11 @@ class BatteryOptimizer:
             prefer_earlier_import = (
                 deadline_mode and t >= deadline_earliest_from
             )
-            import_eps = eps * (t if prefer_earlier_import else (p_n - t))
+            import_eps = eps * (
+                t
+                if prefer_earlier_import
+                else (p_n - t) + pre_bias_import_eps_offset
+            )
             c[grid_import_var(t)] = (p_import[t] + import_eps) * p_dt[t]
             # Prefer direct grid supply over a price-identical battery cycle.
             # This is only a deterministic tie-breaker (0.001 c/kWh per side),

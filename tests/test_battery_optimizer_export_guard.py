@@ -3663,6 +3663,170 @@ def test_deadline_without_forecast_solar_keeps_earliest_first_import(
     assert first_charge == 0
 
 
+def _deadline_bias_plan(
+    module,
+    *,
+    solar_kw: float,
+    deadline: int,
+    solar_until: int,
+    solar_from: int = 0,
+    current_soc: float = 0.20,
+    capacity_wh: int = 50_000,
+    max_charge_w: int = 23_000,
+):
+    """Solve a Charge By Time deadline and report where import sits vs the bias.
+
+    Returns the base slot at which the earliest-first import bias starts
+    alongside the first slot the plan actually imports in, so a test can assert
+    the top-up is placed *from* the bias start rather than backwards into the
+    stretch where forecast solar can still fill the battery for free.
+    """
+    n = 576
+    solar = [
+        solar_kw if solar_from <= idx < solar_until else 0.0 for idx in range(n)
+    ]
+
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=capacity_wh,
+        max_charge_w=max_charge_w,
+        max_discharge_w=max_charge_w,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        interval_minutes=5,
+        horizon_hours=48,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_slot = deadline
+    optimizer.pre_window_soc_target = 1.0
+
+    captured: dict = {}
+    original = module.BatteryOptimizer._deadline_import_bias_start
+
+    def _capture(self, **kwargs):
+        start = original(self, **kwargs)
+        captured["bias_period"] = start
+        captured["periods"] = kwargs["periods"]
+        return start
+
+    module.BatteryOptimizer._deadline_import_bias_start = _capture
+    try:
+        result = optimizer.optimize(
+            import_prices=[0.20] * n,
+            export_prices=[0.03] * n,
+            solar_forecast=solar,
+            load_forecast=[0.0] * n,
+            current_soc=current_soc,
+            acquisition_cost_kwh=0.0,
+            allow_battery_export=[False] * n,
+            allow_grid_charge=True,
+        )
+    finally:
+        module.BatteryOptimizer._deadline_import_bias_start = original
+
+    periods = captured["periods"]
+    bias_period = captured["bias_period"]
+    bias_slot = (
+        periods[bias_period].start if bias_period < len(periods) else deadline
+    )
+    import_slots = [
+        idx for idx, watts in enumerate(result.grid_import_w[:deadline])
+        if watts > 100
+    ]
+    dt_hours = 5 / 60
+    return {
+        "result": result,
+        "bias_slot": bias_slot,
+        "first_import_slot": import_slots[0] if import_slots else None,
+        "import_kwh": sum(result.grid_import_w[:deadline]) / 1000 * dt_hours,
+        "soc_at_deadline": result.schedule.actions[deadline - 1].soc,
+        "cost": result.schedule.predicted_cost,
+    }
+
+
+def test_deadline_import_starts_at_the_bias_not_backwards_from_it(
+    battery_optimizer_module,
+):
+    """The deadline top-up must be placed *from* the earliest-first bias start.
+
+    Both tie-break branches share one epsilon scale, so an unoffset pre-bias
+    branch made the period immediately *before* the bias start the cheapest
+    import period in the whole horizon whenever the bias start sat past the
+    midpoint of the period array. The LP then packed the entire top-up
+    backwards from the bias start, back into the stretch where credited
+    forecast solar could still have filled that headroom for free.
+    """
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    # Evening-armed 100% by 15:00 the next day, weak forecast solar day.
+    plan = _deadline_bias_plan(
+        battery_optimizer_module,
+        solar_kw=0.5,
+        deadline=210,
+        solar_from=114,
+        solar_until=210,
+    )
+
+    assert plan["result"].feasible is True
+    # A top-up is genuinely required and the deadline is still met...
+    assert plan["import_kwh"] > 1.0
+    assert plan["soc_at_deadline"] >= 0.99
+    # ...and the runway from the bias start is long enough to hold all of it,
+    # so none of it belongs before the bias start.
+    assert plan["first_import_slot"] is not None
+    assert plan["first_import_slot"] >= plan["bias_slot"]
+
+
+def test_deadline_import_placement_is_a_tie_break_not_a_cost_change(
+    battery_optimizer_module,
+):
+    """Correcting the ordering must move energy, never change the economics."""
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    module = battery_optimizer_module
+    plan = _deadline_bias_plan(
+        module, solar_kw=0.5, deadline=210, solar_from=114, solar_until=210
+    )
+
+    # Same deadline, same forecast: total import, SOC at the deadline and the
+    # predicted cost are all fixed by the constraints, not by the tie-break.
+    assert plan["import_kwh"] == pytest.approx(35.75, abs=0.5)
+    assert plan["soc_at_deadline"] >= 0.99
+    assert plan["cost"] == pytest.approx(plan["import_kwh"] * 0.20, abs=0.05)
+
+
+def test_same_day_charge_by_time_deadline_does_not_import_before_the_bias(
+    battery_optimizer_module,
+):
+    """Reported variant: 100% by 15:00 set on the same morning.
+
+    Discord #339 reopened with a same-day deadline rather than the
+    evening-armed next-day one v2.12.1140 addressed. A same-day 15:00 target
+    resolves to a short runway whose bias start falls early in the period
+    array, so it never tripped the backwards-packing ordering - lock that in
+    so a future change to either tie-break branch cannot regress it.
+    """
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    # Solved at 08:00 local: 15:00 is +7 h = 84 slots, solar runs to 16:00.
+    plan = _deadline_bias_plan(
+        battery_optimizer_module,
+        solar_kw=1.0,
+        deadline=84,
+        solar_until=96,
+        current_soc=0.30,
+    )
+
+    assert plan["result"].feasible is True
+    assert plan["import_kwh"] > 1.0
+    assert plan["soc_at_deadline"] >= 0.99
+    assert plan["first_import_slot"] is not None
+    assert plan["first_import_slot"] >= plan["bias_slot"]
+
+
 def test_disallow_grid_charge_still_allows_solar_surplus_charging(
     battery_optimizer_module,
 ):
