@@ -49,6 +49,19 @@ class _Logger:
         return lambda *args, **kwargs: None
 
 
+def _price_coverage_schema() -> int:
+    """Read the shipped coverage-schema marker instead of pinning a copy."""
+    tree = ast.parse(COORDINATOR_PATH.read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name)
+            and target.id == "ENERGY_ACC_PRICE_COVERAGE_SCHEMA"
+            for target in node.targets
+        ):
+            return int(ast.literal_eval(node.value))
+    raise AssertionError("ENERGY_ACC_PRICE_COVERAGE_SCHEMA not found")
+
+
 def _load_accumulator(clock: _Clock):
     """Extract EnergyAccumulator without importing Home Assistant."""
     tree = ast.parse(COORDINATOR_PATH.read_text())
@@ -74,7 +87,7 @@ def _load_accumulator(clock: _Clock):
         "Store": _Store,
         "HomeAssistant": object,
         "ENERGY_ACC_SAVE_DELAY": 300,
-        "ENERGY_ACC_PRICE_COVERAGE_SCHEMA": 1,
+        "ENERGY_ACC_PRICE_COVERAGE_SCHEMA": _price_coverage_schema(),
         "dt_util": SimpleNamespace(now=clock.now),
         "math": math,
         "_LOGGER": _Logger(),
@@ -261,7 +274,7 @@ def test_legacy_daily_import_cost_recovers_from_matching_optimizer_totals():
     assert summary["import_cost_covered_kwh"] == 3.91
     assert summary["import_cost_coverage"] == "complete"
     assert summary["mtd_import_cost"] == 0.94
-    assert store.data["price_coverage_schema"] == 1
+    assert store.data["price_coverage_schema"] == _price_coverage_schema()
 
     reloaded = _new_accumulator(clock, store)
     asyncio.run(reloaded.async_restore())
@@ -339,6 +352,11 @@ def test_post_counter_payload_with_a_real_gap_is_not_migrated():
     assert summary["import_cost_today"] is None
     assert summary["import_cost_coverage"] == "partial"
     assert summary["import_cost_covered_kwh"] == 0.12
+
+    # The month-to-date bucket is deliberately the other way round (#385): it
+    # has no midnight self-heal, so the same marker-less payload is repaired
+    # once rather than blanking the month until the next rollover.
+    assert restored.mtd_import_cost_covered_kwh == pytest.approx(3.91)
 
 
 def test_non_integrating_sample_without_home_load_does_not_latch_the_month():
@@ -480,7 +498,7 @@ def test_legacy_payload_without_coverage_counters_adopts_coverage():
 
     # The migration persists, so it runs at most once per install.
     asyncio.run(restored.async_flush())
-    assert store.data["price_coverage_schema"] == 1
+    assert store.data["price_coverage_schema"] == _price_coverage_schema()
     assert store.data["export_earnings_covered_kwh"] == pytest.approx(35.57)
     reloaded = _new_accumulator(clock, store)
     asyncio.run(reloaded.async_restore())
@@ -519,3 +537,135 @@ def test_mtd_average_survives_upgrade_day():
     asyncio.run(restored.async_restore())
 
     assert restored.as_dict()["avg_cost_per_kwh_mtd"] is not None
+
+
+def _covau_free_window(accumulator, clock, minutes: int = 60) -> None:
+    """Integrate a CovaU free-import window priced at exactly 0.0 $/kWh."""
+    for _ in range(minutes * 2):  # 30 s SAJ H2 telemetry cadence
+        clock.current += timedelta(seconds=30)
+        accumulator.update(0.0, 4.8, 0.0, 1.2, 0.0, 0.03)
+
+
+def test_mtd_coverage_written_before_the_schema_marker_is_repaired():
+    """Ticket #385: v2.12.1132/1133 payloads blank the month until the 1st.
+
+    Those two releases shipped the coverage counters one release *before* the
+    schema marker.  They restored the month's measured energy in full but
+    started its counters from zero mid-month, so the key-absence migration
+    added afterwards can never fire on them and Avg Cost per kWh (Month) reads
+    Unknown for the rest of the calendar month - updating does not clear it.
+    """
+    clock = _Clock(datetime(2026, 8, 20, 11, 0, 0))
+    restored = _new_accumulator(
+        clock,
+        _Store(
+            {
+                # Yesterday's payload: the daily bucket starts fresh, so only
+                # the month-to-date state can be responsible.
+                "date": "2026-08-19",
+                "month": "2026-08",
+                "mtd_grid_import_kwh": 210.0,
+                "mtd_grid_export_kwh": 40.0,
+                "mtd_load_kwh": 300.0,
+                "mtd_import_cost": 44.0,
+                "mtd_export_earnings": 1.20,
+                # Counters present but short, and no price_coverage_schema:
+                # only v2.12.1132/1133 can write that combination.
+                "mtd_import_cost_covered_kwh": 24.0,
+                "mtd_export_earnings_covered_kwh": 6.0,
+            }
+        ),
+    )
+    asyncio.run(restored.async_restore())
+
+    assert restored.mtd_import_cost_covered_kwh == pytest.approx(210.0)
+    assert restored.mtd_export_earnings_covered_kwh == pytest.approx(40.0)
+    assert restored.as_dict()["avg_cost_per_kwh_mtd"] is not None
+
+
+def test_stored_month_load_latch_is_cleared_once_on_restore():
+    """Ticket #385: v2.12.1153 stopped setting the latch but never cleared it.
+
+    The month latch clears only at month rollover, so an install that latched
+    under an earlier build kept reading Unknown after updating.  A genuine
+    Home Load hole must still re-latch on the next integrated sample.
+    """
+    clock = _Clock(datetime(2026, 8, 20, 11, 0, 0))
+    restored = _new_accumulator(
+        clock,
+        _Store(
+            {
+                "date": "2026-08-19",
+                "month": "2026-08",
+                "mtd_grid_import_kwh": 210.0,
+                "mtd_grid_export_kwh": 40.0,
+                "mtd_load_kwh": 300.0,
+                "mtd_import_cost": 44.0,
+                "mtd_export_earnings": 1.20,
+                "mtd_import_cost_covered_kwh": 210.0,
+                "mtd_export_earnings_covered_kwh": 40.0,
+                "price_coverage_schema": 1,
+                "load_accounting_partial_mtd": True,
+            }
+        ),
+    )
+    asyncio.run(restored.async_restore())
+
+    assert restored._load_accounting_partial_mtd is False
+    assert restored.as_dict()["avg_cost_per_kwh_mtd"] is not None
+
+    # A real hole in an integrated interval still latches the month again.
+    restored.update(0.0, 1.0, 0.0, 1.0, 0.30, 0.05)
+    clock.current += timedelta(seconds=30)
+    restored.update(0.0, 1.0, 0.0, None, 0.30, 0.05)
+    assert restored._load_accounting_partial_mtd is True
+
+
+def test_repaired_month_payload_is_not_migrated_a_second_time():
+    """The repair is one-time: a fixed build's own payload is left alone."""
+    clock = _Clock(datetime(2026, 8, 20, 11, 0, 0))
+    store = _Store(
+        {
+            "date": "2026-08-19",
+            "month": "2026-08",
+            "mtd_grid_import_kwh": 210.0,
+            "mtd_grid_export_kwh": 40.0,
+            "mtd_load_kwh": 300.0,
+            "mtd_import_cost": 44.0,
+            "mtd_export_earnings": 1.20,
+            "mtd_import_cost_covered_kwh": 24.0,
+            "mtd_export_earnings_covered_kwh": 6.0,
+        }
+    )
+    restored = _new_accumulator(clock, store)
+    asyncio.run(restored.async_restore())
+    asyncio.run(restored.async_flush())
+    assert store.data["price_coverage_schema"] == _price_coverage_schema()
+
+    # Re-restoring the repaired payload keeps the counters it just wrote, and
+    # a genuine later hole in the same month still fails closed.
+    reloaded = _new_accumulator(clock, store)
+    asyncio.run(reloaded.async_restore())
+    assert reloaded.mtd_import_cost_covered_kwh == pytest.approx(210.0)
+    reloaded.mtd_grid_import_kwh = 400.0
+    assert reloaded.as_dict()["avg_cost_per_kwh_mtd"] is None
+
+
+def test_covau_free_import_window_prices_at_zero_and_stays_covered():
+    """Ticket #385: A$0.00 during a CovaU free window is the right answer.
+
+    The contract's effective import price inside a free-import window is
+    exactly 0.0 c/kWh.  Cost must stay flat while coverage keeps advancing, so
+    a legitimately free day never trips the fail-closed blanking that would
+    make it indistinguishable from a broken sensor.
+    """
+    clock = _Clock(datetime(2026, 8, 20, 11, 0, 0))
+    accumulator = _new_accumulator(clock, _Store())
+    _covau_free_window(accumulator, clock)
+
+    summary = accumulator.as_dict()
+    assert summary["grid_import_today_kwh"] > 4.0
+    assert summary["import_cost_today"] == pytest.approx(0.0)
+    assert summary["import_cost_coverage"] == "complete"
+    assert summary["avg_cost_per_kwh_today"] == pytest.approx(0.0)
+    assert summary["avg_cost_per_kwh_mtd"] == pytest.approx(0.0)

@@ -75,7 +75,7 @@ _SOLCAST_ESTIMATE_FIELDS = {
 
 ENERGY_ACC_STORE_VERSION = 1
 ENERGY_ACC_SAVE_DELAY = 300  # Flush at most every 5 minutes
-ENERGY_ACC_PRICE_COVERAGE_SCHEMA = 1
+ENERGY_ACC_PRICE_COVERAGE_SCHEMA = 2
 SOLAREDGE_DAILY_TOTALS_STORE_VERSION = 1
 LIFETIME_TOTALS_STORE_VERSION = 1
 TESLA_OUTAGE_NOTIFY_FAILURES = 5
@@ -472,6 +472,10 @@ class EnergyAccumulator:
         now = dt_util.now()
         today = now.strftime("%Y-%m-%d")
         migrated_legacy_coverage = False
+        try:
+            stored_schema = int(data.get("price_coverage_schema", 0) or 0)
+        except (TypeError, ValueError):
+            stored_schema = 0
         if stored_date == today:
             self.solar_kwh = float(data.get("solar_kwh", 0.0))
             self.grid_import_kwh = float(data.get("grid_import_kwh", 0.0))
@@ -562,9 +566,50 @@ class EnergyAccumulator:
             ):
                 self.mtd_export_earnings_covered_kwh = self.mtd_grid_export_kwh
                 migrated_legacy_coverage = True
+            # The month-to-date bucket has no midnight self-heal, so a payload
+            # written by the two releases that shipped the counters *before*
+            # the schema marker (v2.12.1132/1133) stays blanked until the next
+            # month rollover.  Those builds restored the month's measured
+            # energy in full but started its coverage counters from zero, so
+            # the deficit is exactly the part of the month that ran before the
+            # upgrade - not a real pricing hole.  Only they can write counters
+            # with no marker, so repairing that combination once is unambiguous
+            # and cannot touch a payload from any later build.
+            #
+            # The daily bucket deliberately keeps the stricter key-absence rule
+            # (see _priced_coverage_is_partial and the same-day regression):
+            # there a short counter costs at most the rest of one day and
+            # failing closed is the safer trade.
+            if stored_schema < 1 and "mtd_import_cost_covered_kwh" in data:
+                if self._priced_coverage_is_partial(
+                    self.mtd_import_cost_covered_kwh,
+                    self.mtd_grid_import_kwh,
+                ):
+                    self.mtd_import_cost_covered_kwh = self.mtd_grid_import_kwh
+                    migrated_legacy_coverage = True
+                if self._priced_coverage_is_partial(
+                    self.mtd_export_earnings_covered_kwh,
+                    self.mtd_grid_export_kwh,
+                ):
+                    self.mtd_export_earnings_covered_kwh = (
+                        self.mtd_grid_export_kwh
+                    )
+                    migrated_legacy_coverage = True
             self._load_accounting_partial_mtd = bool(
                 data.get("load_accounting_partial_mtd", False)
             )
+            # Releases before v2.12.1153 latched the month's Home Load
+            # accounting on samples that integrated nothing at all - the first
+            # sample after a restart, or one past the 6-minute staleness guard.
+            # That fix stopped the latch being set wrongly but left every
+            # already-stored latch in place, and the latch clears only at month
+            # rollover, so Avg Cost per kWh (Month) stayed Unknown for the rest
+            # of the month even after updating.  Clear a latch written before
+            # this schema once; a genuine Home Load hole re-latches on the very
+            # next integrated sample that is missing load.
+            if stored_schema < 2 and self._load_accounting_partial_mtd:
+                self._load_accounting_partial_mtd = False
+                migrated_legacy_coverage = True
             # Persist the full year-month rather than only the numeric month;
             # January of a new year must not inherit December/January totals.
             self._last_month = current_month
