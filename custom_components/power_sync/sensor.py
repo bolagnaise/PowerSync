@@ -5031,7 +5031,7 @@ CURTAILMENT_CONTROL_STATE_KEYS = (
 def _generic_curtailment_visible_status(
     *,
     curtailment_enabled: bool,
-    commanded: bool,
+    control_state: str,
     export_uneconomic: bool,
 ) -> str:
     """Return an honest non-FoxESS curtailment state.
@@ -5047,9 +5047,11 @@ def _generic_curtailment_visible_status(
     """
     if not curtailment_enabled:
         return "Normal"
-    if commanded:
+    if control_state == "curtailed":
         return "Active"
-    return "Pending" if export_uneconomic else "Normal"
+    if control_state == "pending" or export_uneconomic:
+        return "Pending"
+    return "Normal"
 
 
 def _foxess_curtailment_visible_status(
@@ -5259,7 +5261,7 @@ class SolarCurtailmentSensor(SensorEntity):
             return self._foxess_status()[0]
         return _generic_curtailment_visible_status(
             curtailment_enabled=self._curtailment_enabled(),
-            commanded=self._control_command_state() == "curtailed",
+            control_state=self._control_command_state(),
             export_uneconomic=self._export_uneconomic(),
         )
 

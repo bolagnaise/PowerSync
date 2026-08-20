@@ -298,14 +298,58 @@ class GoodWeBatteryController:
         )
         self._grid_export_state_saved = True
 
+    def get_grid_export_restore_state(self) -> dict[str, int | None] | None:
+        """Return the export settings that must survive a controller restart."""
+        if not self._grid_export_state_saved:
+            return None
+        return {
+            "grid_export": self._saved_grid_export_enabled,
+            "grid_export_limit": self._saved_grid_export_limit,
+        }
+
+    def restore_grid_export_restore_state(self, state: Any) -> bool:
+        """Restore a previously persisted pre-curtail export-setting snapshot."""
+        if not isinstance(state, dict):
+            return False
+        try:
+            enabled = state.get("grid_export")
+            limit = state.get("grid_export_limit")
+            self._saved_grid_export_enabled = int(enabled) if enabled is not None else None
+            self._saved_grid_export_limit = int(limit) if limit is not None else None
+        except (TypeError, ValueError, OverflowError):
+            return False
+        self._grid_export_state_saved = True
+        return True
+
+    async def _verify_grid_export_settings(
+        self, expected_enabled: int, expected_limit: int
+    ) -> bool:
+        """Confirm both GoodWe export-limit settings after a write."""
+        actual_enabled = await self._read_grid_export_setting("grid_export")
+        actual_limit = await self._read_grid_export_setting("grid_export_limit")
+        if actual_enabled == expected_enabled and actual_limit == expected_limit:
+            return True
+        _LOGGER.warning(
+            "GoodWe export-limit write is not confirmed: expected enabled=%d, "
+            "limit=%dW; read enabled=%s, limit=%sW",
+            expected_enabled,
+            expected_limit,
+            actual_enabled,
+            actual_limit,
+        )
+        return False
+
     async def curtail(self) -> bool:
         """Zero-export curtailment: block all grid export via export limit register."""
         try:
             if not await self.connect():
                 return False
             await self._save_grid_export_state()
-            await self._write_grid_export_enabled(1)
+            if not await self._write_grid_export_enabled(1):
+                return False
             await self._inverter.set_grid_export_limit(0)
+            if not await self._verify_grid_export_settings(1, 0):
+                return False
             _LOGGER.info("GoodWe curtailed: export limit enabled and set to 0W")
             return True
         except Exception as e:
@@ -339,7 +383,12 @@ class GoodWeBatteryController:
                 restore_limit = _GOODWE_EXPORT_LIMIT_MAX_W
                 restore_enabled = 0
             await self._inverter.set_grid_export_limit(restore_limit)
-            await self._write_grid_export_enabled(restore_enabled)
+            if not await self._write_grid_export_enabled(restore_enabled):
+                return False
+            if not await self._verify_grid_export_settings(
+                restore_enabled, restore_limit
+            ):
+                return False
             self._saved_grid_export_enabled = None
             self._saved_grid_export_limit = None
             self._grid_export_state_saved = False

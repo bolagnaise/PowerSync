@@ -140,7 +140,7 @@ def _load_generic_status_helper():
 def _generic_status(**overrides):
     values = {
         "curtailment_enabled": True,
-        "commanded": False,
+        "control_state": "normal",
         "export_uneconomic": True,
     }
     values.update(overrides)
@@ -155,20 +155,24 @@ def test_uncommanded_curtailment_is_pending_for_non_foxess_brands():
     returned without issuing any command at all.
     """
     assert _generic_status() == "Pending"
-    assert _generic_status(commanded=True) == "Active"
+    assert _generic_status(control_state="curtailed") == "Active"
 
 
 def test_generic_curtailment_status_is_normal_when_export_is_economic():
     assert _generic_status(export_uneconomic=False) == "Normal"
     # An acknowledged command outranks the price: still curtailed until restored.
-    assert _generic_status(export_uneconomic=False, commanded=True) == "Active"
+    assert _generic_status(export_uneconomic=False, control_state="curtailed") == "Active"
 
 
 def test_disabled_curtailment_is_normal_for_non_foxess_brands_too():
     assert _generic_status(curtailment_enabled=False) == "Normal"
     assert (
-        _generic_status(curtailment_enabled=False, commanded=True) == "Normal"
+        _generic_status(curtailment_enabled=False, control_state="curtailed") == "Normal"
     )
+
+
+def test_unverified_command_remains_pending_after_price_has_cleared():
+    assert _generic_status(control_state="pending", export_uneconomic=False) == "Pending"
 
 
 def test_status_marker_consults_every_brand_control_state_key():

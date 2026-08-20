@@ -22497,6 +22497,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             pending_tesla_restore.get("reason"),
         )
 
+    stored_goodwe_curtailment_restore_state = stored_data.get(
+        "goodwe_curtailment_restore_state"
+    )
+    goodwe_controller = getattr(goodwe_coordinator, "_controller", None)
+    if stored_goodwe_curtailment_restore_state and goodwe_controller:
+        restore_snapshot = getattr(
+            goodwe_controller, "restore_grid_export_restore_state", None
+        )
+        if callable(restore_snapshot) and restore_snapshot(
+            stored_goodwe_curtailment_restore_state
+        ):
+            _LOGGER.warning(
+                "Restored pending GoodWe export-limit baseline after restart; "
+                "the next curtailment check will verify the current hardware state"
+            )
+        else:
+            stored_goodwe_curtailment_restore_state = None
+
     last_restorable_tesla_tariff = _select_restorable_tesla_tariff(
         stored_data.get("last_restorable_tesla_tariff")
     )
@@ -22593,7 +22611,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
         "sigenergy_curtailment_state": "normal",  # Track Sigenergy DC curtailment state
         "alphaess_curtailment_state": "normal",  # Track AlphaESS DC curtailment state
-        "goodwe_curtailment_state": "normal",  # Track GoodWe export-limit curtailment state
+        # A saved baseline means a prior process may have left a limiter in
+        # place. Never render that as confirmed until this process has read it
+        # back after a fresh command.
+        "goodwe_curtailment_state": "normal" if not stored_goodwe_curtailment_restore_state else "pending",
         "solaredge_curtailment_state": "normal",  # Track SolarEdge active-power curtailment state
         "sungrow_curtailment_state": "normal",  # Track Sungrow export-limit curtailment state
         "sungrow_power_limit_w": None,  # Current Sungrow load-following export limit
@@ -27077,6 +27098,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 reason,
             )
             success = await controller.restore(allow_zero_export_limit=False)
+            store = entry_data.get("store")
+            snapshot_getter = getattr(controller, "get_grid_export_restore_state", None)
+            if store and callable(snapshot_getter):
+                try:
+                    stored_data = await store.async_load() or {}
+                    snapshot = snapshot_getter()
+                    if snapshot:
+                        stored_data["goodwe_curtailment_restore_state"] = snapshot
+                    else:
+                        stored_data.pop("goodwe_curtailment_restore_state", None)
+                    await store.async_save(stored_data)
+                except Exception as err:
+                    _LOGGER.warning(
+                        "Could not persist GoodWe curtailment restore state: %s", err
+                    )
             if success:
                 entry_data["goodwe_curtailment_state"] = "normal"
                 entry_data.pop("_last_goodwe_curtailment_reapply", None)
@@ -27153,6 +27189,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         controller = gw_coord._controller
 
+        async def _persist_restore_snapshot() -> None:
+            """Keep the original direct-GoodWe export settings across reloads."""
+            store = entry_data.get("store")
+            snapshot_getter = getattr(controller, "get_grid_export_restore_state", None)
+            if not store or not callable(snapshot_getter):
+                return
+            try:
+                stored_data = await store.async_load() or {}
+                snapshot = snapshot_getter()
+                if snapshot:
+                    stored_data["goodwe_curtailment_restore_state"] = snapshot
+                else:
+                    stored_data.pop("goodwe_curtailment_restore_state", None)
+                await store.async_save(stored_data)
+            except Exception as err:
+                _LOGGER.warning(
+                    "Could not persist GoodWe curtailment restore state: %s", err
+                )
+
         try:
             if export_uneconomic:
                 if _goodwe_force_export_active(entry_data):
@@ -27190,10 +27245,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             export_earnings,
                         )
                     success = await controller.curtail()
+                    await _persist_restore_snapshot()
                     if success:
                         entry_data["goodwe_curtailment_state"] = "curtailed"
                         entry_data["_last_goodwe_curtailment_reapply"] = _now
                     else:
+                        entry_data["goodwe_curtailment_state"] = "pending"
                         _LOGGER.error("GoodWe curtail() failed")
                 else:
                     _LOGGER.debug("GoodWe already curtailed, no action needed")
@@ -27204,6 +27261,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         export_earnings,
                     )
                     success = await controller.restore()
+                    await _persist_restore_snapshot()
                     if success:
                         entry_data["goodwe_curtailment_state"] = "normal"
                         entry_data.pop("_last_goodwe_curtailment_reapply", None)

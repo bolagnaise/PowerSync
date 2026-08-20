@@ -65,6 +65,16 @@ class _FakeGoodWeInverter:
         self.settings[setting_id] = value
 
 
+class _NoOpGoodWeInverter(_FakeGoodWeInverter):
+    """Acknowledges writes without changing the registers."""
+
+    async def set_grid_export_limit(self, value: int) -> None:
+        self.export_limits.append(value)
+
+    async def write_setting(self, setting_id: str, value: int) -> None:
+        self.setting_writes.append((setting_id, value))
+
+
 def test_restore_uses_goodwe_export_limit_register_maximum():
     module, restore_module = _load_goodwe_controller_module()
     try:
@@ -162,5 +172,52 @@ def test_restore_for_export_command_does_not_keep_saved_zero_export_limit():
         assert controller._saved_grid_export_enabled is None
         assert controller._saved_grid_export_limit is None
         assert controller._grid_export_state_saved is False
+    finally:
+        restore_module()
+
+
+def test_curtail_requires_goodwe_register_readback_before_success():
+    module, restore_module = _load_goodwe_controller_module()
+    try:
+        inverter = _NoOpGoodWeInverter()
+        controller = module.GoodWeBatteryController("192.0.2.10")
+        controller._inverter = inverter
+
+        async def connect() -> bool:
+            return True
+
+        controller.connect = connect
+
+        assert not asyncio.run(controller.curtail())
+        assert controller.get_grid_export_restore_state() == {
+            "grid_export": 0,
+            "grid_export_limit": 5000,
+        }
+    finally:
+        restore_module()
+
+
+def test_restart_snapshot_prevents_recapturing_zero_export_as_user_baseline():
+    module, restore_module = _load_goodwe_controller_module()
+    try:
+        inverter = _FakeGoodWeInverter()
+        first = module.GoodWeBatteryController("192.0.2.10")
+        first._inverter = inverter
+        second = module.GoodWeBatteryController("192.0.2.10")
+        second._inverter = inverter
+
+        async def connect() -> bool:
+            return True
+
+        first.connect = connect
+        second.connect = connect
+
+        assert asyncio.run(first.curtail())
+        assert second.restore_grid_export_restore_state(
+            first.get_grid_export_restore_state()
+        )
+        assert asyncio.run(second.curtail())
+        assert asyncio.run(second.restore())
+        assert inverter.settings == {"grid_export": 0, "grid_export_limit": 5000}
     finally:
         restore_module()

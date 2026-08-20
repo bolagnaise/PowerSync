@@ -80,9 +80,31 @@ class _Controller:
         return True
 
 
-def _run_goodwe_curtailment(controller: Any, *, feedin_price: float):
+class _UnverifiedController(_Controller):
+    def get_grid_export_restore_state(self):
+        return {"grid_export": 0, "grid_export_limit": 5000}
+
+    async def curtail(self) -> bool:
+        self.calls.append("curtail")
+        return False
+
+
+class _Store:
+    def __init__(self) -> None:
+        self.data: dict[str, Any] = {}
+
+    async def async_load(self):
+        return dict(self.data)
+
+    async def async_save(self, data) -> None:
+        self.data = dict(data)
+
+
+def _run_goodwe_curtailment(controller: Any, *, feedin_price: float, store=None):
     """Run the real handler against a fake coordinator and return its state."""
     entry_data: dict[str, Any] = {"goodwe_curtailment_state": "normal"}
+    if store is not None:
+        entry_data["store"] = store
     logger = _Logger()
     entry_data["goodwe_coordinator"] = SimpleNamespace(_controller=controller)
     hass = SimpleNamespace(data={"power_sync": {"entry": entry_data}})
@@ -149,6 +171,22 @@ def test_direct_control_profile_still_curtails():
 
     assert controller.calls == ["curtail"]
     assert entry_data["goodwe_curtailment_state"] == "curtailed"
+
+
+def test_unverified_direct_command_stays_pending_and_persists_restore_baseline():
+    controller = _UnverifiedController()
+    store = _Store()
+
+    entry_data, _logger = _run_goodwe_curtailment(
+        controller, feedin_price=6.0, store=store
+    )
+
+    assert controller.calls == ["curtail"]
+    assert entry_data["goodwe_curtailment_state"] == "pending"
+    assert store.data["goodwe_curtailment_restore_state"] == {
+        "grid_export": 0,
+        "grid_export_limit": 5000,
+    }
 
 
 def test_entity_telemetry_profiles_build_no_control_surface():
