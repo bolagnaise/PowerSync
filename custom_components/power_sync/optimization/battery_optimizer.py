@@ -7384,16 +7384,14 @@ class BatteryOptimizer:
                 power_w = min(new_discharge_w, net_home_w)
             else:
                 power_w = allowed_export_w
-            trimmed.append(ScheduleAction(
-                timestamp=action.timestamp,
+            # Restamp one slot rather than rebuild it: replace() carries every
+            # field this branch does not name. Listing them by hand dropped
+            # ev_charge_w the moment that field was added.
+            trimmed.append(replace(
+                action,
                 action=emitted_action,
                 power_w=round(power_w, 1),
-                soc=action.soc,
-                battery_charge_w=action.battery_charge_w,
                 battery_discharge_w=round(new_discharge_w, 1),
-                reason=action.reason,
-                control_source=action.control_source,
-                control_action=action.control_action,
             ))
         return OptimizationSchedule(
             actions=trimmed,
@@ -7679,16 +7677,16 @@ class BatteryOptimizer:
                 else:
                     power_w = 0.0
                 restamped.append(
-                    ScheduleAction(
-                        timestamp=action.timestamp,
+                    # replace() keeps the fields this restamp does not touch --
+                    # notably ev_charge_w, which a hand-listed rebuild zeroed on
+                    # every solve, erasing the car from the published plan.
+                    replace(
+                        action,
                         action=emitted_action,
                         power_w=round(power_w, 1),
                         soc=round(soc_cursor, 4),
                         battery_charge_w=round(charge_w, 1),
                         battery_discharge_w=round(discharge_w, 1),
-                        reason=action.reason,
-                        control_source=action.control_source,
-                        control_action=action.control_action,
                     )
                 )
             schedule = OptimizationSchedule(

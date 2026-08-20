@@ -476,3 +476,37 @@ def test_a_deadline_already_past_is_still_skipped(build_ev_charge_plan):
         method(types.SimpleNamespace(config_entry=_ENTRY), _solve_timestamps())
         is None
     )
+
+
+def test_reconciliation_keeps_the_planned_ev_draw(optimizer_module):
+    """The published schedule is the reconciled one, so it must keep the car.
+
+    ``reconcile_result_with_schedule`` restamps every action so the emitted
+    plan matches physical dispatch, and the coordinator publishes *that*
+    schedule. Rebuilding ``ScheduleAction`` there without ``ev_charge_w``
+    zeroed the draw the LP had just solved. Since the load overlay is
+    deliberately blanked whenever the LP co-optimizes the car, the plan was
+    then left with no EV load from either source.
+    """
+    optimizer = _optimizer(optimizer_module)
+    kwargs = _kwargs()
+
+    result = optimizer.optimize(**kwargs, ev_plan=_ev_plan(optimizer_module))
+    solved_ev_kwh = sum(ev_kw for _battery_kw, ev_kw in _flows(result))
+    assert solved_ev_kwh > 1.0, "LP did not plan any EV charging to begin with"
+
+    reconciled = optimizer.reconcile_result_with_schedule(
+        result,
+        result.schedule,
+        import_prices=kwargs["import_prices"],
+        export_prices=kwargs["export_prices"],
+        solar=kwargs["solar_forecast"],
+        load=kwargs["load_forecast"],
+        initial_soc=kwargs["current_soc"],
+    )
+
+    reconciled_ev_kwh = sum(
+        (action.ev_charge_w or 0.0) / 1000.0
+        for action in reconciled.schedule.actions
+    )
+    assert reconciled_ev_kwh == pytest.approx(solved_ev_kwh, abs=0.05)
