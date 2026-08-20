@@ -5014,6 +5014,43 @@ class TariffPriceSensor(PowerSyncCurrencyMixin, RestoredNumericStateMixin, Senso
 
 SIGNAL_CURTAILMENT_UPDATED = "power_sync_curtailment_updated_{}"
 
+# Every brand curtailment handler that reaches hardware records its lifecycle
+# under one of these keys, and only sets "curtailed" after the command was
+# acknowledged.  The DC status marker must be backed by one of them: price
+# alone says a curtailment was *warranted*, never that one was performed.
+CURTAILMENT_CONTROL_STATE_KEYS = (
+    "alphaess_curtailment_state",
+    "foxess_curtailment_state",
+    "goodwe_curtailment_state",
+    "sigenergy_curtailment_state",
+    "solaredge_curtailment_state",
+    "sungrow_curtailment_state",
+)
+
+
+def _generic_curtailment_visible_status(
+    *,
+    curtailment_enabled: bool,
+    commanded: bool,
+    export_uneconomic: bool,
+) -> str:
+    """Return an honest non-FoxESS curtailment state.
+
+    ``Active`` renders as "CURTAILED - Export confirmed stopped", so it needs
+    an acknowledged control command behind it.  Reporting it from the feed-in
+    price alone claimed a curtailment on entries where none had been attempted
+    - including brands whose control surface does not exist on the configured
+    profile, where the handler returns without issuing anything (Discord #386,
+    GoodWe ESA exporting 5.9 kW under a "CURTAILED" marker).  Uneconomic export
+    with no acknowledged command is ``Pending``, which the dashboard already
+    renders as "PENDING - Export not confirmed".
+    """
+    if not curtailment_enabled:
+        return "Normal"
+    if commanded:
+        return "Active"
+    return "Pending" if export_uneconomic else "Normal"
+
 
 def _foxess_curtailment_visible_status(
     *,
@@ -5186,22 +5223,49 @@ class SolarCurtailmentSensor(SensorEntity):
                 return price.get("perKwh")
         return None
 
+    def _curtailment_enabled(self) -> bool:
+        """Return whether battery curtailment is switched on for this entry."""
+        return bool(
+            self._entry.options.get(
+                CONF_BATTERY_CURTAILMENT_ENABLED,
+                self._entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
+            )
+        )
+
+    def _export_uneconomic(self) -> bool:
+        """Return whether the live feed-in price makes export uneconomic."""
+        feedin_price = self._get_feedin_price()
+        if feedin_price is None:
+            return False
+        # Export earnings = -feedin_price (Amber uses negative for feed-in costs)
+        return -feedin_price < 1.0
+
+    def _control_command_state(self) -> str:
+        """Return the brand curtailment lifecycle state recorded on this entry."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        for key in CURTAILMENT_CONTROL_STATE_KEYS:
+            state = entry_data.get(key)
+            if isinstance(state, str) and state != "normal":
+                return state
+        # Tesla and other export-rule systems have no per-brand lifecycle key;
+        # the persisted grid export rule is their acknowledged command.
+        if entry_data.get("cached_export_rule") == "never":
+            return "curtailed"
+        return "normal"
+
+    def _visible_status(self) -> str:
+        """Return the state rendered on the DC Solar curtailment card."""
+        if self._is_foxess():
+            return self._foxess_status()[0]
+        return _generic_curtailment_visible_status(
+            curtailment_enabled=self._curtailment_enabled(),
+            commanded=self._control_command_state() == "curtailed",
+            export_uneconomic=self._export_uneconomic(),
+        )
+
     def _is_curtailed(self) -> bool:
         """Determine whether curtailment is confirmed active."""
-        if self._is_foxess():
-            return self._foxess_status()[0] == "Active"
-
-        feedin_price = self._get_feedin_price()
-
-        if feedin_price is not None:
-            # Export earnings = -feedin_price (Amber uses negative for feed-in costs)
-            export_earnings = -feedin_price
-            # Curtailment active when export earnings < 1c/kWh
-            return export_earnings < 1.0
-
-        # No price data, fall back to cached rule
-        cached_rule = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("cached_export_rule")
-        return cached_rule == "never"
+        return self._visible_status() == "Active"
 
     def _foxess_status(self) -> tuple[str, float | None, bool]:
         """Return FoxESS lifecycle state reconciled with live grid telemetry."""
@@ -5256,18 +5320,12 @@ class SolarCurtailmentSensor(SensorEntity):
     @property
     def native_value(self) -> str:
         """Return the state - whether curtailment is active."""
-        if self._is_foxess():
-            return self._foxess_status()[0]
-        if self._is_curtailed():
-            return "Active"
-        return "Normal"
+        return self._visible_status()
 
     @property
     def icon(self) -> str:
         """Return the icon based on state."""
-        if self._is_foxess() and self._foxess_status()[0] == "Pending":
-            return "mdi:solar-power-variant-outline"
-        if self._is_curtailed():
+        if self._visible_status() in ("Active", "Pending"):
             return "mdi:solar-power-variant-outline"  # Different icon when curtailed
         return "mdi:solar-power-variant"
 
@@ -5320,12 +5378,30 @@ class SolarCurtailmentSensor(SensorEntity):
                 "description": descriptions[visible_state],
             }
 
+        control_state = self._control_command_state()
+        visible_state = self._visible_status()
+        descriptions = {
+            "Active": "Export blocked due to negative feed-in price",
+            "Pending": (
+                "Export limiting is not supported on this control profile"
+                if control_state == "unsupported"
+                else "Curtailment is warranted, but no control command has been "
+                "acknowledged"
+            ),
+            "Normal": (
+                "Curtailment is disabled"
+                if not curtailment_enabled
+                else "Normal solar export allowed"
+            ),
+        }
         return {
             "export_rule": cached_rule,
             "curtailment_enabled": curtailment_enabled,
             "feedin_price": feedin_price,
             "export_earnings": export_earnings,
-            "description": "Export blocked due to negative feed-in price" if self._is_curtailed() else "Normal solar export allowed",
+            "export_uneconomic": self._export_uneconomic(),
+            "control_state": control_state,
+            "description": descriptions[visible_state],
         }
 
 

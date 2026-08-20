@@ -27131,7 +27131,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         gw_coord = entry_data.get("goodwe_coordinator")
         if not gw_coord or not hasattr(gw_coord, "_controller") or not gw_coord._controller:
-            _LOGGER.debug("GoodWe curtailment: no controller available")
+            # The entity-telemetry profiles (community GoodWe HA integration,
+            # Modbus TCP, port 502) build no direct control surface, so there is
+            # nothing to send an export limit to.  Returning at DEBUG left the
+            # entry with no curtailment state at all, which the DC status marker
+            # then read as a working curtailment (Discord #386).  Record it so
+            # the marker degrades to Pending, and say so once at WARNING.
+            if entry_data.get("goodwe_curtailment_state") != "unsupported":
+                _LOGGER.warning(
+                    "GoodWe curtailment unavailable: the selected entity-only "
+                    "control profile exposes no export-limit surface, so no "
+                    "curtailment command can be sent"
+                )
+            entry_data["goodwe_curtailment_state"] = "unsupported"
             return
 
         controller = gw_coord._controller

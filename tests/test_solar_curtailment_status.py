@@ -1,8 +1,9 @@
-"""Regression tests for truthful FoxESS curtailment status."""
+"""Regression tests for truthful solar curtailment status."""
 
 from __future__ import annotations
 
 import ast
+import re
 from datetime import datetime, timedelta, timezone
 import math
 from pathlib import Path
@@ -117,3 +118,81 @@ def test_sensor_and_dashboard_expose_pending_as_distinct_state():
     ) >= 3
     assert "PENDING - Export not confirmed" in frontend
     assert "state === 'Active' || state === 'Pending'" in frontend
+
+
+# --- Discord #386: non-FoxESS status must not be a price predicate ----------
+
+
+def _load_generic_status_helper():
+    tree = ast.parse(SENSOR_PATH.read_text())
+    helper = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_generic_curtailment_visible_status"
+    )
+    namespace: dict[str, Any] = {}
+    module = ast.fix_missing_locations(ast.Module(body=[helper], type_ignores=[]))
+    exec(compile(module, str(SENSOR_PATH), "exec"), namespace)
+    return namespace[helper.name]
+
+
+def _generic_status(**overrides):
+    values = {
+        "curtailment_enabled": True,
+        "commanded": False,
+        "export_uneconomic": True,
+    }
+    values.update(overrides)
+    return _load_generic_status_helper()(**values)
+
+
+def test_uncommanded_curtailment_is_pending_for_non_foxess_brands():
+    """#386: a GoodWe ESA exported 5.92 kW under a "CURTAILED" marker.
+
+    The marker was ``-feedin_price < 1.0`` and nothing else, so it asserted
+    "Export confirmed stopped" on an entry whose curtailment handler had
+    returned without issuing any command at all.
+    """
+    assert _generic_status() == "Pending"
+    assert _generic_status(commanded=True) == "Active"
+
+
+def test_generic_curtailment_status_is_normal_when_export_is_economic():
+    assert _generic_status(export_uneconomic=False) == "Normal"
+    # An acknowledged command outranks the price: still curtailed until restored.
+    assert _generic_status(export_uneconomic=False, commanded=True) == "Active"
+
+
+def test_disabled_curtailment_is_normal_for_non_foxess_brands_too():
+    assert _generic_status(curtailment_enabled=False) == "Normal"
+    assert (
+        _generic_status(curtailment_enabled=False, commanded=True) == "Normal"
+    )
+
+
+def test_status_marker_consults_every_brand_control_state_key():
+    """No brand that can command curtailment may be missing from the marker."""
+    source = SENSOR_PATH.read_text()
+    init_source = INIT_PATH.read_text()
+
+    tree = ast.parse(source)
+    keys = next(
+        set(ast.literal_eval(node.value))
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "CURTAILMENT_CONTROL_STATE_KEYS"
+            for target in node.targets
+        )
+    )
+    commanded = {
+        match
+        for match in re.findall(r"\"([a-z_]+_curtailment_state)\"\]\s*=", init_source)
+    }
+    assert commanded, "no brand curtailment lifecycle writes found"
+    assert commanded <= keys
+
+    # And the price is no longer sufficient on its own.
+    assert "return export_earnings < 1.0" not in source
