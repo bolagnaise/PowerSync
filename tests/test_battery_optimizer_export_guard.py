@@ -3673,6 +3673,8 @@ def _deadline_bias_plan(
     current_soc: float = 0.20,
     capacity_wh: int = 50_000,
     max_charge_w: int = 23_000,
+    learned_margin_kwh: float | None = None,
+    learning_confidence: float = 0.0,
 ):
     """Solve a Charge By Time deadline and report where import sits vs the bias.
 
@@ -3699,6 +3701,8 @@ def _deadline_bias_plan(
     )
     optimizer.pre_window_slot = deadline
     optimizer.pre_window_soc_target = 1.0
+    optimizer.pre_window_solar_error_margin_kwh = learned_margin_kwh
+    optimizer.pre_window_solar_learning_confidence = learning_confidence
 
     captured: dict = {}
     original = module.BatteryOptimizer._deadline_import_bias_start
@@ -3825,6 +3829,66 @@ def test_same_day_charge_by_time_deadline_does_not_import_before_the_bias(
     assert plan["soc_at_deadline"] >= 0.99
     assert plan["first_import_slot"] is not None
     assert plan["first_import_slot"] >= plan["bias_slot"]
+
+
+def test_learned_solar_allowance_does_not_collapse_the_deadline_import_bias(
+    battery_optimizer_module,
+):
+    """Discord #339 on v2.12.1162: the top-up was still bought straight away.
+
+    ``SolarForecastLearner.allowance_kwh`` is the P90 of a *whole day's*
+    forecast shortfall, but ``_pre_window_credited_solar_kwh`` subtracted it in
+    full from the partial-day surplus still ahead of the deadline. Once the
+    allowance exceeded that surplus the credit was zero at *every* boundary,
+    ``_deadline_import_bias_start`` reported period 0, and the LP packed the
+    entire evening-armed top-up into the first off-peak slot on a flat tariff -
+    while the same solve still relied on the raw forecast to finish the SOC.
+    The v2.12.1162 tie-break offset cannot help: it is a no-op by construction
+    when the bias starts at period 0.
+    """
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    module = battery_optimizer_module
+    geometry = dict(solar_kw=0.5, deadline=210, solar_from=114, solar_until=210)
+    legacy = _deadline_bias_plan(module, **geometry)
+    # 8 h x 0.5 kW = 4 kWh of pre-deadline surplus against a 6 kWh daily P90
+    # miss - the collapse condition, and a realistic one on a big battery.
+    learned = _deadline_bias_plan(
+        module, **geometry, learned_margin_kwh=6.0, learning_confidence=1.0
+    )
+
+    # The bias start is a question about the surplus ahead of the deadline, so
+    # a whole-day allowance must not move it at all...
+    assert legacy["bias_slot"] > 0
+    assert learned["bias_slot"] == legacy["bias_slot"]
+    assert learned["first_import_slot"] is not None
+    assert learned["first_import_slot"] >= learned["bias_slot"]
+    # ...and this stays a placement change: same energy, same cost, same SOC.
+    assert learned["import_kwh"] == pytest.approx(legacy["import_kwh"], abs=0.05)
+    assert learned["cost"] == pytest.approx(legacy["cost"], abs=0.05)
+    assert learned["soc_at_deadline"] >= 0.99
+
+
+def test_same_day_deadline_keeps_its_bias_under_a_learned_allowance(
+    battery_optimizer_module,
+):
+    """The same-day variant of #339 collapses on a smaller allowance still."""
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    module = battery_optimizer_module
+    geometry = dict(solar_kw=1.0, deadline=84, solar_until=96, current_soc=0.30)
+    legacy = _deadline_bias_plan(module, **geometry)
+    learned = _deadline_bias_plan(
+        module, **geometry, learned_margin_kwh=8.0, learning_confidence=1.0
+    )
+
+    assert legacy["bias_slot"] > 0
+    assert learned["bias_slot"] == legacy["bias_slot"]
+    assert learned["first_import_slot"] is not None
+    assert learned["first_import_slot"] >= learned["bias_slot"]
+    assert learned["soc_at_deadline"] >= 0.99
 
 
 def test_disallow_grid_charge_still_allows_solar_surplus_charging(

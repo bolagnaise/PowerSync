@@ -1809,6 +1809,7 @@ class BatteryOptimizer:
         load: list[float],
         dt_hours: list[float],
         charge_pinned: list[bool] | None = None,
+        use_learned_margin: bool = True,
     ) -> list[float] | None:
         """Return credited storable solar energy remaining at each boundary.
 
@@ -1816,6 +1817,13 @@ class BatteryOptimizer:
         configured or learned credit rules, that can still be stored between
         boundary ``b`` and the pre-window deadline. ``None`` means no deadline
         is active or solar crediting is switched off entirely.
+
+        ``use_learned_margin=False`` drops the learned shortfall allowance and
+        credits solar with the legacy factor alone. The learned allowance is a
+        whole-*day* P90 shortfall, so subtracting it in full from a partial-day
+        surplus is a scope error wherever the answer is a yes/no question about
+        that surplus rather than a headroom reservation - see
+        ``_deadline_import_bias_start``.
         """
         p_n = len(solar)
         if (
@@ -1830,7 +1838,9 @@ class BatteryOptimizer:
         legacy_credit_factor = max(
             0.0, min(1.0, self.pre_window_solar_credit_factor)
         )
-        learned_margin_kwh = self.pre_window_solar_error_margin_kwh
+        learned_margin_kwh = (
+            self.pre_window_solar_error_margin_kwh if use_learned_margin else None
+        )
         learning_confidence = max(
             0.0, min(1.0, self.pre_window_solar_learning_confidence)
         )
@@ -1896,6 +1906,21 @@ class BatteryOptimizer:
         free, and no later re-solve can cancel it. Keep the legacy prefer-later
         tie-break until the credited solar still ahead of the deadline can no
         longer move SOC by ``DEADLINE_IMPORT_BIAS_SOLAR_MIN_SOC``.
+
+        This asks whether forecast solar can still help *at all*, so it credits
+        solar without the learned shortfall allowance. That allowance is the
+        P90 of a whole day's forecast miss; subtracting it in full from the
+        partial-day surplus still ahead of the deadline zeroed the credit at
+        every boundary on sites whose pre-deadline surplus is smaller than a
+        typical daily miss, collapsing the bias start to period 0 and turning
+        the whole horizon into an unconditional earliest-first import - the
+        exact behaviour the bias start exists to prevent. The allowance keeps
+        its job in ``_pre_window_solar_prefill_ceilings``, where reserving
+        headroom pessimistically is the point, and the LP already sizes the
+        top-up from the nowcast-adjusted forecast, so discounting it again here
+        made one solve hold two different beliefs about the same forecast.
+        Placing the top-up later is revisited by every rolling re-solve;
+        placing it earlier is not.
         """
         if self.pre_window_slot is None or not 0 < self.pre_window_slot <= n:
             return 0
@@ -1909,6 +1934,7 @@ class BatteryOptimizer:
             load=load,
             dt_hours=dt_hours,
             charge_pinned=charge_pinned,
+            use_learned_margin=False,
         )
         if credited is None:
             return 0
