@@ -75,7 +75,7 @@ _SOLCAST_ESTIMATE_FIELDS = {
 
 ENERGY_ACC_STORE_VERSION = 1
 ENERGY_ACC_SAVE_DELAY = 300  # Flush at most every 5 minutes
-ENERGY_ACC_PRICE_COVERAGE_SCHEMA = 2
+ENERGY_ACC_PRICE_COVERAGE_SCHEMA = 3
 SOLAREDGE_DAILY_TOTALS_STORE_VERSION = 1
 LIFETIME_TOTALS_STORE_VERSION = 1
 TESLA_OUTAGE_NOTIFY_FAILURES = 5
@@ -566,21 +566,24 @@ class EnergyAccumulator:
             ):
                 self.mtd_export_earnings_covered_kwh = self.mtd_grid_export_kwh
                 migrated_legacy_coverage = True
-            # The month-to-date bucket has no midnight self-heal, so a payload
-            # written by the two releases that shipped the counters *before*
-            # the schema marker (v2.12.1132/1133) stays blanked until the next
-            # month rollover.  Those builds restored the month's measured
-            # energy in full but started its coverage counters from zero, so
-            # the deficit is exactly the part of the month that ran before the
-            # upgrade - not a real pricing hole.  Only they can write counters
-            # with no marker, so repairing that combination once is unambiguous
-            # and cannot touch a payload from any later build.
+            # The month-to-date bucket has no midnight self-heal, so a coverage
+            # deficit inherited from before an upgrade stays blanked until the
+            # next month rollover.  v2.12.1132/1133 shipped the counters one
+            # release before the marker and started them from zero mid-month.
+            # Gating the repair on that marker being absent looked unambiguous
+            # but was unreachable: _data_to_save stamps the *current* marker on
+            # every save, so any build from v2.12.1134 on restores such a
+            # payload, skips the key-absence migration because the keys are
+            # present, and rewrites it carrying its own marker.  Upgrading is
+            # exactly what does that, so the repair never fired for the installs
+            # it was written for.  Pin a one-time repair to the schema it ships
+            # in, never to an older one.
             #
             # The daily bucket deliberately keeps the stricter key-absence rule
             # (see _priced_coverage_is_partial and the same-day regression):
             # there a short counter costs at most the rest of one day and
             # failing closed is the safer trade.
-            if stored_schema < 1 and "mtd_import_cost_covered_kwh" in data:
+            if stored_schema < 3 and "mtd_import_cost_covered_kwh" in data:
                 if self._priced_coverage_is_partial(
                     self.mtd_import_cost_covered_kwh,
                     self.mtd_grid_import_kwh,

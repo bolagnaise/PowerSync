@@ -669,3 +669,41 @@ def test_covau_free_import_window_prices_at_zero_and_stays_covered():
     assert summary["import_cost_coverage"] == "complete"
     assert summary["avg_cost_per_kwh_today"] == pytest.approx(0.0)
     assert summary["avg_cost_per_kwh_mtd"] == pytest.approx(0.0)
+
+
+def test_mtd_coverage_short_under_a_stamped_marker_is_still_repaired():
+    """Ticket #385 retest: v2.12.1162's repair could never reach this install.
+
+    v2.12.1132/1133 wrote the month counters short and marker-less, but
+    ``_data_to_save`` stamps the current marker on every save, so every build
+    from v2.12.1134 on restores that payload, skips the key-absence migration
+    because the keys are present, and rewrites it carrying its own marker.  A
+    repair gated on ``stored_schema < 1`` therefore only fired on a payload no
+    later build had ever opened - which upgrading is exactly what does - so
+    Avg Cost per kWh (Month) stayed Unknown through 1159, 1161 and 1162.
+    Schema 2 is the marker v2.12.1162/1163 themselves wrote.
+    """
+    for stored_schema in (1, 2):
+        clock = _Clock(datetime(2026, 8, 20, 14, 30, 0))
+        restored = _new_accumulator(
+            clock,
+            _Store(
+                {
+                    "date": "2026-08-19",
+                    "month": "2026-08",
+                    "mtd_grid_import_kwh": 190.06,
+                    "mtd_grid_export_kwh": 60.0,
+                    "mtd_load_kwh": 303.0,
+                    "mtd_import_cost": 43.0,
+                    "mtd_export_earnings": 3.20,
+                    "mtd_import_cost_covered_kwh": 10.06,
+                    "mtd_export_earnings_covered_kwh": 0.0,
+                    "price_coverage_schema": stored_schema,
+                }
+            ),
+        )
+        asyncio.run(restored.async_restore())
+
+        assert restored.mtd_import_cost_covered_kwh == pytest.approx(190.06)
+        assert restored.mtd_export_earnings_covered_kwh == pytest.approx(60.0)
+        assert restored.as_dict()["avg_cost_per_kwh_mtd"] is not None
