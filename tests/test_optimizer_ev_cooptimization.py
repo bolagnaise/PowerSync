@@ -563,3 +563,100 @@ def test_the_infeasible_hold_is_unchanged_without_a_car(optimizer_module):
     assert all(
         (action.ev_charge_w or 0.0) == 0.0 for action in hold.schedule.actions
     )
+
+
+def _staged_plans(module, n):
+    """Two cars: one leaving early, one with no deadline at all.
+
+    Modeled on a real two-Tesla site — a car due at 06:00 and a second car
+    with no departure time, on a tariff whose free window opens at 10:00.
+    """
+    from power_sync.optimization.ev_load_plan import combine_ev_charge_plans
+
+    leaves_early = module.EVChargePlan(
+        vehicle_id="leaves_at_slot_10",
+        max_power_kw=tuple(7.36 if i <= 10 else 0.0 for i in range(n)),
+        energy_needed_kwh=32.9,
+        charge_efficiency=0.9,
+    )
+    stays_all_day = module.EVChargePlan(
+        vehicle_id="no_deadline",
+        max_power_kw=(7.36,) * n,
+        energy_needed_kwh=7.6,
+        charge_efficiency=0.9,
+    )
+    return combine_ev_charge_plans([leaves_early, stays_all_day], n)
+
+
+def _staged_kwargs(n=24):
+    """Overnight at 31c to slot 10, a free window at slots 15-18, 51c otherwise."""
+    start = datetime(2026, 8, 20, 19, 0, tzinfo=timezone.utc)
+    prices = [
+        0.31 if i <= 10 else (0.0 if 15 <= i <= 18 else 0.51)
+        for i in range(n)
+    ]
+    return {
+        "import_prices": prices,
+        "export_prices": [0.05] * n,
+        "solar_forecast": [0.0] * n,
+        "load_forecast": [0.5] * n,
+        "current_soc": 0.50,
+        "schedule_timestamps": [start + timedelta(hours=i) for i in range(n)],
+        "allow_grid_charge": True,
+    }
+
+
+def _staged_optimizer(module, n):
+    return module.BatteryOptimizer(
+        capacity_wh=40_000,
+        max_charge_w=14_700,
+        max_discharge_w=10_000,
+        max_grid_import_w=16_100,
+        backup_reserve=0.05,
+        interval_minutes=60,
+        horizon_hours=n,
+    )
+
+
+def test_combining_vehicles_keeps_each_ones_deadline(optimizer_module):
+    """Summing two cars into one energy figure must not erase the earlier one.
+
+    The aggregate is one block against one import limit, but the earlier car's
+    deadline is a real constraint on *when* part of that block has to land.
+    Without staging, the solver satisfied the whole 40.5 kWh total by parking
+    most of it in the free window — which the 06:00 car cannot reach — and the
+    plan showed it charging in a window it would already have left.
+    """
+    n = 24
+    optimizer = _staged_optimizer(optimizer_module, n)
+
+    result = optimizer.optimize(
+        **_staged_kwargs(n),
+        ev_plan=_staged_plans(optimizer_module, n),
+    )
+
+    assert result.feasible
+    ev_kw = [action.ev_charge_w / 1000.0 for action in result.schedule.actions]
+    # Grid-side kWh, so compare against the early car's need grossed up for
+    # charge efficiency: 32.9 / 0.9.
+    before_deadline_kwh = sum(ev_kw[:11])
+    assert before_deadline_kwh >= 32.9 / 0.9 - 0.05
+
+    # The car with no deadline should still take the free window rather than
+    # buying its energy at 31c overnight alongside the other one.
+    free_window_kwh = sum(ev_kw[15:19])
+    assert free_window_kwh >= 7.6 / 0.9 - 0.05
+
+
+def test_a_single_vehicle_still_gets_exactly_one_stage(optimizer_module):
+    """One car must produce the pre-staging model unchanged."""
+    plan = _ev_plan(optimizer_module)
+
+    assert plan.staged_requirements == ((7, 14.0),)
+
+
+def test_combined_stages_are_cumulative(optimizer_module):
+    """Each stage carries everything owed by then, not just that car's share."""
+    combined = _staged_plans(optimizer_module, 24)
+
+    assert combined.staged_requirements == ((10, 32.9), (23, 40.5))

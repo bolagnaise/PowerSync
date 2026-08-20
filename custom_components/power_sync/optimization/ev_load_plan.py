@@ -49,6 +49,25 @@ class EVChargePlan:
     energy_needed_kwh: float
     charge_efficiency: float = 0.9
     min_power_kw: float = 0.0
+    # Cumulative energy that must be delivered by a given slot, as
+    # ``(last_usable_slot, kwh_by_then)`` sorted by slot. Empty means the one
+    # implicit stage every single-vehicle plan has: all of its energy by its
+    # own deadline. Combining vehicles is the only thing that produces more
+    # than one stage, and it is the whole reason the field exists -- summing
+    # two cars into one energy figure otherwise discards the earlier car's
+    # deadline, letting the solver satisfy the total in a cheap window that
+    # car can no longer use.
+    deadline_requirements: tuple[tuple[int, float], ...] = ()
+
+    @property
+    def staged_requirements(self) -> tuple[tuple[int, float], ...]:
+        """Return the cumulative delivery stages, deriving the implicit one."""
+        if self.deadline_requirements:
+            return self.deadline_requirements
+        deadline = self.deadline_index
+        if deadline < 0:
+            return ()
+        return ((deadline, self.energy_needed_kwh),)
 
     @property
     def active(self) -> bool:
@@ -85,12 +104,28 @@ def normalize_ev_charge_plan(
     if not 0.1 <= efficiency <= 1.0:
         efficiency = 0.9
 
+    # A stage whose deadline falls past the horizon is clamped to the last
+    # slot rather than dropped: the energy is still required, and dropping it
+    # would quietly relax the requirement to zero.
+    stages: list[tuple[int, float]] = []
+    for raw_slot, raw_kwh in plan.deadline_requirements or ():
+        try:
+            slot = int(raw_slot)
+        except (TypeError, ValueError):
+            continue
+        kwh = max(0.0, _finite(raw_kwh))
+        if kwh <= 1e-9:
+            continue
+        stages.append((max(0, min(n_slots - 1, slot)), kwh))
+    stages.sort(key=lambda stage: stage[0])
+
     normalized = EVChargePlan(
         vehicle_id=str(plan.vehicle_id or "_default"),
         max_power_kw=tuple(powers),
         energy_needed_kwh=max(0.0, _finite(plan.energy_needed_kwh)),
         charge_efficiency=efficiency,
         min_power_kw=max(0.0, _finite(plan.min_power_kw)),
+        deadline_requirements=tuple(stages),
     )
     return normalized if normalized.active else None
 
@@ -131,12 +166,27 @@ def combine_ev_charge_plans(
         if total_energy > 1e-9
         else normalized[0].charge_efficiency
     )
+    # Each vehicle's own deadline becomes a cumulative stage. By the earliest
+    # deadline the aggregate must already have delivered everything owed to the
+    # vehicles that expire then -- otherwise the solver is free to park the
+    # whole total in a later cheap window those vehicles cannot reach.
+    energy_by_deadline: dict[int, float] = {}
+    for plan in normalized:
+        for slot, kwh in plan.staged_requirements:
+            energy_by_deadline[slot] = energy_by_deadline.get(slot, 0.0) + kwh
+    cumulative = 0.0
+    stages: list[tuple[int, float]] = []
+    for slot in sorted(energy_by_deadline):
+        cumulative += energy_by_deadline[slot]
+        stages.append((slot, cumulative))
+
     return EVChargePlan(
         vehicle_id="_combined",
         max_power_kw=combined_power,
         energy_needed_kwh=total_energy,
         charge_efficiency=weighted_efficiency,
         min_power_kw=min(plan.min_power_kw for plan in normalized),
+        deadline_requirements=tuple(stages),
     )
 
 

@@ -2989,12 +2989,18 @@ class BatteryOptimizer:
         ev_charge_active = ev_plan is not None and any(
             power > 1e-6 for power in p_ev_max_kw
         )
+        # One cumulative delivery stage per distinct vehicle deadline. A single
+        # vehicle yields exactly one stage covering its whole window, so the
+        # model is bit-for-bit what it was before multi-vehicle staging.
+        ev_stages = list(ev_plan.staged_requirements) if ev_charge_active else []
+        if ev_charge_active and not ev_stages:
+            ev_charge_active = False
         ev_charge_offset = next_offset
         if ev_charge_active:
             next_offset += p_n
         ev_shortfall_offset = next_offset
         if ev_charge_active:
-            next_offset += 1
+            next_offset += len(ev_stages)
 
         energy_offset = next_offset
         num_vars = energy_offset + p_n + 1
@@ -3041,8 +3047,22 @@ class BatteryOptimizer:
         def ev_charge_var(t: int) -> int:
             return ev_charge_offset + t
 
-        def ev_shortfall_var() -> int:
-            return ev_shortfall_offset
+        def ev_shortfall_var(stage: int = 0) -> int:
+            return ev_shortfall_offset + stage
+
+        def ev_stage_credit(stage_slot: int, t: int) -> float:
+            """Return period ``t``'s energy coefficient toward a stage.
+
+            A period that straddles the stage's deadline counts only for the
+            slots that fall inside it, so coarsened periods cannot smuggle
+            post-deadline energy into a deadline that has already passed.
+            """
+            period = periods[t]
+            span = max(1, period.end - period.start)
+            inside = max(0, min(period.end, stage_slot + 1) - period.start)
+            if inside <= 0:
+                return 0.0
+            return p_dt[t] * (inside / span) * ev_plan.charge_efficiency
 
         # === Objective function: cost minimization ===
         # minimize SUM(import_price * grid_import - export_price * grid_export) * dt
@@ -3290,7 +3310,8 @@ class BatteryOptimizer:
             # so charging always wins where it is physically possible. The
             # energy itself is already priced through grid_import, so the LP
             # places the car in the cheapest feasible slots with no extra term.
-            c[ev_shortfall_var()] = EV_SHORTFALL_PENALTY_PER_KWH
+            for stage in range(len(ev_stages)):
+                c[ev_shortfall_var(stage)] = EV_SHORTFALL_PENALTY_PER_KWH
 
         # === Equality constraints: power balance ===
         # solar[t] + grid_import[t] + battery_discharge[t] =
@@ -3474,8 +3495,8 @@ class BatteryOptimizer:
                 A_ub_rows += 1
 
         if ev_charge_active:
-            # One soft EV energy-delivery row.
-            A_ub_rows += 1
+            # One soft EV energy-delivery row per cumulative deadline stage.
+            A_ub_rows += len(ev_stages)
 
         A_ub = _LpMatrix((A_ub_rows, num_vars), dtype=float)
         b_ub: list[float] = []
@@ -3853,12 +3874,13 @@ class BatteryOptimizer:
             # dropping every user to the greedy fallback over one vehicle.
             # The shortfall price sits above any realistic import price, so
             # the LP only leaves energy undelivered when it must.
-            for t in range(p_n):
-                A_ub[len(b_ub), ev_charge_var(t)] = (
-                    -p_dt[t] * ev_plan.charge_efficiency
-                )
-            A_ub[len(b_ub), ev_shortfall_var()] = -1.0
-            b_ub.append(-ev_plan.energy_needed_kwh)
+            for stage, (stage_slot, stage_kwh) in enumerate(ev_stages):
+                for t in range(p_n):
+                    credit = ev_stage_credit(stage_slot, t)
+                    if credit > 0.0:
+                        A_ub[len(b_ub), ev_charge_var(t)] = -credit
+                A_ub[len(b_ub), ev_shortfall_var(stage)] = -1.0
+                b_ub.append(-stage_kwh)
 
         bounds = []
         for t in range(p_n):
@@ -4061,8 +4083,9 @@ class BatteryOptimizer:
         if ev_charge_active:
             for t in range(p_n):
                 bounds.append((0.0, p_ev_max_kw[t]))
-            # Shortfall can never exceed the energy that was requested.
-            bounds.append((0.0, ev_plan.energy_needed_kwh))
+            # A stage's shortfall can never exceed the energy it asked for.
+            for _stage_slot, stage_kwh in ev_stages:
+                bounds.append((0.0, stage_kwh))
 
         bounds.append((soc_0 * cap, soc_0 * cap))
         for t in range(1, p_n + 1):
@@ -4258,14 +4281,16 @@ class BatteryOptimizer:
         )
         ev_charge_kw = self._expand_period_values(periods, period_ev_charge, n)
         if ev_charge_active:
-            unmet_kwh = max(0.0, x[ev_shortfall_var()])
-            if unmet_kwh > 0.01:
-                _LOGGER.info(
-                    "EV plan: %.2f kWh of %.2f kWh cannot be delivered in the "
-                    "available window within the site import limit",
-                    unmet_kwh,
-                    ev_plan.energy_needed_kwh,
-                )
+            for stage, (stage_slot, stage_kwh) in enumerate(ev_stages):
+                stage_unmet = max(0.0, x[ev_shortfall_var(stage)])
+                if stage_unmet > 0.01:
+                    _LOGGER.info(
+                        "EV plan: %.2f kWh of the %.2f kWh due by slot %d "
+                        "cannot be delivered within the site import limit",
+                        stage_unmet,
+                        stage_kwh,
+                        stage_slot,
+                    )
         effective_export_prices = [
             export_prices[t] + export_bonus_prices[t]
             for t in range(n)
