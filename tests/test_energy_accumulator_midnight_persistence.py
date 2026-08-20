@@ -353,10 +353,11 @@ def test_post_counter_payload_with_a_real_gap_is_not_migrated():
     assert summary["import_cost_coverage"] == "partial"
     assert summary["import_cost_covered_kwh"] == 0.12
 
-    # The month-to-date bucket is deliberately the other way round (#385): it
-    # has no midnight self-heal, so the same marker-less payload is repaired
-    # once rather than blanking the month until the next rollover.
-    assert restored.mtd_import_cost_covered_kwh == pytest.approx(3.91)
+    # Month-to-date coverage is equally raw evidence.  A schema marker cannot
+    # distinguish this genuine hole from an old migration gap, so it too must
+    # remain fail-closed.
+    assert restored.mtd_import_cost_covered_kwh == pytest.approx(0.12)
+    assert restored.as_dict()["avg_cost_per_kwh_mtd"] is None
 
 
 def test_non_integrating_sample_without_home_load_does_not_latch_the_month():
@@ -546,15 +547,8 @@ def _covau_free_window(accumulator, clock, minutes: int = 60) -> None:
         accumulator.update(0.0, 4.8, 0.0, 1.2, 0.0, 0.03)
 
 
-def test_mtd_coverage_written_before_the_schema_marker_is_repaired():
-    """Ticket #385: v2.12.1132/1133 payloads blank the month until the 1st.
-
-    Those two releases shipped the coverage counters one release *before* the
-    schema marker.  They restored the month's measured energy in full but
-    started its counters from zero mid-month, so the key-absence migration
-    added afterwards can never fire on them and Avg Cost per kWh (Month) reads
-    Unknown for the rest of the calendar month - updating does not clear it.
-    """
+def test_mtd_counter_present_coverage_is_preserved_without_schema_marker():
+    """A counter-present MTD hole stays partial even without a schema marker."""
     clock = _Clock(datetime(2026, 8, 20, 11, 0, 0))
     restored = _new_accumulator(
         clock,
@@ -569,8 +563,8 @@ def test_mtd_coverage_written_before_the_schema_marker_is_repaired():
                 "mtd_load_kwh": 300.0,
                 "mtd_import_cost": 44.0,
                 "mtd_export_earnings": 1.20,
-                # Counters present but short, and no price_coverage_schema:
-                # only v2.12.1132/1133 can write that combination.
+                # Counters present but short, and no price_coverage_schema.
+                # The raw counter is the only trustworthy coverage evidence.
                 "mtd_import_cost_covered_kwh": 24.0,
                 "mtd_export_earnings_covered_kwh": 6.0,
             }
@@ -578,9 +572,9 @@ def test_mtd_coverage_written_before_the_schema_marker_is_repaired():
     )
     asyncio.run(restored.async_restore())
 
-    assert restored.mtd_import_cost_covered_kwh == pytest.approx(210.0)
-    assert restored.mtd_export_earnings_covered_kwh == pytest.approx(40.0)
-    assert restored.as_dict()["avg_cost_per_kwh_mtd"] is not None
+    assert restored.mtd_import_cost_covered_kwh == pytest.approx(24.0)
+    assert restored.mtd_export_earnings_covered_kwh == pytest.approx(6.0)
+    assert restored.as_dict()["avg_cost_per_kwh_mtd"] is None
 
 
 def test_stored_month_load_latch_is_cleared_once_on_restore():
@@ -621,8 +615,8 @@ def test_stored_month_load_latch_is_cleared_once_on_restore():
     assert restored._load_accounting_partial_mtd is True
 
 
-def test_repaired_month_payload_is_not_migrated_a_second_time():
-    """The repair is one-time: a fixed build's own payload is left alone."""
+def test_counter_present_partial_month_payload_round_trips_raw_coverage():
+    """Saving a partial MTD payload must not manufacture priced coverage."""
     clock = _Clock(datetime(2026, 8, 20, 11, 0, 0))
     store = _Store(
         {
@@ -642,12 +636,11 @@ def test_repaired_month_payload_is_not_migrated_a_second_time():
     asyncio.run(restored.async_flush())
     assert store.data["price_coverage_schema"] == _price_coverage_schema()
 
-    # Re-restoring the repaired payload keeps the counters it just wrote, and
-    # a genuine later hole in the same month still fails closed.
+    # Re-restoring the payload keeps the counters it just wrote, so a known
+    # hole keeps failing closed rather than becoming a false complete month.
     reloaded = _new_accumulator(clock, store)
     asyncio.run(reloaded.async_restore())
-    assert reloaded.mtd_import_cost_covered_kwh == pytest.approx(210.0)
-    reloaded.mtd_grid_import_kwh = 400.0
+    assert reloaded.mtd_import_cost_covered_kwh == pytest.approx(24.0)
     assert reloaded.as_dict()["avg_cost_per_kwh_mtd"] is None
 
 
@@ -671,17 +664,13 @@ def test_covau_free_import_window_prices_at_zero_and_stays_covered():
     assert summary["avg_cost_per_kwh_mtd"] == pytest.approx(0.0)
 
 
-def test_mtd_coverage_short_under_a_stamped_marker_is_still_repaired():
-    """Ticket #385 retest: v2.12.1162's repair could never reach this install.
+def test_mtd_coverage_short_under_stamped_marker_stays_partial():
+    """Ticket #384: schemas 1 and 2 do not prove a full-priced month.
 
-    v2.12.1132/1133 wrote the month counters short and marker-less, but
-    ``_data_to_save`` stamps the current marker on every save, so every build
-    from v2.12.1134 on restores that payload, skips the key-absence migration
-    because the keys are present, and rewrites it carrying its own marker.  A
-    repair gated on ``stored_schema < 1`` therefore only fired on a payload no
-    later build had ever opened - which upgrading is exactly what does - so
-    Avg Cost per kWh (Month) stayed Unknown through 1159, 1161 and 1162.
-    Schema 2 is the marker v2.12.1162/1163 themselves wrote.
+    Normal saves stamp the current schema on every update.  A genuine
+    missing-price interval can therefore be counter-present and stamped with
+    schema 1 or 2.  Restoring it must retain the deficit, not present a
+    complete Month average beside partial daily coverage.
     """
     for stored_schema in (1, 2):
         clock = _Clock(datetime(2026, 8, 20, 14, 30, 0))
@@ -704,6 +693,6 @@ def test_mtd_coverage_short_under_a_stamped_marker_is_still_repaired():
         )
         asyncio.run(restored.async_restore())
 
-        assert restored.mtd_import_cost_covered_kwh == pytest.approx(190.06)
-        assert restored.mtd_export_earnings_covered_kwh == pytest.approx(60.0)
-        assert restored.as_dict()["avg_cost_per_kwh_mtd"] is not None
+        assert restored.mtd_import_cost_covered_kwh == pytest.approx(10.06)
+        assert restored.mtd_export_earnings_covered_kwh == pytest.approx(0.0)
+        assert restored.as_dict()["avg_cost_per_kwh_mtd"] is None

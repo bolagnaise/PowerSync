@@ -566,38 +566,14 @@ class EnergyAccumulator:
             ):
                 self.mtd_export_earnings_covered_kwh = self.mtd_grid_export_kwh
                 migrated_legacy_coverage = True
-            # The month-to-date bucket has no midnight self-heal, so a coverage
-            # deficit inherited from before an upgrade stays blanked until the
-            # next month rollover.  v2.12.1132/1133 shipped the counters one
-            # release before the marker and started them from zero mid-month.
-            # Gating the repair on that marker being absent looked unambiguous
-            # but was unreachable: _data_to_save stamps the *current* marker on
-            # every save, so any build from v2.12.1134 on restores such a
-            # payload, skips the key-absence migration because the keys are
-            # present, and rewrites it carrying its own marker.  Upgrading is
-            # exactly what does that, so the repair never fired for the installs
-            # it was written for.  Pin a one-time repair to the schema it ships
-            # in, never to an older one.
-            #
-            # The daily bucket deliberately keeps the stricter key-absence rule
-            # (see _priced_coverage_is_partial and the same-day regression):
-            # there a short counter costs at most the rest of one day and
-            # failing closed is the safer trade.
-            if stored_schema < 3 and "mtd_import_cost_covered_kwh" in data:
-                if self._priced_coverage_is_partial(
-                    self.mtd_import_cost_covered_kwh,
-                    self.mtd_grid_import_kwh,
-                ):
-                    self.mtd_import_cost_covered_kwh = self.mtd_grid_import_kwh
-                    migrated_legacy_coverage = True
-                if self._priced_coverage_is_partial(
-                    self.mtd_export_earnings_covered_kwh,
-                    self.mtd_grid_export_kwh,
-                ):
-                    self.mtd_export_earnings_covered_kwh = (
-                        self.mtd_grid_export_kwh
-                    )
-                    migrated_legacy_coverage = True
+            # A counter-present MTD coverage deficit is evidence, not a schema
+            # migration gap.  Schemas 1 and 2 were both written after priced
+            # coverage counters existed, and can therefore contain genuine
+            # missing-price intervals.  The marker cannot distinguish those
+            # from the old mid-month counter-start issue.  Preserve the raw
+            # counters and fail closed rather than turn a partial total into a
+            # false complete value.  The unambiguous key-absence migrations
+            # above still recover payloads that predate the counters entirely.
             self._load_accounting_partial_mtd = bool(
                 data.get("load_accounting_partial_mtd", False)
             )
