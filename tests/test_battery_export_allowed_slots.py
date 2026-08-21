@@ -5832,6 +5832,55 @@ def test_free_import_charge_lowers_command_when_live_site_headroom_drops(opt_mod
     assert coordinator._optimizer_force_state["power_w"] == 8500
 
 
+def test_sigenergy_spread_import_keeps_scheduled_free_charge_target(opt_module):
+    """Spread Import must not be widened back to free-window headroom."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.25)
+    coordinator.battery_system = "sigenergy"
+    coordinator._config.spread_import_enabled = True
+    coordinator._config.max_grid_import_w = 10000
+    coordinator._config.max_charge_w = 10000
+    coordinator._last_import_prices = [0.0]
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "solar_power": 0.0,
+            "load_power": 0.0,
+            "grid_power": 0.0,
+            "battery_power": 0.0,
+        }
+    )
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="charge", power_w=5327)
+        )
+    )
+
+    assert battery.force_charge_calls == [(10, 5327, False)]
+    assert coordinator._optimizer_force_state["power_w"] == 5327
+
+
+def test_sigenergy_spread_import_clamps_to_lower_live_headroom(opt_module):
+    """Spread Import still fails safely when live site headroom falls."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.25)
+    coordinator.battery_system = "sigenergy"
+    coordinator._config.spread_import_enabled = True
+    coordinator._config.max_grid_import_w = 10000
+    coordinator._config.max_charge_w = 10000
+    coordinator._last_import_prices = [0.0]
+    coordinator._live_site_import_charge_limit_w = lambda: 4000.0
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="charge", power_w=5327)
+        )
+    )
+
+    assert battery.force_charge_calls == [(10, 4000, False)]
+    assert coordinator._optimizer_force_state["power_w"] == 4000
+
+
 def test_paid_import_charge_keeps_scheduled_optimizer_power(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.25)

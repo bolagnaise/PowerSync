@@ -8656,7 +8656,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return max(0.0, min(max_charge_w, max_grid_import_w - grid_w + current_charge_w))
 
     def _charge_command_power_w(self, action: Any) -> float:
-        """Return charge command power, using live headroom in free import slots."""
+        """Return a safe charge command power for the scheduled action."""
         try:
             scheduled_w = max(0.0, float(getattr(action, "power_w", 0.0) or 0.0))
         except (TypeError, ValueError):
@@ -8671,6 +8671,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         live_limit_w = self._live_site_import_charge_limit_w()
         if live_limit_w is None:
             return scheduled_w
+
+        # Spread Import deliberately lowers the scheduled target to distribute
+        # grid charging over its eligible window.  Live headroom remains a
+        # safety ceiling, but must not widen that deliberate target again.
+        if self._should_spread_import_schedule():
+            command_w = min(scheduled_w, live_limit_w)
+            if scheduled_w - command_w >= 250.0:
+                _LOGGER.info(
+                    "Optimizer: Limiting spread-import charge target from %.0fW to %.0fW "
+                    "using live site-import headroom",
+                    scheduled_w,
+                    command_w,
+                )
+            return command_w
 
         if abs(live_limit_w - scheduled_w) >= 250.0:
             _LOGGER.info(
