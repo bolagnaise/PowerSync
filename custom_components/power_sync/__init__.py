@@ -43,6 +43,19 @@ DISCREPANCY_ALERT_DAILY_MAX = 4
 AEMO_SETTLED_SYNC_DELAY_SECONDS = 5.0
 
 
+def _should_sync_sigenergy_static_tariff_on_startup(
+    electricity_provider: str,
+    battery_system: str,
+    auto_sync_enabled: bool,
+) -> bool:
+    """Return whether a static tariff needs one Sigenergy startup upload."""
+    return (
+        electricity_provider == "agl"
+        and battery_system == "sigenergy"
+        and auto_sync_enabled
+    )
+
+
 async def _run_optional_write_guard(
     writer: Callable[[], Any],
     guard_write: Callable[[Callable[[], Any]], Any] | None = None,
@@ -39954,6 +39967,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("✅ TOU sync wired: Octopus :00/:30 cron")
     else:
         _LOGGER.info("✅ TOU sync wired: no automatic sync for %s", electricity_provider)
+
+    if _should_sync_sigenergy_static_tariff_on_startup(
+        electricity_provider,
+        active_battery_system,
+        entry.options.get(
+            CONF_AUTO_SYNC_ENABLED,
+            entry.data.get(CONF_AUTO_SYNC_ENABLED, True),
+        ),
+    ):
+        async def _sigenergy_static_tariff_startup_sync(_event=None) -> None:
+            """Upload the persisted static tariff once after setup or reload."""
+            if _aemo_dispatch_entry_data() is None:
+                return
+            current_provider = entry.options.get(
+                CONF_ELECTRICITY_PROVIDER,
+                entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber"),
+            )
+            current_battery_system = _active_battery_system(entry, hass)
+            if not _should_sync_sigenergy_static_tariff_on_startup(
+                current_provider,
+                current_battery_system,
+                entry.options.get(
+                    CONF_AUTO_SYNC_ENABLED,
+                    entry.data.get(CONF_AUTO_SYNC_ENABLED, True),
+                ),
+            ):
+                return
+            await handle_sync_rest_api_check(check_name="agl static startup")
+
+        if hass.is_running:
+            hass.async_create_task(_sigenergy_static_tariff_startup_sync())
+        else:
+            hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STARTED,
+                _sigenergy_static_tariff_startup_sync,
+            )
+        _LOGGER.info(
+            "✅ TOU sync wired: one-time AGL static tariff upload to Sigenergy"
+        )
 
     if electricity_provider == "flow_power":
         async def _flow_power_startup_tariff_sync(_event=None) -> None:

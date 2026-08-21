@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import importlib
 import asyncio
@@ -475,6 +476,55 @@ def test_sigenergy_manual_sync_uses_static_tou_without_price_coordinator():
     assert "forecast_data = []" in sync_source
     assert "convert_static_tariff_schedule_to_sigenergy" in sigenergy_source
     assert 'payload_source = "static_tou_tariff_schedule"' in sigenergy_source
+
+
+@pytest.mark.parametrize(
+    ("provider", "battery_system", "auto_sync", "expected"),
+    [
+        ("agl", "sigenergy", True, True),
+        ("agl", "sigenergy", False, False),
+        ("agl", "tesla", True, False),
+        ("flow_power", "sigenergy", True, False),
+    ],
+)
+def test_agl_sigenergy_static_tariff_startup_sync_gate(
+    provider,
+    battery_system,
+    auto_sync,
+    expected,
+):
+    source = (COMPONENT_ROOT / "__init__.py").read_text()
+    tree = ast.parse(source)
+    helper = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_should_sync_sigenergy_static_tariff_on_startup"
+    )
+    namespace = {}
+    exec(
+        compile(ast.Module(body=[helper], type_ignores=[]), "<helper>", "exec"),
+        namespace,
+    )
+
+    assert namespace[helper.name](provider, battery_system, auto_sync) is expected
+
+
+def test_agl_sigenergy_static_tariff_sync_runs_once_after_setup():
+    source = (COMPONENT_ROOT / "__init__.py").read_text()
+    start = source.index("if _should_sync_sigenergy_static_tariff_on_startup(")
+    setup_source = source[
+        start:source.index('if electricity_provider == "flow_power":', start)
+    ]
+
+    assert 'check_name="agl static startup"' in setup_source
+    assert "if hass.is_running:" in setup_source
+    assert "hass.async_create_task(_sigenergy_static_tariff_startup_sync())" in setup_source
+    assert "EVENT_HOMEASSISTANT_STARTED" in setup_source
+    assert setup_source.count("_should_sync_sigenergy_static_tariff_on_startup(") == 2
+    assert "electricity_provider,\n        active_battery_system," in setup_source
+    assert "current_battery_system = _active_battery_system(entry, hass)" in setup_source
+    assert "electricity_provider,\n        battery_system," not in setup_source
 
 
 def test_flow_power_canonical_tariff_ignores_raw_current_wholesale_spike(
