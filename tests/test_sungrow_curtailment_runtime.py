@@ -628,6 +628,31 @@ def test_goodwe_curtailment_releases_limit_before_force_discharge():
     assert "controller.restore(allow_zero_export_limit=False)" in helper
 
 
+def test_goodwe_force_discharge_fails_closed_when_curtailment_restore_fails():
+    """A failed direct-GoodWe release must never be followed by force export."""
+    handler = _function_source("handle_force_discharge")
+
+    optimizer_branch = handler[
+        handler.index('"optimizer force discharge"') : handler.index(
+            "goodwe_discharge_result =", handler.index('"optimizer force discharge"')
+        )
+    ]
+    manual_branch = handler[
+        handler.index('"force discharge"', handler.index('"optimizer force discharge"') + 1) : handler.index(
+            "discharge_result =", handler.index('"force discharge"', handler.index('"optimizer force discharge"') + 1)
+        )
+    ]
+
+    assert "goodwe_curtailment_restore_result" in optimizer_branch
+    assert "if not goodwe_curtailment_restore_result:" in optimizer_branch
+    assert '"GoodWe curtailment restore before optimizer force discharge "' in optimizer_branch
+    assert '"was not confirmed"' in optimizer_branch
+    assert "goodwe_curtailment_restore_result" in manual_branch
+    assert "if not goodwe_curtailment_restore_result:" in manual_branch
+    assert 'force_discharge_state["active"] = False' in manual_branch
+    assert "GoodWe force discharge blocked: curtailment restore was not confirmed" in manual_branch
+
+
 def test_goodwe_curtailment_does_not_reapply_during_force_export():
     handler = _function_source("handle_goodwe_curtailment")
     helper = _function_source("_goodwe_force_export_active")

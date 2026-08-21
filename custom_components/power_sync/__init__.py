@@ -30879,18 +30879,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             goodwe_coord = entry_data.get("goodwe_coordinator")
             if goodwe_coord:
-                await _guarded_force_discharge_write(
+                goodwe_curtailment_restore_result = await _guarded_force_discharge_write(
                     lambda _guarded_w: _restore_goodwe_curtailment_for_export(
                         entry_data,
                         "optimizer force discharge",
                         force=True,
                     )
                 )
-                await _guarded_force_discharge_write(
+                if not goodwe_curtailment_restore_result:
+                    raise HomeAssistantError(
+                        "GoodWe curtailment restore before optimizer force discharge "
+                        "was not confirmed"
+                    )
+                goodwe_discharge_result = await _guarded_force_discharge_write(
                     lambda guarded_w: goodwe_coord.force_discharge(
                         duration, power_w=guarded_w
                     )
                 )
+                if not goodwe_discharge_result:
+                    raise HomeAssistantError(
+                        "GoodWe force discharge hardware refresh was not confirmed"
+                    )
                 _LOGGER.debug(f"GoodWe force discharge hardware extended ({duration}min)")
                 return
             alphaess_coord = entry_data.get("alphaess_coordinator")
@@ -31208,13 +31217,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 power_w = command_power_w
-                await _guarded_force_discharge_write(
+                goodwe_curtailment_restore_result = await _guarded_force_discharge_write(
                     lambda _guarded_w: _restore_goodwe_curtailment_for_export(
                         entry_data,
                         "force discharge",
                         force=True,
                     )
                 )
+                if not goodwe_curtailment_restore_result:
+                    force_discharge_state["active"] = False
+                    _LOGGER.error(
+                        "GoodWe force discharge blocked: curtailment restore was not confirmed"
+                    )
+                    return
                 discharge_result = await _guarded_force_discharge_write(
                     lambda guarded_w: goodwe_coord.force_discharge(
                         duration, power_w=guarded_w
