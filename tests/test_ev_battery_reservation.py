@@ -12,7 +12,7 @@ import ast
 import importlib
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -326,49 +326,172 @@ def test_start_path_uses_the_shared_arming_helper():
 # ---------------------------------------------------------------------------
 
 
-def _ev_coordinator(*, ev_charge_w=0.0, enabled=True, has_field=True):
-    fields = {"action": "charge", "power_w": 0.0, "battery_charge_w": 0.0}
-    if has_field:
-        fields["ev_charge_w"] = ev_charge_w
+def _ev_coordinator(
+    *,
+    now,
+    ev_charge_w=0.0,
+    enabled=True,
+    vehicle_id="car",
+    include_vehicle=True,
+    schedule_updated=None,
+    adopted_updated=None,
+):
+    schedule_updated = schedule_updated or now
+    adopted_updated = adopted_updated or schedule_updated
+    action = SimpleNamespace(
+        action="charge",
+        power_w=0.0,
+        battery_charge_w=0.0,
+        timestamp=now,
+        ev_charge_w=ev_charge_w,
+    )
+    schedule = SimpleNamespace(actions=[action], last_updated=schedule_updated)
     return SimpleNamespace(
         _enabled=enabled,
-        _get_current_action=lambda: SimpleNamespace(**fields),
+        _config=SimpleNamespace(interval_minutes=5),
+        _current_schedule=schedule,
+        _last_ev_charge_schedule_updated=adopted_updated,
+        _last_ev_charge_by_vehicle_w=(
+            {vehicle_id: [ev_charge_w]} if include_vehicle else {"other": [9000.0]}
+        ),
+        _get_current_action=lambda: action,
     )
 
 
-def test_planned_ev_power_is_read_from_the_current_action():
-    hass = _hass(_ev_coordinator(ev_charge_w=7000.0))
+def test_planned_ev_power_is_read_from_the_current_action(monkeypatch):
+    now = datetime(2026, 8, 21, 10, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(actions.dt_util, "now", lambda: now)
+    hass = _hass(_ev_coordinator(now=now, ev_charge_w=7000.0))
 
     assert actions._optimizer_planned_ev_charge_kw(
-        hass, _Entry()
+        hass, _Entry(), "car"
     ) == pytest.approx(7.0)
 
 
-def test_no_ev_plan_leaves_the_controller_with_no_ceiling():
-    # A zero or absent plan must never strand a plugged-in car at 0 A; the EV
-    # planner keeps start/stop authority.
+def test_fresh_exact_vehicle_zero_is_an_authoritative_pause(monkeypatch):
+    now = datetime(2026, 8, 21, 10, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(actions.dt_util, "now", lambda: now)
+
     assert (
         actions._optimizer_planned_ev_charge_kw(
-            _hass(_ev_coordinator(ev_charge_w=0.0)), _Entry()
+            _hass(_ev_coordinator(now=now, ev_charge_w=0.0)),
+            _Entry(),
+            "car",
         )
-        is None
+        == 0.0
     )
-    assert (
-        actions._optimizer_planned_ev_charge_kw(
-            _hass(_ev_coordinator(has_field=False)), _Entry()
-        )
-        is None
-    )
-    assert actions._optimizer_planned_ev_charge_kw(_hass(), _Entry()) is None
 
 
-def test_disabled_optimizer_offers_no_ev_ceiling():
+def test_per_vehicle_plan_never_falls_back_to_the_fleet_total(monkeypatch):
+    now = datetime(2026, 8, 21, 10, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(actions.dt_util, "now", lambda: now)
+    coordinator = _ev_coordinator(
+        now=now,
+        vehicle_id="car-a",
+        ev_charge_w=1380.0,
+    )
+    coordinator._last_ev_charge_by_vehicle_w = {
+        "car-a": [0.0],
+        "car-b": [230.0],
+    }
+    hass = _hass(coordinator)
+
+    assert actions._optimizer_planned_ev_charge_kw(
+        hass, _Entry(), "car-a"
+    ) == 0.0
+    assert actions._optimizer_planned_ev_charge_kw(
+        hass, _Entry(), "car-b"
+    ) == pytest.approx(0.230)
+
+
+def test_absent_or_unmodelled_ev_plan_leaves_no_ceiling(monkeypatch):
+    now = datetime(2026, 8, 21, 10, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(actions.dt_util, "now", lambda: now)
+
     assert (
         actions._optimizer_planned_ev_charge_kw(
-            _hass(_ev_coordinator(ev_charge_w=7000.0, enabled=False)), _Entry()
+            _hass(_ev_coordinator(now=now, include_vehicle=False)),
+            _Entry(),
+            "car",
         )
         is None
     )
+    assert (
+        actions._optimizer_planned_ev_charge_kw(_hass(), _Entry(), "car")
+        is None
+    )
+
+
+def test_mismatched_or_stale_ev_plan_falls_back_to_smart_schedule(monkeypatch):
+    now = datetime(2026, 8, 21, 10, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(actions.dt_util, "now", lambda: now)
+
+    mismatch = _ev_coordinator(
+        now=now,
+        ev_charge_w=0.0,
+        adopted_updated=now - timedelta(seconds=1),
+    )
+    stale = _ev_coordinator(
+        now=now,
+        ev_charge_w=0.0,
+        schedule_updated=now - timedelta(minutes=11),
+    )
+
+    assert (
+        actions._optimizer_planned_ev_charge_kw(
+            _hass(mismatch), _Entry(), "car"
+        )
+        is None
+    )
+    assert (
+        actions._optimizer_planned_ev_charge_kw(
+            _hass(stale), _Entry(), "car"
+        )
+        is None
+    )
+
+
+def test_disabled_optimizer_offers_no_ev_ceiling(monkeypatch):
+    now = datetime(2026, 8, 21, 10, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(actions.dt_util, "now", lambda: now)
+    assert (
+        actions._optimizer_planned_ev_charge_kw(
+            _hass(
+                _ev_coordinator(
+                    now=now,
+                    ev_charge_w=7000.0,
+                    enabled=False,
+                )
+            ),
+            _Entry(),
+            "car",
+        )
+        is None
+    )
+
+
+def test_optimizer_power_ceiling_quantizes_down_and_preserves_tesla_one_amp():
+    assert actions._optimizer_ev_ceiling_amps(
+        0.230,
+        voltage=230,
+        phases=1,
+        min_amps=1,
+        max_amps=32,
+    ) == 1
+    assert actions._optimizer_ev_ceiling_amps(
+        0.459,
+        voltage=230,
+        phases=1,
+        min_amps=1,
+        max_amps=32,
+    ) == 1
+    assert actions._optimizer_ev_ceiling_amps(
+        1.150,
+        voltage=230,
+        phases=1,
+        min_amps=6,
+        max_amps=32,
+    ) == 0
 
 
 def test_planned_ev_power_is_applied_as_a_ceiling_not_a_setpoint():

@@ -472,6 +472,44 @@ def _extract_coordinator_method(name: str):
     return namespace[name]
 
 
+def test_solved_ev_series_keeps_exact_vehicle_zeroes_and_schedule_identity():
+    """Execution may trust only the per-vehicle series from this exact solve."""
+    adopt = _extract_coordinator_method("_adopt_solved_ev_series")
+    updated = datetime(2026, 8, 21, 0, 5, tzinfo=timezone.utc)
+    schedule = SimpleNamespace(
+        last_updated=updated,
+        actions=[
+            SimpleNamespace(ev_charge_w=1380.0),
+            SimpleNamespace(ev_charge_w=230.0),
+        ],
+    )
+    result = SimpleNamespace(
+        schedule=schedule,
+        ev_charge_by_vehicle_w={
+            "car-a": [0.0, 230.0],
+            "car-b": [1380.0, 0.0],
+        },
+        ev_source_by_vehicle_w={},
+    )
+    coordinator = SimpleNamespace(
+        _last_ev_charge_by_vehicle_w=None,
+        _last_ev_charge_schedule_updated=None,
+        _last_ev_source_by_vehicle_w=None,
+        _last_planned_ev_load_forecast_w=None,
+        _last_effective_ev_load_forecast_w=None,
+    )
+
+    adopt(coordinator, result)
+
+    assert coordinator._last_ev_charge_by_vehicle_w == {
+        "car-a": [0.0, 230.0],
+        "car-b": [1380.0, 0.0],
+    }
+    assert coordinator._last_ev_charge_schedule_updated is updated
+    assert coordinator._last_planned_ev_load_forecast_w == [1380.0, 230.0]
+    assert coordinator._last_effective_ev_load_forecast_w == [1380.0, 230.0]
+
+
 def test_internal_ev_forecast_prorates_trimmed_time_critical_window():
     """Optimizer demand must start at the trimmed boundary and conserve energy."""
     brisbane_tz = timezone(timedelta(hours=10))

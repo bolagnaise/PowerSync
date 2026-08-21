@@ -153,6 +153,25 @@ def test_ev_charging_lands_in_the_cheapest_slots(optimizer_module):
     assert cheap_ev_kwh > expensive_ev_kwh
 
 
+def test_equal_price_window_starts_in_its_earliest_executable_slots(
+    optimizer_module,
+):
+    """A 10:00 free window must not drift to its equally free 13:00 tail."""
+    optimizer = _optimizer(optimizer_module)
+    scenario = _kwargs(cheap_slots=tuple(range(8)))
+    scenario["import_prices"] = [0.0] * 8
+    scenario["export_prices"] = [0.0] * 8
+
+    result = optimizer.optimize(
+        **scenario,
+        ev_plan=_ev_plan(optimizer_module),
+    )
+
+    ev_kw = [ev_kw for _battery_kw, ev_kw in _flows(result)]
+    assert ev_kw[:2] == pytest.approx([7.0, 7.0], abs=0.05)
+    assert max(ev_kw[2:]) < 0.05
+
+
 def test_solar_only_ev_cannot_be_moved_to_a_cheaper_grid_slot(optimizer_module):
     optimizer = _optimizer(optimizer_module)
     kwargs = _kwargs(cheap_slots=(0, 1, 3, 4, 5, 6, 7))

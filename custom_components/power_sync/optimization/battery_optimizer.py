@@ -55,6 +55,11 @@ MODE_PROJECTION_SELF_USE_REL_TOL = 1e-4
 # fixed rather than allowing it to grow with battery capacity or run length.
 MODE_PROJECTION_SELF_USE_ABS_TOL_KWH = 0.02
 
+# Within an executable free-import EV window, prefer the earlier slot so the LP
+# schedule matches Smart Schedule's start-of-window behavior. This is
+# deliberately tiny and is not applied to paid or non-grid source decisions.
+EV_EARLY_CHARGE_TIE_BREAK_PER_KWH_HOUR = 1e-6
+
 
 def _fallback_ev_slot_policy(
     vehicles: list[dict],
@@ -3691,10 +3696,25 @@ class BatteryOptimizer:
         if ev_charge_active:
             # Undelivered EV energy is priced above any realistic import price
             # so charging always wins where it is physically possible. The
-            # energy itself is already priced through grid_import, so the LP
-            # places the car in the cheapest feasible slots with no extra term.
+            # energy itself is already priced through grid_import. A tiny
+            # elapsed-time coefficient only breaks ties inside free grid
+            # windows, anchoring charging to the window's front.
             for stage in range(len(ev_stages)):
                 c[ev_shortfall_var(stage)] = EV_SHORTFALL_PENALTY_PER_KWH
+            elapsed_hours = 0.0
+            for t in range(p_n):
+                for vehicle in range(n_ev_vehicles):
+                    if (
+                        p_import[t] > 0.001
+                        or not p_ev_allow_grid[vehicle][t]
+                    ):
+                        continue
+                    c[ev_charge_var(vehicle, t)] += (
+                        EV_EARLY_CHARGE_TIE_BREAK_PER_KWH_HOUR
+                        * elapsed_hours
+                        * p_dt[t]
+                    )
+                elapsed_hours += p_dt[t]
 
         # === Equality constraints: power balance ===
         # solar[t] + grid_import[t] + battery_discharge[t] =

@@ -7192,11 +7192,11 @@ def _optimizer_planned_ev_charge_kw(
 ) -> Optional[float]:
     """Return the EV charge power the LP planned for this interval.
 
-    ``None`` means the optimizer is not modeling EV demand, in which case the
-    EV controller keeps its own reactive rate control. With ``vehicle_id``
-    and a per-vehicle plan available, the figure is that car's own share --
-    the aggregate is a fleet total, and using it as one loadpoint's ceiling
-    let a single car ramp toward the sum of every charger on site.
+    ``None`` means there is no fresh, exact-vehicle optimizer directive, so the
+    EV controller keeps its own reactive rate control. ``0.0`` is an explicit
+    pause for this slot, while a positive value is that vehicle's ceiling. The
+    aggregate is never an execution fallback: using a fleet total for one
+    loadpoint lets a single car ramp toward every charger on site.
     """
     try:
         from ..const import DOMAIN
@@ -7208,30 +7208,72 @@ def _optimizer_planned_ev_charge_kw(
         if not callable(get_action):
             return None
         action = get_action()
-        if action is None:
+        if action is None or not vehicle_id:
             return None
-        planned_w = getattr(action, "ev_charge_w", None)
-        if planned_w is None:
+
+        schedule = getattr(coordinator, "_current_schedule", None)
+        actions = getattr(schedule, "actions", None) or []
+        schedule_updated = getattr(schedule, "last_updated", None)
+        adopted_updated = getattr(
+            coordinator, "_last_ev_charge_schedule_updated", None
+        )
+        if schedule_updated is None or adopted_updated != schedule_updated:
             return None
-        if vehicle_id:
-            by_vehicle = getattr(
-                coordinator, "_last_ev_charge_by_vehicle_w", None
-            )
-            series = (by_vehicle or {}).get(str(vehicle_id))
-            if series:
-                schedule = getattr(coordinator, "_current_schedule", None)
-                actions = getattr(schedule, "actions", None) or []
-                for index, candidate in enumerate(actions):
-                    if candidate is action and index < len(series):
-                        planned_w = series[index]
-                        break
-        planned_kw = float(planned_w or 0.0) / 1000.0
-        if not math.isfinite(planned_kw) or planned_kw <= 0:
+
+        interval_minutes = max(
+            1,
+            int(
+                getattr(
+                    getattr(coordinator, "_config", None),
+                    "interval_minutes",
+                    5,
+                )
+                or 5
+            ),
+        )
+        now = dt_util.now()
+        age_seconds = (now - schedule_updated).total_seconds()
+        if age_seconds < -60 or age_seconds > interval_minutes * 120:
             return None
-        return planned_kw
+
+        by_vehicle = getattr(coordinator, "_last_ev_charge_by_vehicle_w", None)
+        if by_vehicle is None or str(vehicle_id) not in by_vehicle:
+            return None
+        series = by_vehicle[str(vehicle_id)]
+        for index, candidate in enumerate(actions):
+            if candidate is not action:
+                continue
+            if index >= len(series):
+                return None
+            planned_w = float(series[index])
+            if not math.isfinite(planned_w) or planned_w < 0:
+                return None
+            return planned_w / 1000.0
+        return None
     except Exception as err:
         _LOGGER.debug("Could not read planned EV charge power: %s", err)
         return None
+
+
+def _optimizer_ev_ceiling_amps(
+    planned_kw: Optional[float],
+    *,
+    voltage: float,
+    phases: int,
+    min_amps: int,
+    max_amps: int,
+) -> Optional[int]:
+    """Convert an optimizer power ceiling to an executable current ceiling."""
+    if planned_kw is None:
+        return None
+    try:
+        unit_w = max(1.0, float(voltage) * max(1, int(phases)))
+        ceiling_amps = int(math.floor(float(planned_kw) * 1000.0 / unit_w + 1e-9))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if ceiling_amps < max(1, int(min_amps)):
+        return 0
+    return min(max(0, int(max_amps)), ceiling_amps)
 
 
 def _battery_target_available_kw(
@@ -7580,6 +7622,8 @@ def _dynamic_ev_commanded_power_kw(state: Dict[str, Any]) -> float:
 def _allocate_dynamic_ev_site_budget(
     sessions: list[tuple[str, Dict[str, Any]]],
     budget_kw: float,
+    *,
+    max_amps_by_vehicle: Optional[Dict[str, int]] = None,
 ) -> Dict[str, int]:
     """Allocate one aggregate site budget without rounding above it."""
     records: list[dict[str, Any]] = []
@@ -7589,6 +7633,11 @@ def _allocate_dynamic_ev_site_budget(
         phases = max(1.0, float(params.get("phases", 1) or 1))
         min_amps = max(1, int(params.get("min_charge_amps", 5) or 5))
         max_amps = max(min_amps, int(params.get("max_charge_amps", 32) or 32))
+        if max_amps_by_vehicle is not None and vehicle_id in max_amps_by_vehicle:
+            max_amps = min(max_amps, max_amps_by_vehicle[vehicle_id])
+            if max_amps < min_amps:
+                min_amps = 0
+                max_amps = 0
         unit_kw = voltage * phases / 1000.0
         records.append(
             {
@@ -7908,7 +7957,26 @@ async def _update_smart_schedule_battery_target_group(
             budget_kw = group_commanded_kw + grid_headroom_kw
         budget_kw = min(site_budget_kw, max(0.0, budget_kw))
 
-    targets = _allocate_dynamic_ev_site_budget(sessions, budget_kw)
+    optimizer_ceilings: Dict[str, int] = {}
+    for vehicle_id, state in sessions:
+        params = state.get("params") or {}
+        planned_kw = _optimizer_planned_ev_charge_kw(
+            hass, config_entry, vehicle_id
+        )
+        ceiling_amps = _optimizer_ev_ceiling_amps(
+            planned_kw,
+            voltage=params.get("voltage", 240),
+            phases=params.get("phases", 1),
+            min_amps=_effective_min_charge_amps(params, hass),
+            max_amps=_effective_max_charge_amps(params, hass),
+        )
+        if ceiling_amps is not None:
+            optimizer_ceilings[vehicle_id] = ceiling_amps
+    targets = _allocate_dynamic_ev_site_budget(
+        sessions,
+        budget_kw,
+        max_amps_by_vehicle=optimizer_ceilings,
+    )
     previous_amps = {
         vehicle_id: int(state.get("current_amps", 0) or 0)
         for vehicle_id, state in sessions
@@ -8755,7 +8823,23 @@ async def _dynamic_ev_update_surplus(
     min_amps = _effective_min_charge_amps(params, hass)
     hardware_min_amps = _hardware_min_charge_amps(params, hass)
     max_amps = _effective_max_charge_amps(params, hass)
-    new_amps = int(round(max(0, min(max_amps, available_amps))))
+    planned_ev_charge_kw = _optimizer_planned_ev_charge_kw(
+        hass, config_entry, vehicle_id
+    )
+    optimizer_ceiling_amps = _optimizer_ev_ceiling_amps(
+        planned_ev_charge_kw,
+        voltage=voltage,
+        phases=phases,
+        min_amps=min_amps,
+        max_amps=max_amps,
+    )
+    executable_available_amps = available_amps
+    if optimizer_ceiling_amps is not None:
+        executable_available_amps = min(
+            executable_available_amps,
+            optimizer_ceiling_amps,
+        )
+    new_amps = int(round(max(0, min(max_amps, executable_available_amps))))
 
     # Hysteresis: don't start unless we have sustained surplus
     sustained_minutes = params.get("sustained_surplus_minutes", 2)
@@ -8764,7 +8848,14 @@ async def _dynamic_ev_update_surplus(
     # Keep the existing nearest-amp targeting once charging is viable, but do
     # not let rounding manufacture the minimum needed to start or continue.
     # For example, 5.5 A of physical surplus cannot satisfy a 6 A floor.
-    if available_amps < min_amps:
+    if optimizer_ceiling_amps == 0:
+        # An exact LP zero is a slot boundary, not a transient solar dip. Pause
+        # immediately while leaving the owned controller alive for a later
+        # positive slot.
+        state["low_surplus_start"] = None
+        state["high_surplus_start"] = None
+        new_amps = 0
+    elif executable_available_amps + 1e-9 < min_amps:
         # Not enough surplus
         if effective_current_amps > 0:
             # Track how long we've been below threshold
@@ -10415,12 +10506,21 @@ async def _dynamic_ev_update(
 
     # Calculate new target amps
     raw_new_amps = current_amps + available_amps
-    if scheduled_floor_active and current_amps > 0 and raw_new_amps < min_amps:
+    if scheduled_floor_active and current_amps > 0 and raw_new_amps + 1e-9 < min_amps:
         new_amps = min_amps
-    elif raw_new_amps < min_amps:
+    elif raw_new_amps + 1e-9 < min_amps:
         new_amps = 0
     else:
         new_amps = int(round(max(min_amps, min(max_amps, raw_new_amps))))
+    optimizer_ceiling_amps = _optimizer_ev_ceiling_amps(
+        planned_ev_charge_kw,
+        voltage=voltage,
+        phases=phases,
+        min_amps=min_amps,
+        max_amps=max_amps,
+    )
+    if optimizer_ceiling_amps is not None:
+        new_amps = min(new_amps, optimizer_ceiling_amps)
 
     # In no_grid_import mode, respond immediately to grid imports (don't wait for 1A threshold)
     # Use ev_relevant_grid_kw (excludes battery charging) to avoid throttling due to
@@ -11286,6 +11386,27 @@ async def _action_start_ev_charging_dynamic_locked(
             f"phases={resolved_phases}{no_grid_info}"
         )
 
+        optimizer_start_ceiling_amps = None
+        if owner_mode == "smart_schedule":
+            optimizer_start_ceiling_amps = _optimizer_ev_ceiling_amps(
+                _optimizer_planned_ev_charge_kw(
+                    hass, config_entry, vehicle_id
+                ),
+                voltage=voltage,
+                phases=resolved_phases,
+                min_amps=min_charge_amps,
+                max_amps=max_charge_amps,
+            )
+            if optimizer_start_ceiling_amps is not None:
+                # A fresh LP directive supersedes the deadline-only fixed
+                # rate: the LP already carries the deadline shortfall penalty.
+                mode_params["fixed_charge_amps"] = None
+                mode_params["requested_fixed_charge_amps"] = None
+                start_amps = min(start_amps, optimizer_start_ceiling_amps)
+                if optimizer_start_ceiling_amps <= 0:
+                    defer_battery_target_start = True
+                    start_amps = 0
+
     # Get time window from context (passed from automation trigger)
     time_window_start = context.get("time_window_start") if context else None
     time_window_end = context.get("time_window_end") if context else None
@@ -11393,6 +11514,14 @@ async def _action_start_ev_charging_dynamic_locked(
                     phases=resolved_phases,
                     acceptance_learner=initial_battery_acceptance_learner,
                 )
+                if (
+                    initial_amps is not None
+                    and optimizer_start_ceiling_amps is not None
+                ):
+                    initial_amps = min(
+                        initial_amps,
+                        optimizer_start_ceiling_amps,
+                    )
                 if initial_amps is None:
                     reason = "live site power is unavailable or invalid"
                     _LOGGER.info(

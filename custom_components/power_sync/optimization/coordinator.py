@@ -528,6 +528,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_planned_ev_load_forecast_w: list[float] | None = None
         self._last_effective_ev_load_forecast_w: list[float] | None = None
         self._last_ev_charge_by_vehicle_w: dict[str, list[float]] | None = None
+        self._last_ev_charge_schedule_updated: datetime | None = None
         self._last_ev_source_by_vehicle_w: dict[str, dict[str, list[float]]] | None = None
         self._last_ev_optimizer_policy: dict[str, dict[str, Any]] | None = None
         self._last_smart_schedule_ev_load_w: list[float] | None = None
@@ -5448,6 +5449,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_planned_ev_load_forecast_w = None
             self._last_effective_ev_load_forecast_w = None
             self._last_ev_charge_by_vehicle_w = None
+            self._last_ev_charge_schedule_updated = None
             self._last_ev_source_by_vehicle_w = None
             self._last_ev_optimizer_policy = None
             self._last_smart_schedule_ev_load_w = None
@@ -6874,10 +6876,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_ev_charge_by_vehicle_w = (
             dict(getattr(result, "ev_charge_by_vehicle_w", None) or {}) or None
         )
+        schedule = getattr(result, "schedule", None)
+        self._last_ev_charge_schedule_updated = (
+            getattr(schedule, "last_updated", None)
+            if self._last_ev_charge_by_vehicle_w is not None
+            else None
+        )
         self._last_ev_source_by_vehicle_w = (
             dict(getattr(result, "ev_source_by_vehicle_w", None) or {}) or None
         )
-        actions = getattr(getattr(result, "schedule", None), "actions", None) or []
+        actions = getattr(schedule, "actions", None) or []
         solved = [
             max(0.0, float(getattr(action, "ev_charge_w", 0.0) or 0.0))
             for action in actions
