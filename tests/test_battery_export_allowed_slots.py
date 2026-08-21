@@ -4584,6 +4584,136 @@ def test_transition_clears_solar_export_hold_before_next_action(opt_module):
     assert coordinator._last_executed_action == "self_consumption"
 
 
+def test_tesla_self_consumption_restores_stale_grid_charge(opt_module):
+    """A confirmed mode/reserve cannot hide continued force-charge flow."""
+    battery = _FakeBattery(
+        hardware_mode="self_consumption",
+        backup_reserve=10,
+        restore_normal_result=True,
+    )
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.225)
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "battery_power": -3.34,
+            "grid_power": 3.96,
+            "battery_level": 22.5,
+            "grid_services_active": False,
+        }
+    )
+    coordinator._get_energy_data = lambda: coordinator.energy_coordinator.data
+    action = SimpleNamespace(
+        action="self_consumption",
+        power_w=0,
+        timestamp=datetime(2026, 8, 22, 7, 20, tzinfo=timezone.utc),
+    )
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restore_normal_calls == 1
+    assert battery.self_consumption_calls == 0
+    assert battery.backup_reserve_calls == [20]
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_tesla_stale_grid_charge_rechecks_after_restore_cooldown(opt_module):
+    """Continued physical charging triggers another restore after cooldown."""
+    battery = _FakeBattery(
+        hardware_mode="self_consumption",
+        backup_reserve=20,
+        restore_normal_result=True,
+    )
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.235)
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "battery_power": -3.34,
+            "grid_power": 3.96,
+            "battery_level": 23.5,
+            "grid_services_active": False,
+        }
+    )
+    coordinator._get_energy_data = lambda: coordinator.energy_coordinator.data
+    now = datetime(2026, 8, 22, 7, 20, tzinfo=timezone.utc)
+    current_time = {"now": now}
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: current_time["now"]
+    action = SimpleNamespace(action="self_consumption", power_w=0)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert battery.restore_normal_calls == 1
+
+    current_time["now"] += opt_module.TESLA_STALE_GRID_CHARGE_RESTORE_COOLDOWN
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restore_normal_calls == 2
+
+
+def test_tesla_stale_grid_charge_retries_failed_restore(opt_module):
+    """A failed restore remains immediately retryable on the next cycle."""
+    battery = _FakeBattery(
+        hardware_mode="self_consumption",
+        backup_reserve=20,
+        restore_normal_result=False,
+    )
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.235)
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "battery_power": -3.34,
+            "grid_power": 3.96,
+            "battery_level": 23.5,
+            "grid_services_active": False,
+        }
+    )
+    coordinator._get_energy_data = lambda: coordinator.energy_coordinator.data
+    action = SimpleNamespace(action="self_consumption", power_w=0)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restore_normal_calls == 2
+    assert not hasattr(coordinator, "_last_tesla_stale_grid_charge_restore_at")
+
+
+@pytest.mark.parametrize(
+    ("battery_kw", "grid_kw", "soc_pct", "grid_services_active"),
+    [
+        (-3.34, 0.20, 23.5, False),  # Predominantly solar-funded charge.
+        (-3.34, 3.96, 21.5, False),  # Legitimate reserve recovery.
+        (-3.34, 3.96, 23.5, True),  # Native grid-service dispatch owns it.
+    ],
+)
+def test_tesla_self_consumption_keeps_expected_charge_sources(
+    opt_module,
+    battery_kw,
+    grid_kw,
+    soc_pct,
+    grid_services_active,
+):
+    battery = _FakeBattery(
+        hardware_mode="self_consumption",
+        backup_reserve=20,
+    )
+    coordinator = _execution_coordinator(opt_module, battery, soc=soc_pct / 100)
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "battery_power": battery_kw,
+            "grid_power": grid_kw,
+            "battery_level": soc_pct,
+            "grid_services_active": grid_services_active,
+        }
+    )
+    coordinator._get_energy_data = lambda: coordinator.energy_coordinator.data
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.restore_normal_calls == 0
+    assert battery.self_consumption_calls == 0
+    assert battery.backup_reserve_calls == []
+
+
 def test_failed_hold_cleanup_suppresses_next_force_action_and_uses_normal_control(
     opt_module,
 ):

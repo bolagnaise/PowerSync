@@ -153,6 +153,7 @@ FORCED_ACTIONS = CHARGE_ACTIONS | EXPORT_ACTIONS
 BOUNDARY_FRESH_SOLVE_GRACE = timedelta(seconds=30)
 OPTIMIZER_FORCE_CHARGE_MIN_COMMITMENT = timedelta(minutes=20)
 OPTIMIZER_FORCE_DISCHARGE_MIN_COMMITMENT = timedelta(minutes=20)
+TESLA_STALE_GRID_CHARGE_RESTORE_COOLDOWN = timedelta(minutes=5)
 SUNGROW_INFERRED_RESTORE_COOLDOWN = timedelta(minutes=5)
 GLOBIRD_QUOTA_EXPORT_RULE_ID = "globird_zerohero_bonus_export"
 GLOBIRD_QUOTA_IMPORT_RULE_ID = "globird_zerocharge_import"
@@ -8916,6 +8917,53 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return True, None, cap
         return soc >= cap - 0.0001, soc, cap
 
+    def _tesla_stale_grid_charge_reading(
+        self,
+        reserve_pct: int | None,
+    ) -> tuple[float, float, float] | None:
+        """Return a material unintended Tesla grid-charge reading.
+
+        Tesla can confirm ``self_consumption`` and the restored backup reserve
+        while retaining the previous force-charge dispatch. Only treat the
+        flow as stale when the battery is materially charging from the grid,
+        SOC is already clear of the reserve, and native grid services are not
+        active. Solar-funded charging and reserve recovery remain untouched.
+        """
+        if self.battery_system != "tesla" or reserve_pct is None:
+            return None
+
+        entry_data = self.hass.data.get("power_sync", {}).get(
+            self.entry_id,
+            {},
+        )
+        if entry_data.get("calibration_suspected"):
+            return None
+
+        data = self._get_energy_data()
+        if not isinstance(data, dict) or data.get("grid_services_active"):
+            return None
+
+        try:
+            battery_kw = float(data.get("battery_power"))
+            grid_kw = float(data.get("grid_power"))
+            soc_pct = float(data.get("battery_level"))
+        except (TypeError, ValueError):
+            return None
+        if not all(
+            math.isfinite(value) for value in (battery_kw, grid_kw, soc_pct)
+        ):
+            return None
+
+        charge_kw = max(0.0, -battery_kw)
+        grid_import_kw = max(0.0, grid_kw)
+        if (
+            charge_kw < 0.5
+            or grid_import_kw < max(0.5, charge_kw * 0.5)
+            or soc_pct <= float(reserve_pct) + 2.0
+        ):
+            return None
+        return charge_kw, grid_import_kw, soc_pct
+
     async def _execute_optimizer_action(
         self,
         action: Any,
@@ -10226,6 +10274,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     desired_reserve_pct: int | None = None
                     current_reserve: int | None = None
                     current_reserve_trust = None
+                    tesla_stale_grid_charge = False
                     last_optimizer_reserve_target = getattr(
                         self,
                         "_last_optimizer_self_consumption_reserve_target",
@@ -10329,6 +10378,37 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                         reserve_pct,
                                     )
                                     reapply_backup_reserve = True
+                            stale_charge = self._tesla_stale_grid_charge_reading(
+                                reserve_pct,
+                            )
+                            if stale_charge is not None:
+                                last_restore = getattr(
+                                    self,
+                                    "_last_tesla_stale_grid_charge_restore_at",
+                                    None,
+                                )
+                                now = dt_util.utcnow()
+                                if (
+                                    last_restore is None
+                                    or now - last_restore
+                                    >= TESLA_STALE_GRID_CHARGE_RESTORE_COOLDOWN
+                                ):
+                                    charge_kw, grid_import_kw, stale_soc_pct = (
+                                        stale_charge
+                                    )
+                                    _LOGGER.warning(
+                                        "Optimizer: Tesla is still grid-charging "
+                                        "%.2fkW (grid import %.2fkW, SOC %.1f%%, "
+                                        "reserve %d%%) while LP action and hardware "
+                                        "mode are self_consumption — restoring the "
+                                        "normal tariff and controls",
+                                        charge_kw,
+                                        grid_import_kw,
+                                        stale_soc_pct,
+                                        reserve_pct,
+                                    )
+                                    apply_self_consumption = True
+                                    tesla_stale_grid_charge = True
                         if self.battery_system == "goodwe" and self.energy_coordinator:
                             coord_data = getattr(self.energy_coordinator, "data", None) or {}
                             try:
@@ -10512,7 +10592,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             reserve_pct = max(reserve_pct, current_reserve)
                     mode_apply_failed = False
                     if apply_self_consumption or reapply_backup_reserve:
-                        if hasattr(battery, "set_self_consumption_mode"):
+                        if (
+                            tesla_stale_grid_charge
+                            and hasattr(battery, "restore_normal")
+                        ):
+                            if await battery.restore_normal() is False:
+                                mode_apply_failed = True
+                            else:
+                                self._last_tesla_stale_grid_charge_restore_at = (
+                                    dt_util.utcnow()
+                                )
+                        elif hasattr(battery, "set_self_consumption_mode"):
                             if apply_self_consumption:
                                 if await battery.set_self_consumption_mode() is False:
                                     mode_apply_failed = True
