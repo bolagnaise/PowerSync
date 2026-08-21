@@ -3793,3 +3793,54 @@ def test_sungrow_summary_still_blanks_a_real_materially_partial_accumulator():
     assert summary["export_earnings_today"] is None
     assert summary["export_earnings_coverage"] == "partial"
     assert summary["avg_cost_per_kwh_today"] is None
+
+
+def test_sungrow_hardware_coverage_gap_also_blanks_mtd_average():
+    """Ticket #388: hardware-only daily energy must reach the MTD gate.
+
+    A current-day Sungrow register can prove 5.0 kWh exported while the
+    software accumulator has only seen 0.12 kWh.  The daily register check
+    already suppresses the incomplete daily earnings, but the same missing
+    energy must not be ignored by the month-to-date coverage decision.
+    """
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    try:
+        EnergyAccumulator = sys.modules["power_sync.coordinator"].EnergyAccumulator
+        accumulator = EnergyAccumulator(None)
+        accumulator.grid_import_kwh = 0.12
+        accumulator.grid_export_kwh = 0.12
+        accumulator.import_cost_covered_kwh = 0.12
+        accumulator.export_earnings_covered_kwh = 0.12
+        accumulator.import_cost_today = 0.02
+        accumulator.export_earnings_today = 0.01
+        accumulator.load_kwh = 1.0
+        accumulator.mtd_grid_import_kwh = 0.12
+        accumulator.mtd_grid_export_kwh = 0.12
+        accumulator.mtd_import_cost_covered_kwh = 0.12
+        accumulator.mtd_export_earnings_covered_kwh = 0.12
+        accumulator.mtd_import_cost = 1.0
+        accumulator.mtd_export_earnings = 1.71
+        accumulator.mtd_load_kwh = 10.0
+
+        coordinator = _new_sungrow_coordinator(
+            SungrowEnergyCoordinator,
+            object(),
+        )
+        coordinator._energy_acc = accumulator
+        summary = coordinator._build_energy_summary(
+            {
+                "daily_import": 0.12,
+                "daily_export": 5.0,
+                "daily_pv_generation": 6.0,
+                "daily_battery_charge": 0.0,
+                "daily_battery_discharge": 0.0,
+            }
+        )
+    finally:
+        restore()
+
+    assert summary["export_earnings_today"] is None
+    assert summary["export_earnings_coverage"] == "partial"
+    assert summary["avg_cost_per_kwh_today"] is None
+    assert summary["avg_cost_per_kwh_mtd"] is None

@@ -696,3 +696,48 @@ def test_mtd_coverage_short_under_stamped_marker_stays_partial():
         assert restored.mtd_import_cost_covered_kwh == pytest.approx(10.06)
         assert restored.mtd_export_earnings_covered_kwh == pytest.approx(0.0)
         assert restored.as_dict()["avg_cost_per_kwh_mtd"] is None
+
+
+def test_hardware_daily_coverage_gap_survives_restart_and_day_rollover():
+    """Ticket #388: a trusted Sungrow gap remains MTD evidence after reload."""
+    clock = _Clock(datetime(2026, 8, 21, 23, 59, 0))
+    store = _Store()
+    accumulator = _new_accumulator(clock, store)
+    accumulator.update(0.0, 0.0, 0.0, 1.0)
+    accumulator.grid_import_kwh = 0.12
+    accumulator.grid_export_kwh = 0.12
+    accumulator.import_cost_covered_kwh = 0.12
+    accumulator.export_earnings_covered_kwh = 0.12
+    accumulator.import_cost_today = 0.02
+    accumulator.export_earnings_today = 0.01
+    accumulator.load_kwh = 1.0
+    accumulator.mtd_grid_import_kwh = 0.12
+    accumulator.mtd_grid_export_kwh = 0.12
+    accumulator.mtd_import_cost_covered_kwh = 0.12
+    accumulator.mtd_export_earnings_covered_kwh = 0.12
+    accumulator.mtd_import_cost = 1.0
+    accumulator.mtd_export_earnings = 1.71
+    accumulator.mtd_load_kwh = 10.0
+
+    accumulator.reconcile_hardware_daily_coverage(export_kwh=5.0)
+    assert accumulator.as_dict()["avg_cost_per_kwh_mtd"] is None
+    asyncio.run(accumulator.async_flush())
+
+    same_day = _new_accumulator(clock, store)
+    asyncio.run(same_day.async_restore())
+    assert same_day._hardware_daily_export_coverage_gap_kwh == pytest.approx(4.88)
+    assert same_day.as_dict()["avg_cost_per_kwh_mtd"] is None
+
+    # The first next-day sample moves the day's known unpriced gap into the
+    # persistent MTD bucket instead of forgetting it with the daily reset.
+    clock.current = datetime(2026, 8, 22, 0, 1, 0)
+    same_day.update(0.0, 0.0, 0.0, 1.0)
+    assert same_day._hardware_daily_export_coverage_gap_kwh == 0.0
+    assert same_day._mtd_hardware_export_coverage_gap_kwh == pytest.approx(4.88)
+    assert same_day.as_dict()["avg_cost_per_kwh_mtd"] is None
+
+    asyncio.run(same_day.async_flush())
+    reloaded = _new_accumulator(clock, store)
+    asyncio.run(reloaded.async_restore())
+    assert reloaded._mtd_hardware_export_coverage_gap_kwh == pytest.approx(4.88)
+    assert reloaded.as_dict()["avg_cost_per_kwh_mtd"] is None

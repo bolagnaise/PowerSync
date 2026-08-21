@@ -75,7 +75,7 @@ _SOLCAST_ESTIMATE_FIELDS = {
 
 ENERGY_ACC_STORE_VERSION = 1
 ENERGY_ACC_SAVE_DELAY = 300  # Flush at most every 5 minutes
-ENERGY_ACC_PRICE_COVERAGE_SCHEMA = 3
+ENERGY_ACC_PRICE_COVERAGE_SCHEMA = 4
 SOLAREDGE_DAILY_TOTALS_STORE_VERSION = 1
 LIFETIME_TOTALS_STORE_VERSION = 1
 TESLA_OUTAGE_NOTIFY_FAILURES = 5
@@ -447,6 +447,14 @@ class EnergyAccumulator:
         self.mtd_export_earnings: float = 0.0
         self.mtd_import_cost_covered_kwh: float = 0.0
         self.mtd_export_earnings_covered_kwh: float = 0.0
+        # Sungrow's daily register can prove energy that the power-sample
+        # accumulator did not see.  Keep that unpriced energy separate from
+        # the accumulator totals: it must make coverage fail closed, but it
+        # must never manufacture a cost or claim that an interval was priced.
+        self._hardware_daily_import_coverage_gap_kwh: float = 0.0
+        self._hardware_daily_export_coverage_gap_kwh: float = 0.0
+        self._mtd_hardware_import_coverage_gap_kwh: float = 0.0
+        self._mtd_hardware_export_coverage_gap_kwh: float = 0.0
         self._load_accounting_partial_mtd = False
         self._last_month: Any = None
         self._store: Store | None = None
@@ -516,6 +524,12 @@ class EnergyAccumulator:
             self._load_accounting_partial_today = bool(
                 data.get("load_accounting_partial_today", False)
             )
+            self._hardware_daily_import_coverage_gap_kwh = max(
+                0.0, float(data.get("hardware_daily_import_coverage_gap_kwh", 0.0))
+            )
+            self._hardware_daily_export_coverage_gap_kwh = max(
+                0.0, float(data.get("hardware_daily_export_coverage_gap_kwh", 0.0))
+            )
             _LOGGER.info(
                 "Restored energy accumulator: solar=%.2f grid_in=%.2f grid_out=%.2f "
                 "charge=%.2f discharge=%.2f load=%.2f kWh, cost=$%.2f earn=$%.2f (date=%s)",
@@ -550,6 +564,12 @@ class EnergyAccumulator:
             )
             self.mtd_export_earnings_covered_kwh = float(
                 data.get("mtd_export_earnings_covered_kwh", 0.0)
+            )
+            self._mtd_hardware_import_coverage_gap_kwh = max(
+                0.0, float(data.get("mtd_hardware_import_coverage_gap_kwh", 0.0))
+            )
+            self._mtd_hardware_export_coverage_gap_kwh = max(
+                0.0, float(data.get("mtd_hardware_export_coverage_gap_kwh", 0.0))
             )
             # Same one-time migration for the month-to-date buckets.  Without
             # it, Avg Cost per kWh (Month) stayed unknown until the next month
@@ -592,6 +612,26 @@ class EnergyAccumulator:
             # Persist the full year-month rather than only the numeric month;
             # January of a new year must not inherit December/January totals.
             self._last_month = current_month
+
+            # If Home Assistant stopped before the first poll after midnight,
+            # today's hardware-only gap was saved in the daily bucket.  The
+            # normal rollover below never got a chance to move it into MTD,
+            # so recover it once while the stored month is still current.
+            if stored_date != today:
+                stored_import_gap = max(
+                    0.0,
+                    float(data.get("hardware_daily_import_coverage_gap_kwh", 0.0)),
+                )
+                stored_export_gap = max(
+                    0.0,
+                    float(data.get("hardware_daily_export_coverage_gap_kwh", 0.0)),
+                )
+                if stored_import_gap or stored_export_gap:
+                    self._mtd_hardware_import_coverage_gap_kwh += stored_import_gap
+                    self._mtd_hardware_export_coverage_gap_kwh += stored_export_gap
+                    self._hardware_daily_import_coverage_gap_kwh = 0.0
+                    self._hardware_daily_export_coverage_gap_kwh = 0.0
+                    migrated_legacy_coverage = True
 
         if migrated_legacy_coverage:
             _LOGGER.info(
@@ -665,6 +705,18 @@ class EnergyAccumulator:
             "mtd_export_earnings_covered_kwh": round(
                 self.mtd_export_earnings_covered_kwh, 4
             ),
+            "hardware_daily_import_coverage_gap_kwh": round(
+                self._hardware_daily_import_coverage_gap_kwh, 4
+            ),
+            "hardware_daily_export_coverage_gap_kwh": round(
+                self._hardware_daily_export_coverage_gap_kwh, 4
+            ),
+            "mtd_hardware_import_coverage_gap_kwh": round(
+                self._mtd_hardware_import_coverage_gap_kwh, 4
+            ),
+            "mtd_hardware_export_coverage_gap_kwh": round(
+                self._mtd_hardware_export_coverage_gap_kwh, 4
+            ),
             "load_accounting_partial_mtd": self._load_accounting_partial_mtd,
         }
 
@@ -714,6 +766,10 @@ class EnergyAccumulator:
             self.mtd_export_earnings = 0.0
             self.mtd_import_cost_covered_kwh = 0.0
             self.mtd_export_earnings_covered_kwh = 0.0
+            self._hardware_daily_import_coverage_gap_kwh = 0.0
+            self._hardware_daily_export_coverage_gap_kwh = 0.0
+            self._mtd_hardware_import_coverage_gap_kwh = 0.0
+            self._mtd_hardware_export_coverage_gap_kwh = 0.0
             self._load_accounting_partial_mtd = False
 
         # Reset at local midnight
@@ -735,6 +791,14 @@ class EnergyAccumulator:
             self.export_earnings_today = 0.0
             self.import_cost_covered_kwh = 0.0
             self.export_earnings_covered_kwh = 0.0
+            self._mtd_hardware_import_coverage_gap_kwh += (
+                self._hardware_daily_import_coverage_gap_kwh
+            )
+            self._mtd_hardware_export_coverage_gap_kwh += (
+                self._hardware_daily_export_coverage_gap_kwh
+            )
+            self._hardware_daily_import_coverage_gap_kwh = 0.0
+            self._hardware_daily_export_coverage_gap_kwh = 0.0
             self._load_accounting_partial_today = False
 
         # Integrate power × time
@@ -806,11 +870,15 @@ class EnergyAccumulator:
         )
         mtd_import_cost_complete = not self._priced_coverage_is_partial(
             self.mtd_import_cost_covered_kwh,
-            self.mtd_grid_import_kwh,
+            self.mtd_grid_import_kwh
+            + self._mtd_hardware_import_coverage_gap_kwh
+            + self._hardware_daily_import_coverage_gap_kwh,
         )
         mtd_export_earnings_complete = not self._priced_coverage_is_partial(
             self.mtd_export_earnings_covered_kwh,
-            self.mtd_grid_export_kwh,
+            self.mtd_grid_export_kwh
+            + self._mtd_hardware_export_coverage_gap_kwh
+            + self._hardware_daily_export_coverage_gap_kwh,
         )
         import_cost_today = (
             round(self.import_cost_today, 4) if import_cost_complete else None
@@ -873,6 +941,41 @@ class EnergyAccumulator:
             "mtd_load_kwh": round(self.mtd_load_kwh, 3),
             "avg_cost_per_kwh_mtd": avg_mtd,
         }
+
+    def reconcile_hardware_daily_coverage(
+        self,
+        import_kwh: float | None = None,
+        export_kwh: float | None = None,
+    ) -> bool:
+        """Carry trusted Sungrow daily-register gaps into MTD coverage.
+
+        ``None`` means the register was unavailable for this poll and retains
+        the last trusted reading.  A hardware total is used only to add known
+        unpriced energy to the coverage denominator; cost and priced-energy
+        counters stay untouched.
+        """
+        changed = False
+
+        def _gap(total: float, accumulated: float) -> float:
+            try:
+                return max(0.0, float(total) - max(0.0, float(accumulated)))
+            except (TypeError, ValueError, OverflowError):
+                return 0.0
+
+        if import_kwh is not None:
+            import_gap = _gap(import_kwh, self.grid_import_kwh)
+            if import_gap != self._hardware_daily_import_coverage_gap_kwh:
+                self._hardware_daily_import_coverage_gap_kwh = import_gap
+                changed = True
+        if export_kwh is not None:
+            export_gap = _gap(export_kwh, self.grid_export_kwh)
+            if export_gap != self._hardware_daily_export_coverage_gap_kwh:
+                self._hardware_daily_export_coverage_gap_kwh = export_gap
+                changed = True
+
+        if changed:
+            self._schedule_save()
+        return changed
 
     def reconcile_price_coverage(self, reference: dict[str, Any] | None) -> bool:
         """Recover priced coverage from the independent optimizer cost ledger.
@@ -6164,6 +6267,32 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         final_export = summary.get("grid_export_today_kwh", 0)
         summary["grid_import_today_source"] = import_source
         summary["grid_export_today_source"] = export_source
+
+        # A trusted hardware total can expose current-day energy the sampled
+        # accumulator never observed.  The daily register cross-check below
+        # already fails those costs closed; retain that same known gap in the
+        # accumulator's MTD coverage denominator so the Month average cannot
+        # become a false complete value (and so a restart/rollover preserves
+        # the evidence).  Test doubles and non-Sungrow accumulators may not
+        # provide this optional reconciliation hook.
+        reconcile_hardware_coverage = getattr(
+            self._energy_acc,
+            "reconcile_hardware_daily_coverage",
+            None,
+        )
+        if callable(reconcile_hardware_coverage):
+            reconcile_hardware_coverage(
+                final_import if import_source != "power_accumulator" else None,
+                final_export if export_source != "power_accumulator" else None,
+            )
+            reconciled_summary = self._energy_acc.as_dict()
+            for key in (
+                "mtd_import_cost",
+                "mtd_export_earnings",
+                "mtd_load_kwh",
+                "avg_cost_per_kwh_mtd",
+            ):
+                summary[key] = reconciled_summary[key]
 
         # Grid costs are accumulated from priced power samples.  Do not pair a
         # partial accumulator value with a full-day Sungrow hardware counter:
