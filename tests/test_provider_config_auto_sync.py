@@ -115,3 +115,26 @@ def test_octopus_provider_config_returns_persisted_auto_sync_false():
     assert response.payload["success"] is True
     assert response.payload["electricity_provider"] == "octopus"
     assert response.payload["config"]["auto_sync"] is False
+
+
+def test_provider_config_demand_charge_updates_use_the_reload_lifecycle():
+    """Demand Charge changes must rebuild its coordinator and protection timers."""
+
+    source = INIT_PATH.read_text()
+    module = ast.parse(source)
+    post_source = None
+    for node in module.body:
+        if isinstance(node, ast.ClassDef) and node.name == "ProviderConfigView":
+            post = next(
+                child
+                for child in node.body
+                if isinstance(child, ast.AsyncFunctionDef) and child.name == "post"
+            )
+            post_source = ast.get_source_segment(source, post)
+            break
+
+    assert post_source is not None
+    assert '"demand_charge_enabled"' in post_source
+    assert '"demand_charge_billing_day"' in post_source
+    assert "demand_charge_changed = bool(" in post_source
+    assert "and not demand_charge_changed" in post_source

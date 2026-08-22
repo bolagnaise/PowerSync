@@ -47,8 +47,16 @@ def _install_coordinator_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
             self.data = None
 
     class Store:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
+        saved: dict[str, object] = {}
+
+        def __init__(self, _hass, _version, key) -> None:
+            self.key = key
+
+        async def async_load(self):
+            return self.saved.get(self.key)
+
+        async def async_save(self, value) -> None:
+            self.saved[self.key] = value
 
     ha_core.HomeAssistant = object
     ha_exceptions.ConfigEntryAuthFailed = ConfigEntryAuthFailed
@@ -131,3 +139,60 @@ def test_peak_demand_tracks_only_billable_demand_window_samples(
     assert data["grid_import_power_kw"] == 10.99
     assert data["peak_demand_kw"] == 4.2
     assert data["estimated_cost"] == pytest.approx(37.8)
+
+
+def test_peak_demand_survives_same_cycle_reconstruction(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    coordinator_module = _coordinator_module(monkeypatch)
+    _Clock.current = datetime(2026, 8, 21, 17, 0, tzinfo=timezone.utc)
+    energy = SimpleNamespace(data={"grid_power": 7.25})
+    first = coordinator_module.DemandChargeCoordinator(
+        hass=SimpleNamespace(),
+        energy_coordinator=energy,
+        enabled=True,
+        rate=10.0,
+        start_time="15:00",
+        end_time="21:00",
+        days="All Days",
+        billing_day=1,
+        entry_id="entry-1",
+    )
+    assert asyncio.run(first._async_update_data())["peak_demand_kw"] == 7.25
+
+    energy.data = {"grid_power": 2.0}
+    reconstructed = coordinator_module.DemandChargeCoordinator(
+        hass=SimpleNamespace(),
+        energy_coordinator=energy,
+        enabled=True,
+        rate=10.0,
+        start_time="15:00",
+        end_time="21:00",
+        days="All Days",
+        billing_day=1,
+        entry_id="entry-1",
+    )
+    asyncio.run(reconstructed.async_load())
+    assert asyncio.run(reconstructed._async_update_data())["peak_demand_kw"] == 7.25
+
+
+def test_peak_demand_does_not_cross_billing_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    coordinator_module = _coordinator_module(monkeypatch)
+    _Clock.current = datetime(2026, 8, 31, 17, 0, tzinfo=timezone.utc)
+    energy = SimpleNamespace(data={"grid_power": 7.25})
+    first = coordinator_module.DemandChargeCoordinator(
+        SimpleNamespace(), energy, True, 10.0, "15:00", "21:00", "All Days", 1,
+        entry_id="entry-2",
+    )
+    asyncio.run(first._async_update_data())
+
+    _Clock.current = datetime(2026, 9, 1, 17, 0, tzinfo=timezone.utc)
+    energy.data = {"grid_power": 2.0}
+    reconstructed = coordinator_module.DemandChargeCoordinator(
+        SimpleNamespace(), energy, True, 10.0, "15:00", "21:00", "All Days", 1,
+        entry_id="entry-2",
+    )
+    asyncio.run(reconstructed.async_load())
+    assert asyncio.run(reconstructed._async_update_data())["peak_demand_kw"] == 2.0

@@ -4484,6 +4484,7 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         billing_day: int = 1,
         daily_supply_charge: float = 0.0,
         monthly_supply_charge: float = 0.0,
+        entry_id: str | None = None,
     ) -> None:
         """Initialize the coordinator."""
         self.tesla_coordinator = energy_coordinator
@@ -4499,6 +4500,11 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         # Track peak demand (persists across coordinator updates)
         self._peak_demand_kw = 0.0
         self._last_billing_day_check = None
+        self._store = (
+            Store(hass, 1, f"{DOMAIN}.demand_charge.{entry_id}")
+            if entry_id
+            else None
+        )
 
         super().__init__(
             hass,
@@ -4506,6 +4512,64 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
             name=f"{DOMAIN}_demand_charge",
             update_interval=timedelta(minutes=1),  # Check every minute
         )
+
+    def _billing_cycle_key(self, now: datetime) -> str:
+        """Return the configured billing cycle containing ``now``."""
+        year, month = now.year, now.month
+        if now.day < self.billing_day:
+            if month == 1:
+                year, month = year - 1, 12
+            else:
+                month -= 1
+        return f"{year:04d}-{month:02d}-{self.billing_day:02d}"
+
+    def _store_identity(self) -> dict[str, Any]:
+        """Return settings that define which samples belong to this peak."""
+        return {
+            "billing_day": self.billing_day,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "days": self.days,
+        }
+
+    async def async_load(self) -> None:
+        """Restore a peak only when it belongs to this configured cycle."""
+        if self._store is None:
+            return
+        try:
+            stored = await self._store.async_load()
+        except Exception as err:
+            _LOGGER.debug("Could not load Demand Charge peak: %s", err)
+            return
+        if not isinstance(stored, dict):
+            return
+        if (
+            stored.get("cycle") != self._billing_cycle_key(dt_util.now())
+            or stored.get("identity") != self._store_identity()
+        ):
+            return
+        try:
+            peak = float(stored.get("peak_demand_kw", 0.0))
+        except (TypeError, ValueError):
+            return
+        if math.isfinite(peak) and peak >= 0:
+            self._peak_demand_kw = peak
+
+    async def async_save(self, now: datetime | None = None) -> None:
+        """Persist the current peak for the active configured billing cycle."""
+        if self._store is None:
+            return
+        now = now or dt_util.now()
+        try:
+            await self._store.async_save(
+                {
+                    "cycle": self._billing_cycle_key(now),
+                    "identity": self._store_identity(),
+                    "peak_demand_kw": self._peak_demand_kw,
+                }
+            )
+        except Exception as err:
+            _LOGGER.debug("Could not save Demand Charge peak: %s", err)
 
     def _is_in_peak_period(self, now: datetime) -> bool:
         """Check if current time is within peak period and correct day."""
@@ -4561,6 +4625,7 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
             if current_day == self.billing_day and last_check_day != self.billing_day:
                 _LOGGER.info("Billing cycle reset triggered on day %d", self.billing_day)
                 self.reset_peak_demand()
+                await self.async_save(now)
 
         self._last_billing_day_check = now
 
@@ -4579,6 +4644,7 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         if in_peak_period and grid_import_kw > self._peak_demand_kw:
             self._peak_demand_kw = grid_import_kw
             _LOGGER.info("New peak demand: %.2f kW", self._peak_demand_kw)
+            await self.async_save(now)
 
         # Calculate estimated demand charge cost (peak demand * rate)
         estimated_demand_cost = self._peak_demand_kw * self.rate

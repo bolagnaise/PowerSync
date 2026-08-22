@@ -11578,6 +11578,16 @@ class ProviderConfigView(HomeAssistantView):
                 and new_options.get(CONF_FLOW_POWER_HAPPY_HOUR_END)
                 != current_happy_hour_end
             )
+            demand_charge_changed = bool(
+                {
+                    "demand_charge_enabled",
+                    "demand_charge_rate",
+                    "demand_charge_start_time",
+                    "demand_charge_end_time",
+                    "demand_charge_days",
+                    "demand_charge_billing_day",
+                }.intersection(data)
+            )
 
             if entry.options.get(
                 CONF_SUNGROW_CONNECTION_TYPE,
@@ -11670,6 +11680,7 @@ class ProviderConfigView(HomeAssistantView):
             if (
                 new_options != dict(entry.options)
                 and not happy_hour_end_changed
+                and not demand_charge_changed
             ):
                 entry_data["_skip_reload"] = True
             try:
@@ -21910,7 +21921,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             billing_day=demand_charge_billing_day,
             daily_supply_charge=daily_supply_charge,
             monthly_supply_charge=monthly_supply_charge,
+            entry_id=entry.entry_id,
         )
+        await demand_charge_coordinator.async_load()
         await demand_charge_coordinator.async_config_entry_first_refresh()
         _LOGGER.info("Demand charge coordinator initialized")
 
@@ -43506,6 +43519,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if demand_charging_cancel := entry_data.get("demand_charging_cancel"):
         demand_charging_cancel()
         _LOGGER.debug("Cancelled demand period grid charging timer")
+
+    if demand_charge_coordinator := entry_data.get("demand_charge_coordinator"):
+        try:
+            await demand_charge_coordinator.async_save()
+        except Exception as err:
+            _LOGGER.debug("Could not save Demand Charge peak on unload: %s", err)
 
     # Cancel the Tesla calibration-recovery check timer if it exists
     if calibration_check_unsub := entry_data.get("_calibration_check_unsub"):
