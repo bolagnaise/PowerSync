@@ -75,6 +75,26 @@ class _NoOpGoodWeInverter(_FakeGoodWeInverter):
         self.setting_writes.append((setting_id, value))
 
 
+class _DisabledLimitNormalizingGoodWeInverter(_FakeGoodWeInverter):
+    """Reports 0W for the inactive limit while grid export is disabled."""
+
+    async def read_setting(self, setting_id: str) -> int:
+        if setting_id == "grid_export_limit" and self.settings["grid_export"] == 0:
+            return 0
+        return await super().read_setting(setting_id)
+
+
+class _RetainedZeroExportLimitGoodWeInverter(_FakeGoodWeInverter):
+    """Reports a still-enabled 0W limiter regardless of release writes."""
+
+    async def read_setting(self, setting_id: str) -> int:
+        if setting_id == "grid_export":
+            return 1
+        if setting_id == "grid_export_limit":
+            return 0
+        return await super().read_setting(setting_id)
+
+
 def test_restore_uses_goodwe_export_limit_register_maximum():
     module, restore_module = _load_goodwe_controller_module()
     try:
@@ -172,6 +192,51 @@ def test_restore_for_export_command_does_not_keep_saved_zero_export_limit():
         assert controller._saved_grid_export_enabled is None
         assert controller._saved_grid_export_limit is None
         assert controller._grid_export_state_saved is False
+    finally:
+        restore_module()
+
+
+def test_restore_for_export_accepts_disabled_zero_limit_normalization():
+    module, restore_module = _load_goodwe_controller_module()
+    try:
+        inverter = _DisabledLimitNormalizingGoodWeInverter()
+        inverter.settings["grid_export"] = 1
+        inverter.settings["grid_export_limit"] = 0
+        controller = module.GoodWeBatteryController("192.0.2.10")
+        controller._inverter = inverter
+
+        async def connect() -> bool:
+            return True
+
+        controller.connect = connect
+
+        assert asyncio.run(controller.curtail())
+        assert asyncio.run(controller.restore(allow_zero_export_limit=False))
+        assert inverter.export_limits == [0, 65535]
+        assert inverter.setting_writes == [("grid_export", 1), ("grid_export", 0)]
+        assert controller.get_grid_export_restore_state() is None
+    finally:
+        restore_module()
+
+
+def test_restore_for_export_rejects_retained_enabled_zero_limit():
+    module, restore_module = _load_goodwe_controller_module()
+    try:
+        inverter = _RetainedZeroExportLimitGoodWeInverter()
+        controller = module.GoodWeBatteryController("192.0.2.10")
+        controller._inverter = inverter
+
+        async def connect() -> bool:
+            return True
+
+        controller.connect = connect
+
+        assert asyncio.run(controller.curtail())
+        assert not asyncio.run(controller.restore(allow_zero_export_limit=False))
+        assert controller.get_grid_export_restore_state() == {
+            "grid_export": 1,
+            "grid_export_limit": 0,
+        }
     finally:
         restore_module()
 

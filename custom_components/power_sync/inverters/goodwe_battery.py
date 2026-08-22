@@ -324,10 +324,15 @@ class GoodWeBatteryController:
     async def _verify_grid_export_settings(
         self, expected_enabled: int, expected_limit: int
     ) -> bool:
-        """Confirm both GoodWe export-limit settings after a write."""
+        """Confirm the effective GoodWe export-limit state after a write."""
         actual_enabled = await self._read_grid_export_setting("grid_export")
         actual_limit = await self._read_grid_export_setting("grid_export_limit")
-        if actual_enabled == expected_enabled and actual_limit == expected_limit:
+        # GoodWe devices may normalize the inactive numeric limit to 0W when
+        # the limiter is disabled. The enable flag is the effective control in
+        # that state, while an enabled limiter must still echo its exact limit.
+        if actual_enabled == expected_enabled and (
+            expected_enabled == 0 or actual_limit == expected_limit
+        ):
             return True
         _LOGGER.warning(
             "GoodWe export-limit write is not confirmed: expected enabled=%d, "
