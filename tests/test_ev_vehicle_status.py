@@ -1315,6 +1315,122 @@ def test_generic_charger_vehicle_reports_measured_charging_power():
     }]
 
 
+def test_generic_and_native_wall_connector_same_device_are_one_loadpoint():
+    """A generic entity sourced from a Wall Connector must not be summed twice."""
+    power_sync = _power_sync_module()
+    generic_power = "sensor.tesla_wall_connector_single_phase_load"
+    generic_status = "sensor.tesla_wall_connector_vehicle"
+    native_power = "sensor.tesla_wall_connector_total_power"
+    device_id = "wall-connector-1"
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "generic_charger_power_entity": generic_power,
+            "generic_charger_status_entity": generic_status,
+        },
+    )
+    states = [
+        _State(generic_power, "6.96", {"unit_of_measurement": "kW"}),
+        _State(generic_status, "connected"),
+        _State(native_power, "6.96", {"unit_of_measurement": "kW"}),
+    ]
+    hass = _Hass(
+        states,
+        {state.entity_id: _entity(state.entity_id, device_id) for state in states},
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+
+    assert vehicles == [{
+        "vehicle_id": "generic_ev",
+        "vehicle_name": "EV",
+        "ev_power_kw": 6.96,
+        "ev_soc": None,
+        "is_connected": True,
+        "is_charging": True,
+    }]
+
+
+def test_generic_and_native_wall_connector_same_device_stay_one_idle_loadpoint():
+    """The duplicate must not return when the connected charger is idle."""
+    power_sync = _power_sync_module()
+    generic_power = "sensor.tesla_wall_connector_single_phase_load"
+    generic_status = "sensor.tesla_wall_connector_vehicle"
+    native_power = "sensor.tesla_wall_connector_total_power"
+    device_id = "wall-connector-1"
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "generic_charger_power_entity": generic_power,
+            "generic_charger_status_entity": generic_status,
+        },
+    )
+    states = [
+        _State(generic_power, "0", {"unit_of_measurement": "kW"}),
+        _State(generic_status, "connected"),
+        _State(native_power, "0", {"unit_of_measurement": "kW"}),
+    ]
+    hass = _Hass(
+        states,
+        {state.entity_id: _entity(state.entity_id, device_id) for state in states},
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+
+    assert vehicles == [{
+        "vehicle_id": "generic_ev",
+        "vehicle_name": "EV",
+        "ev_power_kw": 0.0,
+        "ev_soc": None,
+        "is_connected": True,
+        "is_charging": False,
+    }]
+
+
+def test_generic_and_native_wall_connector_distinct_devices_remain_separate():
+    """Device identity, not matching power or connection text, joins a charger."""
+    power_sync = _power_sync_module()
+    generic_power = "sensor.generic_ev_power"
+    generic_status = "sensor.generic_ev_status"
+    native_power = "sensor.tesla_wall_connector_total_power"
+    native_status = "sensor.tesla_wall_connector_vehicle"
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "generic_charger_power_entity": generic_power,
+            "generic_charger_status_entity": generic_status,
+        },
+    )
+    states = [
+        _State(generic_power, "6.96", {"unit_of_measurement": "kW"}),
+        _State(generic_status, "connected"),
+        _State(native_power, "6.96", {"unit_of_measurement": "kW"}),
+        _State(native_status, "connected"),
+    ]
+    hass = _Hass(
+        states,
+        {
+            generic_power: _entity(generic_power, "generic-charger"),
+            generic_status: _entity(generic_status, "generic-charger"),
+            native_power: _entity(native_power, "wall-connector"),
+            native_status: _entity(native_status, "wall-connector"),
+        },
+    )
+
+    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+
+    assert [(vehicle["vehicle_id"], vehicle["ev_power_kw"]) for vehicle in vehicles] == [
+        ("generic_ev", 6.96),
+        ("wall_connector_ha", 6.96),
+    ]
+
+
 def test_aggregate_ev_status_uses_generic_charger_fallback_soc():
     power_sync = _power_sync_module()
     entry = SimpleNamespace(

@@ -1311,6 +1311,7 @@ def _apply_wall_connector_observation(
     wc_observed_at: datetime | None = None,
     *,
     allow_heuristic: bool = True,
+    source_device_ids: set[str] | None = None,
 ) -> bool:
     """Attach Wall Connector telemetry only when it can be matched safely."""
     wc_vin_key = str(wc_vin or "").strip().lower()
@@ -1384,6 +1385,22 @@ def _apply_wall_connector_observation(
             )
             if direct_observed_at is not None:
                 vehicle["_connected_observed_at"] = direct_observed_at
+
+    # A generic charger can deliberately use an entity exposed by the same HA
+    # device as native Wall Connector discovery. That is one meter, not two
+    # chargers. Device registry identity is the only safe bridge: names,
+    # equal power and connection text are all ambiguous across installations.
+    if source_device_ids:
+        matching_generic = [
+            vehicle
+            for vehicle in vehicles
+            if source_device_ids.intersection(
+                set(vehicle.get("_source_device_ids") or ())
+            )
+        ]
+        if len(matching_generic) == 1:
+            update_vehicle(matching_generic[0])
+            return True
 
     if wc_vin_key:
         matching_vehicles = [
@@ -2066,9 +2083,35 @@ def _get_ev_vehicles_status(hass, entry) -> list:
     # state, or measured charge power instead of switch existence.
     config = {**entry.data, **entry.options}
     generic_observation = _generic_charger_observation_from_config(hass, config)
+    generic_device_ids: set[str] = set()
+    if generic_observation:
+        from .const import (
+            CONF_GENERIC_CHARGER_AMPS_ENTITY,
+            CONF_GENERIC_CHARGER_POWER_ENTITY,
+            CONF_GENERIC_CHARGER_SOC_ENTITY,
+            CONF_GENERIC_CHARGER_SOC_ENTITY_2,
+            CONF_GENERIC_CHARGER_STATUS_ENTITY,
+            CONF_GENERIC_CHARGER_SWITCH_ENTITY,
+        )
+
+        for option in (
+            CONF_GENERIC_CHARGER_SWITCH_ENTITY,
+            CONF_GENERIC_CHARGER_AMPS_ENTITY,
+            CONF_GENERIC_CHARGER_STATUS_ENTITY,
+            CONF_GENERIC_CHARGER_POWER_ENTITY,
+            CONF_GENERIC_CHARGER_SOC_ENTITY,
+            CONF_GENERIC_CHARGER_SOC_ENTITY_2,
+        ):
+            entity_id = config.get(option)
+            registry_entity = (
+                entity_registry.entities.get(entity_id) if entity_id else None
+            )
+            device_id = getattr(registry_entity, "device_id", None)
+            if device_id:
+                generic_device_ids.add(device_id)
     if generic_observation:
         generic_power_kw = float(generic_observation.get("ev_power_kw") or 0.0)
-        vehicles.append({
+        generic_vehicle = {
             "vehicle_id": "generic_ev",
             "vehicle_name": generic_observation.get("vehicle_name") or "EV",
             "ev_power_kw": generic_power_kw,
@@ -2078,7 +2121,10 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 bool(generic_observation.get("is_charging"))
                 or generic_power_kw > 0.05
             ),
-        })
+        }
+        if generic_device_ids:
+            generic_vehicle["_source_device_ids"] = generic_device_ids
+        vehicles.append(generic_vehicle)
 
     ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
     ble_prefixes = _resolve_ble_prefixes(hass, config)
@@ -2247,6 +2293,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                     or wc_index
                 ),
                 wc_observed_at,
+                set(),
             ))
 
         if not wc_observations:
@@ -2255,7 +2302,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             )
             if wc_power_kw > 0.05:
                 wc_observations.append(
-                    (wc_power_kw, True, True, None, "site", wc_observed_at)
+                    (wc_power_kw, True, True, None, "site", wc_observed_at, set())
                 )
 
     if not wc_observations:
@@ -2263,12 +2310,17 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         wc_connected = False
         wc_vin = None
         wc_observed_at = None
+        wc_device_ids: set[str] = set()
         for state_obj in hass.states.async_all("sensor"):
             eid = state_obj.entity_id.lower()
             if "wall_connector" not in eid:
                 continue
             if state_obj.state in ("unknown", "unavailable"):
                 continue
+            registry_entity = entity_registry.entities.get(state_obj.entity_id)
+            device_id = getattr(registry_entity, "device_id", None)
+            if device_id:
+                wc_device_ids.add(device_id)
             # Wall Connector vehicle sensor: "disconnected", "charging", "connected", etc.
             if "vehicle" in eid and "power" not in eid:
                 wc_observed_at = _latest_ev_observed_at(
@@ -2296,6 +2348,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                     wc_vin,
                     "ha",
                     wc_observed_at,
+                    wc_device_ids,
                 )
             )
 
@@ -2306,6 +2359,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         wc_vin,
         wc_id,
         wc_observed_at,
+        wc_device_ids,
     ) in wc_observations:
         matched = _apply_wall_connector_observation(
             vehicles,
@@ -2315,6 +2369,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             wc_vin,
             wc_observed_at,
             allow_heuristic=len(wc_observations) == 1,
+            source_device_ids=wc_device_ids,
         )
         if not matched:
             connector_connected = wc_connected
@@ -2375,6 +2430,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         ):
             if vehicle.get(timestamp_field) is None:
                 vehicle.pop(timestamp_field, None)
+        vehicle.pop("_source_device_ids", None)
     return coalesced
 
 
