@@ -75,7 +75,7 @@ _SOLCAST_ESTIMATE_FIELDS = {
 
 ENERGY_ACC_STORE_VERSION = 1
 ENERGY_ACC_SAVE_DELAY = 300  # Flush at most every 5 minutes
-ENERGY_ACC_PRICE_COVERAGE_SCHEMA = 4
+ENERGY_ACC_PRICE_COVERAGE_SCHEMA = 5
 SOLAREDGE_DAILY_TOTALS_STORE_VERSION = 1
 LIFETIME_TOTALS_STORE_VERSION = 1
 TESLA_OUTAGE_NOTIFY_FAILURES = 5
@@ -455,6 +455,14 @@ class EnergyAccumulator:
         self._hardware_daily_export_coverage_gap_kwh: float = 0.0
         self._mtd_hardware_import_coverage_gap_kwh: float = 0.0
         self._mtd_hardware_export_coverage_gap_kwh: float = 0.0
+        # A daily hardware gap that is material at daily scale must remain a
+        # coverage failure for the month.  Raw kWh alone is not enough: the
+        # proportional MTD tolerance can otherwise dilute a proved daily
+        # failure below the monthly threshold.
+        self._hardware_daily_import_coverage_partial = False
+        self._hardware_daily_export_coverage_partial = False
+        self._mtd_hardware_import_coverage_partial = False
+        self._mtd_hardware_export_coverage_partial = False
         self._load_accounting_partial_mtd = False
         self._last_month: Any = None
         self._store: Store | None = None
@@ -530,6 +538,26 @@ class EnergyAccumulator:
             self._hardware_daily_export_coverage_gap_kwh = max(
                 0.0, float(data.get("hardware_daily_export_coverage_gap_kwh", 0.0))
             )
+            self._hardware_daily_import_coverage_partial = bool(
+                data.get(
+                    "hardware_daily_import_coverage_partial",
+                    self._priced_coverage_is_partial(
+                        self.import_cost_covered_kwh,
+                        self.grid_import_kwh
+                        + self._hardware_daily_import_coverage_gap_kwh,
+                    ),
+                )
+            )
+            self._hardware_daily_export_coverage_partial = bool(
+                data.get(
+                    "hardware_daily_export_coverage_partial",
+                    self._priced_coverage_is_partial(
+                        self.export_earnings_covered_kwh,
+                        self.grid_export_kwh
+                        + self._hardware_daily_export_coverage_gap_kwh,
+                    ),
+                )
+            )
             _LOGGER.info(
                 "Restored energy accumulator: solar=%.2f grid_in=%.2f grid_out=%.2f "
                 "charge=%.2f discharge=%.2f load=%.2f kWh, cost=$%.2f earn=$%.2f (date=%s)",
@@ -570,6 +598,12 @@ class EnergyAccumulator:
             )
             self._mtd_hardware_export_coverage_gap_kwh = max(
                 0.0, float(data.get("mtd_hardware_export_coverage_gap_kwh", 0.0))
+            )
+            self._mtd_hardware_import_coverage_partial = bool(
+                data.get("mtd_hardware_import_coverage_partial", False)
+            )
+            self._mtd_hardware_export_coverage_partial = bool(
+                data.get("mtd_hardware_export_coverage_partial", False)
             )
             # Same one-time migration for the month-to-date buckets.  Without
             # it, Avg Cost per kWh (Month) stayed unknown until the next month
@@ -629,6 +663,32 @@ class EnergyAccumulator:
                 if stored_import_gap or stored_export_gap:
                     self._mtd_hardware_import_coverage_gap_kwh += stored_import_gap
                     self._mtd_hardware_export_coverage_gap_kwh += stored_export_gap
+                    self._mtd_hardware_import_coverage_partial = (
+                        self._mtd_hardware_import_coverage_partial
+                        or bool(
+                            data.get(
+                                "hardware_daily_import_coverage_partial",
+                                self._priced_coverage_is_partial(
+                                    float(data.get("import_cost_covered_kwh", 0.0)),
+                                    float(data.get("grid_import_kwh", 0.0))
+                                    + stored_import_gap,
+                                ),
+                            )
+                        )
+                    )
+                    self._mtd_hardware_export_coverage_partial = (
+                        self._mtd_hardware_export_coverage_partial
+                        or bool(
+                            data.get(
+                                "hardware_daily_export_coverage_partial",
+                                self._priced_coverage_is_partial(
+                                    float(data.get("export_earnings_covered_kwh", 0.0)),
+                                    float(data.get("grid_export_kwh", 0.0))
+                                    + stored_export_gap,
+                                ),
+                            )
+                        )
+                    )
                     self._hardware_daily_import_coverage_gap_kwh = 0.0
                     self._hardware_daily_export_coverage_gap_kwh = 0.0
                     migrated_legacy_coverage = True
@@ -717,6 +777,18 @@ class EnergyAccumulator:
             "mtd_hardware_export_coverage_gap_kwh": round(
                 self._mtd_hardware_export_coverage_gap_kwh, 4
             ),
+            "hardware_daily_import_coverage_partial": (
+                self._hardware_daily_import_coverage_partial
+            ),
+            "hardware_daily_export_coverage_partial": (
+                self._hardware_daily_export_coverage_partial
+            ),
+            "mtd_hardware_import_coverage_partial": (
+                self._mtd_hardware_import_coverage_partial
+            ),
+            "mtd_hardware_export_coverage_partial": (
+                self._mtd_hardware_export_coverage_partial
+            ),
             "load_accounting_partial_mtd": self._load_accounting_partial_mtd,
         }
 
@@ -770,6 +842,10 @@ class EnergyAccumulator:
             self._hardware_daily_export_coverage_gap_kwh = 0.0
             self._mtd_hardware_import_coverage_gap_kwh = 0.0
             self._mtd_hardware_export_coverage_gap_kwh = 0.0
+            self._hardware_daily_import_coverage_partial = False
+            self._hardware_daily_export_coverage_partial = False
+            self._mtd_hardware_import_coverage_partial = False
+            self._mtd_hardware_export_coverage_partial = False
             self._load_accounting_partial_mtd = False
 
         # Reset at local midnight
@@ -797,8 +873,18 @@ class EnergyAccumulator:
             self._mtd_hardware_export_coverage_gap_kwh += (
                 self._hardware_daily_export_coverage_gap_kwh
             )
+            self._mtd_hardware_import_coverage_partial = (
+                self._mtd_hardware_import_coverage_partial
+                or self._hardware_daily_import_coverage_partial
+            )
+            self._mtd_hardware_export_coverage_partial = (
+                self._mtd_hardware_export_coverage_partial
+                or self._hardware_daily_export_coverage_partial
+            )
             self._hardware_daily_import_coverage_gap_kwh = 0.0
             self._hardware_daily_export_coverage_gap_kwh = 0.0
+            self._hardware_daily_import_coverage_partial = False
+            self._hardware_daily_export_coverage_partial = False
             self._load_accounting_partial_today = False
 
         # Integrate power × time
@@ -868,17 +954,25 @@ class EnergyAccumulator:
             self.export_earnings_covered_kwh,
             self.grid_export_kwh,
         )
-        mtd_import_cost_complete = not self._priced_coverage_is_partial(
-            self.mtd_import_cost_covered_kwh,
-            self.mtd_grid_import_kwh
-            + self._mtd_hardware_import_coverage_gap_kwh
-            + self._hardware_daily_import_coverage_gap_kwh,
+        mtd_import_cost_complete = (
+            not self._mtd_hardware_import_coverage_partial
+            and not self._hardware_daily_import_coverage_partial
+            and not self._priced_coverage_is_partial(
+                self.mtd_import_cost_covered_kwh,
+                self.mtd_grid_import_kwh
+                + self._mtd_hardware_import_coverage_gap_kwh
+                + self._hardware_daily_import_coverage_gap_kwh,
+            )
         )
-        mtd_export_earnings_complete = not self._priced_coverage_is_partial(
-            self.mtd_export_earnings_covered_kwh,
-            self.mtd_grid_export_kwh
-            + self._mtd_hardware_export_coverage_gap_kwh
-            + self._hardware_daily_export_coverage_gap_kwh,
+        mtd_export_earnings_complete = (
+            not self._mtd_hardware_export_coverage_partial
+            and not self._hardware_daily_export_coverage_partial
+            and not self._priced_coverage_is_partial(
+                self.mtd_export_earnings_covered_kwh,
+                self.mtd_grid_export_kwh
+                + self._mtd_hardware_export_coverage_gap_kwh
+                + self._hardware_daily_export_coverage_gap_kwh,
+            )
         )
         import_cost_today = (
             round(self.import_cost_today, 4) if import_cost_complete else None
@@ -967,10 +1061,20 @@ class EnergyAccumulator:
             if import_gap != self._hardware_daily_import_coverage_gap_kwh:
                 self._hardware_daily_import_coverage_gap_kwh = import_gap
                 changed = True
+            if self._priced_coverage_is_partial(
+                self.import_cost_covered_kwh, import_kwh
+            ) and not self._hardware_daily_import_coverage_partial:
+                self._hardware_daily_import_coverage_partial = True
+                changed = True
         if export_kwh is not None:
             export_gap = _gap(export_kwh, self.grid_export_kwh)
             if export_gap != self._hardware_daily_export_coverage_gap_kwh:
                 self._hardware_daily_export_coverage_gap_kwh = export_gap
+                changed = True
+            if self._priced_coverage_is_partial(
+                self.export_earnings_covered_kwh, export_kwh
+            ) and not self._hardware_daily_export_coverage_partial:
+                self._hardware_daily_export_coverage_partial = True
                 changed = True
 
         if changed:

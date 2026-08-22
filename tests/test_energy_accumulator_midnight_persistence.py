@@ -741,3 +741,75 @@ def test_hardware_daily_coverage_gap_survives_restart_and_day_rollover():
     asyncio.run(reloaded.async_restore())
     assert reloaded._mtd_hardware_export_coverage_gap_kwh == pytest.approx(4.88)
     assert reloaded.as_dict()["avg_cost_per_kwh_mtd"] is None
+
+
+def test_daily_material_hardware_gap_cannot_be_diluted_in_mtd():
+    """Ticket #388: a daily failure stays partial even in a large month."""
+    clock = _Clock(datetime(2026, 8, 21, 23, 59, 0))
+    store = _Store()
+    accumulator = _new_accumulator(clock, store)
+    accumulator.update(0.0, 0.0, 0.0, 1.0)
+    accumulator.grid_export_kwh = 0.03
+    accumulator.export_earnings_covered_kwh = 0.03
+    accumulator.export_earnings_today = 0.0
+    accumulator.mtd_grid_export_kwh = 100.0
+    accumulator.mtd_export_earnings_covered_kwh = 100.0
+    accumulator.mtd_export_earnings = 12.10
+    accumulator.mtd_import_cost = 5.0
+    accumulator.mtd_load_kwh = 100.0
+
+    accumulator.reconcile_hardware_daily_coverage(export_kwh=0.10)
+    assert accumulator._hardware_daily_export_coverage_partial is True
+    assert accumulator.as_dict()["avg_cost_per_kwh_mtd"] is None
+    asyncio.run(accumulator.async_flush())
+
+    same_day = _new_accumulator(clock, store)
+    asyncio.run(same_day.async_restore())
+    assert same_day._hardware_daily_export_coverage_partial is True
+    assert same_day.as_dict()["avg_cost_per_kwh_mtd"] is None
+
+    clock.current = datetime(2026, 8, 22, 0, 1, 0)
+    same_day.update(0.0, 0.0, 0.0, 1.0)
+    assert same_day._mtd_hardware_export_coverage_partial is True
+    asyncio.run(same_day.async_flush())
+
+    reloaded = _new_accumulator(clock, store)
+    asyncio.run(reloaded.async_restore())
+    assert reloaded._mtd_hardware_export_coverage_partial is True
+    assert reloaded.as_dict()["avg_cost_per_kwh_mtd"] is None
+
+
+@pytest.mark.parametrize(
+    ("direction", "hardware_kwh"),
+    (("import", 0.10), ("export", 0.10), ("export", 0.07)),
+)
+def test_hardware_coverage_latch_respects_daily_materiality(
+    direction: str, hardware_kwh: float
+):
+    """Ticket #388: import/export symmetry retains the existing daily tolerance."""
+    clock = _Clock(datetime(2026, 8, 21, 12, 0, 0))
+    accumulator = _new_accumulator(clock)
+    accumulator.update(0.0, 0.0, 0.0, 1.0)
+    accumulator.grid_import_kwh = 0.03
+    accumulator.grid_export_kwh = 0.03
+    accumulator.import_cost_covered_kwh = 0.03
+    accumulator.export_earnings_covered_kwh = 0.03
+    accumulator.import_cost_today = 0.02
+    accumulator.export_earnings_today = 0.0
+    accumulator.mtd_grid_import_kwh = 100.0
+    accumulator.mtd_grid_export_kwh = 100.0
+    accumulator.mtd_import_cost_covered_kwh = 100.0
+    accumulator.mtd_export_earnings_covered_kwh = 100.0
+    accumulator.mtd_import_cost = 5.0
+    accumulator.mtd_export_earnings = 12.10
+    accumulator.mtd_load_kwh = 100.0
+
+    accumulator.reconcile_hardware_daily_coverage(
+        **{f"{direction}_kwh": hardware_kwh}
+    )
+    summary = accumulator.as_dict()
+    expected_partial = hardware_kwh == 0.10
+    if expected_partial:
+        assert summary["avg_cost_per_kwh_mtd"] is None
+    else:
+        assert summary["avg_cost_per_kwh_mtd"] == pytest.approx(-0.071)
