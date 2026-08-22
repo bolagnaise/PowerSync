@@ -10596,7 +10596,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             tesla_stale_grid_charge
                             and hasattr(battery, "restore_normal")
                         ):
-                            if await battery.restore_normal() is False:
+                            if await battery.restore_normal(force_restore=True) is False:
                                 mode_apply_failed = True
                             else:
                                 self._last_tesla_stale_grid_charge_restore_at = (

@@ -34349,6 +34349,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info(f"🔄 Restore normal service called (context: user_id={context.user_id}, parent_id={context.parent_id}, source={source})")
         _LOGGER.info("🔄 RESTORE NORMAL: Restoring normal operation")
         force_restore = bool(call.data.get("_force_restore"))
+        confirm_restore = bool(call.data.get("_confirm_restore"))
         skip_backup_reserve_restore = bool(
             call.data.get("_skip_backup_reserve_restore")
             or force_charge_state.get("_skip_backup_reserve_restore")
@@ -35338,6 +35339,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         if not force_restore and not has_active_force and not has_saved_state:
             _LOGGER.info("Restore normal: no force mode active and no saved state — nothing to restore")
+            if confirm_restore:
+                return {"success": False, "error": "nothing to restore"}
             return
 
         try:
@@ -35457,6 +35460,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Get Tesla gateway config
             if not site_configs:
                 _LOGGER.error("Missing Tesla site ID or token for restore normal")
+                if confirm_restore:
+                    return {"success": False, "error": "Tesla site configuration unavailable"}
                 return
 
             session = async_get_clientsession(hass)
@@ -35902,6 +35907,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 if _schedule_tesla_restore_retry("one or more Tesla restore writes failed"):
                     await persist_force_mode_state()
+                if confirm_restore:
+                    return {
+                        "success": False,
+                        "error": "one or more Tesla restore writes failed",
+                    }
                 return
 
             # Clear discharge state
@@ -35965,8 +35975,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Clear persisted state (no longer needed after restore)
             await persist_force_mode_state()
 
+            if confirm_restore:
+                return {"success": True, "error": None}
+
         except Exception as e:
             _LOGGER.error(f"Error in restore normal: {e}", exc_info=True)
+            if confirm_restore:
+                return {"success": False, "error": str(e)}
 
     # Per-brand capability matrix for Hold SoC. "supported=True" means the
     # brand has a primitive that can freeze the battery (block charge AND
@@ -38397,7 +38412,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(DOMAIN, SERVICE_HOLD_BATTERY_SOC, handle_hold_battery_soc)
-    hass.services.async_register(DOMAIN, SERVICE_RESTORE_NORMAL, handle_restore_normal)
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RESTORE_NORMAL,
+        handle_restore_normal,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(DOMAIN, "set_self_consumption", handle_set_self_consumption)
     hass.services.async_register(DOMAIN, "set_autonomous", handle_set_autonomous)
 

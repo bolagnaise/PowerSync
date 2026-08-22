@@ -789,6 +789,24 @@ def test_restore_normal_force_restore_releases_tesla_even_without_saved_state():
     assert "Force restore: leaving Tesla in self_consumption" in restore_source
 
 
+def test_tesla_stale_charge_restore_requires_confirmed_no_state_cleanup():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    restore = _find_function(tree, "handle_restore_normal")
+    restore_source = ast.get_source_segment(source, restore)
+    wrapper_path = ROOT / "custom_components" / "power_sync" / "optimization" / "battery_controller.py"
+    wrapper_source = wrapper_path.read_text()
+
+    assert restore_source is not None
+    assert 'confirm_restore = bool(call.data.get("_confirm_restore"))' in restore_source
+    assert 'return {"success": True, "error": None}' in restore_source
+    assert 'return {"success": False, "error": "nothing to restore"}' in restore_source
+    assert "SERVICE_RESTORE_NORMAL,\n        handle_restore_normal,\n        supports_response=SupportsResponse.OPTIONAL" in source
+    assert 'service_data["_force_restore"] = True' in wrapper_source
+    assert 'service_data["_confirm_restore"] = True' in wrapper_source
+    assert "return_response=True" in wrapper_source
+
+
 def test_restore_normal_treats_octopus_as_dynamic_sync_provider():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

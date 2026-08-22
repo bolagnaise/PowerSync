@@ -205,7 +205,7 @@ class BatteryControllerWrapper:
             _LOGGER.error(f"Force discharge failed: {e}", exc_info=True)
             return False
 
-    async def restore_normal(self) -> bool:
+    async def restore_normal(self, *, force_restore: bool = False) -> bool:
         """
         Restore battery to normal autonomous operation.
 
@@ -218,11 +218,38 @@ class BatteryControllerWrapper:
         try:
             _LOGGER.info("🔋 Optimizer: Restoring normal operation")
 
-            await self.hass.services.async_call(
-                "power_sync", "restore_normal",
-                {"source": "optimizer", "_allow_monitoring_restore": True},
-                blocking=True,
-            )
+            service_data = {
+                "source": "optimizer",
+                "_allow_monitoring_restore": True,
+            }
+            if force_restore:
+                # A retained Tesla dispatch can outlive its force-state
+                # metadata.  Ask the handler to run the no-state cleanup path
+                # and require its confirmed result rather than treating a
+                # no-op service return as a successful recovery.
+                service_data["_force_restore"] = True
+                service_data["_confirm_restore"] = True
+                response = await self.hass.services.async_call(
+                    "power_sync",
+                    "restore_normal",
+                    service_data,
+                    blocking=True,
+                    return_response=True,
+                )
+                if not isinstance(response, dict) or response.get("success") is not True:
+                    error = response.get("error") if isinstance(response, dict) else None
+                    _LOGGER.warning(
+                        "Optimizer: Tesla forced restore was not confirmed%s",
+                        f": {error}" if error else "",
+                    )
+                    return False
+            else:
+                await self.hass.services.async_call(
+                    "power_sync",
+                    "restore_normal",
+                    service_data,
+                    blocking=True,
+                )
             return True
 
         except Exception as e:

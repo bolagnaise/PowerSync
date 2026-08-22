@@ -4401,6 +4401,7 @@ class _FakeBattery:
         self.backup_reserve = backup_reserve
         self.self_consumption_calls = 0
         self.restore_normal_calls = 0
+        self.restore_normal_force_flags = []
         self.restore_normal_result = restore_normal_result
         self.self_consumption_result = self_consumption_result
         self.backup_reserve_calls = []
@@ -4419,8 +4420,9 @@ class _FakeBattery:
         self.self_consumption_calls += 1
         return self.self_consumption_result
 
-    async def restore_normal(self):
+    async def restore_normal(self, *, force_restore=False):
         self.restore_normal_calls += 1
+        self.restore_normal_force_flags.append(force_restore)
         return self.restore_normal_result
 
     async def set_backup_reserve(self, percent):
@@ -4610,6 +4612,7 @@ def test_tesla_self_consumption_restores_stale_grid_charge(opt_module):
     asyncio.run(coordinator._execute_optimizer_action(action))
 
     assert battery.restore_normal_calls == 1
+    assert battery.restore_normal_force_flags == [True]
     assert battery.self_consumption_calls == 0
     assert battery.backup_reserve_calls == [20]
     assert coordinator._last_executed_action == "self_consumption"

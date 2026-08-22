@@ -167,6 +167,32 @@ def test_non_tesla_force_discharge_keeps_fire_and_wait_service_contract():
         restore()
 
 
+def test_tesla_forced_restore_requires_handler_confirmation():
+    module, restore = _load_controller_module()
+    try:
+        for response, expected in (
+            ({"success": True, "error": None}, True),
+            ({"success": False, "error": "readback failed"}, False),
+            (None, False),
+        ):
+            services = _Services(response)
+            controller = module.BatteryControllerWrapper(
+                SimpleNamespace(services=services),
+                "tesla",
+            )
+
+            assert asyncio.run(controller.restore_normal(force_restore=True)) is expected
+            assert services.return_response_requests == [True]
+            assert services.calls[0][2] == {
+                "source": "optimizer",
+                "_allow_monitoring_restore": True,
+                "_force_restore": True,
+                "_confirm_restore": True,
+            }
+    finally:
+        restore()
+
+
 def test_only_solax_routes_total_battery_discharge_to_service():
     module, restore = _load_controller_module()
     try:
