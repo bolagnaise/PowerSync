@@ -6585,6 +6585,73 @@ def test_scheduled_sigenergy_start_uses_fresh_site_headroom(monkeypatch):
     assert state["params"]["target_battery_charge_kw"] == 7.16
 
 
+def test_scheduled_sigenergy_start_uses_persisted_optimizer_import_limit(monkeypatch):
+    """The configured optimizer cap, not the 12.5 kW fallback, governs EV headroom."""
+    set_amps_calls: list[int] = []
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    async def fresh_live_status(*args, **kwargs):
+        return {
+            "battery_power": -7160,
+            "grid_power": 7200,
+            "solar_power": 0,
+            "load_power": 40,
+            "battery_soc": 78,
+        }
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(
+        actions, "_get_initial_smart_schedule_live_status", fresh_live_status
+    )
+    actions._dynamic_ev_state.clear()
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            _Hass([]),
+            _Entry(),
+            {
+                "vehicle_id": "sigenergy_charger",
+                "vehicle_vin": "sigenergy_charger",
+                "dynamic_mode": "battery_target",
+                "owner_mode": "scheduled",
+                "charger_type": "sigenergy",
+                "target_battery_charge_kw": 7.16,
+                "optimizer_max_grid_import_kw": 14.9,
+                "min_charge_amps": 6,
+                "max_charge_amps": 32,
+            },
+            context=None,
+        )
+    )
+
+    assert result is True
+    assert set_amps_calls == [32]
+
+
+def test_optimizer_import_limit_yields_to_lower_home_power_cap():
+    hass = _Hass([])
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
+        _data={
+            "home_power_settings": {
+                "phase_type": "single",
+                "max_grid_import_amps": 50,
+                "default_voltage": 240,
+            }
+        }
+    )
+
+    assert asyncio.run(
+        actions._resolve_max_grid_import_kw(
+            hass,
+            _Entry(),
+            {"optimizer_max_grid_import_kw": 14.9},
+        )
+    ) == 12.0
+
+
 def test_scheduled_sigenergy_start_waits_without_minimum_headroom(monkeypatch):
     """No Sigenergy register write is safe when the site has no EV budget."""
     set_amps_calls: list[int] = []

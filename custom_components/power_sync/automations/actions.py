@@ -9555,17 +9555,35 @@ async def _resolve_max_grid_import_kw(
     config_entry,
     params: Optional[dict] = None,
 ) -> Optional[float]:
-    """Resolve site import capacity: explicit param, Tesla site limit, Home Power."""
+    """Resolve site import capacity without bypassing a lower safety limit."""
     params = params or {}
     explicit = _coerce_positive_float(params.get("max_grid_import_kw"))
     if explicit is not None:
         return explicit
 
+    optimizer_limit = _coerce_positive_float(
+        params.get("optimizer_max_grid_import_kw")
+    )
     tesla_limit = await _get_tesla_max_site_meter_power_kw(hass, config_entry)
+    home_power_limit = _get_home_power_max_grid_import_kw(hass, config_entry)
+
+    # Preserve the established Tesla-over-Home-Power resolution for ordinary
+    # action parameters.  The optimizer limit is a persisted whole-site
+    # envelope, however, so it must never widen a lower Home Power or Tesla
+    # safety constraint when coordinated charging inherits it.
+    if optimizer_limit is not None:
+        limits = [optimizer_limit]
+        limits.extend(
+            limit
+            for limit in (tesla_limit, home_power_limit)
+            if limit is not None
+        )
+        return min(limits)
+
     if tesla_limit is not None:
         return tesla_limit
 
-    return _get_home_power_max_grid_import_kw(hass, config_entry)
+    return home_power_limit
 
 
 def _resolve_dynamic_max_charge_amps(

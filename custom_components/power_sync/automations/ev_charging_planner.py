@@ -9136,6 +9136,10 @@ def _get_optimizer_battery_params(
         if opt_coordinator and hasattr(opt_coordinator, '_config'):
             max_charge_kw = opt_coordinator._config.max_charge_w / 1000.0
             max_discharge_kw = opt_coordinator._config.max_discharge_w / 1000.0
+            max_grid_import_kw = float(
+                getattr(opt_coordinator._config, "max_grid_import_w", 0) or 0
+            ) / 1000.0
+            params = {}
             if max_charge_kw > 0 and max_discharge_kw > 0:
                 params = {
                     "max_inverter_kw": max_discharge_kw,
@@ -9143,7 +9147,12 @@ def _get_optimizer_battery_params(
                 }
                 if include_target:
                     params["target_battery_charge_kw"] = max_charge_kw
-                return params
+            # The optimizer's persisted import envelope must follow coordinated
+            # EV starts too.  Keep it separate from an explicit action limit:
+            # actions.py combines this source with any lower runtime safety cap.
+            if max_grid_import_kw > 0:
+                params["optimizer_max_grid_import_kw"] = max_grid_import_kw
+            return params
     except Exception:
         pass
 

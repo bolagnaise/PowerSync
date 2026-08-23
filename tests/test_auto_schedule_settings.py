@@ -71,6 +71,49 @@ sys.modules.pop("power_sync.const", None)
 ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner")
 
 
+def test_optimizer_battery_params_include_persisted_grid_import_limit():
+    config = types.SimpleNamespace(
+        max_charge_w=7160,
+        max_discharge_w=10000,
+        max_grid_import_w=14900,
+    )
+    hass = types.SimpleNamespace(
+        data={
+            "power_sync": {
+                "entry-1": {
+                    "optimization_coordinator": types.SimpleNamespace(_config=config),
+                }
+            }
+        }
+    )
+    entry = types.SimpleNamespace(entry_id="entry-1")
+
+    assert ev_planner._get_optimizer_battery_params(hass, entry) == {
+        "max_inverter_kw": 10.0,
+        "max_battery_charge_rate_kw": 7.16,
+        "optimizer_max_grid_import_kw": 14.9,
+    }
+
+
+def test_optimizer_battery_params_keep_legacy_battery_limits_without_grid_limit():
+    config = types.SimpleNamespace(max_charge_w=7160, max_discharge_w=10000)
+    hass = types.SimpleNamespace(
+        data={
+            "power_sync": {
+                "entry-1": {
+                    "optimization_coordinator": types.SimpleNamespace(_config=config),
+                }
+            }
+        }
+    )
+    entry = types.SimpleNamespace(entry_id="entry-1")
+
+    assert ev_planner._get_optimizer_battery_params(hass, entry) == {
+        "max_inverter_kw": 10.0,
+        "max_battery_charge_rate_kw": 7.16,
+    }
+
+
 def test_empty_departure_times_does_not_rehydrate_legacy_schedule():
     settings = ev_planner.AutoScheduleSettings.from_dict({
         "departure_time": "07:30",
