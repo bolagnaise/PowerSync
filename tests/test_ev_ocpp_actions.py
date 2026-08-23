@@ -9779,10 +9779,14 @@ def test_away_tesla_dynamic_start_is_blocked_before_physical_command(monkeypatch
     assert actions._dynamic_ev_state == {}
 
 
-def test_automated_tesla_command_boundaries_block_explicit_away_location(monkeypatch):
+@pytest.mark.parametrize("location", ["remote_charger", "unavailable"])
+def test_automated_tesla_command_boundaries_block_explicit_away_location(
+    monkeypatch,
+    location,
+):
     vehicle_id = "LRW3F7FS1NC484342"
     hass = _Hass([])
-    _install_away_location_module(monkeypatch, "remote_charger")
+    _install_away_location_module(monkeypatch, location)
     params = {
         "vehicle_vin": vehicle_id,
         "vehicle_id": vehicle_id,

@@ -744,7 +744,9 @@ async def get_ev_location(
                      vehicle location.
 
     Returns:
-        Location string: "home", "work", "not_home", or "unknown"
+        Location string: "home", "work", "not_home", "unknown", or
+        "unavailable" when a VIN-matched tracker exists but has no usable
+        state and no cached/local presence can safely resolve it.
     """
     from ..const import (
         DOMAIN,
@@ -757,6 +759,7 @@ async def get_ev_location(
     from homeassistant.helpers import entity_registry as er, device_registry as dr
 
     location = "unknown"
+    specific_location_entity_unavailable = False
 
     # Zaptec standalone — charger is at home by definition
     if config_entry:
@@ -792,6 +795,8 @@ async def get_ev_location(
                             return candidate_location
                         if location == "unknown":
                             location = candidate_location
+                    elif vehicle_vin is not None:
+                        specific_location_entity_unavailable = True
 
     # Method 1: Check Tesla Fleet/Teslemetry device_tracker entities
     entity_registry = er.async_get(hass)
@@ -822,6 +827,8 @@ async def get_ev_location(
                     elif location == "unknown":
                         location = candidate_location
                     break
+                if vehicle_vin is not None:
+                    specific_location_entity_unavailable = True
 
             elif entity_id.startswith("binary_sensor.") and "located_at_home" in entity_id_lower:
                 state = hass.states.get(entity_id)
@@ -859,6 +866,26 @@ async def get_ev_location(
             _LOGGER.debug(f"Using cached last known EV location for {cache_key}: {location}")
         elif location != "unknown":
             cache[cache_key] = location
+
+    # A VIN-matched tracker that exists but currently has no usable state is
+    # materially different from a setup with no location provider.  After an
+    # integration/HA reload the in-memory cache can be empty while the tracker
+    # is briefly unavailable; treating that as permissive ``unknown`` lets an
+    # automated Tesla path wake and start a car whose last provider location
+    # was away.  Preserve compatibility for installations with no tracker, but
+    # fail closed at the existing non-home command gates until this known
+    # tracker reports again (or a paired BLE source proves local presence).
+    if (
+        location == "unknown"
+        and vehicle_vin is not None
+        and specific_location_entity_unavailable
+    ):
+        location = "unavailable"
+        _LOGGER.debug(
+            "VIN-matched EV location entity is unavailable for %s; "
+            "keeping automated charging outside command scope",
+            vehicle_vin,
+        )
 
     return location
 

@@ -3466,6 +3466,42 @@ def test_unspecified_ev_location_prefers_home_vehicle(monkeypatch):
     )
 
 
+def test_specific_tesla_unavailable_location_is_not_permissive_unknown(monkeypatch):
+    """A known tracker outage after reload must not authorize Tesla commands."""
+    vehicle_vin = "LRWYTEST000000001"
+    hass = _FakeHass(
+        states={"device_tracker.w3rt1e_location": "unavailable"}
+    )
+    hass.device_registry = SimpleNamespace(
+        devices={
+            "device-1": SimpleNamespace(
+                id="device-1",
+                identifiers={("tesla_fleet", vehicle_vin)},
+            )
+        }
+    )
+    hass.entity_registry = SimpleNamespace(
+        entities={
+            "device_tracker.w3rt1e_location": SimpleNamespace(
+                entity_id="device_tracker.w3rt1e_location",
+                device_id="device-1",
+            )
+        }
+    )
+    monkeypatch.setattr(_ha_dr, "async_get", lambda _hass: _hass.device_registry)
+
+    assert (
+        asyncio.run(
+            ev_planner.get_ev_location(
+                hass,
+                _FakeConfigEntry(),
+                vehicle_vin=vehicle_vin,
+            )
+        )
+        == "unavailable"
+    )
+
+
 def test_unspecified_ev_plug_state_checks_later_home_vehicle(monkeypatch):
     first_vin = "XP7YHCEL7TB811704"
     second_vin = "LRWYHCEKXTC687964"
