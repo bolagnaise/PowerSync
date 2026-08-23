@@ -9,6 +9,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
+VIN = "5YJTEST0000000001"
+VIN_2 = "LRWTEST0000000002"
 _ps = types.ModuleType("power_sync")
 _ps.__path__ = [str(ROOT)]
 sys.modules["power_sync"] = _ps
@@ -20,6 +22,11 @@ sys.modules["power_sync.automations"] = _automations
 from power_sync.automations.observed_tesla_sessions import (  # noqa: E402
     OBSERVED_SESSION_MODE,
     ObservedTeslaSessionTracker,
+)
+from power_sync.automations.ev_ownership import (  # noqa: E402
+    claim_ev_ownership,
+    get_ev_last_commands,
+    get_ev_ownership,
 )
 
 
@@ -54,6 +61,7 @@ class _Session:
     def __init__(self, vehicle_id: str, mode: str) -> None:
         self.vehicle_id = vehicle_id
         self.mode = mode
+        self.id = f"session-{vehicle_id}-{mode}"
 
 
 class _SessionManager:
@@ -98,9 +106,9 @@ class _SessionManager:
         return session
 
 
-def _tracker(manager, vehicles):
+def _tracker(manager, vehicles, hass=None):
     return ObservedTeslaSessionTracker(
-        _Hass(),
+        hass or _Hass(),
         _Entry(),
         manager,
         lambda _hass, _entry: vehicles,
@@ -109,38 +117,55 @@ def _tracker(manager, vehicles):
 
 def test_observed_tesla_charge_starts_and_updates_session():
     manager = _SessionManager()
+    hass = _Hass()
     tracker = _tracker(
         manager,
         [{
-            "vehicle_id": "LRW3TESTVIN12345",
+            "vehicle_id": VIN,
             "vehicle_name": "Tessa",
             "ev_power_kw": 10.9,
             "ev_soc": 70,
             "is_charging": True,
+            "is_connected": True,
         }],
+        hass,
     )
 
     asyncio.run(tracker.poll())
 
-    assert manager.started == [("LRW3TESTVIN12345", OBSERVED_SESSION_MODE, 70, None)]
+    assert manager.started == [(VIN, OBSERVED_SESSION_MODE, 70, None)]
     assert manager.updated == [
-        ("LRW3TESTVIN12345", 10.9, 0, False, 0.0, 5.0, 70)
+        (VIN, 10.9, 0, False, 0.0, 5.0, 70)
     ]
+    lease_id, lease = get_ev_ownership(hass, _Entry(), VIN)
+    assert lease_id == VIN
+    assert lease["owner"] == "external"
+    assert lease["owner_mode"] == "external"
+    assert lease["session_id"] == f"session-{VIN}-observed"
+    assert get_ev_last_commands(hass, _Entry()) == {}
 
 
 def test_observed_tesla_charge_does_not_duplicate_powersync_session():
     manager = _SessionManager()
-    manager.active_sessions["LRW3TESTVIN12345"] = _Session(
-        "LRW3TESTVIN12345",
+    hass = _Hass()
+    manager.active_sessions[VIN] = _Session(
+        VIN,
         "solar_surplus",
     )
     tracker = _tracker(
         manager,
         [{
-            "vehicle_id": "LRW3TESTVIN12345",
+            "vehicle_id": VIN,
             "ev_power_kw": 10.9,
             "is_charging": True,
         }],
+        hass,
+    )
+    claim_ev_ownership(
+        hass,
+        _Entry(),
+        VIN,
+        owner_mode="solar_surplus",
     )
 
     asyncio.run(tracker.poll())
@@ -148,28 +173,83 @@ def test_observed_tesla_charge_does_not_duplicate_powersync_session():
     assert manager.started == []
     assert manager.updated == []
     assert manager.ended == []
+    assert get_ev_ownership(hass, _Entry(), VIN)[1]["owner_mode"] == "solar_surplus"
 
 
 def test_observed_tesla_charge_ends_after_idle_confirmation():
     manager = _SessionManager()
-    manager.active_sessions["LRW3TESTVIN12345"] = _Session(
-        "LRW3TESTVIN12345",
-        OBSERVED_SESSION_MODE,
-    )
-    tracker = _tracker(
-        manager,
-        [{
-            "vehicle_id": "LRW3TESTVIN12345",
-            "ev_power_kw": 0.0,
-            "ev_soc": 72,
-            "is_charging": False,
-        }],
-    )
+    hass = _Hass()
+    vehicles = [{
+        "vehicle_id": VIN,
+        "ev_power_kw": 10.9,
+        "ev_soc": 70,
+        "is_charging": True,
+        "is_connected": True,
+    }]
+    tracker = _tracker(manager, vehicles, hass)
+
+    asyncio.run(tracker.poll())
+    vehicles[0].update({
+        "ev_power_kw": 0.0,
+        "ev_soc": 72,
+        "is_charging": False,
+        "is_connected": True,
+    })
 
     asyncio.run(tracker.poll())
     assert manager.ended == []
 
     asyncio.run(tracker.poll())
-    assert manager.ended == [
-        ("LRW3TESTVIN12345", "observed_charge_stopped", 72)
-    ]
+    assert manager.ended == [(VIN, "observed_charge_stopped", 72)]
+    assert get_ev_ownership(hass, _Entry(), VIN)[1]["owner"] == "external"
+
+    vehicles[0]["is_connected"] = False
+    asyncio.run(tracker.poll())
+    assert get_ev_ownership(hass, _Entry(), VIN) == (None, None)
+
+
+def test_external_tesla_ownership_is_vin_scoped():
+    manager = _SessionManager()
+    hass = _Hass()
+    tracker = _tracker(
+        manager,
+        [
+            {
+                "vehicle_id": VIN,
+                "ev_power_kw": 7.2,
+                "is_charging": True,
+                "is_connected": True,
+            },
+            {
+                "vehicle_id": VIN_2,
+                "ev_power_kw": 0.0,
+                "is_charging": False,
+                "is_connected": True,
+            },
+        ],
+        hass,
+    )
+
+    asyncio.run(tracker.poll())
+
+    assert get_ev_ownership(hass, _Entry(), VIN)[1]["owner"] == "external"
+    assert get_ev_ownership(hass, _Entry(), VIN_2) == (None, None)
+
+
+def test_generic_observation_does_not_claim_tesla_command_ownership():
+    manager = _SessionManager()
+    hass = _Hass()
+    tracker = _tracker(
+        manager,
+        [{
+            "vehicle_id": "generic_ev",
+            "ev_power_kw": 7.2,
+            "is_charging": True,
+            "is_connected": True,
+        }],
+        hass,
+    )
+
+    asyncio.run(tracker.poll())
+
+    assert get_ev_ownership(hass, _Entry(), "generic_ev") == (None, None)

@@ -40813,6 +40813,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Set up automation evaluation timer (every 30 seconds)
     async def auto_evaluate_automations(now):
         """Evaluate all user automations and auto-schedule."""
+        observed_tracker = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get(
+            "observed_tesla_session_tracker"
+        )
+        if observed_tracker is not None:
+            try:
+                await observed_tracker.reconcile_ownership()
+            except Exception as err:
+                _LOGGER.debug("Observed Tesla ownership reconciliation failed: %s", err)
+
         try:
             triggered_count = await automation_engine.async_evaluate_all()
             if triggered_count > 0:

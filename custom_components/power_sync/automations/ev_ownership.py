@@ -8,8 +8,10 @@ from typing import Any
 
 
 DEFAULT_VEHICLE_ID = "_default"
+EXTERNAL_OWNER_MODE = "external"
 MANUAL_STOP_HOLD_SECONDS = 15 * 60
 RECOVERED_OWNERSHIP_MAX_AGE_SECONDS = 15 * 60
+EXTERNAL_COMMAND_SETTLE_SECONDS = 90
 
 
 def owner_family(owner_mode: Any = None) -> str:
@@ -64,6 +66,20 @@ def can_take_over_ev_ownership(
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _as_utc_datetime(value: Any) -> datetime | None:
+    """Return one timezone-aware timestamp, or ``None`` when unusable."""
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def normalize_vehicle_id(vehicle_id: Any = None) -> str:
@@ -374,6 +390,111 @@ def get_ev_ownership(
     return None, None
 
 
+def _has_fresh_recovered_powersync_ownership(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+) -> bool:
+    """Return whether restart evidence still attributes this session to PowerSync."""
+    entry = _entry_data(hass, config_entry.entry_id)
+    recovered = entry.get("ev_recovered_ownership")
+    if not isinstance(recovered, Mapping):
+        return False
+
+    saved_at = _as_utc_datetime(entry.get("ev_recovered_ownership_saved_at"))
+    if saved_at is None:
+        return False
+    age_seconds = (datetime.now(timezone.utc) - saved_at).total_seconds()
+    if age_seconds < -60 or age_seconds > RECOVERED_OWNERSHIP_MAX_AGE_SECONDS:
+        return False
+
+    for candidate_id in _candidate_vehicle_ids(vehicle_id, recovered):
+        lease = recovered.get(candidate_id)
+        if isinstance(lease, Mapping) and lease.get("owner") == "powersync":
+            return True
+    return False
+
+
+def ensure_external_ev_ownership(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+    *,
+    session_id: str | None = None,
+    reason: str = "Observed external charging",
+    observed_at: Any = None,
+) -> bool:
+    """Latch an unowned physical charging session as externally controlled.
+
+    Fresh restart evidence and a still-settling PowerSync command take priority,
+    so delayed Tesla telemetry cannot turn PowerSync's own session into an
+    external lease.  Once external ownership is established it remains until
+    an explicit unplug or a direct manual/Boost takeover.
+    """
+    _lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
+    if lease is not None:
+        if lease.get("owner") != EXTERNAL_OWNER_MODE:
+            return False
+        if session_id and lease.get("session_id") != session_id:
+            lease["session_id"] = session_id
+            lease["updated_at"] = _now_iso()
+            _schedule_runtime_save(hass, config_entry)
+        return True
+
+    if _has_fresh_recovered_powersync_ownership(hass, config_entry, vehicle_id):
+        return False
+
+    observed_time = _as_utc_datetime(observed_at)
+    commands = get_ev_last_commands(hass, config_entry)
+    for candidate_id in _candidate_vehicle_ids(vehicle_id, commands):
+        command = commands.get(candidate_id)
+        if not isinstance(command, Mapping) or command.get("source") != "powersync":
+            continue
+        command_time = _as_utc_datetime(command.get("at"))
+        if command_time is None:
+            continue
+        command_age = (datetime.now(timezone.utc) - command_time).total_seconds()
+        if (
+            -60 <= command_age <= EXTERNAL_COMMAND_SETTLE_SECONDS
+            and (observed_time is None or observed_time <= command_time)
+        ):
+            return False
+
+    claim_ev_ownership(
+        hass,
+        config_entry,
+        vehicle_id,
+        owner=EXTERNAL_OWNER_MODE,
+        owner_mode=EXTERNAL_OWNER_MODE,
+        session_id=session_id,
+        reason=reason,
+        extra={"observed": True},
+    )
+    return True
+
+
+def release_external_ev_ownership(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+    *,
+    reason: str = "External vehicle unplugged",
+) -> bool:
+    """Release only a matching externally-owned loadpoint lease."""
+    lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
+    if lease_id is None or lease is None or lease.get("owner") != EXTERNAL_OWNER_MODE:
+        return False
+    release_ev_ownership(
+        hass,
+        config_entry,
+        lease_id,
+        reason=reason,
+        command="external_unplug",
+        source=EXTERNAL_OWNER_MODE,
+    )
+    return True
+
+
 def record_ev_command(
     hass: Any,
     config_entry: Any,
@@ -489,6 +610,7 @@ def release_ev_ownership(
     reason: str | None = None,
     command: str = "release",
     success: bool = True,
+    source: str = "powersync",
 ) -> dict[str, Any] | None:
     """Release ownership and remember the final command for diagnostics."""
     vid = normalize_vehicle_id(vehicle_id)
@@ -501,7 +623,7 @@ def release_ev_ownership(
     last_command = {
         "command": command,
         "at": now,
-        "source": "powersync",
+        "source": source,
         "success": bool(success),
         "reason": reason,
     }

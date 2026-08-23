@@ -48,6 +48,19 @@ def _vehicle_id(vehicle: Mapping[str, Any]) -> str:
     return str(vehicle_id or "").strip()
 
 
+def _is_tesla_control_identity(vehicle_id: str) -> bool:
+    """Exclude generic and Wall Connector-only observations from VIN ownership."""
+    normalized = str(vehicle_id or "").strip()
+    return (
+        normalized.startswith("ble_")
+        or (
+            len(normalized) == 17
+            and normalized.isalnum()
+            and not normalized.isdigit()
+        )
+    )
+
+
 class ObservedTeslaSessionTracker:
     """Create charge-history sessions when Tesla charging starts outside PowerSync."""
 
@@ -117,6 +130,53 @@ class ObservedTeslaSessionTracker:
         self._idle_counts.pop(vehicle_id, None)
         _LOGGER.info("Observed Tesla charging session ended for %s", vehicle_id)
 
+    def _reconcile_vehicle_ownership(
+        self,
+        vehicle: Mapping[str, Any],
+        vehicle_id: str,
+    ) -> None:
+        """Keep external command ownership aligned with physical plug state."""
+        if not _is_tesla_control_identity(vehicle_id):
+            return
+
+        from .ev_ownership import (
+            ensure_external_ev_ownership,
+            release_external_ev_ownership,
+        )
+
+        power_kw = _float_value(
+            vehicle.get("ev_power_kw", vehicle.get("current_power_kw")),
+            0.0,
+        )
+        is_charging = bool(vehicle.get("is_charging")) or power_kw > ACTIVE_POWER_THRESHOLD_KW
+        if is_charging:
+            if self._has_other_active_session(self._session_manager, vehicle_id):
+                return
+            session = self._active_observed_session(self._session_manager, vehicle_id)
+            ensure_external_ev_ownership(
+                self._hass,
+                self._entry,
+                vehicle_id,
+                session_id=getattr(session, "id", None),
+                reason="Observed Tesla charging started outside PowerSync",
+                observed_at=vehicle.get("_charging_observed_at") or vehicle.get("_observed_at"),
+            )
+        elif vehicle.get("is_connected") is False:
+            release_external_ev_ownership(
+                self._hass,
+                self._entry,
+                vehicle_id,
+            )
+
+    async def reconcile_ownership(self) -> None:
+        """Reconcile external leases before EV automation decisions run."""
+        if not self._has_fresh_tesla_data():
+            return
+        for vehicle in self._vehicle_status_fn(self._hass, self._entry):
+            vehicle_id = _vehicle_id(vehicle)
+            if vehicle_id:
+                self._reconcile_vehicle_ownership(vehicle, vehicle_id)
+
     async def poll(self, _now=None) -> None:
         """Poll live Tesla telemetry and update observed charging sessions."""
         if not self._has_fresh_tesla_data():
@@ -142,6 +202,7 @@ class ObservedTeslaSessionTracker:
             soc = _optional_int(vehicle.get("ev_soc", vehicle.get("current_soc")))
 
             if not is_charging:
+                self._reconcile_vehicle_ownership(vehicle, vehicle_id)
                 await self._mark_idle(vehicle_id, end_soc=soc)
                 continue
 
@@ -157,6 +218,8 @@ class ObservedTeslaSessionTracker:
                     start_soc=soc,
                 )
                 _LOGGER.info("Observed Tesla charging session started for %s", vehicle_id)
+
+            self._reconcile_vehicle_ownership(vehicle, vehicle_id)
 
             import_price, export_price = get_current_ev_prices(
                 self._hass,

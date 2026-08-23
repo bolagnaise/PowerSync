@@ -356,3 +356,122 @@ def test_boost_is_its_own_arbitration_family_and_yields_to_manual():
     # Boost supersedes automated owners, but a later manual command still wins.
     assert ev_ownership.can_take_over_ev_ownership("boost", "manual")
     assert not ev_ownership.can_take_over_ev_ownership("boost", "smart_schedule")
+
+
+def test_automated_owners_yield_to_external_ownership():
+    hass = _Hass()
+    vehicle_id = "5YJTEST0000000001"
+    ev_ownership.claim_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+        owner="external",
+        owner_mode="external",
+    )
+
+    for owner_mode in (
+        "smart_schedule",
+        "price_level_opportunity",
+        "scheduled",
+        "solar_surplus",
+    ):
+        can_claim, _lease_id, lease, reason = ev_ownership.can_claim_ev_ownership(
+            hass,
+            _Entry(),
+            vehicle_id,
+            owner_mode=owner_mode,
+            allow_takeover=True,
+        )
+        assert can_claim is False
+        assert lease["owner"] == "external"
+        assert reason == "external already owns this loadpoint"
+
+
+def test_manual_command_can_take_over_external_ownership():
+    hass = _Hass()
+    vehicle_id = "5YJTEST0000000001"
+    ev_ownership.claim_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+        owner="external",
+        owner_mode="external",
+    )
+
+    can_claim, lease_id, _lease, reason = ev_ownership.can_claim_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+        owner_mode="manual",
+    )
+
+    assert can_claim is True
+    assert lease_id == vehicle_id
+    assert reason is None
+
+
+def test_recent_powersync_command_blocks_stale_external_observation():
+    hass = _Hass()
+    vehicle_id = "5YJTEST0000000001"
+    command = ev_ownership.record_ev_command(
+        hass,
+        _Entry(),
+        vehicle_id,
+        command="stop_smart_schedule",
+        success=True,
+    )
+
+    claimed = ev_ownership.ensure_external_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+        observed_at=datetime.fromisoformat(command["at"]) - timedelta(seconds=1),
+    )
+
+    assert claimed is False
+    assert ev_ownership.get_ev_ownership(hass, _Entry(), vehicle_id) == (None, None)
+
+
+def test_new_observation_after_powersync_command_claims_external_ownership():
+    hass = _Hass()
+    vehicle_id = "5YJTEST0000000001"
+    command = ev_ownership.record_ev_command(
+        hass,
+        _Entry(),
+        vehicle_id,
+        command="stop_smart_schedule",
+        success=True,
+    )
+
+    claimed = ev_ownership.ensure_external_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+        session_id="observed-session",
+        observed_at=datetime.fromisoformat(command["at"]) + timedelta(seconds=1),
+    )
+
+    assert claimed is True
+    _lease_id, lease = ev_ownership.get_ev_ownership(hass, _Entry(), vehicle_id)
+    assert lease["owner"] == "external"
+    assert lease["session_id"] == "observed-session"
+
+
+def test_fresh_recovered_powersync_session_blocks_external_claim():
+    hass = _Hass()
+    vehicle_id = "5YJTEST0000000001"
+    entry = hass.data["power_sync"][_Entry.entry_id]
+    entry["ev_recovered_ownership"] = {
+        vehicle_id: {"owner": "powersync", "owner_mode": "solar_surplus"}
+    }
+    entry["ev_recovered_ownership_saved_at"] = datetime.now(timezone.utc).isoformat()
+
+    claimed = ev_ownership.ensure_external_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+        observed_at=datetime.now(timezone.utc),
+    )
+
+    assert claimed is False
+    assert ev_ownership.get_ev_ownership(hass, _Entry(), vehicle_id) == (None, None)

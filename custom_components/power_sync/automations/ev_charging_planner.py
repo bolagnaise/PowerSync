@@ -7505,6 +7505,18 @@ class AutoScheduleExecutor:
         ):
             return False
 
+        if _claim_external_charging_ownership(
+            self.hass,
+            self.config_entry,
+            loadpoint_id,
+            reason="Tesla charging started outside PowerSync Smart Schedule",
+        ):
+            _LOGGER.info(
+                "Auto-schedule leaving externally-started charging alone for %s",
+                loadpoint_id,
+            )
+            return False
+
         _LOGGER.info(
             "Auto-schedule detected %s charging while waiting — sending stop: %s",
             loadpoint_id,
@@ -7660,6 +7672,24 @@ def _get_active_dynamic_ev_mode(hass: "HomeAssistant", config_entry: "ConfigEntr
         return str(params.get("owner_mode") or params.get("dynamic_mode") or "dynamic")
 
     return None
+
+
+def _claim_external_charging_ownership(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+    vehicle_id: Optional[str],
+    *,
+    reason: str,
+) -> bool:
+    """Latch unowned physical charging before an automated mode can act."""
+    from .ev_ownership import ensure_external_ev_ownership
+
+    return ensure_external_ev_ownership(
+        hass,
+        config_entry,
+        vehicle_id,
+        reason=reason,
+    )
 
 
 def _dynamic_ev_owner_suspended_control(
@@ -10368,11 +10398,23 @@ class PriceLevelChargingExecutor:
                             self.hass, self.config_entry, vehicle_vin=vin
                         )
                         if external_charge:
-                            _LOGGER.info(
-                                f"{name} ({vin}) charging without an active price-level "
-                                f"session — sending stop: {reason}"
-                            )
-                            await self._stop_charging(reason, vehicle_vin=vin)
+                            if _claim_external_charging_ownership(
+                                self.hass,
+                                self.config_entry,
+                                vin,
+                                reason="Tesla charging started outside PowerSync Price-Level",
+                            ):
+                                vehicle_state.last_decision = "external"
+                                vehicle_state.last_decision_reason = (
+                                    f"{reason}; external charging controls this session"
+                                )
+                                _LOGGER.info(
+                                    "%s (%s) is externally charging; Price-Level is yielding",
+                                    name,
+                                    vin,
+                                )
+                            else:
+                                await self._stop_charging(reason, vehicle_vin=vin)
                         else:
                             vehicle_state.last_decision = "waiting"
                             vehicle_state.last_decision_reason = reason
@@ -10920,6 +10962,13 @@ async def _find_external_scheduled_charging_vehicle(
         if not can_stop:
             return None, False, reason
         if await is_ev_actively_charging(hass, config_entry):
+            if _claim_external_charging_ownership(
+                hass,
+                config_entry,
+                None,
+                reason="Charging started outside PowerSync Scheduled Charging",
+            ):
+                return None, False, "external charging controls the loadpoint"
             return None, True, reason
         return None, False, "no active external scheduled session"
 
@@ -10956,6 +11005,13 @@ async def _find_external_scheduled_charging_vehicle(
 
         saw_home_vehicle = True
         if await is_ev_actively_charging(hass, config_entry, vehicle_vin):
+            if _claim_external_charging_ownership(
+                hass,
+                config_entry,
+                vehicle_vin,
+                reason="Tesla charging started outside PowerSync Scheduled Charging",
+            ):
+                return vehicle_vin, False, "external charging controls the loadpoint"
             return vehicle_vin, True, "vehicle is at home"
 
     if vehicles:
@@ -10967,6 +11023,13 @@ async def _find_external_scheduled_charging_vehicle(
     if not can_stop:
         return None, False, reason
     if await is_ev_actively_charging(hass, config_entry):
+        if _claim_external_charging_ownership(
+            hass,
+            config_entry,
+            None,
+            reason="Charging started outside PowerSync Scheduled Charging",
+        ):
+            return None, False, "external charging controls the loadpoint"
         return None, True, reason
     return None, False, "no active external scheduled session"
 
