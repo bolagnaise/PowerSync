@@ -277,6 +277,26 @@ def test_agl_is_wired_as_a_first_class_static_provider():
     assert '"agl",' in sensor_source
 
 
+def test_mobile_custom_tariff_api_reapplies_agl_overlay():
+    init_path = COMPONENT_ROOT / "__init__.py"
+    source = init_path.read_text()
+    tree = ast.parse(source)
+    post_method = next(
+        item
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "CustomTariffView"
+        for item in node.body
+        if isinstance(item, ast.AsyncFunctionDef) and item.name == "post"
+    )
+    post_source = ast.get_source_segment(source, post_method)
+
+    assert post_source is not None
+    assert "tariff_season_validation_error(data.get(\"seasons\"))" in post_source
+    assert 'if provider == "agl":' in post_source
+    assert "data = apply_battery_rewards_export_rates(" in post_source
+    assert "store.set_custom_tariff(data)" in post_source
+
+
 def test_config_tariff_builder_applies_agl_overlay(agl_module):
     config_path = COMPONENT_ROOT / "config_flow.py"
     tree = ast.parse(config_path.read_text())

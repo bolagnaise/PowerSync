@@ -6596,6 +6596,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             if tariff_type == "flat":
                 flat_rate = user_input.get("flat_rate", 30) / 100
+                self._tariff_seasons = [
+                    {"name": "All Year", "from_month": 1, "to_month": 12}
+                ]
                 self._custom_tariff_data = self._build_tariff_from_periods(
                     [
                         {
@@ -6611,6 +6614,19 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_battery_system()
 
             self._tariff_periods = []
+            self._tariff_seasons = (
+                []
+                if user_input.get("seasonal_rates", False)
+                else [
+                    {
+                        "name": "All Year",
+                        "from_month": 1,
+                        "to_month": 12,
+                    }
+                ]
+            )
+            if user_input.get("seasonal_rates", False):
+                return await self.async_step_tariff_season()
             return await self.async_step_tariff_period()
 
         tariff_type_options = {
@@ -6656,6 +6672,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     mode=NumberSelectorMode.BOX,
                 )
             ),
+            vol.Optional("seasonal_rates", default=False): BooleanSelector(),
         }
         if not is_agl and not is_four4free_custom:
             schema_fields[
@@ -6697,6 +6714,167 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     else "You can skip this and configure rates later."
                 ),
             },
+        )
+
+    @staticmethod
+    def _months_in_tariff_season(from_month: int, to_month: int) -> list[int]:
+        """Expand an inclusive, possibly year-wrapping month range."""
+        if not 1 <= from_month <= 12 or not 1 <= to_month <= 12:
+            return []
+        if from_month <= to_month:
+            return list(range(from_month, to_month + 1))
+        return list(range(from_month, 13)) + list(range(1, to_month + 1))
+
+    @classmethod
+    def _tariff_seasons_error(cls, seasons: list[dict]) -> str | None:
+        """Validate unique names and exact, non-overlapping year coverage."""
+        if not seasons:
+            return "season_required"
+
+        names: set[str] = set()
+        coverage: dict[int, str] = {}
+        has_all_year_fallback = False
+        for season in seasons:
+            name = str(season.get("name", "")).strip()
+            if not name or name.casefold() in names:
+                return "season_name_invalid"
+            names.add(name.casefold())
+            try:
+                from_month = int(season.get("from_month"))
+                to_month = int(season.get("to_month"))
+            except (TypeError, ValueError):
+                return "season_month_invalid"
+            months = cls._months_in_tariff_season(from_month, to_month)
+            if not months:
+                return "season_month_invalid"
+            if name.casefold() == "all year":
+                if months != list(range(1, 13)):
+                    return "season_month_invalid"
+                has_all_year_fallback = True
+                continue
+            for month in months:
+                if month in coverage:
+                    return "season_month_overlap"
+                coverage[month] = name
+
+        if not has_all_year_fallback and set(coverage) != set(range(1, 13)):
+            return "season_month_gap"
+        return None
+
+    @staticmethod
+    def _tariff_season_options(seasons: list[dict]) -> list[SelectOptionDict]:
+        """Build selector options for existing tariff seasons."""
+        return [
+            SelectOptionDict(value=str(season["name"]), label=str(season["name"]))
+            for season in seasons
+        ]
+
+    @staticmethod
+    def _tariff_month_options() -> list[SelectOptionDict]:
+        """Build month selector options without relying on locale state."""
+        names = (
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        )
+        return [
+            SelectOptionDict(value=str(index), label=name)
+            for index, name in enumerate(names, 1)
+        ]
+
+    async def async_step_tariff_season(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Define calendar seasons before adding their TOU periods."""
+        errors: dict[str, str] = {}
+        seasons = getattr(self, "_tariff_seasons", [])
+
+        if user_input is not None:
+            remove_season = user_input.get("remove_season", "none")
+            if remove_season != "none":
+                self._tariff_seasons = [
+                    season
+                    for season in seasons
+                    if season.get("name") != remove_season
+                ]
+                return await self.async_step_tariff_season()
+
+            if not user_input.get("finish_seasons", False):
+                name = str(user_input.get("season_name", "")).strip()
+                try:
+                    from_month = int(user_input.get("from_month", 11))
+                    to_month = int(user_input.get("to_month", 3))
+                except (TypeError, ValueError):
+                    from_month = to_month = 0
+                candidate = {
+                    "name": name,
+                    "from_month": from_month,
+                    "to_month": to_month,
+                }
+                existing_names = {
+                    str(season.get("name", "")).casefold() for season in seasons
+                }
+                if not name or name.casefold() in existing_names:
+                    errors["base"] = "season_name_invalid"
+                elif not self._months_in_tariff_season(from_month, to_month):
+                    errors["base"] = "season_month_invalid"
+                else:
+                    seasons.append(candidate)
+
+            if not errors:
+                if user_input.get("add_another", False):
+                    return await self.async_step_tariff_season()
+                error = self._tariff_seasons_error(seasons)
+                if error:
+                    errors["base"] = error
+                else:
+                    return await self.async_step_tariff_period()
+
+        count = len(seasons)
+        default_name = "High Season" if count == 0 else "Low Season"
+        default_from = "11" if count == 0 else "4"
+        default_to = "3" if count == 0 else "10"
+        schema_fields: dict[Any, Any] = {
+            vol.Optional("season_name", default=default_name): TextSelector(
+                TextSelectorConfig(type=TextSelectorType.TEXT)
+            ),
+            vol.Optional("from_month", default=default_from): SelectSelector(
+                SelectSelectorConfig(
+                    options=self._tariff_month_options(),
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional("to_month", default=default_to): SelectSelector(
+                SelectSelectorConfig(
+                    options=self._tariff_month_options(),
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional("add_another", default=False): BooleanSelector(),
+            vol.Optional("finish_seasons", default=False): BooleanSelector(),
+        }
+        if count:
+            schema_fields = {
+                vol.Optional("remove_season", default="none"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value="none", label="Keep all seasons"),
+                            *self._tariff_season_options(seasons),
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                **schema_fields,
+            }
+
+        summary = ", ".join(
+            f"{season['name']} ({season['from_month']}-{season['to_month']})"
+            for season in seasons
+        )
+        return self.async_show_form(
+            step_id="tariff_season",
+            data_schema=vol.Schema(schema_fields),
+            errors=errors,
+            description_placeholders={"season_info": summary or "No seasons added yet."},
         )
 
     @staticmethod
@@ -6769,6 +6947,12 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._tariff_periods.append(
                 {
                     "name": user_input.get("period_type", "PEAK"),
+                    "season": user_input.get(
+                        "season",
+                        getattr(self, "_tariff_seasons", [{"name": "All Year"}])[0][
+                            "name"
+                        ],
+                    ),
                     "start": start_hour,
                     "end": end_hour,
                     "days": user_input.get("period_days", "weekdays"),
@@ -6822,8 +7006,14 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "all_days": "Mon-Sun",
             }
             for idx, period in enumerate(self._tariff_periods, 1):
+                season_prefix = (
+                    f"{period.get('season')}: "
+                    if len(getattr(self, "_tariff_seasons", [])) > 1
+                    else ""
+                )
                 line = (
-                    f"{idx}. {period['name']} {period['start']:02d}:00-"
+                    f"{idx}. {season_prefix}{period['name']} "
+                    f"{period['start']:02d}:00-"
                     f"{period['end']:02d}:00 "
                     f"{day_labels.get(period.get('days'), 'Mon-Sun')}, import "
                     f"{period['import_rate'] * 100:.{rate_precision}f}{minor_unit}"
@@ -6877,6 +7067,21 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             vol.Optional("add_another", default=False): BooleanSelector(),
         }
+        seasons = getattr(
+            self,
+            "_tariff_seasons",
+            [{"name": "All Year", "from_month": 1, "to_month": 12}],
+        )
+        if len(seasons) > 1 or seasons[0].get("name") != "All Year":
+            schema_fields = {
+                vol.Required("season", default=str(seasons[0]["name"])): SelectSelector(
+                    SelectSelectorConfig(
+                        options=self._tariff_season_options(seasons),
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                **schema_fields,
+            }
         if count > 0:
             remove_field = vol.Optional("remove_period", default="none")
             schema_fields = {
@@ -6919,12 +7124,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         Each period with different rates gets a unique internal name (e.g. PEAK_1,
         PEAK_2) so the optimizer sees distinct prices for each time block.
-        Remaining hours not covered by any period become OFF_PEAK.
+        Remaining hours not covered by any period become OFF_PEAK. When calendar
+        seasons are configured, each season is built independently.
         """
-        tou_periods: dict[str, list] = {}
-        energy_charges: dict[str, float] = {}
-        sell_charges: dict[str, float] = {}
-
         def _day_ranges(scope: str) -> list[tuple[int, int]]:
             if scope == "weekdays":
                 return [(1, 5)]
@@ -6932,31 +7134,31 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return [(0, 0), (6, 6)]
             return [(0, 6)]
 
-        # Assign unique names when the same period type has different rates
-        name_counters: dict[str, int] = {}
-        for period in periods:
-            base_name = period["name"]
+        def _build_season(
+            season_periods: list[dict],
+        ) -> tuple[dict[str, list], dict[str, float], dict[str, float]]:
+            tou_periods: dict[str, list] = {}
+            energy_charges: dict[str, float] = {}
+            sell_charges: dict[str, float] = {}
 
-            # Check if an existing period with same name has the same rates
-            existing_key = None
-            for key in tou_periods:
-                if key == base_name or key.startswith(base_name + "_"):
-                    if (
-                        energy_charges.get(key) == period["import_rate"]
-                        and sell_charges.get(key) == period["export_rate"]
-                    ):
-                        existing_key = key
-                        break
+            # Assign unique names when the same period type has different rates.
+            name_counters: dict[str, int] = {}
+            for period in season_periods:
+                base_name = period["name"]
+                existing_key = None
+                for key in tou_periods:
+                    if key == base_name or key.startswith(base_name + "_"):
+                        if (
+                            energy_charges.get(key) == period["import_rate"]
+                            and sell_charges.get(key) == period["export_rate"]
+                        ):
+                            existing_key = key
+                            break
 
-            if existing_key:
-                # Same rates — add time range to existing period
-                unique_name = existing_key
-            else:
-                # Different rates or new period — create unique name
-                if base_name not in name_counters:
-                    # First occurrence — use base name
+                if existing_key:
+                    unique_name = existing_key
+                elif base_name not in name_counters:
                     if base_name in tou_periods:
-                        # Base name taken with different rates — rename it
                         old_periods = tou_periods.pop(base_name)
                         old_import = energy_charges.pop(base_name)
                         old_export = sell_charges.pop(base_name)
@@ -6973,94 +7175,99 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     name_counters[base_name] += 1
                     unique_name = f"{base_name}_{name_counters[base_name]}"
 
-            if unique_name not in tou_periods:
-                tou_periods[unique_name] = []
-            for from_day, to_day in _day_ranges(period.get("days", "weekdays")):
-                tou_periods[unique_name].append(
-                    {
-                        "fromDayOfWeek": from_day,
-                        "toDayOfWeek": to_day,
-                        "fromHour": period["start"],
-                        "toHour": period["end"],
-                    }
-                )
-            energy_charges[unique_name] = period["import_rate"]
-            sell_charges[unique_name] = period["export_rate"]
+                if unique_name not in tou_periods:
+                    tou_periods[unique_name] = []
+                for from_day, to_day in _day_ranges(
+                    period.get("days", "weekdays")
+                ):
+                    tou_periods[unique_name].append(
+                        {
+                            "fromDayOfWeek": from_day,
+                            "toDayOfWeek": to_day,
+                            "fromHour": period["start"],
+                            "toHour": period["end"],
+                        }
+                    )
+                energy_charges[unique_name] = period["import_rate"]
+                sell_charges[unique_name] = period["export_rate"]
 
-        # Auto-fill remaining hours as OFF_PEAK per day. This lets tariffs have
-        # different weekday and weekend definitions while still covering gaps.
-        defined_hours_by_day = {day: set() for day in range(7)}
+            defined_hours_by_day = {day: set() for day in range(7)}
 
-        def _days_between(start: int, end: int) -> list[int]:
-            start %= 7
-            end %= 7
-            if start <= end:
-                return list(range(start, end + 1))
-            return list(range(start, 7)) + list(range(0, end + 1))
+            def _days_between(start: int, end: int) -> list[int]:
+                start %= 7
+                end %= 7
+                if start <= end:
+                    return list(range(start, end + 1))
+                return list(range(start, 7)) + list(range(0, end + 1))
 
-        def _mark_hours(day: int, start: int, end: int) -> None:
-            defined_hours_by_day[day % 7].update(range(start, end))
+            def _mark_hours(day: int, start: int, end: int) -> None:
+                defined_hours_by_day[day % 7].update(range(start, end))
 
-        for period_list in tou_periods.values():
-            for p in period_list:
-                start_hour = int(p["fromHour"])
-                end_hour = int(p["toHour"])
-                for day in _days_between(p["fromDayOfWeek"], p["toDayOfWeek"]):
-                    if start_hour == end_hour:
-                        _mark_hours(day, 0, 24)
-                    elif start_hour < end_hour:
-                        _mark_hours(day, start_hour, end_hour)
-                    else:
-                        _mark_hours(day, start_hour, 24)
-                        _mark_hours(day + 1, 0, end_hour)
+            for period_list in tou_periods.values():
+                for item in period_list:
+                    start_hour = int(item["fromHour"])
+                    end_hour = int(item["toHour"])
+                    for day in _days_between(
+                        item["fromDayOfWeek"], item["toDayOfWeek"]
+                    ):
+                        if start_hour == end_hour:
+                            _mark_hours(day, 0, 24)
+                        elif start_hour < end_hour:
+                            _mark_hours(day, start_hour, end_hour)
+                        else:
+                            _mark_hours(day, start_hour, 24)
+                            _mark_hours(day + 1, 0, end_hour)
 
-        offpeak_periods = []
-        offpeak_gaps: dict[tuple[int, int], list[int]] = {}
-        for day, defined_hours in defined_hours_by_day.items():
-            gap_start = None
-            for h in range(25):
-                if h < 24 and h not in defined_hours:
-                    if gap_start is None:
-                        gap_start = h
-                elif gap_start is not None:
-                    offpeak_gaps.setdefault((gap_start, h), []).append(day)
-                    gap_start = None
+            offpeak_periods = []
+            offpeak_gaps: dict[tuple[int, int], list[int]] = {}
+            for day, defined_hours in defined_hours_by_day.items():
+                gap_start = None
+                for hour in range(25):
+                    if hour < 24 and hour not in defined_hours:
+                        if gap_start is None:
+                            gap_start = hour
+                    elif gap_start is not None:
+                        offpeak_gaps.setdefault((gap_start, hour), []).append(day)
+                        gap_start = None
 
-        for (from_hour, to_hour), days in offpeak_gaps.items():
-            sorted_days = sorted(days)
-            range_start = sorted_days[0]
-            previous_day = range_start
-            for day in sorted_days[1:] + [None]:
-                if day is not None and day == previous_day + 1:
-                    previous_day = day
-                    continue
+            for (from_hour, to_hour), days in offpeak_gaps.items():
+                sorted_days = sorted(days)
+                range_start = sorted_days[0]
+                previous_day = range_start
+                for day in sorted_days[1:] + [None]:
+                    if day is not None and day == previous_day + 1:
+                        previous_day = day
+                        continue
+                    offpeak_periods.append(
+                        {
+                            "fromDayOfWeek": range_start,
+                            "toDayOfWeek": previous_day,
+                            "fromHour": from_hour,
+                            "toHour": to_hour,
+                        }
+                    )
+                    if day is not None:
+                        range_start = previous_day = day
+
+            if not offpeak_periods and not tou_periods:
                 offpeak_periods.append(
                     {
-                        "fromDayOfWeek": range_start,
-                        "toDayOfWeek": previous_day,
-                        "fromHour": from_hour,
-                        "toHour": to_hour,
+                        "fromDayOfWeek": 0,
+                        "toDayOfWeek": 6,
+                        "fromHour": 0,
+                        "toHour": 24,
                     }
                 )
-                if day is not None:
-                    range_start = previous_day = day
 
-        if not offpeak_periods and not tou_periods:
-            offpeak_periods.append(
-                {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24}
-            )
+            if offpeak_periods:
+                op_name = "OFF_PEAK_AUTO" if "OFF_PEAK" in tou_periods else "OFF_PEAK"
+                tou_periods[op_name] = offpeak_periods
+                energy_charges[op_name] = getattr(
+                    self, "_tariff_offpeak_rate", 0.15
+                )
+                sell_charges[op_name] = getattr(self, "_tariff_fit_rate", 0.05)
 
-        offpeak_rate = getattr(self, "_tariff_offpeak_rate", 0.15)
-        fit_rate = getattr(self, "_tariff_fit_rate", 0.05)
-
-        if offpeak_periods:
-            # Use a unique off-peak name if OFF_PEAK is already taken by a user period
-            op_name = "OFF_PEAK"
-            if op_name in tou_periods:
-                op_name = "OFF_PEAK_AUTO"
-            tou_periods[op_name] = offpeak_periods
-            energy_charges[op_name] = offpeak_rate
-            sell_charges[op_name] = fit_rate
+            return tou_periods, energy_charges, sell_charges
 
         provider_name = {
             "agl": "AGL",
@@ -7079,24 +7286,38 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
         )
 
+        season_defs = getattr(
+            self,
+            "_tariff_seasons",
+            [{"name": "All Year", "from_month": 1, "to_month": 12}],
+        )
+        seasons: dict[str, dict] = {}
+        energy_charges: dict[str, dict[str, float]] = {}
+        sell_energy_charges: dict[str, dict[str, float]] = {}
+        for season in season_defs:
+            season_name = str(season["name"])
+            matching_periods = [
+                period
+                for period in periods
+                if period.get("season", season_name) == season_name
+            ]
+            tou_periods, buy_rates, sell_rates = _build_season(matching_periods)
+            seasons[season_name] = {
+                "fromMonth": int(season["from_month"]),
+                "toMonth": int(season["to_month"]),
+                "tou_periods": tou_periods,
+            }
+            energy_charges[season_name] = buy_rates
+            sell_energy_charges[season_name] = sell_rates
+
         tariff = {
             "name": plan_name,
             "utility": provider_name,
             "currency": tariff_currency,
-            "seasons": {
-                "All Year": {
-                    "fromMonth": 1,
-                    "toMonth": 12,
-                    "tou_periods": tou_periods,
-                }
-            },
-            "energy_charges": {
-                "All Year": energy_charges,
-            },
+            "seasons": seasons,
+            "energy_charges": energy_charges,
             "sell_tariff": {
-                "energy_charges": {
-                    "All Year": sell_charges,
-                }
+                "energy_charges": sell_energy_charges,
             },
         }
         if getattr(self, "_selected_electricity_provider", "other") == "agl":
@@ -16333,6 +16554,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
             if tariff_type == "flat":
                 flat_rate = user_input.get("flat_rate", 30) / 100
+                self._tariff_seasons = [
+                    {"name": "All Year", "from_month": 1, "to_month": 12}
+                ]
                 custom_tariff = self._build_tariff_from_periods_compat(
                     [
                         {
@@ -16354,6 +16578,25 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             self._tariff_periods = self._custom_tariff_periods(
                 getattr(self, "_custom_tariff_for_options", None)
             )
+            saved_seasons = self._custom_tariff_seasons(
+                getattr(self, "_custom_tariff_for_options", None)
+            )
+            if user_input.get("seasonal_rates", False):
+                self._tariff_seasons = (
+                    saved_seasons
+                    if saved_seasons
+                    and not (
+                        len(saved_seasons) == 1
+                        and saved_seasons[0]["name"] == "All Year"
+                    )
+                    else []
+                )
+                return await self.async_step_tariff_season_options()
+            self._tariff_seasons = [
+                {"name": "All Year", "from_month": 1, "to_month": 12}
+            ]
+            for period in self._tariff_periods:
+                period["season"] = "All Year"
             return await self.async_step_tariff_period_options()
 
         # Get current custom tariff defaults
@@ -16373,7 +16616,16 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         default_offpeak = 15
         default_fit = 5
         if current_tariff:
-            charges = current_tariff.get("energy_charges", {}).get("All Year", {})
+            season_names = list(current_tariff.get("seasons", {}))
+            default_season = (
+                "All Year" if "All Year" in season_names
+                else season_names[0] if season_names else "All Year"
+            )
+            charges = current_tariff.get("energy_charges", {}).get(
+                default_season, {}
+            )
+            if isinstance(charges, dict) and isinstance(charges.get("rates"), dict):
+                charges = charges["rates"]
             # OFF_PEAK_AUTO is the generated uncovered-hours rate when the
             # tariff also contains an explicit OFF_PEAK period.
             offpeak_rate = charges.get("OFF_PEAK_AUTO")
@@ -16384,8 +16636,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             sell_charges = (
                 current_tariff.get("sell_tariff", {})
                 .get("energy_charges", {})
-                .get("All Year", {})
+                .get(default_season, {})
             )
+            if isinstance(sell_charges, dict) and isinstance(
+                sell_charges.get("rates"), dict
+            ):
+                sell_charges = sell_charges["rates"]
             for k, v in sell_charges.items():
                 if k.startswith("OFF_PEAK") or k == "ALL":
                     if isinstance(v, (int, float)):
@@ -16441,6 +16697,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     mode=NumberSelectorMode.BOX,
                 )
             ),
+            vol.Optional(
+                "seasonal_rates",
+                default=len((current_tariff or {}).get("seasons", {})) > 1
+                or (
+                    bool((current_tariff or {}).get("seasons"))
+                    and "All Year" not in (current_tariff or {}).get("seasons", {})
+                ),
+            ): BooleanSelector(),
         }
         if not is_agl:
             schema_fields[
@@ -16473,6 +16737,33 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         )
 
     @staticmethod
+    def _custom_tariff_seasons(custom_tariff: dict | None) -> list[dict]:
+        """Recover ordered season definitions from a saved custom tariff."""
+        if not isinstance(custom_tariff, dict):
+            return []
+        result = []
+        for name, season in custom_tariff.get("seasons", {}).items():
+            if not isinstance(season, dict):
+                continue
+            try:
+                from_month = int(season.get("fromMonth", 1))
+                to_month = int(season.get("toMonth", 12))
+            except (TypeError, ValueError):
+                continue
+            if not PowerSyncConfigFlow._months_in_tariff_season(
+                from_month, to_month
+            ):
+                continue
+            result.append(
+                {
+                    "name": str(name),
+                    "from_month": from_month,
+                    "to_month": to_month,
+                }
+            )
+        return result
+
+    @staticmethod
     def _custom_tariff_periods(custom_tariff: dict | None) -> list[dict]:
         """Recover explicit TOU periods from a saved custom tariff.
 
@@ -16484,43 +16775,64 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         if not isinstance(custom_tariff, dict):
             return []
 
-        season = custom_tariff.get("seasons", {}).get("All Year", {})
-        tou_periods = season.get("tou_periods", {})
-        import_rates = custom_tariff.get("energy_charges", {}).get("All Year", {})
-        export_rates = (
-            custom_tariff.get("sell_tariff", {})
-            .get("energy_charges", {})
-            .get("All Year", {})
-        )
-        if not isinstance(tou_periods, dict):
-            return []
-
         periods: list[dict] = []
-        for internal_name, ranges in tou_periods.items():
-            if internal_name == "OFF_PEAK_AUTO":
+        seasons = custom_tariff.get("seasons", {})
+        if not isinstance(seasons, dict):
+            return periods
+        multiple_seasons = len(seasons) > 1 or "All Year" not in seasons
+        for season_name, season in seasons.items():
+            if not isinstance(season, dict):
                 continue
-            if internal_name == "OFF_PEAK" and "OFF_PEAK_AUTO" not in tou_periods:
-                # A generated off-peak gap has no companion AUTO key.
+            tou_periods = season.get("tou_periods", {})
+            import_rates = custom_tariff.get("energy_charges", {}).get(
+                season_name, {}
+            )
+            export_rates = (
+                custom_tariff.get("sell_tariff", {})
+                .get("energy_charges", {})
+                .get(season_name, {})
+            )
+            if isinstance(import_rates, dict) and isinstance(
+                import_rates.get("rates"), dict
+            ):
+                import_rates = import_rates["rates"]
+            if isinstance(export_rates, dict) and isinstance(
+                export_rates.get("rates"), dict
+            ):
+                export_rates = export_rates["rates"]
+            if not isinstance(tou_periods, dict):
                 continue
-            if not isinstance(ranges, list):
-                continue
-            base_name = internal_name.rsplit("_", 1)[0]
-            if base_name not in {"PEAK", "SHOULDER", "OFF_PEAK", "SUPER_OFF_PEAK"}:
-                base_name = internal_name
-            for item in ranges:
-                if not isinstance(item, dict):
+
+            for internal_name, ranges in tou_periods.items():
+                if internal_name == "OFF_PEAK_AUTO":
                     continue
-                day_range = (item.get("fromDayOfWeek"), item.get("toDayOfWeek"))
-                days = {
-                    (1, 5): "weekdays",
-                    (0, 6): "all_days",
-                    (0, 0): "weekends",
-                    (6, 6): "weekends",
-                }.get(day_range)
-                if days is None:
+                if (
+                    internal_name == "OFF_PEAK"
+                    and "OFF_PEAK_AUTO" not in tou_periods
+                ):
                     continue
-                periods.append(
-                    {
+                if not isinstance(ranges, list):
+                    continue
+                base_name = internal_name.rsplit("_", 1)[0]
+                if base_name not in {
+                    "PEAK", "SHOULDER", "OFF_PEAK", "SUPER_OFF_PEAK"
+                }:
+                    base_name = internal_name
+                for item in ranges:
+                    if not isinstance(item, dict):
+                        continue
+                    day_range = (
+                        item.get("fromDayOfWeek"), item.get("toDayOfWeek")
+                    )
+                    days = {
+                        (1, 5): "weekdays",
+                        (0, 6): "all_days",
+                        (0, 0): "weekends",
+                        (6, 6): "weekends",
+                    }.get(day_range)
+                    if days is None:
+                        continue
+                    period = {
                         "name": base_name,
                         "start": int(item.get("fromHour", 0)),
                         "end": int(item.get("toHour", 24)),
@@ -16528,8 +16840,114 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         "import_rate": float(import_rates.get(internal_name, 0)),
                         "export_rate": float(export_rates.get(internal_name, 0)),
                     }
-                )
+                    if multiple_seasons:
+                        period["season"] = str(season_name)
+                    periods.append(period)
         return periods
+
+    async def async_step_tariff_season_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Edit calendar seasons before editing their TOU periods."""
+        errors: dict[str, str] = {}
+        seasons = getattr(self, "_tariff_seasons", [])
+
+        if user_input is not None:
+            remove_season = user_input.get("remove_season", "none")
+            if remove_season != "none":
+                self._tariff_seasons = [
+                    season
+                    for season in seasons
+                    if season.get("name") != remove_season
+                ]
+                self._tariff_periods = [
+                    period
+                    for period in getattr(self, "_tariff_periods", [])
+                    if period.get("season") != remove_season
+                ]
+                return await self.async_step_tariff_season_options()
+
+            if not user_input.get("finish_seasons", False):
+                name = str(user_input.get("season_name", "")).strip()
+                try:
+                    from_month = int(user_input.get("from_month", 11))
+                    to_month = int(user_input.get("to_month", 3))
+                except (TypeError, ValueError):
+                    from_month = to_month = 0
+                existing_names = {
+                    str(season.get("name", "")).casefold() for season in seasons
+                }
+                if not name or name.casefold() in existing_names:
+                    errors["base"] = "season_name_invalid"
+                elif not PowerSyncConfigFlow._months_in_tariff_season(
+                    from_month, to_month
+                ):
+                    errors["base"] = "season_month_invalid"
+                else:
+                    seasons.append(
+                        {
+                            "name": name,
+                            "from_month": from_month,
+                            "to_month": to_month,
+                        }
+                    )
+
+            if not errors:
+                if user_input.get("add_another", False):
+                    return await self.async_step_tariff_season_options()
+                error = PowerSyncConfigFlow._tariff_seasons_error(seasons)
+                if error:
+                    errors["base"] = error
+                else:
+                    return await self.async_step_tariff_period_options()
+
+        count = len(seasons)
+        default_name = "High Season" if count == 0 else "Low Season"
+        default_from = "11" if count == 0 else "4"
+        default_to = "3" if count == 0 else "10"
+        schema_fields: dict[Any, Any] = {
+            vol.Optional("season_name", default=default_name): TextSelector(
+                TextSelectorConfig(type=TextSelectorType.TEXT)
+            ),
+            vol.Optional("from_month", default=default_from): SelectSelector(
+                SelectSelectorConfig(
+                    options=PowerSyncConfigFlow._tariff_month_options(),
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional("to_month", default=default_to): SelectSelector(
+                SelectSelectorConfig(
+                    options=PowerSyncConfigFlow._tariff_month_options(),
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional("add_another", default=False): BooleanSelector(),
+            vol.Optional("finish_seasons", default=False): BooleanSelector(),
+        }
+        if count:
+            schema_fields = {
+                vol.Optional("remove_season", default="none"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value="none", label="Keep all seasons"),
+                            *PowerSyncConfigFlow._tariff_season_options(seasons),
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                **schema_fields,
+            }
+
+        summary = ", ".join(
+            f"{season['name']} ({season['from_month']}-{season['to_month']})"
+            for season in seasons
+        )
+        return self.async_show_form(
+            step_id="tariff_season_options",
+            data_schema=vol.Schema(schema_fields),
+            errors=errors,
+            description_placeholders={"season_info": summary or "No seasons added yet."},
+        )
 
     async def async_step_tariff_period_options(
         self, user_input: dict[str, Any] | None = None
@@ -16566,6 +16984,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
             period = {
                 "name": user_input.get("period_type", "PEAK"),
+                "season": user_input.get(
+                    "season",
+                    getattr(self, "_tariff_seasons", [{"name": "All Year"}])[0][
+                        "name"
+                    ],
+                ),
                 "start": start_hour,
                 "end": end_hour,
                 "days": user_input.get("period_days", "weekdays"),
@@ -16641,7 +17065,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         f", {p['export_rate'] * 100:.2f}{minor_unit} export"
                     )
                 lines.append(
-                    f"{i}. {label} {p['start']:02d}:00-{p['end']:02d}:00 "
+                    f"{i}. "
+                    + (
+                        f"{p.get('season')}: "
+                        if len(getattr(self, "_tariff_seasons", [])) > 1
+                        else ""
+                    )
+                    + f"{label} {p['start']:02d}:00-{p['end']:02d}:00 "
                     f"{day_labels.get(p.get('days'), 'Mon-Sun')} "
                     f"({rate_summary})"
                 )
@@ -16689,6 +17119,21 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ),
             vol.Optional("add_another", default=False): BooleanSelector(),
         }
+        seasons = getattr(
+            self,
+            "_tariff_seasons",
+            [{"name": "All Year", "from_month": 1, "to_month": 12}],
+        )
+        if len(seasons) > 1 or seasons[0].get("name") != "All Year":
+            schema_fields = {
+                vol.Required("season", default=str(seasons[0]["name"])): SelectSelector(
+                    SelectSelectorConfig(
+                        options=PowerSyncConfigFlow._tariff_season_options(seasons),
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                **schema_fields,
+            }
         if count > 0:
             remove_field = vol.Optional("remove_period", default="none")
             schema_fields = {
@@ -16757,6 +17202,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ),
         )
         ctx._tariff_currency = self._currency()
+        ctx._tariff_seasons = getattr(
+            self,
+            "_tariff_seasons",
+            [{"name": "All Year", "from_month": 1, "to_month": 12}],
+        )
         ctx.hass = self.hass
         return PowerSyncConfigFlow._build_tariff_from_periods(ctx, periods)
 

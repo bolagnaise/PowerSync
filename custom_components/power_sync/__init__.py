@@ -13247,6 +13247,15 @@ class CustomTariffView(HomeAssistantView):
                     status=400
                 )
 
+            from .tariff_time import tariff_season_validation_error
+
+            season_error = tariff_season_validation_error(data.get("seasons"))
+            if season_error:
+                return web.json_response(
+                    {"success": False, "error": season_error},
+                    status=400,
+                )
+
             raw_import_quota = data.get("import_quota")
             if (
                 isinstance(raw_import_quota, dict)
@@ -13281,6 +13290,42 @@ class CustomTariffView(HomeAssistantView):
                 currency_for_entry(entry, self._hass),
             )
             data["currency"] = tariff_currency
+
+            if entry is not None:
+                from .const import (
+                    CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                    CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                    CONF_ELECTRICITY_PROVIDER,
+                    DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                    DEFAULT_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                )
+
+                provider = entry.options.get(
+                    CONF_ELECTRICITY_PROVIDER,
+                    entry.data.get(CONF_ELECTRICITY_PROVIDER),
+                )
+                if provider == "agl":
+                    from .agl import apply_battery_rewards_export_rates
+
+                    peak_rate = float(entry.options.get(
+                        CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                        entry.data.get(
+                            CONF_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                            DEFAULT_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE,
+                        ),
+                    )) / 100
+                    offpeak_rate = float(entry.options.get(
+                        CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                        entry.data.get(
+                            CONF_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                            DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE,
+                        ),
+                    )) / 100
+                    data = apply_battery_rewards_export_rates(
+                        data,
+                        peak_export_rate=peak_rate,
+                        offpeak_export_rate=offpeak_rate,
+                    )
 
             store.set_custom_tariff(data)
             await store.async_save()

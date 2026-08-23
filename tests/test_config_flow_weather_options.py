@@ -67,6 +67,7 @@ CONFIG_OPTION_TEXT_STEP_PAIRS = (
     ("octopus", "octopus_options"),
     ("octopus_saving_sessions", "octopus_saving_sessions_options"),
     ("custom_tariff", "custom_tariff_options"),
+    ("tariff_season", "tariff_season_options"),
     ("tariff_period", "tariff_period_options"),
     ("nz_retailer", "nz_options"),
     ("nz_rates", "nz_options"),
@@ -851,6 +852,68 @@ def test_custom_tou_tariff_periods_support_weekend_only_ranges():
         "fromHour": 0,
         "toHour": 7,
     } in tou_periods["OFF_PEAK"]
+
+
+def test_custom_tou_tariff_builder_keeps_independent_calendar_seasons():
+    source = CONFIG_FLOW_PATH.read_text()
+    builder_source = ast.get_source_segment(
+        source,
+        _config_flow_method("_build_tariff_from_periods"),
+    )
+    assert builder_source is not None
+
+    namespace = {
+        "normalize_currency": lambda value, fallback: value or fallback,
+        "currency_for_provider": lambda provider, hass: "AUD",
+    }
+    exec(textwrap.dedent(builder_source), namespace)
+    ctx = type(
+        "Ctx",
+        (),
+        {
+            "_tariff_offpeak_rate": 0.21,
+            "_tariff_fit_rate": 0.05,
+            "_tariff_plan_name": "Seasonal TOU",
+            "_selected_electricity_provider": "other",
+            "_tariff_currency": "AUD",
+            "_tariff_seasons": [
+                {"name": "High Season", "from_month": 11, "to_month": 3},
+                {"name": "Low Season", "from_month": 4, "to_month": 10},
+            ],
+            "hass": None,
+        },
+    )()
+
+    tariff = namespace["_build_tariff_from_periods"](
+        ctx,
+        [
+            {
+                "season": "High Season",
+                "name": "PEAK",
+                "start": 16,
+                "end": 20,
+                "days": "weekdays",
+                "import_rate": 0.68,
+                "export_rate": 0.05,
+            },
+            {
+                "season": "Low Season",
+                "name": "PEAK",
+                "start": 16,
+                "end": 20,
+                "days": "weekdays",
+                "import_rate": 0.47,
+                "export_rate": 0.05,
+            },
+        ],
+    )
+
+    assert tariff["seasons"]["High Season"]["fromMonth"] == 11
+    assert tariff["seasons"]["High Season"]["toMonth"] == 3
+    assert tariff["energy_charges"]["High Season"]["PEAK"] == 0.68
+    assert tariff["energy_charges"]["Low Season"]["PEAK"] == 0.47
+    assert tariff["energy_charges"]["High Season"]["OFF_PEAK"] == 0.21
+    assert tariff["energy_charges"]["Low Season"]["OFF_PEAK"] == 0.21
 
 
 def test_globird_plan_strings_are_available_in_setup_and_options():
@@ -2535,6 +2598,65 @@ def test_custom_tariff_options_preserve_saved_explicit_periods_on_reopen():
         {"name": "PEAK", "start": 17, "end": 20, "days": "weekdays", "import_rate": 0.5, "export_rate": 0.1},
     ]
 
+    seasonal = recover(
+        {
+            "seasons": {
+                "High Season": {
+                    "fromMonth": 11,
+                    "toMonth": 3,
+                    "tou_periods": {
+                        "PEAK": [
+                            {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 16, "toHour": 20}
+                        ],
+                        "OFF_PEAK": [
+                            {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 16}
+                        ],
+                    },
+                },
+                "Low Season": {
+                    "fromMonth": 4,
+                    "toMonth": 10,
+                    "tou_periods": {
+                        "PEAK": [
+                            {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 16, "toHour": 20}
+                        ],
+                        "OFF_PEAK": [
+                            {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 16}
+                        ],
+                    },
+                },
+            },
+            "energy_charges": {
+                "High Season": {"PEAK": 0.68, "OFF_PEAK": 0.21},
+                "Low Season": {"PEAK": 0.47, "OFF_PEAK": 0.21},
+            },
+            "sell_tariff": {"energy_charges": {
+                "High Season": {"PEAK": 0.05, "OFF_PEAK": 0.05},
+                "Low Season": {"PEAK": 0.05, "OFF_PEAK": 0.05},
+            }},
+        }
+    )
+    assert seasonal == [
+        {
+            "name": "PEAK",
+            "season": "High Season",
+            "start": 16,
+            "end": 20,
+            "days": "weekdays",
+            "import_rate": 0.68,
+            "export_rate": 0.05,
+        },
+        {
+            "name": "PEAK",
+            "season": "Low Season",
+            "start": 16,
+            "end": 20,
+            "days": "weekdays",
+            "import_rate": 0.47,
+            "export_rate": 0.05,
+        },
+    ]
+
 
 def test_agl_custom_tariff_rates_preserve_hundredths_of_a_cent():
     source = CONFIG_FLOW_PATH.read_text()
@@ -2676,6 +2798,7 @@ def test_agl_custom_tariff_rates_preserve_hundredths_of_a_cent():
         "TextSelector": selector,
         "SelectSelectorConfig": selector_config,
         "SelectSelector": selector,
+        "BooleanSelector": lambda: object(),
         "TextSelectorType": SimpleNamespace(TEXT="text"),
         "SelectSelectorMode": SimpleNamespace(DROPDOWN="dropdown"),
         "NumberSelectorMode": SimpleNamespace(BOX="box"),

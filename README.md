@@ -77,7 +77,7 @@ Solar inverters that bypass the battery can be curtailed during negative feed-in
 | **Amber Electric** | Australia | Dynamic 5-min & 30-min pricing plus partial-day metered cost (API token required) |
 | **Localvolts** | Australia | Real-time 5-min wholesale pricing (API key + Partner ID) |
 | **Flow Power / AEMO** | Australia | Official Flow Power Web Data API or AEMO wholesale pricing |
-| **AGL Battery Rewards** | Australia | Address-specific import tariff with configurable daily 5pm-9pm evening and off-peak feed-in rates |
+| **AGL Battery Rewards** | Australia | Address-specific import tariff with configurable calendar seasons, daily 5pm-9pm evening feed-in rates, and off-peak feed-in rates |
 | **Globird / AEMO VPP** | Australia | Retail tariff schedule + AEMO spike detection |
 | **CovaU SolarMax** | Australia | Fixture-backed NSW, Queensland and South Australia stepped tariffs with measured daily free-import and premium-export quotas |
 | **Octopus Energy** | UK | Dynamic 30-min (Agile, Go, Intelligent Go, Flux, Tracker). Reads from [BottlecapDave's integration](https://github.com/BottlecapDave/HomeAssistant-OctopusEnergy) when installed |

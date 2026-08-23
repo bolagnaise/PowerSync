@@ -110,6 +110,51 @@ def find_season_for_month(seasons: Mapping[str, Any], month: int) -> str:
     return fallback or next(iter(seasons), "All Year")
 
 
+def tariff_season_validation_error(seasons: Any) -> str | None:
+    """Validate a user-authored season map before it reaches runtime lookup."""
+    if not isinstance(seasons, Mapping) or not seasons:
+        return "Tariff seasons are required"
+
+    coverage: dict[int, str] = {}
+    has_all_year_fallback = False
+    for season_name, season_data in seasons.items():
+        if not str(season_name).strip() or not isinstance(season_data, Mapping):
+            return "Each tariff season needs a name and month range"
+        try:
+            from_month = int(season_data.get("fromMonth"))
+            to_month = int(season_data.get("toMonth"))
+        except (TypeError, ValueError):
+            return f"Tariff season {season_name} has an invalid month range"
+        if not 1 <= from_month <= 12 or not 1 <= to_month <= 12:
+            return f"Tariff season {season_name} has an invalid month range"
+        months = (
+            range(from_month, to_month + 1)
+            if from_month <= to_month
+            else (*range(from_month, 13), *range(1, to_month + 1))
+        )
+        if str(season_name).casefold() == "all year":
+            if list(months) != list(range(1, 13)):
+                return "All Year must cover January through December"
+            has_all_year_fallback = True
+            continue
+        for month in months:
+            if month in coverage:
+                return (
+                    f"Tariff seasons {coverage[month]} and {season_name} "
+                    f"both include month {month}"
+                )
+            coverage[month] = str(season_name)
+
+    missing = sorted(set(range(1, 13)) - set(coverage))
+    if has_all_year_fallback:
+        missing = []
+    if missing:
+        return "Tariff seasons do not cover months: " + ", ".join(
+            str(month) for month in missing
+        )
+    return None
+
+
 def season_rate_maps(energy_charges: Any) -> dict[str, dict[str, float]]:
     """Normalize direct and Tesla-nested tariff rates for every season."""
     if not isinstance(energy_charges, Mapping):

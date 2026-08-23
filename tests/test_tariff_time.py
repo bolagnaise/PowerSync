@@ -17,10 +17,30 @@ sys.modules["power_sync"] = _ps
 from power_sync.tariff_time import (  # noqa: E402
     find_matching_tou_period,
     season_rate_maps,
+    tariff_season_validation_error,
     tariff_components_for_datetime,
     tesla_day_of_week,
     tou_period_matches,
 )
+
+
+def test_user_authored_tariff_seasons_require_exact_month_coverage():
+    assert tariff_season_validation_error({
+        "High Season": {"fromMonth": 11, "toMonth": 3},
+        "Low Season": {"fromMonth": 4, "toMonth": 10},
+    }) is None
+    assert tariff_season_validation_error({
+        "All Year": {"fromMonth": 1, "toMonth": 12},
+        "Winter": {"fromMonth": 6, "toMonth": 8},
+    }) is None
+    assert "both include month 3" in tariff_season_validation_error({
+        "Summer": {"fromMonth": 11, "toMonth": 3},
+        "Winter": {"fromMonth": 3, "toMonth": 10},
+    })
+    assert "do not cover months" in tariff_season_validation_error({
+        "Summer": {"fromMonth": 11, "toMonth": 3},
+        "Winter": {"fromMonth": 6, "toMonth": 8},
+    })
 
 
 def test_tesla_day_of_week_maps_sunday_to_zero():

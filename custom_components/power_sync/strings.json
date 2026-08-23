@@ -327,7 +327,8 @@
           "tariff_type": "Tariff type",
           "flat_rate": "Flat rate",
           "offpeak_rate": "Off-peak rate",
-          "fit_rate": "Default feed-in tariff"
+          "fit_rate": "Default feed-in tariff",
+          "seasonal_rates": "Rates change by season"
         },
         "data_description": {
           "skip_tariff": "Check to use default estimation instead of configuring custom rates.",
@@ -335,7 +336,26 @@
           "tariff_type": "Flat rate uses a single price all day. Time of Use lets you add multiple periods with different rates.",
           "flat_rate": "Only used for flat rate tariff type.",
           "offpeak_rate": "Rate for hours not covered by any period you define.",
-          "fit_rate": "Default export earnings for off-peak hours. Use a negative value when you pay to export."
+          "fit_rate": "Default export earnings for off-peak hours. Use a negative value when you pay to export.",
+          "seasonal_rates": "Enable this when month ranges use different time periods or prices."
+        },
+        "submit": "Next"
+      },
+      "tariff_season": {
+        "title": "Add tariff season",
+        "description": "{season_info}",
+        "data": {
+          "remove_season": "Remove a season",
+          "season_name": "Season name",
+          "from_month": "Starts in",
+          "to_month": "Ends in",
+          "add_another": "Add another season",
+          "finish_seasons": "Use the seasons above and continue"
+        },
+        "data_description": {
+          "from_month": "First calendar month in this season.",
+          "to_month": "Last calendar month in this season. A range such as November to March wraps across New Year.",
+          "finish_seasons": "Continue only after the saved seasons cover every month exactly once."
         },
         "submit": "Next"
       },
@@ -343,6 +363,7 @@
         "title": "Add tariff period",
         "description": "{period_info}",
         "data": {
+          "season": "Season",
           "period_type": "Period type",
           "period_start": "Start time",
           "period_end": "End time",
@@ -353,6 +374,7 @@
           "add_another": "Add another period"
         },
         "data_description": {
+          "season": "Calendar season this time period and rate belongs to.",
           "period_type": "e.g. Peak, Shoulder, Off-Peak, Super Off-Peak.",
           "period_start": "Start time in 24-hour format (e.g. 07:00).",
           "period_end": "End time in 24-hour format (e.g. 22:00).",
@@ -1069,6 +1091,11 @@
       }
     },
     "error": {
+      "season_required": "Add at least one tariff season.",
+      "season_name_invalid": "Each tariff season needs a unique, non-empty name.",
+      "season_month_invalid": "Choose valid start and end months for the tariff season.",
+      "season_month_overlap": "Tariff seasons overlap. Each month can belong to only one season.",
+      "season_month_gap": "Tariff seasons must cover all 12 months before continuing.",
       "invalid_auth": "Token rejected by the API -- check you copied the full token string with no extra spaces.",
       "cannot_connect": "Cannot reach the API server. Check your internet connection and that Home Assistant has outbound HTTPS access.",
       "invalid_globird_auth": "Email or password is incorrect. Check your GloBird portal login credentials.",
@@ -1158,6 +1185,11 @@
   },
   "options": {
     "error": {
+      "season_required": "Add at least one tariff season.",
+      "season_name_invalid": "Each tariff season needs a unique, non-empty name.",
+      "season_month_invalid": "Choose valid start and end months for the tariff season.",
+      "season_month_overlap": "Tariff seasons overlap. Each month can belong to only one season.",
+      "season_month_gap": "Tariff seasons must cover all 12 months before continuing.",
       "cannot_connect": "Cannot reach the provider portal. Check your internet connection and that Home Assistant has outbound HTTPS access.",
       "invalid_ai_summary_settings": "Choose either Clear saved provider key or enter a replacement key, not both.",
       "alphaess_cloud_required": "AlphaESS Cloud monitoring requires both an App ID and App Secret.",
@@ -2266,21 +2298,42 @@
           "tariff_type": "Tariff type",
           "flat_rate": "Flat rate",
           "offpeak_rate": "Off-peak rate",
-          "fit_rate": "Default feed-in tariff"
+          "fit_rate": "Default feed-in tariff",
+          "seasonal_rates": "Rates change by season"
         },
         "data_description": {
           "plan_name": "Optional label for this tariff plan. Shown in the integration card.",
           "tariff_type": "Flat rate uses a single price all day. Time of Use lets you add multiple periods with different rates.",
           "flat_rate": "Only used for flat rate tariff type.",
           "offpeak_rate": "Rate for hours not covered by any period you define.",
-          "fit_rate": "Default export earnings for off-peak hours. Use a negative value when you pay to export."
+          "fit_rate": "Default export earnings for off-peak hours. Use a negative value when you pay to export.",
+          "seasonal_rates": "Enable this when month ranges use different time periods or prices."
         },
         "submit": "Save"
+      },
+      "tariff_season_options": {
+        "title": "Edit tariff seasons",
+        "description": "{season_info}",
+        "data": {
+          "remove_season": "Remove a season",
+          "season_name": "Season name",
+          "from_month": "Starts in",
+          "to_month": "Ends in",
+          "add_another": "Add another season",
+          "finish_seasons": "Use the seasons above and continue"
+        },
+        "data_description": {
+          "from_month": "First calendar month in this season.",
+          "to_month": "Last calendar month in this season. A range such as November to March wraps across New Year.",
+          "finish_seasons": "Continue only after the saved seasons cover every month exactly once."
+        },
+        "submit": "Next"
       },
       "tariff_period_options": {
         "title": "Add tariff period",
         "description": "{period_info}",
         "data": {
+          "season": "Season",
           "period_type": "Period type",
           "period_start": "Start time",
           "period_end": "End time",
@@ -2291,6 +2344,7 @@
           "add_another": "Add another period"
         },
         "data_description": {
+          "season": "Calendar season this time period and rate belongs to.",
           "period_type": "e.g. Peak, Shoulder, Off-Peak, Super Off-Peak.",
           "period_start": "Start time in 24-hour format (e.g. 07:00).",
           "period_end": "End time in 24-hour format (e.g. 22:00).",
