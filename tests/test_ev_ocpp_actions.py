@@ -6535,18 +6535,27 @@ def test_dynamic_session_follows_active_charger_cap_changes(monkeypatch):
     assert state["params"]["fixed_charge_amps"] == 32
 
 
-def test_dynamic_sigenergy_start_uses_charger_abstraction(monkeypatch):
+def test_scheduled_sigenergy_start_uses_fresh_site_headroom(monkeypatch):
+    """A Scheduled Sigenergy start must not briefly exceed the site cap."""
     set_amps_calls: list[tuple[str, int, str]] = []
 
     async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
         set_amps_calls.append((vehicle_id, amps, params["charger_type"]))
         return True
 
-    async def fail_tesla_start(*args, **kwargs):
-        raise AssertionError("Sigenergy dynamic starts must not use Tesla discovery")
+    async def fresh_live_status(*args, **kwargs):
+        return {
+            "battery_power": -7160,
+            "grid_power": 7200,
+            "solar_power": 0,
+            "load_power": 40,
+            "battery_soc": 78,
+        }
 
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
-    monkeypatch.setattr(actions, "_action_start_ev_charging", fail_tesla_start)
+    monkeypatch.setattr(
+        actions, "_get_initial_smart_schedule_live_status", fresh_live_status
+    )
     actions._dynamic_ev_state.clear()
     hass = _Hass([])
 
@@ -6558,9 +6567,10 @@ def test_dynamic_sigenergy_start_uses_charger_abstraction(monkeypatch):
                 "vehicle_id": "sigenergy_charger",
                 "vehicle_vin": "sigenergy_charger",
                 "dynamic_mode": "battery_target",
-                "owner_mode": "smart_schedule",
+                "owner_mode": "scheduled",
                 "charger_type": "sigenergy",
-                "target_battery_charge_kw": 0,
+                "target_battery_charge_kw": 7.16,
+                "max_grid_import_kw": 12.5,
                 "min_charge_amps": 6,
                 "max_charge_amps": 32,
             },
@@ -6569,10 +6579,57 @@ def test_dynamic_sigenergy_start_uses_charger_abstraction(monkeypatch):
     )
 
     assert result is True
-    assert set_amps_calls == [("sigenergy_charger", 32, "sigenergy")]
+    assert set_amps_calls == [("sigenergy_charger", 22, "sigenergy")]
     state = actions._dynamic_ev_state["entry-1"]["sigenergy_charger"]
-    assert state["current_amps"] == 32
-    assert state["params"]["target_battery_charge_kw"] == 0
+    assert state["current_amps"] == 22
+    assert state["params"]["target_battery_charge_kw"] == 7.16
+
+
+def test_scheduled_sigenergy_start_waits_without_minimum_headroom(monkeypatch):
+    """No Sigenergy register write is safe when the site has no EV budget."""
+    set_amps_calls: list[int] = []
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    async def fresh_live_status(*args, **kwargs):
+        return {
+            "battery_power": -7160,
+            "grid_power": 12500,
+            "solar_power": 0,
+            "load_power": 5340,
+            "battery_soc": 78,
+        }
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(
+        actions, "_get_initial_smart_schedule_live_status", fresh_live_status
+    )
+    hass = _Hass([])
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_id": "sigenergy_charger",
+                "vehicle_vin": "sigenergy_charger",
+                "dynamic_mode": "battery_target",
+                "owner_mode": "scheduled",
+                "charger_type": "sigenergy",
+                "target_battery_charge_kw": 7.16,
+                "max_grid_import_kw": 12.5,
+                "min_charge_amps": 6,
+                "max_charge_amps": 32,
+            },
+            context=None,
+        )
+    )
+
+    assert result is False
+    assert set_amps_calls == []
+    assert actions._dynamic_ev_state == {}
 
 
 def test_dynamic_update_holds_fixed_deadline_rate(monkeypatch):

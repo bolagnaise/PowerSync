@@ -11291,6 +11291,20 @@ async def _action_start_ev_charging_dynamic_locked(
         and not params.get("no_grid_import", False)
         and not _coerce_positive_int(params.get("fixed_charge_amps"))
     )
+    # A Scheduled Sigenergy EVAC start uses the same shared site envelope as
+    # Smart Schedule, but it starts through the charger abstraction rather
+    # than the Tesla branch below.  Do not let that routing difference bypass
+    # the first-command headroom check.
+    scheduled_sigenergy_headroom_start = (
+        dynamic_mode == "battery_target"
+        and params.get("owner_mode") == "scheduled"
+        and params.get("charger_type") == "sigenergy"
+        and not params.get("no_grid_import", False)
+        and not _coerce_positive_int(params.get("fixed_charge_amps"))
+    )
+    initial_site_headroom_start = (
+        adaptive_smart_schedule_start or scheduled_sigenergy_headroom_start
+    )
     defer_battery_target_start = (
         adaptive_smart_schedule_start
         and any(
@@ -11453,6 +11467,87 @@ async def _action_start_ev_charging_dynamic_locked(
     )
 
     initial_battery_acceptance_learner: Dict[str, Any] = {}
+    initial_amps_pre_set = False
+
+    # The first physical command must respect the same measured site budget
+    # as periodic dynamic updates.  Tesla needs a separate rate write before
+    # its start command; Sigenergy's charger abstraction writes the safe rate
+    # and starts atomically in the branch below.
+    if initial_site_headroom_start and not defer_battery_target_start:
+        live_status = await _get_initial_smart_schedule_live_status(
+            hass,
+            config_entry,
+        )
+        initial_amps = _initial_smart_schedule_battery_target_amps(
+            live_status,
+            max_grid_import_kw=mode_params["max_grid_import_kw"],
+            target_battery_charge_kw=_resolve_battery_reservation_kw(
+                session_target_kw=target_battery_charge_kw,
+                planned_charge_kw=_optimizer_planned_battery_charge_kw(
+                    hass,
+                    config_entry,
+                ),
+                max_battery_charge_rate_kw=params.get(
+                    "max_battery_charge_rate_kw"
+                ),
+            ),
+            min_amps=min_charge_amps,
+            max_amps=max_charge_amps,
+            voltage=voltage,
+            phases=resolved_phases,
+            acceptance_learner=initial_battery_acceptance_learner,
+        )
+        if initial_amps is not None and optimizer_start_ceiling_amps is not None:
+            initial_amps = min(initial_amps, optimizer_start_ceiling_amps)
+        if initial_amps is None:
+            reason = "live site power is unavailable or invalid"
+            _LOGGER.info("Dynamic EV: start waiting for %s", reason)
+            record_ev_command(
+                hass,
+                config_entry,
+                vehicle_id,
+                command=f"start_{owner_mode}",
+                success=False,
+                reason=reason,
+            )
+            return False
+        if initial_amps <= 0:
+            reason = (
+                "site import headroom is below the configured "
+                f"{min_charge_amps}A minimum"
+            )
+            _LOGGER.info("Dynamic EV: start waiting because %s", reason)
+            record_ev_command(
+                hass,
+                config_entry,
+                vehicle_id,
+                command=f"start_{owner_mode}",
+                success=False,
+                reason=reason,
+            )
+            return False
+        start_amps = initial_amps
+        if charger_type == "tesla":
+            initial_amps_pre_set = await _set_vehicle_amps(
+                hass,
+                config_entry,
+                vehicle_id,
+                start_amps,
+                params,
+            )
+            if initial_amps_pre_set:
+                start_amps = _phase_applied_amps(params, start_amps)
+            else:
+                reason = f"could not pre-set the safe initial rate to {start_amps}A"
+                record_ev_command(
+                    hass,
+                    config_entry,
+                    vehicle_id,
+                    command=f"start_{owner_mode}",
+                    success=False,
+                    reason=reason,
+                )
+                return False
 
     # For battery_target mode, start EV charging immediately
     # For solar_surplus mode, we wait for sufficient surplus before starting
@@ -11489,96 +11584,6 @@ async def _action_start_ev_charging_dynamic_locked(
                 )
                 return False
         else:
-            initial_amps_pre_set = False
-            if adaptive_smart_schedule_start:
-                live_status = await _get_initial_smart_schedule_live_status(
-                    hass,
-                    config_entry,
-                )
-                initial_amps = _initial_smart_schedule_battery_target_amps(
-                    live_status,
-                    max_grid_import_kw=mode_params["max_grid_import_kw"],
-                    target_battery_charge_kw=_resolve_battery_reservation_kw(
-                        session_target_kw=target_battery_charge_kw,
-                        planned_charge_kw=_optimizer_planned_battery_charge_kw(
-                            hass,
-                            config_entry,
-                        ),
-                        max_battery_charge_rate_kw=params.get(
-                            "max_battery_charge_rate_kw"
-                        ),
-                    ),
-                    min_amps=min_charge_amps,
-                    max_amps=max_charge_amps,
-                    voltage=voltage,
-                    phases=resolved_phases,
-                    acceptance_learner=initial_battery_acceptance_learner,
-                )
-                if (
-                    initial_amps is not None
-                    and optimizer_start_ceiling_amps is not None
-                ):
-                    initial_amps = min(
-                        initial_amps,
-                        optimizer_start_ceiling_amps,
-                    )
-                if initial_amps is None:
-                    reason = "live site power is unavailable or invalid"
-                    _LOGGER.info(
-                        "Dynamic EV: Smart Schedule start waiting for %s",
-                        reason,
-                    )
-                    record_ev_command(
-                        hass,
-                        config_entry,
-                        vehicle_id,
-                        command=f"start_{owner_mode}",
-                        success=False,
-                        reason=reason,
-                    )
-                    return False
-                if initial_amps <= 0:
-                    reason = (
-                        "site import headroom is below the configured "
-                        f"{min_charge_amps}A minimum"
-                    )
-                    _LOGGER.info(
-                        "Dynamic EV: Smart Schedule start waiting because %s",
-                        reason,
-                    )
-                    record_ev_command(
-                        hass,
-                        config_entry,
-                        vehicle_id,
-                        command=f"start_{owner_mode}",
-                        success=False,
-                        reason=reason,
-                    )
-                    return False
-                start_amps = initial_amps
-                initial_amps_pre_set = await _set_vehicle_amps(
-                    hass,
-                    config_entry,
-                    vehicle_id,
-                    start_amps,
-                    params,
-                )
-                if initial_amps_pre_set:
-                    start_amps = _phase_applied_amps(params, start_amps)
-                if not initial_amps_pre_set:
-                    reason = (
-                        f"could not pre-set the safe initial rate to {start_amps}A"
-                    )
-                    record_ev_command(
-                        hass,
-                        config_entry,
-                        vehicle_id,
-                        command=f"start_{owner_mode}",
-                        success=False,
-                        reason=reason,
-                    )
-                    return False
-
             require_physical_confirmation = bool(
                 params.get("require_physical_start_confirmation")
                 and charger_type == "tesla"
