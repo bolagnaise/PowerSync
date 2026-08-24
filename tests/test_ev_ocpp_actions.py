@@ -6075,6 +6075,103 @@ def test_dynamic_smart_schedule_start_keeps_lp_zero_owned_but_stopped(monkeypatc
     assert state["ownership"]["owner_mode"] == "smart_schedule"
 
 
+def test_dynamic_smart_schedule_lp_zero_reconciles_fresh_physical_current(
+    monkeypatch,
+):
+    """A deferred LP zero must not hide an already-charging owned Tesla."""
+    start_calls: list[str | None] = []
+    set_amps_calls: list[int] = []
+
+    async def fake_start(hass, config_entry, params, context=None):
+        start_calls.append(params.get("vehicle_vin"))
+        return True
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    async def observed_current(*args, **kwargs):
+        return 32.0
+
+    async def live_status(*args, **kwargs):
+        return {
+            "battery_power": -9000,
+            "grid_power": 16000,
+            "solar_power": 0,
+            "load_power": 23360,
+            "ev_power": 7360,
+            "battery_soc": 50,
+        }
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(
+        actions,
+        "_optimizer_planned_ev_charge_kw",
+        lambda *args, **kwargs: 0.0,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_observed_owned_charge_amps",
+        observed_current,
+    )
+    monkeypatch.setattr(actions, "_get_tesla_live_status", live_status)
+    monkeypatch.setattr(
+        actions,
+        "_clear_ble_dynamic_session_if_unplugged",
+        not_unplugged,
+    )
+
+    hass = _Hass([])
+    actions._dynamic_ev_state.clear()
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_vin": "ble_tesla_yf88",
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "target_battery_charge_kw": 15,
+                "max_grid_import_kw": 20,
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+                "voltage": 230,
+                "phases": 1,
+            },
+            context=None,
+        )
+    )
+
+    assert result is True
+    assert start_calls == []
+    assert set_amps_calls == []
+    state = actions._dynamic_ev_state["entry-1"]["ble_tesla_yf88"]
+    assert state["active"] is True
+    assert state["charging_started"] is True
+    assert state["current_amps"] == 32
+    assert state["target_amps"] == 32
+    assert state["ownership"]["owner_mode"] == "smart_schedule"
+    assert state["ownership"]["last_commanded_amps"] == 0
+
+    asyncio.run(
+        actions._dynamic_ev_update(
+            hass,
+            _Entry(),
+            "entry-1",
+            "ble_tesla_yf88",
+        )
+    )
+
+    assert set_amps_calls == [0]
+    assert state["current_amps"] == 0
+    assert state["target_amps"] == 0
+
+
 def test_dynamic_start_defers_second_battery_target_vehicle(monkeypatch):
     """A second Smart Schedule must wait for aggregate site allocation."""
     start_calls: list[str | None] = []

@@ -11486,6 +11486,7 @@ async def _action_start_ev_charging_dynamic_locked(
 
     initial_battery_acceptance_learner: Dict[str, Any] = {}
     initial_amps_pre_set = False
+    deferred_observed_amps: Optional[int] = None
 
     # The first physical command must respect the same measured site budget
     # as periodic dynamic updates.  Tesla needs a separate rate write before
@@ -11572,11 +11573,32 @@ async def _action_start_ev_charging_dynamic_locked(
     if dynamic_mode == "battery_target":
         if defer_battery_target_start:
             start_success = True
-            _LOGGER.info(
-                "Dynamic EV: Deferring %s until the active site controller "
-                "allocates shared grid headroom",
-                vehicle_id,
-            )
+            if not self_stopped_during_teardown:
+                observed_amps = await _observed_owned_charge_amps(
+                    hass,
+                    config_entry,
+                    vehicle_id,
+                    params,
+                )
+                if observed_amps is not None and observed_amps > 0.5:
+                    deferred_observed_amps = max(
+                        1,
+                        int(round(observed_amps)),
+                    )
+            if deferred_observed_amps is not None:
+                _LOGGER.info(
+                    "Dynamic EV: Deferring %s at the optimizer's 0A ceiling; "
+                    "fresh physical telemetry shows %dA, so the managed "
+                    "session will reconcile it on the next controller update",
+                    vehicle_id,
+                    deferred_observed_amps,
+                )
+            else:
+                _LOGGER.info(
+                    "Dynamic EV: Deferring %s until the active site controller "
+                    "allocates shared grid headroom",
+                    vehicle_id,
+                )
         elif charger_type in ("ocpp", "generic", "zaptec", "sigenergy") or _is_ha_native_charger_type(charger_type):
             start_params = dict(params)
             if charger_type == "sigenergy":
@@ -11893,7 +11915,11 @@ async def _action_start_ev_charging_dynamic_locked(
     initial_current_amps = (
         recovered_continuation_amps
         if recovered_continuation_amps is not None
-        else start_amps
+        else (
+            deferred_observed_amps
+            if deferred_observed_amps is not None
+            else start_amps
+        )
     )
     recovered_continuation = recovered_continuation_amps is not None
 
@@ -11908,6 +11934,7 @@ async def _action_start_ev_charging_dynamic_locked(
         "paused_reason": None,
         "charging_started": (
             recovered_continuation
+            or deferred_observed_amps is not None
             or (dynamic_mode == "battery_target" and not defer_battery_target_start)
         ),
         "external_start_detection_armed": (
@@ -11962,7 +11989,15 @@ async def _action_start_ev_charging_dynamic_locked(
         ),
         extra={
             "charger_type": charger_type,
-            "last_commanded_amps": initial_current_amps,
+            # A fresh physical observation is runtime truth, not a command.
+            # Keep the deferred LP directive as the last commanded value so
+            # restart recovery cannot misrepresent an observed 32A draw as a
+            # rate PowerSync issued.
+            "last_commanded_amps": (
+                start_amps
+                if deferred_observed_amps is not None
+                else initial_current_amps
+            ),
         },
     )
 
