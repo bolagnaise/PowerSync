@@ -5054,6 +5054,51 @@ def _generic_curtailment_visible_status(
     return "Normal"
 
 
+def _goodwe_curtailment_visible_status(
+    *,
+    curtailment_enabled: bool,
+    control_state: str,
+    export_uneconomic: bool,
+    grid_power_kw: Any,
+    telemetry_ready: bool,
+    last_update_success: bool,
+    force_dispatch_active: bool,
+    last_update: Any,
+    update_interval: Any = None,
+    now: datetime | None = None,
+) -> tuple[str, float | None, bool]:
+    """Return GoodWe status only when direct control has physical proof.
+
+    GoodWe's direct controller verifies that the export-limit registers were
+    accepted, but a register echo is not proof that export has stopped.  Reuse
+    the shared freshness and residual-export contract: ``Active`` requires the
+    acknowledged lifecycle *and* fresh direct GoodWe grid telemetry at or below
+    250 W export.
+    """
+    if not curtailment_enabled:
+        return "Normal", None, False
+    if control_state in {"pending", "unsupported"}:
+        return "Pending", None, False
+    if control_state != "curtailed":
+        return ("Pending", None, False) if export_uneconomic else ("Normal", None, False)
+
+    return _foxess_curtailment_visible_status(
+        curtailment_enabled=curtailment_enabled,
+        control_state=control_state,
+        grid_power_kw=grid_power_kw,
+        # A GoodWe coordinator only produces ``data`` after parsing its direct
+        # runtime payload; the helper still rejects absent, invalid, stale, or
+        # unsuccessful telemetry before it can confirm a physical effect.
+        grid_power_valid=True,
+        telemetry_ready=telemetry_ready,
+        last_update_success=last_update_success,
+        force_dispatch_active=force_dispatch_active,
+        last_update=last_update,
+        update_interval=update_interval,
+        now=now,
+    )
+
+
 def _foxess_curtailment_visible_status(
     *,
     curtailment_enabled: bool,
@@ -5259,10 +5304,38 @@ class SolarCurtailmentSensor(SensorEntity):
         """Return the state rendered on the DC Solar curtailment card."""
         if self._is_foxess():
             return self._foxess_status()[0]
+        if self._is_goodwe():
+            return self._goodwe_status()[0]
         return _generic_curtailment_visible_status(
             curtailment_enabled=self._curtailment_enabled(),
             control_state=self._control_command_state(),
             export_uneconomic=self._export_uneconomic(),
+        )
+
+    def _is_goodwe(self) -> bool:
+        """Return whether this entry has the GoodWe curtailment lifecycle."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        return entry_data.get("goodwe_coordinator") is not None
+
+    def _goodwe_status(self) -> tuple[str, float | None, bool]:
+        """Return GoodWe lifecycle state reconciled with direct grid telemetry."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        coordinator = entry_data.get("goodwe_coordinator")
+        coordinator_data = getattr(coordinator, "data", None)
+        if not isinstance(coordinator_data, dict):
+            coordinator_data = {}
+        return _goodwe_curtailment_visible_status(
+            curtailment_enabled=self._curtailment_enabled(),
+            control_state=str(entry_data.get("goodwe_curtailment_state", "normal")),
+            export_uneconomic=self._export_uneconomic(),
+            grid_power_kw=coordinator_data.get("grid_power"),
+            telemetry_ready=coordinator_data.get("telemetry_ready", True) is True,
+            last_update_success=(
+                getattr(coordinator, "last_update_success", False) is True
+            ),
+            force_dispatch_active=self._foxess_force_dispatch_active(),
+            last_update=coordinator_data.get("last_update"),
+            update_interval=getattr(coordinator, "update_interval", None),
         )
 
     def _is_curtailed(self) -> bool:
@@ -5373,6 +5446,38 @@ class SolarCurtailmentSensor(SensorEntity):
                     if force_dispatch_active
                     else "curtailment"
                     if entry_data.get("foxess_curtailment_state") == "curtailed"
+                    else "normal"
+                ),
+                "grid_export_w": grid_export_w,
+                "effect_confirmed": effect_confirmed,
+                "description": descriptions[visible_state],
+            }
+
+        if self._is_goodwe():
+            visible_state, grid_export_w, effect_confirmed = self._goodwe_status()
+            force_dispatch_active = self._foxess_force_dispatch_active()
+            descriptions = {
+                "Active": "Curtailment confirmed; grid export is below 250 W",
+                "Pending": (
+                    "Curtailment status is pending while force dispatch owns control"
+                    if force_dispatch_active
+                    else "Curtailment command acknowledged, but physical zero-export "
+                    "is not confirmed"
+                ),
+                "Normal": "Normal solar export allowed",
+            }
+            return {
+                "export_rule": cached_rule,
+                "curtailment_enabled": curtailment_enabled,
+                "feedin_price": feedin_price,
+                "export_earnings": export_earnings,
+                "export_uneconomic": self._export_uneconomic(),
+                "control_state": entry_data.get("goodwe_curtailment_state", "normal"),
+                "control_owner": (
+                    "force_dispatch"
+                    if force_dispatch_active
+                    else "curtailment"
+                    if entry_data.get("goodwe_curtailment_state") == "curtailed"
                     else "normal"
                 ),
                 "grid_export_w": grid_export_w,

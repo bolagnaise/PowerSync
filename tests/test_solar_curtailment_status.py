@@ -137,6 +137,27 @@ def _load_generic_status_helper():
     return namespace[helper.name]
 
 
+def _load_goodwe_status_helper():
+    tree = ast.parse(SENSOR_PATH.read_text())
+    helpers = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name
+        in {"_foxess_curtailment_visible_status", "_goodwe_curtailment_visible_status"}
+    ]
+    namespace = {
+        "Any": Any,
+        "datetime": datetime,
+        "math": math,
+        "timedelta": timedelta,
+        "timezone": timezone,
+    }
+    module = ast.fix_missing_locations(ast.Module(body=helpers, type_ignores=[]))
+    exec(compile(module, str(SENSOR_PATH), "exec"), namespace)
+    return namespace["_goodwe_curtailment_visible_status"]
+
+
 def _generic_status(**overrides):
     values = {
         "curtailment_enabled": True,
@@ -145,6 +166,24 @@ def _generic_status(**overrides):
     }
     values.update(overrides)
     return _load_generic_status_helper()(**values)
+
+
+def _goodwe_status(**overrides):
+    now = datetime(2026, 8, 24, 5, 12, tzinfo=timezone.utc)
+    values = {
+        "curtailment_enabled": True,
+        "control_state": "curtailed",
+        "export_uneconomic": True,
+        "grid_power_kw": -2.8,
+        "telemetry_ready": True,
+        "last_update_success": True,
+        "force_dispatch_active": False,
+        "last_update": now - timedelta(seconds=15),
+        "update_interval": timedelta(seconds=30),
+        "now": now,
+    }
+    values.update(overrides)
+    return _load_goodwe_status_helper()(**values)
 
 
 def test_uncommanded_curtailment_is_pending_for_non_foxess_brands():
@@ -173,6 +212,27 @@ def test_disabled_curtailment_is_normal_for_non_foxess_brands_too():
 
 def test_unverified_command_remains_pending_after_price_has_cleared():
     assert _generic_status(control_state="pending", export_uneconomic=False) == "Pending"
+
+
+def test_goodwe_active_requires_fresh_physical_zero_export_proof():
+    """#386: direct GoodWe register readback alone is not a physical effect."""
+    assert _goodwe_status() == ("Pending", 2800.0, False)
+    assert _goodwe_status(grid_power_kw=-0.2) == ("Active", 200.0, True)
+    assert _goodwe_status(grid_power_kw=None) == ("Pending", None, False)
+    assert _goodwe_status(
+        grid_power_kw=-0.2,
+        last_update=datetime(2026, 8, 24, 5, 0, tzinfo=timezone.utc),
+    ) == ("Pending", None, False)
+    assert _goodwe_status(grid_power_kw=-0.2, force_dispatch_active=True) == (
+        "Pending",
+        None,
+        False,
+    )
+    assert _goodwe_status(control_state="unsupported") == ("Pending", None, False)
+    assert _goodwe_status(control_state="normal") == ("Pending", None, False)
+    assert _goodwe_status(
+        control_state="normal", export_uneconomic=False
+    ) == ("Normal", None, False)
 
 
 def test_status_marker_consults_every_brand_control_state_key():

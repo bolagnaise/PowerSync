@@ -27243,6 +27243,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if success:
                 entry_data["goodwe_curtailment_state"] = "normal"
                 entry_data.pop("_last_goodwe_curtailment_reapply", None)
+                async_dispatcher_send(
+                    hass, f"power_sync_curtailment_updated_{entry.entry_id}"
+                )
                 return True
             _LOGGER.error("GoodWe curtailment release before %s failed", reason)
         except Exception as err:
@@ -27262,6 +27265,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         current_state = entry_data.get("goodwe_curtailment_state", "normal")
+
+        def _notify_curtailment_update() -> None:
+            """Refresh the card when GoodWe lifecycle state changes."""
+            async_dispatcher_send(
+                hass, f"power_sync_curtailment_updated_{entry.entry_id}"
+            )
 
         if feedin_price is None:
             feedin_price, import_price, price_source = get_current_prices_for_curtailment(
@@ -27312,6 +27321,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "curtailment command can be sent"
                 )
             entry_data["goodwe_curtailment_state"] = "unsupported"
+            _notify_curtailment_update()
             return
 
         controller = gw_coord._controller
@@ -27379,6 +27389,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     else:
                         entry_data["goodwe_curtailment_state"] = "pending"
                         _LOGGER.error("GoodWe curtail() failed")
+                    _notify_curtailment_update()
                 else:
                     _LOGGER.debug("GoodWe already curtailed, no action needed")
             else:
@@ -27393,7 +27404,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         entry_data["goodwe_curtailment_state"] = "normal"
                         entry_data.pop("_last_goodwe_curtailment_reapply", None)
                     else:
+                        entry_data["goodwe_curtailment_state"] = "pending"
                         _LOGGER.error("GoodWe restore() failed")
+                    _notify_curtailment_update()
                 else:
                     _LOGGER.debug("GoodWe already in normal mode, no action needed")
         except Exception as e:

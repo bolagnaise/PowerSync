@@ -89,6 +89,12 @@ class _UnverifiedController(_Controller):
         return False
 
 
+class _RestoreFailureController(_Controller):
+    async def restore(self, **_kwargs) -> bool:
+        self.calls.append("restore")
+        return False
+
+
 class _Store:
     def __init__(self) -> None:
         self.data: dict[str, Any] = {}
@@ -100,14 +106,21 @@ class _Store:
         self.data = dict(data)
 
 
-def _run_goodwe_curtailment(controller: Any, *, feedin_price: float, store=None):
+def _run_goodwe_curtailment(
+    controller: Any,
+    *,
+    feedin_price: float,
+    store=None,
+    initial_state: str = "normal",
+):
     """Run the real handler against a fake coordinator and return its state."""
-    entry_data: dict[str, Any] = {"goodwe_curtailment_state": "normal"}
+    entry_data: dict[str, Any] = {"goodwe_curtailment_state": initial_state}
     if store is not None:
         entry_data["store"] = store
     logger = _Logger()
     entry_data["goodwe_coordinator"] = SimpleNamespace(_controller=controller)
     hass = SimpleNamespace(data={"power_sync": {"entry": entry_data}})
+    dispatches: list[tuple[Any, ...]] = []
     namespace: dict[str, Any] = {
         "DOMAIN": "power_sync",
         "hass": hass,
@@ -115,6 +128,7 @@ def _run_goodwe_curtailment(controller: Any, *, feedin_price: float, store=None)
         "_LOGGER": logger,
         "with_hysteresis": _load_with_hysteresis(),
         "_goodwe_force_export_active": lambda _entry_data: False,
+        "async_dispatcher_send": lambda *args, **_kwargs: dispatches.append(args),
         "get_current_prices_for_curtailment": lambda *_a, **_k: (None, None, None),
         "amber_coordinator": None,
         "localvolts_coordinator": None,
@@ -128,20 +142,21 @@ def _run_goodwe_curtailment(controller: Any, *, feedin_price: float, store=None)
             feedin_price=feedin_price, import_price=17.22
         )
     )
-    return entry_data, logger
+    return entry_data, logger, dispatches
 
 
 def test_entity_only_profile_records_unsupported_and_warns():
     """No control surface must be visible, not a silent DEBUG return."""
     # feedin_price 6.0 => export_earnings -6.0 c/kWh: the user pays to export.
-    entry_data, logger = _run_goodwe_curtailment(None, feedin_price=6.0)
+    entry_data, logger, dispatches = _run_goodwe_curtailment(None, feedin_price=6.0)
 
     assert entry_data["goodwe_curtailment_state"] == "unsupported"
     assert logger.levels("no export-limit surface") == ["warning"]
+    assert [call[1] for call in dispatches] == ["power_sync_curtailment_updated_entry"]
 
 
 def test_repeated_polls_do_not_repeat_the_unsupported_warning():
-    entry_data, logger = _run_goodwe_curtailment(None, feedin_price=6.0)
+    entry_data, logger, _dispatches = _run_goodwe_curtailment(None, feedin_price=6.0)
     assert logger.levels("no export-limit surface") == ["warning"]
 
     # Second poll on an entry already marked unsupported stays quiet.
@@ -154,6 +169,7 @@ def test_repeated_polls_do_not_repeat_the_unsupported_warning():
         "_LOGGER": second,
         "with_hysteresis": _load_with_hysteresis(),
         "_goodwe_force_export_active": lambda _entry_data: False,
+        "async_dispatcher_send": lambda *_args, **_kwargs: None,
     }
     exec(_nested_function_source("handle_goodwe_curtailment"), namespace)
     asyncio.run(
@@ -167,17 +183,18 @@ def test_repeated_polls_do_not_repeat_the_unsupported_warning():
 def test_direct_control_profile_still_curtails():
     """The working direct-UDP path must be untouched."""
     controller = _Controller()
-    entry_data, _logger = _run_goodwe_curtailment(controller, feedin_price=6.0)
+    entry_data, _logger, dispatches = _run_goodwe_curtailment(controller, feedin_price=6.0)
 
     assert controller.calls == ["curtail"]
     assert entry_data["goodwe_curtailment_state"] == "curtailed"
+    assert [call[1] for call in dispatches] == ["power_sync_curtailment_updated_entry"]
 
 
 def test_unverified_direct_command_stays_pending_and_persists_restore_baseline():
     controller = _UnverifiedController()
     store = _Store()
 
-    entry_data, _logger = _run_goodwe_curtailment(
+    entry_data, _logger, dispatches = _run_goodwe_curtailment(
         controller, feedin_price=6.0, store=store
     )
 
@@ -187,6 +204,22 @@ def test_unverified_direct_command_stays_pending_and_persists_restore_baseline()
         "grid_export": 0,
         "grid_export_limit": 5000,
     }
+    assert [call[1] for call in dispatches] == ["power_sync_curtailment_updated_entry"]
+
+
+def test_failed_restore_stays_pending_and_refreshes_the_card():
+    controller = _RestoreFailureController()
+
+    entry_data, _logger, dispatches = _run_goodwe_curtailment(
+        controller,
+        # -2c/kWh feed-in means export earnings are +2c/kWh: restore.
+        feedin_price=-2.0,
+        initial_state="curtailed",
+    )
+
+    assert controller.calls == ["restore"]
+    assert entry_data["goodwe_curtailment_state"] == "pending"
+    assert [call[1] for call in dispatches] == ["power_sync_curtailment_updated_entry"]
 
 
 def test_entity_telemetry_profiles_build_no_control_surface():
