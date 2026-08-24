@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -12,6 +12,7 @@ EXTERNAL_OWNER_MODE = "external"
 MANUAL_STOP_HOLD_SECONDS = 15 * 60
 RECOVERED_OWNERSHIP_MAX_AGE_SECONDS = 15 * 60
 EXTERNAL_COMMAND_SETTLE_SECONDS = 90
+POWERSYNC_STOP_CONFIRM_SECONDS = 15 * 60
 
 
 def owner_family(owner_mode: Any = None) -> str:
@@ -435,6 +436,25 @@ def ensure_external_ev_ownership(
     if lease is not None:
         if lease.get("owner") != EXTERNAL_OWNER_MODE:
             return False
+        if lease.get("stop_settling"):
+            existing_session_id = lease.get("session_id")
+            if (
+                session_id
+                and existing_session_id
+                and session_id != existing_session_id
+            ):
+                lease.pop("stop_settling", None)
+                lease.pop("stop_command_at", None)
+                lease.pop("stop_settling_expires_at", None)
+                lease["reason"] = reason
+            expires_at = _as_utc_datetime(lease.get("stop_settling_expires_at"))
+            if expires_at is not None and datetime.now(timezone.utc) >= expires_at:
+                lease.pop("stop_settling", None)
+                lease.pop("stop_command_at", None)
+                lease.pop("stop_settling_expires_at", None)
+                lease["reason"] = reason
+                lease["updated_at"] = _now_iso()
+                _schedule_runtime_save(hass, config_entry)
         if session_id and lease.get("session_id") != session_id:
             lease["session_id"] = session_id
             lease["updated_at"] = _now_iso()
@@ -454,6 +474,36 @@ def ensure_external_ev_ownership(
         if command_time is None:
             continue
         command_age = (datetime.now(timezone.utc) - command_time).total_seconds()
+        command_name = str(command.get("command") or "")
+        is_successful_stop = bool(
+            command.get("success")
+            and (command_name == "stop" or command_name.startswith("stop_"))
+            and not command.get("settled_at")
+        )
+        if (
+            -60 <= command_age <= POWERSYNC_STOP_CONFIRM_SECONDS
+            and is_successful_stop
+            and (observed_time is None or observed_time > command_time)
+        ):
+            claim_ev_ownership(
+                hass,
+                config_entry,
+                vehicle_id,
+                owner=EXTERNAL_OWNER_MODE,
+                owner_mode=EXTERNAL_OWNER_MODE,
+                session_id=session_id,
+                reason="Awaiting telemetry confirmation of PowerSync stop",
+                extra={
+                    "observed": True,
+                    "stop_settling": True,
+                    "stop_command_at": command_time.isoformat(),
+                    "stop_settling_expires_at": (
+                        command_time
+                        + timedelta(seconds=POWERSYNC_STOP_CONFIRM_SECONDS)
+                    ).isoformat(),
+                },
+            )
+            return True
         if (
             -60 <= command_age <= EXTERNAL_COMMAND_SETTLE_SECONDS
             and (observed_time is None or observed_time <= command_time)
@@ -471,6 +521,62 @@ def ensure_external_ev_ownership(
         extra={"observed": True},
     )
     return True
+
+
+def confirm_powersync_ev_stop(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+    *,
+    observed_at: Any = None,
+) -> bool:
+    """Clear only the provisional lease once stopped telemetry is observed."""
+    observed_time = _as_utc_datetime(observed_at)
+    lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
+    if (
+        lease_id is not None
+        and lease is not None
+        and lease.get("owner") == EXTERNAL_OWNER_MODE
+        and lease.get("stop_settling")
+    ):
+        stop_time = _as_utc_datetime(lease.get("stop_command_at"))
+        if observed_time is None or (
+            stop_time is not None and observed_time <= stop_time
+        ):
+            return False
+        release_ev_ownership(
+            hass,
+            config_entry,
+            lease_id,
+            reason="PowerSync stop confirmed by vehicle telemetry",
+            command="stop_observed",
+            source="powersync",
+        )
+        return True
+    if lease is not None and lease.get("owner") == EXTERNAL_OWNER_MODE:
+        return False
+
+    commands = get_ev_last_commands(hass, config_entry)
+    for candidate_id in _candidate_vehicle_ids(vehicle_id, commands):
+        command = commands.get(candidate_id)
+        if not isinstance(command, dict) or command.get("source") != "powersync":
+            continue
+        command_name = str(command.get("command") or "")
+        if not (
+            command.get("success")
+            and (command_name == "stop" or command_name.startswith("stop_"))
+            and not command.get("settled_at")
+        ):
+            continue
+        command_time = _as_utc_datetime(command.get("at"))
+        if observed_time is None or (
+            command_time is not None and observed_time <= command_time
+        ):
+            continue
+        command["settled_at"] = _now_iso()
+        _schedule_runtime_save(hass, config_entry)
+        return True
+    return False
 
 
 def release_external_ev_ownership(

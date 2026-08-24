@@ -455,6 +455,90 @@ def test_new_observation_after_powersync_command_claims_external_ownership():
     _lease_id, lease = ev_ownership.get_ev_ownership(hass, _Entry(), vehicle_id)
     assert lease["owner"] == "external"
     assert lease["session_id"] == "observed-session"
+    assert lease["stop_settling"] is True
+
+
+def test_external_start_after_confirmed_powersync_stop_is_sticky():
+    hass = _Hass()
+    vehicle_id = "5YJTEST0000000001"
+    command = ev_ownership.record_ev_command(
+        hass,
+        _Entry(),
+        vehicle_id,
+        command="stop",
+        success=True,
+    )
+    command_time = datetime.fromisoformat(command["at"])
+
+    assert ev_ownership.confirm_powersync_ev_stop(
+        hass,
+        _Entry(),
+        vehicle_id,
+        observed_at=command_time + timedelta(seconds=1),
+    ) is True
+    assert ev_ownership.ensure_external_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+        observed_at=command_time + timedelta(seconds=2),
+    ) is True
+
+    _lease_id, lease = ev_ownership.get_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+    )
+    assert lease["owner"] == "external"
+    assert "stop_settling" not in lease
+    assert ev_ownership.confirm_powersync_ev_stop(
+        hass,
+        _Entry(),
+        vehicle_id,
+        observed_at=command_time + timedelta(seconds=3),
+    ) is False
+    assert ev_ownership.get_ev_ownership(hass, _Entry(), vehicle_id)[1] is lease
+
+
+def test_new_external_session_promotes_provisional_stop_lease_to_sticky():
+    hass = _Hass()
+    vehicle_id = "5YJTEST0000000001"
+    command = ev_ownership.record_ev_command(
+        hass,
+        _Entry(),
+        vehicle_id,
+        command="stop",
+        success=True,
+    )
+    command_time = datetime.fromisoformat(command["at"])
+
+    assert ev_ownership.ensure_external_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+        session_id="delayed-readback",
+        observed_at=command_time + timedelta(seconds=1),
+    ) is True
+    assert ev_ownership.ensure_external_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+        session_id="genuine-external-session",
+        observed_at=command_time + timedelta(seconds=2),
+    ) is True
+
+    _lease_id, lease = ev_ownership.get_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+    )
+    assert lease["session_id"] == "genuine-external-session"
+    assert "stop_settling" not in lease
+    assert ev_ownership.confirm_powersync_ev_stop(
+        hass,
+        _Entry(),
+        vehicle_id,
+        observed_at=command_time + timedelta(seconds=3),
+    ) is False
 
 
 def test_fresh_recovered_powersync_session_blocks_external_claim():

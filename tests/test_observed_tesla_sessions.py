@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -24,9 +25,11 @@ from power_sync.automations.observed_tesla_sessions import (  # noqa: E402
     ObservedTeslaSessionTracker,
 )
 from power_sync.automations.ev_ownership import (  # noqa: E402
+    can_claim_ev_ownership,
     claim_ev_ownership,
     get_ev_last_commands,
     get_ev_ownership,
+    record_ev_command,
 )
 
 
@@ -206,6 +209,58 @@ def test_observed_tesla_charge_ends_after_idle_confirmation():
     vehicles[0]["is_connected"] = False
     asyncio.run(tracker.poll())
     assert get_ev_ownership(hass, _Entry(), VIN) == (None, None)
+
+
+def test_delayed_charge_readback_after_powersync_stop_does_not_stick_external():
+    """A settled PowerSync stop must not poison the rest of the plug session."""
+    manager = _SessionManager()
+    hass = _Hass()
+    vehicles = [{
+        "vehicle_id": VIN,
+        "ev_power_kw": 3.8,
+        "ev_soc": 66,
+        "is_charging": True,
+        "is_connected": True,
+    }]
+    tracker = _tracker(manager, vehicles, hass)
+    command = record_ev_command(
+        hass,
+        _Entry(),
+        VIN,
+        command="stop",
+        success=True,
+        reason="HA restart teardown",
+    )
+    vehicles[0]["_charging_observed_at"] = (
+        datetime.fromisoformat(command["at"]) + timedelta(seconds=1)
+    ).isoformat()
+
+    # TESSY can continue echoing Charging for several minutes after the local
+    # charger has accepted PowerSync's stop.  Protect that ambiguous interval,
+    # but do not turn it into a sticky external lease.
+    asyncio.run(tracker.poll())
+    _lease_id, lease = get_ev_ownership(hass, _Entry(), VIN)
+    assert lease["owner"] == "external"
+    assert lease["stop_settling"] is True
+
+    vehicles[0].update({
+        "ev_power_kw": 0.0,
+        "is_charging": False,
+    })
+    asyncio.run(tracker.poll())
+    assert get_ev_ownership(hass, _Entry(), VIN)[1]["stop_settling"] is True
+    asyncio.run(tracker.poll())
+
+    assert get_ev_ownership(hass, _Entry(), VIN) == (None, None)
+    allowed, _lease_id, _lease, reason = can_claim_ev_ownership(
+        hass,
+        _Entry(),
+        VIN,
+        owner_mode="smart_schedule",
+        allow_takeover=True,
+    )
+    assert allowed is True
+    assert reason is None
 
 
 def test_external_tesla_ownership_is_vin_scoped():

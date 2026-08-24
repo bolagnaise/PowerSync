@@ -112,8 +112,21 @@ class ObservedTeslaSessionTracker:
         session = manager.active_sessions.get(vehicle_id)
         return bool(session and getattr(session, "mode", None) not in OBSERVED_SESSION_MODES)
 
-    async def _mark_idle(self, vehicle_id: str, end_soc: int | None = None) -> None:
-        if not self._active_observed_session(self._session_manager, vehicle_id):
+    async def _mark_idle(
+        self,
+        vehicle_id: str,
+        end_soc: int | None = None,
+        observed_at: Any = None,
+    ) -> None:
+        observed_session = self._active_observed_session(
+            self._session_manager,
+            vehicle_id,
+        )
+        from .ev_ownership import get_ev_ownership
+
+        _lease_id, lease = get_ev_ownership(self._hass, self._entry, vehicle_id)
+        stop_settling = bool(lease and lease.get("stop_settling"))
+        if observed_session is None and not stop_settling:
             self._idle_counts.pop(vehicle_id, None)
             return
 
@@ -122,13 +135,23 @@ class ObservedTeslaSessionTracker:
         if idle_count < self._idle_polls_to_end:
             return
 
-        await self._session_manager.end_session(
+        from .ev_ownership import confirm_powersync_ev_stop
+
+        confirm_powersync_ev_stop(
+            self._hass,
+            self._entry,
             vehicle_id,
-            reason="observed_charge_stopped",
-            end_soc=end_soc,
+            observed_at=observed_at,
         )
+        if observed_session is not None:
+            await self._session_manager.end_session(
+                vehicle_id,
+                reason="observed_charge_stopped",
+                end_soc=end_soc,
+            )
         self._idle_counts.pop(vehicle_id, None)
-        _LOGGER.info("Observed Tesla charging session ended for %s", vehicle_id)
+        if observed_session is not None:
+            _LOGGER.info("Observed Tesla charging session ended for %s", vehicle_id)
 
     def _reconcile_vehicle_ownership(
         self,
@@ -161,12 +184,13 @@ class ObservedTeslaSessionTracker:
                 reason="Observed Tesla charging started outside PowerSync",
                 observed_at=vehicle.get("_charging_observed_at") or vehicle.get("_observed_at"),
             )
-        elif vehicle.get("is_connected") is False:
-            release_external_ev_ownership(
-                self._hass,
-                self._entry,
-                vehicle_id,
-            )
+        else:
+            if vehicle.get("is_connected") is False:
+                release_external_ev_ownership(
+                    self._hass,
+                    self._entry,
+                    vehicle_id,
+                )
 
     async def reconcile_ownership(self) -> None:
         """Reconcile external leases before EV automation decisions run."""
@@ -203,7 +227,14 @@ class ObservedTeslaSessionTracker:
 
             if not is_charging:
                 self._reconcile_vehicle_ownership(vehicle, vehicle_id)
-                await self._mark_idle(vehicle_id, end_soc=soc)
+                await self._mark_idle(
+                    vehicle_id,
+                    end_soc=soc,
+                    observed_at=(
+                        vehicle.get("_charging_observed_at")
+                        or vehicle.get("_observed_at")
+                    ),
+                )
                 continue
 
             self._idle_counts[vehicle_id] = 0
