@@ -17290,6 +17290,58 @@ class ChargingScheduleView(HomeAssistantView):
                 return entry_data["automation_store"]
         return None
 
+    async def _get_vehicle_planning_charger_power_kw(
+        self,
+        vehicle_id: str,
+        configured_power_kw: float,
+    ) -> float:
+        """Use the executor's VIN-scoped live EVSE limit for plan previews."""
+        from .automations.ev_charging_planner import get_auto_schedule_executor
+
+        executor = get_auto_schedule_executor()
+        if executor is None or getattr(executor, "hass", None) is not self._hass:
+            return configured_power_kw
+
+        try:
+            settings = executor.get_settings(vehicle_id)
+            executor._sync_charger_params_from_vehicle_configs(
+                vehicle_id,
+                settings,
+            )
+            settings_max_amps = float(settings.max_charge_amps)
+            settings_voltage = float(settings.voltage)
+            settings_phases = int(settings.phases)
+            settings_power_kw = (
+                settings_max_amps
+                * settings_voltage
+                * settings_phases
+                / 1000.0
+            )
+            if settings_power_kw > 0:
+                configured_power_kw = settings_power_kw
+            capability = await executor._resolve_effective_charger_capability(
+                vehicle_id,
+                settings,
+            )
+            if not capability or not capability.get("capability_known"):
+                # Match AutoScheduleExecutor._regenerate_plan(): an away,
+                # unplugged, or sleeping Tesla retains configured planning
+                # power while the command path remains fail-closed.
+                return configured_power_kw
+
+            max_amps = float(capability["max_charge_amps"])
+            voltage = float(capability["voltage"])
+            phases = int(capability["phases"])
+            live_power_kw = max_amps * voltage * phases / 1000.0
+            if live_power_kw > 0:
+                return live_power_kw
+        except (AttributeError, KeyError, TypeError, ValueError):
+            # Preview generation must remain available for lightweight,
+            # legacy, and non-Tesla loadpoints that have no live resolver.
+            pass
+
+        return configured_power_kw
+
     async def _get_vehicle_soc(self, vehicle_id: str) -> int:
         """Get current SoC for a vehicle from Home Assistant entities.
 
@@ -17494,6 +17546,16 @@ class ChargingScheduleView(HomeAssistantView):
                         phases = vc.get("phases", 1)
                         charger_power_kw = (max_amps * voltage * phases) / 1000
                         break
+
+            # The app's preview endpoint historically stopped at the stored
+            # charger ceiling above. That made a Tesla moved from a 32A Wall
+            # Connector to a 10A UMC display a late 32A plan even though the
+            # executor had already adopted the live 10A pilot. Resolve through
+            # the same VIN-scoped capability path used by execution.
+            charger_power_kw = await self._get_vehicle_planning_charger_power_kw(
+                vehicle_id,
+                charger_power_kw,
+            )
 
             from .automations.ev_vehicle_capacity import resolve_ev_battery_capacity
             from .const import CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH

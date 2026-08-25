@@ -394,6 +394,149 @@ def test_schedule_view_uses_same_planner_as_vehicle_scoped_executor(monkeypatch)
     assert namespace["_get_planner"](view) is executor_planner
 
 
+def test_schedule_view_preview_uses_live_vehicle_charger_capability(monkeypatch):
+    """The display plan must use the same UMC pilot limit as execution."""
+    tree = ast.parse(INIT_PATH.read_text())
+    method = next(
+        item
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ChargingScheduleView"
+        for item in node.body
+        if (
+            isinstance(item, ast.AsyncFunctionDef)
+            and item.name == "_get_vehicle_planning_charger_power_kw"
+        )
+    )
+    namespace = {"__package__": "power_sync"}
+    exec(
+        compile(ast.Module(body=[method], type_ignores=[]), str(INIT_PATH), "exec"),
+        namespace,
+    )
+
+    hass = SimpleNamespace()
+
+    class _VehicleScopedExecutor:
+        def __init__(self):
+            self.hass = hass
+            self.calls = []
+
+        def get_settings(self, vehicle_id):
+            self.calls.append(("settings", vehicle_id))
+            return SimpleNamespace(max_charge_amps=32, voltage=230, phases=1)
+
+        def _sync_charger_params_from_vehicle_configs(self, vehicle_id, settings):
+            self.calls.append(("sync", vehicle_id, settings.max_charge_amps))
+
+        async def _resolve_effective_charger_capability(self, vehicle_id, settings):
+            self.calls.append(("capability", vehicle_id, settings.max_charge_amps))
+            return {
+                "capability_known": True,
+                "max_charge_amps": 10,
+                "voltage": 230,
+                "phases": 1,
+                "max_charge_amps_source": "active_charger",
+            }
+
+    executor = _VehicleScopedExecutor()
+    monkeypatch.setattr(ev_planner, "_auto_schedule_executor", executor)
+
+    view = SimpleNamespace(_hass=hass)
+    power_kw = asyncio.run(
+        namespace["_get_vehicle_planning_charger_power_kw"](
+            view,
+            "5YJTEST0000000001",
+            7.36,
+        )
+    )
+
+    assert power_kw == pytest.approx(2.3)
+    assert executor.calls == [
+        ("settings", "5YJTEST0000000001"),
+        ("sync", "5YJTEST0000000001", 32),
+        ("capability", "5YJTEST0000000001", 32),
+    ]
+
+
+def test_schedule_view_preview_keeps_configured_power_without_live_capability(
+    monkeypatch,
+):
+    """Away/asleep vehicles retain configured planning power like execution."""
+    tree = ast.parse(INIT_PATH.read_text())
+    method = next(
+        item
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ChargingScheduleView"
+        for item in node.body
+        if (
+            isinstance(item, ast.AsyncFunctionDef)
+            and item.name == "_get_vehicle_planning_charger_power_kw"
+        )
+    )
+    namespace = {"__package__": "power_sync"}
+    exec(
+        compile(ast.Module(body=[method], type_ignores=[]), str(INIT_PATH), "exec"),
+        namespace,
+    )
+
+    hass = SimpleNamespace()
+
+    class _VehicleScopedExecutor:
+        def __init__(self):
+            self.hass = hass
+
+        def get_settings(self, _vehicle_id):
+            return SimpleNamespace(max_charge_amps=32, voltage=230, phases=1)
+
+        def _sync_charger_params_from_vehicle_configs(self, _vehicle_id, _settings):
+            return None
+
+        async def _resolve_effective_charger_capability(self, _vehicle_id, _settings):
+            return {
+                "capability_known": False,
+                "max_charge_amps": 5,
+                "voltage": 230,
+                "phases": 1,
+                "max_charge_amps_source": "safe_unknown_charger",
+            }
+
+    monkeypatch.setattr(
+        ev_planner,
+        "_auto_schedule_executor",
+        _VehicleScopedExecutor(),
+    )
+
+    view = SimpleNamespace(_hass=hass)
+    power_kw = asyncio.run(
+        namespace["_get_vehicle_planning_charger_power_kw"](
+            view,
+            "5YJTEST0000000001",
+            7.0,
+        )
+    )
+
+    assert power_kw == pytest.approx(7.36)
+
+
+def test_schedule_view_get_routes_preview_through_live_charger_capability():
+    """The public preview endpoint must not bypass its live-capability helper."""
+    tree = ast.parse(INIT_PATH.read_text())
+    method = next(
+        item
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ChargingScheduleView"
+        for item in node.body
+        if isinstance(item, ast.AsyncFunctionDef) and item.name == "get"
+    )
+
+    assert any(
+        isinstance(node, ast.Await)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "_get_vehicle_planning_charger_power_kw"
+        for node in ast.walk(method)
+    )
+
+
 def test_two_identified_vehicles_keep_independent_capacity_and_energy():
     planner = _planner()
     async def build_plans():
