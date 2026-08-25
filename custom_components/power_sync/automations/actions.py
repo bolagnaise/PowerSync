@@ -942,6 +942,7 @@ _TESLA_NON_CHARGING_STATES = frozenset(
     }
 )
 _TESLA_RESTART_TELEMETRY_GRACE_SECONDS = 90
+_TESLA_DYNAMIC_RESTART_RETRY_SECONDS = 300
 # Cloud-backed Tesla providers can acknowledge the start command before their
 # charging-state and measured-draw entities catch up. Production telemetry has
 # shown the physical transition arriving just after the old 90-second cutoff,
@@ -1035,6 +1036,70 @@ def _tesla_restart_telemetry_pending(state: Dict[str, Any]) -> bool:
     return (
         now - started_at
     ).total_seconds() < _TESLA_RESTART_TELEMETRY_GRACE_SECONDS
+
+
+def _tesla_dynamic_restart_due(state: Dict[str, Any]) -> bool:
+    """Bound retries after an owned Tesla session stops unexpectedly."""
+    attempted_at = state.get("last_physical_restart_attempt_at")
+    if not isinstance(attempted_at, datetime):
+        return True
+    now = (
+        datetime.now(attempted_at.tzinfo)
+        if attempted_at.tzinfo
+        else datetime.now()
+    )
+    return (
+        now - attempted_at
+    ).total_seconds() >= _TESLA_DYNAMIC_RESTART_RETRY_SECONDS
+
+
+async def _reconcile_stopped_smart_schedule_tesla(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+    state: Dict[str, Any],
+) -> bool:
+    """Replace stale commanded current with fresh stopped/zero-A telemetry."""
+    params = state.get("params") or {}
+    current_amps = int(state.get("current_amps", 0) or 0)
+    if (
+        params.get("charger_type", "tesla") != "tesla"
+        or params.get("owner_mode") != "smart_schedule"
+        or current_amps <= 0
+        or _tesla_restart_telemetry_pending(state)
+    ):
+        return False
+
+    observed_amps = await _observed_owned_charge_amps(
+        hass,
+        config_entry,
+        vehicle_id,
+        params,
+    )
+    charging_state = _get_tesla_charging_state(
+        hass,
+        vehicle_id,
+        (
+            params.get("tesla_charging_state_entity")
+            or params.get("charger_status_entity")
+        ),
+    )
+    if observed_amps is None or observed_amps > 0.5 or charging_state != "stopped":
+        return False
+
+    state["physical_restart_required"] = True
+    state["current_amps"] = 0
+    state["target_amps"] = 0
+    state["charging_started"] = False
+    _LOGGER.warning(
+        "Dynamic EV: Tesla %s reports stopped at %.1fA while the Smart "
+        "Schedule controller still holds a %sA command; restarting the "
+        "active deadline session",
+        vehicle_id,
+        observed_amps,
+        current_amps,
+    )
+    return True
 
 
 def _tesla_start_confirmation_entity_ids(
@@ -7851,6 +7916,14 @@ async def _update_smart_schedule_battery_target_group(
             return
         if not _plan_is_current():
             return
+        await _reconcile_stopped_smart_schedule_tesla(
+            hass,
+            config_entry,
+            vehicle_id,
+            state,
+        )
+        if not _plan_is_current():
+            return
 
     max_grid_limits = []
     for _vehicle_id, state in sessions:
@@ -8008,6 +8081,16 @@ async def _update_smart_schedule_battery_target_group(
         target_amps = targets[vehicle_id]
         if not _plan_still_owns_vehicle(vehicle_id):
             return False
+        physical_restart_required = bool(
+            state.get("physical_restart_required")
+        )
+        if (
+            current_amps <= 0 < target_amps
+            and physical_restart_required
+            and not _tesla_dynamic_restart_due(state)
+        ):
+            state["target_amps"] = current_amps
+            return True
 
         amps_set = await _set_vehicle_amps(
             hass,
@@ -8026,6 +8109,10 @@ async def _update_smart_schedule_battery_target_group(
             and params.get("charger_type", "tesla") == "tesla"
             and current_amps <= 0 < target_amps
         ):
+            if physical_restart_required:
+                state["last_physical_restart_attempt_at"] = (
+                    datetime.now().astimezone()
+                )
             start_params = dict(params)
             start_params["vehicle_vin"] = (
                 vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None
@@ -8044,6 +8131,9 @@ async def _update_smart_schedule_battery_target_group(
             state["current_amps"] = target_amps
             state["target_amps"] = target_amps
             state["charging_started"] = target_amps > 0
+            if current_amps <= 0 < target_amps:
+                state["last_start_command_at"] = datetime.now().astimezone()
+                state.pop("physical_restart_required", None)
             return True
 
         if _plan_still_owns_vehicle(vehicle_id):
@@ -10409,6 +10499,14 @@ async def _dynamic_ev_update(
         or params.get("dynamic_mode")
         or ""
     ).lower()
+    if await _reconcile_stopped_smart_schedule_tesla(
+        hass,
+        config_entry,
+        vehicle_id,
+        state,
+    ):
+        current_amps = 0
+    physical_restart_required = bool(state.get("physical_restart_required"))
     expected_ownership = state.get("ownership")
     scheduled_floor_active = owner_mode == "scheduled" and not no_grid_import
 
@@ -10457,18 +10555,55 @@ async def _dynamic_ev_update(
         fixed_amps = max(min_amps, min(max_amps, fixed_charge_amps))
         state["target_amps"] = fixed_amps
         if abs(fixed_amps - current_amps) >= 1:
+            if (
+                physical_restart_required
+                and not _tesla_dynamic_restart_due(state)
+            ):
+                return
             if not _session_is_current():
                 return
             _LOGGER.info(
                 f"⚡ Dynamic EV: Holding fixed charge rate {fixed_amps}A "
                 f"(current={current_amps}A)"
             )
-            success = await _set_vehicle_amps(hass, config_entry, vehicle_id, fixed_amps, params)
+            amps_set = await _set_vehicle_amps(
+                hass,
+                config_entry,
+                vehicle_id,
+                fixed_amps,
+                params,
+            )
+            success = amps_set
+            if amps_set and physical_restart_required:
+                state["last_physical_restart_attempt_at"] = (
+                    datetime.now().astimezone()
+                )
+                start_params = dict(params)
+                start_params["vehicle_vin"] = (
+                    vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None
+                )
+                start_params["amps"] = fixed_amps
+                success = await _action_start_ev_charging(
+                    hass,
+                    config_entry,
+                    start_params,
+                    context=None,
+                )
+                if success:
+                    state["last_start_command_at"] = datetime.now().astimezone()
+                    state["charging_started"] = True
+                    state.pop("physical_restart_required", None)
+                else:
+                    _LOGGER.warning(
+                        "Dynamic EV: Failed to restart stopped Tesla charging "
+                        "at fixed %sA",
+                        fixed_amps,
+                    )
             if success:
                 applied_amps = _phase_applied_amps(params, fixed_amps)
                 state["current_amps"] = applied_amps
                 state["target_amps"] = applied_amps
-            else:
+            elif not amps_set:
                 _LOGGER.warning(f"Dynamic EV: Failed to set fixed amps to {fixed_amps}A")
         return
 
@@ -10683,6 +10818,12 @@ async def _dynamic_ev_update(
             and current_amps <= 0
             and new_amps > 0
         )
+        if (
+            tesla_restart_required
+            and physical_restart_required
+            and not _tesla_dynamic_restart_due(state)
+        ):
+            return
         if not _session_still_owns_vehicle():
             _LOGGER.debug(
                 "Dynamic EV: Session changed before applying %sA to %s",
@@ -10713,6 +10854,10 @@ async def _dynamic_ev_update(
                 vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None
             )
             start_params["amps"] = applied_amps
+            if physical_restart_required:
+                state["last_physical_restart_attempt_at"] = (
+                    datetime.now().astimezone()
+                )
             success = await _action_start_ev_charging(
                 hass,
                 config_entry,
@@ -10727,6 +10872,10 @@ async def _dynamic_ev_update(
         if success:
             state["current_amps"] = applied_amps
             state["target_amps"] = applied_amps
+            if tesla_restart_required:
+                state["last_start_command_at"] = datetime.now().astimezone()
+                state["charging_started"] = True
+                state.pop("physical_restart_required", None)
         elif not amps_set:
             _LOGGER.warning(f"Dynamic EV: Failed to set amps to {new_amps}A")
 

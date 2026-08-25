@@ -6919,6 +6919,246 @@ def test_dynamic_update_holds_fixed_deadline_rate(monkeypatch):
     assert set_amps_calls == [32]
 
 
+def test_dynamic_update_restarts_stopped_tesla_with_stale_commanded_amps(
+    monkeypatch,
+):
+    """A 32 A command must not mask fresh stopped/0 A Tesla telemetry."""
+    vehicle_id = "5YJTEST00000000R4"
+    set_amps_calls: list[int] = []
+    start_calls: list[int] = []
+
+    async def keep_session(*args, **kwargs):
+        return False
+
+    async def keep_capability(*args, **kwargs):
+        return True
+
+    async def observed_current(*args, **kwargs):
+        return 0.0
+
+    async def live_status(*args, **kwargs):
+        return {
+            "battery_power": 0,
+            "grid_power": 0,
+            "solar_power": 0,
+            "load_power": 0,
+            "ev_power": 0,
+            "battery_soc": 50,
+        }
+
+    async def fake_set_vehicle_amps(
+        hass, config_entry, selected_vehicle_id, amps, params
+    ):
+        assert selected_vehicle_id == vehicle_id
+        set_amps_calls.append(amps)
+        return True
+
+    async def fake_start(hass, config_entry, params, context=None):
+        assert params["vehicle_vin"] == vehicle_id
+        start_calls.append(params["amps"])
+        return True
+
+    monkeypatch.setattr(actions, "_release_dynamic_tesla_if_away", keep_session)
+    monkeypatch.setattr(
+        actions,
+        "_clear_ble_dynamic_session_if_unplugged",
+        keep_session,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_refresh_dynamic_tesla_charger_capability",
+        keep_capability,
+    )
+    monkeypatch.setattr(actions, "_observed_owned_charge_amps", observed_current)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", live_status)
+    monkeypatch.setattr(
+        actions,
+        "_optimizer_planned_ev_charge_kw",
+        lambda *args, **kwargs: 7.36,
+    )
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+
+    stopped_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+    hass = _Hass(
+        [
+            _State(
+                "sensor.tessy_charging",
+                "stopped",
+                last_changed=stopped_at,
+            )
+        ]
+    )
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_id: {
+            "active": True,
+            "charging_started": True,
+            "current_amps": 32,
+            "target_amps": 32,
+            "last_start_command_at": stopped_at - timedelta(minutes=10),
+            "params": {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_id,
+                "tesla_charging_state_entity": "sensor.tessy_charging",
+                "min_charge_amps": 1,
+                "max_charge_amps": 32,
+                "target_battery_charge_kw": 0,
+                "max_grid_import_kw": 12.5,
+                "voltage": 230,
+                "phases": 1,
+            },
+        }
+    }
+
+    asyncio.run(
+        actions._dynamic_ev_update(
+            hass,
+            _Entry(),
+            "entry-1",
+            vehicle_id,
+        )
+    )
+
+    assert set_amps_calls == [32]
+    assert start_calls == [32]
+    state = actions._dynamic_ev_state["entry-1"][vehicle_id]
+    assert state["current_amps"] == 32
+    assert state["target_amps"] == 32
+    assert state["charging_started"] is True
+
+
+def test_dynamic_multi_tesla_restarts_only_stopped_owned_loadpoint(monkeypatch):
+    """Two Wall Connector sessions reconcile their own VIN telemetry."""
+    vehicle_ids = ("5YJTEST00000000M1", "5YJTEST00000000M2")
+    status_entities = {
+        vehicle_ids[0]: "sensor.first_tesla_charging",
+        vehicle_ids[1]: "sensor.second_tesla_charging",
+    }
+    observed_amps = {vehicle_ids[0]: 0.0, vehicle_ids[1]: 16.0}
+    set_amps_calls: list[tuple[str, int]] = []
+    start_calls: list[tuple[str, int]] = []
+
+    async def keep_session(*args, **kwargs):
+        return False
+
+    async def keep_capability(*args, **kwargs):
+        return True
+
+    async def observed_current(hass, config_entry, vehicle_id, params):
+        return observed_amps[vehicle_id]
+
+    async def live_status(*args, **kwargs):
+        return {
+            "battery_power": 0,
+            "grid_power": 3680,
+            "solar_power": 0,
+            "load_power": 3680,
+            "ev_power": 3680,
+            "battery_soc": 50,
+        }
+
+    async def fake_set_vehicle_amps(
+        hass, config_entry, vehicle_id, amps, params
+    ):
+        set_amps_calls.append((vehicle_id, amps))
+        return True
+
+    async def fake_start(hass, config_entry, params, context=None):
+        start_calls.append((params["vehicle_vin"], params["amps"]))
+        return True
+
+    monkeypatch.setattr(actions, "_release_dynamic_tesla_if_away", keep_session)
+    monkeypatch.setattr(
+        actions,
+        "_refresh_dynamic_tesla_charger_capability",
+        keep_capability,
+    )
+    monkeypatch.setattr(actions, "_observed_owned_charge_amps", observed_current)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", live_status)
+    monkeypatch.setattr(
+        actions,
+        "_optimizer_planned_ev_charge_kw",
+        lambda *args, **kwargs: 7.36,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_optimizer_planned_battery_charge_kw",
+        lambda *args, **kwargs: 0.0,
+    )
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+
+    ev_session = types.ModuleType("power_sync.automations.ev_charging_session")
+    ev_session.get_session_manager = lambda: None
+    monkeypatch.setitem(
+        sys.modules,
+        "power_sync.automations.ev_charging_session",
+        ev_session,
+    )
+
+    stopped_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+    hass = _Hass(
+        [
+            _State(
+                status_entities[vehicle_ids[0]],
+                "stopped",
+                last_changed=stopped_at,
+            ),
+            _State(
+                status_entities[vehicle_ids[1]],
+                "charging",
+                last_changed=stopped_at,
+            ),
+        ]
+    )
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_id: {
+            "active": True,
+            "charging_started": True,
+            "current_amps": 32 if index == 0 else 16,
+            "target_amps": 32 if index == 0 else 16,
+            "last_start_command_at": stopped_at - timedelta(minutes=10),
+            "ownership": {"lease": vehicle_id},
+            "priority": 1,
+            "params": {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_id,
+                "tesla_charging_state_entity": status_entities[vehicle_id],
+                "min_charge_amps": 1,
+                "max_charge_amps": 32,
+                "target_battery_charge_kw": 0,
+                "max_grid_import_kw": 20,
+                "voltage": 230,
+                "phases": 1,
+            },
+        }
+        for index, vehicle_id in enumerate(vehicle_ids)
+    }
+
+    sessions = list(actions._dynamic_ev_state["entry-1"].items())
+    asyncio.run(
+        actions._update_smart_schedule_battery_target_group(
+            hass,
+            _Entry(),
+            "entry-1",
+            sessions,
+        )
+    )
+
+    assert start_calls == [(vehicle_ids[0], 32)]
+    assert (vehicle_ids[0], 32) in set_amps_calls
+    assert actions._dynamic_ev_state["entry-1"][vehicle_ids[0]][
+        "charging_started"
+    ] is True
+    assert "physical_restart_required" not in actions._dynamic_ev_state[
+        "entry-1"
+    ][vehicle_ids[0]]
+
+
 def test_scheduled_dynamic_update_uses_solax_kilowatt_snapshot(monkeypatch):
     """Generic Scheduled dynamic control should consume the canonical SolaX coordinator."""
     set_amps_calls: list[int] = []
