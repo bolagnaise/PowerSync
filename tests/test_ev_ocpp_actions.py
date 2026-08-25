@@ -586,6 +586,11 @@ def test_tesla_active_charger_capability_uses_exact_wall_connector_over_stale_bl
         "phases": 3,
         "allow_stale_entity_max_override": True,
         "prefer_vin_scoped_current_control": True,
+        "active_wall_connector_serial": "WC-SERIAL-A",
+        "wall_connector_connected_observed_at": None,
+        "capability_observed_at": None,
+        "provider_max_charge_amps": [32],
+        "capability_refresh_required": False,
     }
 
     configured_limit = asyncio.run(
@@ -601,6 +606,89 @@ def test_tesla_active_charger_capability_uses_exact_wall_connector_over_stale_bl
         "active_wall_connector_vehicle_and_configured_limit"
     )
     assert configured_limit["allow_stale_entity_max_override"] is True
+
+
+def test_tesla_active_charger_capability_marks_pre_connection_pilot_stale(
+    monkeypatch,
+):
+    """A pilot observation from before the exact plug episode needs refresh."""
+    now = datetime.now(timezone.utc)
+    hass, vin_a, _vin_b = _tesla_capability_hass(first_max=10)
+    hass.states.get("binary_sensor.car_a_charge_cable").last_changed = now
+    hass.states.get("binary_sensor.car_a_charge_cable").last_updated = now
+    hass.states.get("number.car_a_charge_current").last_changed = (
+        now - timedelta(minutes=5)
+    )
+    hass.states.get("number.car_a_charge_current").last_updated = (
+        now - timedelta(minutes=5)
+    )
+    hass.states._states.update({
+        "binary_sensor.garage_wall_connector_vehicle_connected": _State(
+            "binary_sensor.garage_wall_connector_vehicle_connected",
+            "on",
+            last_changed=now,
+        ),
+        "sensor.garage_wall_connector_vehicle": _State(
+            "sensor.garage_wall_connector_vehicle",
+            vin_a,
+            last_changed=now,
+        ),
+    })
+    hass.entity_registry.entities.update({
+        "binary_sensor.garage_wall_connector_vehicle_connected": SimpleNamespace(
+            entity_id="binary_sensor.garage_wall_connector_vehicle_connected",
+            device_id="garage-wall-connector-local",
+            platform="tesla_wall_connector",
+        ),
+        "sensor.garage_wall_connector_vehicle": SimpleNamespace(
+            entity_id="sensor.garage_wall_connector_vehicle",
+            device_id="garage-wall-connector-fleet",
+            platform="tesla_fleet",
+        ),
+    })
+    hass.device_registry.devices.update({
+        "garage-wall-connector-local": SimpleNamespace(
+            id="garage-wall-connector-local",
+            identifiers={("tesla_wall_connector", "WC-SERIAL-A")},
+            serial_number="WC-SERIAL-A",
+        ),
+        "garage-wall-connector-fleet": SimpleNamespace(
+            id="garage-wall-connector-fleet",
+            identifiers={("tesla_fleet", "wall-connector-a")},
+            serial_number="WC-SERIAL-A",
+        ),
+    })
+    monkeypatch.setattr(
+        actions,
+        "_resolve_ble_prefix_for_vehicle",
+        lambda _hass, _entry, _vin: None,
+    )
+
+    stale = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass, _Entry(), vin_a, configured_max_amps=32
+        )
+    )
+
+    assert stale["active_wall_connector_serial"] == "WC-SERIAL-A"
+    assert stale["wall_connector_connected_observed_at"] == now.timestamp()
+    assert stale["provider_max_charge_amps"] == [10]
+    assert stale["capability_refresh_required"] is True
+
+    refreshed_at = now + timedelta(seconds=1)
+    current = hass.states.get("number.car_a_charge_current")
+    current.state = "32"
+    current.attributes["max"] = 32
+    current.last_changed = refreshed_at
+    current.last_updated = refreshed_at
+    fresh = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass, _Entry(), vin_a, configured_max_amps=32
+        )
+    )
+
+    assert fresh["max_charge_amps"] == 32
+    assert fresh["capability_refresh_required"] is False
 
 
 def test_tesla_active_charger_capability_keeps_ble_cap_for_conflicting_connector_vins(

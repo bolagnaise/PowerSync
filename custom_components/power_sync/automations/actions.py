@@ -9723,6 +9723,7 @@ def _tesla_source_capability(
     phases: list[int] = []
     measured_current: Optional[float] = None
     measured_power_kw: Optional[float] = None
+    capability_observed_at: Optional[float] = None
 
     for entity_id in entity_ids:
         state = hass.states.get(entity_id)
@@ -9736,6 +9737,12 @@ def _tesla_source_capability(
             cap = _coerce_positive_int(state.attributes.get("max"))
             if cap is not None:
                 caps.append(cap)
+                observed_at = _tesla_connection_observation_timestamp(state)
+                if observed_at is not None:
+                    capability_observed_at = max(
+                        capability_observed_at or observed_at,
+                        observed_at,
+                    )
             continue
         if entity_id.startswith("sensor.") and re.search(
             r"_charge_current_request_max(?:_\d+)?$",
@@ -9744,6 +9751,12 @@ def _tesla_source_capability(
             cap = _coerce_positive_int(state.state)
             if cap is not None:
                 caps.append(cap)
+                observed_at = _tesla_connection_observation_timestamp(state)
+                if observed_at is not None:
+                    capability_observed_at = max(
+                        capability_observed_at or observed_at,
+                        observed_at,
+                    )
             continue
         if entity_id.startswith("sensor.") and re.search(
             r"_(?:charger_voltage|charge_voltage)(?:_\d+)?$",
@@ -9787,6 +9800,7 @@ def _tesla_source_capability(
         "max_amps": min(caps) if caps else None,
         "voltage": min(voltages) if voltages else None,
         "phases": phases[0] if phases and len(set(phases)) == 1 else None,
+        "capability_observed_at": capability_observed_at,
     }
 
 
@@ -9796,12 +9810,12 @@ def _tesla_wall_connector_serial(device: Any) -> Optional[str]:
     return serial or None
 
 
-def _exact_tesla_wall_connector_vehicle_vins(
+def _exact_tesla_wall_connector_vehicle_associations(
     hass: HomeAssistant,
     entity_registry: Any,
     device_registry: Any,
-) -> set[str]:
-    """Return VINs uniquely paired to their own connected Wall Connector.
+) -> dict[str, dict[str, Any]]:
+    """Return exact VIN-to-connected-Wall-Connector associations.
 
     Fleet/Teslemetry and the local Wall Connector integration create separate
     HA devices, but expose the same connector serial. Correlating on that
@@ -9812,9 +9826,9 @@ def _exact_tesla_wall_connector_vehicle_vins(
         sensor_states = hass.states.async_all("sensor")
         binary_states = hass.states.async_all("binary_sensor")
     except (AttributeError, TypeError):
-        return set()
+        return {}
 
-    connected_serials: set[str] = set()
+    connected_serials: dict[str, Optional[float]] = {}
     for state in binary_states:
         entity_id = str(getattr(state, "entity_id", "") or "").lower()
         if (
@@ -9837,9 +9851,25 @@ def _exact_tesla_wall_connector_vehicle_vins(
             continue
         serial = _tesla_wall_connector_serial(device)
         if serial:
-            connected_serials.add(serial)
+            # ``last_updated`` can move when unrelated Wall Connector
+            # attributes refresh.  The once-per-plug episode identifier must
+            # be anchored to the connected boolean's actual state transition.
+            changed_at = getattr(state, "last_changed", None)
+            try:
+                observed_at = (
+                    float(changed_at.timestamp())
+                    if changed_at is not None
+                    else None
+                )
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                observed_at = None
+            previous = connected_serials.get(serial)
+            if previous is None or (
+                observed_at is not None and observed_at > previous
+            ):
+                connected_serials[serial] = observed_at
     if not connected_serials:
-        return set()
+        return {}
 
     identified_vins_by_serial: dict[str, set[str]] = {}
     for state in sensor_states:
@@ -9870,10 +9900,30 @@ def _exact_tesla_wall_connector_vehicle_vins(
         vin = next(iter(identified_vins))
         serial_by_vin.setdefault(vin, set()).add(serial)
     return {
-        vin
+        vin: {
+            "serial": next(iter(serials)),
+            "connected_observed_at": connected_serials.get(
+                next(iter(serials))
+            ),
+        }
         for vin, serials in serial_by_vin.items()
         if len(serials) == 1
     }
+
+
+def _exact_tesla_wall_connector_vehicle_vins(
+    hass: HomeAssistant,
+    entity_registry: Any,
+    device_registry: Any,
+) -> set[str]:
+    """Return VINs uniquely paired to their own connected Wall Connector."""
+    return set(
+        _exact_tesla_wall_connector_vehicle_associations(
+            hass,
+            entity_registry,
+            device_registry,
+        )
+    )
 
 
 async def _resolve_tesla_active_charger_capability(
@@ -9951,13 +10001,13 @@ async def _resolve_tesla_active_charger_capability(
             f"sensor.{paired_prefix}_charger_power",
         ], "paired_ble"))
 
-    exact_wall_connector_vehicle = normalized_vin in (
-        _exact_tesla_wall_connector_vehicle_vins(
-            hass,
-            entity_registry,
-            device_registry,
+    wall_connector_associations = (
+        _exact_tesla_wall_connector_vehicle_associations(
+            hass, entity_registry, device_registry
         )
     )
+    wall_connector_association = wall_connector_associations.get(normalized_vin)
+    exact_wall_connector_vehicle = wall_connector_association is not None
 
     connection_observations: list[
         tuple[bool, Optional[float], dict[str, Any], str]
@@ -10019,7 +10069,8 @@ async def _resolve_tesla_active_charger_capability(
         result["max_charge_amps_source"] = "safe_unavailable_charger_capability"
         return result
 
-    effective_max = min(live_caps)
+    raw_effective_max = min(live_caps)
+    effective_max = raw_effective_max
     source = (
         "active_wall_connector_vehicle"
         if ignored_paired_ble_capability
@@ -10040,6 +10091,53 @@ async def _resolve_tesla_active_charger_capability(
     if ignored_paired_ble_capability:
         result["allow_stale_entity_max_override"] = True
         result["prefer_vin_scoped_current_control"] = True
+
+    if wall_connector_association is not None:
+        provider_caps = sorted(set(live_caps))
+        capability_timestamps = [
+            capability.get("capability_observed_at")
+            for capability in plugged_capabilities
+            if capability.get("max_amps") is not None
+            and capability.get("capability_observed_at") is not None
+        ]
+        capability_observed_at = (
+            max(capability_timestamps) if capability_timestamps else None
+        )
+        connection_observed_at = wall_connector_association.get(
+            "connected_observed_at"
+        )
+        capability_predates_connection = bool(
+            connection_observed_at is not None
+            and (
+                capability_observed_at is None
+                or capability_observed_at < connection_observed_at
+            )
+        )
+        expected_ceiling_candidates = [
+            value
+            for value in (configured_max, site_max)
+            if value is not None
+        ]
+        expected_ceiling = (
+            min(expected_ceiling_candidates)
+            if expected_ceiling_candidates
+            else None
+        )
+        capability_below_expected_ceiling = bool(
+            expected_ceiling is not None
+            and expected_ceiling - raw_effective_max >= 2
+        )
+        result.update({
+            "active_wall_connector_serial": wall_connector_association["serial"],
+            "wall_connector_connected_observed_at": connection_observed_at,
+            "capability_observed_at": capability_observed_at,
+            "provider_max_charge_amps": provider_caps,
+            "capability_refresh_required": (
+                len(provider_caps) > 1
+                or capability_predates_connection
+                or capability_below_expected_ceiling
+            ),
+        })
 
     live_voltages = [
         capability["voltage"]

@@ -167,11 +167,15 @@ def _discard_recovered_ev_ownership(entry: dict[str, Any], vehicle_id: Any) -> N
 
 def _runtime_snapshot(hass: Any, config_entry: Any) -> dict[str, Any]:
     """Return the EV runtime state safe to persist across restarts."""
+    entry = _entry_data(hass, config_entry.entry_id)
     return {
         "active_ownership": dict(get_ev_ownerships(hass, config_entry)),
         "last_commands": dict(get_ev_last_commands(hass, config_entry)),
         "manual_stop_holds": dict(
-            _entry_data(hass, config_entry.entry_id).get("ev_manual_stop_holds", {})
+            entry.get("ev_manual_stop_holds", {})
+        ),
+        "capability_refresh_records": dict(
+            entry.get("ev_capability_refresh_records", {})
         ),
         "saved_at": _now_iso(),
     }
@@ -224,6 +228,9 @@ def restore_ev_runtime_state(
     stored_commands = runtime_state.get("last_commands") or {}
     stored_ownership = runtime_state.get("active_ownership") or {}
     stored_manual_stop_holds = runtime_state.get("manual_stop_holds") or {}
+    stored_capability_refresh = (
+        runtime_state.get("capability_refresh_records") or {}
+    )
 
     if isinstance(stored_commands, dict):
         get_ev_last_commands(hass, config_entry).update(
@@ -239,6 +246,13 @@ def restore_ev_runtime_state(
             normalize_vehicle_id(vehicle_id): dict(hold)
             for vehicle_id, hold in stored_manual_stop_holds.items()
             if isinstance(hold, Mapping)
+        }
+
+    if isinstance(stored_capability_refresh, dict):
+        entry["ev_capability_refresh_records"] = {
+            str(episode_key): dict(record)
+            for episode_key, record in stored_capability_refresh.items()
+            if isinstance(record, Mapping)
         }
 
     recovered: dict[str, dict[str, Any]] = {}

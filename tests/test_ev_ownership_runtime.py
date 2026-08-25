@@ -69,6 +69,33 @@ def test_persist_ev_runtime_state_saves_ownership_and_last_commands():
     assert runtime["last_commands"]["VIN123"]["command"] == "start"
 
 
+def test_capability_probe_record_survives_restart_for_bounded_recovery():
+    hass = _Hass()
+    store = _Store()
+    entry_data = hass.data["power_sync"]["entry-1"]
+    entry_data["automation_store"] = store
+    entry_data["ev_capability_refresh_records"] = {
+        "VIN123|WC-A|1": {
+            "vin": "VIN123",
+            "connector_serial": "WC-A",
+            "phase": "probing",
+            "start_confirmed": True,
+            "stop_required": True,
+        }
+    }
+
+    asyncio.run(ev_ownership.persist_ev_runtime_state(hass, _Entry(), store))
+    restored_hass = _Hass()
+    restored_hass.data["power_sync"]["entry-1"]["automation_store"] = store
+    ev_ownership.restore_ev_runtime_state(restored_hass, _Entry(), store)
+
+    restored = restored_hass.data["power_sync"]["entry-1"][
+        "ev_capability_refresh_records"
+    ]
+    assert restored["VIN123|WC-A|1"]["start_confirmed"] is True
+    assert restored["VIN123|WC-A|1"]["stop_required"] is True
+
+
 def test_restore_ev_runtime_state_clears_stale_active_ownership():
     store = _Store(
         {

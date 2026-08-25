@@ -4521,6 +4521,119 @@ class AutoScheduleExecutor:
         ] = {}
         self._start_failure_state: Dict[str, Tuple[int, float]] = {}
         self._start_in_flight: set[str] = set()
+        self._capability_refresh_coordinator = None
+
+    def _settings_for_vehicle_vin(
+        self,
+        vehicle_vin: str,
+    ) -> Optional[tuple[str, AutoScheduleSettings]]:
+        """Return the enabled Smart Schedule loadpoint for one exact VIN."""
+        normalized_vin = str(vehicle_vin or "").upper()
+        for vehicle_id, settings in self._settings.items():
+            if not settings.enabled:
+                continue
+            try:
+                resolved_vin = self._resolve_vehicle_vin(vehicle_id)
+            except (AttributeError, KeyError, TypeError):
+                continue
+            if str(resolved_vin or "").upper() == normalized_vin:
+                return vehicle_id, settings
+        return None
+
+    async def _resolve_capability_refresh_vin(
+        self,
+        vehicle_vin: str,
+    ) -> Optional[dict]:
+        """Resolve capability for the Smart Schedule loadpoint owning a VIN."""
+        match = self._settings_for_vehicle_vin(vehicle_vin)
+        if match is None:
+            return None
+        vehicle_id, settings = match
+        return await self._resolve_effective_charger_capability(
+            vehicle_id,
+            settings,
+        )
+
+    async def _capability_refresh_still_eligible(
+        self,
+        vehicle_vin: str,
+        connector_serial: str,
+    ) -> bool:
+        """Fail closed when a probe's exact loadpoint or policy changes."""
+        from ..const import CONF_MONITORING_MODE
+        from .actions import _tesla_physical_charging_snapshot
+        from .ev_ownership import get_ev_ownership, manual_stop_hold_reason
+
+        if self.config_entry.options.get(
+            CONF_MONITORING_MODE,
+            self.config_entry.data.get(CONF_MONITORING_MODE, False),
+        ):
+            return False
+        match = self._settings_for_vehicle_vin(vehicle_vin)
+        if match is None:
+            return False
+        vehicle_id, _settings = match
+        state = self.get_state(vehicle_id)
+        if state.is_charging or vehicle_id in getattr(self, "_start_in_flight", set()):
+            return False
+        if manual_stop_hold_reason(
+            self.hass, self.config_entry, vehicle_vin
+        ):
+            return False
+        _lease_id, lease = get_ev_ownership(
+            self.hass, self.config_entry, vehicle_vin
+        )
+        if lease is not None:
+            return False
+        recovered = (
+            self.hass.data.get(DOMAIN, {})
+            .get(self.config_entry.entry_id, {})
+            .get("ev_recovered_ownership", {})
+        )
+        if isinstance(recovered, Mapping) and vehicle_vin in recovered:
+            return False
+        capability = await self._resolve_capability_refresh_vin(vehicle_vin)
+        if not capability or str(
+            capability.get("active_wall_connector_serial") or ""
+        ).upper() != str(connector_serial or "").upper():
+            return False
+        if not capability.get("capability_refresh_required"):
+            return False
+        snapshot = _tesla_physical_charging_snapshot(
+            self.hass,
+            self.config_entry,
+            vehicle_vin,
+            {"charger_type": "tesla", "vehicle_vin": vehicle_vin},
+        )
+        return not bool(snapshot.get("charging") or snapshot.get("measurements"))
+
+    def _invalidate_capability_refresh_plan(self, vehicle_id: str) -> None:
+        """Force the next evaluation to rebuild a newly measured plan."""
+        state = self.get_state(vehicle_id)
+        state.current_plan = None
+        state.current_window = None
+        self._charger_capability_signatures.pop(vehicle_id, None)
+        _LOGGER.info(
+            "Auto-schedule: refreshed active charger capability for %s; "
+            "regenerating the plan",
+            vehicle_id,
+        )
+
+    def _get_capability_refresh_coordinator(self):
+        """Create the refresh coordinator lazily for lightweight test adapters."""
+        coordinator = getattr(self, "_capability_refresh_coordinator", None)
+        if coordinator is None:
+            from .ev_capability_refresh import TeslaCapabilityRefreshCoordinator
+
+            coordinator = TeslaCapabilityRefreshCoordinator(
+                self.hass,
+                self.config_entry,
+                resolve_capability=self._resolve_capability_refresh_vin,
+                is_eligible=self._capability_refresh_still_eligible,
+                invalidate_plan=self._invalidate_capability_refresh_plan,
+            )
+            self._capability_refresh_coordinator = coordinator
+        return coordinator
 
     def _resolve_vehicle_vin(self, vehicle_id: str) -> Optional[str]:
         """Resolve sequential vehicle_id to actual VIN or BLE identifier.
@@ -5853,6 +5966,30 @@ class AutoScheduleExecutor:
                     state.last_decision_reason,
                 )
                 return
+
+        # Tesla integrations can retain the previous EVSE pilot limit while a
+        # moved vehicle is idle.  The refresh coordinator first waits/polls,
+        # then wakes the exact VIN, and only as a final fallback performs one
+        # minimum-current probe for this exact Wall Connector connection
+        # episode.  The task is backgrounded so the 30-second executor loop and
+        # other vehicles remain independent.
+        if (
+            charger_capability is not None
+            and charger_capability.get("capability_refresh_required")
+            and re.fullmatch(
+                r"[A-HJ-NPR-Z0-9]{17}",
+                str(vehicle_vin or "").upper(),
+            )
+        ):
+            await self._get_capability_refresh_coordinator().request(
+                vehicle_id=vehicle_id,
+                vehicle_vin=str(vehicle_vin).upper(),
+                capability=charger_capability,
+                configured_max_amps=settings.max_charge_amps,
+                min_charge_amps=settings.min_charge_amps,
+                voltage=settings.voltage,
+                phases=settings.phases,
+            )
 
         # =====================================================================
         # STANDARD CHARGING PLANNER
