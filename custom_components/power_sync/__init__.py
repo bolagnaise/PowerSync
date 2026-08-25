@@ -27746,6 +27746,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             export_earnings=export_earnings,
         )
 
+    async def handle_goodwe_and_ac_inverter_curtailment(
+        feedin_price=None,
+        import_price=None,
+        price_source: str | None = None,
+        refresh_prices: bool = False,
+    ) -> None:
+        """Run GoodWe and a separately configured AC inverter independently.
+
+        A GoodWe hybrid's zero-export register and a separately configured AC
+        inverter are separate command surfaces.  In particular, an unavailable
+        GoodWe direct controller must not prevent the AC controller from
+        receiving its own curtail or restore decision.
+        """
+        await handle_goodwe_curtailment(
+            feedin_price=feedin_price,
+            import_price=import_price,
+        )
+
+        ac_enabled = entry.options.get(
+            CONF_AC_INVERTER_CURTAILMENT_ENABLED,
+            entry.data.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
+        )
+        if ac_enabled and not ac_inverter_is_same_hybrid():
+            await handle_ac_inverter_curtailment_only(
+                feedin_price=feedin_price,
+                import_price=import_price,
+                price_source=price_source,
+                refresh_prices=refresh_prices,
+            )
+
     async def handle_solar_curtailment_check(call: ServiceCall = None) -> None:
         """
         Check export prices and curtail solar export when price is below 1c/kWh.
@@ -27794,7 +27824,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # GoodWe uses export limit register for curtailment, not Tesla API
         if is_goodwe:
-            await handle_goodwe_curtailment()
+            await handle_goodwe_and_ac_inverter_curtailment(refresh_prices=True)
             return
 
         # Sungrow uses export limit register for curtailment, not Tesla API
@@ -28172,7 +28202,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if is_goodwe:
             feedin_price = websocket_data.get('feedIn', {}).get('perKwh') if websocket_data else None
             import_price = websocket_data.get('general', {}).get('perKwh') if websocket_data else None
-            await handle_goodwe_curtailment(feedin_price=feedin_price, import_price=import_price)
+            await handle_goodwe_and_ac_inverter_curtailment(
+                feedin_price=feedin_price,
+                import_price=import_price,
+                price_source="websocket",
+            )
             return
 
         # Sungrow uses export limit register for curtailment, not Tesla API

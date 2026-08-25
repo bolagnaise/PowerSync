@@ -8659,7 +8659,26 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         "",
                     )
                 elif profile.profile_id == "goodwe_direct":
-                    updates[CONF_GOODWE_EMS_CONTROL_MODE] = GOODWE_EMS_CONTROL_DIRECT
+                    # Legacy GoodWe entries can use direct telemetry with an
+                    # explicit HA entity relay for EMS commands.  Selecting
+                    # the resolved direct profile must not silently replace
+                    # that relay with direct EMS control.
+                    current_ems_mode = self._get_option(
+                        CONF_GOODWE_EMS_CONTROL_MODE,
+                        None,
+                    )
+                    current_ems_prefix = self._get_option(
+                        CONF_GOODWE_EMS_ENTITY_PREFIX,
+                        "",
+                    )
+                    if (
+                        current_ems_mode == GOODWE_EMS_CONTROL_ENTITY
+                        and current_ems_prefix
+                    ):
+                        updates[CONF_GOODWE_EMS_CONTROL_MODE] = GOODWE_EMS_CONTROL_ENTITY
+                        updates[CONF_GOODWE_EMS_ENTITY_PREFIX] = current_ems_prefix
+                    else:
+                        updates[CONF_GOODWE_EMS_CONTROL_MODE] = GOODWE_EMS_CONTROL_DIRECT
 
                 return await self._save_connection_profile_and_reload(updates)
 

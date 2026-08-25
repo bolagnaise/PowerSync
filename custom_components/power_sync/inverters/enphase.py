@@ -1835,6 +1835,7 @@ class EnphaseController(InverterController):
                 # Handle production.json format
                 if "production" in production:
                     prod_list = production.get("production", [])
+                    eim_production_w = None
                     for item in prod_list:
                         if item.get("type") == "inverters":
                             attrs["inverters_active"] = item.get("activeCount", 0)
@@ -1842,8 +1843,37 @@ class EnphaseController(InverterController):
                             attrs["daily_production_wh"] = item.get("whToday", 0)
                             attrs["lifetime_production_wh"] = item.get("whLifetime", 0)
                         elif item.get("type") == "eim":
-                            attrs["production_w"] = item.get("wNow", 0)
-                            attrs["daily_production_wh"] = item.get("whToday", 0)
+                            eim_production_w = item.get("wNow", 0)
+
+                    # The EIM is the site-power measurement when it is
+                    # available.  Apply it after iterating so response row
+                    # order cannot change the published instantaneous power.
+                    if eim_production_w is not None:
+                        attrs["production_w"] = eim_production_w
+
+                    # The EIM reports site power, but its counters need not
+                    # have the same measurement boundary as the inverter row.
+                    # Keep daily and lifetime together so the status entity
+                    # cannot publish an impossible daily value from one row
+                    # beside a lifetime value from another.
+                    daily = attrs.get("daily_production_wh")
+                    lifetime = attrs.get("lifetime_production_wh")
+                    if daily is not None and lifetime is not None:
+                        try:
+                            if float(daily) < 0 or float(lifetime) < 0 or float(daily) > float(lifetime):
+                                _LOGGER.warning(
+                                    "Ignoring inconsistent Enphase production counters: daily=%s lifetime=%s",
+                                    daily,
+                                    lifetime,
+                                )
+                                attrs.pop("daily_production_wh", None)
+                        except (TypeError, ValueError):
+                            _LOGGER.warning(
+                                "Ignoring non-numeric Enphase production counters: daily=%s lifetime=%s",
+                                daily,
+                                lifetime,
+                            )
+                            attrs.pop("daily_production_wh", None)
 
                     consumption = production.get("consumption", [])
                     for item in consumption:

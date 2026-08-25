@@ -206,3 +206,50 @@ def test_dpel_restore_uses_full_percentage_relay_config():
         }
     finally:
         restore_module()
+
+
+def test_production_counters_stay_on_the_inverter_measurement_boundary():
+    """#20: an EIM daily counter must not overwrite inverter lifetime data."""
+    module, restore_module = _load_enphase_controller_module()
+    try:
+        controller = module.EnphaseController("192.0.2.10")
+
+        inverter = {
+            "type": "inverters",
+            "activeCount": 23,
+            "wNow": 5706,
+            "whToday": 9812,
+            "whLifetime": 8809304,
+        }
+        eim = {
+            "type": "eim",
+            "wNow": 5722,
+            "whToday": 37912912,
+        }
+
+        async def get_production() -> dict:
+            return {
+                "production": [
+                    eim,
+                    inverter,
+                ]
+            }
+
+        async def get(_endpoint: str):
+            return None
+
+        async def get_dpel_settings():
+            return None
+
+        controller._get_production = get_production
+        controller._get = get
+        controller._get_dpel_settings = get_dpel_settings
+
+        attrs = asyncio.run(controller._read_all_data())
+
+        assert attrs["production_w"] == 5722
+        assert attrs["daily_production_wh"] == 9812
+        assert attrs["lifetime_production_wh"] == 8809304
+        assert 0 <= attrs["daily_production_wh"] <= attrs["lifetime_production_wh"]
+    finally:
+        restore_module()

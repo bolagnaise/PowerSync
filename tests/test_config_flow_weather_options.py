@@ -2297,6 +2297,22 @@ def test_goodwe_flow_exposes_explicit_ems_control_mode_selector():
         assert "GOODWE_EMS_CONTROL_ENTITY" in method_source
 
 
+def test_goodwe_direct_profile_preserves_an_explicit_legacy_entity_relay():
+    """#20: saving the profile page must not silently change EMS ownership."""
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_battery_connection_profile")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    direct_branch = method_source[
+        method_source.index('elif profile.profile_id == "goodwe_direct":'):
+    ]
+    assert "current_ems_mode = self._get_option(" in direct_branch
+    assert "current_ems_prefix = self._get_option(" in direct_branch
+    assert "current_ems_mode == GOODWE_EMS_CONTROL_ENTITY" in direct_branch
+    assert "updates[CONF_GOODWE_EMS_ENTITY_PREFIX] = current_ems_prefix" in direct_branch
+
+
 def test_goodwe_runtime_auto_uses_entity_prefix_for_tcp_control():
     init_source = (
         ROOT / "custom_components" / "power_sync" / "__init__.py"

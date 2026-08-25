@@ -725,6 +725,48 @@ def test_periodic_solar_curtailment_routes_to_sungrow_before_tesla_path():
     assert "await handle_sungrow_curtailment()" in pre_tesla_path
 
 
+def test_goodwe_runs_a_separate_ac_inverter_controller_after_its_own_handler():
+    """#20: GoodWe's native path must not consume a separate Enphase path."""
+    calls: list[tuple[str, dict]] = []
+
+    async def handle_goodwe_curtailment(**kwargs):
+        calls.append(("goodwe", kwargs))
+
+    async def handle_ac_inverter_curtailment_only(**kwargs):
+        calls.append(("ac", kwargs))
+
+    namespace = {
+        "entry": SimpleNamespace(
+            options={"ac_inverter_curtailment_enabled": True},
+            data={},
+        ),
+        "CONF_AC_INVERTER_CURTAILMENT_ENABLED": "ac_inverter_curtailment_enabled",
+        "handle_goodwe_curtailment": handle_goodwe_curtailment,
+        "handle_ac_inverter_curtailment_only": handle_ac_inverter_curtailment_only,
+        "ac_inverter_is_same_hybrid": lambda: False,
+    }
+    exec(
+        textwrap.dedent(_function_source("handle_goodwe_and_ac_inverter_curtailment")),
+        namespace,
+    )
+
+    asyncio.run(
+        namespace["handle_goodwe_and_ac_inverter_curtailment"](
+            feedin_price=6.0,
+            import_price=17.0,
+            price_source="websocket",
+        )
+    )
+
+    assert [name for name, _kwargs in calls] == ["goodwe", "ac"]
+    assert calls[1][1] == {
+        "feedin_price": 6.0,
+        "import_price": 17.0,
+        "price_source": "websocket",
+        "refresh_prices": False,
+    }
+
+
 def test_solar_curtailment_runs_startup_check_before_first_periodic_tick():
     source = INIT_PATH.read_text()
     setup_section = source[
@@ -826,6 +868,15 @@ def test_websocket_solar_curtailment_routes_to_sungrow_with_prices():
         "await handle_sungrow_curtailment("
         "feedin_price=feedin_price, import_price=import_price)"
     ) in pre_tesla_path
+
+
+def test_websocket_solar_curtailment_routes_goodwe_and_ac_inverter_with_prices():
+    handler = _function_source("handle_solar_curtailment_with_websocket_data")
+    pre_tesla_path = handler[: handler.index("if token_getter is None:")]
+
+    assert "if is_goodwe:" in pre_tesla_path
+    assert "await handle_goodwe_and_ac_inverter_curtailment(" in pre_tesla_path
+    assert 'price_source="websocket"' in pre_tesla_path
 
 
 def test_websocket_solar_curtailment_routes_ac_inverter_without_tesla_token():
