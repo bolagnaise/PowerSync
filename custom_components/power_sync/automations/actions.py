@@ -8606,6 +8606,43 @@ async def _dynamic_ev_update_surplus(
         current_vehicle_charging_state_changed_at,
         state.get("last_stop_command_at"),
     )
+    from .ev_ownership import (
+        EXTERNAL_CONTROL_POLICY_YIELD,
+        claim_ev_ownership,
+        ensure_external_ev_ownership,
+        get_external_control_policy,
+        get_ev_ownership,
+        release_ev_ownership,
+        release_external_ev_ownership,
+    )
+
+    yield_external_control = (
+        get_external_control_policy(hass, config_entry, vehicle_id)
+        == EXTERNAL_CONTROL_POLICY_YIELD
+    )
+    if state.get("external_manual_override") and not yield_external_control:
+        release_external_ev_ownership(
+            hass,
+            config_entry,
+            vehicle_id,
+            reason="PowerSync control policy restored",
+            command="external_policy_override",
+            source="powersync",
+        )
+        state["ownership"] = claim_ev_ownership(
+            hass,
+            config_entry,
+            vehicle_id,
+            owner_mode=str(params.get("owner_mode") or "solar_surplus"),
+            reason="Solar Surplus resumed under PowerSync control policy",
+        )
+        state["external_manual_override"] = False
+        state["external_start_detection_armed"] = True
+        _LOGGER.info(
+            "Solar surplus EV: PowerSync control policy restored for %s; "
+            "resuming automated rate control",
+            vehicle_id,
+        )
     if state.get("external_manual_override"):
         external_manual_charge_ended = (
             current_vehicle_charging_state in _TESLA_NON_CHARGING_STATES
@@ -8627,13 +8664,27 @@ async def _dynamic_ev_update_surplus(
         state["target_amps"] = 0
         state["low_surplus_start"] = None
         state["high_surplus_start"] = None
+        release_external_ev_ownership(
+            hass,
+            config_entry,
+            vehicle_id,
+            reason="External vehicle charge ended",
+        )
+        state["ownership"] = claim_ev_ownership(
+            hass,
+            config_entry,
+            vehicle_id,
+            owner_mode=str(params.get("owner_mode") or "solar_surplus"),
+            reason="Solar Surplus resumed after external charge ended",
+        )
         _LOGGER.info(
             "Solar surplus EV: external manual charge ended for %s; "
             "resuming automated control",
             vehicle_id,
         )
     elif (
-        external_tesla_charge_active
+        yield_external_control
+        and external_tesla_charge_active
         and (
             state.get(
                 "external_start_detection_armed",
@@ -8642,6 +8693,26 @@ async def _dynamic_ev_update_surplus(
             or external_start_after_last_stop
         )
     ):
+        release_ev_ownership(
+            hass,
+            config_entry,
+            vehicle_id,
+            reason="Solar Surplus yielded to external charging",
+            command="external_handoff",
+            source="external",
+        )
+        ensure_external_ev_ownership(
+            hass,
+            config_entry,
+            vehicle_id,
+            reason="Tesla charging started outside PowerSync Solar Surplus",
+            observed_at=current_vehicle_charging_state_changed_at,
+        )
+        state["ownership"] = get_ev_ownership(
+            hass,
+            config_entry,
+            vehicle_id,
+        )[1]
         state["external_manual_override"] = True
         state["external_start_detection_armed"] = False
         state["reason"] = (

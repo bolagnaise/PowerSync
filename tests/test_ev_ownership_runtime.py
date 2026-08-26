@@ -25,6 +25,16 @@ ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
 
 class _Entry:
     entry_id = "entry-1"
+    data = {}
+    options = {}
+
+
+class _MappedEntry(_Entry):
+    data = {
+        "ev_provider": "both",
+        "tesla_ble_entity_prefix": "tesla_ble_car",
+        "tesla_ble_vehicle_mapping": "5YJTEST0000000001=tesla_ble_car",
+    }
 
 
 class _Hass:
@@ -43,6 +53,143 @@ class _Store:
 
     async def async_save(self):
         self.saved += 1
+
+
+def _set_external_policy(hass, vehicle_id, policy):
+    store = _Store(
+        {
+            "vehicle_charging_configs": [
+                {
+                    "vehicle_id": vehicle_id,
+                    "external_control_policy": policy,
+                }
+            ]
+        }
+    )
+    hass.data["power_sync"]["entry-1"]["automation_store"] = store
+    return store
+
+
+def test_external_control_policy_defaults_to_override_and_normalizes_yield():
+    hass = _Hass()
+
+    assert (
+        ev_ownership.get_external_control_policy(hass, _Entry(), "VIN123")
+        == "override"
+    )
+    _set_external_policy(hass, "VIN123", "yield")
+    assert (
+        ev_ownership.get_external_control_policy(hass, _Entry(), "VIN123")
+        == "yield"
+    )
+
+
+def test_invalid_persisted_external_control_policy_fails_safe_to_override():
+    hass = _Hass()
+    _set_external_policy(hass, "VIN123", "surprise")
+
+    assert (
+        ev_ownership.get_external_control_policy(hass, _Entry(), "VIN123")
+        == "override"
+    )
+
+
+def test_unique_generic_profile_can_explicitly_yield_default_loadpoint():
+    hass = _Hass()
+    store = _set_external_policy(hass, "generic_ev", "yield")
+    store._data["vehicle_charging_configs"][0]["charger_type"] = "generic"
+
+    assert (
+        ev_ownership.get_external_control_policy(hass, _Entry(), None)
+        == "yield"
+    )
+
+
+def test_ambiguous_default_tesla_profile_cannot_advertise_yield_support():
+    assert not ev_ownership.external_control_policy_supported("_default", "tesla")
+    assert ev_ownership.external_control_policy_supported("_default", "ocpp")
+    assert ev_ownership.external_control_policy_supported("VIN123", "tesla")
+
+
+def test_external_policy_resolves_stored_ble_profile_from_runtime_vin():
+    hass = _Hass()
+    _set_external_policy(hass, "ble_tesla_ble_car", "yield")
+
+    assert ev_ownership.external_control_vehicle_ids_match(
+        hass,
+        _MappedEntry(),
+        "ble_tesla_ble_car",
+        "5YJTEST0000000001",
+    )
+    assert (
+        ev_ownership.get_external_control_policy(
+            hass,
+            _MappedEntry(),
+            "5YJTEST0000000001",
+        )
+        == "yield"
+    )
+
+
+def test_external_observation_requires_explicit_yield_policy():
+    hass = _Hass()
+
+    assert not ev_ownership.ensure_external_ev_ownership(
+        hass,
+        _Entry(),
+        "VIN123",
+    )
+    assert ev_ownership.get_ev_ownership(hass, _Entry(), "VIN123") == (None, None)
+
+    _set_external_policy(hass, "VIN123", "yield")
+    assert ev_ownership.ensure_external_ev_ownership(
+        hass,
+        _Entry(),
+        "VIN123",
+    )
+    assert ev_ownership.get_ev_ownership(hass, _Entry(), "VIN123")[1]["owner"] == "external"
+
+
+def test_override_policy_releases_stale_external_lease_for_automated_owner():
+    hass = _Hass()
+    ev_ownership.claim_ev_ownership(
+        hass,
+        _Entry(),
+        "VIN123",
+        owner="external",
+        owner_mode="external",
+    )
+
+    can_claim, lease_id, lease, reason = ev_ownership.can_claim_ev_ownership(
+        hass,
+        _Entry(),
+        "VIN123",
+        owner_mode="smart_schedule",
+    )
+
+    assert can_claim is True
+    assert lease_id is None
+    assert lease is None
+    assert reason is None
+    assert ev_ownership.get_ev_ownership(hass, _Entry(), "VIN123") == (None, None)
+
+
+def test_effective_owner_ignores_stale_external_lease_under_override():
+    hass = _Hass()
+    ev_ownership.claim_ev_ownership(
+        hass,
+        _Entry(),
+        "VIN123",
+        owner="external",
+        owner_mode="external",
+    )
+
+    assert ev_ownership.get_active_ev_owner_mode(
+        hass,
+        _Entry(),
+        "VIN123",
+    ) is None
+    assert ev_ownership.get_ev_ownership(hass, _Entry(), "VIN123") == (None, None)
 
 
 def test_persist_ev_runtime_state_saves_ownership_and_last_commands():
@@ -388,6 +535,7 @@ def test_boost_is_its_own_arbitration_family_and_yields_to_manual():
 def test_automated_owners_yield_to_external_ownership():
     hass = _Hass()
     vehicle_id = "5YJTEST0000000001"
+    _set_external_policy(hass, vehicle_id, "yield")
     ev_ownership.claim_ev_ownership(
         hass,
         _Entry(),
@@ -417,6 +565,7 @@ def test_automated_owners_yield_to_external_ownership():
 def test_manual_command_can_take_over_external_ownership():
     hass = _Hass()
     vehicle_id = "5YJTEST0000000001"
+    _set_external_policy(hass, vehicle_id, "yield")
     ev_ownership.claim_ev_ownership(
         hass,
         _Entry(),
@@ -440,6 +589,7 @@ def test_manual_command_can_take_over_external_ownership():
 def test_recent_powersync_command_blocks_stale_external_observation():
     hass = _Hass()
     vehicle_id = "5YJTEST0000000001"
+    _set_external_policy(hass, vehicle_id, "yield")
     command = ev_ownership.record_ev_command(
         hass,
         _Entry(),
@@ -462,6 +612,7 @@ def test_recent_powersync_command_blocks_stale_external_observation():
 def test_new_observation_after_powersync_command_claims_external_ownership():
     hass = _Hass()
     vehicle_id = "5YJTEST0000000001"
+    _set_external_policy(hass, vehicle_id, "yield")
     command = ev_ownership.record_ev_command(
         hass,
         _Entry(),
@@ -485,9 +636,49 @@ def test_new_observation_after_powersync_command_claims_external_ownership():
     assert lease["stop_settling"] is True
 
 
+def test_override_policy_keeps_only_provisional_stop_settling_lease():
+    hass = _Hass()
+    vehicle_id = "5YJTEST0000000001"
+    command = ev_ownership.record_ev_command(
+        hass,
+        _Entry(),
+        vehicle_id,
+        command="stop_smart_schedule",
+        success=True,
+    )
+    observed_at = datetime.fromisoformat(command["at"]) + timedelta(seconds=1)
+
+    assert ev_ownership.ensure_external_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+        observed_at=observed_at,
+    )
+    lease = ev_ownership.get_ev_ownership(hass, _Entry(), vehicle_id)[1]
+    assert lease["stop_settling"] is True
+
+    can_claim, _lease_id, _lease, reason = ev_ownership.can_claim_ev_ownership(
+        hass,
+        _Entry(),
+        vehicle_id,
+        owner_mode="smart_schedule",
+    )
+    assert can_claim is False
+    assert reason == "Awaiting telemetry confirmation of PowerSync stop"
+
+    assert ev_ownership.confirm_powersync_ev_stop(
+        hass,
+        _Entry(),
+        vehicle_id,
+        observed_at=observed_at + timedelta(seconds=1),
+    )
+    assert ev_ownership.get_ev_ownership(hass, _Entry(), vehicle_id) == (None, None)
+
+
 def test_external_start_after_confirmed_powersync_stop_is_sticky():
     hass = _Hass()
     vehicle_id = "5YJTEST0000000001"
+    _set_external_policy(hass, vehicle_id, "yield")
     command = ev_ownership.record_ev_command(
         hass,
         _Entry(),
@@ -529,6 +720,7 @@ def test_external_start_after_confirmed_powersync_stop_is_sticky():
 def test_new_external_session_promotes_provisional_stop_lease_to_sticky():
     hass = _Hass()
     vehicle_id = "5YJTEST0000000001"
+    _set_external_policy(hass, vehicle_id, "yield")
     command = ev_ownership.record_ev_command(
         hass,
         _Entry(),
@@ -571,6 +763,7 @@ def test_new_external_session_promotes_provisional_stop_lease_to_sticky():
 def test_fresh_recovered_powersync_session_blocks_external_claim():
     hass = _Hass()
     vehicle_id = "5YJTEST0000000001"
+    _set_external_policy(hass, vehicle_id, "yield")
     entry = hass.data["power_sync"][_Entry.entry_id]
     entry["ev_recovered_ownership"] = {
         vehicle_id: {"owner": "powersync", "owner_mode": "solar_surplus"}

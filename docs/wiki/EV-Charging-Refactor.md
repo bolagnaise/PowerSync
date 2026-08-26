@@ -10,13 +10,33 @@ state, and status consistency problems across Home Assistant and the mobile app.
 - One source of truth for each EV/loadpoint state.
 - One coordinator that arbitrates Smart Schedule, Solar Surplus, Price-Level,
   Scheduled Charging, and manual/app commands.
-- PowerSync only stops charging sessions it owns, unless the user has explicitly
-  enabled a mode whose policy is to stop external charging.
+- Enabled PowerSync charging modes are authoritative by default; hands-off
+  externally started charging is an explicit per-vehicle opt-in.
 - Home Assistant and the mobile app display the same charging status, owner,
   reason, and next action.
 - OCPP, generic switch/number chargers, Zaptec, Tesla Fleet, Tesla BLE, and
   Teslemetry Bluetooth use the same control contract, with Sigenergy EVAC/EVDC
   chargers represented through the same loadpoint model.
+
+## Externally started charging policy
+
+Each vehicle profile has one external-control policy in **EVs & Chargers**:
+
+- **PowerSync controls charging (recommended)** is the default, including for
+  existing profiles created before this setting existed. When an enabled Smart
+  Schedule, Scheduled Charging, Price-Level, or Solar Surplus rule is active,
+  PowerSync may stop an externally started charge or adjust its current through
+  that mode's normal control path.
+- **Allow hands-off external charging** is an explicit opt-in. If an exact,
+  unambiguous vehicle starts charging outside PowerSync, automated modes do not
+  stop the session or adjust its amps until the vehicle is unplugged. Manual and
+  Boost controls can still take over.
+
+Tesla telemetry cannot distinguish a deliberate app/manual start from normal
+automatic start-on-plug, so the hands-off option applies to both. The policy is
+VIN/loadpoint-scoped; ambiguous default identities never create a hands-off
+lease. Changing back to PowerSync control releases only the software lease and
+does not send a charger or vehicle command from the settings request.
 
 ## Per-phase EV load management
 
@@ -259,8 +279,8 @@ increases. The existing aggregate import limit remains an additional cap.
 
 Missing, invalid, unavailable, wrong-unit, or stale required telemetry blocks
 new starts and increases. Once telemetry is stale, active PowerSync-owned
-charging is stopped. Manual and externally managed charging is never altered;
-its measured current continues to consume the available phase budget.
+charging is stopped. Manual and explicitly hands-off external charging is never
+altered; its measured current continues to consume the available phase budget.
 
 ## Acceptance Tests
 
@@ -270,7 +290,9 @@ its measured current continues to consume the available phase budget.
 - When Price-Level owns a session and price rises above threshold, PowerSync
   stops that owned session.
 - When price-level charging is enabled and an unmanaged Tesla auto-starts during
-  high prices, policy enforcement still stops it.
+  high prices, the default policy still stops it.
+- When that vehicle explicitly opts into hands-off external charging, automated
+  modes send no stop or current-adjustment command for the observed session.
 - OCPP `charging -> finishing -> idle` transitions clear active session state.
 - Deleting an EV clears dynamic EV state, session tracking, and mobile status.
 - HA and mobile return the same `actual_charging`, `power_kw`, `owner_mode`, and

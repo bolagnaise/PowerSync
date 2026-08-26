@@ -208,6 +208,43 @@ def test_vehicle_capacity_api_regenerates_without_charger_command_and_refreshes_
     assert "_stop_charging(" not in view_source
 
 
+def test_vehicle_config_api_exposes_validates_and_preserves_external_policy():
+    source = INIT_PATH.read_text()
+    start = source.index("class VehicleChargingConfigView")
+    end = source.index("class SolarSurplusConfigView", start)
+    view_source = source[start:end]
+
+    assert "normalize_external_control_policy" in view_source
+    assert "validate_external_control_policy" in view_source
+    assert "external_control_policy_supported" in view_source
+    assert "Hands-off external charging requires an exact vehicle" in view_source
+    assert 'if "external_control_policy" in data:' in view_source
+    assert '"external_control_policy", "override"' in view_source
+    assert "release_external_ev_ownership" in view_source
+    assert 'command="external_policy_override"' in view_source
+    assert "services.async_call" not in view_source
+
+
+def test_vehicle_sync_creates_powersync_authoritative_profiles():
+    source = INIT_PATH.read_text()
+    start = source.index("class EVVehiclesSyncView")
+    end = source.index("class EVVehicleCommandView", start)
+    view_source = source[start:end]
+
+    assert '"external_control_policy": "override"' in view_source
+
+
+def test_loadpoint_status_exposes_resolved_external_policy():
+    source = INIT_PATH.read_text()
+    start = source.index("class EVLoadpointStatusView")
+    end = source.index("class PriceRecommendationView", start)
+    view_source = source[start:end]
+
+    assert "get_external_control_policy" in view_source
+    assert 'loadpoint["external_control_policy"]' in view_source
+    assert 'loadpoint.get("owner") == "external"' in view_source
+
+
 def test_vehicle_deletion_releases_smart_schedule_battery_preserve_owner():
     source = INIT_PATH.read_text()
     start = source.index("class VehicleChargingConfigView")

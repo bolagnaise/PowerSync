@@ -50,6 +50,14 @@ class _Hass:
         self.data = {
             "power_sync": {
                 "entry-1": {
+                    "automation_store": types.SimpleNamespace(
+                        _data={
+                            "vehicle_charging_configs": [
+                                {"vehicle_id": VIN, "external_control_policy": "yield"},
+                                {"vehicle_id": VIN_2, "external_control_policy": "yield"},
+                            ]
+                        }
+                    ),
                     "tesla_coordinator": _Coordinator(),
                     "tariff_schedule": {
                         "buy_price": 0.0,

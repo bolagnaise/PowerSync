@@ -9,6 +9,14 @@ from typing import Any
 
 DEFAULT_VEHICLE_ID = "_default"
 EXTERNAL_OWNER_MODE = "external"
+EXTERNAL_CONTROL_POLICY_OVERRIDE = "override"
+EXTERNAL_CONTROL_POLICY_YIELD = "yield"
+EXTERNAL_CONTROL_POLICIES = frozenset(
+    {EXTERNAL_CONTROL_POLICY_OVERRIDE, EXTERNAL_CONTROL_POLICY_YIELD}
+)
+EXTERNAL_CONTROL_DEFAULT_LOADPOINT_TYPES = frozenset(
+    {"generic", "ocpp", "sigenergy", "zaptec"}
+)
 MANUAL_STOP_HOLD_SECONDS = 15 * 60
 RECOVERED_OWNERSHIP_MAX_AGE_SECONDS = 15 * 60
 EXTERNAL_COMMAND_SETTLE_SECONDS = 90
@@ -86,6 +94,151 @@ def _as_utc_datetime(value: Any) -> datetime | None:
 def normalize_vehicle_id(vehicle_id: Any = None) -> str:
     """Return the canonical id used by PowerSync for a loadpoint."""
     return str(vehicle_id or DEFAULT_VEHICLE_ID)
+
+
+def normalize_external_control_policy(value: Any) -> str:
+    """Return the safe persisted policy for externally started charging."""
+    policy = str(value or "").strip().lower()
+    if policy == EXTERNAL_CONTROL_POLICY_YIELD:
+        return EXTERNAL_CONTROL_POLICY_YIELD
+    return EXTERNAL_CONTROL_POLICY_OVERRIDE
+
+
+def validate_external_control_policy(value: Any) -> str:
+    """Validate an explicit API policy value without silently mutating it."""
+    policy = str(value or "").strip().lower()
+    if policy not in EXTERNAL_CONTROL_POLICIES:
+        raise ValueError("external_control_policy must be 'override' or 'yield'")
+    return policy
+
+
+def external_control_policy_supported(
+    vehicle_id: Any,
+    charger_type: Any,
+) -> bool:
+    """Return whether a profile has an identity safe enough to opt into yield."""
+    if normalize_vehicle_id(vehicle_id) != DEFAULT_VEHICLE_ID:
+        return True
+    return str(charger_type or "").strip().lower() in (
+        EXTERNAL_CONTROL_DEFAULT_LOADPOINT_TYPES
+    )
+
+
+def _stored_vehicle_charging_configs(
+    hass: Any,
+    config_entry: Any,
+) -> list[Mapping[str, Any]]:
+    entry = _entry_data(hass, config_entry.entry_id)
+    store = entry.get("automation_store")
+    stored_data = getattr(store, "_data", {}) if store is not None else {}
+    configs = (
+        stored_data.get("vehicle_charging_configs", [])
+        if isinstance(stored_data, Mapping)
+        else []
+    )
+    if not isinstance(configs, list):
+        return []
+    return [config for config in configs if isinstance(config, Mapping)]
+
+
+def _canonical_external_policy_id(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+    configs: list[Mapping[str, Any]],
+    *extra_ids: Any,
+) -> str:
+    value = normalize_vehicle_id(vehicle_id)
+    if not value.startswith("ble_"):
+        return value
+    try:
+        from ..tesla_ble_mapping import (
+            canonical_tesla_vehicle_id,
+            resolve_ble_prefixes,
+        )
+
+        options = {
+            **getattr(config_entry, "data", {}),
+            **getattr(config_entry, "options", {}),
+        }
+        candidate_ids = [config.get("vehicle_id") for config in configs]
+        candidate_ids.extend(extra_ids)
+        fleet_vins = [
+            str(candidate)
+            for candidate in candidate_ids
+            if len(str(candidate or "")) == 17
+            and str(candidate or "").isalnum()
+            and not str(candidate or "").isdigit()
+        ]
+        return canonical_tesla_vehicle_id(
+            options,
+            value,
+            fleet_vins,
+            resolve_ble_prefixes(hass, options),
+        )
+    except Exception:
+        return value
+
+
+def external_control_vehicle_ids_match(
+    hass: Any,
+    config_entry: Any,
+    first: Any,
+    second: Any,
+) -> bool:
+    """Match exact loadpoint identities, including configured BLE/VIN pairs."""
+    from .ev_vehicle_capacity import vehicle_ids_match
+
+    configs = _stored_vehicle_charging_configs(hass, config_entry)
+    left = _canonical_external_policy_id(
+        hass, config_entry, first, configs, first, second
+    )
+    right = _canonical_external_policy_id(
+        hass, config_entry, second, configs, first, second
+    )
+    return vehicle_ids_match(left, right)
+
+
+def get_external_control_policy(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+) -> str:
+    """Resolve one exact vehicle's external-control policy.
+
+    Missing, invalid, or ambiguous identities fail safe to PowerSync control.
+    A unique configured non-Tesla default loadpoint can opt in; Tesla BLE
+    aliases are mapped only when the configured pairing is exact and
+    unambiguous.
+    """
+    vid = normalize_vehicle_id(vehicle_id)
+    configs = _stored_vehicle_charging_configs(hass, config_entry)
+    if vid == DEFAULT_VEHICLE_ID:
+        matches = [
+            config
+            for config in configs
+            if external_control_policy_supported(
+                config.get("vehicle_id"),
+                config.get("charger_type"),
+            )
+        ]
+    else:
+        matches = [
+            config
+            for config in configs
+            if external_control_vehicle_ids_match(
+                hass,
+                config_entry,
+                config.get("vehicle_id"),
+                vid,
+            )
+        ]
+
+    if len(matches) != 1:
+        return EXTERNAL_CONTROL_POLICY_OVERRIDE
+    return normalize_external_control_policy(
+        matches[0].get("external_control_policy")
+    )
 
 
 def record_manual_stop_hold(
@@ -446,6 +599,10 @@ def ensure_external_ev_ownership(
     external lease.  Once external ownership is established it remains until
     an explicit unplug or a direct manual/Boost takeover.
     """
+    yield_external_control = (
+        get_external_control_policy(hass, config_entry, vehicle_id)
+        == EXTERNAL_CONTROL_POLICY_YIELD
+    )
     _lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
     if lease is not None:
         if lease.get("owner") != EXTERNAL_OWNER_MODE:
@@ -457,18 +614,50 @@ def ensure_external_ev_ownership(
                 and existing_session_id
                 and session_id != existing_session_id
             ):
+                if not yield_external_control:
+                    release_external_ev_ownership(
+                        hass,
+                        config_entry,
+                        vehicle_id,
+                        reason="New session observed under PowerSync control policy",
+                        command="external_policy_override",
+                        source="powersync",
+                    )
+                    return False
                 lease.pop("stop_settling", None)
                 lease.pop("stop_command_at", None)
                 lease.pop("stop_settling_expires_at", None)
                 lease["reason"] = reason
             expires_at = _as_utc_datetime(lease.get("stop_settling_expires_at"))
             if expires_at is not None and datetime.now(timezone.utc) >= expires_at:
+                if not yield_external_control:
+                    release_external_ev_ownership(
+                        hass,
+                        config_entry,
+                        vehicle_id,
+                        reason="PowerSync stop-settling window expired",
+                        command="external_policy_override",
+                        source="powersync",
+                    )
+                    return False
                 lease.pop("stop_settling", None)
                 lease.pop("stop_command_at", None)
                 lease.pop("stop_settling_expires_at", None)
                 lease["reason"] = reason
                 lease["updated_at"] = _now_iso()
                 _schedule_runtime_save(hass, config_entry)
+            if not yield_external_control:
+                return True
+        elif not yield_external_control:
+            release_external_ev_ownership(
+                hass,
+                config_entry,
+                vehicle_id,
+                reason="PowerSync control policy is active",
+                command="external_policy_override",
+                source="powersync",
+            )
+            return False
         if session_id and lease.get("session_id") != session_id:
             lease["session_id"] = session_id
             lease["updated_at"] = _now_iso()
@@ -523,6 +712,9 @@ def ensure_external_ev_ownership(
             and (observed_time is None or observed_time <= command_time)
         ):
             return False
+
+    if not yield_external_control:
+        return False
 
     claim_ev_ownership(
         hass,
@@ -599,6 +791,8 @@ def release_external_ev_ownership(
     vehicle_id: Any,
     *,
     reason: str = "External vehicle unplugged",
+    command: str = "external_unplug",
+    source: str = EXTERNAL_OWNER_MODE,
 ) -> bool:
     """Release only a matching externally-owned loadpoint lease."""
     lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
@@ -609,8 +803,8 @@ def release_external_ev_ownership(
         config_entry,
         lease_id,
         reason=reason,
-        command="external_unplug",
-        source=EXTERNAL_OWNER_MODE,
+        command=command,
+        source=source,
     )
     return True
 
@@ -657,6 +851,28 @@ def can_claim_ev_ownership(
     """Return whether an owner mode may claim a loadpoint right now."""
     lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
     if lease is None:
+        return True, None, None, None
+
+    if (
+        lease.get("owner") == EXTERNAL_OWNER_MODE
+        and get_external_control_policy(hass, config_entry, vehicle_id)
+        != EXTERNAL_CONTROL_POLICY_YIELD
+    ):
+        if lease.get("stop_settling"):
+            return (
+                False,
+                lease_id,
+                lease,
+                "Awaiting telemetry confirmation of PowerSync stop",
+            )
+        release_ev_ownership(
+            hass,
+            config_entry,
+            lease_id,
+            reason="PowerSync control policy is active",
+            command="external_policy_override",
+            source="powersync",
+        )
         return True, None, None, None
 
     existing_mode = str(lease.get("owner_mode") or "dynamic")
@@ -778,8 +994,23 @@ def get_active_ev_owner_mode(
 ) -> str | None:
     """Return the active owner mode for a loadpoint, considering default overlap."""
     vid = normalize_vehicle_id(vehicle_id)
-    _lease_id, lease = get_ev_ownership(hass, config_entry, vid)
+    lease_id, lease = get_ev_ownership(hass, config_entry, vid)
     if lease is not None:
+        if (
+            lease.get("owner") == EXTERNAL_OWNER_MODE
+            and not lease.get("stop_settling")
+            and get_external_control_policy(hass, config_entry, vid)
+            != EXTERNAL_CONTROL_POLICY_YIELD
+        ):
+            release_ev_ownership(
+                hass,
+                config_entry,
+                lease_id,
+                reason="PowerSync control policy is active",
+                command="external_policy_override",
+                source="powersync",
+            )
+            return None
         return str(lease.get("owner_mode") or "dynamic")
 
     return None

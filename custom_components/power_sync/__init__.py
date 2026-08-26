@@ -15005,6 +15005,7 @@ class EVVehiclesSyncView(HomeAssistantView):
                             new_config = {
                                 "vehicle_id": vehicle_id,
                                 "display_name": vehicle.get("display_name", f"Vehicle {i + 1}"),
+                                "external_control_policy": "override",
                                 "priority": i + 1,  # First vehicle = 1 (primary), second = 2, etc.
                                 "solar_charging_enabled": True,
                                 "vehicle_model": vehicle.get("model"),
@@ -16528,6 +16529,23 @@ class VehicleChargingConfigView(HomeAssistantView):
             ),
         )
 
+    def _external_policy_contract(self, config: dict) -> dict:
+        """Return normalized external-control policy and capability metadata."""
+        from .automations.ev_ownership import (
+            external_control_policy_supported,
+            normalize_external_control_policy,
+        )
+
+        return {
+            "external_control_policy": normalize_external_control_policy(
+                config.get("external_control_policy")
+            ),
+            "external_control_policy_supported": external_control_policy_supported(
+                config.get("vehicle_id"),
+                config.get("charger_type"),
+            ),
+        }
+
     def _dynamic_state_matches_config(self, state: dict, config: dict | None) -> bool:
         """Return true when runtime dynamic state belongs to a removed config."""
         if not config:
@@ -16634,7 +16652,11 @@ class VehicleChargingConfigView(HomeAssistantView):
                 data.get("vehicle_charging_configs", [])
             )
             resolved_configs = [
-                {**config, **self._capacity_contract(config)}
+                {
+                    **config,
+                    **self._external_policy_contract(config),
+                    **self._capacity_contract(config),
+                }
                 for config in vehicle_configs
             ]
 
@@ -16661,6 +16683,19 @@ class VehicleChargingConfigView(HomeAssistantView):
                     "success": False,
                     "error": "vehicle_id is required"
                 }, status=400)
+
+            if "external_control_policy" in data:
+                from .automations.ev_ownership import validate_external_control_policy
+
+                try:
+                    data["external_control_policy"] = validate_external_control_policy(
+                        data.get("external_control_policy")
+                    )
+                except ValueError as err:
+                    return web.json_response({
+                        "success": False,
+                        "error": str(err),
+                    }, status=400)
 
             store = self._get_store()
             if not store:
@@ -16691,6 +16726,19 @@ class VehicleChargingConfigView(HomeAssistantView):
                 or existing_config.get("charger_type")
                 or ""
             ).lower()
+            if data.get("external_control_policy") == "yield":
+                from .automations.ev_ownership import (
+                    external_control_policy_supported,
+                )
+
+                if not external_control_policy_supported(vehicle_id, charger_type):
+                    return web.json_response({
+                        "success": False,
+                        "error": (
+                            "Hands-off external charging requires an exact vehicle "
+                            "or a unique configured non-Tesla loadpoint"
+                        ),
+                    }, status=400)
             stable_id = str(vehicle_id).lower()
             anonymous = (
                 charger_type in ("generic", "ocpp")
@@ -16740,6 +16788,9 @@ class VehicleChargingConfigView(HomeAssistantView):
                 new_config = {
                     "vehicle_id": vehicle_id,
                     "display_name": data.get("display_name", f"Vehicle {vehicle_id}"),
+                    "external_control_policy": data.get(
+                        "external_control_policy", "override"
+                    ),
                     "charger_type": data.get(
                         "charger_type",
                         "generic" if stable_id.startswith("generic_") else (
@@ -16920,9 +16971,87 @@ class VehicleChargingConfigView(HomeAssistantView):
                 if vehicle_ids_match(c.get("vehicle_id"), vehicle_id)
             )
 
+            from .automations.ev_ownership import (
+                EXTERNAL_CONTROL_POLICY_OVERRIDE,
+                claim_ev_ownership,
+                external_control_vehicle_ids_match,
+                get_ev_ownerships,
+                normalize_external_control_policy,
+                release_external_ev_ownership,
+            )
+
+            saved_policy = normalize_external_control_policy(
+                saved.get("external_control_policy")
+            )
+            if saved_policy == EXTERNAL_CONTROL_POLICY_OVERRIDE:
+                for entry in self._hass.config_entries.async_entries(DOMAIN):
+                    for lease_id, lease in list(
+                        get_ev_ownerships(self._hass, entry).items()
+                    ):
+                        if (
+                            lease.get("owner") == "external"
+                            and external_control_vehicle_ids_match(
+                                self._hass,
+                                entry,
+                                lease_id,
+                                vehicle_id,
+                            )
+                        ):
+                            release_external_ev_ownership(
+                                self._hass,
+                                entry,
+                                lease_id,
+                                reason=(
+                                    "PowerSync control enabled in vehicle settings"
+                                ),
+                                command="external_policy_override",
+                                source="powersync",
+                            )
+
+                try:
+                    from .automations.actions import _dynamic_ev_state
+
+                    for entry in self._hass.config_entries.async_entries(DOMAIN):
+                        vehicles = _dynamic_ev_state.get(entry.entry_id, {})
+                        for runtime_id, runtime_state in vehicles.items():
+                            if external_control_vehicle_ids_match(
+                                self._hass,
+                                entry,
+                                runtime_id,
+                                vehicle_id,
+                            ):
+                                was_external = bool(
+                                    runtime_state.get("external_manual_override")
+                                )
+                                runtime_state["external_manual_override"] = False
+                                runtime_state["external_start_detection_armed"] = True
+                                if was_external and runtime_state.get("active"):
+                                    params = runtime_state.get("params") or {}
+                                    runtime_state["ownership"] = claim_ev_ownership(
+                                        self._hass,
+                                        entry,
+                                        runtime_id,
+                                        owner_mode=str(
+                                            params.get("owner_mode")
+                                            or params.get("dynamic_mode")
+                                            or "solar_surplus"
+                                        ),
+                                        reason=(
+                                            "PowerSync control enabled in vehicle settings"
+                                        ),
+                                    )
+                except Exception as err:
+                    _LOGGER.debug(
+                        "EV external-control runtime refresh failed: %s", err
+                    )
+
             return web.json_response({
                 "success": True,
-                "config": {**saved, **self._capacity_contract(saved)},
+                "config": {
+                    **saved,
+                    **self._external_policy_contract(saved),
+                    **self._capacity_contract(saved),
+                },
             })
 
         except Exception as e:
@@ -18565,7 +18694,13 @@ class EVLoadpointStatusView(HomeAssistantView):
             from .automations.loadpoint_status import (
                 build_loadpoint_status,
             )
-            from .automations.ev_ownership import get_ev_last_commands, get_ev_ownerships
+            from .automations.ev_ownership import (
+                EXTERNAL_CONTROL_POLICY_YIELD,
+                get_ev_last_commands,
+                get_ev_ownership,
+                get_ev_ownerships,
+                get_external_control_policy,
+            )
             from .automations.ev_charging_planner import (
                 get_ev_charging_coordinator,
                 get_price_level_executor,
@@ -18830,6 +18965,27 @@ class EVLoadpointStatusView(HomeAssistantView):
 
             for loadpoint in loadpoints:
                 loadpoint_id = loadpoint.get("loadpoint_id")
+                external_control_policy = get_external_control_policy(
+                    self._hass,
+                    self._config_entry,
+                    loadpoint_id,
+                )
+                loadpoint["external_control_policy"] = external_control_policy
+                _lease_id, active_lease = get_ev_ownership(
+                    self._hass,
+                    self._config_entry,
+                    loadpoint_id,
+                )
+                if (
+                    loadpoint.get("owner") == "external"
+                    and (
+                        external_control_policy != EXTERNAL_CONTROL_POLICY_YIELD
+                        or not active_lease
+                        or active_lease.get("owner") != "external"
+                    )
+                ):
+                    loadpoint["owner"] = None
+                    loadpoint["owner_mode"] = None
                 vehicle_config = next(
                     (
                         item for item in vehicle_configs

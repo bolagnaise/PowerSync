@@ -347,6 +347,16 @@ class _Entry:
     options = {}
 
 
+def _set_external_policy(hass, vehicle_id: str, policy: str = "yield") -> None:
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
+        _data={
+            "vehicle_charging_configs": [
+                {"vehicle_id": vehicle_id, "external_control_policy": policy}
+            ]
+        }
+    )
+
+
 def _tesla_capability_hass(
     *,
     first_max: int = 32,
@@ -8933,6 +8943,7 @@ def test_solar_surplus_external_tesla_start_suspends_until_charge_ends(monkeypat
         ),
     ])
     vehicle_id = "VIN123"
+    _set_external_policy(hass, vehicle_id)
     actions._dynamic_ev_state.clear()
     state = _solar_surplus_state(current_amps=0)
     state["low_surplus_start"] = datetime.now() - timedelta(minutes=11)
@@ -8970,6 +8981,10 @@ def test_solar_surplus_external_tesla_start_suspends_until_charge_ends(monkeypat
     override_state = actions._dynamic_ev_state["entry-1"][vehicle_id]
     assert override_state["params"]["owner_mode"] == "solar_surplus"
     assert override_state["external_manual_override"] is True
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
+    lease = ev_ownership.get_ev_ownership(hass, _Entry(), vehicle_id)[1]
+    assert lease["owner"] == "external"
+    assert lease["owner_mode"] == "external"
     assert "rate control suspended" in override_state["reason"]
     assert set_amps_calls == []
 
@@ -8998,6 +9013,7 @@ def test_solar_surplus_external_tessie_start_uses_vin_device_entity(monkeypatch)
         ),
     ])
     vehicle_id = "LRW3F7FS1NC484342"
+    _set_external_policy(hass, vehicle_id)
     actions._dynamic_ev_state.clear()
     state = _solar_surplus_state(current_amps=0)
     state["low_surplus_start"] = datetime.now() - timedelta(minutes=11)
@@ -9054,6 +9070,7 @@ def test_solar_surplus_external_tesla_override_survives_power_telemetry_gap(
         _State("sensor.VIN123_charging_state", "charging"),
     ])
     vehicle_id = "VIN123"
+    _set_external_policy(hass, vehicle_id)
     actions._dynamic_ev_state.clear()
     state = _solar_surplus_state(current_amps=0)
     state["external_manual_override"] = True
@@ -9096,6 +9113,7 @@ def test_solar_surplus_external_tesla_override_survives_state_telemetry_gap(
         _State(charging_entity, "unavailable"),
     ])
     vehicle_id = "VIN123"
+    _set_external_policy(hass, vehicle_id)
     actions._dynamic_ev_state.clear()
     state = _solar_surplus_state(current_amps=0)
     state["external_manual_override"] = True

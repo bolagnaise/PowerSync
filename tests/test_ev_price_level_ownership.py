@@ -1882,6 +1882,14 @@ class _FakeStates:
         return [entity_id for entity_id in self._states if entity_id.startswith(prefix)]
 
 
+def _set_external_policy(hass, *vehicle_ids: str, policy: str = "yield") -> None:
+    store = hass.data["power_sync"]["entry-1"]["automation_store"]
+    store._data["vehicle_charging_configs"] = [
+        {"vehicle_id": vehicle_id, "external_control_policy": policy}
+        for vehicle_id in vehicle_ids
+    ]
+
+
 def _scheduled_price_hass(schedule: dict | None) -> _FakeHass:
     hass = _FakeHass()
     hass.data["power_sync"]["entry-1"]["automation_store"]._data[
@@ -3307,7 +3315,7 @@ def test_price_level_preserve_home_battery_sets_optimizer_intent(fake_actions):
     assert preserve_state["source"] == "price_level_charging"
 
 
-def test_scheduled_yields_to_external_charging_outside_window(monkeypatch, fake_actions):
+def test_scheduled_does_not_yield_an_ambiguous_default_loadpoint(monkeypatch, fake_actions):
     fake_actions._dynamic_ev_state = {}
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
 
@@ -3353,14 +3361,14 @@ def test_scheduled_yields_to_external_charging_outside_window(monkeypatch, fake_
         ev_planner.set_scheduled_charging_executor(previous_executor)
         ev_planner.set_price_level_executor(previous_price_executor)
 
-    fake_actions._action_stop_ev_charging_dynamic.assert_not_awaited()
+    fake_actions._action_stop_ev_charging_dynamic.assert_awaited_once()
     ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     lease = ev_ownership.get_ev_ownership(
         hass,
         _FakeConfigEntry(),
         ev_ownership.DEFAULT_VEHICLE_ID,
     )[1]
-    assert lease["owner"] == "external"
+    assert lease is None
 
 
 def test_scheduled_yields_to_active_second_tesla_outside_window(monkeypatch, fake_actions):
@@ -3370,6 +3378,7 @@ def test_scheduled_yields_to_active_second_tesla_outside_window(monkeypatch, fak
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
 
     hass = _FakeHass()
+    _set_external_policy(hass, first_vin, second_vin)
     hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {
@@ -3721,6 +3730,7 @@ def test_scheduled_external_owner_is_retained_while_tesla_state_is_stale(
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
 
     hass = _FakeHass()
+    _set_external_policy(hass, second_vin)
     hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {
@@ -4389,6 +4399,7 @@ def test_auto_schedule_yields_to_untracked_tesla_while_waiting(monkeypatch, fake
     monkeypatch.setattr(ev_planner.dt_util, "now", lambda *args, **kwargs: ha_now)
 
     hass = _FakeHass()
+    _set_external_policy(hass, VIN)
     planner = SimpleNamespace(
         should_charge_now=AsyncMock(
             return_value=(False, stop_reason, "grid_offpeak")
@@ -4514,7 +4525,7 @@ def test_auto_schedule_failed_stop_preserves_local_state(monkeypatch):
         ("manual", True, False, False),
         ("solar_surplus", True, False, False),
         ("external", True, False, False),
-        (None, True, False, True),
+        (None, True, True, True),
         (None, False, False, True),
     ],
 )
@@ -4529,6 +4540,8 @@ def test_auto_schedule_external_stop_respects_owner_and_physical_state(
     ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     hass = _FakeHass()
     entry = _FakeConfigEntry()
+    if owner_mode == "external":
+        _set_external_policy(hass, VIN)
     if owner_mode is not None:
         ev_ownership.claim_ev_ownership(
             hass,
@@ -6356,6 +6369,7 @@ def test_enabled_price_level_yields_to_external_high_price_charging(
     )
 
     hass = _FakeHass()
+    _set_external_policy(hass, VIN)
     entry = _FakeConfigEntry()
     executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
     asyncio.run(executor.evaluate_all_vehicles(50))
