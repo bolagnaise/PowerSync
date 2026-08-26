@@ -217,3 +217,34 @@ def test_successful_self_consumption_restore_advances_marker(opt_module):
         assert calls == [True]
 
     asyncio.run(_run())
+
+
+def test_calibration_holds_active_optimizer_force_without_hardware_refresh(opt_module):
+    """An expiring optimizer force must not refresh while calibration is active."""
+    async def _run():
+        calls = []
+
+        async def force_charge(**kwargs):
+            calls.append(kwargs)
+            return True
+
+        battery = SimpleNamespace(force_charge=force_charge)
+        coordinator = _execute_coordinator(opt_module, battery)
+        coordinator.hass.data = {
+            "power_sync": {"test-entry": {"calibration_suspected": True}}
+        }
+        coordinator._get_active_force_state = lambda: {
+            "active": True, "source": "optimizer", "type": "charge"
+        }
+
+        await coordinator._execute_optimizer_action(
+            SimpleNamespace(
+                timestamp=datetime(2026, 7, 6, 18, 0, tzinfo=timezone.utc),
+                action="charge", power_w=20_000.0, soc=0.8,
+                battery_charge_w=20_000.0, battery_discharge_w=0.0,
+            )
+        )
+
+        assert calls == []
+
+    asyncio.run(_run())

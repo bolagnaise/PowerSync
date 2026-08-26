@@ -8919,6 +8919,29 @@ class InverterStatusView(HomeAssistantView):
                 "error": "Inverter not configured (no host)"
             })
 
+        # The status entity already owns the controller and coalesces its
+        # initial, interval and dispatcher refreshes.  Reuse that path for
+        # mobile reads so a dashboard refresh cannot create an independent
+        # Envoy request batch alongside a slow scheduled poll.
+        entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        status_sensor = entry_data.get("inverter_status_sensor")
+        if status_sensor is not None:
+            await status_sensor._async_poll_inverter()
+            state_dict = dict(status_sensor.extra_state_attributes)
+            cached_state = status_sensor._cached_state
+            state_dict["status"] = (
+                "online" if cached_state == "running" else cached_state or "unknown"
+            )
+            state_dict["is_curtailed"] = cached_state == "curtailed"
+            return web.json_response({
+                "success": True,
+                "enabled": True,
+                "brand": inverter_brand,
+                "model": inverter_model,
+                "host": inverter_host,
+                **state_dict,
+            })
+
         controller = None
         try:
             controller = get_inverter_controller(

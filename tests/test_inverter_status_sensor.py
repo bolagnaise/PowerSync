@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import ast
+import asyncio
+import copy
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
 SENSOR_PATH = ROOT / "custom_components" / "power_sync" / "sensor.py"
+INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
 
 
 def _method_source(class_name: str, method_name: str) -> str:
@@ -45,7 +48,7 @@ def _function(function_name: str):
 
 
 def test_cached_curtailed_state_is_only_trusted_for_fronius_simple_mode():
-    source = _method_source("InverterStatusSensor", "_async_poll_inverter")
+    source = _method_source("InverterStatusSensor", "_async_poll_inverter_once")
 
     assert "inverter_brand == 'fronius'" in source
     assert "cached_curtail_state == 'curtailed'" in source
@@ -147,3 +150,52 @@ def test_inverter_status_restores_daily_counter_before_initial_poll():
     assert source.index("await self.async_get_last_state()") < source.index(
         "await self._async_poll_inverter()"
     )
+
+
+def test_slow_inverter_poll_coalesces_interval_and_dispatcher_triggers():
+    """A slow Envoy request must not let a second scheduler tick start a batch."""
+    module = ast.parse(SENSOR_PATH.read_text())
+    sensor = next(
+        node for node in module.body
+        if isinstance(node, ast.ClassDef) and node.name == "InverterStatusSensor"
+    )
+    wrapper = copy.deepcopy(next(
+        node for node in sensor.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_async_poll_inverter"
+    ))
+    wrapper.decorator_list = []
+    wrapper.name = "poll"
+    wrapper.args.args[0].arg = "self"
+    tree = ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[]))
+    namespace = {"asyncio": asyncio, "_LOGGER": type("Logger", (), {"debug": lambda *args: None})()}
+    exec(compile(tree, str(SENSOR_PATH), "exec"), namespace)
+
+    class Sensor:
+        def __init__(self):
+            self._inverter_poll_task = None
+            self.calls = 0
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def _async_poll_inverter_once(self):
+            self.calls += 1
+            self.entered.set()
+            await self.release.wait()
+
+    async def run():
+        sensor = Sensor()
+        first = asyncio.create_task(namespace["poll"](sensor))
+        await sensor.entered.wait()
+        await namespace["poll"](sensor)
+        assert sensor.calls == 1
+        sensor.release.set()
+        await first
+        assert sensor._inverter_poll_task is None
+
+    asyncio.run(run())
+
+
+def test_mobile_inverter_status_reuses_the_status_sensor_poll_path():
+    source = INIT_PATH.read_text()
+    assert 'status_sensor = entry_data.get("inverter_status_sensor")' in source
+    assert "await status_sensor._async_poll_inverter()" in source

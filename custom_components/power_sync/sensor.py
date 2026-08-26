@@ -1,6 +1,7 @@
 """Sensor platform for PowerSync integration."""
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -5538,6 +5539,10 @@ class InverterStatusSensor(RestoreEntity, SensorEntity):
         self._cached_state = None
         self._cached_attrs = {}
         self._controller = None  # Cached controller to preserve state (e.g., JWT token timestamp)
+        # The interval scheduler and curtailment dispatcher may fire while a
+        # slow status request is still in flight.  Keep one request batch per
+        # configured inverter rather than queueing concurrent Envoy polls.
+        self._inverter_poll_task = None
 
     @property
     def device_info(self):
@@ -5590,6 +5595,9 @@ class InverterStatusSensor(RestoreEntity, SensorEntity):
         # Initialize BEFORE initial poll so exception handler can use it
         self._offline_count = 0
         self._max_offline_before_backoff = 3  # After 3 failed polls, reduce frequency
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        if entry_data:
+            entry_data["inverter_status_sensor"] = self
 
         # Do initial poll
         _LOGGER.info("Performing initial inverter poll")
@@ -5621,6 +5629,12 @@ class InverterStatusSensor(RestoreEntity, SensorEntity):
             self._unsub_dispatcher()
         if self._unsub_interval:
             self._unsub_interval()
+        poll_task = getattr(self, "_inverter_poll_task", None)
+        if poll_task and not poll_task.done():
+            poll_task.cancel()
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        if entry_data.get("inverter_status_sensor") is self:
+            entry_data.pop("inverter_status_sensor", None)
         # Disconnect cached controller
         if self._controller:
             try:
@@ -5630,6 +5644,21 @@ class InverterStatusSensor(RestoreEntity, SensorEntity):
             self._controller = None
 
     async def _async_poll_inverter(self) -> None:
+        """Coalesce concurrent requests for inverter status."""
+        active_poll = getattr(self, "_inverter_poll_task", None)
+        current_task = asyncio.current_task()
+        if active_poll is not None and active_poll is not current_task and not active_poll.done():
+            _LOGGER.debug("Inverter status poll already in flight - coalescing trigger")
+            return
+
+        self._inverter_poll_task = current_task
+        try:
+            await self._async_poll_inverter_once()
+        finally:
+            if self._inverter_poll_task is current_task:
+                self._inverter_poll_task = None
+
+    async def _async_poll_inverter_once(self) -> None:
         """Poll the inverter to get current status."""
         from .inverters import get_inverter_controller
 

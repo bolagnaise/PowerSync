@@ -9034,6 +9034,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "Profit Max: ordinary self-consumption fallback command failed"
                 )
 
+        # An active Powerwall calibration pauses automatic battery commands.
+        # Check this before the optimizer-owned force-extension path: that
+        # path can otherwise refresh a Tesla TOU tariff (and reserve/mode
+        # writes) before the ordinary action gate below converts charge/export
+        # to self-consumption.
+        from ..const import DOMAIN as _CAL_DOMAIN
+        _calibration_data = self.hass.data.get(_CAL_DOMAIN, {}).get(
+            self.entry_id, {}
+        )
+        if _calibration_data.get("calibration_suspected"):
+            active_force = self._get_active_force_state()
+            if (
+                active_force
+                and active_force.get("active")
+                and active_force.get("source") == "optimizer"
+            ):
+                _LOGGER.info(
+                    "Optimizer: calibration suspected - holding active optimizer force "
+                    "without refreshing hardware"
+                )
+                return
+
         # Check if force charge/discharge is active.
         # User-triggered force modes own the battery state — don't override.
         # Optimizer-triggered force modes can be overridden if the LP changes
