@@ -1505,7 +1505,7 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
-        value_fn=lambda data: data.get("peak_demand_kw", 0.0) if data else 0.0,
+        value_fn=lambda data: data.get("peak_demand_kw") if data else None,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DEMAND_CHARGE_COST,
@@ -1514,7 +1514,7 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         currency_attrs=True,
         device_class=SensorDeviceClass.MONETARY,
         suggested_display_precision=2,
-        value_fn=lambda data: data.get("estimated_cost", 0.0) if data else 0.0,
+        value_fn=lambda data: data.get("estimated_cost") if data else None,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_SUPPLY_CHARGE_COST,

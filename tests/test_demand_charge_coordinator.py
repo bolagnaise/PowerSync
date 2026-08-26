@@ -196,3 +196,113 @@ def test_peak_demand_does_not_cross_billing_cycle(
     )
     asyncio.run(reconstructed.async_load())
     assert asyncio.run(reconstructed._async_update_data())["peak_demand_kw"] == 2.0
+
+
+def test_peak_demand_load_failure_is_warned_unavailable_and_never_overwrites(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+):
+    coordinator_module = _coordinator_module(monkeypatch)
+
+    class FailingLoadStore:
+        saved: dict[str, object] = {}
+
+        def __init__(self, _hass, _version, key) -> None:
+            self.key = key
+
+        async def async_load(self):
+            raise OSError("storage temporarily unavailable")
+
+        async def async_save(self, value) -> None:
+            self.saved[self.key] = value
+
+    coordinator_module.Store = FailingLoadStore
+    _Clock.current = datetime(2026, 8, 21, 17, 0, tzinfo=timezone.utc)
+    energy = SimpleNamespace(data={"grid_power": 2.0})
+    demand = coordinator_module.DemandChargeCoordinator(
+        SimpleNamespace(), energy, True, 10.0, "15:00", "21:00", "All Days", 1,
+        entry_id="entry-load-failure",
+    )
+    prior = {
+        "cycle": "2026-08-01",
+        "identity": demand._store_identity(),
+        "peak_demand_kw": 7.25,
+    }
+    FailingLoadStore.saved[demand._store.key] = prior
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(demand.async_load())
+    data = asyncio.run(demand._async_update_data())
+    asyncio.run(demand.async_save())
+
+    assert data["peak_demand_kw"] is None
+    assert data["estimated_cost"] is None
+    assert FailingLoadStore.saved[demand._store.key] == prior
+    assert "could not load" in caplog.text
+
+
+def test_peak_demand_retries_a_failed_restore_and_merges_session_peak(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    coordinator_module = _coordinator_module(monkeypatch)
+
+    class RecoveringStore:
+        saved: dict[str, object] = {}
+        load_attempts = 0
+
+        def __init__(self, _hass, _version, key) -> None:
+            self.key = key
+
+        async def async_load(self):
+            type(self).load_attempts += 1
+            if self.load_attempts == 1:
+                raise OSError("storage temporarily unavailable")
+            return self.saved.get(self.key)
+
+        async def async_save(self, value) -> None:
+            self.saved[self.key] = value
+
+    coordinator_module.Store = RecoveringStore
+    _Clock.current = datetime(2026, 8, 21, 17, 0, tzinfo=timezone.utc)
+    energy = SimpleNamespace(data={"grid_power": 8.0})
+    demand = coordinator_module.DemandChargeCoordinator(
+        SimpleNamespace(), energy, True, 10.0, "15:00", "21:00", "All Days", 1,
+        entry_id="entry-recovering-load",
+    )
+    RecoveringStore.saved[demand._store.key] = {
+        "cycle": "2026-08-01",
+        "identity": demand._store_identity(),
+        "peak_demand_kw": 7.25,
+    }
+
+    asyncio.run(demand.async_load())
+    data = asyncio.run(demand._async_update_data())
+
+    assert data["peak_demand_kw"] == 8.0
+    assert RecoveringStore.saved[demand._store.key]["peak_demand_kw"] == 8.0
+
+
+def test_peak_demand_malformed_current_cycle_is_unavailable_and_preserved(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+):
+    coordinator_module = _coordinator_module(monkeypatch)
+    _Clock.current = datetime(2026, 8, 21, 17, 0, tzinfo=timezone.utc)
+    energy = SimpleNamespace(data={"grid_power": 2.0})
+    demand = coordinator_module.DemandChargeCoordinator(
+        SimpleNamespace(), energy, True, 10.0, "15:00", "21:00", "All Days", 1,
+        entry_id="entry-malformed-peak",
+    )
+    prior = {
+        "cycle": "2026-08-01",
+        "identity": object(),
+        "peak_demand_kw": 7.25,
+    }
+    demand._store.saved[demand._store.key] = prior
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(demand.async_load())
+    data = asyncio.run(demand._async_update_data())
+    asyncio.run(demand.async_save())
+
+    assert data["peak_demand_kw"] is None
+    assert demand._store.saved[demand._store.key] is prior
+    assert "invalid stored identity" in caplog.text

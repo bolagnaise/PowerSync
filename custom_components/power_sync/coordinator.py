@@ -4499,6 +4499,11 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
 
         # Track peak demand (persists across coordinator updates)
         self._peak_demand_kw = 0.0
+        # Never replace an unknown restored peak with the constructor's zero.
+        # A Store error can otherwise turn a same-cycle peak into a plausible
+        # but incorrect zero during the next unload or update.
+        self._peak_demand_restore_unresolved = False
+        self._peak_demand_restore_error_logged = False
         self._last_billing_day_check = None
         self._store = (
             Store(hass, 1, f"{DOMAIN}.demand_charge.{entry_id}")
@@ -4539,25 +4544,74 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         try:
             stored = await self._store.async_load()
         except Exception as err:
-            _LOGGER.debug("Could not load Demand Charge peak: %s", err)
+            self._mark_peak_restore_unresolved("could not load", err)
+            return
+        if stored is None:
+            self._peak_demand_restore_unresolved = False
+            self._peak_demand_restore_error_logged = False
             return
         if not isinstance(stored, dict):
+            self._mark_peak_restore_unresolved("has invalid stored data")
             return
-        if (
-            stored.get("cycle") != self._billing_cycle_key(dt_util.now())
-            or stored.get("identity") != self._store_identity()
-        ):
+        current_cycle = self._billing_cycle_key(dt_util.now())
+        stored_cycle = stored.get("cycle")
+        if not isinstance(stored_cycle, str):
+            self._mark_peak_restore_unresolved("has an invalid stored billing cycle")
+            return
+        if stored_cycle != current_cycle:
+            # A different billing cycle or changed demand window intentionally
+            # starts a new, incomparable peak.
+            self._peak_demand_restore_unresolved = False
+            self._peak_demand_restore_error_logged = False
+            return
+        stored_identity = stored.get("identity")
+        if not isinstance(stored_identity, dict):
+            self._mark_peak_restore_unresolved("has an invalid stored identity")
+            return
+        if stored_identity != self._store_identity():
+            # The current billing cycle is not comparable after a demand-window
+            # configuration change.
+            self._peak_demand_restore_unresolved = False
+            self._peak_demand_restore_error_logged = False
             return
         try:
-            peak = float(stored.get("peak_demand_kw", 0.0))
-        except (TypeError, ValueError):
+            peak = float(stored["peak_demand_kw"])
+        except (KeyError, TypeError, ValueError):
+            self._mark_peak_restore_unresolved("has an invalid stored peak")
             return
-        if math.isfinite(peak) and peak >= 0:
-            self._peak_demand_kw = peak
+        if not math.isfinite(peak) or peak < 0:
+            self._mark_peak_restore_unresolved("has a non-finite stored peak")
+            return
+        self._peak_demand_kw = max(self._peak_demand_kw, peak)
+        self._peak_demand_restore_unresolved = False
+        self._peak_demand_restore_error_logged = False
+
+    def _mark_peak_restore_unresolved(
+        self, reason: str, err: Exception | None = None
+    ) -> None:
+        """Keep a failed same-cycle restoration visible and non-destructive."""
+        self._peak_demand_restore_unresolved = True
+        detail = f": {err}" if err is not None else ""
+        if not self._peak_demand_restore_error_logged:
+            _LOGGER.warning(
+                "Demand Charge peak %s; keeping Peak Demand This Cycle unavailable "
+                "until the stored value can be read%s",
+                reason,
+                detail,
+            )
+            self._peak_demand_restore_error_logged = True
+        else:
+            _LOGGER.debug("Demand Charge peak restoration remains unresolved%s", detail)
 
     async def async_save(self, now: datetime | None = None) -> None:
         """Persist the current peak for the active configured billing cycle."""
         if self._store is None:
+            return
+        if self._peak_demand_restore_unresolved:
+            _LOGGER.debug(
+                "Not saving Demand Charge peak while its prior same-cycle value "
+                "is unresolved"
+            )
             return
         now = now or dt_util.now()
         try:
@@ -4569,7 +4623,7 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
                 }
             )
         except Exception as err:
-            _LOGGER.debug("Could not save Demand Charge peak: %s", err)
+            _LOGGER.warning("Could not save Demand Charge peak: %s", err)
 
     def _is_in_peak_period(self, now: datetime) -> bool:
         """Check if current time is within peak period and correct day."""
@@ -4618,6 +4672,11 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         now = dt_util.now()
         current_day = now.day
 
+        # A transient Store failure is retried on the next regular update. The
+        # session candidate is retained and merged with a recovered stored peak.
+        if self._peak_demand_restore_unresolved:
+            await self.async_load()
+
         # If we've crossed the billing day, reset peak demand
         if self._last_billing_day_check is not None:
             # Check if we've passed the billing day since last check
@@ -4625,6 +4684,8 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
             if current_day == self.billing_day and last_check_day != self.billing_day:
                 _LOGGER.info("Billing cycle reset triggered on day %d", self.billing_day)
                 self.reset_peak_demand()
+                self._peak_demand_restore_unresolved = False
+                self._peak_demand_restore_error_logged = False
                 await self.async_save(now)
 
         self._last_billing_day_check = now
@@ -4646,8 +4707,14 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
             _LOGGER.info("New peak demand: %.2f kW", self._peak_demand_kw)
             await self.async_save(now)
 
-        # Calculate estimated demand charge cost (peak demand * rate)
-        estimated_demand_cost = self._peak_demand_kw * self.rate
+        # Do not publish the constructor's zero as an accounting value when a
+        # same-cycle restore is unresolved.
+        peak_demand_kw = (
+            None if self._peak_demand_restore_unresolved else self._peak_demand_kw
+        )
+        estimated_demand_cost = (
+            None if peak_demand_kw is None else peak_demand_kw * self.rate
+        )
 
         # Calculate days elapsed in current billing cycle
         days_elapsed = self._calculate_days_elapsed(now)
@@ -4659,12 +4726,16 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         daily_supply_cost = self.daily_supply_charge * days_elapsed
 
         # Calculate total monthly cost
-        total_monthly_cost = estimated_demand_cost + daily_supply_cost + self.monthly_supply_charge
+        total_monthly_cost = (
+            None
+            if estimated_demand_cost is None
+            else estimated_demand_cost + daily_supply_cost + self.monthly_supply_charge
+        )
 
         return {
             "in_peak_period": in_peak_period,
             "grid_import_power_kw": grid_import_kw,
-            "peak_demand_kw": self._peak_demand_kw,
+            "peak_demand_kw": peak_demand_kw,
             "estimated_cost": estimated_demand_cost,
             "daily_supply_charge_cost": daily_supply_cost,
             "monthly_supply_charge": self.monthly_supply_charge,
