@@ -5204,6 +5204,8 @@ def test_auto_schedule_free_grid_overrides_priority_without_forcing_max_rate(
     demand_blocked,
     expected_start,
 ):
+    actions_module = importlib.import_module("power_sync.automations.actions")
+    actions_module._smart_schedule_effective_authorizations.clear()
     start_calls: list[tuple[str, bool]] = []
 
     async def at_home(*args, **kwargs):
@@ -5284,6 +5286,11 @@ def test_auto_schedule_free_grid_overrides_priority_without_forcing_max_rate(
 
     assert start_calls == ([("grid_free", False)] if expected_start else [])
     assert state.last_decision == ("started" if expected_start else "waiting")
+    authorization = actions_module._smart_schedule_effective_authorizations[
+        "entry-1"
+    ][VIN]
+    assert authorization["allowed"] is expected_start
+    assert authorization["source"] == "grid_free"
 
 
 @pytest.mark.parametrize(

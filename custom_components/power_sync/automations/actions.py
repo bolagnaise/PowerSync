@@ -30,6 +30,7 @@ import logging
 import asyncio
 import math
 import re
+import time
 from collections.abc import Mapping
 from typing import List, Dict, Any, Optional, Callable
 
@@ -5277,6 +5278,10 @@ async def _action_set_ev_charging_amps(
 # Global storage for dynamic EV charging state per config entry
 # Structure: { entry_id: { vehicle_id: { state... }, ... }, ... }
 _dynamic_ev_state: Dict[str, Dict[str, Dict[str, Any]]] = {}
+_smart_schedule_effective_authorizations: Dict[
+    str, Dict[str, Dict[str, Any]]
+] = {}
+_SMART_SCHEDULE_AUTHORIZATION_MAX_AGE_SECONDS = 90
 _BATTERY_FULL_RESERVE_BYPASS_SOC = 99.0
 _BATTERY_TAPER_BYPASS_SOC = 95.0
 _BATTERY_TARGET_SHORTFALL_KW = 0.2
@@ -5341,6 +5346,7 @@ def cleanup_dynamic_ev_entry(hass: HomeAssistant, entry_id: str) -> None:
                 )
 
     _dynamic_ev_state.pop(entry_id, None)
+    _smart_schedule_effective_authorizations.pop(entry_id, None)
     _dynamic_ev_update_locks.pop(entry_id, None)
     _phase_load_management_locks.pop(entry_id, None)
     _phase_load_management_targets.pop(entry_id, None)
@@ -5352,6 +5358,55 @@ def cleanup_dynamic_ev_entry(hass: HomeAssistant, entry_id: str) -> None:
     )
     if isinstance(entry_data, dict):
         entry_data.pop("dynamic_ev_state", None)
+
+
+def record_smart_schedule_effective_authorization(
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+    *,
+    allowed: bool,
+    source: str,
+) -> None:
+    """Publish one exact-VIN Smart Schedule execution decision.
+
+    The optimizer plan is intentionally separate from the live executor. This
+    short-lived record lets dynamic rate control recognize the one case where
+    the live executor authorizes free grid charging outside its stored plan.
+    """
+    normalized_vin = str(vehicle_id or "").upper()
+    if not _is_explicit_tesla_vin(normalized_vin):
+        return
+    _smart_schedule_effective_authorizations.setdefault(
+        config_entry.entry_id, {}
+    )[normalized_vin] = {
+        "allowed": bool(allowed),
+        "source": str(source or ""),
+        "recorded_at": time.monotonic(),
+    }
+
+
+def _smart_schedule_has_fresh_free_grid_authorization(
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+) -> bool:
+    """Return whether the exact VIN has a fresh live free-grid decision."""
+    normalized_vin = str(vehicle_id or "").upper()
+    if not _is_explicit_tesla_vin(normalized_vin):
+        return False
+    record = _smart_schedule_effective_authorizations.get(
+        config_entry.entry_id, {}
+    ).get(normalized_vin)
+    if not isinstance(record, dict):
+        return False
+    try:
+        age = time.monotonic() - float(record["recorded_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bool(
+        record.get("allowed")
+        and record.get("source") == "grid_free"
+        and -1 <= age <= _SMART_SCHEDULE_AUTHORIZATION_MAX_AGE_SECONDS
+    )
 
 
 def reset_phase_load_management_runtime(
@@ -8036,6 +8091,14 @@ async def _update_smart_schedule_battery_target_group(
         planned_kw = _optimizer_planned_ev_charge_kw(
             hass, config_entry, vehicle_id
         )
+        if (
+            planned_kw == 0
+            and params.get("owner_mode") == "smart_schedule"
+            and _smart_schedule_has_fresh_free_grid_authorization(
+                config_entry, vehicle_id
+            )
+        ):
+            planned_kw = None
         ceiling_amps = _optimizer_ev_ceiling_amps(
             planned_kw,
             voltage=params.get("voltage", 240),
@@ -9885,6 +9948,8 @@ def _tesla_source_capability(
     measured_current: Optional[float] = None
     measured_power_kw: Optional[float] = None
     capability_observed_at: Optional[float] = None
+    measured_current_observed_at: Optional[float] = None
+    measured_power_observed_at: Optional[float] = None
 
     for entity_id in entity_ids:
         state = hass.states.get(entity_id)
@@ -9940,6 +10005,12 @@ def _tesla_source_capability(
             entity_id_lower,
         ):
             measured_current = _coerce_positive_float(state.state)
+            observed_at = _tesla_connection_observation_timestamp(state)
+            if measured_current is not None and observed_at is not None:
+                measured_current_observed_at = max(
+                    measured_current_observed_at or observed_at,
+                    observed_at,
+                )
             continue
         if entity_id.startswith("sensor.") and re.search(
             r"_(?:charger_power|charge_power|charging_power)(?:_\d+)?$",
@@ -9949,6 +10020,12 @@ def _tesla_source_capability(
             unit = str(state.attributes.get("unit_of_measurement") or "").lower()
             if measured_power_kw is not None and unit in ("w", "watts"):
                 measured_power_kw /= 1000.0
+            observed_at = _tesla_connection_observation_timestamp(state)
+            if measured_power_kw is not None and observed_at is not None:
+                measured_power_observed_at = max(
+                    measured_power_observed_at or observed_at,
+                    observed_at,
+                )
 
     if not phases and measured_current and measured_power_kw and voltages:
         inferred = measured_power_kw * 1000.0 / (measured_current * voltages[0])
@@ -9957,12 +10034,23 @@ def _tesla_source_capability(
         elif 2.2 <= inferred <= 3.8:
             phases.append(3)
 
-    return {
+    result = {
         "max_amps": min(caps) if caps else None,
         "voltage": min(voltages) if voltages else None,
         "phases": phases[0] if phases and len(set(phases)) == 1 else None,
         "capability_observed_at": capability_observed_at,
     }
+    if measured_current is not None:
+        result["measured_current"] = measured_current
+        if measured_current_observed_at is not None:
+            result["measured_current_observed_at"] = (
+                measured_current_observed_at
+            )
+    if measured_power_kw is not None:
+        result["measured_power_kw"] = measured_power_kw
+        if measured_power_observed_at is not None:
+            result["measured_power_observed_at"] = measured_power_observed_at
+    return result
 
 
 def _tesla_wall_connector_serial(device: Any) -> Optional[str]:
@@ -10231,12 +10319,62 @@ async def _resolve_tesla_active_charger_capability(
         return result
 
     raw_effective_max = min(live_caps)
+    physically_proven_max = None
+    if wall_connector_association is not None:
+        connected_observed_at = wall_connector_association.get(
+            "connected_observed_at"
+        )
+        for capability in plugged_capabilities:
+            measured_current = capability.get("measured_current")
+            measured_power_kw = capability.get("measured_power_kw")
+            current_observed_at = capability.get(
+                "measured_current_observed_at"
+            )
+            power_observed_at = capability.get("measured_power_observed_at")
+            voltage = capability.get("voltage")
+            phases = capability.get("phases")
+            if not all(
+                value is not None
+                for value in (
+                    measured_current,
+                    measured_power_kw,
+                    current_observed_at,
+                    power_observed_at,
+                    voltage,
+                    phases,
+                    connected_observed_at,
+                )
+            ):
+                continue
+            expected_power_kw = (
+                float(measured_current) * float(voltage) * int(phases) / 1000.0
+            )
+            if (
+                float(current_observed_at) < float(connected_observed_at)
+                or float(power_observed_at) < float(connected_observed_at)
+                or abs(float(current_observed_at) - float(power_observed_at))
+                > TESLA_CONNECTION_CONFLICT_FRESHNESS_SECONDS
+                or float(measured_current) <= raw_effective_max
+                or expected_power_kw <= 0
+                or not 0.65
+                <= float(measured_power_kw) / expected_power_kw
+                <= 1.35
+            ):
+                continue
+            proven = max(1, int(float(measured_current)))
+            physically_proven_max = max(physically_proven_max or 0, proven)
+
+    if physically_proven_max is not None:
+        raw_effective_max = physically_proven_max
     effective_max = raw_effective_max
-    source = (
-        "active_wall_connector_vehicle"
-        if ignored_paired_ble_capability
-        else "active_charger"
-    )
+    if physically_proven_max is not None:
+        source = "active_wall_connector_measured"
+    else:
+        source = (
+            "active_wall_connector_vehicle"
+            if ignored_paired_ble_capability
+            else "active_charger"
+        )
     configured_max = _coerce_positive_int(configured_max_amps)
     if configured_max is not None and configured_max < effective_max:
         effective_max = configured_max
@@ -10249,7 +10387,7 @@ async def _resolve_tesla_active_charger_capability(
         "max_charge_amps": effective_max,
         "max_charge_amps_source": source,
     })
-    if ignored_paired_ble_capability:
+    if ignored_paired_ble_capability or physically_proven_max is not None:
         result["allow_stale_entity_max_override"] = True
         result["prefer_vin_scoped_current_control"] = True
 
@@ -10268,7 +10406,8 @@ async def _resolve_tesla_active_charger_capability(
             "connected_observed_at"
         )
         capability_predates_connection = bool(
-            connection_observed_at is not None
+            physically_proven_max is None
+            and connection_observed_at is not None
             and (
                 capability_observed_at is None
                 or capability_observed_at < connection_observed_at
@@ -10817,6 +10956,19 @@ async def _dynamic_ev_update(
     planned_ev_charge_kw = _optimizer_planned_ev_charge_kw(
         hass, config_entry, vehicle_id
     )
+    if (
+        planned_ev_charge_kw == 0
+        and params.get("owner_mode") == "smart_schedule"
+        and _smart_schedule_has_fresh_free_grid_authorization(
+            config_entry, vehicle_id
+        )
+    ):
+        _LOGGER.debug(
+            "Dynamic EV: ignoring conflicting optimizer zero for fresh "
+            "free-grid Smart Schedule authorization on %s",
+            vehicle_id,
+        )
+        planned_ev_charge_kw = None
     if planned_ev_charge_kw is not None:
         available_power_kw = min(
             available_power_kw,

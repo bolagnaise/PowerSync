@@ -4165,7 +4165,9 @@ class PowerSyncEVPanel extends HTMLElement {
   }
 
   _canStart(loadpoint) {
-    return !!loadpoint && loadpoint.connected && !this._ownerConflict(loadpoint) && !this._savingKey;
+    // Manual Start is an explicit takeover. Backend ownership arbitration
+    // remains authoritative for all safety and availability checks.
+    return !!loadpoint && loadpoint.connected && !this._savingKey;
   }
 
   _canStop(loadpoint) {
@@ -4693,7 +4695,7 @@ class PowerSyncEVPanel extends HTMLElement {
         ${selected ? this._statusHtml(selected, conflict) : ''}
         ${selected ? this._controlsHtml(loadpoints, selected, canStart, canStop) : ''}
         ${selected && !selected.connected ? this._noticeHtml('warn', 'EV is disconnected. Start is disabled until the charger reports a connected vehicle.') : ''}
-        ${conflict ? this._noticeHtml('error', `${this._title(selected.owner_mode)} already owns this loadpoint.`) : ''}
+        ${conflict ? this._noticeHtml('warn', `${this._title(selected.owner_mode)} currently controls this loadpoint. Manual Start will take over.`) : ''}
         ${this._modeSectionsHtml()}
       </ha-card>
     `;

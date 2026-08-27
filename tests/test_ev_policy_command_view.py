@@ -18,6 +18,13 @@ ACTIONS_PATH = (
     / "automations"
     / "actions.py"
 )
+FRONTEND_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "custom_components"
+    / "power_sync"
+    / "frontend"
+    / "power-sync-strategy.js"
+)
 
 
 def test_vehicle_command_view_accepts_start_policy_charging():
@@ -60,6 +67,17 @@ def test_manual_owner_guard_uses_manual_takeover_policy():
     assert 'owner_mode="manual"' in method_source
     assert "return None if allowed else reason" in method_source
     assert "owner_family(" not in method_source
+
+
+def test_dashboard_manual_start_does_not_block_automated_owner_takeover():
+    source = FRONTEND_PATH.read_text()
+    method_start = source.index("  _canStart(loadpoint) {")
+    method_source = source[
+        method_start:source.index("  _canStop(loadpoint) {", method_start)
+    ]
+
+    assert "loadpoint.connected" in method_source
+    assert "!this._ownerConflict(loadpoint)" not in method_source
 
 
 def test_manual_vehicle_config_lookup_filters_ambiguous_ble_only_vins():

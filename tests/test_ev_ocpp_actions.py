@@ -479,6 +479,89 @@ def test_tesla_active_charger_capability_applies_lower_site_limit():
     assert capability["max_charge_amps_source"] == "active_charger_and_site_limit"
 
 
+def test_exact_wall_connector_physical_current_promotes_stale_provider_cap():
+    """Fresh exact-VIN charging proves a stale provider ceiling is too low."""
+    connected_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+    measured_at = connected_at + timedelta(seconds=30)
+    hass, vin_a, _vin_b = _tesla_capability_hass(first_max=15)
+    hass.states.get("sensor.car_a_charger_phases").state = "1"
+    hass.states._states.update({
+        "sensor.car_a_charger_current": _State(
+            "sensor.car_a_charger_current",
+            "32",
+            {"unit_of_measurement": "A"},
+            last_changed=measured_at,
+        ),
+        "sensor.car_a_charger_power": _State(
+            "sensor.car_a_charger_power",
+            "7.36",
+            {"unit_of_measurement": "kW"},
+            last_changed=measured_at,
+        ),
+        "binary_sensor.garage_wall_connector_vehicle_connected": _State(
+            "binary_sensor.garage_wall_connector_vehicle_connected",
+            "on",
+            last_changed=connected_at,
+        ),
+        "sensor.garage_wall_connector_vehicle": _State(
+            "sensor.garage_wall_connector_vehicle",
+            vin_a,
+            last_changed=measured_at,
+        ),
+    })
+    hass.entity_registry.entities.update({
+        "sensor.car_a_charger_current": SimpleNamespace(
+            entity_id="sensor.car_a_charger_current",
+            device_id="car-a",
+            platform="tesla_fleet",
+        ),
+        "sensor.car_a_charger_power": SimpleNamespace(
+            entity_id="sensor.car_a_charger_power",
+            device_id="car-a",
+            platform="tesla_fleet",
+        ),
+        "binary_sensor.garage_wall_connector_vehicle_connected": SimpleNamespace(
+            entity_id="binary_sensor.garage_wall_connector_vehicle_connected",
+            device_id="garage-wall-connector-local",
+            platform="tesla_wall_connector",
+        ),
+        "sensor.garage_wall_connector_vehicle": SimpleNamespace(
+            entity_id="sensor.garage_wall_connector_vehicle",
+            device_id="garage-wall-connector-fleet",
+            platform="tesla_fleet",
+        ),
+    })
+    hass.device_registry.devices.update({
+        "garage-wall-connector-local": SimpleNamespace(
+            id="garage-wall-connector-local",
+            identifiers={("tesla_wall_connector", "WC-SERIAL-A")},
+            serial_number="WC-SERIAL-A",
+        ),
+        "garage-wall-connector-fleet": SimpleNamespace(
+            id="garage-wall-connector-fleet",
+            identifiers={("tesla_fleet", "wall-connector-a")},
+            serial_number="WC-SERIAL-A",
+        ),
+    })
+
+    capability = asyncio.run(
+        actions._resolve_tesla_active_charger_capability(
+            hass,
+            _Entry(),
+            vin_a,
+            configured_max_amps=32,
+        )
+    )
+
+    assert capability["max_charge_amps"] == 32
+    assert capability["max_charge_amps_source"] == (
+        "active_wall_connector_measured"
+    )
+    assert capability["allow_stale_entity_max_override"] is True
+    assert capability["prefer_vin_scoped_current_control"] is True
+    assert capability["capability_refresh_required"] is False
+
+
 def test_tesla_active_charger_capability_uses_exact_wall_connector_over_stale_ble(
     monkeypatch,
 ):
@@ -6268,6 +6351,127 @@ def test_dynamic_smart_schedule_lp_zero_reconciles_fresh_physical_current(
     assert set_amps_calls == [0]
     assert state["current_amps"] == 0
     assert state["target_amps"] == 0
+
+
+def test_dynamic_smart_schedule_free_grid_ignores_conflicting_lp_zero(
+    monkeypatch,
+):
+    """A live free-price admission must not be stopped by a stale LP zero."""
+    set_amps_calls: list[int] = []
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    async def observed_current(*args, **kwargs):
+        return 32.0
+
+    async def live_status(*args, **kwargs):
+        return {
+            "battery_power": -1000,
+            "grid_power": 8500,
+            "solar_power": 0,
+            "load_power": 8500,
+            "ev_power": 7360,
+            "battery_soc": 99,
+        }
+
+    async def not_unplugged(*args, **kwargs):
+        return False
+
+    async def keep_capability(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(
+        actions,
+        "_optimizer_planned_ev_charge_kw",
+        lambda *args, **kwargs: 0.0,
+    )
+    monkeypatch.setattr(actions, "_observed_owned_charge_amps", observed_current)
+    monkeypatch.setattr(actions, "_get_tesla_live_status", live_status)
+    monkeypatch.setattr(
+        actions,
+        "_refresh_dynamic_tesla_charger_capability",
+        keep_capability,
+    )
+    monkeypatch.setattr(
+        actions,
+        "_clear_ble_dynamic_session_if_unplugged",
+        not_unplugged,
+    )
+
+    hass = _Hass([])
+    actions._dynamic_ev_state.clear()
+    actions._smart_schedule_effective_authorizations.clear()
+    vehicle_vin = "5YJTEST00000000F1"
+    actions.record_smart_schedule_effective_authorization(
+        _Entry(),
+        vehicle_vin,
+        allowed=True,
+        source="grid_free",
+    )
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_vin: {
+            "active": True,
+            "charging_started": True,
+            "current_amps": 32,
+            "target_amps": 32,
+            "params": {
+                "vehicle_vin": vehicle_vin,
+                "dynamic_mode": "battery_target",
+                "owner_mode": "smart_schedule",
+                "charger_type": "tesla",
+                "target_battery_charge_kw": 0,
+                "max_grid_import_kw": 20,
+                "min_charge_amps": 5,
+                "max_charge_amps": 32,
+                "voltage": 230,
+                "phases": 1,
+            },
+        }
+    }
+
+    asyncio.run(
+        actions._dynamic_ev_update(
+            hass,
+            _Entry(),
+            "entry-1",
+            vehicle_vin,
+        )
+    )
+
+    assert set_amps_calls == []
+    state = actions._dynamic_ev_state["entry-1"][vehicle_vin]
+    assert state["current_amps"] == 32
+    assert state["target_amps"] == 32
+
+
+def test_free_grid_authorization_is_exact_vehicle_and_fresh(monkeypatch):
+    first_vin = "5YJTEST00000000F1"
+    second_vin = "5YJTEST00000000F2"
+    now = 1000.0
+    monkeypatch.setattr(actions.time, "monotonic", lambda: now)
+    actions._smart_schedule_effective_authorizations.clear()
+
+    actions.record_smart_schedule_effective_authorization(
+        _Entry(),
+        first_vin,
+        allowed=True,
+        source="grid_free",
+    )
+
+    assert actions._smart_schedule_has_fresh_free_grid_authorization(
+        _Entry(), first_vin
+    )
+    assert not actions._smart_schedule_has_fresh_free_grid_authorization(
+        _Entry(), second_vin
+    )
+
+    now += actions._SMART_SCHEDULE_AUTHORIZATION_MAX_AGE_SECONDS + 1
+    assert not actions._smart_schedule_has_fresh_free_grid_authorization(
+        _Entry(), first_vin
+    )
 
 
 def test_dynamic_start_defers_second_battery_target_vehicle(monkeypatch):

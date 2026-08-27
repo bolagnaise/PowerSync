@@ -6231,6 +6231,24 @@ class AutoScheduleExecutor:
                         vehicle_id,
                     )
 
+        # Publish the effective, post-policy decision separately from the
+        # stored optimizer envelope. A bounded exact-VIN free-grid signal is
+        # the only authority dynamic control may use to disregard an LP zero.
+        from . import actions as actions_module
+
+        record_authorization = getattr(
+            actions_module,
+            "record_smart_schedule_effective_authorization",
+            None,
+        )
+        if callable(record_authorization):
+            record_authorization(
+                self.config_entry,
+                vehicle_vin or vehicle_id,
+                allowed=should_charge,
+                source=source,
+            )
+
         # Find current window (if in one)
         current_window = None
         for window in state.current_plan.windows:
