@@ -281,6 +281,46 @@ def test_peak_demand_retries_a_failed_restore_and_merges_session_peak(
     assert RecoveringStore.saved[demand._store.key]["peak_demand_kw"] == 8.0
 
 
+def test_peak_demand_save_failure_is_unavailable_then_retries_retained_peak(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+):
+    coordinator_module = _coordinator_module(monkeypatch)
+
+    class FlakySaveStore:
+        saved: dict[str, object] = {}
+        save_attempts = 0
+
+        def __init__(self, _hass, _version, key) -> None:
+            self.key = key
+
+        async def async_load(self):
+            return self.saved.get(self.key)
+
+        async def async_save(self, value) -> None:
+            type(self).save_attempts += 1
+            if self.save_attempts == 1:
+                raise OSError("storage temporarily unavailable")
+            self.saved[self.key] = value
+
+    coordinator_module.Store = FlakySaveStore
+    _Clock.current = datetime(2026, 8, 21, 17, 0, tzinfo=timezone.utc)
+    energy = SimpleNamespace(data={"grid_power": 7.25})
+    demand = coordinator_module.DemandChargeCoordinator(
+        SimpleNamespace(), energy, True, 10.0, "15:00", "21:00", "All Days", 1,
+        entry_id="entry-save-retry",
+    )
+
+    with caplog.at_level("WARNING"):
+        failed_save = asyncio.run(demand._async_update_data())
+    assert failed_save["peak_demand_kw"] is None
+    assert "Could not save Demand Charge peak" in caplog.text
+
+    energy.data = {"grid_power": 2.0}
+    recovered = asyncio.run(demand._async_update_data())
+    assert recovered["peak_demand_kw"] == 7.25
+    assert FlakySaveStore.saved[demand._store.key]["peak_demand_kw"] == 7.25
+
+
 def test_peak_demand_malformed_current_cycle_is_unavailable_and_preserved(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ):

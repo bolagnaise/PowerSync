@@ -4504,6 +4504,10 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         # but incorrect zero during the next unload or update.
         self._peak_demand_restore_unresolved = False
         self._peak_demand_restore_error_logged = False
+        # A failed write leaves the in-memory value ahead of durable storage.
+        # Do not report that value as settled accounting until a retry succeeds.
+        self._peak_demand_persistence_unresolved = False
+        self._peak_demand_save_error_logged = False
         self._last_billing_day_check = None
         self._store = (
             Store(hass, 1, f"{DOMAIN}.demand_charge.{entry_id}")
@@ -4623,7 +4627,19 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
                 }
             )
         except Exception as err:
-            _LOGGER.warning("Could not save Demand Charge peak: %s", err)
+            self._peak_demand_persistence_unresolved = True
+            if not self._peak_demand_save_error_logged:
+                _LOGGER.warning(
+                    "Could not save Demand Charge peak; keeping Peak Demand "
+                    "This Cycle unavailable until persistence succeeds: %s",
+                    err,
+                )
+                self._peak_demand_save_error_logged = True
+            else:
+                _LOGGER.debug("Demand Charge peak persistence remains unresolved: %s", err)
+        else:
+            self._peak_demand_persistence_unresolved = False
+            self._peak_demand_save_error_logged = False
 
     def _is_in_peak_period(self, now: datetime) -> bool:
         """Check if current time is within peak period and correct day."""
@@ -4677,6 +4693,12 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         if self._peak_demand_restore_unresolved:
             await self.async_load()
 
+        # A peak can fail to persist after it was observed, even without a
+        # higher sample on the next minute. Retry that exact retained peak so a
+        # transient Store failure cannot leave accounting state behind.
+        if self._peak_demand_persistence_unresolved:
+            await self.async_save(now)
+
         # If we've crossed the billing day, reset peak demand
         if self._last_billing_day_check is not None:
             # Check if we've passed the billing day since last check
@@ -4710,7 +4732,12 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         # Do not publish the constructor's zero as an accounting value when a
         # same-cycle restore is unresolved.
         peak_demand_kw = (
-            None if self._peak_demand_restore_unresolved else self._peak_demand_kw
+            None
+            if (
+                self._peak_demand_restore_unresolved
+                or self._peak_demand_persistence_unresolved
+            )
+            else self._peak_demand_kw
         )
         estimated_demand_cost = (
             None if peak_demand_kw is None else peak_demand_kw * self.rate

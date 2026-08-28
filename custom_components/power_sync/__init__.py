@@ -27967,6 +27967,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         3. If export price < 1c: Set grid export rule to 'never'
         4. If export price >= 1c: Restore normal export ('battery_ok')
         """
+        if _is_monitoring_mode():
+            _LOGGER.info(
+                "[MONITORING] Would check solar curtailment — blocked by monitoring mode"
+            )
+            return
+
         # Check if curtailment is enabled
         curtailment_enabled = entry.options.get(
             CONF_BATTERY_CURTAILMENT_ENABLED,
@@ -28337,6 +28343,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         EVENT-DRIVEN: Check solar curtailment using WebSocket price data.
         Called by WebSocket callback - uses price data directly without REST API refresh.
         """
+        if _is_monitoring_mode():
+            _LOGGER.info(
+                "[MONITORING] Would check solar curtailment from WebSocket — "
+                "blocked by monitoring mode"
+            )
+            return
+
         # Check if curtailment is enabled
         curtailment_enabled = entry.options.get(
             CONF_BATTERY_CURTAILMENT_ENABLED,
@@ -40600,6 +40613,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             entry_data = _aemo_dispatch_entry_data()
             if entry_data is None:
+                return
+
+            if _is_monitoring_mode():
+                _LOGGER.debug(
+                    "[MONITORING] Would update inverter load-following limit — "
+                    "blocked by monitoring mode"
+                )
                 return
 
             # Check if AC curtailment is enabled

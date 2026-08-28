@@ -438,6 +438,7 @@ def _run_fast_load_following_case(
         "DOMAIN": "power_sync",
         "hass": hass,
         "entry": entry,
+        "_is_monitoring_mode": lambda: False,
         "aemo_dispatch_generation": old_generation,
         "_LOGGER": SimpleNamespace(
             debug=lambda *args, **kwargs: None,
@@ -839,14 +840,34 @@ def test_ac_coupled_curtails_zero_export_when_exporting_and_battery_not_absorbin
     assert asyncio.run(namespace["should_curtail_ac_coupled"](20.09, 0.0)) is True
 
 
-def test_solar_curtailment_is_not_blocked_by_monitoring_mode():
+@pytest.mark.parametrize(
+    "handler_name,arguments",
+    (
+        ("handle_solar_curtailment_check", (None,)),
+        ("handle_solar_curtailment_with_websocket_data", ({},)),
+    ),
+)
+def test_solar_curtailment_monitoring_mode_blocks_automatic_command_routes(
+    handler_name, arguments,
+):
     periodic_handler = _function_source("handle_solar_curtailment_check")
     websocket_handler = _function_source("handle_solar_curtailment_with_websocket_data")
 
-    assert "_is_monitoring_mode()" not in periodic_handler
-    assert "_is_monitoring_mode()" not in websocket_handler
-    assert "Would check solar curtailment" not in periodic_handler
-    assert "Would check solar curtailment" not in websocket_handler
+    assert "_is_monitoring_mode()" in periodic_handler
+    assert "_is_monitoring_mode()" in websocket_handler
+    assert "Would check solar curtailment" in periodic_handler
+    assert "Would check solar curtailment" in websocket_handler
+
+    messages = []
+    namespace = {
+        "ServiceCall": object,
+        "_is_monitoring_mode": lambda: True,
+        "_LOGGER": SimpleNamespace(info=lambda message: messages.append(message)),
+    }
+    exec(textwrap.dedent(_function_source(handler_name)), namespace)
+
+    assert asyncio.run(namespace[handler_name](*arguments)) is None
+    assert messages and "[MONITORING]" in messages[0]
 
 
 def test_periodic_tesla_curtailment_uses_any_provider_price_source():
