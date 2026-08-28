@@ -1152,8 +1152,25 @@ FLOW_POWER_EXPORT_RATES = {
 # account/plan setting, not a regional pricing rule; keep the legacy window as
 # the safe default for existing entries and invalid/missing stored values.
 CONF_FLOW_POWER_HAPPY_HOUR_END = "flow_power_happy_hour_end"
+CONF_FLOW_POWER_PLAN = "flow_power_plan"
 DEFAULT_FLOW_POWER_HAPPY_HOUR_END = "19:30"
 FLOW_POWER_HAPPY_HOUR_START = "17:30"
+FLOW_POWER_PLAN_SCHEMA_VERSION = 1
+FLOW_POWER_PLAN_EFFECTIVE_FROM = "2026-09-01"
+FLOW_POWER_PLAN_IDS = {
+    "legacy_unclassified": "Legacy / unclassified",
+    "happy_hour_2026": "Battery Happy Hour",
+    "four_free_2026": "Flow Power 4Free",
+    "flow_home_2026": "Flow Home",
+    "account_specific": "Account-specific contract",
+}
+FLOW_POWER_PLAN_REGIONS = {
+    "NSW": "New South Wales",
+    "QLD": "Queensland",
+    "SA": "South Australia",
+    "SEQ": "South East Queensland",
+    "VIC": "Victoria",
+}
 FLOW_POWER_HAPPY_HOUR_END_OPTIONS = {
     "19:30": "5:30pm to 7:30pm (2 hours)",
     "21:30": "5:30pm to 9:30pm (4 hours)",

@@ -535,6 +535,7 @@ from .const import (
     CONF_FLOW_POWER_STATE,
     CONF_FLOW_POWER_PRICE_SOURCE,
     CONF_FLOW_POWER_HAPPY_HOUR_END,
+    CONF_FLOW_POWER_PLAN,
     CONF_FLOWPOWER_API_KEY,
     CONF_FLOWPOWER_NMI,
     CONF_AEMO_SENSOR_ENTITY,
@@ -562,6 +563,7 @@ from .const import (
     CONF_PEA_ENABLED,
     CONF_FLOW_POWER_BASE_RATE,
     CONF_FLOW_POWER_EXPORT_RATE,
+    FLOW_POWER_EXPORT_RATES,
     DEFAULT_FLOW_POWER_HAPPY_HOUR_END,
     resolve_flow_power_happy_hour_end,
     CONF_PEA_CUSTOM_VALUE,
@@ -11153,6 +11155,16 @@ class ProviderConfigView(HomeAssistantView):
 
             elif electricity_provider == "flow_power":
                 # Flow Power settings
+                from .flow_power import (
+                    flow_power_plan_catalog,
+                    flow_power_provider_contract,
+                    resolve_flow_power_plan,
+                )
+
+                selected_plan = entry.options.get(
+                    CONF_FLOW_POWER_PLAN,
+                    entry.data.get(CONF_FLOW_POWER_PLAN),
+                )
                 config = {
                     "auto_sync": entry.options.get(
                         CONF_AUTO_SYNC_ENABLED,
@@ -11245,6 +11257,7 @@ class ProviderConfigView(HomeAssistantView):
                             ),
                         )
                     ),
+                    "flow_power_plan": selected_plan,
                     "pea_custom_value": entry.options.get(
                         CONF_PEA_CUSTOM_VALUE,
                         entry.data.get(CONF_PEA_CUSTOM_VALUE, None)
@@ -11275,6 +11288,46 @@ class ProviderConfigView(HomeAssistantView):
                         entry.data.get(CONF_DEMAND_CHARGE_BILLING_DAY, 1)
                     ),
                 }
+                entry_runtime = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                opt_coordinator = entry_runtime.get("optimization_coordinator")
+                provider_contract = (
+                    opt_coordinator.get_provider_contract()
+                    if opt_coordinator is not None
+                    and hasattr(opt_coordinator, "get_provider_contract")
+                    else None
+                )
+                if provider_contract is None:
+                    state = config.get("state", "")
+                    configured_rate = config.get("flow_power_export_rate")
+                    try:
+                        legacy_rate = (
+                            float(configured_rate) / 100.0
+                            if configured_rate not in (None, "")
+                            else FLOW_POWER_EXPORT_RATES.get(state, 0.0)
+                        )
+                    except (TypeError, ValueError):
+                        legacy_rate = FLOW_POWER_EXPORT_RATES.get(state, 0.0)
+                    try:
+                        snapshot = resolve_flow_power_plan(
+                            selected_plan,
+                            timezone_token=self._hass.config.time_zone,
+                            legacy_export_rate_dollars=legacy_rate,
+                            legacy_happy_hour_end=config.get("flow_power_happy_hour_end"),
+                        )
+                    except (TypeError, ValueError):
+                        snapshot = resolve_flow_power_plan(
+                            None,
+                            timezone_token=self._hass.config.time_zone,
+                            legacy_export_rate_dollars=legacy_rate,
+                            legacy_happy_hour_end=config.get("flow_power_happy_hour_end"),
+                        )
+                    provider_contract = flow_power_provider_contract(
+                        snapshot,
+                        at=dt_util.now(),
+                        import_price=0.0,
+                    )
+                config["provider_contract"] = provider_contract
+                config["provider_catalog"] = flow_power_plan_catalog()
 
             elif electricity_provider == "agl":
                 config = {
@@ -11600,6 +11653,7 @@ class ProviderConfigView(HomeAssistantView):
                 "flow_power_base_rate": CONF_FLOW_POWER_BASE_RATE,
                 "flow_power_export_rate": CONF_FLOW_POWER_EXPORT_RATE,
                 "flow_power_happy_hour_end": CONF_FLOW_POWER_HAPPY_HOUR_END,
+                "flow_power_plan": CONF_FLOW_POWER_PLAN,
                 "pea_custom_value": CONF_PEA_CUSTOM_VALUE,
                 "demand_charge_enabled": CONF_DEMAND_CHARGE_ENABLED,
                 "demand_charge_rate": CONF_DEMAND_CHARGE_RATE,
@@ -11633,6 +11687,19 @@ class ProviderConfigView(HomeAssistantView):
             # Build new options dict starting with existing options
             new_options = dict(entry.options)
 
+            if "flow_power_plan" in data:
+                from .flow_power import validate_flow_power_plan_selection
+
+                try:
+                    data["flow_power_plan"] = validate_flow_power_plan_selection(
+                        data["flow_power_plan"]
+                    ).to_dict()
+                except (TypeError, ValueError) as err:
+                    return web.json_response(
+                        {"success": False, "error": str(err)},
+                        status=400,
+                    )
+
             # Update only the keys that were provided
             for key, value in data.items():
                 if key in key_mapping:
@@ -11656,6 +11723,14 @@ class ProviderConfigView(HomeAssistantView):
                 "flow_power_happy_hour_end" in data
                 and new_options.get(CONF_FLOW_POWER_HAPPY_HOUR_END)
                 != current_happy_hour_end
+            )
+            flow_power_plan_changed = (
+                "flow_power_plan" in data
+                and new_options.get(CONF_FLOW_POWER_PLAN)
+                != entry.options.get(
+                    CONF_FLOW_POWER_PLAN,
+                    entry.data.get(CONF_FLOW_POWER_PLAN),
+                )
             )
             demand_charge_changed = bool(
                 {
@@ -11759,6 +11834,7 @@ class ProviderConfigView(HomeAssistantView):
             if (
                 new_options != dict(entry.options)
                 and not happy_hour_end_changed
+                and not flow_power_plan_changed
                 and not demand_charge_changed
             ):
                 entry_data["_skip_reload"] = True
@@ -24696,6 +24772,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 flow_power_state,
                 _configured_flow_power_export_rate(),
                 happy_hour_end=flow_power_happy_hour_end,
+                plan_selection=entry.options.get(
+                    CONF_FLOW_POWER_PLAN,
+                    entry.data.get(CONF_FLOW_POWER_PLAN),
+                ),
             )
 
         return tariff
@@ -26187,6 +26267,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 flow_power_state,
                 export_rate,
                 happy_hour_end=flow_power_happy_hour_end,
+                plan_selection=entry.options.get(
+                    CONF_FLOW_POWER_PLAN,
+                    entry.data.get(CONF_FLOW_POWER_PLAN),
+                ),
             )
 
         # Apply export price boost for Amber users (if enabled)

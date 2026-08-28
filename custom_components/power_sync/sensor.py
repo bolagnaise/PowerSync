@@ -6158,6 +6158,20 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
         )
         return max(0.0, price_cents / 100), tariff_data
 
+    def _flow_power_provider_contract(self) -> dict[str, Any] | None:
+        """Return the quota-aware contract published by the optimizer."""
+        if not hasattr(self, "hass"):
+            return None
+        coordinator = (
+            self.hass.data.get(DOMAIN, {})
+            .get(self._entry.entry_id, {})
+            .get("optimization_coordinator")
+        )
+        if coordinator is None or not hasattr(coordinator, "get_provider_contract"):
+            return None
+        contract = coordinator.get_provider_contract()
+        return contract if isinstance(contract, dict) else None
+
     def _get_effective_twap(self) -> float:
         """Get effective raw wholesale TWAP: override -> tracker -> fallback."""
         return self._get_pricing_context().twap
@@ -6240,6 +6254,15 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
     @property
     def native_value(self) -> float | None:
         """Return the current price in $/kWh."""
+        contract = self._flow_power_provider_contract()
+        plan_id = ((contract or {}).get("plan") or {}).get("plan_id")
+        if plan_id in {"happy_hour_2026", "four_free_2026", "flow_home_2026"}:
+            marginal = ((contract.get("prices") or {}).get("marginal") or {})
+            key = "import" if self._is_import_sensor else "export"
+            try:
+                return round(max(0.0, float(marginal[key])), 4)
+            except (KeyError, TypeError, ValueError):
+                pass
         tariff_price = self._get_current_tariff_price()
         if tariff_price is not None:
             value, _tariff_data = tariff_price
@@ -6283,6 +6306,24 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
             "base_rate_cents": base_rate,
             **self._coordinator_source_attributes(),
         }
+
+        contract = self._flow_power_provider_contract()
+        if contract is not None:
+            plan = contract.get("plan") or {}
+            prices = contract.get("prices") or {}
+            key = "import" if self._is_import_sensor else "export"
+            settlement = (prices.get("settlement") or {}).get(key)
+            marginal = (prices.get("marginal") or {}).get(key)
+            attributes.update(
+                {
+                    "flow_power_plan_id": plan.get("plan_id"),
+                    "flow_power_plan_region": plan.get("region"),
+                    "settlement_rate": settlement,
+                    "marginal_rate": marginal,
+                    "quota_status": contract.get("quotas", []),
+                    "quota_telemetry": contract.get("telemetry", {}),
+                }
+            )
 
         tariff_price = self._get_current_tariff_price()
         if tariff_price is not None:

@@ -12,7 +12,10 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from ..flow_power import FlowPowerPlanSnapshot
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
@@ -3197,10 +3200,243 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._schedule_cost_save()
         return settled
 
+    def _flow_power_snapshot(self) -> "FlowPowerPlanSnapshot | None":
+        """Resolve the selected Flow Power contract and preserved legacy fallback."""
+        if self._provider_key() != "flow_power" or not self._entry:
+            return None
+        from ..const import (
+            CONF_FLOW_POWER_EXPORT_RATE,
+            CONF_FLOW_POWER_HAPPY_HOUR_END,
+            CONF_FLOW_POWER_STATE,
+            FLOW_POWER_EXPORT_RATES,
+        )
+        flow_power_plan_key = "flow_power_plan"
+
+        raw = self._entry.options.get(
+            flow_power_plan_key,
+            self._entry.data.get(flow_power_plan_key),
+        )
+        # Entries created before the versioned contract existed stay on the
+        # exact legacy scalar path, including its established test/runtime
+        # behavior. Only an explicit selection activates the plan adapter.
+        if not isinstance(raw, dict):
+            return None
+        from ..flow_power import resolve_flow_power_plan
+
+        state = self._entry.options.get(
+            CONF_FLOW_POWER_STATE,
+            self._entry.data.get(CONF_FLOW_POWER_STATE, ""),
+        )
+        configured_rate = self._entry.options.get(
+            CONF_FLOW_POWER_EXPORT_RATE,
+            self._entry.data.get(CONF_FLOW_POWER_EXPORT_RATE),
+        )
+        try:
+            legacy_rate = (
+                float(configured_rate) / 100.0
+                if configured_rate not in (None, "")
+                else FLOW_POWER_EXPORT_RATES.get(state, 0.0)
+            )
+        except (TypeError, ValueError):
+            legacy_rate = FLOW_POWER_EXPORT_RATES.get(state, 0.0)
+        try:
+            snapshot = resolve_flow_power_plan(
+                raw,
+                timezone_token=getattr(
+                    getattr(self.hass, "config", None),
+                    "time_zone",
+                    "Australia/Sydney",
+                ),
+                legacy_export_rate_dollars=legacy_rate,
+                legacy_happy_hour_end=self._entry.options.get(
+                    CONF_FLOW_POWER_HAPPY_HOUR_END,
+                    self._entry.data.get(CONF_FLOW_POWER_HAPPY_HOUR_END),
+                ),
+            )
+        except (TypeError, ValueError) as err:
+            warning = f"Invalid Flow Power plan selection: {err}"
+            if warning != getattr(self, "_last_flow_power_config_warning", None):
+                _LOGGER.warning("%s; retaining legacy tariff behavior", warning)
+                self._last_flow_power_config_warning = warning
+            snapshot = resolve_flow_power_plan(
+                None,
+                timezone_token=getattr(
+                    getattr(self.hass, "config", None),
+                    "time_zone",
+                    "Australia/Sydney",
+                ),
+                legacy_export_rate_dollars=legacy_rate,
+                legacy_happy_hour_end=self._entry.options.get(
+                    CONF_FLOW_POWER_HAPPY_HOUR_END,
+                    self._entry.data.get(CONF_FLOW_POWER_HAPPY_HOUR_END),
+                ),
+            )
+        cached_hash = getattr(self, "_flow_power_plan_hash", None)
+        if cached_hash is not None and cached_hash != snapshot.plan_hash:
+            self._flow_power_ledger = None
+        self._flow_power_plan_hash = snapshot.plan_hash
+        return snapshot
+
+    def _ensure_flow_power_ledger(
+        self,
+        state: QuotaLedgerState | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> tuple["FlowPowerPlanSnapshot", QuotaLedger | None] | None:
+        """Return the Flow Power snapshot and its measured quota ledger."""
+        snapshot = self._flow_power_snapshot()
+        if snapshot is None:
+            return None
+        from ..flow_power import flow_power_quota_rules
+        rules = flow_power_quota_rules(snapshot)
+        if not rules:
+            return snapshot, None
+        ledger = getattr(self, "_flow_power_ledger", None)
+        if ledger is None or state is not None:
+            ledger = QuotaLedger(rules, state)
+            self._flow_power_ledger = ledger
+        ledger.advance_to(now or dt_util.now())
+        return snapshot, ledger
+
+    def _settle_flow_power_measurements(
+        self,
+        now: datetime,
+        grid_import_kw: float,
+        grid_export_kw: float,
+    ) -> dict[str, float]:
+        """Settle official Flow Power buckets from site totals or grid power."""
+        runtime = self._ensure_flow_power_ledger(now=now)
+        if runtime is None or runtime[1] is None:
+            return {"import": 0.0, "export": 0.0}
+        _snapshot, ledger = runtime
+        data = self._get_energy_data() or {}
+        settled = {"import": 0.0, "export": 0.0}
+        directions = {rule.direction for rule in ledger.rules}
+        for direction, power_kw in (
+            ("import", grid_import_kw),
+            ("export", grid_export_kw),
+        ):
+            if direction not in directions:
+                continue
+            total_kwh = self._energy_summary_total_kwh(data, direction)
+            if total_kwh is not None:
+                settled[direction] = ledger.observe_cumulative(
+                    direction, total_kwh, now
+                )
+            else:
+                settled[direction] = ledger.observe_power(
+                    direction, max(0.0, power_kw) * 1000.0, now
+                )
+        self._schedule_cost_save()
+        return settled
+
+    def _capture_flow_power_measurements_before_plan(self) -> None:
+        """Settle Flow Power measured usage immediately before planning."""
+        data = self._get_energy_data()
+        if not data:
+            return
+        try:
+            grid_power_kw = float(data.get("grid_power", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        delta = self._settle_flow_power_measurements(
+            dt_util.now(),
+            max(0.0, grid_power_kw),
+            max(0.0, -grid_power_kw),
+        )
+        pending = getattr(
+            self, "_pending_flow_power_settlement", {"import": 0.0, "export": 0.0}
+        )
+        self._pending_flow_power_settlement = {
+            "import": pending.get("import", 0.0) + delta["import"],
+            "export": pending.get("export", 0.0) + delta["export"],
+        }
+
+    def _apply_flow_power_optimizer_inputs(
+        self,
+        import_prices: list[float],
+        export_prices: list[float],
+    ) -> None:
+        """Apply official Flow Power quota bonuses through existing LP inputs."""
+        n = min(len(import_prices), len(export_prices))
+        self._last_zerocharge_bonus_prices = [0.0] * n
+        self._last_zerocharge_bonus_cap_kwh = 0.0
+        self._last_zerohero_bonus_prices = [0.0] * n
+        self._last_zerohero_bonus_cap_kwh = 0.0
+        self._last_import_bonus_group_ids = None
+        self._last_export_bonus_group_ids = None
+        self._last_import_bonus_caps_by_group = None
+        self._last_export_bonus_caps_by_group = None
+        runtime = self._ensure_flow_power_ledger(now=dt_util.now())
+        if runtime is None or n <= 0:
+            return
+        snapshot, ledger = runtime
+        from ..flow_power import flow_power_price_series
+
+        series = flow_power_price_series(
+            snapshot,
+            self._price_timestamps(n),
+            import_prices[:n],
+            ledger=ledger,
+        )
+        self._last_settlement_import_prices = list(series.settlement_import)
+        self._last_settlement_export_prices = list(series.settlement_export)
+        self._last_display_import_prices = list(series.marginal_import)
+        self._last_display_export_prices = list(series.marginal_export)
+        self._last_grid_charge_cap_import_prices = list(series.marginal_import)
+        self._last_zerocharge_bonus_prices = list(series.import_bonus)
+        self._last_zerohero_bonus_prices = list(series.export_bonus)
+        self._last_import_bonus_group_ids = list(series.import_group_ids)
+        self._last_export_bonus_group_ids = list(series.export_group_ids)
+        self._last_import_bonus_caps_by_group = dict(series.import_group_caps_kwh)
+        self._last_export_bonus_caps_by_group = dict(series.export_group_caps_kwh)
+        self._last_zerocharge_bonus_cap_kwh = sum(series.import_group_caps_kwh.values())
+        self._last_zerohero_bonus_cap_kwh = sum(series.export_group_caps_kwh.values())
+
+    def _flow_power_planned_quota_kwh(
+        self,
+        ledger: QuotaLedger | None,
+    ) -> dict[str, float]:
+        """Return current-day forecast reservations without mutating settlement."""
+        result = getattr(self, "_last_optimizer_result", None)
+        if result is None or ledger is None or ledger.state.tariff_day is None:
+            return {}
+        offset = self._get_forecast_offset()
+        dt_hours = self._config.interval_minutes / 60.0
+        planned: dict[str, float] = {}
+        for values, groups in (
+            (
+                getattr(result, "grid_import_w", None) or [],
+                self._last_import_bonus_group_ids or [],
+            ),
+            (
+                getattr(result, "grid_export_w", None) or [],
+                self._last_export_bonus_group_ids or [],
+            ),
+        ):
+            for idx in range(offset, min(len(values), len(groups))):
+                group = groups[idx]
+                if not group or not group.startswith(f"{ledger.state.tariff_day}:"):
+                    continue
+                rule_id = group.split(":", 1)[1]
+                planned[rule_id] = planned.get(rule_id, 0.0) + (
+                    max(0.0, float(values[idx] or 0.0)) / 1000.0 * dt_hours
+                )
+        return {
+            rule.rule_id: min(
+                max(0.0, planned.get(rule.rule_id, 0.0)),
+                ledger.remaining_kwh(rule.rule_id),
+            )
+            for rule in ledger.rules
+        }
+
     def _capture_provider_quota_measurements_before_plan(self) -> None:
         """Settle the active provider allowance before calculating caps."""
         if self._provider_key() == "covau":
             self._capture_covau_measurements_before_plan()
+            return
+        if self._provider_key() == "flow_power":
+            self._capture_flow_power_measurements_before_plan()
             return
         runtime = self._ensure_custom_tariff_quota_ledger(now=dt_util.now())
         if runtime is None:
@@ -3437,6 +3673,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._provider_key() == "covau":
             self._apply_covau_optimizer_inputs(import_prices, export_prices)
             return
+        if self._provider_key() == "flow_power":
+            self._apply_flow_power_optimizer_inputs(import_prices, export_prices)
+            return
         if self._ensure_custom_tariff_quota_ledger(now=dt_util.now()) is not None:
             self._apply_custom_tariff_quota_optimizer_inputs(
                 import_prices,
@@ -3506,6 +3745,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def get_provider_contract(self) -> dict[str, Any] | None:
         """Return the stable provider/runtime contract used by HA and mobile."""
+        if self._provider_key() == "flow_power":
+            runtime = self._ensure_flow_power_ledger(now=dt_util.now())
+            if runtime is None:
+                return None
+            snapshot, ledger = runtime
+            current_import = 0.0
+            prices = getattr(self, "_last_settlement_import_prices", None) or []
+            offset = self._get_forecast_offset()
+            if offset < len(prices):
+                current_import = max(0.0, float(prices[offset] or 0.0))
+            from ..flow_power import flow_power_provider_contract
+
+            return flow_power_provider_contract(
+                snapshot,
+                at=dt_util.now(),
+                import_price=current_import,
+                ledger=ledger,
+                planned_kwh=self._flow_power_planned_quota_kwh(ledger),
+            )
         runtime = self._ensure_covau_ledger(now=dt_util.now())
         if runtime is not None:
             snapshot, ledger = runtime
@@ -11901,6 +12159,38 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self._entry:
             return [False] * n
 
+        runtime = self._ensure_flow_power_ledger(now=dt_util.now())
+        if runtime is not None and runtime[0].plan_id in {
+            "happy_hour_2026",
+            "four_free_2026",
+            "flow_home_2026",
+        }:
+            snapshot, ledger = runtime
+            if snapshot.plan_id == "flow_home_2026":
+                return [False] * n
+            from ..flow_power import flow_power_price_series
+
+            series = flow_power_price_series(
+                snapshot,
+                self._price_timestamps(n),
+                [0.0] * n,
+                ledger=ledger,
+            )
+            return [
+                (
+                    active_plan == "legacy_unclassified"
+                    and base_export > 0
+                )
+                or (group is not None and bonus > 0)
+                for active_plan, base_export, group, bonus in zip(
+                    series.active_plan_ids,
+                    series.settlement_export,
+                    series.export_group_ids,
+                    series.export_bonus,
+                    strict=False,
+                )
+            ]
+
         from ..const import (
             CONF_FLOW_POWER_EXPORT_RATE,
             CONF_FLOW_POWER_HAPPY_HOUR_END,
@@ -12429,11 +12719,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _apply_flow_power_export(
         self, export_prices: list[float]
     ) -> list[float]:
-        """Replace export prices with Flow Power Happy Hour schedule.
-
-        Flow Power: 0c export except Happy Hour (17:30 to the selected plan
-        end) at the configured regional/plan rate.
-        """
+        """Replace export prices with the Flow Power billable base schedule."""
         if not self._entry:
             return export_prices
 
@@ -12452,6 +12738,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         if provider != "flow_power":
             return export_prices
+
+        runtime = self._ensure_flow_power_ledger(now=dt_util.now())
+        if runtime is not None:
+            snapshot, ledger = runtime
+            from ..flow_power import flow_power_price_series
+
+            series = flow_power_price_series(
+                snapshot,
+                self._price_timestamps(len(export_prices)),
+                [0.0] * len(export_prices),
+                ledger=ledger,
+            )
+            self._last_flow_power_price_series = series
+            return list(series.settlement_export)
 
         state = self._entry.options.get(
             CONF_FLOW_POWER_STATE,
@@ -15332,6 +15632,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # rollover is independent of HA's local daily-cost date.
         if self._provider_key() == "covau":
             self._ensure_covau_ledger(now=dt_util.now())
+        elif self._provider_key() == "flow_power":
+            self._ensure_flow_power_ledger(now=dt_util.now())
         else:
             self._ensure_custom_tariff_quota_ledger(now=dt_util.now())
         try:
@@ -15345,6 +15647,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         quota_state = data.get("quota_state_v2")
+        flow_runtime = self._ensure_flow_power_ledger(now=dt_util.now())
+        if (
+            flow_runtime is not None
+            and flow_runtime[1] is not None
+            and isinstance(quota_state, dict)
+            and quota_state.get("provider") == "flow_power"
+            and quota_state.get("plan_content_hash") == flow_runtime[0].plan_hash
+        ):
+            self._ensure_flow_power_ledger(
+                QuotaLedgerState.from_dict(quota_state),
+                now=dt_util.now(),
+            )
         snapshot = self._covau_snapshot()
         if (
             snapshot is not None
@@ -15641,6 +15955,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _quota_state_v2_to_save(self) -> dict[str, Any] | None:
         """Dual-write provider-neutral quota state beside legacy counters."""
+        if self._provider_key() == "flow_power":
+            runtime = self._ensure_flow_power_ledger(now=dt_util.now())
+            if runtime is None or runtime[1] is None:
+                return None
+            snapshot, ledger = runtime
+            payload = ledger.state.to_dict()
+            payload.update(
+                {
+                    "provider": "flow_power",
+                    "plan_id": snapshot.plan_id,
+                    "plan_content_hash": snapshot.plan_hash,
+                }
+            )
+            return payload
         if self._provider_key() == "covau":
             runtime = self._ensure_covau_ledger(now=dt_util.now())
             if runtime is None:
@@ -15965,7 +16293,48 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         actual_import_cost = grid_import_kwh * import_price
         actual_export_earnings = grid_export_kwh * export_price
 
-        if self._provider_key() == "covau":
+        if self._provider_key() == "flow_power":
+            quota_delta = dict(
+                getattr(
+                    self,
+                    "_pending_flow_power_settlement",
+                    {"import": 0.0, "export": 0.0},
+                )
+            )
+            latest_delta = self._settle_flow_power_measurements(
+                now,
+                grid_import_kw,
+                grid_export_kw,
+            )
+            quota_delta["import"] = quota_delta.get("import", 0.0) + latest_delta["import"]
+            quota_delta["export"] = quota_delta.get("export", 0.0) + latest_delta["export"]
+            self._pending_flow_power_settlement = {"import": 0.0, "export": 0.0}
+            runtime = self._ensure_flow_power_ledger(now=now)
+            if runtime is not None:
+                snapshot, ledger = runtime
+                base_import_prices = self._last_settlement_import_prices or self._last_import_prices
+                base_import_price = max(0.0, float(base_import_prices[0] or 0.0))
+                from ..flow_power import flow_power_price_series
+
+                series = flow_power_price_series(
+                    snapshot,
+                    [now],
+                    [base_import_price],
+                    ledger=ledger,
+                )
+                actual_import_cost = (
+                    grid_import_kwh * series.settlement_import[0]
+                    - max(0.0, quota_delta["import"]) * series.import_bonus[0]
+                )
+                actual_export_earnings = (
+                    grid_export_kwh * series.settlement_export[0]
+                    + max(0.0, quota_delta["export"]) * series.export_bonus[0]
+                )
+                if grid_import_kwh > 1e-9:
+                    import_price = actual_import_cost / grid_import_kwh
+                if grid_export_kwh > 1e-9:
+                    export_price = actual_export_earnings / grid_export_kwh
+        elif self._provider_key() == "covau":
             quota_delta = dict(
                 getattr(
                     self,

@@ -48,6 +48,7 @@ from .settings_metadata import (
     submitted_live_settings,
 )
 from .zerohero import zerohero_plan_from_entry
+from .flow_power import validate_flow_power_plan_selection
 from .optimization.ai_summary import AISummaryError, apply_ai_summary_settings
 from .const import (
     DOMAIN,
@@ -324,11 +325,14 @@ from .const import (
     CONF_FLOW_POWER_BASE_RATE,
     CONF_FLOW_POWER_EXPORT_RATE,
     CONF_FLOW_POWER_HAPPY_HOUR_END,
+    CONF_FLOW_POWER_PLAN,
     CONF_PEA_CUSTOM_VALUE,
     FLOW_POWER_DEFAULT_BASE_RATE,
     FLOW_POWER_EXPORT_RATES,
     DEFAULT_FLOW_POWER_HAPPY_HOUR_END,
     FLOW_POWER_HAPPY_HOUR_END_OPTIONS,
+    FLOW_POWER_PLAN_IDS,
+    FLOW_POWER_PLAN_REGIONS,
     resolve_flow_power_happy_hour_end,
     # Export price boost configuration
     CONF_EXPORT_BOOST_ENABLED,
@@ -2391,11 +2395,26 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            try:
+                user_input[CONF_FLOW_POWER_PLAN] = (
+                    validate_flow_power_plan_selection(
+                        {
+                            "plan_id": user_input.pop("flow_power_plan_id"),
+                            "region": user_input.pop("flow_power_plan_region"),
+                        }
+                    ).to_dict()
+                )
+            except (KeyError, TypeError, ValueError):
+                errors["base"] = "invalid_flow_power_plan"
             user_input[CONF_FLOW_POWER_HAPPY_HOUR_END] = (
                 resolve_flow_power_happy_hour_end(
                     user_input.get(CONF_FLOW_POWER_HAPPY_HOUR_END)
                 )
             )
+            if errors:
+                user_input = None
+
+        if user_input is not None:
             # Apply sensible defaults for fields not shown during initial setup
             api_key = user_input.get(CONF_FLOWPOWER_API_KEY)
             user_input[CONF_FLOW_POWER_PRICE_SOURCE] = "kwatch" if api_key else "aemo"
@@ -2442,6 +2461,25 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="flow_power_setup",
             data_schema=vol.Schema(
                 {
+                    vol.Required("flow_power_plan_id"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=value, label=label)
+                                for value, label in FLOW_POWER_PLAN_IDS.items()
+                                if value != "legacy_unclassified"
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Required("flow_power_plan_region"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=value, label=label)
+                                for value, label in FLOW_POWER_PLAN_REGIONS.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                     vol.Required(CONF_FLOW_POWER_STATE, default="NSW1"): SelectSelector(
                         SelectSelectorConfig(
                             options=[
@@ -15269,6 +15307,21 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Step 2b: Flow Power main settings (region, base rate, PEA, sync)."""
         if user_input is not None:
+            try:
+                user_input[CONF_FLOW_POWER_PLAN] = (
+                    validate_flow_power_plan_selection(
+                        {
+                            "plan_id": user_input.pop("flow_power_plan_id"),
+                            "region": user_input.pop("flow_power_plan_region"),
+                        }
+                    ).to_dict()
+                )
+            except (KeyError, TypeError, ValueError):
+                return self.async_show_form(
+                    step_id="flow_power_options",
+                    data_schema=self._flow_power_options_schema(),
+                    errors={"base": "invalid_flow_power_plan"},
+                )
             update_api_key = bool(
                 user_input.pop("update_flow_power_api_key", False)
             )
@@ -15298,7 +15351,39 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
             return await self.async_step_flow_power_network_options()
 
+        return self.async_show_form(
+            step_id="flow_power_options",
+            data_schema=self._flow_power_options_schema(),
+        )
+
+    def _flow_power_options_schema(self) -> vol.Schema:
+        """Build Flow Power options, preserving legacy entries explicitly."""
+        stored_plan = self._get_option(CONF_FLOW_POWER_PLAN, None)
+        try:
+            selection = validate_flow_power_plan_selection(stored_plan)
+        except (TypeError, ValueError):
+            selection = validate_flow_power_plan_selection(None)
         schema = {
+            vol.Required(
+                "flow_power_plan_id",
+                default=selection.plan_id,
+            ): SelectSelector(SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=value, label=label)
+                    for value, label in FLOW_POWER_PLAN_IDS.items()
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
+            vol.Required(
+                "flow_power_plan_region",
+                default=selection.region or "NSW",
+            ): SelectSelector(SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=value, label=label)
+                    for value, label in FLOW_POWER_PLAN_REGIONS.items()
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
             vol.Required(
                 CONF_FLOW_POWER_STATE,
                 default=self._get_option(CONF_FLOW_POWER_STATE, "NSW1"),
@@ -15370,10 +15455,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ): BooleanSelector(),
         }
 
-        return self.async_show_form(
-            step_id="flow_power_options",
-            data_schema=vol.Schema(schema),
-        )
+        return vol.Schema(schema)
 
 
     async def async_step_flow_power_amber_token(

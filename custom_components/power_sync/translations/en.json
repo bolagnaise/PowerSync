@@ -80,12 +80,16 @@
         "title": "Flow Power pricing",
         "description": "Enter your base rate from your Flow Power bill.",
         "data": {
+          "flow_power_plan_id": "Residential plan",
+          "flow_power_plan_region": "Plan region",
           "flow_power_state": "NEM region",
           "flow_power_base_rate": "Base rate",
           "flow_power_happy_hour_end": "Happy Hour plan end time",
           "flowpower_api_key": "Flow Power API key"
         },
         "data_description": {
+          "flow_power_plan_id": "Choose the exact written plan on your account. Existing ambiguous accounts remain Legacy / unclassified until explicitly changed.",
+          "flow_power_plan_region": "Choose the plan's published region. 4Free is available in SEQ, not automatically all of QLD.",
           "flow_power_state": "Your NEM region determines which wholesale price feed is used. Check your bill if unsure.",
           "flow_power_base_rate": "The base energy rate from your Flow Power contract, before wholesale adjustments.",
           "flow_power_happy_hour_end": "Select the Happy Hour end time stated on your Flow Power plan or fact sheet. This changes the Happy Hour window only; the separate Happy Hour export-rate setting remains unchanged.",
@@ -1061,6 +1065,7 @@
       }
     },
     "error": {
+      "invalid_flow_power_plan": "Choose a Flow Power plan and a region supported by that plan.",
       "season_required": "Add at least one tariff season.",
       "season_name_invalid": "Each tariff season needs a unique, non-empty name.",
       "season_month_invalid": "Choose valid start and end months for the tariff season.",
@@ -1155,6 +1160,7 @@
   },
   "options": {
     "error": {
+      "invalid_flow_power_plan": "Choose a Flow Power plan and a region supported by that plan.",
       "season_required": "Add at least one tariff season.",
       "season_name_invalid": "Each tariff season needs a unique, non-empty name.",
       "season_month_invalid": "Choose valid start and end months for the tariff season.",
@@ -2002,6 +2008,8 @@
         "title": "Flow Power settings",
         "description": "Update Flow Power API, tariff, and PEA settings. Get the API key from the Flow Power app under More > Web Data Access.",
         "data": {
+          "flow_power_plan_id": "Residential plan",
+          "flow_power_plan_region": "Plan region",
           "flow_power_state": "NEM region",
           "flow_power_price_source": "Price source",
           "flow_power_base_rate": "Base rate",
@@ -2012,6 +2020,8 @@
           "update_flow_power_api_key": "Enter or replace Flow Power API key"
         },
         "data_description": {
+          "flow_power_plan_id": "Legacy / unclassified preserves your saved Happy Hour rate and end time. Official plans use quota-aware terms from their effective date.",
+          "flow_power_plan_region": "The plan region is separate from the NEM wholesale-price region; QLD1 is never silently treated as SEQ.",
           "flow_power_price_source": "Flow Power API uses your KWatch API key. AEMO Direct fetches wholesale prices from NEMWeb without an API key. Amber API uses your Amber Electric account.",
           "flow_power_export_rate": "Fixed export credit paid during Flow Power Happy Hour. Set this if Flow Power has applied a promo or account-specific feed-in rate.",
           "flow_power_happy_hour_end": "Select the Happy Hour end time stated on your Flow Power plan or fact sheet. This changes the Happy Hour window only; the separate Happy Hour export-rate setting remains unchanged.",

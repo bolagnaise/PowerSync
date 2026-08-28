@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import math
 
 from homeassistant.util import dt as dt_util
@@ -1744,6 +1744,7 @@ def apply_flow_power_export(
     state: str,
     export_rate: float | None = None,
     happy_hour_end: str | None = None,
+    plan_selection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Apply Flow Power export rates to a tariff structure.
@@ -1766,7 +1767,30 @@ def apply_flow_power_export(
         _LOGGER.warning("No tariff provided for Flow Power export adjustment")
         return tariff
 
-    # Get the happy hour export rate for this state
+    plan_id = str((plan_selection or {}).get("plan_id") or "legacy_unclassified")
+    region = str((plan_selection or {}).get("region") or "").upper()
+    effective_from = str((plan_selection or {}).get("effective_from") or "2026-09-01")
+    official_active = False
+    if plan_id in {"happy_hour_2026", "four_free_2026", "flow_home_2026"}:
+        try:
+            official_active = dt_util.now().date() >= date.fromisoformat(effective_from)
+        except ValueError:
+            official_active = False
+
+    # Static tariffs publish billable/post-quota base prices. Quota premiums
+    # are supplied separately to the optimizer and must never be flattened
+    # across an entire capped window.
+    all_day_rate = None
+    if official_active and plan_id == "happy_hour_2026":
+        export_rate = 0.10
+        happy_hour_end = "21:30"
+    elif official_active and plan_id == "four_free_2026":
+        export_rate = 0.02 if region == "VIC" else 0.05
+        happy_hour_end = "21:30"
+    elif official_active and plan_id == "flow_home_2026":
+        all_day_rate = 0.02
+
+    # Get the legacy Happy Hour export rate for this state.
     if export_rate is None:
         export_rate = FLOW_POWER_EXPORT_RATES.get(state, 0.0)  # Default to 0c for unknown regions
 
@@ -1790,10 +1814,14 @@ def apply_flow_power_export(
         for period in list(rates.keys()):
             rates[period] = 0.0
 
-        # Then set Happy Hour periods to the fixed rate
-        for period in happy_hour_periods:
-            if period in rates or len(rates) > 0:
-                rates[period] = export_rate
+        if all_day_rate is not None:
+            for period in list(rates.keys()):
+                rates[period] = all_day_rate
+        else:
+            # Then set Happy Hour periods to the fixed rate
+            for period in happy_hour_periods:
+                if period in rates or len(rates) > 0:
+                    rates[period] = export_rate
 
     # Log summary of changes
     happy_hour_periods_count = len(happy_hour_periods)

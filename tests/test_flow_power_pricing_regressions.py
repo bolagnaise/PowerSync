@@ -183,6 +183,77 @@ def test_flow_power_tariff_conversion_uses_selected_happy_hour_end():
     assert summer_rates["PERIOD_21_30"] == 0.0
 
 
+def test_flow_power_official_tariffs_publish_post_quota_base_rates():
+    """Static tariff schedules must not flatten capped premium prices."""
+    from datetime import date, datetime, timezone
+
+    function = _function_source(TARIFF_CONVERTER_PATH, "apply_flow_power_export")
+    all_periods = [
+        "PERIOD_00_00",
+        "PERIOD_17_30",
+        "PERIOD_19_30",
+        "PERIOD_21_00",
+        "PERIOD_21_30",
+    ]
+    namespace = {
+        "Any": object,
+        "date": date,
+        "dt_util": SimpleNamespace(
+            now=lambda: datetime(2026, 9, 2, tzinfo=timezone.utc)
+        ),
+        "_LOGGER": SimpleNamespace(
+            warning=lambda *args, **kwargs: None,
+            info=lambda *args, **kwargs: None,
+        ),
+        "FLOW_POWER_EXPORT_RATES": {"VIC1": 0.35},
+        "resolve_flow_power_happy_hour_end": lambda value=None: value or "19:30",
+        "flow_power_happy_hour_periods": lambda value=None: [
+            "PERIOD_17_30",
+            "PERIOD_19_30",
+            "PERIOD_21_00",
+        ],
+    }
+    exec("from __future__ import annotations\n" + function, namespace)
+
+    def tariff():
+        return {
+            "sell_tariff": {
+                "energy_charges": {
+                    season: {"rates": {period: 0.99 for period in all_periods}}
+                    for season in ("Summer", "Winter")
+                }
+            }
+        }
+
+    four_free = tariff()
+    namespace["apply_flow_power_export"](
+        four_free,
+        "VIC1",
+        plan_selection={
+            "plan_id": "four_free_2026",
+            "region": "VIC",
+            "effective_from": "2026-09-01",
+        },
+    )
+    rates = four_free["sell_tariff"]["energy_charges"]["Summer"]["rates"]
+    assert rates["PERIOD_17_30"] == 0.02
+    assert rates["PERIOD_21_00"] == 0.02
+    assert rates["PERIOD_21_30"] == 0.0
+
+    flow_home = tariff()
+    namespace["apply_flow_power_export"](
+        flow_home,
+        "VIC1",
+        plan_selection={
+            "plan_id": "flow_home_2026",
+            "region": "VIC",
+            "effective_from": "2026-09-01",
+        },
+    )
+    rates = flow_home["sell_tariff"]["energy_charges"]["Summer"]["rates"]
+    assert set(rates.values()) == {0.02}
+
+
 
 
 def _method_source(file_path: Path, class_name: str, method_name: str) -> str:
