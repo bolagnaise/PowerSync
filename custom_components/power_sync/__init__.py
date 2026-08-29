@@ -824,12 +824,8 @@ from .const import (
     EV_PROVIDER_BOTH,
     CONF_TESLA_BLE_ENTITY_PREFIX,
     DEFAULT_TESLA_BLE_ENTITY_PREFIX,
-    TESLA_BLE_SENSOR_CHARGE_LEVEL,
-    TESLA_BLE_SENSOR_CHARGING_STATE,
     TESLA_BLE_SENSOR_CHARGE_LIMIT,
-    TESLA_BLE_SENSOR_CHARGE_POWER,
     TESLA_BLE_BINARY_ASLEEP,
-    TESLA_BLE_BINARY_CHARGE_FLAP,
     TESLA_BLE_SWITCH_CHARGER,
     TESLA_BLE_NUMBER_CHARGING_AMPS,
     TESLA_BLE_NUMBER_CHARGING_LIMIT,
@@ -916,7 +912,13 @@ from .currency import (
 )
 from .inverters import get_inverter_controller
 from .curtailment_config import export_earnings_are_uneconomic
-from .tesla_ble import get_tesla_ble_status_state
+from .tesla_ble import (
+    get_tesla_ble_battery_state,
+    get_tesla_ble_charge_power_state,
+    get_tesla_ble_charging_state,
+    get_tesla_ble_plug_state,
+    get_tesla_ble_status_state,
+)
 from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
 from .battery_backend.profiles import resolve_connection_profile
 from .battery_backend.discovery import (
@@ -1634,8 +1636,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
     # Check Tesla BLE sensors (all configured prefixes)
     for prefix in ble_prefixes:
         # Read SoC first so we can validate charging state
-        ble_soc_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=prefix)
-        ble_soc_state = hass.states.get(ble_soc_entity)
+        ble_soc_state = get_tesla_ble_battery_state(hass, prefix)
         ble_soc_value = None
         if ble_soc_state and ble_soc_state.state not in ("unknown", "unavailable"):
             try:
@@ -1647,8 +1648,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
 
         # Only trust power sensor if vehicle is actually charging
         # Reject stale "Charging" state when SoC is 100% (BLE doesn't always update promptly)
-        ble_charging_entity = TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=prefix)
-        ble_charging_state = hass.states.get(ble_charging_entity)
+        ble_charging_state = get_tesla_ble_charging_state(hass, prefix)
         is_ble_charging = (
             ble_charging_state
             and ble_charging_state.state not in ("unknown", "unavailable")
@@ -1657,8 +1657,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
             and prefix not in away_ble_prefixes
         )
 
-        ble_power_entity = TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix)
-        ble_state = hass.states.get(ble_power_entity)
+        ble_state = get_tesla_ble_charge_power_state(hass, prefix)
         if is_ble_charging and ble_state and ble_state.state not in ("unknown", "unavailable"):
             val = _kw_from_power_state(ble_state)
             if val > 0:
@@ -2169,7 +2168,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         ble_connected_observed_at = None
         charging_state_plugged = None
 
-        charge_state = hass.states.get(TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=prefix))
+        charge_state = get_tesla_ble_charging_state(hass, prefix)
         if charge_state and charge_state.state not in ("unknown", "unavailable"):
             ble_state_observed_at = _latest_ev_observed_at(
                 ble_state_observed_at,
@@ -2184,7 +2183,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                     getattr(charge_state, "last_updated", None),
                 )
 
-        charge_flap = hass.states.get(TESLA_BLE_BINARY_CHARGE_FLAP.format(prefix=prefix))
+        charge_flap = get_tesla_ble_plug_state(hass, prefix)
         # Charge-port flap position is only a fallback hint. An explicit
         # charging-state plug semantic is authoritative when the flap remains
         # open after the cable has been removed.
@@ -2202,7 +2201,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                     getattr(charge_flap, "last_updated", None),
                 )
 
-        power_state = hass.states.get(TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix))
+        power_state = get_tesla_ble_charge_power_state(hass, prefix)
         if power_state:
             ble_power_observed_at = _latest_ev_observed_at(
                 ble_power_observed_at,
@@ -2229,7 +2228,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             ev_power_kw = 0.0
             is_connected = False
 
-        soc_state = hass.states.get(TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=prefix))
+        soc_state = get_tesla_ble_battery_state(hass, prefix)
         if soc_state and soc_state.state not in ("unknown", "unavailable"):
             try:
                 ev_soc = int(float(soc_state.state))
@@ -14392,8 +14391,7 @@ class EVVehiclesView(HomeAssistantView):
 
         # Get charge level
         battery_level = None
-        charge_level_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=prefix)
-        charge_level_state = self._hass.states.get(charge_level_entity)
+        charge_level_state = get_tesla_ble_battery_state(self._hass, prefix)
         if charge_level_state and charge_level_state.state not in ("unknown", "unavailable"):
             try:
                 battery_level = int(float(charge_level_state.state))
@@ -14402,8 +14400,7 @@ class EVVehiclesView(HomeAssistantView):
 
         # Get charging state
         charging_state = None
-        charging_state_entity = TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=prefix)
-        charging_state_state = self._hass.states.get(charging_state_entity)
+        charging_state_state = get_tesla_ble_charging_state(self._hass, prefix)
         if charging_state_state:
             if charging_state_state.state in ("unknown", "unavailable"):
                 # Check if car is asleep
@@ -14429,8 +14426,7 @@ class EVVehiclesView(HomeAssistantView):
         # Check if plugged in (charge flap open is a proxy)
         is_plugged_in = False
         plugged_in_definitive = False  # True when charge_flap has a real reading (on/off)
-        charge_flap_entity = f"binary_sensor.{prefix}_charge_flap"
-        charge_flap_state = self._hass.states.get(charge_flap_entity)
+        charge_flap_state = get_tesla_ble_plug_state(self._hass, prefix)
         if charge_flap_state:
             if charge_flap_state.state == "on":
                 is_plugged_in = True
@@ -14462,8 +14458,7 @@ class EVVehiclesView(HomeAssistantView):
             charging_state and charging_state.lower() == "charging"
         )
         if is_ble_charging:
-            charge_power_entity = TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix)
-            charge_power_state = self._hass.states.get(charge_power_entity)
+            charge_power_state = get_tesla_ble_charge_power_state(self._hass, prefix)
             if charge_power_state and charge_power_state.state not in ("unknown", "unavailable"):
                 try:
                     charger_power = float(charge_power_state.state)
@@ -15399,8 +15394,7 @@ class EVVehicleCommandView(HomeAssistantView):
         # Check BLE charge_flap sensor for BLE vehicles
         if vehicle_vin and vehicle_vin.startswith("ble_"):
             ble_prefix = vehicle_vin[4:]
-            charge_flap_entity = TESLA_BLE_BINARY_CHARGE_FLAP.format(prefix=ble_prefix)
-            state = self._hass.states.get(charge_flap_entity)
+            state = get_tesla_ble_plug_state(self._hass, ble_prefix)
             if state and state.state == "on":
                 return True
             if state and state.state == "off":
@@ -15500,8 +15494,7 @@ class EVVehicleCommandView(HomeAssistantView):
         # Check BLE charging_state sensor for BLE vehicles
         if vehicle_vin and vehicle_vin.startswith("ble_"):
             ble_prefix = vehicle_vin[4:]
-            ble_entity = TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=ble_prefix)
-            state = self._hass.states.get(ble_entity)
+            state = get_tesla_ble_charging_state(self._hass, ble_prefix)
             if state and state.state not in ("unavailable", "unknown"):
                 return state.state.lower()
             return ""
@@ -17613,14 +17606,13 @@ class ChargingScheduleView(HomeAssistantView):
             config = dict(entries[0].options)
 
         ble_prefix = _resolve_ble_prefix(self._hass, config)
-        ble_charge_level_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=ble_prefix)
-        ble_state = self._hass.states.get(ble_charge_level_entity)
+        ble_state = get_tesla_ble_battery_state(self._hass, ble_prefix)
 
         if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
             try:
                 level = float(ble_state.state)
                 if 0 <= level <= 100:
-                    _LOGGER.debug(f"ChargingScheduleView: Found Tesla BLE SoC from {ble_charge_level_entity}: {level}%")
+                    _LOGGER.debug("ChargingScheduleView: Found Tesla BLE SoC from compatibility entity: %s%%", level)
                     return int(level)
             except (ValueError, TypeError):
                 pass

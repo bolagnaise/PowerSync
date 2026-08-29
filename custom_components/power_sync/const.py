@@ -118,6 +118,11 @@ TESLA_BLE_SENSOR_CHARGING_STATE = "sensor.{prefix}_charging_state"
 TESLA_BLE_SENSOR_CHARGE_LIMIT = "sensor.{prefix}_charge_limit"
 TESLA_BLE_SENSOR_CHARGE_CURRENT = "sensor.{prefix}_charge_current"
 TESLA_BLE_SENSOR_CHARGE_POWER = "sensor.{prefix}_charge_power"
+# Current yoziru/esphome-tesla-ble entity names.  Keep the legacy patterns
+# above because existing bridges remain supported.
+TESLA_BLE_SENSOR_BATTERY = "sensor.{prefix}_battery"
+TESLA_BLE_SENSOR_CHARGING = "sensor.{prefix}_charging"
+TESLA_BLE_SENSOR_CHARGER_POWER = "sensor.{prefix}_charger_power"
 TESLA_BLE_SENSOR_RANGE = "sensor.{prefix}_range"
 # Binary sensors
 TESLA_BLE_BINARY_ASLEEP = "binary_sensor.{prefix}_asleep"
@@ -126,6 +131,7 @@ TESLA_BLE_BINARY_STATUS = "binary_sensor.{prefix}_status"
 # Tesla connection status exposed by the esphome-tesla-ble component itself.
 TESLA_BLE_BINARY_CONNECTION_STATUS = "binary_sensor.{prefix}_ble_status"
 TESLA_BLE_BINARY_CHARGE_FLAP = "binary_sensor.{prefix}_charge_flap"
+TESLA_BLE_BINARY_CHARGER = "binary_sensor.{prefix}_charger"
 # Controls
 TESLA_BLE_SWITCH_CHARGER = "switch.{prefix}_charger"
 TESLA_BLE_NUMBER_CHARGING_AMPS = "number.{prefix}_charging_amps"

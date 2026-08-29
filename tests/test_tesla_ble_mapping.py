@@ -23,6 +23,12 @@ from power_sync.tesla_ble_mapping import (  # noqa: E402
     resolve_ble_prefixes,
     vehicle_ble_prefix,
 )
+from power_sync.tesla_ble import (  # noqa: E402
+    get_tesla_ble_battery_state,
+    get_tesla_ble_charge_power_state,
+    get_tesla_ble_charging_state,
+    get_tesla_ble_plug_state,
+)
 
 
 VIN_A = "5YJ3E1EA7NF0000A1"
@@ -48,6 +54,44 @@ def _hass(*entity_ids: str) -> SimpleNamespace:
             async_all=lambda: list(states.values()),
         )
     )
+
+
+def _hass_states(**states: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        states=SimpleNamespace(
+            get=lambda entity_id: (
+                SimpleNamespace(
+                    entity_id=entity_id,
+                    state=states[entity_id.replace(".", "_")],
+                )
+                if entity_id.replace(".", "_") in states
+                else None
+            ),
+        ),
+    )
+
+
+def test_current_yoziru_entities_fallback_for_ble_telemetry():
+    hass = _hass_states(
+        sensor_my_model_y_battery="67",
+        sensor_my_model_y_charging="Stopped",
+        sensor_my_model_y_charger_power="0",
+        binary_sensor_my_model_y_charger="on",
+    )
+
+    assert get_tesla_ble_battery_state(hass, "my_model_y").state == "67"
+    assert get_tesla_ble_charging_state(hass, "my_model_y").state == "Stopped"
+    assert get_tesla_ble_charge_power_state(hass, "my_model_y").state == "0"
+    assert get_tesla_ble_plug_state(hass, "my_model_y").state == "on"
+
+
+def test_current_yoziru_entities_replace_unavailable_legacy_telemetry():
+    hass = _hass_states(
+        sensor_my_model_y_charge_level="unavailable",
+        sensor_my_model_y_battery="67",
+    )
+
+    assert get_tesla_ble_battery_state(hass, "my_model_y").state == "67"
 
 
 def test_mapping_accepts_comma_and_newline_separators():

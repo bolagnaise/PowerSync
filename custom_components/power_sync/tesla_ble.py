@@ -5,9 +5,31 @@ from __future__ import annotations
 from typing import Any
 
 from .const import (
+    TESLA_BLE_BINARY_CHARGE_FLAP,
+    TESLA_BLE_BINARY_CHARGER,
     TESLA_BLE_BINARY_CONNECTION_STATUS,
     TESLA_BLE_BINARY_STATUS,
+    TESLA_BLE_SENSOR_BATTERY,
+    TESLA_BLE_SENSOR_CHARGE_LEVEL,
+    TESLA_BLE_SENSOR_CHARGE_POWER,
+    TESLA_BLE_SENSOR_CHARGER_POWER,
+    TESLA_BLE_SENSOR_CHARGING,
+    TESLA_BLE_SENSOR_CHARGING_STATE,
 )
+
+
+def _first_available_state(hass: Any, entity_ids: tuple[str, ...]) -> Any | None:
+    """Return the first current HA state from compatibility entity names."""
+    unavailable_state = None
+    for entity_id in entity_ids:
+        state = hass.states.get(entity_id)
+        if state is None:
+            continue
+        if state.state not in ("unavailable", "unknown", "None", None):
+            return state
+        if unavailable_state is None:
+            unavailable_state = state
+    return unavailable_state
 
 
 def tesla_ble_status_entity_ids(prefix: str) -> tuple[str, str]:
@@ -31,3 +53,47 @@ def get_tesla_ble_status_state(hass: Any, prefix: str) -> Any | None:
         if state is not None:
             return state
     return None
+
+
+def get_tesla_ble_battery_state(hass: Any, prefix: str) -> Any | None:
+    """Resolve legacy charge-level and current Tesla BLE battery entities."""
+    return _first_available_state(
+        hass,
+        (
+            TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=prefix),
+            TESLA_BLE_SENSOR_BATTERY.format(prefix=prefix),
+        ),
+    )
+
+
+def get_tesla_ble_charging_state(hass: Any, prefix: str) -> Any | None:
+    """Resolve legacy and current Tesla BLE charging-state entities."""
+    return _first_available_state(
+        hass,
+        (
+            TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=prefix),
+            TESLA_BLE_SENSOR_CHARGING.format(prefix=prefix),
+        ),
+    )
+
+
+def get_tesla_ble_charge_power_state(hass: Any, prefix: str) -> Any | None:
+    """Resolve legacy and current Tesla BLE charger-power entities."""
+    return _first_available_state(
+        hass,
+        (
+            TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix),
+            TESLA_BLE_SENSOR_CHARGER_POWER.format(prefix=prefix),
+        ),
+    )
+
+
+def get_tesla_ble_plug_state(hass: Any, prefix: str) -> Any | None:
+    """Resolve a physical plug-state entity without treating a control as state."""
+    return _first_available_state(
+        hass,
+        (
+            TESLA_BLE_BINARY_CHARGE_FLAP.format(prefix=prefix),
+            TESLA_BLE_BINARY_CHARGER.format(prefix=prefix),
+        ),
+    )

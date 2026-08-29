@@ -158,6 +158,16 @@ def test_configured_vehicle_profiles_are_kept_as_idle_loadpoints():
     assert "'include_idle': any((vehicle_ids_match(configured_id, vehicle_id)" in source
 
 
+def test_ble_loadpoint_observations_use_current_entity_compatibility_helpers():
+    tree = ast.parse(INIT_PATH.read_text())
+    source = ast.unparse(tree)
+
+    assert "get_tesla_ble_battery_state(hass, prefix)" in source
+    assert "get_tesla_ble_charging_state(hass, prefix)" in source
+    assert "get_tesla_ble_charge_power_state(hass, prefix)" in source
+    assert "get_tesla_ble_plug_state(hass, prefix)" in source
+
+
 def _get_async_class_method(class_name: str, method_name: str) -> ast.AsyncFunctionDef:
     tree = ast.parse(INIT_PATH.read_text())
     for node in ast.walk(tree):

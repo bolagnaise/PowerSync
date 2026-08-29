@@ -54,6 +54,12 @@ from ..tesla_ble_mapping import (
     resolve_ble_prefixes,
     vehicle_ble_prefix,
 )
+from ..tesla_ble import (
+    get_tesla_ble_battery_state,
+    get_tesla_ble_charge_power_state,
+    get_tesla_ble_charging_state,
+    get_tesla_ble_plug_state,
+)
 from .ev_vehicle_capacity import (
     CAPACITY_SOURCE_CHARGER_FALLBACK,
     CAPACITY_SOURCE_DEFAULT_ESTIMATE,
@@ -512,9 +518,7 @@ def _cached_ble_plug_state(hass: "HomeAssistant", prefix: str) -> bool | None:
 
 
 def _tesla_ble_charge_power_kw(hass: "HomeAssistant", prefix: str) -> float:
-    from ..const import TESLA_BLE_SENSOR_CHARGE_POWER
-
-    power_state = hass.states.get(TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix))
+    power_state = get_tesla_ble_charge_power_state(hass, prefix)
     power_w = _state_power_w(power_state)
     return (power_w or 0.0) / 1000
 
@@ -525,8 +529,6 @@ def _tesla_ble_plugged_in_status(
 ) -> bool | None:
     """Return definitive BLE plug state, avoiding stale charger-switch existence."""
     from ..const import (
-        TESLA_BLE_BINARY_CHARGE_FLAP,
-        TESLA_BLE_SENSOR_CHARGING_STATE,
         TESLA_BLE_SWITCH_CHARGER,
     )
     from .loadpoint_status import charging_state_plugged_status
@@ -535,7 +537,7 @@ def _tesla_ble_plugged_in_status(
         _LOGGER.debug("Tesla BLE %s: charge power present -> plugged in", prefix)
         return True
 
-    charging_state = hass.states.get(TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=prefix))
+    charging_state = get_tesla_ble_charging_state(hass, prefix)
     if _valid_state(charging_state):
         plugged = charging_state_plugged_status(charging_state.state)
         if plugged is not None:
@@ -547,7 +549,7 @@ def _tesla_ble_plugged_in_status(
             )
             return plugged
 
-    charge_flap = hass.states.get(TESLA_BLE_BINARY_CHARGE_FLAP.format(prefix=prefix))
+    charge_flap = get_tesla_ble_plug_state(hass, prefix)
     if charge_flap:
         if charge_flap.state == "on":
             _LOGGER.debug(
@@ -5321,7 +5323,6 @@ class AutoScheduleExecutor:
             CONF_GENERIC_CHARGER_ENABLED,
             CONF_TESLA_BLE_ENTITY_PREFIX,
             DEFAULT_TESLA_BLE_ENTITY_PREFIX,
-            TESLA_BLE_SENSOR_CHARGE_LEVEL,
         )
         from .generic_charger_soc import resolve_generic_charger_soc
         from homeassistant.helpers import entity_registry as er, device_registry as dr
@@ -5367,14 +5368,13 @@ class AutoScheduleExecutor:
                 # for any vehicle whose VIN couldn't be resolved.
                 ble_prefixes = [p.strip() for p in raw_prefix.split(",") if p.strip()]
             for prefix in ble_prefixes:
-                ble_charge_level_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=prefix)
-                ble_state = self.hass.states.get(ble_charge_level_entity)
+                ble_state = get_tesla_ble_battery_state(self.hass, prefix)
                 if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
                     try:
                         level = float(ble_state.state)
                         if 0 <= level <= 100:
                             live_soc = int(level)
-                            _LOGGER.debug(f"Found Tesla BLE SoC from {ble_charge_level_entity}: {live_soc}%")
+                            _LOGGER.debug("Found Tesla BLE SoC from compatibility entity: %s%%", live_soc)
                             break
                     except (ValueError, TypeError):
                         continue
@@ -9496,7 +9496,6 @@ class PriceLevelChargingExecutor:
         """
         from ..const import (
             CONF_GENERIC_CHARGER_ENABLED,
-            TESLA_BLE_SENSOR_CHARGE_LEVEL,
         )
         from .generic_charger_soc import resolve_generic_charger_soc
         from homeassistant.helpers import entity_registry as er, device_registry as dr
@@ -9517,8 +9516,7 @@ class PriceLevelChargingExecutor:
         # to its configured charge-level entity before the registry searches.
         if vehicle_vin and vehicle_vin.startswith("ble_"):
             ble_prefix = vehicle_vin[4:]
-            ble_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=ble_prefix)
-            ble_state = self.hass.states.get(ble_entity)
+            ble_state = get_tesla_ble_battery_state(self.hass, ble_prefix)
             if ble_state and ble_state.state not in (
                 "unavailable",
                 "unknown",
@@ -9529,8 +9527,7 @@ class PriceLevelChargingExecutor:
                     level = float(ble_state.state)
                     if 0 <= level <= 100:
                         _LOGGER.debug(
-                            "Found Tesla BLE battery level from %s: %s%%",
-                            ble_entity,
+                            "Found Tesla BLE battery level from compatibility entity: %s%%",
                             level,
                         )
                         return int(level)
