@@ -7,6 +7,68 @@ forecast, household load forecast, battery limits, and configured reserve floors
 Solar forecasting via Solcast or Open-Meteo Solar Forecast should be configured
 for accurate schedules.
 
+## AI Plan Explanation
+
+AI Plan Explanation is optional. It turns an existing deterministic Smart
+Optimization plan into a homeowner-oriented explanation; it cannot control,
+execute, modify, or recommend changes to the optimizer plan, settings, battery,
+EV, tariff, or hardware.
+
+### Gemini availability and diagnostics
+
+PowerSync does not itself require a paid Gemini tier. Gemini
+`gemini-3.5-flash-lite` can work with a Gemini API free-tier key when Google
+allows that key to use the model and quota is available. Google controls project
+and account eligibility, regional availability, model access, quota, and rate
+limits, so a free-tier key can still be rejected or rate-limited. PowerSync
+cannot promise free-tier access for every Google account, project, or region.
+
+To distinguish a provider eligibility or quota problem from a PowerSync setting,
+test the same key directly. This request mirrors the integration's current
+Gemini endpoint, API revision, and model. Run it in an empty local directory;
+it writes the response headers and body there. Enter the key only at the prompt
+so it is not put in shell history, and never post, paste, or share the key.
+
+```sh
+read -rsp "Gemini API key: " GEMINI_API_KEY; export GEMINI_API_KEY; printf '\n'
+curl --silent --show-error \
+  --dump-header gemini-response.headers \
+  --output gemini-response.json \
+  --write-out 'HTTP status: %{http_code}\n' \
+  --request POST 'https://generativelanguage.googleapis.com/v1beta/interactions' \
+  --header 'Content-Type: application/json' \
+  --header "x-goog-api-key: $GEMINI_API_KEY" \
+  --header 'Api-Revision: 2026-05-20' \
+  --data '{
+    "model": "gemini-3.5-flash-lite",
+    "input": "Return only valid JSON: {\"ok\": true}.",
+    "store": false,
+    "generation_config": {"max_output_tokens": 32},
+    "response_format": {
+      "type": "text",
+      "mime_type": "application/json",
+      "schema": {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": false
+      }
+    }
+  }'
+unset GEMINI_API_KEY
+```
+
+Keep the displayed HTTP status and the exact raw provider response locally as
+the provider-error evidence. Before sharing a diagnostic, make a redacted copy
+of the headers and response that removes the API key and any account, project,
+or request identifiers; do not alter the local original.
+
+### Grok billing
+
+xAI Grok API calls are separately metered. They are not included with an X or
+Grok consumer subscription, so use an xAI API account with applicable billing
+and usage limits.
+
 ## Core controls
 
 ### Enable Smart Optimization
