@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 from uuid import uuid4
@@ -528,6 +529,7 @@ from .const import (
     CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
     CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
     CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
+    CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
     CONF_PROFIT_MAX_ENABLED,
     CONF_COST_NEUTRAL_ENABLED,
     CONF_CHARGE_BY_TIME_ENABLED,
@@ -540,6 +542,7 @@ from .const import (
     CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
     CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY,
     DEFAULT_OPTIMIZATION_AI_SUMMARY_PROVIDER,
+    normalize_grid_charge_blackout_windows,
     COST_FUNCTION_COST,
     DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
     DEFAULT_CHARGE_BY_TIME_TARGET_TIME,
@@ -3569,6 +3572,19 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_OPTIMIZATION_PROVIDER,
                 OPT_PROVIDER_POWERSYNC,
             )
+            try:
+                initial_grid_charge_blackout_windows = (
+                    normalize_grid_charge_blackout_windows(
+                        user_input.get(
+                            CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
+                            [],
+                        )
+                    )
+                )
+            except ValueError:
+                # Do not persist malformed legacy/text-client input during
+                # setup. The options form also shows the field-specific error.
+                return await self.async_step_ml_options()
             self._optimization_provider = optimization_provider
             self._ml_options = {
                 CONF_MONITORING_MODE: bool(
@@ -3663,6 +3679,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_OPTIMIZATION_ALLOW_GRID_CHARGE: user_input.get(
                         CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                         True,
+                    ),
+                    CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS: (
+                        initial_grid_charge_blackout_windows
                     ),
                     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED: spread_export_enabled,
                     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED: spread_import_enabled,
@@ -3859,6 +3878,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     mode=NumberSelectorMode.SLIDER,
                 )
             ),
+            vol.Optional(
+                CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
+                default="[]",
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         }
         if not is_tesla:
             schema_fields.update({
@@ -11600,6 +11623,24 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                     True,
                 )
+                try:
+                    grid_charge_blackout_windows = (
+                        normalize_grid_charge_blackout_windows(
+                            user_input.get(
+                                CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
+                                [],
+                            )
+                        )
+                    )
+                except ValueError:
+                    return await self._async_step_optimization(
+                        None,
+                        form_step_id=form_step_id,
+                        errors={
+                            CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS:
+                                "invalid_grid_charge_blackout_windows"
+                        },
+                    )
                 profit_max_enabled = bool(
                     user_input.get(CONF_PROFIT_MAX_ENABLED, False)
                 )
@@ -11669,6 +11710,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_options[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = grid_charge_soc_cap
                 new_data[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = allow_grid_charge
                 new_options[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = allow_grid_charge
+                new_data[CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS] = (
+                    grid_charge_blackout_windows
+                )
+                new_options[CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS] = (
+                    grid_charge_blackout_windows
+                )
                 spread_export_enabled = (
                     False
                     if is_tesla
@@ -11888,6 +11935,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     "max_grid_charge_price": max_grid_charge_price,
                     "grid_charge_soc_cap": grid_charge_soc_cap,
                     "allow_grid_charge": allow_grid_charge,
+                    "grid_charge_blackout_windows": grid_charge_blackout_windows,
                     "cost_function": COST_FUNCTION_COST,
                     "profit_max_enabled": profit_max_enabled,
                     "cost_neutral_enabled": cost_neutral_enabled,
@@ -11928,6 +11976,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         ),
                         "grid_charge_soc_cap": CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
                         "allow_grid_charge": CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
+                        "grid_charge_blackout_windows": (
+                            CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS
+                        ),
                         "profit_max_enabled": CONF_PROFIT_MAX_ENABLED,
                         "cost_neutral_enabled": CONF_COST_NEUTRAL_ENABLED,
                         "daily_supply_charge": CONF_DAILY_SUPPLY_CHARGE,
@@ -12087,6 +12138,18 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ),
             1.0,
         )
+        try:
+            current_grid_charge_blackout_windows = normalize_grid_charge_blackout_windows(
+                self._get_option(
+                    CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
+                    self.config_entry.data.get(
+                        CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
+                        [],
+                    ),
+                )
+            )
+        except ValueError:
+            current_grid_charge_blackout_windows = []
         current_spread_export_enabled = self._get_option(
             CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
             self.config_entry.data.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED, False),
@@ -12227,6 +12290,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 current_max_grid_charge_price
             ),
             CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP: current_grid_charge_soc_cap,
+            CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS: json.dumps(
+                current_grid_charge_blackout_windows
+            ),
             CONF_PROFIT_MAX_ENABLED: bool(current_profit_max_enabled),
             CONF_COST_NEUTRAL_ENABLED: bool(current_cost_neutral_enabled),
             CONF_DAILY_SUPPLY_CHARGE: current_daily_supply_charge,
@@ -12418,6 +12484,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     min=0, max=100, step=1, unit_of_measurement="%",
                     mode=NumberSelectorMode.SLIDER,
                 )),
+                vol.Optional(
+                    CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
+                    default=json.dumps(current_grid_charge_blackout_windows),
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             }
         )
         if not is_tesla:

@@ -2045,6 +2045,9 @@ CONF_OPTIMIZATION_MAX_GRID_EXPORT_W = "optimization_max_grid_export_w"
 CONF_OPTIMIZATION_ALLOW_GRID_CHARGE = "optimization_allow_grid_charge"
 CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE = "optimization_max_grid_charge_price"
 CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP = "optimization_grid_charge_soc_cap"
+CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS = (
+    "optimization_grid_charge_blackout_windows"
+)
 CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED = "optimization_spread_export_enabled"
 CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED = "optimization_spread_import_enabled"
 CONF_OPTIMIZATION_DISABLE_IDLE = "optimization_disable_idle"
@@ -2065,6 +2068,49 @@ CONF_CHARGE_BY_TIME_TARGET_TIME = "charge_by_time_target_time"  # HH:MM time to 
 CONF_CHARGE_BY_TIME_TARGET_SOC = "charge_by_time_target_soc"  # Target SOC before the configured time
 CONF_PROFIT_MAX_TARGET_TIME = "profit_max_target_time"  # Legacy alias for charge_by_time_target_time
 CONF_PROFIT_MAX_TARGET_SOC = "profit_max_target_soc"  # Legacy alias for charge_by_time_target_soc
+
+
+def normalize_grid_charge_blackout_windows(value) -> list[dict[str, str]]:
+    """Return canonical local-time grid-charge blackout windows.
+
+    The persisted form is deliberately small and timezone-agnostic: schedule
+    timestamps are converted to the site's local time when the policy is
+    evaluated.  A JSON list is accepted by the config form/API, while a
+    comma-separated ``HH:MM-HH:MM`` form remains convenient for text clients.
+    """
+    if value in (None, "", []):
+        return []
+    raw = value
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            raw = [part.strip() for part in raw.split(",") if part.strip()]
+    if not isinstance(raw, list):
+        raise ValueError("blackout windows must be a list")
+
+    canonical: set[tuple[str, str]] = set()
+    for item in raw:
+        if isinstance(item, str) and "-" in item:
+            start, end = (part.strip() for part in item.split("-", 1))
+        elif isinstance(item, dict):
+            start, end = item.get("start"), item.get("end")
+        else:
+            raise ValueError("blackout windows must contain start/end ranges")
+        if not isinstance(start, str) or not isinstance(end, str):
+            raise ValueError("blackout times must be strings")
+        for clock in (start, end):
+            if len(clock) != 5 or clock[2] != ":" or not (
+                clock[:2].isdigit() and clock[3:].isdigit()
+            ):
+                raise ValueError("blackout times must use HH:MM")
+            hour, minute = int(clock[:2]), int(clock[3:])
+            if hour > 23 or minute > 59:
+                raise ValueError("blackout times must use a 24-hour clock")
+        if start == end:
+            raise ValueError("blackout windows cannot be zero length")
+        canonical.add((start, end))
+    return [{"start": start, "end": end} for start, end in sorted(canonical)]
 
 TARGET_EXPORT_POWER_BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_GOODWE,

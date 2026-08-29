@@ -10,7 +10,7 @@ import asyncio
 import calendar
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -52,6 +52,7 @@ from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode
 from ..const import (
     CONF_GENERIC_CHARGER_POWER_ENTITY,
     DEFAULT_OPTIMIZATION_INTERVAL,
+    normalize_grid_charge_blackout_windows,
 )
 from ..coordinator import normalize_custom_power_kw
 from ..currency import currency_for_entry, currency_metadata
@@ -313,6 +314,7 @@ class OptimizationConfig:
     allow_grid_charge: bool = True
     max_grid_charge_price: float | None = None
     grid_charge_soc_cap: float = 1.0
+    grid_charge_blackout_windows: list[dict[str, str]] = field(default_factory=list)
     backup_reserve: float = 0.2
     interval_minutes: int = FIXED_OPTIMIZATION_INTERVAL_MINUTES
     horizon_hours: int = 48
@@ -328,6 +330,11 @@ class OptimizationConfig:
     battery_efficiency_learning_enabled: bool = True
     auto_apply_reserve_enabled: bool = False
     manual_backup_reserve: float | None = None
+
+    def __post_init__(self) -> None:
+        self.grid_charge_blackout_windows = normalize_grid_charge_blackout_windows(
+            self.grid_charge_blackout_windows
+        )
 
 
 # Update interval for the coordinator
@@ -4436,6 +4443,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._entry:
             from ..const import (
                 CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
+                CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
                 CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
                 CONF_OPTIMIZATION_DISABLE_IDLE,
                 CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
@@ -4454,6 +4462,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._entry.data.get(CONF_OPTIMIZATION_ALLOW_GRID_CHARGE, True),
             )
             self._config.allow_grid_charge = bool(allow_grid_charge)
+            try:
+                self._config.grid_charge_blackout_windows = (
+                    normalize_grid_charge_blackout_windows(
+                        self._entry.options.get(
+                            CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
+                            self._entry.data.get(
+                                CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
+                                [],
+                            ),
+                        )
+                    )
+                )
+            except ValueError:
+                _LOGGER.warning(
+                    "Invalid persisted grid-charge blackout windows; using no blackout"
+                )
+                self._config.grid_charge_blackout_windows = []
             self._config.battery_efficiency_learning_enabled = bool(
                 self._entry.options.get(
                     CONF_OPTIMIZATION_BATTERY_EFFICIENCY_LEARNING,
@@ -6239,6 +6264,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 export_reserve_floor: float | list[float] | None = None,
                 charge_blocked_slots: list[bool] | None = None,
                 solar_export_slots: list[bool] | None = None,
+                grid_charge_slots: list[bool] | None = None,
             ) -> OptimizerResult:
                 if reserve_floor is not None:
                     self._optimizer.update_config(backup_reserve=reserve_floor)
@@ -6255,7 +6281,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         battery_export_allowed,
                         charge_blocked_slots or battery_charge_blocked,
                         self._config.allow_grid_charge,
-                        grid_charge_allowed,
+                        grid_charge_slots or grid_charge_allowed,
                         self._last_zerohero_bonus_prices,
                         self._last_zerohero_bonus_cap_kwh,
                         self._last_zerocharge_bonus_prices,
@@ -6304,6 +6330,61 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     charge_blocked_slots=hard_battery_charge_blocked,
                     solar_export_slots=[False] * len(import_prices),
                 )
+            self._charge_by_time_blackout_diagnostic = None
+            blackout_slots = list(
+                getattr(self, "_last_grid_charge_blackout_slots", []) or []
+            )
+            target_slot = getattr(self._optimizer, "pre_window_slot", None)
+            affected_before_deadline = [
+                idx
+                for idx, blocked in enumerate(blackout_slots)
+                if blocked and (target_slot is None or idx <= target_slot)
+            ]
+            if (
+                not result.feasible
+                and self.charge_by_time_enabled
+                and affected_before_deadline
+            ):
+                counterfactual = await _run_optimizer_once(
+                    solve_reserve_override,
+                    grid_charge_slots=list(
+                        getattr(
+                            self,
+                            "_last_grid_charge_pre_blackout_allowed",
+                            grid_charge_allowed,
+                        )
+                    ),
+                )
+                if counterfactual.feasible:
+                    self._charge_by_time_blackout_diagnostic = {
+                        "reason": "charge_by_time_blackout_infeasible",
+                        "target_soc": int(round(self._charge_by_time_target_soc() * 100)),
+                        "deadline": self._config.charge_by_time_target_time,
+                        "affected_slots": affected_before_deadline,
+                        "affected_windows": self._grid_charge_blackout_windows(),
+                        "eligible_slots_before_blackout": sum(
+                            bool(slot)
+                            for slot in getattr(
+                                self,
+                                "_last_grid_charge_pre_blackout_allowed",
+                                [],
+                            )
+                        ),
+                        "eligible_slots": sum(bool(slot) for slot in grid_charge_allowed),
+                    }
+                    _LOGGER.warning(
+                        "Charge By Time is infeasible because configured grid-charge "
+                        "blackout windows remove %d eligible slot(s) before %s",
+                        len(affected_before_deadline),
+                        self._config.charge_by_time_target_time,
+                    )
+            if self._charge_by_time_blackout_diagnostic:
+                result.lp_stats["charge_by_time_blackout_infeasible"] = dict(
+                    self._charge_by_time_blackout_diagnostic
+                )
+            result.lp_stats["grid_charge_blackout"] = dict(
+                getattr(self, "_grid_charge_blackout_status", {}) or {}
+            )
             if result.feasible and any(profit_max_solar_export_slots):
                 revised_solar_export_slots = self._revise_solar_export_holds(
                     result,
@@ -9367,6 +9448,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cap_cancelled_for_new_action = False
 
                 if force_type == "charge":
+                    if self._grid_charge_blackout_active_now():
+                        _LOGGER.info(
+                            "Optimizer: Canceling active force charge during configured "
+                            "grid-charge blackout; restoring self_consumption"
+                        )
+                        if force_state.get("scope") == "optimizer":
+                            self._clear_optimizer_force_state()
+                        elif self._force_state_clearer:
+                            self._force_state_clearer()
+                        restore_success = True
+                        if hasattr(battery, "restore_normal"):
+                            restore_success = await battery.restore_normal()
+                        elif hasattr(battery, "set_self_consumption_mode"):
+                            restore_success = await battery.set_self_consumption_mode()
+                        if restore_success is False:
+                            _LOGGER.warning(
+                                "Optimizer: blackout restore failed; retaining force "
+                                "state for retry"
+                            )
+                            return
+                        self._last_executed_planned_action = action.action
+                        self._last_executed_action = "self_consumption"
+                        return
                     try:
                         cap_reached, charge_soc_now, charge_soc_cap = (
                             await self._grid_charge_soc_cap_reached()
@@ -10174,6 +10278,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     return
 
             if effective_action == "charge":
+                if self._grid_charge_blackout_active_now():
+                    _LOGGER.info(
+                        "Optimizer: Blocking force charge during configured "
+                        "grid-charge blackout; restoring self_consumption"
+                    )
+                    restore_success = True
+                    if hasattr(battery, "restore_normal"):
+                        restore_success = await battery.restore_normal()
+                    elif hasattr(battery, "set_self_consumption_mode"):
+                        restore_success = await battery.set_self_consumption_mode()
+                    if restore_success is False:
+                        _LOGGER.warning(
+                            "Optimizer: blackout restore failed; next cycle will retry"
+                        )
+                        return
+                    self._last_executed_planned_action = action.action
+                    self._last_executed_action = "self_consumption"
+                    return
                 try:
                     cap_reached, charge_soc_now, charge_soc_cap = (
                         await self._grid_charge_soc_cap_reached()
@@ -17198,6 +17320,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 value = self._coerce_optional_price(value)
             if key == "grid_charge_soc_cap":
                 value = self._soc_ratio(value, 1.0)
+            if key == "grid_charge_blackout_windows":
+                value = normalize_grid_charge_blackout_windows(value)
             if hasattr(self._config, key):
                 setattr(self._config, key, value)
         self._config.interval_minutes = FIXED_OPTIMIZATION_INTERVAL_MINUTES
@@ -17346,6 +17470,88 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return allowed
 
+    def _apply_grid_charge_blackout_limit(self, allowed: list[bool]) -> list[bool]:
+        """Intersect final non-blackout eligibility with the blackout policy."""
+        pre_blackout_allowed = list(allowed)
+        blackout_mask = self._grid_charge_blackout_slots(len(allowed))
+        result = [
+            bool(slot_allowed) and not bool(blackout)
+            for slot_allowed, blackout in zip(
+                allowed, blackout_mask, strict=False
+            )
+        ]
+        self._last_grid_charge_pre_blackout_allowed = pre_blackout_allowed
+        self._last_grid_charge_blackout_slots = blackout_mask
+        self._grid_charge_blackout_status = {
+            "windows": self._grid_charge_blackout_windows(),
+            "blocked_slots": sum(bool(slot) for slot in blackout_mask),
+            "eligible_slots_before_blackout": sum(
+                bool(slot) for slot in pre_blackout_allowed
+            ),
+            "eligible_slots": sum(bool(slot) for slot in result),
+        }
+        return result
+
+    def _grid_charge_blackout_windows(self) -> list[dict[str, str]]:
+        """Return the canonical configured local-time force-charge exclusions."""
+        try:
+            return normalize_grid_charge_blackout_windows(
+                getattr(self._config, "grid_charge_blackout_windows", [])
+            )
+        except ValueError:
+            # Old or externally edited entries must fail closed.  The config
+            # flow/API rejects invalid values; this is only upgrade defence.
+            _LOGGER.warning("Ignoring invalid grid-charge blackout configuration")
+            return []
+
+    @staticmethod
+    def _time_is_in_grid_charge_blackout(
+        timestamp: datetime,
+        windows: list[dict[str, str]],
+    ) -> bool:
+        """Evaluate a local timestamp against start-inclusive/end-exclusive ranges."""
+        minute = timestamp.hour * 60 + timestamp.minute
+        for window in windows:
+            start_text, end_text = window["start"], window["end"]
+            start = int(start_text[:2]) * 60 + int(start_text[3:])
+            end = int(end_text[:2]) * 60 + int(end_text[3:])
+            if (start < end and start <= minute < end) or (
+                end < start and (minute >= start or minute < end)
+            ):
+                return True
+        return False
+
+    def _grid_charge_blackout_slots(self, n: int) -> list[bool]:
+        """Build a blackout mask on instant-contiguous solve timestamps.
+
+        Evaluating each actual timestamp, rather than adding local wall-clock
+        offsets, means both repeated fall-back occurrences obey the policy and
+        no imaginary spring-forward slot is created.
+        """
+        windows = self._grid_charge_blackout_windows()
+        if not windows:
+            return [False] * n
+        localize = getattr(dt_util, "as_local", None)
+        return [
+            self._time_is_in_grid_charge_blackout(
+                localize(timestamp) if callable(localize) else timestamp,
+                windows,
+            )
+            for timestamp in self._price_timestamps(n)
+        ]
+
+    def _grid_charge_blackout_active_now(self) -> bool:
+        """Return whether optimizer-owned grid charging must be stopped now."""
+        windows = self._grid_charge_blackout_windows()
+        if not windows:
+            return False
+        now = dt_util.now()
+        localize = getattr(dt_util, "as_local", None)
+        return self._time_is_in_grid_charge_blackout(
+            localize(now) if callable(localize) else now,
+            windows,
+        )
+
     def _apply_custom_tariff_quota_grid_charge_limit(
         self,
         allowed: list[bool],
@@ -17355,14 +17561,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Stop discretionary battery charging before an import cap is exceeded."""
         runtime = self._ensure_custom_tariff_quota_ledger(now=dt_util.now())
         if runtime is None:
-            return allowed
+            return self._apply_grid_charge_blackout_limit(allowed)
         tariff, rule, ledger, _content_hash = runtime
         raw_quota = tariff.get("import_quota")
         if (
             not isinstance(raw_quota, dict)
             or raw_quota.get("stop_grid_charging_at_quota", False) is not True
         ):
-            return allowed
+            return self._apply_grid_charge_blackout_limit(allowed)
 
         result = list(allowed)
         timestamps = self._price_timestamps(len(result))
@@ -17403,7 +17609,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 result[idx] = False
                 continue
             budgets[day] -= max_battery_import_kwh
-        return result
+        return self._apply_grid_charge_blackout_limit(result)
 
     async def force_reoptimize(self) -> Any:
         """Force immediate re-optimization."""
@@ -17862,6 +18068,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     round(self._soc_ratio(self._config.grid_charge_soc_cap, 1.0) * 100)
                 ),
                 "allow_grid_charge": self._config.allow_grid_charge,
+                "grid_charge_blackout_windows": self._grid_charge_blackout_windows(),
                 "spread_export_enabled": self._config.spread_export_enabled,
                 "spread_import_enabled": self._config.spread_import_enabled,
                 "disable_idle_enabled": self.disable_idle_enabled,
@@ -18493,6 +18700,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "battery_capacity_wh", "max_charge_w", "max_discharge_w",
             "max_grid_import_w", "max_grid_export_w",
             "max_grid_charge_price", "grid_charge_soc_cap",
+            "grid_charge_blackout_windows",
             "allow_grid_charge", "backup_reserve", "horizon_hours",
         ]
         raw_config_updates = {k: v for k, v in settings.items() if k in config_keys}
@@ -18516,6 +18724,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     config_updates["grid_charge_soc_cap"],
                     1.0,
                 )
+            if "grid_charge_blackout_windows" in config_updates:
+                try:
+                    config_updates["grid_charge_blackout_windows"] = (
+                        normalize_grid_charge_blackout_windows(
+                            config_updates["grid_charge_blackout_windows"]
+                        )
+                    )
+                except ValueError as err:
+                    response["success"] = False
+                    response["error"] = f"Invalid grid-charge blackout windows: {err}"
+                    return response
             if "horizon_hours" in config_updates:
                 try:
                     horizon_hours = int(float(config_updates["horizon_hours"]))
@@ -18570,6 +18789,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
                     CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
                     CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
+                    CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
                 )
                 new_data = dict(self._entry.data)
                 new_options = dict(self._entry.options)
@@ -18631,6 +18851,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     soc_cap = self._soc_ratio(settings["grid_charge_soc_cap"], 1.0)
                     new_options[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = soc_cap
                     new_data[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = soc_cap
+                if "grid_charge_blackout_windows" in config_updates:
+                    windows = config_updates["grid_charge_blackout_windows"]
+                    new_options[CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS] = windows
+                    new_data[CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS] = windows
                 if "allow_grid_charge" in settings:
                     new_options[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = bool(settings["allow_grid_charge"])
                 # Prevent reload from API-driven options update — only when

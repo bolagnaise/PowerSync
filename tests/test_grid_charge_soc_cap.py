@@ -9,14 +9,16 @@ assuming earliest-possible charging fills the cap first.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import importlib.util
 import sys
 import types
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -403,3 +405,104 @@ def test_grid_charge_price_cap_still_prunes_slots(opt_module):
     )
 
     assert allowed == [True, True, False, True]
+
+
+def test_grid_charge_blackout_windows_normalize_and_reject_invalid(opt_module):
+    assert opt_module.normalize_grid_charge_blackout_windows(
+        '[{"start":"22:00","end":"06:00"}, {"start":"22:00","end":"06:00"}]'
+    ) == [{"start": "22:00", "end": "06:00"}]
+    with pytest.raises(ValueError):
+        opt_module.normalize_grid_charge_blackout_windows([{"start": "6:00", "end": "07:00"}])
+    with pytest.raises(ValueError):
+        opt_module.normalize_grid_charge_blackout_windows([{"start": "06:00", "end": "06:00"}])
+
+
+def test_grid_charge_blackout_intersects_price_cap_and_crosses_midnight(opt_module):
+    coordinator = _coordinator(opt_module)
+    coordinator._config.max_grid_charge_price = 0.30
+    coordinator._config.grid_charge_blackout_windows = [
+        {"start": "22:00", "end": "06:00"}
+    ]
+    coordinator._pending_price_timestamps = [
+        datetime(2026, 5, 3, 21, 55, tzinfo=timezone.utc) + timedelta(minutes=5 * idx)
+        for idx in range(5)
+    ]
+
+    allowed = coordinator._apply_grid_charge_blackout_limit(
+        coordinator._grid_charge_allowed_slots(
+            import_prices=[0.20, 0.20, 0.40, 0.20, 0.20],
+            solar_forecast=[0.0] * 5,
+            load_forecast=[0.0] * 5,
+            current_soc=0.2,
+        )
+    )
+
+    assert allowed == [True, False, False, False, False]
+    assert coordinator._last_grid_charge_pre_blackout_allowed == [True, True, False, True, True]
+    assert coordinator._grid_charge_blackout_status["blocked_slots"] == 4
+
+
+def test_grid_charge_blackout_evaluates_both_fall_back_occurrences(opt_module):
+    coordinator = _coordinator(opt_module)
+    coordinator._config.grid_charge_blackout_windows = [
+        {"start": "01:00", "end": "02:00"}
+    ]
+    local_tz = ZoneInfo("America/New_York")
+    coordinator._pending_price_timestamps = [
+        datetime(2026, 11, 1, 1, 30, tzinfo=local_tz, fold=0),
+        datetime(2026, 11, 1, 1, 30, tzinfo=local_tz, fold=1),
+        datetime(2026, 11, 1, 2, 0, tzinfo=local_tz),
+    ]
+
+    assert coordinator._grid_charge_blackout_slots(3) == [True, True, False]
+
+
+def test_runtime_blackout_cancels_only_optimizer_owned_force_charge(opt_module):
+    class Battery:
+        def __init__(self):
+            self.restored = 0
+
+        async def restore_normal(self):
+            self.restored += 1
+            return True
+
+    battery = Battery()
+    coordinator = _coordinator(opt_module)
+    coordinator._enabled = True
+    coordinator._executor = SimpleNamespace(battery_controller=battery)
+    coordinator._optimizer_restore_in_progress = False
+    coordinator._effective_runtime_action = lambda action: action
+    coordinator._solar_export_hold = None
+    coordinator._monitoring_mode_active = lambda: False
+    coordinator.hass = SimpleNamespace(data={"power_sync": {"entry-1": {}}})
+    coordinator.entry_id = "entry-1"
+    coordinator.battery_system = "custom"
+    coordinator._scheduled_ev_preserve_active = lambda: False
+    coordinator._grid_charge_blackout_active_now = lambda: True
+    coordinator._optimizer_force_state = {"active": True, "scope": "optimizer"}
+    coordinator._clear_optimizer_force_state = lambda: coordinator._optimizer_force_state.clear()
+    coordinator._force_state_clearer = None
+    coordinator._last_executed_action = None
+    coordinator._last_executed_planned_action = None
+    action = SimpleNamespace(action="charge", power_w=1000)
+
+    coordinator._get_active_force_state = lambda: {
+        "active": True,
+        "type": "charge",
+        "source": "optimizer",
+        "scope": "optimizer",
+    }
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restored == 1
+    assert coordinator._last_executed_action == "self_consumption"
+
+    coordinator._last_executed_action = None
+    coordinator._get_active_force_state = lambda: {
+        "active": True,
+        "type": "charge",
+        "source": "user",
+    }
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert battery.restored == 1
+    assert coordinator._last_executed_action is None
