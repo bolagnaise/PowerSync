@@ -36,6 +36,7 @@ from .history_migration import (
     format_history_relink_summary,
     preview_history_relink,
 )
+from .curtailment_config import normalize_curtailment_export_threshold_cents
 from .monitoring import async_prepare_monitoring_handoff, finish_monitoring_handoff
 from .powerwall_host import normalize_powerwall_gateway_host
 from .tesla_ble_mapping import (
@@ -56,6 +57,8 @@ from .const import (
     CONF_AMBER_SITE_ID,
     CONF_AMBER_FORECAST_TYPE,
     CONF_BATTERY_CURTAILMENT_ENABLED,
+    CONF_CURTAILMENT_EXPORT_THRESHOLD_CENTS,
+    DEFAULT_CURTAILMENT_EXPORT_THRESHOLD_CENTS,
     CONF_AUTO_UPDATE_ENABLED,
     CONF_AUTO_UPDATE_TIME,
     DEFAULT_AUTO_UPDATE_TIME,
@@ -14144,6 +14147,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             # Store curtailment settings (no weather options here)
             self._curtailment_options = {
                 CONF_BATTERY_CURTAILMENT_ENABLED: new_curtailment_enabled,
+                CONF_CURTAILMENT_EXPORT_THRESHOLD_CENTS: (
+                    normalize_curtailment_export_threshold_cents(
+                        user_input.get(
+                            CONF_CURTAILMENT_EXPORT_THRESHOLD_CENTS,
+                            DEFAULT_CURTAILMENT_EXPORT_THRESHOLD_CENTS,
+                        )
+                    )
+                ),
             }
 
             # If entered from menu, save curtailment settings and finish
@@ -14247,6 +14258,21 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
                 ),
             ): BooleanSelector(),
+            vol.Optional(
+                CONF_CURTAILMENT_EXPORT_THRESHOLD_CENTS,
+                default=self._get_option(
+                    CONF_CURTAILMENT_EXPORT_THRESHOLD_CENTS,
+                    DEFAULT_CURTAILMENT_EXPORT_THRESHOLD_CENTS,
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=-100.0,
+                    max=200.0,
+                    step=0.1,
+                    mode=NumberSelectorMode.BOX,
+                    unit_of_measurement="c/kWh",
+                )
+            ),
         }
 
         if is_sigenergy:

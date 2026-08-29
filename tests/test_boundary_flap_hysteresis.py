@@ -48,6 +48,16 @@ def _load_tariff_utils():
     return module
 
 
+def _configured_curtailment(with_hysteresis):
+    """Build the default-policy adapter used by extracted nested functions."""
+    return lambda value, was_active, entry: with_hysteresis(
+        value,
+        was_active,
+        enter_threshold=entry.options.get("curtailment_export_threshold_cents", 1.0),
+        exit_threshold=entry.options.get("curtailment_export_threshold_cents", 1.0) + 0.2,
+    )
+
+
 def _nested_function_source(name: str) -> str:
     """Extract a (possibly nested) function definition by name from __init__.py."""
     source = INIT_PATH.read_text()
@@ -79,6 +89,7 @@ def _build_should_curtail_ac_coupled(get_live_status, with_hysteresis):
         "hass": SimpleNamespace(data={}),
         "DOMAIN": "power_sync",
         "with_hysteresis": with_hysteresis,
+        "export_earnings_are_uneconomic": _configured_curtailment(with_hysteresis),
         "_aemo_dispatch_entry_data": lambda: entry_data,
     }
     exec(textwrap.dedent(_nested_function_source("should_curtail_ac_coupled")), namespace)
@@ -274,6 +285,7 @@ def _build_handle_ac_inverter_curtailment_only(with_hysteresis):
         ),
         "apply_inverter_curtailment": apply_inverter_curtailment,
         "with_hysteresis": with_hysteresis,
+        "export_earnings_are_uneconomic": _configured_curtailment(with_hysteresis),
     }
     exec(
         textwrap.dedent(_nested_function_source("handle_ac_inverter_curtailment_only")),
@@ -362,6 +374,7 @@ def _build_handle_foxess_curtailment(
         "timedelta": timedelta,
         "timezone": timezone,
         "with_hysteresis": with_hysteresis,
+        "export_earnings_are_uneconomic": _configured_curtailment(with_hysteresis),
     }
     exec(textwrap.dedent(_nested_function_source("handle_foxess_curtailment")), namespace)
     return namespace["handle_foxess_curtailment"], entry_data
@@ -708,7 +721,9 @@ def test_brand_curtailment_handlers_use_hysteresis_not_raw_boundary():
         assert "export_earnings < 1" not in source, f"{name} still has the raw boundary comparison"
         assert f'entry_data.get("{key}", False)' in source, f"{name} missing hysteresis read for {key}"
         assert f'entry_data["{key}"] = {write_var}' in source, f"{name} missing hysteresis write for {key}"
-        assert "with_hysteresis(" in source, f"{name} does not call with_hysteresis"
+        assert "export_earnings_are_uneconomic(" in source, (
+            f"{name} does not call the configured hysteresis policy"
+        )
         assert key not in seen_keys, f"{key} reused across handlers -- state must not cross-contaminate"
         seen_keys.add(key)
 

@@ -2140,6 +2140,7 @@ def _install_solar_surplus_runtime_stubs(
     monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
     monkeypatch.setattr(actions, "_get_observed_ev_power_kw", fake_observed_ev_power_kw)
+    monkeypatch.setattr(actions, "_get_current_ev_export_price", lambda *args: 8.0)
     return set_amps_calls
 
 
@@ -2582,6 +2583,7 @@ def test_observed_wall_connector_power_is_counted_for_solar_surplus_stop(monkeyp
     monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
     monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_amps)
+    monkeypatch.setattr(actions, "_get_current_ev_export_price", lambda *args: 8.0)
 
     ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
@@ -2688,6 +2690,7 @@ def test_solar_surplus_active_tesla_uses_positive_measured_power_under_curtailme
     monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
     monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    monkeypatch.setattr(actions, "_get_current_ev_export_price", lambda *args: 8.0)
     monkeypatch.setattr(
         actions,
         "_resolve_tesla_active_charger_capability",
@@ -4790,6 +4793,7 @@ def test_solar_surplus_stays_paused_at_pause_soc_until_min_soc(monkeypatch):
     monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
     monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    monkeypatch.setattr(actions, "_get_current_ev_export_price", lambda *args: 8.0)
     actions._dynamic_ev_state.clear()
     actions._dynamic_ev_state["entry-1"] = {
         "generic_ev": {
@@ -4860,6 +4864,7 @@ def test_solar_surplus_does_not_start_below_generic_entity_floor(monkeypatch):
     monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
     monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    monkeypatch.setattr(actions, "_get_current_ev_export_price", lambda *args: 8.0)
     actions._dynamic_ev_state.clear()
     actions._dynamic_ev_state["entry-1"] = {
         "generic_ev": {
@@ -4973,6 +4978,7 @@ def test_solar_surplus_resumes_at_pause_threshold_when_floor_stop_disabled(monke
     monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
     monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
+    monkeypatch.setattr(actions, "_get_current_ev_export_price", lambda *args: 8.0)
     actions._dynamic_ev_state.clear()
     actions._dynamic_ev_state["entry-1"] = {
         "generic_ev": {
@@ -8732,6 +8738,71 @@ def test_solar_surplus_stop_delay_reduces_to_minimum_on_first_low_sample(monkeyp
     assert state["target_amps"] == 5
     assert state["low_surplus_start"] is not None
     assert set_amps_calls == [5]
+
+
+def test_solar_surplus_high_export_value_pauses_before_rate_control(monkeypatch):
+    hass = _Hass([])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=8)
+    state["params"]["max_export_price_cents"] = 15.0
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    set_amps_calls = _install_solar_surplus_runtime_stubs(
+        monkeypatch,
+        {
+            "battery_soc": 100,
+            "grid_power": -3000,
+            "battery_power": 0,
+            "solar_power": 5000,
+            "load_power": 2000,
+        },
+    )
+    monkeypatch.setattr(
+        actions,
+        "_get_current_ev_export_price",
+        lambda *args: 20.0,
+    )
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    assert state["paused"] is True
+    assert state["paused_by_export_price"] is True
+    assert state["current_amps"] == 0
+    assert set_amps_calls == [0]
+
+
+def test_solar_surplus_missing_export_price_cannot_authorize_start(monkeypatch):
+    hass = _Hass([])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=0)
+    state["charging_started"] = False
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    set_amps_calls = _install_solar_surplus_runtime_stubs(
+        monkeypatch,
+        {
+            "battery_soc": 100,
+            "grid_power": -3000,
+            "battery_power": 0,
+            "solar_power": 5000,
+            "load_power": 2000,
+        },
+    )
+    monkeypatch.setattr(
+        actions,
+        "_get_current_ev_export_price",
+        lambda *args: None,
+    )
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    assert state["paused"] is True
+    assert state["paused_by_export_price"] is True
+    assert set_amps_calls == []
 
 
 def test_solar_surplus_exact_lp_zero_bypasses_stop_delay(monkeypatch):

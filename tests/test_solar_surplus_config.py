@@ -13,10 +13,13 @@ _ps.__path__ = [str(ROOT)]
 sys.modules["power_sync"] = _ps
 
 from power_sync.solar_surplus_config import (  # noqa: E402
+    DEFAULT_SOLAR_SURPLUS_MAX_EXPORT_PRICE_CENTS,
     DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC,
     get_stored_solar_surplus_config,
+    get_solar_surplus_max_export_price_cents,
     get_solar_surplus_min_battery_soc,
     normalize_solar_surplus_config,
+    solar_surplus_price_allows_charging,
 )
 
 
@@ -85,3 +88,37 @@ def test_stored_solar_config_falls_back_to_entry_data():
     assert config["household_buffer_kw"] == 1.0
     assert config["home_battery_minimum"] == 35
     assert config["min_battery_soc"] == 35
+
+
+def test_default_export_opportunity_threshold_is_fifteen_cents():
+    config = normalize_solar_surplus_config()
+
+    assert config["max_export_price_cents"] == (
+        DEFAULT_SOLAR_SURPLUS_MAX_EXPORT_PRICE_CENTS
+    )
+    assert get_solar_surplus_max_export_price_cents(config) == 15.0
+
+
+def test_export_opportunity_threshold_is_normalized_and_clamped():
+    assert get_solar_surplus_max_export_price_cents(
+        {"max_export_price_cents": "20.5"}
+    ) == 20.5
+    assert get_solar_surplus_max_export_price_cents(
+        {"max_export_price_cents": -5}
+    ) == 0.0
+    assert get_solar_surplus_max_export_price_cents(
+        {"max_export_price_cents": 999}
+    ) == 200.0
+
+
+def test_solar_price_gate_blocks_high_or_missing_price_but_allows_deadline():
+    config = {"max_export_price_cents": 15}
+
+    assert solar_surplus_price_allows_charging(15.0, config) is True
+    assert solar_surplus_price_allows_charging(20.0, config) is False
+    assert solar_surplus_price_allows_charging(None, config) is False
+    assert solar_surplus_price_allows_charging(
+        20.0,
+        config,
+        deadline_override=True,
+    ) is True

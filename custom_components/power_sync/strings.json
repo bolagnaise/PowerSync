@@ -796,13 +796,13 @@
       },
       "sigenergy_dc_curtailment": {
         "title": "DC solar curtailment",
-        "description": "When enabled, PowerSync limits DC solar production when export earnings drop below 1c/kWh via Modbus. For AC-coupled inverters, configure curtailment separately.",
+        "description": "When enabled, PowerSync limits DC solar production when export earnings drop below the configured threshold via Modbus. For AC-coupled inverters, configure curtailment separately.",
         "data": {
           "sigenergy_dc_curtailment_enabled": "Enable DC solar curtailment",
           "sigenergy_export_limit_kw": "Grid export limit (kW)"
         },
         "data_description": {
-          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export earnings drop below 1c/kWh. Requires Modbus write access to the Sigenergy system.",
+          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export earnings drop below the configured threshold. Requires Modbus write access to the Sigenergy system.",
           "sigenergy_export_limit_kw": "Your DNSP grid export limit in kW. Leave blank to auto-detect from inverter registers. Prevents PowerSync from ever exceeding your grid connection allowance."
         },
         "submit": "Next"
@@ -886,7 +886,7 @@
           "amber_site_id": "If you have multiple Amber NMIs, select the one associated with this Powerwall.",
           "auto_sync_enabled": "When enabled, PowerSync uploads a new TOU tariff schedule to your battery every 5 minutes based on current Amber prices.",
           "amber_forecast_type": "Predicted is balanced. Low assumes cheaper prices (more aggressive charging). High assumes expensive prices (more conservative).",
-          "battery_curtailment_enabled": "Stop battery from exporting to grid when export earnings drop below 1c/kWh. This is the main toggle -- must be enabled for any curtailment to work."
+          "battery_curtailment_enabled": "Stop battery from exporting to grid when export earnings drop below the configured threshold. This is the main toggle -- must be enabled for any curtailment to work."
         },
         "submit": "Finish"
       },
@@ -936,20 +936,20 @@
       },
       "curtailment_setup": {
         "title": "Export curtailment",
-        "description": "Configure automatic curtailment when export earnings drop below 1c/kWh. These settings stop battery export and optionally shut down solar.",
+        "description": "Configure automatic curtailment. These settings stop battery export and optionally shut down solar.",
         "data": {
           "battery_curtailment_enabled": "Enable battery export curtailment",
           "ac_inverter_curtailment_enabled": "Enable separate AC-coupled inverter shutdown"
         },
         "data_description": {
-          "battery_curtailment_enabled": "Stop battery from exporting to grid when export earnings drop below 1c/kWh. This is the main toggle -- must be enabled for any curtailment to work.",
-          "ac_inverter_curtailment_enabled": "Shut down a separate AC-coupled or string solar inverter (Fronius, Sungrow, GoodWe, Enphase) when export earnings drop below 1c/kWh. Do not enable this for the hybrid battery inverter already configured as the battery system."
+          "battery_curtailment_enabled": "Stop battery export when earnings fall below the configured threshold. This is the main toggle -- it must be enabled for curtailment to work.",
+          "ac_inverter_curtailment_enabled": "Shut down a separate AC-coupled or string solar inverter (Fronius, Sungrow, GoodWe, Enphase) below the configured threshold. Do not enable this for the hybrid battery inverter already configured as the battery system."
         },
         "submit": "Next"
       },
       "inverter_brand_setup": {
         "title": "AC-coupled inverter brand",
-        "description": "Select your solar inverter brand for direct curtailment control when export earnings drop below 1c/kWh.",
+        "description": "Select your solar inverter brand for direct curtailment control when export earnings drop below the configured threshold.",
         "data": {
           "inverter_brand": "Inverter brand"
         },
@@ -1493,7 +1493,7 @@
           "sigenergy_modbus_host": "Local IP address of your Sigenergy inverter or gateway (e.g. 192.168.1.100).",
           "sigenergy_modbus_port": "Default Modbus TCP port is 502. Only change if customised.",
           "sigenergy_modbus_slave_id": "Default is 247. PowerSync auto-detects the correct registers.",
-          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export earnings drop below 1c/kWh. Requires Modbus write access to the Sigenergy system.",
+          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export earnings drop below the configured threshold. Requires Modbus write access to the Sigenergy system.",
           "sigenergy_export_limit_kw": "Your DNSP grid export limit in kW. Leave blank to auto-detect from inverter registers. Prevents PowerSync from ever exceeding your grid connection allowance.",
           "sigenergy_username": "Your Sigenergy Cloud account email address.",
           "sigenergy_password": "Plain-text password (recommended). Encoded automatically.",
@@ -1883,7 +1883,7 @@
           "sigenergy_modbus_host": "Local IP address of your Sigenergy inverter or gateway (e.g. 192.168.1.100).",
           "sigenergy_modbus_port": "Default Modbus TCP port is 502. Only change if customised.",
           "sigenergy_modbus_slave_id": "Default is 247. PowerSync auto-detects the correct registers.",
-          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export earnings drop below 1c/kWh. Requires Modbus write access to the Sigenergy system.",
+          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export earnings drop below the configured threshold. Requires Modbus write access to the Sigenergy system.",
           "sigenergy_export_limit_kw": "Your DNSP grid export limit in kW. Leave blank to auto-detect from inverter registers. Prevents PowerSync from ever exceeding your grid connection allowance.",
           "sigenergy_username": "Your Sigenergy Cloud account email address.",
           "sigenergy_password": "Plain-text password (recommended). Encoded automatically.",
@@ -2020,9 +2020,9 @@
           "update_amber_token": "Paste a new Amber API token to rotate it. Leave blank to keep your current token.",
           "auto_sync_enabled": "When enabled, PowerSync uploads a new TOU tariff schedule to your battery every 5 minutes based on current Amber prices.",
           "amber_forecast_type": "Predicted is balanced. Low assumes cheaper prices (more aggressive charging). High assumes expensive prices (more conservative).",
-          "battery_curtailment_enabled": "Stop battery from exporting to grid when export earnings drop below 1c/kWh. This is the main toggle -- must be enabled for any curtailment to work.",
+          "battery_curtailment_enabled": "Stop battery from exporting to grid when export earnings drop below the configured threshold. This is the main toggle -- must be enabled for any curtailment to work.",
           "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent your battery from charging from grid.",
-          "ac_inverter_curtailment_enabled": "Shut down a separate AC-coupled or string solar inverter (Fronius, Sungrow, GoodWe, Enphase) when export earnings drop below 1c/kWh. Do not enable this for the hybrid battery inverter already configured as the battery system.",
+          "ac_inverter_curtailment_enabled": "Shut down a separate AC-coupled or string solar inverter (Fronius, Sungrow, GoodWe, Enphase) when export earnings drop below the configured threshold. Do not enable this for the hybrid battery inverter already configured as the battery system.",
           "forecast_discrepancy_alert": "Send a mobile notification when Amber predicted and High (higher-price) forecasts diverge significantly. Indicates the forecast spread is large and conservative scheduling may be preferable.",
           "forecast_discrepancy_threshold": "Average price difference between Amber predicted and High forecasts that triggers the alert. Default 10 in the selected price unit.",
           "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force immediate recalculation. Tesla only, causes a ~5 second interruption.",
@@ -2201,14 +2201,14 @@
           "localvolts_partner_id": "Partner ID",
           "localvolts_nmi": "NMI",
           "auto_sync_enabled": "Enable automatic TOU sync",
-          "battery_curtailment_enabled": "Stop export below 1c"
+          "battery_curtailment_enabled": "Stop export below threshold"
         },
         "data_description": {
           "localvolts_api_key": "Contact Localvolts support to request your API key. Keep it secret -- treat it like a password.",
           "localvolts_partner_id": "Your Localvolts Partner ID, provided alongside the API key.",
           "localvolts_nmi": "Your 10-digit National Meter Identifier (on your electricity bill). Enter * to authorize all NMIs on the account.",
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current prices.",
-          "battery_curtailment_enabled": "Stop battery from exporting when export earnings drop below 1c/kWh."
+          "battery_curtailment_enabled": "Stop battery from exporting when export earnings drop below the configured threshold."
         },
         "submit": "Save"
       },
@@ -2223,7 +2223,7 @@
           "epex_import_price_entity": "Import price sensor",
           "epex_export_price_entity": "Export price sensor",
           "auto_sync_enabled": "Enable automatic TOU sync",
-          "battery_curtailment_enabled": "Stop export below 1c"
+          "battery_curtailment_enabled": "Stop export below threshold"
         },
         "data_description": {
           "epex_region": "Choose a supported EPEX bidding zone: DE, AT, BE, NL, DK1, DK2, or SE1-SE4.",
@@ -2233,7 +2233,7 @@
           "epex_import_price_entity": "Optional Home Assistant sensor for actual import costs. Use ct/kWh or EUR/kWh; a price_values attribute can provide a forecast.",
           "epex_export_price_entity": "Optional Home Assistant sensor for actual export earnings. Use ct/kWh or EUR/kWh; a price_values attribute can provide a forecast.",
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery.",
-          "battery_curtailment_enabled": "Stop battery from exporting when export earnings drop below 1c/kWh."
+          "battery_curtailment_enabled": "Stop battery from exporting when export earnings drop below the configured threshold."
         },
         "submit": "Save"
       },
@@ -2244,13 +2244,13 @@
           "octopus_product": "Octopus product",
           "octopus_region": "GSP region",
           "auto_sync_enabled": "Enable automatic TOU sync",
-          "battery_curtailment_enabled": "Stop export below 1c"
+          "battery_curtailment_enabled": "Stop export below threshold"
         },
         "data_description": {
           "octopus_product": "Agile = half-hourly dynamic. Go/Intelligent Go = cheap overnight EV rates. Flux/Intelligent Flux = solar+battery optimised. Tracker = daily wholesale.",
           "octopus_region": "Your Grid Supply Point region (single letter A-P). Check your Octopus bill or account dashboard.",
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current prices.",
-          "battery_curtailment_enabled": "Stop battery from exporting when export earnings drop below 1c/kWh."
+          "battery_curtailment_enabled": "Stop battery from exporting when export earnings drop below the configured threshold."
         },
         "submit": "Save"
       },
@@ -2367,19 +2367,21 @@
       },
       "curtailment_options": {
         "title": "Curtailment settings",
-        "description": "Configure automatic curtailment when export earnings drop below 1c/kWh. Changes take effect immediately.",
+        "description": "Configure automatic curtailment and choose the export earnings threshold. Changes take effect immediately.",
         "data": {
           "battery_curtailment_enabled": "Enable battery export curtailment",
           "ac_inverter_curtailment_enabled": "Enable separate AC-coupled inverter shutdown",
+          "curtailment_export_threshold_cents": "Curtail below export earnings",
           "powerwall_offgrid_as_curtailment": "Enable Powerwall off-grid fallback",
           "sigenergy_dc_curtailment_enabled": "Enable DC solar curtailment",
           "openweathermap_api_key": "OpenWeatherMap API key"
         },
         "data_description": {
-          "battery_curtailment_enabled": "Stop battery from exporting to grid when export earnings drop below 1c/kWh. This is the main toggle -- must be enabled for any curtailment to work.",
-          "ac_inverter_curtailment_enabled": "Shut down a separate AC-coupled or string solar inverter (Fronius, Sungrow, GoodWe, Enphase) when export earnings drop below 1c/kWh. Do not enable this for the hybrid battery inverter already configured as the battery system.",
+          "battery_curtailment_enabled": "Stop battery export when earnings fall below the configured threshold. This is the main toggle -- it must be enabled for curtailment to work.",
+          "ac_inverter_curtailment_enabled": "Shut down a separate AC-coupled or string solar inverter (Fronius, Sungrow, GoodWe, Enphase) below the configured threshold. Do not enable this for the hybrid battery inverter already configured as the battery system.",
+          "curtailment_export_threshold_cents": "Curtail when export earnings are below this value. Set 0 to curtail only at negative export earnings. A 0.2c/kWh release deadband prevents rapid switching.",
           "powerwall_offgrid_as_curtailment": "Allow PowerSync to temporarily island the Powerwall when export curtailment is needed but no AC inverter curtailment path is configured or available.",
-          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export earnings drop below 1c/kWh. Requires Modbus write access to the Sigenergy system.",
+          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export earnings drop below the configured threshold. Requires Modbus write access to the Sigenergy system.",
           "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny, cloudy, rain, snow, and storm triggers). Leave blank to disable."
         },
         "submit": "Save"
@@ -2580,7 +2582,7 @@
       },
       "inverter_brand": {
         "title": "AC-coupled inverter brand",
-        "description": "Select your solar inverter brand for curtailment control when export earnings drop below 1c/kWh.",
+        "description": "Select your solar inverter brand for curtailment control when export earnings drop below the configured threshold.",
         "data": {
           "inverter_brand": "Inverter brand"
         },

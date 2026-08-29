@@ -32,6 +32,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
+from .curtailment_config import get_curtailment_price_thresholds
 from .const import (
     CONF_POWERWALL_LOCAL_PAIRED,
     CONF_BATTERY_SENSOR_DISPLAY_MODE,
@@ -5307,7 +5308,10 @@ class SolarCurtailmentSensor(SensorEntity):
         if feedin_price is None:
             return False
         # Export earnings = -feedin_price (Amber uses negative for feed-in costs)
-        return -feedin_price < 1.0
+        enter_threshold, _exit_threshold = get_curtailment_price_thresholds(
+            self._entry
+        )
+        return -feedin_price < enter_threshold
 
     def _control_command_state(self) -> str:
         """Return the brand curtailment lifecycle state recorded on this entry."""
@@ -5441,7 +5445,13 @@ class SolarCurtailmentSensor(SensorEntity):
         if self._is_foxess():
             visible_state, grid_export_w, effect_confirmed = self._foxess_status()
             force_dispatch_active = self._foxess_force_dispatch_active()
-            export_uneconomic = export_earnings is not None and export_earnings < 1.0
+            enter_threshold, _exit_threshold = get_curtailment_price_thresholds(
+                self._entry
+            )
+            export_uneconomic = (
+                export_earnings is not None
+                and export_earnings < enter_threshold
+            )
             descriptions = {
                 "Active": "Curtailment confirmed; grid export is below 250 W",
                 "Pending": (

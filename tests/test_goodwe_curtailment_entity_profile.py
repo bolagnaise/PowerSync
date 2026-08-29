@@ -127,6 +127,14 @@ def _run_goodwe_curtailment(
         "entry": SimpleNamespace(entry_id="entry"),
         "_LOGGER": logger,
         "with_hysteresis": _load_with_hysteresis(),
+        "export_earnings_are_uneconomic": lambda value, active, _entry: (
+            _load_with_hysteresis()(
+                value,
+                active,
+                enter_threshold=1.0,
+                exit_threshold=1.2,
+            )
+        ),
         "_goodwe_force_export_active": lambda _entry_data: False,
         "async_dispatcher_send": lambda *args, **_kwargs: dispatches.append(args),
         "get_current_prices_for_curtailment": lambda *_a, **_k: (None, None, None),
@@ -168,6 +176,14 @@ def test_repeated_polls_do_not_repeat_the_unsupported_warning():
         "entry": SimpleNamespace(entry_id="entry"),
         "_LOGGER": second,
         "with_hysteresis": _load_with_hysteresis(),
+        "export_earnings_are_uneconomic": lambda value, active, _entry: (
+            _load_with_hysteresis()(
+                value,
+                active,
+                enter_threshold=1.0,
+                exit_threshold=1.2,
+            )
+        ),
         "_goodwe_force_export_active": lambda _entry_data: False,
         "async_dispatcher_send": lambda *_args, **_kwargs: None,
     }

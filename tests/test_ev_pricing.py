@@ -19,7 +19,10 @@ _automations.__path__ = [str(ROOT / "automations")]
 sys.modules["power_sync.automations"] = _automations
 
 from power_sync.automations import ev_pricing  # noqa: E402
-from power_sync.automations.ev_pricing import get_current_ev_prices  # noqa: E402
+from power_sync.automations.ev_pricing import (  # noqa: E402
+    get_current_ev_prices,
+    get_current_export_price,
+)
 
 
 def _hass_with(coordinator_key: str, import_cents: float, export_cents: float):
@@ -80,6 +83,22 @@ def test_ev_prices_fall_back_to_stored_current_prices():
     assert get_current_ev_prices(hass, "entry-1") == (27.0, 9.5)
 
 
+def test_strict_export_price_uses_signed_dynamic_provider_earnings():
+    assert get_current_export_price(
+        _hass_with("amber_coordinator", 30.0, 20.0),
+        "entry-1",
+    ) == 20.0
+
+    pays_to_export = _hass_with("amber_coordinator", 30.0, -5.0)
+    assert get_current_export_price(pays_to_export, "entry-1") == -5.0
+
+
+def test_strict_export_price_has_no_synthetic_fallback():
+    hass = SimpleNamespace(data={"power_sync": {"entry-1": {}}})
+
+    assert get_current_export_price(hass, "entry-1") is None
+
+
 def test_optimizer_retail_price_uses_timestamp_aligned_local_slot(monkeypatch):
     """The current retail slot is selected, not the first/padded optimizer value."""
     monkeypatch.setattr(
@@ -109,3 +128,33 @@ def test_optimizer_retail_price_uses_timestamp_aligned_local_slot(monkeypatch):
     )
 
     assert ev_pricing.get_current_retail_price(hass, "entry-1") == 24.32
+
+
+def test_optimizer_export_price_uses_timestamp_aligned_local_slot(monkeypatch):
+    monkeypatch.setattr(
+        ev_pricing.dt_util,
+        "now",
+        lambda: datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc),
+    )
+    hass = SimpleNamespace(
+        data={
+            "power_sync": {
+                "entry-1": {
+                    "optimization_coordinator": SimpleNamespace(
+                        data={
+                            "schedule": {
+                                "timestamps": [
+                                    "2026-08-05T11:30:00+00:00",
+                                    "2026-08-05T12:00:00+00:00",
+                                    "2026-08-05T12:30:00+00:00",
+                                ],
+                                "export_price": [0.05, 0.20, 0.08],
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    )
+
+    assert get_current_export_price(hass, "entry-1") == 20.0

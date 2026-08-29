@@ -353,7 +353,15 @@ def test_should_curtail_live_status_await_does_not_recreate_runtime(replacement)
         "entry": entry,
         "hass": hass,
         "get_live_status": _get_live_status,
-        "with_hysteresis": _load_with_hysteresis(),
+            "with_hysteresis": _load_with_hysteresis(),
+            "export_earnings_are_uneconomic": lambda value, active, _entry: (
+                _load_with_hysteresis()(
+                    value,
+                    active,
+                    enter_threshold=1.0,
+                    exit_threshold=1.2,
+                )
+            ),
     }
     exec(_function_source("_aemo_dispatch_entry_data"), namespace)
     exec(textwrap.dedent(_function_source("should_curtail_ac_coupled")), namespace)
@@ -833,6 +841,14 @@ def test_ac_coupled_curtails_zero_export_when_exporting_and_battery_not_absorbin
         "hass": SimpleNamespace(data={}),
         "DOMAIN": "power_sync",
         "with_hysteresis": _load_with_hysteresis(),
+        "export_earnings_are_uneconomic": lambda value, active, _entry: (
+            _load_with_hysteresis()(
+                value,
+                active,
+                enter_threshold=1.0,
+                exit_threshold=1.2,
+            )
+        ),
         "_aemo_dispatch_entry_data": lambda: entry_data,
     }
     exec(textwrap.dedent(_function_source("should_curtail_ac_coupled")), namespace)

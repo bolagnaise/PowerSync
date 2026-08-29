@@ -61,8 +61,10 @@ from ..const import (
 )
 from ..solar_surplus_config import (
     DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC,
+    get_solar_surplus_max_export_price_cents,
     get_solar_surplus_min_battery_soc,
     normalize_solar_surplus_config,
+    solar_surplus_price_allows_charging,
 )
 from ..tesla_ble_mapping import (
     canonical_tesla_vehicle_id,
@@ -6193,6 +6195,13 @@ def _get_current_ev_prices(hass, entry_id: str) -> tuple:
     return get_current_ev_prices(hass, entry_id)
 
 
+def _get_current_ev_export_price(hass, entry_id: str) -> float | None:
+    """Get an authoritative live export value without synthetic fallbacks."""
+    from .ev_pricing import get_current_export_price
+
+    return get_current_export_price(hass, entry_id)
+
+
 def get_price_recommendation(
     import_price_cents: float,
     export_price_cents: float,
@@ -6225,17 +6234,16 @@ def get_price_recommendation(
     recommendation = "wait"
     reason = "No clear advantage to charge now"
 
-    # Check for solar surplus first (best option - free energy)
-    if surplus_kw >= 1.0 and battery_soc >= min_battery_soc:
+    # Exporting valuable solar can be cheaper than consuming it in the EV.
+    if surplus_kw > 0 and export_price_cents > prefer_export_threshold_cents:
+        recommendation = "export"
+        reason = f"High export rate ({export_price_cents:.1f}c/kWh) - sell to grid instead"
+    elif surplus_kw >= 1.0 and battery_soc >= min_battery_soc:
         recommendation = "charge"
-        reason = f"Solar surplus available ({surplus_kw:.1f}kW) - free charging!"
+        reason = f"Solar surplus available ({surplus_kw:.1f}kW)"
     elif surplus_kw >= 1.0 and battery_soc < min_battery_soc:
         recommendation = "wait"
         reason = f"Solar surplus available but battery only at {battery_soc:.0f}% (need {min_battery_soc}%)"
-    # Check if export price is high enough to prefer selling
-    elif surplus_kw > 0 and export_price_cents >= prefer_export_threshold_cents:
-        recommendation = "export"
-        reason = f"High export rate ({export_price_cents:.1f}c/kWh) - sell to grid instead"
     # Check for arbitrage opportunity (import < export is rare but possible)
     elif import_price_cents < export_price_cents:
         recommendation = "charge"
@@ -8301,6 +8309,7 @@ def _refresh_solar_surplus_runtime_params(
             "dual_vehicle_strategy": config.get("dual_vehicle_strategy", "priority_first"),
             "allow_parallel_charging": config.get("allow_parallel_charging", False),
             "max_battery_charge_rate_kw": config.get("max_battery_charge_rate_kw", 5.0),
+            "max_export_price_cents": get_solar_surplus_max_export_price_cents(config),
         }
     )
     # Smart Schedule supplies the home-battery floor for its solar-surplus
@@ -8797,6 +8806,50 @@ async def _dynamic_ev_update_surplus(
         and not restart_telemetry_pending
     ):
         state["external_start_detection_armed"] = True
+
+    export_price_cents = _get_current_ev_export_price(hass, entry_id)
+    deadline_override = bool(
+        params.get("solar_export_price_deadline_override", False)
+    )
+    if not solar_surplus_price_allows_charging(
+        export_price_cents,
+        params,
+        deadline_override=deadline_override,
+    ):
+        limit = get_solar_surplus_max_export_price_cents(params)
+        if export_price_cents is None:
+            paused_reason = "Export price unavailable; automatic solar charging paused"
+        else:
+            paused_reason = (
+                f"Export value {export_price_cents:.1f}c/kWh exceeds "
+                f"Solar Surplus limit {limit:.1f}c/kWh"
+            )
+        state["paused"] = True
+        state["paused_by_export_price"] = True
+        state["paused_reason"] = paused_reason
+        state["reason"] = paused_reason
+        state["high_surplus_start"] = None
+        if current_amps > 0:
+            success = await _set_vehicle_amps(
+                hass,
+                config_entry,
+                vehicle_id,
+                0,
+                params,
+            )
+            if _session_was_replaced("export-value pause"):
+                return
+            if success:
+                state["current_amps"] = 0
+                state["target_amps"] = 0
+        return
+
+    if state.pop("paused_by_export_price", False):
+        state["paused"] = False
+        state["paused_reason"] = None
+        state["reason"] = "Export value permits Solar Surplus charging"
+        state["low_surplus_start"] = None
+        state["high_surplus_start"] = None
 
     # Calculate available surplus after the household buffer and any configured
     # parallel battery reserve.

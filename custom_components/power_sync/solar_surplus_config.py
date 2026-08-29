@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
 from typing import Any
 
 
 DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC = 80
+DEFAULT_SOLAR_SURPLUS_MAX_EXPORT_PRICE_CENTS = 15.0
 
 DEFAULT_SOLAR_SURPLUS_CONFIG: dict[str, Any] = {
     "enabled": False,
@@ -19,6 +21,7 @@ DEFAULT_SOLAR_SURPLUS_CONFIG: dict[str, Any] = {
     "min_battery_soc": DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC,
     "allow_parallel_charging": False,
     "max_battery_charge_rate_kw": 5.0,
+    "max_export_price_cents": DEFAULT_SOLAR_SURPLUS_MAX_EXPORT_PRICE_CENTS,
 }
 
 
@@ -46,6 +49,49 @@ def get_solar_surplus_min_battery_soc(
     return value if value is not None else DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC
 
 
+def get_solar_surplus_max_export_price_cents(
+    config: Mapping[str, Any] | None,
+) -> float:
+    """Return the maximum export value allowed for automatic solar charging."""
+    raw = (
+        config.get(
+            "max_export_price_cents",
+            DEFAULT_SOLAR_SURPLUS_MAX_EXPORT_PRICE_CENTS,
+        )
+        if config
+        else DEFAULT_SOLAR_SURPLUS_MAX_EXPORT_PRICE_CENTS
+    )
+    if isinstance(raw, bool):
+        return DEFAULT_SOLAR_SURPLUS_MAX_EXPORT_PRICE_CENTS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_SOLAR_SURPLUS_MAX_EXPORT_PRICE_CENTS
+    if not math.isfinite(value):
+        return DEFAULT_SOLAR_SURPLUS_MAX_EXPORT_PRICE_CENTS
+    return max(0.0, min(200.0, value))
+
+
+def solar_surplus_price_allows_charging(
+    export_price_cents: float | None,
+    config: Mapping[str, Any] | None,
+    *,
+    deadline_override: bool = False,
+) -> bool:
+    """Return whether export opportunity cost permits automatic solar charging."""
+    if deadline_override:
+        return True
+    if export_price_cents is None or isinstance(export_price_cents, bool):
+        return False
+    try:
+        export_price = float(export_price_cents)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not math.isfinite(export_price):
+        return False
+    return export_price <= get_solar_surplus_max_export_price_cents(config)
+
+
 def normalize_solar_surplus_config(config: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Merge solar-surplus config with defaults and keep threshold aliases aligned."""
     min_battery_soc = get_solar_surplus_min_battery_soc(config)
@@ -55,6 +101,9 @@ def normalize_solar_surplus_config(config: Mapping[str, Any] | None = None) -> d
 
     normalized["home_battery_minimum"] = min_battery_soc
     normalized["min_battery_soc"] = min_battery_soc
+    normalized["max_export_price_cents"] = (
+        get_solar_surplus_max_export_price_cents(config)
+    )
     return normalized
 
 

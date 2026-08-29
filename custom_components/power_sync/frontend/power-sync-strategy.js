@@ -4875,6 +4875,7 @@ class PowerSyncEVPanel extends HTMLElement {
           [
             { key: 'enabled', label: 'Enabled', type: 'checkbox' },
             { key: 'household_buffer_kw', label: 'Buffer kW', type: 'number', step: '0.1' },
+            { key: 'max_export_price_cents', label: 'Max Export c/kWh', type: 'number', step: '0.1' },
             { key: 'home_battery_minimum', label: 'Home SOC %', type: 'number', step: '1' },
             { key: 'sustained_surplus_minutes', label: 'Start Delay', type: 'number', step: '1' },
             { key: 'stop_delay_minutes', label: 'Stop Delay', type: 'number', step: '1' },

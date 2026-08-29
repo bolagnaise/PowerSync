@@ -117,6 +117,14 @@ def _load_handler(entry_data: dict, *, force_charge_active: bool = False,
         "force_discharge_state": {"active": force_discharge_active},
         "_optimizer_current_force_action_matches": _optimizer_current_force_action_matches,
         "with_hysteresis": _load_with_hysteresis(),
+        "export_earnings_are_uneconomic": lambda value, active, _entry: (
+            _load_with_hysteresis()(
+                value,
+                active,
+                enter_threshold=1.0,
+                exit_threshold=1.2,
+            )
+        ),
     }
     exec(_function_source("handle_alphaess_curtailment"), namespace)
     return namespace["handle_alphaess_curtailment"], hass

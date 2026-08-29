@@ -17,7 +17,7 @@ except (FileNotFoundError, json.JSONDecodeError):
     POWER_SYNC_VERSION = "0.0.0"
 
 # Dashboard JS version — bump this to cache-bust the strategy JS independently of the app version
-DASHBOARD_JS_VERSION = "47"
+DASHBOARD_JS_VERSION = "48"
 
 # User-Agent for API identification
 POWER_SYNC_USER_AGENT = f"PowerSync/{POWER_SYNC_VERSION} HomeAssistant"
@@ -40,6 +40,8 @@ DEFAULT_AUTO_UPDATE_TIME = "03:00"
 CONF_TIMEZONE = "timezone"
 CONF_AMBER_FORECAST_TYPE = "amber_forecast_type"
 CONF_BATTERY_CURTAILMENT_ENABLED = "battery_curtailment_enabled"
+CONF_CURTAILMENT_EXPORT_THRESHOLD_CENTS = "curtailment_export_threshold_cents"
+DEFAULT_CURTAILMENT_EXPORT_THRESHOLD_CENTS = 1.0
 
 # Automations - OpenWeatherMap API for weather triggers
 CONF_OPENWEATHERMAP_API_KEY = "openweathermap_api_key"

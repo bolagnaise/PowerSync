@@ -5848,11 +5848,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     or self._entry.options.get(CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False)
                 )
                 if curtailment_enabled:
-                    # Curtailment activates when export < 1c/kWh AND battery
-                    # is full — matching runtime logic in should_curtail_ac/dc.
+                    from ..curtailment_config import get_curtailment_price_thresholds
+
+                    # Curtailment activates below the configured export value
+                    # when the battery is full, matching runtime curtailment.
                     # While battery has room, solar charges it (no curtailment).
                     # Use forward SOC projection to estimate when battery fills.
-                    curtail_threshold = 0.01  # $/kWh
+                    curtail_threshold_cents, _ = get_curtailment_price_thresholds(
+                        self._entry
+                    )
+                    curtail_threshold = curtail_threshold_cents / 100.0
                     max_charge_kw = self._config.max_charge_w / 1000.0
                     capacity_kwh = self._config.battery_capacity_wh / 1000.0
                     dt_hours = self._config.interval_minutes / 60.0
@@ -10010,11 +10015,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                     if _current_export is None:
                         _current_export = _ep[0] if _ep else 0
-                    if _current_export < 0.01:  # < 1c/kWh
+                    from ..curtailment_config import get_curtailment_price_thresholds
+
+                    curtail_threshold_cents, _ = get_curtailment_price_thresholds(
+                        self._entry
+                    )
+                    if _current_export < curtail_threshold_cents / 100.0:
                         _LOGGER.info(
                             "Optimizer: Overriding %s → self_consumption — "
-                            "export price %.1fc/kWh < 1c threshold",
-                            effective_action, _current_export * 100,
+                            "export price %.1fc/kWh < %.1fc threshold",
+                            effective_action,
+                            _current_export * 100,
+                            curtail_threshold_cents,
                         )
                         effective_action = "self_consumption"
 

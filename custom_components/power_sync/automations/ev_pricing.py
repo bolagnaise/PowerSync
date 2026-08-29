@@ -35,16 +35,15 @@ def _parse_schedule_timestamp(value: Any, local_tz: Any) -> datetime | None:
     return parsed
 
 
-def get_current_retail_price(hass: Any, entry_id: str) -> float | None:
-    """Resolve the current retail import price from the optimizer schedule.
+def _get_current_optimizer_schedule_price(
+    hass: Any,
+    entry_id: str,
+    price_key: str,
+) -> float | None:
+    """Resolve one timestamp-aligned optimizer schedule price in cents/kWh.
 
-    ``OptimizationCoordinator`` keeps the tariff in dollars/kWh, aligned to
-    ``schedule.timestamps``.  This intentionally reads only that timestamped
-    retail schedule; provider wholesale arrays and positional fallbacks are not
-    safe inputs for a scheduled EV max-price gate.
-
-    Returns cents/kWh, or ``None`` when the schedule is missing, malformed,
-    stale, or has no slot covering the HA-local current time.
+    Returns ``None`` when the schedule is missing, malformed, stale, or has no
+    slot covering the HA-local current time.
     """
     entry_data = hass.data.get(DOMAIN, {}).get(entry_id, {})
     coordinator = entry_data.get("optimization_coordinator")
@@ -58,7 +57,7 @@ def get_current_retail_price(hass: Any, entry_id: str) -> float | None:
         return None
 
     timestamps = schedule.get("timestamps")
-    prices = schedule.get("import_price")
+    prices = schedule.get(price_key)
     if (
         not isinstance(timestamps, (list, tuple))
         or not isinstance(prices, (list, tuple))
@@ -129,6 +128,95 @@ def get_current_retail_price(hass: Any, entry_id: str) -> float | None:
 
     price_cents = price_dollars * 100.0
     return price_cents if math.isfinite(price_cents) else None
+
+
+def get_current_retail_price(hass: Any, entry_id: str) -> float | None:
+    """Resolve the current retail import price from the optimizer schedule.
+
+    ``OptimizationCoordinator`` keeps the tariff in dollars/kWh, aligned to
+    ``schedule.timestamps``. This intentionally reads only that timestamped
+    retail schedule; provider wholesale arrays and positional fallbacks are not
+    safe inputs for a scheduled EV max-price gate.
+    """
+    return _get_current_optimizer_schedule_price(hass, entry_id, "import_price")
+
+
+def get_current_export_price(hass: Any, entry_id: str) -> float | None:
+    """Resolve current export earnings without synthetic fallback values."""
+    optimizer_price = _get_current_optimizer_schedule_price(
+        hass,
+        entry_id,
+        "export_price",
+    )
+    if optimizer_price is not None:
+        return optimizer_price
+
+    entry_data = hass.data.get(DOMAIN, {}).get(entry_id, {})
+    for coordinator_key in (
+        "amber_coordinator",
+        "localvolts_coordinator",
+        "octopus_coordinator",
+        "epex_coordinator",
+        "aemo_sensor_coordinator",
+    ):
+        coordinator = entry_data.get(coordinator_key)
+        if getattr(coordinator, "last_update_success", True) is False:
+            continue
+        data = getattr(coordinator, "data", None)
+        if not isinstance(data, dict):
+            continue
+        for price in data.get("current", []):
+            if price.get("channelType") != "feedIn":
+                continue
+            raw = price.get("perKwh")
+            if isinstance(raw, bool):
+                return None
+            try:
+                feed_in = float(raw)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return -feed_in if math.isfinite(feed_in) else None
+
+    tariff_schedule = entry_data.get("tariff_schedule")
+    if tariff_schedule:
+        try:
+            from .. import get_current_price_from_tariff_schedule
+
+            _import_price, export_price, _current_period = (
+                get_current_price_from_tariff_schedule(tariff_schedule)
+            )
+            parsed = float(export_price)
+            return parsed if math.isfinite(parsed) else None
+        except Exception as err:
+            _LOGGER.debug("Could not resolve strict EV export price: %s", err)
+
+    sigenergy_tariff = entry_data.get("sigenergy_tariff")
+    if sigenergy_tariff:
+        sell_prices = sigenergy_tariff.get("sell_prices", [])
+        now = dt_util.now()
+        current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
+        for slot in sell_prices:
+            if slot.get("timeRange", "").startswith(current_time):
+                try:
+                    parsed = float(slot.get("price"))
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                return parsed if math.isfinite(parsed) else None
+
+    for key, field in (
+        ("current_prices", "export_cents"),
+        ("price_data", "export_price_cents"),
+    ):
+        price_data = entry_data.get(key)
+        if not isinstance(price_data, dict) or field not in price_data:
+            continue
+        try:
+            parsed = float(price_data[field])
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    return None
 
 
 def _prices_from_current(data: dict[str, Any] | None) -> tuple[float, float] | None:

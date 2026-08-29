@@ -315,6 +315,7 @@ def test_opportunistic_solar_respects_smart_schedule_priority(
             plan=plan,
             current_surplus_kw=3.5,
             current_price_cents=31.0,
+            current_export_price_cents=8.0,
             battery_soc=80.0,
             priority=priority,
         )
@@ -322,6 +323,77 @@ def test_opportunistic_solar_respects_smart_schedule_priority(
 
     assert should_charge is expected_should_charge
     assert source == expected_source
+
+
+def test_solar_only_live_decision_blocks_high_value_export(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 8, 18, 9, 0, tzinfo=brisbane_tz),
+    )
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
+        "solar_surplus_config"
+    ] = {"max_export_price_cents": 15.0}
+    planner = ev_planner.ChargingPlanner(hass, _FakeConfigEntry())
+
+    should_charge, reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=SimpleNamespace(windows=[]),
+            current_surplus_kw=3.5,
+            current_price_cents=31.0,
+            current_export_price_cents=20.0,
+            battery_soc=80.0,
+            priority=ev_planner.ChargingPriority.SOLAR_ONLY,
+        )
+    )
+
+    assert should_charge is False
+    assert reason == "Export value 20.0c/kWh exceeds Solar Surplus limit 15.0c/kWh"
+    assert source == "waiting"
+
+
+def test_time_critical_live_decision_can_override_high_export_value(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 8, 18, 9, 0, tzinfo=brisbane_tz),
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    plan = SimpleNamespace(
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time="2026-08-18T09:00:00",
+                end_time="2026-08-18T10:00:00",
+                source="solar_surplus",
+                estimated_power_kw=3.5,
+                estimated_energy_kwh=3.5,
+                price_cents_kwh=20.0,
+                reason="target_deadline",
+            )
+        ],
+        target_time="2026-08-18T10:00:00",
+        can_meet_target=True,
+    )
+
+    should_charge, _reason, source = asyncio.run(
+        planner.should_charge_now(
+            vehicle_id=VIN,
+            plan=plan,
+            current_surplus_kw=3.5,
+            current_price_cents=31.0,
+            current_export_price_cents=20.0,
+            battery_soc=80.0,
+            is_time_critical=True,
+            priority=ev_planner.ChargingPriority.TIME_CRITICAL,
+        )
+    )
+
+    assert should_charge is True
+    assert source == "solar_surplus"
 
 
 def test_cost_optimized_still_executes_a_planned_solar_window(monkeypatch):
@@ -352,6 +424,7 @@ def test_cost_optimized_still_executes_a_planned_solar_window(monkeypatch):
             plan=plan,
             current_surplus_kw=3.5,
             current_price_cents=31.0,
+            current_export_price_cents=8.0,
             battery_soc=80.0,
             priority=ev_planner.ChargingPriority.COST_OPTIMIZED,
         )
@@ -516,6 +589,7 @@ def test_solar_preferred_excludes_past_and_post_deadline_windows(monkeypatch):
         )
         for hour, price in (
             ("2026-07-16T12:00:00", 1.0),
+            ("2026-07-17T11:00:00", 20.0),
             ("2026-07-17T13:00:00", 10.0),
             ("2026-07-17T15:00:00", -5.0),
         )
@@ -605,6 +679,56 @@ def test_cost_optimized_matches_solar_to_price_by_local_hour(monkeypatch):
     assert plan.windows[0].start_time == "2026-07-16T19:00:00"
     assert plan.windows[0].source == "solar_surplus"
     assert plan.estimated_solar_kwh == pytest.approx(3.0)
+
+
+def test_cost_optimized_values_solar_at_foregone_export_price(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 8, 18, 9, 0, tzinfo=brisbane_tz),
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    price_forecast = [
+        ev_planner.PriceForecast(
+            hour="2026-08-18T09:00:00",
+            import_cents=31.0,
+            export_cents=20.0,
+            period="peak",
+        ),
+        ev_planner.PriceForecast(
+            hour="2026-08-18T10:00:00",
+            import_cents=10.0,
+            export_cents=5.0,
+            period="offpeak",
+        ),
+    ]
+    surplus_forecast = [
+        ev_planner.SurplusForecast(
+            hour="2026-08-18T09:00:00",
+            solar_kw=4.0,
+            load_kw=1.0,
+            surplus_kw=3.0,
+            confidence=0.8,
+        )
+    ]
+
+    plan = asyncio.run(
+        planner._plan_cost_optimized(
+            vehicle_id=VIN,
+            current_soc=60,
+            target_soc=70,
+            target_time=datetime(2026, 8, 18, 12, 0, tzinfo=brisbane_tz),
+            energy_needed_kwh=3.0,
+            charger_power_kw=7.36,
+            surplus_forecast=surplus_forecast,
+            price_forecast=price_forecast,
+        )
+    )
+
+    assert len(plan.windows) == 1
+    assert plan.windows[0].source == "grid_offpeak"
+    assert plan.windows[0].price_cents_kwh == 10.0
 
 
 def test_cost_optimized_prefers_guaranteed_near_zero_grid_over_solar(monkeypatch):

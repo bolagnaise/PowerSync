@@ -41,8 +41,11 @@ from ..optimization.price_level_projection import (
 )
 from ..solar_surplus_config import (
     DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC,
+    get_solar_surplus_max_export_price_cents,
+    get_stored_solar_surplus_config,
     get_solar_surplus_min_battery_soc,
     normalize_solar_surplus_config,
+    solar_surplus_price_allows_charging,
 )
 from ..tesla_ble_mapping import (
     canonical_tesla_vehicle_id,
@@ -2586,6 +2589,14 @@ class ChargingPlanner:
         self._get_battery_schedule = battery_schedule_getter
         self._grid_capacity_kw = grid_capacity_kw
 
+    async def _get_solar_surplus_config(self) -> dict:
+        """Return the normalized Solar Surplus policy for this config entry."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(
+            self.config_entry.entry_id,
+            {},
+        )
+        return get_stored_solar_surplus_config(entry_data)
+
     def _is_grid_charging_blocked_at(self, when: datetime) -> bool:
         """Return True if grid charging is blocked at `when` due to demand window.
 
@@ -2872,6 +2883,7 @@ class ChargingPlanner:
                 vehicle_id, current_soc, target_soc, target_time,
                 energy_needed_kwh, charger_power_kw,
                 surplus_forecast,
+                price_forecast=price_forecast,
                 battery_power_schedule=battery_power_schedule,
                 reserved_ev_power_schedule=reserved_ev_power_schedule,
                 minimum_charging_power_kw=minimum_charging_power_kw,
@@ -2934,6 +2946,7 @@ class ChargingPlanner:
         energy_needed_kwh: float,
         charger_power_kw: float,
         surplus_forecast: List[SurplusForecast],
+        price_forecast: Optional[List[PriceForecast]] = None,
         battery_power_schedule: Dict[str, float] = None,
         reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
         minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
@@ -2950,11 +2963,23 @@ class ChargingPlanner:
             if target_time is not None and target_time.tzinfo is not None
             else target_time
         )
+        policy = await self._get_solar_surplus_config()
+        export_by_hour = {
+            key: price.export_cents
+            for price in (price_forecast or [])
+            if (key := _forecast_hour_key(price.hour)) is not None
+        }
         for forecast in surplus_forecast:
             if energy_allocated >= energy_needed_kwh:
                 break
 
             if forecast.surplus_kw >= 1.0:  # Minimum 1kW to charge
+                export_value = export_by_hour.get(_forecast_hour_key(forecast.hour))
+                if price_forecast is not None and not solar_surplus_price_allows_charging(
+                    export_value,
+                    policy,
+                ):
+                    continue
                 hour_dt = _parse_forecast_hour_local_naive(forecast.hour)
                 if hour_dt is None:
                     continue
@@ -3005,7 +3030,7 @@ class ChargingPlanner:
                     source="solar_surplus",
                     estimated_power_kw=available_power,
                     estimated_energy_kwh=energy_this_hour,
-                    price_cents_kwh=0,  # Solar is free
+                    price_cents_kwh=float(export_value or 0),
                     reason="solar_forecast",
                 ))
 
@@ -3065,6 +3090,12 @@ class ChargingPlanner:
         repeated_price_hours = _repeated_forecast_local_hours(
             [price.hour for price in price_forecast]
         )
+        policy = await self._get_solar_surplus_config()
+        export_by_hour = {
+            key: price.export_cents
+            for price in price_forecast
+            if (key := _forecast_hour_key(price.hour)) is not None
+        }
 
         # First pass: allocate solar
         for forecast in surplus_forecast:
@@ -3072,6 +3103,9 @@ class ChargingPlanner:
                 break
 
             if forecast.surplus_kw >= 1.0:
+                export_value = export_by_hour.get(_forecast_hour_key(forecast.hour))
+                if not solar_surplus_price_allows_charging(export_value, policy):
+                    continue
                 hour_dt = _parse_forecast_hour_local_naive(forecast.hour)
                 if hour_dt is None:
                     continue
@@ -3121,7 +3155,7 @@ class ChargingPlanner:
                     source="solar_surplus",
                     estimated_power_kw=available_power,
                     estimated_energy_kwh=energy_this_hour,
-                    price_cents_kwh=0,
+                    price_cents_kwh=float(export_value or 0),
                     reason="solar_forecast",
                 ))
 
@@ -3326,6 +3360,7 @@ class ChargingPlanner:
             for forecast in surplus_forecast
             if (key := _forecast_hour_key(forecast.hour)) is not None
         }
+        solar_policy = await self._get_solar_surplus_config()
 
         for i, price in enumerate(price_forecast):
             try:
@@ -3371,7 +3406,10 @@ class ChargingPlanner:
             option_identity = _forecast_hour_key(price.hour) or display_start
 
             # Solar surplus is free
-            if solar_available >= 1.0:
+            if solar_available >= 1.0 and solar_surplus_price_allows_charging(
+                price.export_cents,
+                solar_policy,
+            ):
                 charging_options.append({
                     "hour": display_start,
                     "hour_dt": hour_dt,
@@ -3379,7 +3417,7 @@ class ChargingPlanner:
                     "identity": option_identity,
                     "source": "solar_surplus",
                     "power_kw": min(solar_available, charger_power_kw),
-                    "cost_cents": 0,  # Solar is free
+                    "cost_cents": price.export_cents,
                     "actual_price": price.import_cents,  # Store actual price for reference
                     "confidence": surplus.confidence if surplus is not None else 0.5,
                     "usable_fraction": usable_fraction,
@@ -3836,6 +3874,7 @@ class ChargingPlanner:
         current_surplus_kw: float,
         current_price_cents: float,
         battery_soc: float,
+        current_export_price_cents: Optional[float] = None,
         min_battery_soc: int = DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC,
         is_time_critical: bool = False,
         priority: ChargingPriority = ChargingPriority.COST_OPTIMIZED,
@@ -3866,6 +3905,24 @@ class ChargingPlanner:
             Tuple of (should_charge, reason, source)
         """
         now = _ha_local_now_naive()
+        policy = await self._get_solar_surplus_config()
+
+        def _solar_export_gate() -> tuple[bool, str]:
+            allowed = solar_surplus_price_allows_charging(
+                current_export_price_cents,
+                policy,
+                deadline_override=is_time_critical,
+            )
+            if allowed:
+                return True, ""
+            if current_export_price_cents is None:
+                return False, "Export price unavailable; automatic solar charging paused"
+            limit = get_solar_surplus_max_export_price_cents(policy)
+            return (
+                False,
+                f"Export value {current_export_price_cents:.1f}c/kWh exceeds "
+                f"Solar Surplus limit {limit:.1f}c/kWh",
+            )
 
         # Note: min_battery_soc is used to prevent battery DISCHARGE during surplus
         # calculation, but does NOT block charging from solar/grid.
@@ -3883,6 +3940,10 @@ class ChargingPlanner:
                 )
 
                 if window_start <= comparison_now < window_end:
+                    if window.source == "solar_surplus":
+                        solar_allowed, solar_reason = _solar_export_gate()
+                        if not solar_allowed:
+                            return False, solar_reason, "waiting"
                     _LOGGER.debug(
                         f"In planned window: {window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')} "
                         f"({window.source}, {window.price_cents_kwh:.1f}c/kWh)"
@@ -3964,6 +4025,9 @@ class ChargingPlanner:
             ChargingPriority.SOLAR_PREFERRED.value,
         }
         if opportunistic_solar_enabled and current_surplus_kw >= 1.5:
+            solar_allowed, solar_reason = _solar_export_gate()
+            if not solar_allowed:
+                return False, solar_reason, "waiting"
             return True, f"Solar surplus ({current_surplus_kw:.1f}kW)", "solar_surplus"
 
         # Keep free planned windows in the comparison.  Dropping zero prices
@@ -6079,11 +6143,18 @@ class AutoScheduleExecutor:
                 return
 
         # Use planner's should_charge_now logic
+        from .ev_pricing import get_current_export_price
+
+        current_export_price_cents = get_current_export_price(
+            self.hass,
+            self.config_entry.entry_id,
+        )
         should_charge, reason, source = await self.planner.should_charge_now(
             vehicle_id=vehicle_id,
             plan=state.current_plan,
             current_surplus_kw=current_surplus_kw,
             current_price_cents=current_price_cents,
+            current_export_price_cents=current_export_price_cents,
             battery_soc=battery_soc,
             min_battery_soc=effective_home_min,
             is_time_critical=is_time_critical,
@@ -7472,8 +7543,10 @@ class AutoScheduleExecutor:
             # Disable curtailment to allow full solar production for EV charging
             # This prevents solar being curtailed when we could use it to charge the EV
             await self._disable_curtailment_for_ev(state)
+            solar_surplus_policy = await self.planner._get_solar_surplus_config()
         else:
             dynamic_mode = "battery_target"
+            solar_surplus_policy = {}
 
         params = {
             "vehicle_id": vehicle_id,
@@ -7522,6 +7595,12 @@ class AutoScheduleExecutor:
             "no_grid_import": settings.get_effective_limit_grid_import(dt_util.now().weekday()),
             **battery_params,
             "target_battery_charge_kw": target_battery_charge_kw,
+            "max_export_price_cents": get_solar_surplus_max_export_price_cents(
+                solar_surplus_policy
+            ),
+            "solar_export_price_deadline_override": bool(
+                source == "solar_surplus" and force_max_rate
+            ),
         }
         if max_grid_import_kw is not None:
             params["max_grid_import_kw"] = max_grid_import_kw
