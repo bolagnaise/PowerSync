@@ -183,6 +183,13 @@ def optimizer_settings_schema() -> dict[str, Any]:
                 "order": 42,
                 "capability": "grid_charge",
             },
+            "grid_charge_blackout_windows": {
+                "category": "advanced",
+                "owner": "optimizer",
+                "section": "grid_site_constraints",
+                "order": 43,
+                "capability": "grid_charge",
+            },
             "spread_import_enabled": {
                 "category": "advanced",
                 "owner": "optimizer",
@@ -244,6 +251,7 @@ def optimizer_settings_groups() -> dict[str, Any]:
                 "allow_grid_charge",
                 "max_grid_charge_price",
                 "grid_charge_soc_cap",
+                "grid_charge_blackout_windows",
                 "max_grid_import_w",
                 "max_grid_export_w",
                 "spread_import_enabled",

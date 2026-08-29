@@ -878,6 +878,7 @@ from .const import (
     CONF_NETWORK_EXPORT_PCC_MAX_AGE_SECONDS,
     CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
     CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
+    CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
     CONF_OPTIMIZATION_DISABLE_IDLE,
@@ -895,6 +896,7 @@ from .const import (
     DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
     BATTERY_CAPACITY_DEFAULTS,
     BATTERY_POWER_DEFAULTS,
+    normalize_grid_charge_blackout_windows,
 )
 from .tesla_ble_mapping import (
     ble_prefix_vehicle_pairs,
@@ -41824,6 +41826,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
                 1.0,
             )
+            try:
+                saved_grid_charge_blackout_windows = (
+                    normalize_grid_charge_blackout_windows(
+                        entry.options.get(
+                            CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
+                            entry.data.get(
+                                CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
+                                [],
+                            ),
+                        )
+                    )
+                )
+            except ValueError:
+                saved_grid_charge_blackout_windows = []
             saved_horizon_hours = _positive_int_setting(CONF_OPTIMIZATION_HORIZON)
             saved_auto_apply_reserve = bool(
                 entry.options.get(
@@ -41927,6 +41943,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 saved_max_grid_charge_price
             )
             optimizer_config_updates["grid_charge_soc_cap"] = saved_grid_charge_soc_cap
+            optimizer_config_updates["grid_charge_blackout_windows"] = (
+                saved_grid_charge_blackout_windows
+            )
             if saved_horizon_hours is not None:
                 optimizer_config_updates["horizon_hours"] = saved_horizon_hours
             optimization_coordinator.update_config(**optimizer_config_updates)
@@ -42966,6 +42985,19 @@ class OptimizationSettingsView(HomeAssistantView):
                         CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
                         1.0,
                     ),
+                    "grid_charge_blackout_windows": (
+                        normalize_grid_charge_blackout_windows(
+                            config_entry.options.get(
+                                CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
+                                config_entry.data.get(
+                                    CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
+                                    [],
+                                ),
+                            )
+                        )
+                        if config_entry
+                        else []
+                    ),
                     "horizon_hours": (
                         _entry_int_setting(CONF_OPTIMIZATION_HORIZON, 48)
                         if config_entry
@@ -43505,6 +43537,27 @@ class OptimizationSettingsView(HomeAssistantView):
             if "allow_grid_charge" in settings:
                 new_options[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = bool(settings["allow_grid_charge"])
                 changes.append(f"Set grid charging to {settings['allow_grid_charge']}")
+
+            if "grid_charge_blackout_windows" in settings:
+                try:
+                    blackout_windows = normalize_grid_charge_blackout_windows(
+                        settings["grid_charge_blackout_windows"]
+                    )
+                except ValueError as err:
+                    return web.json_response(
+                        {
+                            "success": False,
+                            "error": f"Invalid grid-charge blackout windows: {err}",
+                        },
+                        status=400,
+                    )
+                new_data[CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS] = (
+                    blackout_windows
+                )
+                new_options[CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS] = (
+                    blackout_windows
+                )
+                changes.append("Updated grid-charge blackout windows")
 
             if "max_grid_charge_price" in settings:
                 raw_price_cap = settings.get("max_grid_charge_price")
