@@ -13982,10 +13982,10 @@ class EVStatusView(HomeAssistantView):
         self._hass = hass
 
     def _get_powersync_config(self) -> dict:
-        """Get PowerSync config entry options."""
+        """Get effective PowerSync config entry settings."""
         entries = self._hass.config_entries.async_entries(DOMAIN)
         if entries:
-            return dict(entries[0].options)
+            return {**entries[0].data, **entries[0].options}
         return {}
 
     def _get_tesla_ble_status(self) -> dict:
@@ -14269,7 +14269,7 @@ def _get_available_ev_vehicles(hass: HomeAssistant) -> list[dict]:
     config = {}
     entries = hass.config_entries.async_entries(DOMAIN)
     if entries:
-        config = dict(entries[0].options)
+        config = {**entries[0].data, **entries[0].options}
     ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
 
     # 1. Tesla Fleet API / Teslemetry — scan device registry for 17-char VIN identifiers
@@ -14343,10 +14343,10 @@ class EVVehiclesView(HomeAssistantView):
         self._hass = hass
 
     def _get_powersync_config(self) -> dict:
-        """Get PowerSync config entry options."""
+        """Get effective PowerSync config entry settings."""
         entries = self._hass.config_entries.async_entries(DOMAIN)
         if entries:
-            return dict(entries[0].options)
+            return {**entries[0].data, **entries[0].options}
         return {}
 
     @staticmethod
@@ -15142,10 +15142,10 @@ class EVVehicleCommandView(HomeAssistantView):
         self._hass = hass
 
     def _get_powersync_config(self) -> dict:
-        """Get PowerSync config entry options."""
+        """Get effective PowerSync config entry settings."""
         entries = self._hass.config_entries.async_entries(DOMAIN)
         if entries:
-            return dict(entries[0].options)
+            return {**entries[0].data, **entries[0].options}
         return {}
 
     def _get_vin_from_vehicle_id(self, vehicle_id: str) -> str | None:

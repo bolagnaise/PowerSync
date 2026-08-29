@@ -213,11 +213,16 @@ class _Hass:
         registry_entities: dict[str, object] | None = None,
         devices: dict[str, object] | None = None,
         entry_data: dict | None = None,
+        config_entries: list[object] | None = None,
     ) -> None:
         self.states = _States(states)
         self.entity_registry = SimpleNamespace(entities=registry_entities or {})
         self.device_registry = SimpleNamespace(devices=devices or {})
         self.data = {"power_sync": {"entry-1": entry_data or {}}}
+        self.config_entries = SimpleNamespace(
+            async_entries=lambda domain: config_entries or [],
+            async_domains=lambda: [],
+        )
 
 
 def _fake_site_snapshot(hass) -> dict:
@@ -1030,6 +1035,35 @@ def test_mobile_ble_vehicle_accepts_connection_status_without_optional_node_stat
 
     assert canonical_vehicle is not None
     assert canonical_vehicle["is_online"] is False
+
+
+def test_mobile_ble_views_merge_legacy_entry_data_with_options():
+    """A legacy BLE provider setting must reach every mobile EV entry point."""
+    power_sync = _power_sync_module()
+    entry = SimpleNamespace(
+        data={
+            "ev_provider": power_sync.EV_PROVIDER_TESLA_BLE,
+            "tesla_ble_entity_prefix": "legacy_ble",
+        },
+        options={"tesla_ble_entity_prefix": "current_ble"},
+    )
+    hass = _Hass(
+        [_State("binary_sensor.current_ble_status", "on")],
+        config_entries=[entry],
+    )
+
+    expected_config = {
+        "ev_provider": power_sync.EV_PROVIDER_TESLA_BLE,
+        "tesla_ble_entity_prefix": "current_ble",
+    }
+    assert power_sync.EVStatusView(hass)._get_powersync_config() == expected_config
+    assert power_sync.EVVehiclesView(hass)._get_powersync_config() == expected_config
+    assert power_sync.EVVehicleCommandView(hass)._get_powersync_config() == expected_config
+    assert power_sync._get_available_ev_vehicles(hass) == [{
+        "id": "ble_current_ble",
+        "display_name": "Tesla BLE (Current Ble)",
+        "source": "tesla_ble",
+    }]
 
 
 def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesla():
