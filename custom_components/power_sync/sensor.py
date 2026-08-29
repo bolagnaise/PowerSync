@@ -5100,6 +5100,27 @@ def _goodwe_curtailment_visible_status(
     )
 
 
+def _goodwe_curtailment_description(
+    *,
+    visible_state: str,
+    control_state: str,
+    force_dispatch_active: bool,
+) -> str:
+    """Describe GoodWe curtailment without overstating a command outcome."""
+    if visible_state == "Active":
+        return "Curtailment confirmed; grid export is below 250 W"
+    if visible_state == "Pending":
+        if force_dispatch_active:
+            return "Curtailment status is pending while force dispatch owns control"
+        if control_state == "unsupported":
+            return (
+                "Export limiting is not supported on this control profile; "
+                "no curtailment command was sent"
+            )
+        return "Curtailment command acknowledged, but physical zero-export is not confirmed"
+    return "Normal solar export allowed"
+
+
 def _foxess_curtailment_visible_status(
     *,
     curtailment_enabled: bool,
@@ -5457,16 +5478,6 @@ class SolarCurtailmentSensor(SensorEntity):
         if self._is_goodwe():
             visible_state, grid_export_w, effect_confirmed = self._goodwe_status()
             force_dispatch_active = self._foxess_force_dispatch_active()
-            descriptions = {
-                "Active": "Curtailment confirmed; grid export is below 250 W",
-                "Pending": (
-                    "Curtailment status is pending while force dispatch owns control"
-                    if force_dispatch_active
-                    else "Curtailment command acknowledged, but physical zero-export "
-                    "is not confirmed"
-                ),
-                "Normal": "Normal solar export allowed",
-            }
             return {
                 "export_rule": cached_rule,
                 "curtailment_enabled": curtailment_enabled,
@@ -5483,7 +5494,11 @@ class SolarCurtailmentSensor(SensorEntity):
                 ),
                 "grid_export_w": grid_export_w,
                 "effect_confirmed": effect_confirmed,
-                "description": descriptions[visible_state],
+                "description": _goodwe_curtailment_description(
+                    visible_state=visible_state,
+                    control_state=entry_data.get("goodwe_curtailment_state", "normal"),
+                    force_dispatch_active=force_dispatch_active,
+                ),
             }
 
         control_state = self._control_command_state()

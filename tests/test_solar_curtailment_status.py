@@ -158,6 +158,20 @@ def _load_goodwe_status_helper():
     return namespace["_goodwe_curtailment_visible_status"]
 
 
+def _load_goodwe_description_helper():
+    tree = ast.parse(SENSOR_PATH.read_text())
+    helper = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_goodwe_curtailment_description"
+    )
+    namespace: dict[str, Any] = {}
+    module = ast.fix_missing_locations(ast.Module(body=[helper], type_ignores=[]))
+    exec(compile(module, str(SENSOR_PATH), "exec"), namespace)
+    return namespace[helper.name]
+
+
 def _generic_status(**overrides):
     values = {
         "curtailment_enabled": True,
@@ -233,6 +247,23 @@ def test_goodwe_active_requires_fresh_physical_zero_export_proof():
     assert _goodwe_status(
         control_state="normal", export_uneconomic=False
     ) == ("Normal", None, False)
+
+
+def test_goodwe_unsupported_status_does_not_claim_a_command_was_acknowledged():
+    description = _load_goodwe_description_helper()
+    assert description(
+        visible_state="Pending",
+        control_state="unsupported",
+        force_dispatch_active=False,
+    ) == (
+        "Export limiting is not supported on this control profile; "
+        "no curtailment command was sent"
+    )
+    assert description(
+        visible_state="Pending",
+        control_state="pending",
+        force_dispatch_active=False,
+    ) == "Curtailment command acknowledged, but physical zero-export is not confirmed"
 
 
 def test_status_marker_consults_every_brand_control_state_key():
