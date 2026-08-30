@@ -594,6 +594,41 @@ def test_dynamic_state_uses_observed_power_for_matched_vehicle():
     assert loadpoints[0]["confidence"] == "observed"
 
 
+def test_dynamic_state_keeps_tesla_ble_target_separate_from_observed_current():
+    loadpoints = build_loadpoint_status(
+        {
+            "ble_my_model_y": {
+                "active": True,
+                "vehicle_name": "Tesla BLE (my_model_y)",
+                "current_amps": 5,
+                "target_amps": 5,
+                "charging_started": True,
+                "params": {
+                    "dynamic_mode": "solar_surplus",
+                    "voltage": 230,
+                    "phases": 1,
+                },
+            }
+        },
+        [
+            {
+                "vehicle_id": "ble_my_model_y",
+                "vehicle_name": "Tesla BLE (my_model_y)",
+                "charger_type": "tesla",
+                "current_amps": 10,
+                "ev_power_kw": 2.0,
+                "is_connected": True,
+                "is_charging": True,
+            }
+        ],
+    )
+
+    assert loadpoints[0]["current_amps"] == 10
+    assert loadpoints[0]["target_amps"] == 5
+    assert loadpoints[0]["commanded_power_kw"] == 1.15
+    assert loadpoints[0]["current_power_kw"] == 2.0
+
+
 def test_tesla_ble_bridge_merges_with_single_named_tesla_vehicle():
     loadpoints = build_loadpoint_status(
         {},

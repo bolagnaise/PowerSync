@@ -123,6 +123,7 @@ TESLA_BLE_SENSOR_CHARGE_POWER = "sensor.{prefix}_charge_power"
 TESLA_BLE_SENSOR_BATTERY = "sensor.{prefix}_battery"
 TESLA_BLE_SENSOR_CHARGING = "sensor.{prefix}_charging"
 TESLA_BLE_SENSOR_CHARGER_POWER = "sensor.{prefix}_charger_power"
+TESLA_BLE_SENSOR_CHARGER_CURRENT = "sensor.{prefix}_charger_current"
 TESLA_BLE_SENSOR_RANGE = "sensor.{prefix}_range"
 # Binary sensors
 TESLA_BLE_BINARY_ASLEEP = "binary_sensor.{prefix}_asleep"

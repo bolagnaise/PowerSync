@@ -983,16 +983,20 @@ def _dynamic_loadpoint(
         if observation_vehicle_id:
             loadpoint_id = observation_vehicle_id
 
-    current_amps = _int_value(state.get("current_amps"), 0)
-    observed_amps = _int_value((observation or {}).get("current_amps"), 0)
-    if current_amps <= 0 and observed_amps > 0:
-        current_amps = observed_amps
-    target_amps = _int_value(state.get("target_amps"), current_amps)
-    if target_amps <= 0 and observed_amps > 0:
+    commanded_amps = _int_value(state.get("current_amps"), 0)
+    observed_current = (observation or {}).get("current_amps")
+    observed_amps = _int_value(observed_current, 0)
+    # A dynamic session records its last command internally.  When the bridge
+    # has an actual-current sensor, that fresh readback is the displayed
+    # current even if the accepted setpoint differs.  Do not use a requested
+    # current control as an observation.
+    current_amps = observed_amps if observed_current is not None else commanded_amps
+    target_amps = _int_value(state.get("target_amps"), commanded_amps)
+    if target_amps <= 0 and observed_current is not None:
         target_amps = observed_amps
     voltage = _float_value(params.get("voltage"), 240.0)
     phases = _float_value(params.get("phases"), 1.0)
-    commanded_power_kw = current_amps * voltage * phases / 1000
+    commanded_power_kw = target_amps * voltage * phases / 1000
 
     observed_power_kw = None
     if observation is not None:

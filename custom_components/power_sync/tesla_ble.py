@@ -12,6 +12,8 @@ from .const import (
     TESLA_BLE_SENSOR_BATTERY,
     TESLA_BLE_SENSOR_CHARGE_LEVEL,
     TESLA_BLE_SENSOR_CHARGE_POWER,
+    TESLA_BLE_SENSOR_CHARGE_CURRENT,
+    TESLA_BLE_SENSOR_CHARGER_CURRENT,
     TESLA_BLE_SENSOR_CHARGER_POWER,
     TESLA_BLE_SENSOR_CHARGING,
     TESLA_BLE_SENSOR_CHARGING_STATE,
@@ -84,6 +86,21 @@ def get_tesla_ble_charge_power_state(hass: Any, prefix: str) -> Any | None:
         (
             TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix),
             TESLA_BLE_SENSOR_CHARGER_POWER.format(prefix=prefix),
+        ),
+    )
+
+
+def get_tesla_ble_charge_current_state(hass: Any, prefix: str) -> Any | None:
+    """Resolve legacy and current Tesla BLE measured-current entities.
+
+    ``number.*_charging_amps`` is a writable requested-current control, not a
+    physical-current readback, so it is deliberately not a fallback here.
+    """
+    return _first_available_state(
+        hass,
+        (
+            TESLA_BLE_SENSOR_CHARGE_CURRENT.format(prefix=prefix),
+            TESLA_BLE_SENSOR_CHARGER_CURRENT.format(prefix=prefix),
         ),
     )
 

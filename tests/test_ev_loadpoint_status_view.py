@@ -163,6 +163,7 @@ def test_ble_loadpoint_observations_use_current_entity_compatibility_helpers():
     source = ast.unparse(tree)
 
     assert "get_tesla_ble_battery_state(hass, prefix)" in source
+    assert "get_tesla_ble_charge_current_state(hass, prefix)" in source
     assert "get_tesla_ble_charging_state(hass, prefix)" in source
     assert "get_tesla_ble_charge_power_state(hass, prefix)" in source
     assert "get_tesla_ble_plug_state(hass, prefix)" in source

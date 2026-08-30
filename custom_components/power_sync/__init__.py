@@ -914,6 +914,7 @@ from .inverters import get_inverter_controller
 from .curtailment_config import export_earnings_are_uneconomic
 from .tesla_ble import (
     get_tesla_ble_battery_state,
+    get_tesla_ble_charge_current_state,
     get_tesla_ble_charge_power_state,
     get_tesla_ble_charging_state,
     get_tesla_ble_plug_state,
@@ -2165,7 +2166,9 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         is_connected = False
         ble_state_observed_at = None
         ble_power_observed_at = None
+        ble_current_observed_at = None
         ble_connected_observed_at = None
+        current_amps = None
         charging_state_plugged = None
 
         charge_state = get_tesla_ble_charging_state(hass, prefix)
@@ -2216,6 +2219,19 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 ble_power_observed_at,
             )
 
+        current_state = get_tesla_ble_charge_current_state(hass, prefix)
+        if current_state and current_state.state not in ("unknown", "unavailable"):
+            try:
+                candidate_current = float(current_state.state)
+                if 0 <= candidate_current <= 100:
+                    current_amps = int(round(candidate_current))
+                    ble_current_observed_at = _latest_ev_observed_at(
+                        ble_current_observed_at,
+                        getattr(current_state, "last_updated", None),
+                    )
+            except (ValueError, TypeError):
+                pass
+
         bridge_vehicle_id = paired_prefixes.get(prefix)
         if (
             bridge_vehicle_id
@@ -2244,6 +2260,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             "is_charging": ev_power_kw > 0.05,
             "_observed_at": (
                 ble_power_observed_at
+                or ble_current_observed_at
                 or ble_state_observed_at
             ),
             "_charging_observed_at": (
@@ -2257,6 +2274,8 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 or ble_power_observed_at
             ),
         }
+        if current_amps is not None:
+            ble_observation["current_amps"] = current_amps
         if ev_provider == EV_PROVIDER_BOTH and bridge_vehicle_id:
             ble_observation["bridge_vehicle_id"] = bridge_vehicle_id
             if _vehicle_identity_key(bridge_vehicle_id) in away_fleet_vehicle_ids:

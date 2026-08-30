@@ -25,6 +25,7 @@ from power_sync.tesla_ble_mapping import (  # noqa: E402
 )
 from power_sync.tesla_ble import (  # noqa: E402
     get_tesla_ble_battery_state,
+    get_tesla_ble_charge_current_state,
     get_tesla_ble_charge_power_state,
     get_tesla_ble_charging_state,
     get_tesla_ble_plug_state,
@@ -83,6 +84,15 @@ def test_current_yoziru_entities_fallback_for_ble_telemetry():
     assert get_tesla_ble_charging_state(hass, "my_model_y").state == "Stopped"
     assert get_tesla_ble_charge_power_state(hass, "my_model_y").state == "0"
     assert get_tesla_ble_plug_state(hass, "my_model_y").state == "on"
+
+
+def test_current_yoziru_current_falls_back_from_unavailable_legacy_entity():
+    hass = _hass_states(
+        sensor_my_model_y_charge_current="unavailable",
+        sensor_my_model_y_charger_current="10",
+    )
+
+    assert get_tesla_ble_charge_current_state(hass, "my_model_y").state == "10"
 
 
 def test_current_yoziru_entities_replace_unavailable_legacy_telemetry():
