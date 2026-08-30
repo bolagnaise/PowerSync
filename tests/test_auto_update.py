@@ -138,44 +138,14 @@ class _Hass:
         self.data = {}
 
 
-class _HacsStore:
+class _PrivateHacsRepository:
+    """HACS internals that PowerSync must never call or mutate."""
+
     def __init__(self) -> None:
-        self.write_count = 0
-
-    async def async_write(self) -> None:
-        self.write_count += 1
-
-
-class _Coordinator:
-    def __init__(self) -> None:
-        self.update_count = 0
-
-    def async_update_listeners(self) -> None:
-        self.update_count += 1
-
-
-class _Repositories:
-    def __init__(self, repositories: list) -> None:
-        self.list_downloaded = repositories
-
-
-class _Hacs:
-    def __init__(self, repositories: list, coordinator: _Coordinator) -> None:
-        self.repositories = _Repositories(repositories)
-        self.coordinators = {"integration": coordinator}
-        self.data = _HacsStore()
-
-
-class _HacsRepository:
-    def __init__(self, state: _State) -> None:
-        self.data = types.SimpleNamespace(
-            full_name="bolagnaise/PowerSync",
-            domain="power_sync",
-            category="integration",
-        )
-        self.display_name = "PowerSync"
         self.refresh_count = 0
-        self._state = state
+        self.content = types.SimpleNamespace(
+            path=types.SimpleNamespace(remote="custom_components")
+        )
 
     async def update_repository(
         self,
@@ -183,11 +153,9 @@ class _HacsRepository:
         ignore_issues: bool = False,
         force: bool = False,
     ) -> None:
-        assert ignore_issues is True
-        assert force is True
         self.refresh_count += 1
-        self._state.state = "on"
-        self._state.attributes["latest_version"] = "2.12.273"
+        self.content.path.remote = "custom_components/None"
+        raise RuntimeError("HACS repository tree is not initialized")
 
 
 def test_auto_update_time_normalizes_hhmm_and_hhmmss():
@@ -235,21 +203,22 @@ def test_find_power_sync_update_entities_requires_install_capability():
     ]
 
 
-def test_install_force_refreshes_hacs_metadata_before_install():
+def test_install_does_not_mutate_hacs_repository_internals():
     state = _State(
         "update.power_sync_update",
-        "off",
+        "on",
         {
             "friendly_name": "PowerSync Update",
             "supported_features": 1,
             "installed_version": "2.12.272",
-            "latest_version": "2.12.272",
+            "latest_version": "2.12.273",
         },
     )
     hass = _Hass([state])
-    coordinator = _Coordinator()
-    repository = _HacsRepository(state)
-    hass.data["hacs"] = _Hacs([repository], coordinator)
+    repository = _PrivateHacsRepository()
+    hass.data["hacs"] = types.SimpleNamespace(
+        repositories=types.SimpleNamespace(list_downloaded=[repository])
+    )
 
     result = asyncio.run(auto_update.async_install_power_sync_update(hass))
 
@@ -257,9 +226,8 @@ def test_install_force_refreshes_hacs_metadata_before_install():
         entity_id="update.power_sync_update",
         action=auto_update.AUTO_UPDATE_ACTION_INSTALLED,
     )
-    assert repository.refresh_count == 1
-    assert coordinator.update_count == 1
-    assert hass.data["hacs"].data.write_count == 1
+    assert repository.refresh_count == 0
+    assert repository.content.path.remote == "custom_components"
     assert (
         "update",
         "install",

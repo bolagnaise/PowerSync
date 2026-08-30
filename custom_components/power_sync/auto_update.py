@@ -26,7 +26,6 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-HACS_DOMAIN = "hacs"
 HOMEASSISTANT_DOMAIN = "homeassistant"
 UPDATE_DOMAIN = "update"
 SERVICE_INSTALL = "install"
@@ -48,7 +47,6 @@ POWER_SYNC_UPDATE_HINTS = (
     "tesla_amber_sync",
     "tesla amber sync",
 )
-POWER_SYNC_HACS_REPOSITORY = "bolagnaise/powersync"
 AUTO_UPDATE_ACTION_INSTALLED = "installed"
 AUTO_UPDATE_ACTION_PENDING_RESTART = "pending_restart"
 
@@ -164,99 +162,6 @@ def _state_needs_restart(state: Any) -> bool:
     return "restart" in release_summary and "home assistant" in release_summary
 
 
-def _hacs_repository_haystack(repository: Any) -> str:
-    """Build searchable text for a HACS repository object."""
-    data = getattr(repository, "data", None)
-    values = [
-        getattr(data, "full_name", ""),
-        getattr(data, "domain", ""),
-        getattr(data, "name", ""),
-        getattr(data, "id", ""),
-        getattr(repository, "display_name", ""),
-        getattr(repository, "name", ""),
-        getattr(repository, "string", ""),
-    ]
-    return (
-        " ".join(str(value) for value in values if value)
-        .lower()
-        .replace("-", "_")
-    )
-
-
-def _is_power_sync_hacs_repository(repository: Any) -> bool:
-    """Return True when a HACS repository object looks like PowerSync."""
-    data = getattr(repository, "data", None)
-    full_name = str(getattr(data, "full_name", "")).lower()
-    domain = str(getattr(data, "domain", "")).lower()
-    if full_name == POWER_SYNC_HACS_REPOSITORY or domain == DOMAIN:
-        return True
-
-    haystack = _hacs_repository_haystack(repository)
-    return POWER_SYNC_HACS_REPOSITORY in haystack or any(
-        hint in haystack for hint in POWER_SYNC_UPDATE_HINTS
-    )
-
-
-def _find_power_sync_hacs_repositories(hass: HomeAssistant) -> list[Any]:
-    """Find downloaded HACS repository objects for PowerSync."""
-    hacs = getattr(hass, "data", {}).get(HACS_DOMAIN)
-    repositories = getattr(getattr(hacs, "repositories", None), "list_downloaded", [])
-    if callable(repositories):
-        repositories = repositories()
-    return [
-        repository
-        for repository in repositories or []
-        if _is_power_sync_hacs_repository(repository)
-    ]
-
-
-async def _refresh_hacs_repository_metadata(hass: HomeAssistant) -> bool:
-    """Force-refresh PowerSync metadata through HACS internals when available."""
-    hacs = getattr(hass, "data", {}).get(HACS_DOMAIN)
-    repositories = _find_power_sync_hacs_repositories(hass)
-    if not hacs or not repositories:
-        return False
-
-    refreshed = False
-    for repository in repositories:
-        update_repository = getattr(repository, "update_repository", None)
-        if update_repository is None:
-            continue
-        try:
-            try:
-                await update_repository(ignore_issues=True, force=True)
-            except TypeError:
-                await update_repository(ignore_issues=True)
-        except Exception as err:
-            _LOGGER.debug(
-                "PowerSync auto-update: HACS metadata refresh raised for %s: %s",
-                getattr(getattr(repository, "data", None), "full_name", repository),
-                err,
-            )
-            continue
-        refreshed = True
-
-        category = getattr(getattr(repository, "data", None), "category", None)
-        coordinator = getattr(hacs, "coordinators", {}).get(category)
-        if coordinator is not None and hasattr(coordinator, "async_update_listeners"):
-            coordinator.async_update_listeners()
-
-    if refreshed:
-        data_store = getattr(hacs, "data", None)
-        async_write = getattr(data_store, "async_write", None)
-        if async_write is not None:
-            try:
-                await async_write()
-            except Exception as err:
-                _LOGGER.debug(
-                    "PowerSync auto-update: HACS metadata save raised: %s",
-                    err,
-                )
-        _LOGGER.info("PowerSync auto-update: refreshed PowerSync metadata via HACS")
-
-    return refreshed
-
-
 def find_power_sync_update_entities(
     hass: HomeAssistant,
     *,
@@ -297,10 +202,10 @@ async def async_install_power_sync_update(
 ) -> AutoUpdateInstallResult | None:
     """Install the currently available PowerSync HACS update, if one exists.
 
-    The homeassistant.update_entity service only asks HACS's entity to write
-    its cached state. When HACS is available, force-refresh the PowerSync
-    repository metadata first so the scheduled run does not miss a release
-    that HACS has not found on its background cadence yet.
+    The update entity is HACS's supported Home Assistant boundary. Refresh it
+    without calling HACS repository internals, which may be mid-initialization
+    and must remain owned by HACS. Retry to give HACS's coordinator time to
+    discover a release that was published near the scheduled run.
     """
     entity_ids = find_power_sync_update_entities(
         hass,
@@ -320,7 +225,6 @@ async def async_install_power_sync_update(
     )
 
     for attempt in range(1, HACS_REFRESH_RETRIES + 1):
-        await _refresh_hacs_repository_metadata(hass)
         await _refresh_hacs_entities(hass, entity_ids)
 
         for entity_id in entity_ids:
