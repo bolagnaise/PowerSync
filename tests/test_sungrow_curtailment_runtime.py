@@ -231,6 +231,15 @@ def _stale_ac_curtailment_case(kind: str, replace_during: str | None = None):
         "hass": hass,
         "entry": entry,
         "aemo_dispatch_generation": old_generation,
+        "_is_monitoring_mode": lambda: False,
+        "_entry_value": lambda key, default=None: entry.options.get(
+            key, entry.data.get(key, default)
+        ),
+        "CONF_BATTERY_CURTAILMENT_ENABLED": "battery_curtailment_enabled",
+        "CONF_CURTAILMENT_CONTROL_IN_MONITORING_MODE": (
+            "curtailment_control_in_monitoring_mode"
+        ),
+        "DEFAULT_CURTAILMENT_CONTROL_IN_MONITORING_MODE": False,
         "_LOGGER": _Logger(),
         "get_inverter_controller": _get_inverter_controller,
         "should_curtail_ac_coupled": _should_curtail,
@@ -267,6 +276,12 @@ def _stale_ac_curtailment_case(kind: str, replace_during: str | None = None):
         namespace[constant] = constant.removeprefix("CONF_").lower()
 
     exec(_function_source("_aemo_dispatch_entry_data"), namespace)
+    exec(
+        textwrap.dedent(
+            _function_source("_monitoring_mode_allows_curtailment")
+        ),
+        namespace,
+    )
     exec(_function_source("apply_inverter_curtailment"), namespace)
     result = asyncio.run(namespace["apply_inverter_curtailment"](True, -1.0, 0.0))
     return result, calls, domain_data, initial_domain_data, replacement_entry_data
@@ -381,6 +396,8 @@ def _run_fast_load_following_case(
     load_power: int = 100,
     grid_power: float | None = None,
     applied_device_limit_w: int | None = None,
+    monitoring_mode: bool = False,
+    allow_monitoring_curtailment: bool = False,
 ):
     """Run the extracted timer callback against one generation lifecycle."""
     entry_id = "entry-id"
@@ -418,7 +435,11 @@ def _run_fast_load_following_case(
     hass = SimpleNamespace(data={"power_sync": domain_data})
     entry = SimpleNamespace(
         entry_id=entry_id,
-        options={},
+        options={
+            "curtailment_control_in_monitoring_mode": (
+                allow_monitoring_curtailment
+            ),
+        },
         data={
             "ac_inverter_curtailment_enabled": True,
             "inverter_brand": brand,
@@ -446,7 +467,14 @@ def _run_fast_load_following_case(
         "DOMAIN": "power_sync",
         "hass": hass,
         "entry": entry,
-        "_is_monitoring_mode": lambda: False,
+        "_is_monitoring_mode": lambda: monitoring_mode,
+        "_entry_value": lambda key, default=None: entry.options.get(
+            key, entry.data.get(key, default)
+        ),
+        "CONF_CURTAILMENT_CONTROL_IN_MONITORING_MODE": (
+            "curtailment_control_in_monitoring_mode"
+        ),
+        "DEFAULT_CURTAILMENT_CONTROL_IN_MONITORING_MODE": False,
         "aemo_dispatch_generation": old_generation,
         "_LOGGER": SimpleNamespace(
             debug=lambda *args, **kwargs: None,
@@ -470,6 +498,12 @@ def _run_fast_load_following_case(
         namespace[constant] = constant.removeprefix("CONF_").lower()
 
     exec(_function_source("_aemo_dispatch_entry_data"), namespace)
+    exec(
+        textwrap.dedent(
+            _function_source("_monitoring_mode_allows_curtailment")
+        ),
+        namespace,
+    )
     exec(_function_source("fast_load_following_update"), namespace)
     result = asyncio.run(namespace["fast_load_following_update"](SimpleNamespace(second=0)))
     return result, status_calls, controller_calls, state_calls, replacement_entry_data
@@ -486,6 +520,25 @@ def test_fast_load_following_update_generation_fence(kind):
     assert controller_calls == ([100] if kind == "live" else [])
     assert state_calls == ([('load_following', 100)] if kind == "live" else [])
     assert replacement_entry_data["replacement_state"] == "untouched"
+
+
+@pytest.mark.parametrize("allow_monitoring_curtailment", (False, True))
+def test_fast_load_following_monitoring_mode_permission(
+    allow_monitoring_curtailment,
+):
+    _result, status_calls, controller_calls, state_calls, _replacement = (
+        _run_fast_load_following_case(
+            "live",
+            monitoring_mode=True,
+            allow_monitoring_curtailment=allow_monitoring_curtailment,
+        )
+    )
+
+    assert status_calls == ([True] if allow_monitoring_curtailment else [])
+    assert controller_calls == ([100] if allow_monitoring_curtailment else [])
+    assert state_calls == (
+        [('load_following', 100)] if allow_monitoring_curtailment else []
+    )
 
 
 def test_fronius_ac_inverter_uses_load_following_and_fast_refresh():
@@ -788,6 +841,7 @@ def test_solar_curtailment_runs_startup_check_before_first_periodic_tick():
     assert "await handle_solar_curtailment_check(None)" in setup_section
     assert "hass.async_create_task(_startup_curtailment_check())" in setup_section
     assert "EVENT_HOMEASSISTANT_STARTED" in setup_section
+    assert "_monitoring_mode_allows_curtailment" in setup_section
 
 
 def test_periodic_solar_curtailment_routes_ac_inverter_without_tesla_token():
@@ -869,21 +923,123 @@ def test_solar_curtailment_monitoring_mode_blocks_automatic_command_routes(
     periodic_handler = _function_source("handle_solar_curtailment_check")
     websocket_handler = _function_source("handle_solar_curtailment_with_websocket_data")
 
-    assert "_is_monitoring_mode()" in periodic_handler
-    assert "_is_monitoring_mode()" in websocket_handler
+    assert "_monitoring_mode_allows_curtailment" in periodic_handler
+    assert "_monitoring_mode_allows_curtailment" in websocket_handler
     assert "Would check solar curtailment" in periodic_handler
     assert "Would check solar curtailment" in websocket_handler
 
     messages = []
+    entry = SimpleNamespace(
+        entry_id="entry-id",
+        options={"battery_curtailment_enabled": True},
+        data={},
+    )
     namespace = {
         "ServiceCall": object,
         "_is_monitoring_mode": lambda: True,
+        "_entry_value": lambda key, default=None: entry.options.get(
+            key, entry.data.get(key, default)
+        ),
+        "entry": entry,
+        "hass": SimpleNamespace(data={"power_sync": {"entry-id": {}}}),
+        "DOMAIN": "power_sync",
+        "CONF_CURTAILMENT_CONTROL_IN_MONITORING_MODE": (
+            "curtailment_control_in_monitoring_mode"
+        ),
+        "DEFAULT_CURTAILMENT_CONTROL_IN_MONITORING_MODE": False,
+        "CONF_BATTERY_CURTAILMENT_ENABLED": "battery_curtailment_enabled",
         "_LOGGER": SimpleNamespace(info=lambda message: messages.append(message)),
     }
+    exec(
+        textwrap.dedent(
+            _function_source("_monitoring_mode_allows_curtailment")
+        ),
+        namespace,
+    )
     exec(textwrap.dedent(_function_source(handler_name)), namespace)
 
     assert asyncio.run(namespace[handler_name](*arguments)) is None
     assert messages and "[MONITORING]" in messages[0]
+
+
+@pytest.mark.parametrize(
+    "handler_name,arguments",
+    (
+        ("handle_solar_curtailment_check", (None,)),
+        ("handle_solar_curtailment_with_websocket_data", ({},)),
+    ),
+)
+def test_solar_curtailment_monitoring_mode_explicit_permission_routes_control(
+    handler_name, arguments,
+):
+    """An explicit curtailment permission is a narrow automatic-route carveout."""
+    calls = []
+    entry = SimpleNamespace(
+        entry_id="entry-id",
+        options={
+            "battery_curtailment_enabled": True,
+            "curtailment_control_in_monitoring_mode": True,
+        },
+        data={},
+    )
+
+    async def _handle_sungrow_curtailment(**_kwargs):
+        calls.append("sungrow")
+
+    namespace = {
+        "ServiceCall": object,
+        "_is_monitoring_mode": lambda: True,
+        "_entry_value": lambda key, default=None: entry.options.get(
+            key, entry.data.get(key, default)
+        ),
+        "entry": entry,
+        "hass": SimpleNamespace(data={"power_sync": {"entry-id": {}}}),
+        "DOMAIN": "power_sync",
+        "CONF_CURTAILMENT_CONTROL_IN_MONITORING_MODE": (
+            "curtailment_control_in_monitoring_mode"
+        ),
+        "DEFAULT_CURTAILMENT_CONTROL_IN_MONITORING_MODE": False,
+        "CONF_BATTERY_CURTAILMENT_ENABLED": "battery_curtailment_enabled",
+        "_LOGGER": SimpleNamespace(
+            info=lambda *args, **kwargs: None,
+            debug=lambda *args, **kwargs: None,
+        ),
+        "is_foxess": False,
+        "is_sigenergy": False,
+        "is_alphaess": False,
+        "is_goodwe": False,
+        "is_sungrow": True,
+        "is_solaredge": False,
+        "token_getter": None,
+        "handle_sungrow_curtailment": _handle_sungrow_curtailment,
+        "async_dispatcher_send": lambda *args, **kwargs: None,
+    }
+    exec(
+        textwrap.dedent(
+            _function_source("_monitoring_mode_allows_curtailment")
+        ),
+        namespace,
+    )
+    exec(textwrap.dedent(_function_source(handler_name)), namespace)
+
+    assert asyncio.run(namespace[handler_name](*arguments)) is None
+    assert calls == ["sungrow"]
+
+
+def test_monitoring_permission_does_not_weaken_unrelated_control_gates():
+    helper = _function_source("_monitoring_mode_should_block_control")
+    assert "_is_monitoring_mode()" in helper
+    assert "_monitoring_mode_allows_curtailment" not in helper
+
+    for handler_name in (
+        "handle_force_charge",
+        "handle_force_discharge",
+        "handle_set_operation_mode",
+        "handle_set_backup_reserve",
+    ):
+        handler = _function_source(handler_name)
+        assert "_monitoring_mode_should_block_control(call)" in handler
+        assert "_monitoring_mode_allows_curtailment" not in handler
 
 
 def test_periodic_tesla_curtailment_uses_any_provider_price_source():

@@ -30,6 +30,7 @@ from homeassistant.helpers.selector import (
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
+    TimeSelector,
 )
 
 from .history_migration import (
@@ -59,7 +60,9 @@ from .const import (
     CONF_AMBER_FORECAST_TYPE,
     CONF_BATTERY_CURTAILMENT_ENABLED,
     CONF_CURTAILMENT_EXPORT_THRESHOLD_CENTS,
+    CONF_CURTAILMENT_CONTROL_IN_MONITORING_MODE,
     DEFAULT_CURTAILMENT_EXPORT_THRESHOLD_CENTS,
+    DEFAULT_CURTAILMENT_CONTROL_IN_MONITORING_MODE,
     CONF_AUTO_UPDATE_ENABLED,
     CONF_AUTO_UPDATE_TIME,
     DEFAULT_AUTO_UPDATE_TIME,
@@ -528,6 +531,7 @@ from .const import (
     CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
     CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
     CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
+    CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
     CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
     CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
     CONF_PROFIT_MAX_ENABLED,
@@ -541,10 +545,19 @@ from .const import (
     CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER,
     CONF_OPTIMIZATION_AI_SUMMARY_API_KEY,
     CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY,
+    CONF_OPTIMIZATION_BACKUP_ENERGY_WH,
+    CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+    CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+    CONF_OPTIMIZATION_BACKUP_ENERGY_END,
     DEFAULT_OPTIMIZATION_AI_SUMMARY_PROVIDER,
     normalize_grid_charge_blackout_windows,
     COST_FUNCTION_COST,
     DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
+    DEFAULT_OPTIMIZATION_MIN_EXPORT_PRICE,
+    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_WH,
+    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START,
+    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END,
     DEFAULT_CHARGE_BY_TIME_TARGET_TIME,
     DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
     BATTERY_CAPACITY_DEFAULTS,
@@ -964,7 +977,7 @@ def _stored_wh_to_kwh(value: Any, default_wh: int) -> float:
         amount = float(value)
     except (TypeError, ValueError):
         amount = float(default_wh)
-    return amount / 1000.0 if amount > 1000 else amount
+    return amount / 1000.0 if amount >= 1000 else amount
 
 
 def _stored_w_to_kw(value: Any, default_w: int) -> float:
@@ -1011,6 +1024,15 @@ def _stored_optional_price_to_cents(value: Any) -> float:
     if amount <= 0:
         return 0.0
     return amount * 100.0 if amount <= 1 else amount
+
+
+def _stored_normalized_price_to_cents(value: Any) -> float:
+    """Convert an unambiguously stored $/kWh value to c/kWh."""
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, amount) * 100.0
 
 
 def _normalize_optional_entity(value: Any) -> str | None:
@@ -1100,6 +1122,15 @@ def _form_optional_cents_to_price(value: Any) -> float | None:
     if amount <= 0:
         return None
     return amount / 100.0 if amount > 1 else amount
+
+
+def _form_nonnegative_cents_to_price(value: Any) -> float:
+    """Convert a required c/kWh field to normalized stored $/kWh."""
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, amount) / 100.0
 
 
 def _form_percent_to_ratio(value: Any, default_ratio: float) -> float:
@@ -3672,6 +3703,29 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             user_input.get(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE)
                         )
                     ),
+                    CONF_OPTIMIZATION_MIN_EXPORT_PRICE: (
+                        _form_nonnegative_cents_to_price(
+                            user_input.get(CONF_OPTIMIZATION_MIN_EXPORT_PRICE)
+                        )
+                    ),
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_WH: _form_kwh_to_wh(
+                        user_input.get(CONF_OPTIMIZATION_BACKUP_ENERGY_WH),
+                        DEFAULT_OPTIMIZATION_BACKUP_ENERGY_WH / 1000,
+                    ),
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W: _form_kw_to_w(
+                        user_input.get(
+                            CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W
+                        ),
+                        DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W / 1000,
+                    ),
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_START: user_input.get(
+                        CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+                        DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START,
+                    ),
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_END: user_input.get(
+                        CONF_OPTIMIZATION_BACKUP_ENERGY_END,
+                        DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END,
+                    ),
                     CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP: _form_percent_to_ratio(
                         user_input.get(CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP),
                         1.0,
@@ -3866,6 +3920,50 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     mode=NumberSelectorMode.BOX,
                 )
             ),
+            vol.Required(
+                CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
+                default=DEFAULT_OPTIMIZATION_MIN_EXPORT_PRICE * 100,
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=500,
+                    step=0.1,
+                    unit_of_measurement="c/kWh",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(
+                CONF_OPTIMIZATION_BACKUP_ENERGY_WH,
+                default=DEFAULT_OPTIMIZATION_BACKUP_ENERGY_WH / 1000,
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=200,
+                    step=0.1,
+                    unit_of_measurement="kWh",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(
+                CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+                default=DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W / 1000,
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0.1,
+                    max=50,
+                    step=0.1,
+                    unit_of_measurement="kW",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(
+                CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+                default=DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START,
+            ): TimeSelector(),
+            vol.Required(
+                CONF_OPTIMIZATION_BACKUP_ENERGY_END,
+                default=DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END,
+            ): TimeSelector(),
             vol.Required(
                 CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
                 default=100,
@@ -11615,6 +11713,29 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 max_grid_charge_price = _form_optional_cents_to_price(
                     user_input.get(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE)
                 )
+                min_export_price = _form_nonnegative_cents_to_price(
+                    user_input.get(CONF_OPTIMIZATION_MIN_EXPORT_PRICE)
+                )
+                backup_energy_wh = _form_kwh_to_wh(
+                    user_input.get(CONF_OPTIMIZATION_BACKUP_ENERGY_WH),
+                    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_WH / 1000,
+                )
+                backup_energy_max_power_w = _form_kw_to_w(
+                    user_input.get(CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W),
+                    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W / 1000,
+                )
+                backup_energy_start = str(
+                    user_input.get(
+                        CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+                        DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START,
+                    )
+                ).strip()
+                backup_energy_end = str(
+                    user_input.get(
+                        CONF_OPTIMIZATION_BACKUP_ENERGY_END,
+                        DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END,
+                    )
+                ).strip()
                 grid_charge_soc_cap = _form_percent_to_ratio(
                     user_input.get(CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP),
                     1.0,
@@ -11706,6 +11827,22 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     new_options[CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE] = (
                         max_grid_charge_price
                     )
+                new_data[CONF_OPTIMIZATION_MIN_EXPORT_PRICE] = min_export_price
+                new_options[CONF_OPTIMIZATION_MIN_EXPORT_PRICE] = min_export_price
+                new_data[CONF_OPTIMIZATION_BACKUP_ENERGY_WH] = backup_energy_wh
+                new_options[CONF_OPTIMIZATION_BACKUP_ENERGY_WH] = backup_energy_wh
+                new_data[CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W] = (
+                    backup_energy_max_power_w
+                )
+                new_options[CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W] = (
+                    backup_energy_max_power_w
+                )
+                new_data[CONF_OPTIMIZATION_BACKUP_ENERGY_START] = backup_energy_start
+                new_options[CONF_OPTIMIZATION_BACKUP_ENERGY_START] = (
+                    backup_energy_start
+                )
+                new_data[CONF_OPTIMIZATION_BACKUP_ENERGY_END] = backup_energy_end
+                new_options[CONF_OPTIMIZATION_BACKUP_ENERGY_END] = backup_energy_end
                 new_data[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = grid_charge_soc_cap
                 new_options[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = grid_charge_soc_cap
                 new_data[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = allow_grid_charge
@@ -11933,6 +12070,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     "max_grid_export_w": max_grid_export_w,
                     "max_grid_import_w": max_grid_import_w,
                     "max_grid_charge_price": max_grid_charge_price,
+                    # Coordinator/mobile settings contract uses cents/kWh;
+                    # persisted config remains normalized dollars/kWh.
+                    "min_export_price": min_export_price * 100,
+                    "backup_energy_wh": backup_energy_wh,
+                    "backup_energy_max_power_w": backup_energy_max_power_w,
+                    "backup_energy_start": backup_energy_start,
+                    "backup_energy_end": backup_energy_end,
                     "grid_charge_soc_cap": grid_charge_soc_cap,
                     "allow_grid_charge": allow_grid_charge,
                     "grid_charge_blackout_windows": grid_charge_blackout_windows,
@@ -11974,6 +12118,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         "max_grid_charge_price": (
                             CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE
                         ),
+                        "min_export_price": CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
+                        "backup_energy_wh": CONF_OPTIMIZATION_BACKUP_ENERGY_WH,
+                        "backup_energy_max_power_w": (
+                            CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W
+                        ),
+                        "backup_energy_start": CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+                        "backup_energy_end": CONF_OPTIMIZATION_BACKUP_ENERGY_END,
                         "grid_charge_soc_cap": CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
                         "allow_grid_charge": CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                         "grid_charge_blackout_windows": (
@@ -12129,6 +12280,55 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             self._get_option(
                 CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
                 self.config_entry.data.get(CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE),
+            )
+        )
+        current_min_export_price = _stored_normalized_price_to_cents(
+            self._get_option(
+                CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
+                self.config_entry.data.get(
+                    CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
+                    DEFAULT_OPTIMIZATION_MIN_EXPORT_PRICE,
+                ),
+            )
+        )
+        if current_min_export_price is None:
+            current_min_export_price = DEFAULT_OPTIMIZATION_MIN_EXPORT_PRICE * 100
+        current_backup_energy_kwh = _stored_wh_to_kwh(
+            self._get_option(
+                CONF_OPTIMIZATION_BACKUP_ENERGY_WH,
+                self.config_entry.data.get(
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_WH,
+                    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_WH,
+                ),
+            ),
+            DEFAULT_OPTIMIZATION_BACKUP_ENERGY_WH,
+        )
+        current_backup_energy_max_power_kw = _stored_w_to_kw(
+            self._get_option(
+                CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+                self.config_entry.data.get(
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+                    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+                ),
+            ),
+            DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+        )
+        current_backup_energy_start = str(
+            self._get_option(
+                CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+                self.config_entry.data.get(
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+                    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START,
+                ),
+            )
+        )
+        current_backup_energy_end = str(
+            self._get_option(
+                CONF_OPTIMIZATION_BACKUP_ENERGY_END,
+                self.config_entry.data.get(
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_END,
+                    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END,
+                ),
             )
         )
         current_grid_charge_soc_cap = _stored_ratio_to_percent(
@@ -12289,6 +12489,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE: (
                 current_max_grid_charge_price
             ),
+            CONF_OPTIMIZATION_MIN_EXPORT_PRICE: current_min_export_price,
+            CONF_OPTIMIZATION_BACKUP_ENERGY_WH: current_backup_energy_kwh,
+            CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W: (
+                current_backup_energy_max_power_kw
+            ),
+            CONF_OPTIMIZATION_BACKUP_ENERGY_START: current_backup_energy_start,
+            CONF_OPTIMIZATION_BACKUP_ENERGY_END: current_backup_energy_end,
             CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP: current_grid_charge_soc_cap,
             CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS: json.dumps(
                 current_grid_charge_blackout_windows
@@ -12478,6 +12685,35 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     mode=NumberSelectorMode.BOX,
                 )),
                 vol.Required(
+                    CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
+                    default=current_min_export_price,
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0, max=500, step=0.1, unit_of_measurement="c/kWh",
+                    mode=NumberSelectorMode.BOX,
+                )),
+                vol.Required(
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_WH,
+                    default=current_backup_energy_kwh,
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0, max=200, step=0.1, unit_of_measurement="kWh",
+                    mode=NumberSelectorMode.BOX,
+                )),
+                vol.Required(
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+                    default=current_backup_energy_max_power_kw,
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0.1, max=50, step=0.1, unit_of_measurement="kW",
+                    mode=NumberSelectorMode.BOX,
+                )),
+                vol.Required(
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+                    default=current_backup_energy_start,
+                ): TimeSelector(),
+                vol.Required(
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_END,
+                    default=current_backup_energy_end,
+                ): TimeSelector(),
+                vol.Required(
                     CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
                     default=current_grid_charge_soc_cap,
                 ): NumberSelector(NumberSelectorConfig(
@@ -12575,6 +12811,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_OPTIMIZATION_LOAD_ENTITY,
                 CONF_OPTIMIZATION_EV_INTEGRATION,
                 CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
+                CONF_OPTIMIZATION_BACKUP_ENERGY_WH,
+                CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+                CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+                CONF_OPTIMIZATION_BACKUP_ENERGY_END,
             },
             "grid_site_constraints": {
                 CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
@@ -12582,6 +12822,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
                 CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
                 CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
+                CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
             },
             "dispatch_behaviour": {
                 CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
@@ -14210,9 +14451,27 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             new_curtailment_enabled = user_input.get(
                 CONF_BATTERY_CURTAILMENT_ENABLED, False
             )
+            was_monitoring_curtailment_enabled = self._get_option(
+                CONF_CURTAILMENT_CONTROL_IN_MONITORING_MODE,
+                DEFAULT_CURTAILMENT_CONTROL_IN_MONITORING_MODE,
+            )
+            new_monitoring_curtailment_enabled = bool(
+                user_input.get(
+                    CONF_CURTAILMENT_CONTROL_IN_MONITORING_MODE,
+                    DEFAULT_CURTAILMENT_CONTROL_IN_MONITORING_MODE,
+                )
+            )
 
             if was_curtailment_enabled and not new_curtailment_enabled:
                 await self._restore_export_rule()
+            if (
+                was_monitoring_curtailment_enabled
+                and not new_monitoring_curtailment_enabled
+            ):
+                # Relinquish only curtailment state PowerSync owns before the
+                # permission is persisted off. Monitoring Mode remains active
+                # and continues to block every unrelated control path.
+                await self._restore_owned_curtailment_limits()
 
             # Store curtailment settings (no weather options here)
             self._curtailment_options = {
@@ -14224,6 +14483,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                             DEFAULT_CURTAILMENT_EXPORT_THRESHOLD_CENTS,
                         )
                     )
+                ),
+                CONF_CURTAILMENT_CONTROL_IN_MONITORING_MODE: (
+                    new_monitoring_curtailment_enabled
                 ),
             }
 
@@ -14343,6 +14605,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     unit_of_measurement="c/kWh",
                 )
             ),
+            vol.Optional(
+                CONF_CURTAILMENT_CONTROL_IN_MONITORING_MODE,
+                default=self._get_option(
+                    CONF_CURTAILMENT_CONTROL_IN_MONITORING_MODE,
+                    DEFAULT_CURTAILMENT_CONTROL_IN_MONITORING_MODE,
+                ),
+            ): BooleanSelector(),
         }
 
         if is_sigenergy:

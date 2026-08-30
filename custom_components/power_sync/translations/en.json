@@ -468,6 +468,11 @@
           "optimization_max_grid_export_w": "Maximum grid export",
           "optimization_max_grid_import_w": "Maximum grid import",
           "optimization_max_grid_charge_price": "Maximum grid charge price",
+          "optimization_min_export_price": "Minimum battery export price",
+          "optimization_backup_energy_wh": "Backup / V2X energy allowance",
+          "optimization_backup_energy_max_power_w": "Backup / V2X maximum power",
+          "optimization_backup_energy_start": "Backup / V2X window start",
+          "optimization_backup_energy_end": "Backup / V2X window end",
           "optimization_grid_charge_soc_cap": "Grid charge SOC cap",
           "optimization_grid_charge_blackout_windows": "Grid charge blackout windows",
           "optimization_allow_grid_charge": "Allow grid charging",
@@ -498,6 +503,11 @@
           "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Auto-detected only when your inverter reports its own export limit; otherwise Profit Max solar export stays off until you set this. Set 0 for zero-export sites. This does not limit battery power used by house loads.",
           "optimization_max_grid_import_w": "Maximum total site grid import in kW. Set 0 for no site import cap; solar can still add charging power above this limit.",
           "optimization_max_grid_charge_price": "Advanced: never plan forced battery charging from grid import above this import price. Set 0 to disable the price cap.",
+          "optimization_min_export_price": "Never plan or execute intentional battery export below this real feed-in price. Natural solar export is unchanged. Set 0 to disable this floor and preserve existing tariff-event behavior.",
+          "optimization_backup_energy_wh": "Optional daily planning-only energy allowance supplied by a backup or V2X source during the configured window. It offsets forecast household grid import without commanding a vehicle, charger, transfer switch, or generator. Set 0 to disable.",
+          "optimization_backup_energy_max_power_w": "Maximum planning offset power available from the external backup or V2X source.",
+          "optimization_backup_energy_start": "Local HH:MM start of the recurring backup / V2X availability window.",
+          "optimization_backup_energy_end": "Local HH:MM end of the recurring backup / V2X availability window. An end earlier than the start creates an overnight window.",
           "optimization_grid_charge_soc_cap": "Advanced: stop forced grid charging once forecast battery SOC reaches this cap. Solar surplus can still charge above the cap.",
           "optimization_grid_charge_blackout_windows": "Optional JSON list of local-time ranges. Each range has a start and end time; an overnight range can start at 22:00 and end at 06:00. Smart Optimization will not force grid charging during these ranges; solar charging is unchanged.",
           "optimization_allow_grid_charge": "When disabled, Smart Optimization can still charge from solar surplus but will not plan forced battery charging from grid import.",
@@ -1660,7 +1670,11 @@
               "optimization_battery_efficiency_learning": "Learn battery efficiency",
               "optimization_load_entity": "Historical load sensor",
               "optimization_ev_integration": "PowerSync EV charger plans",
-              "optimization_planned_ev_load_entity": "Planned EV load forecast sensor"
+              "optimization_planned_ev_load_entity": "Planned EV load forecast sensor",
+              "optimization_backup_energy_wh": "Backup / V2X energy allowance",
+              "optimization_backup_energy_max_power_w": "Backup / V2X maximum power",
+              "optimization_backup_energy_start": "Backup / V2X window start",
+              "optimization_backup_energy_end": "Backup / V2X window end"
             },
             "data_description": {
               "optimization_battery_capacity_wh": "Total usable battery capacity in kWh. This should match the battery specs shown in the mobile app.",
@@ -1669,7 +1683,11 @@
               "optimization_battery_efficiency_learning": "Learn effective AC round-trip efficiency from completed battery cycles and apply it to physical SOC planning. Economic export decisions remain capped at the conservative legacy efficiency.",
               "optimization_load_entity": "Optional recorder-backed live household load sensor for Smart Optimization history. Use a no-EV load sensor here if your home load history includes EV charging and you also add planned EV load separately.",
               "optimization_ev_integration": "Adds EV demand from PowerSync-managed charger schedules to Smart Optimization. Leave this off when the planned EV load forecast sensor already represents the same charging demand.",
-              "optimization_planned_ev_load_entity": "Optional sensor with a planned_load attribute for forecast-only EV demand. PowerSync always adds this sensor to the load forecast when selected, but does not control the charger."
+              "optimization_planned_ev_load_entity": "Optional sensor with a planned_load attribute for forecast-only EV demand. PowerSync always adds this sensor to the load forecast when selected, but does not control the charger.",
+              "optimization_backup_energy_wh": "Optional daily planning-only energy allowance supplied by a backup or V2X source during the configured window. It offsets forecast household grid import without commanding external hardware. Set 0 to disable.",
+              "optimization_backup_energy_max_power_w": "Maximum planning offset power available from the external backup or V2X source.",
+              "optimization_backup_energy_start": "Local HH:MM start of the recurring backup / V2X availability window.",
+              "optimization_backup_energy_end": "Local HH:MM end of the recurring backup / V2X availability window. Overnight windows are supported."
             }
           },
           "grid_site_constraints": {
@@ -1678,6 +1696,7 @@
             "data": {
               "optimization_allow_grid_charge": "Allow grid charging",
               "optimization_max_grid_charge_price": "Maximum grid charge price",
+              "optimization_min_export_price": "Minimum battery export price",
               "optimization_grid_charge_soc_cap": "Grid charge SOC cap",
               "optimization_grid_charge_blackout_windows": "Grid charge blackout windows",
               "optimization_max_grid_export_w": "Maximum grid export",
@@ -1686,6 +1705,7 @@
             "data_description": {
               "optimization_allow_grid_charge": "When disabled, Smart Optimization can still charge from solar surplus but will not plan forced battery charging from grid import.",
               "optimization_max_grid_charge_price": "Advanced: never plan forced battery charging from grid import above this import price. Set 0 to disable the price cap.",
+              "optimization_min_export_price": "Never plan or execute intentional battery export below this real feed-in price. Natural solar export is unchanged. Set 0 to disable this floor and preserve existing tariff-event behavior.",
               "optimization_grid_charge_soc_cap": "Advanced: stop forced grid charging once forecast battery SOC reaches this cap. Solar surplus can still charge above the cap.",
               "optimization_grid_charge_blackout_windows": "Optional JSON list of site-local start/end ranges. Smart Optimization will not force grid charging during these ranges; solar charging is unchanged.",
               "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Auto-detected only when your inverter reports its own export limit; otherwise Profit Max solar export stays off until you set this. Set 0 for zero-export sites. This does not limit battery power used by house loads.",
@@ -1741,6 +1761,11 @@
           "optimization_max_grid_export_w": "Maximum grid export",
           "optimization_max_grid_import_w": "Maximum grid import",
           "optimization_max_grid_charge_price": "Maximum grid charge price",
+          "optimization_min_export_price": "Minimum battery export price",
+          "optimization_backup_energy_wh": "Backup / V2X energy allowance",
+          "optimization_backup_energy_max_power_w": "Backup / V2X maximum power",
+          "optimization_backup_energy_start": "Backup / V2X window start",
+          "optimization_backup_energy_end": "Backup / V2X window end",
           "optimization_grid_charge_soc_cap": "Grid charge SOC cap",
           "optimization_grid_charge_blackout_windows": "Grid charge blackout windows",
           "optimization_allow_grid_charge": "Allow grid charging",
@@ -1771,6 +1796,11 @@
           "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Auto-detected only when your inverter reports its own export limit; otherwise Profit Max solar export stays off until you set this. Set 0 for zero-export sites. This does not limit battery power used by house loads.",
           "optimization_max_grid_import_w": "Maximum total site grid import in kW. Set 0 for no site import cap; solar can still add charging power above this limit.",
           "optimization_max_grid_charge_price": "Advanced: never plan forced battery charging from grid import above this import price. Set 0 to disable the price cap.",
+          "optimization_min_export_price": "Never plan or execute intentional battery export below this real feed-in price. Natural solar export is unchanged. Set 0 to disable this floor and preserve existing tariff-event behavior.",
+          "optimization_backup_energy_wh": "Optional daily planning-only energy allowance supplied by a backup or V2X source during the configured window. It offsets forecast household grid import without commanding a vehicle, charger, transfer switch, or generator. Set 0 to disable.",
+          "optimization_backup_energy_max_power_w": "Maximum planning offset power available from the external backup or V2X source.",
+          "optimization_backup_energy_start": "Local HH:MM start of the recurring backup / V2X availability window.",
+          "optimization_backup_energy_end": "Local HH:MM end of the recurring backup / V2X availability window. An end earlier than the start creates an overnight window.",
           "optimization_grid_charge_soc_cap": "Advanced: stop forced grid charging once forecast battery SOC reaches this cap. Solar surplus can still charge above the cap.",
           "optimization_grid_charge_blackout_windows": "Optional JSON list of local-time ranges. Each range has a start and end time; an overnight range can start at 22:00 and end at 06:00. Smart Optimization will not force grid charging during these ranges; solar charging is unchanged.",
           "optimization_allow_grid_charge": "When disabled, Smart Optimization can still charge from solar surplus but will not plan forced battery charging from grid import.",
@@ -2345,6 +2375,7 @@
           "battery_curtailment_enabled": "Enable battery export curtailment",
           "ac_inverter_curtailment_enabled": "Enable separate AC-coupled inverter shutdown",
           "curtailment_export_threshold_cents": "Curtail below export earnings",
+          "curtailment_control_in_monitoring_mode": "Allow curtailment control in Monitoring Mode",
           "powerwall_offgrid_as_curtailment": "Enable Powerwall off-grid fallback",
           "sigenergy_dc_curtailment_enabled": "Enable DC solar curtailment",
           "openweathermap_api_key": "OpenWeatherMap API key"
@@ -2353,6 +2384,7 @@
           "battery_curtailment_enabled": "Stop battery export when earnings fall below the configured threshold. This is the main toggle -- it must be enabled for curtailment to work.",
           "ac_inverter_curtailment_enabled": "Shut down a separate AC-coupled or string solar inverter (Fronius, Sungrow, GoodWe, Enphase) below the configured threshold. Do not enable this for the hybrid battery inverter already configured as the battery system.",
           "curtailment_export_threshold_cents": "Curtail when export earnings are below this value. Set 0 to curtail only at negative export earnings. A 0.2c/kWh release deadband prevents rapid switching.",
+          "curtailment_control_in_monitoring_mode": "When explicitly enabled, automatic curtail and restore commands may run while Monitoring Mode continues to block every unrelated battery, EV, and inverter dispatch command. Curtailment can change solar output or inverter export settings.",
           "powerwall_offgrid_as_curtailment": "Allow PowerSync to temporarily island the Powerwall when export curtailment is needed but no AC inverter curtailment path is configured or available.",
           "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export earnings drop below the configured threshold. Requires Modbus write access to the Sigenergy system.",
           "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny, cloudy, rain, snow, and storm triggers). Leave blank to disable."

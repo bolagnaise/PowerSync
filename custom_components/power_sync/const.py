@@ -42,6 +42,10 @@ CONF_AMBER_FORECAST_TYPE = "amber_forecast_type"
 CONF_BATTERY_CURTAILMENT_ENABLED = "battery_curtailment_enabled"
 CONF_CURTAILMENT_EXPORT_THRESHOLD_CENTS = "curtailment_export_threshold_cents"
 DEFAULT_CURTAILMENT_EXPORT_THRESHOLD_CENTS = 1.0
+CONF_CURTAILMENT_CONTROL_IN_MONITORING_MODE = (
+    "curtailment_control_in_monitoring_mode"
+)
+DEFAULT_CURTAILMENT_CONTROL_IN_MONITORING_MODE = False
 
 # Automations - OpenWeatherMap API for weather triggers
 CONF_OPENWEATHERMAP_API_KEY = "openweathermap_api_key"
@@ -2051,6 +2055,7 @@ CONF_OPTIMIZATION_MAX_GRID_IMPORT_W = "optimization_max_grid_import_w"
 CONF_OPTIMIZATION_MAX_GRID_EXPORT_W = "optimization_max_grid_export_w"
 CONF_OPTIMIZATION_ALLOW_GRID_CHARGE = "optimization_allow_grid_charge"
 CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE = "optimization_max_grid_charge_price"
+CONF_OPTIMIZATION_MIN_EXPORT_PRICE = "optimization_min_export_price"
 CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP = "optimization_grid_charge_soc_cap"
 CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS = (
     "optimization_grid_charge_blackout_windows"
@@ -2065,6 +2070,12 @@ CONF_OPTIMIZATION_WEATHER_INTEGRATION = "optimization_weather_integration"
 CONF_OPTIMIZATION_AI_SUMMARY_PROVIDER = "optimization_ai_summary_provider"
 CONF_OPTIMIZATION_AI_SUMMARY_API_KEY = "optimization_ai_summary_api_key"
 CONF_OPTIMIZATION_AI_SUMMARY_CLEAR_API_KEY = "optimization_ai_summary_clear_api_key"
+CONF_OPTIMIZATION_BACKUP_ENERGY_WH = "optimization_backup_energy_wh"
+CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W = (
+    "optimization_backup_energy_max_power_w"
+)
+CONF_OPTIMIZATION_BACKUP_ENERGY_START = "optimization_backup_energy_start"
+CONF_OPTIMIZATION_BACKUP_ENERGY_END = "optimization_backup_energy_end"
 DEFAULT_OPTIMIZATION_AI_SUMMARY_PROVIDER = "gemini"
 CONF_AWAY_ENABLED_AT = "away_enabled_at"    # ISO timestamp when away mode was turned on
 CONF_AWAY_DISABLED_AT = "away_disabled_at"  # ISO timestamp when away mode was turned off
@@ -2151,6 +2162,11 @@ COST_FUNCTION_COST = "cost"
 DEFAULT_OPTIMIZATION_INTERVAL = 5      # Re-optimize every 5 minutes
 DEFAULT_OPTIMIZATION_HORIZON = 48      # 48-hour forecast horizon
 DEFAULT_OPTIMIZATION_BACKUP_RESERVE = 0.20  # 20% minimum SOC
+DEFAULT_OPTIMIZATION_MIN_EXPORT_PRICE = 0.0  # $/kWh; 0 preserves current behavior
+DEFAULT_OPTIMIZATION_BACKUP_ENERGY_WH = 0  # Disabled until explicitly configured
+DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W = 3600
+DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START = "18:00"
+DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END = "06:00"
 DEFAULT_CHARGE_BY_TIME_TARGET_TIME = "17:15"
 DEFAULT_CHARGE_BY_TIME_TARGET_SOC = 1.0
 DEFAULT_PROFIT_MAX_TARGET_TIME = DEFAULT_CHARGE_BY_TIME_TARGET_TIME

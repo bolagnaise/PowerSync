@@ -1,10 +1,10 @@
 # Vehicle-to-Home Planning and Control Architecture
 
-Status: architecture proposal
+Status: planning-only import-offset slice implemented
 
-Evidence date: 2026-08-15
+Evidence date: 2026-08-30
 
-Runtime status: not implemented; no V2H commands or user-facing settings
+Runtime status: configurable planning assumption; no V2H commands
 
 ## Decision
 
@@ -27,7 +27,30 @@ import-offset-only. It may reduce forecast native-home grid imports. It must
 not increase grid export, stationary-battery charging, grid import, or planned
 EV charging. It must not acquire an EV ownership lease or call a provider.
 
-This is a code-confirmed feature gap, not a defect in the current optimizer.
+Full V2H observation and control remain a code-confirmed feature gap, not a
+defect in the current optimizer.
+
+## Implemented planning-only slice
+
+PowerSync now exposes one generic recurring backup / V2X planning resource in
+Smart Optimization. The user configures net AC energy per session, maximum
+power, and a local availability window. A value of 0 kWh disables it.
+
+The implementation deliberately follows the constrained second-stage design
+below: it allocates the finite allowance only against forecast native-home
+grid import, chooses the highest avoided-import-price slots first, leaves all
+stationary-battery actions and grid export unchanged, and publishes the plan
+separately under `external_energy_resources`.
+
+Session consumption is stored by config entry, resource, and UTC session start.
+Elapsed measured energy will take precedence when an observer is added; until
+then, elapsed planned energy is consumed conservatively so rolling solves and
+restarts cannot replenish an active session.
+
+This setting is not evidence of compatible V2H hardware and does not call a
+vehicle, charger, inverter, transfer switch, generator, or EV ownership path.
+The later observation, co-optimization, and execution layers remain future
+work and retain the gates documented here.
 
 ## Ticket problem
 

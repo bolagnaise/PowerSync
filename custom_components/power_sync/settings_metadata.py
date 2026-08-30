@@ -157,6 +157,30 @@ def optimizer_settings_schema() -> dict[str, Any]:
                 "section": "battery_forecast_inputs",
                 "order": 62,
             },
+            "backup_energy_wh": {
+                "category": "advanced",
+                "owner": "optimizer",
+                "section": "battery_forecast_inputs",
+                "order": 63,
+            },
+            "backup_energy_max_power_w": {
+                "category": "advanced",
+                "owner": "optimizer",
+                "section": "battery_forecast_inputs",
+                "order": 64,
+            },
+            "backup_energy_start": {
+                "category": "advanced",
+                "owner": "optimizer",
+                "section": "battery_forecast_inputs",
+                "order": 65,
+            },
+            "backup_energy_end": {
+                "category": "advanced",
+                "owner": "optimizer",
+                "section": "battery_forecast_inputs",
+                "order": 66,
+            },
             "max_grid_import_w": {
                 "category": "system",
                 "owner": "optimizer",
@@ -175,6 +199,12 @@ def optimizer_settings_schema() -> dict[str, Any]:
                 "section": "grid_site_constraints",
                 "order": 41,
                 "capability": "grid_charge",
+            },
+            "min_export_price": {
+                "category": "advanced",
+                "owner": "optimizer",
+                "section": "grid_site_constraints",
+                "order": 44,
             },
             "grid_charge_soc_cap": {
                 "category": "advanced",
@@ -242,6 +272,10 @@ def optimizer_settings_groups() -> dict[str, Any]:
                 "battery_capacity_wh",
                 "max_charge_w",
                 "max_discharge_w",
+                "backup_energy_wh",
+                "backup_energy_max_power_w",
+                "backup_energy_start",
+                "backup_energy_end",
             ],
         },
         "advanced_optimizer": {
@@ -250,6 +284,7 @@ def optimizer_settings_groups() -> dict[str, Any]:
             "fields": [
                 "allow_grid_charge",
                 "max_grid_charge_price",
+                "min_export_price",
                 "grid_charge_soc_cap",
                 "grid_charge_blackout_windows",
                 "max_grid_import_w",

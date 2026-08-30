@@ -93,6 +93,30 @@ def _top_level_function(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
     raise AssertionError(f"Function {name} not found")
 
 
+def _run_top_level_function(name: str):
+    """Load one pure config-flow helper without importing Home Assistant."""
+    namespace = {"Any": object}
+    module = ast.Module(body=[_top_level_function(name)], type_ignores=[])
+    exec(compile(module, str(CONFIG_FLOW_PATH), "exec"), namespace)
+    return namespace[name]
+
+
+def test_new_optimizer_units_are_unambiguous_at_boundary_values():
+    cents_to_price = _run_top_level_function(
+        "_form_nonnegative_cents_to_price"
+    )
+    price_to_cents = _run_top_level_function(
+        "_stored_normalized_price_to_cents"
+    )
+    wh_to_kwh = _run_top_level_function("_stored_wh_to_kwh")
+
+    assert cents_to_price(0.5) == 0.005
+    assert cents_to_price(250) == 2.5
+    assert price_to_cents(0.005) == 0.5
+    assert price_to_cents(2.5) == 250
+    assert wh_to_kwh(1000, 0) == 1.0
+
+
 def _config_flow_method(name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
     for node in _module_tree().body:
         if isinstance(node, ast.ClassDef) and node.name == "PowerSyncConfigFlow":

@@ -56,6 +56,8 @@ _STUB_MODULE_NAMES = (
     "power_sync.optimization.coordinator",
     "power_sync.optimization.ev_coordinator",
     "power_sync.optimization.executor",
+    "power_sync.optimization.export_policy",
+    "power_sync.optimization.external_energy_resource",
     "power_sync.optimization.load_estimator",
     "power_sync.optimization.schedule_reader",
     "power_sync.optimization.solar_export",
@@ -183,7 +185,21 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_OPTIMIZATION_MAX_GRID_IMPORT_W = "max_grid_import_w"
     const_module.CONF_OPTIMIZATION_MAX_GRID_EXPORT_W = "optimization_max_grid_export_w"
     const_module.CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE = "optimization_max_grid_charge_price"
+    const_module.CONF_OPTIMIZATION_MIN_EXPORT_PRICE = "optimization_min_export_price"
+    const_module.CONF_OPTIMIZATION_BACKUP_ENERGY_WH = "optimization_backup_energy_wh"
+    const_module.CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W = "optimization_backup_energy_max_power_w"
+    const_module.CONF_OPTIMIZATION_BACKUP_ENERGY_START = "optimization_backup_energy_start"
+    const_module.CONF_OPTIMIZATION_BACKUP_ENERGY_END = "optimization_backup_energy_end"
+    const_module.DEFAULT_OPTIMIZATION_MIN_EXPORT_PRICE = 0.0
+    const_module.DEFAULT_OPTIMIZATION_BACKUP_ENERGY_WH = 0
+    const_module.DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W = 3600
+    const_module.DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START = "18:00"
+    const_module.DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END = "06:00"
+    const_module.normalize_grid_charge_blackout_windows = lambda value: list(value or [])
     const_module.CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP = "optimization_grid_charge_soc_cap"
+    const_module.CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS = "optimization_grid_charge_blackout_windows"
+    const_module.CONF_CURTAILMENT_EXPORT_THRESHOLD_CENTS = "curtailment_export_threshold_cents"
+    const_module.DEFAULT_CURTAILMENT_EXPORT_THRESHOLD_CENTS = 1.0
     const_module.CONF_SIGENERGY_EXPORT_LIMIT_KW = "sigenergy_export_limit_kw"
     const_module.CONF_ALPHAESS_EXPORT_LIMIT_KW = "alphaess_export_limit_kw"
     const_module.CONF_CHARGE_BY_TIME_ENABLED = "charge_by_time_enabled"
@@ -3484,6 +3500,119 @@ def test_positive_export_prices_allowed_when_profit_max_off(opt_module):
         False,
     ]
     assert coordinator._profit_max_terminal_weight() == 1.0
+
+
+def test_global_export_floor_filters_every_provider_export_source(opt_module):
+    coordinator = _coordinator(opt_module, "octopus", profit_max=False)
+    coordinator._config.min_export_price = 0.10
+
+    assert coordinator._battery_export_allowed_slots(
+        4,
+        [0.0999, 0.10, 0.25, 0.0],
+    ) == [False, True, True, False]
+
+
+def test_set_settings_treats_sub_cent_export_floor_as_cents(opt_module):
+    coordinator = _coordinator(opt_module, "octopus", profit_max=False)
+    updates, _, background_tasks = _prepare_enabled_settings_coordinator(coordinator)
+
+    result = asyncio.run(coordinator.set_settings({"min_export_price": 0.5}))
+
+    assert result["success"] is True
+    assert coordinator._config.min_export_price == pytest.approx(0.005)
+    assert updates[-1]["data"]["optimization_min_export_price"] == pytest.approx(
+        0.005
+    )
+    assert updates[-1]["options"][
+        "optimization_min_export_price"
+    ] == pytest.approx(0.005)
+    assert background_tasks == ["powersync_settings_reoptimize"]
+
+
+@pytest.mark.parametrize("value", [-0.1, float("nan"), "invalid"])
+def test_set_settings_rejects_invalid_export_floor(opt_module, value):
+    coordinator = _coordinator(opt_module, "octopus", profit_max=False)
+    updates, _, background_tasks = _prepare_enabled_settings_coordinator(coordinator)
+
+    result = asyncio.run(coordinator.set_settings({"min_export_price": value}))
+
+    assert result["success"] is False
+    assert "non-negative" in result["error"]
+    assert updates == []
+    assert background_tasks == []
+
+
+def test_zero_export_floor_preserves_legacy_bonus_window_behavior(opt_module):
+    coordinator = _coordinator(opt_module, "octopus", profit_max=False)
+    coordinator._config.min_export_price = 0.0
+    coordinator._saving_session_coordinator = SimpleNamespace(
+        data={
+            "sessions": [
+                SimpleNamespace(
+                    joined=True,
+                    session_type="saving",
+                    start=datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc),
+                    end=datetime(2026, 5, 3, 8, 35, tzinfo=timezone.utc),
+                )
+            ]
+        }
+    )
+
+    assert coordinator._battery_export_allowed_slots(1, [0.0]) == [True]
+
+
+def test_external_energy_second_stage_offsets_only_native_home_import(opt_module):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator.entry_id = "entry-1"
+    coordinator._config = opt_module.OptimizationConfig(
+        interval_minutes=5,
+        backup_energy_wh=100,
+        backup_energy_max_power_w=1000,
+        backup_energy_start="18:00",
+        backup_energy_end="19:00",
+    )
+    coordinator.hass = SimpleNamespace(config=SimpleNamespace(time_zone="UTC"))
+
+    class _Store:
+        def __init__(self):
+            self.saved = []
+
+        async def async_load(self):
+            return None
+
+        async def async_save(self, value):
+            self.saved.append(value)
+
+    store = _Store()
+    coordinator._external_energy_ledger_store = store
+    coordinator._external_energy_ledger_loaded = False
+    start = datetime(2026, 5, 3, 18, 0, tzinfo=timezone.utc)
+    timestamps = [start, start + timedelta(minutes=5)]
+    schedule = SimpleNamespace(predicted_cost=1.0, predicted_savings=0.0)
+    result = SimpleNamespace(
+        schedule=schedule,
+        grid_import_w=[2000.0, 2000.0],
+        grid_export_w=[0.0, 1000.0],
+        lp_stats={},
+    )
+
+    returned = asyncio.run(
+        coordinator._apply_external_energy_plan(
+            result,
+            timestamps=timestamps,
+            native_home_load_w=[2000.0, 2000.0],
+            solar_forecast_kw=[0.0, 0.0],
+            avoided_import_prices=[0.10, 0.50],
+            now=start,
+        )
+    )
+
+    assert returned is result
+    assert result.schedule is schedule
+    assert result.grid_export_w == [0.0, 1000.0]
+    assert result.grid_import_w == pytest.approx([1800.0, 1000.0])
+    assert coordinator._last_external_energy_allocation.external_energy_kwh == pytest.approx(0.1)
+    assert store.saved
 
 
 @pytest.mark.parametrize("provider", ["amber", "aemo_vpp", "globird", "octopus", "nz"])
@@ -11407,6 +11536,43 @@ def test_export_price_gate_uses_action_timestamp(opt_module):
     assert battery.force_discharge_calls == [(5, 4200, False, None)]
     assert battery.self_consumption_calls == 0
     assert coordinator._last_executed_action == "export"
+
+
+def test_global_export_floor_uses_real_settlement_price_at_execution(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "foxess"
+    coordinator._config.min_export_price = 0.10
+    coordinator._last_executed_action = "charge"
+    start = datetime(2026, 5, 3, 17, 30, tzinfo=timezone.utc)
+    action = SimpleNamespace(action="export", power_w=4200, timestamp=start)
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+    coordinator._last_price_timestamps = [start]
+    coordinator._last_export_prices = [0.50]
+    coordinator._last_settlement_export_prices = [0.08]
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_discharge_calls == []
+    assert battery.self_consumption_calls == 1
+    assert coordinator._last_executed_planned_action == "export"
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_global_export_floor_allows_exact_boundary_price(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "foxess"
+    coordinator._config.min_export_price = 0.10
+    start = datetime(2026, 5, 3, 17, 30, tzinfo=timezone.utc)
+    action = SimpleNamespace(action="export", power_w=4200, timestamp=start)
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+    coordinator._last_price_timestamps = [start]
+    coordinator._last_settlement_export_prices = [0.10]
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_discharge_calls == [(5, 4200, False, None)]
 
 
 def test_zerohero_export_price_gate_uses_bonus_value(opt_module):

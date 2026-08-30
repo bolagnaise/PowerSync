@@ -34,6 +34,20 @@ from .cost_neutral import (
     CostNeutralPlan,
     elapsed_settlement_seconds,
 )
+from .export_policy import (
+    battery_export_allowed_slots,
+    export_price_allows_battery_export,
+    normalize_min_export_price,
+)
+from .external_energy_resource import (
+    ExternalEnergyAllocationResult,
+    ExternalEnergyLedgerState,
+    ExternalEnergyResourceConfig,
+    allocate_external_energy,
+    expand_external_energy_sessions,
+    reduce_external_energy_ledger,
+    resolve_external_energy_sessions,
+)
 from .schedule_reader import OptimizationSchedule, ScheduleAction
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
@@ -52,6 +66,11 @@ from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode
 from ..const import (
     CONF_GENERIC_CHARGER_POWER_ENTITY,
     DEFAULT_OPTIMIZATION_INTERVAL,
+    DEFAULT_OPTIMIZATION_MIN_EXPORT_PRICE,
+    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_WH,
+    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START,
+    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END,
     normalize_grid_charge_blackout_windows,
 )
 from ..coordinator import normalize_custom_power_kw
@@ -147,6 +166,7 @@ SOLAR_FORECAST_LEARNING_STORE_SAVE_DELAY = 300
 BATTERY_EFFICIENCY_LEARNING_STORE_VERSION = 1
 BATTERY_EFFICIENCY_LEARNING_STORE_SAVE_DELAY = 300
 SOLAR_EXPORT_HOLD_STORE_VERSION = 1
+EXTERNAL_ENERGY_LEDGER_STORE_VERSION = 1
 INITIAL_OPTIMIZATION_DELAY_SECONDS = 90.0
 FIXED_OPTIMIZATION_INTERVAL_MINUTES = DEFAULT_OPTIMIZATION_INTERVAL
 FLOW_POWER_NEM_TZ = timezone(timedelta(hours=10))
@@ -313,6 +333,7 @@ class OptimizationConfig:
     max_grid_export_w: int | None = None
     allow_grid_charge: bool = True
     max_grid_charge_price: float | None = None
+    min_export_price: float = DEFAULT_OPTIMIZATION_MIN_EXPORT_PRICE
     grid_charge_soc_cap: float = 1.0
     grid_charge_blackout_windows: list[dict[str, str]] = field(default_factory=list)
     backup_reserve: float = 0.2
@@ -330,11 +351,16 @@ class OptimizationConfig:
     battery_efficiency_learning_enabled: bool = True
     auto_apply_reserve_enabled: bool = False
     manual_backup_reserve: float | None = None
+    backup_energy_wh: int = DEFAULT_OPTIMIZATION_BACKUP_ENERGY_WH
+    backup_energy_max_power_w: int = DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W
+    backup_energy_start: str = DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START
+    backup_energy_end: str = DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END
 
     def __post_init__(self) -> None:
         self.grid_charge_blackout_windows = normalize_grid_charge_blackout_windows(
             self.grid_charge_blackout_windows
         )
+        self.min_export_price = normalize_min_export_price(self.min_export_price)
 
 
 # Update interval for the coordinator
@@ -409,6 +435,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
                 CONF_OPTIMIZATION_BACKUP_RESERVE,
                 CONF_OPTIMIZATION_MANUAL_RESERVE,
+                CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
+                CONF_OPTIMIZATION_BACKUP_ENERGY_WH,
+                CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+                CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+                CONF_OPTIMIZATION_BACKUP_ENERGY_END,
             )
 
             self._auto_apply_reserve_enabled = bool(
@@ -432,6 +463,59 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             self._config.auto_apply_reserve_enabled = self._auto_apply_reserve_enabled
             self._config.manual_backup_reserve = self._manual_backup_reserve
+            self._config.min_export_price = normalize_min_export_price(
+                self._entry.options.get(
+                    CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
+                    self._entry.data.get(
+                        CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
+                        DEFAULT_OPTIMIZATION_MIN_EXPORT_PRICE,
+                    ),
+                )
+            )
+
+            def _entry_nonnegative_int(key: str, default: int) -> int:
+                try:
+                    return max(
+                        0,
+                        int(
+                            float(
+                                self._entry.options.get(
+                                    key,
+                                    self._entry.data.get(key, default),
+                                )
+                                or 0
+                            )
+                        ),
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    return default
+
+            self._config.backup_energy_wh = _entry_nonnegative_int(
+                CONF_OPTIMIZATION_BACKUP_ENERGY_WH,
+                DEFAULT_OPTIMIZATION_BACKUP_ENERGY_WH,
+            )
+            self._config.backup_energy_max_power_w = _entry_nonnegative_int(
+                CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+                DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+            )
+            self._config.backup_energy_start = str(
+                self._entry.options.get(
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+                    self._entry.data.get(
+                        CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+                        DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START,
+                    ),
+                )
+            )
+            self._config.backup_energy_end = str(
+                self._entry.options.get(
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_END,
+                    self._entry.data.get(
+                        CONF_OPTIMIZATION_BACKUP_ENERGY_END,
+                        DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END,
+                    ),
+                )
+            )
 
         # Lock to prevent concurrent LP solves. Three independent triggers
         # (DataUpdateCoordinator's _async_update_data, _schedule_polling_loop,
@@ -645,6 +729,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"power_sync.solar_export_hold.{entry_id}",
             ),
             resolve_solar_export_adapter(battery_system, energy_coordinator),
+        )
+        self._external_energy_ledger_store = Store(
+            hass,
+            EXTERNAL_ENERGY_LEDGER_STORE_VERSION,
+            f"power_sync.external_energy.{entry_id}",
+        )
+        self._external_energy_ledger = ExternalEnergyLedgerState()
+        self._external_energy_ledger_loaded = False
+        self._last_external_energy_allocation = ExternalEnergyAllocationResult(
+            reason="disabled"
         )
         self._last_profit_max_solar_export_slots: list[bool] = []
         self._solar_export_capability_status: dict[str, Any] = {
@@ -5607,6 +5701,214 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # conservative proxy for energy that may have carried over overnight.
         return median_import_cost
 
+    async def _async_load_external_energy_ledger(self) -> None:
+        """Load the planning-only external-resource session ledger once."""
+        if getattr(self, "_external_energy_ledger_loaded", False):
+            return
+        self._external_energy_ledger_loaded = True
+        store = getattr(self, "_external_energy_ledger_store", None)
+        if store is None or not hasattr(store, "async_load"):
+            self._external_energy_ledger = ExternalEnergyLedgerState()
+            return
+        try:
+            raw = await store.async_load()
+            self._external_energy_ledger = ExternalEnergyLedgerState.from_dict(raw)
+        except Exception:
+            _LOGGER.exception(
+                "External energy ledger could not be loaded; active sessions fail closed"
+            )
+            self._external_energy_ledger = ExternalEnergyLedgerState(
+                corrupt=True,
+                reason="ledger_load_failed",
+            )
+
+    def _external_energy_resource_config(
+        self,
+    ) -> ExternalEnergyResourceConfig | None:
+        """Return the single generic planning-only backup/V2X resource."""
+        try:
+            usable_energy_wh = max(
+                0,
+                int(float(getattr(self._config, "backup_energy_wh", 0) or 0)),
+            )
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if usable_energy_wh <= 0:
+            return None
+        try:
+            max_power_w = max(
+                0,
+                int(
+                    float(
+                        getattr(self._config, "backup_energy_max_power_w", 0)
+                        or 0
+                    )
+                ),
+            )
+        except (TypeError, ValueError, OverflowError):
+            return None
+        timezone_name = getattr(
+            getattr(getattr(self, "hass", None), "config", None),
+            "time_zone",
+            "UTC",
+        )
+        config = ExternalEnergyResourceConfig(
+            resource_id="configured_backup_v2x",
+            usable_energy_wh=usable_energy_wh,
+            max_power_w=max_power_w,
+            start_local=getattr(
+                self._config,
+                "backup_energy_start",
+                DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START,
+            ),
+            end_local=getattr(
+                self._config,
+                "backup_energy_end",
+                DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END,
+            ),
+            timezone=timezone_name,
+            config_entry_id=self.entry_id,
+        )
+        if config.validate() is not None:
+            return None
+        return config
+
+    async def _apply_external_energy_plan(
+        self,
+        result: OptimizerResult,
+        *,
+        timestamps: list[datetime],
+        native_home_load_w: list[float],
+        solar_forecast_kw: list[float],
+        avoided_import_prices: list[float],
+        now: datetime,
+    ) -> OptimizerResult:
+        """Apply the constrained second-stage import-offset-only resource plan."""
+        config = self._external_energy_resource_config()
+        if config is None or not timestamps:
+            self._last_external_energy_allocation = ExternalEnergyAllocationResult(
+                reason="disabled"
+            )
+            return result
+
+        await self._async_load_external_energy_ledger()
+        interval = timedelta(minutes=max(1, int(self._config.interval_minutes or 5)))
+        horizon_end = timestamps[-1] + interval
+        raw_sessions = expand_external_energy_sessions(
+            config,
+            timestamps[0],
+            horizon_end,
+            slot_duration=interval,
+        )
+        ledger = getattr(
+            self,
+            "_external_energy_ledger",
+            ExternalEnergyLedgerState(),
+        )
+        # First settle elapsed slots from the previous plan. This prevents every
+        # rolling solve or restart from granting the active session a fresh budget.
+        for session in raw_sessions:
+            ledger = reduce_external_energy_ledger(session, ledger, now=now)
+        sessions = resolve_external_energy_sessions(
+            (config,),
+            timestamps[0],
+            horizon_end,
+            slot_duration=interval,
+            ledger=ledger,
+        )
+        n = min(
+            len(timestamps),
+            len(getattr(result, "grid_import_w", []) or []),
+            len(native_home_load_w),
+            len(solar_forecast_kw),
+        )
+        if n <= 0:
+            self._last_external_energy_allocation = ExternalEnergyAllocationResult(
+                reason="empty_horizon"
+            )
+            return result
+        base_import_kw = [
+            max(0.0, float(value or 0.0) / 1000.0)
+            for value in result.grid_import_w[:n]
+        ]
+        base_export_kw = [
+            max(0.0, float(value or 0.0) / 1000.0)
+            for value in (getattr(result, "grid_export_w", []) or [])[:n]
+        ]
+        if len(base_export_kw) < n:
+            base_export_kw.extend([0.0] * (n - len(base_export_kw)))
+        native_deficit_kw = [
+            max(
+                0.0,
+                float(native_home_load_w[idx] or 0.0) / 1000.0
+                - max(0.0, float(solar_forecast_kw[idx] or 0.0)),
+            )
+            for idx in range(n)
+        ]
+        eligible_import_kw = [
+            min(base_import_kw[idx], native_deficit_kw[idx])
+            for idx in range(n)
+        ]
+        allocation = allocate_external_energy(
+            sessions,
+            eligible_native_home_import_kw=eligible_import_kw,
+            avoided_import_price=avoided_import_prices[:n],
+            slot_duration_hours=interval.total_seconds() / 3600.0,
+            grid_import_without_resource_kw=base_import_kw,
+            grid_export_without_resource_kw=base_export_kw,
+        )
+        result.grid_import_w[:n] = [
+            round(value * 1000.0, 3)
+            for value in allocation.grid_import_with_resource_kw
+        ]
+        avoided_cost = sum(
+            max(0.0, before - after)
+            * (interval.total_seconds() / 3600.0)
+            * max(0.0, float(avoided_import_prices[idx] or 0.0))
+            for idx, (before, after) in enumerate(
+                zip(
+                    allocation.grid_import_without_resource_kw,
+                    allocation.grid_import_with_resource_kw,
+                    strict=False,
+                )
+            )
+            if idx < len(avoided_import_prices)
+        )
+        result.schedule.predicted_cost = round(
+            float(result.schedule.predicted_cost or 0.0) - avoided_cost,
+            2,
+        )
+        result.schedule.predicted_savings = round(
+            float(result.schedule.predicted_savings or 0.0) + avoided_cost,
+            2,
+        )
+        result.lp_stats["external_energy"] = {
+            "planning_mode": "import_offset_only",
+            "control_capability": "planning_assumption",
+            "planned_energy_kwh": round(allocation.external_energy_kwh, 4),
+            "avoided_import_cost": round(avoided_cost, 4),
+        }
+        plan_by_session = {plan.session_id: plan for plan in allocation.plans}
+        for session in sessions:
+            plan = plan_by_session.get(session.session_id)
+            ledger = reduce_external_energy_ledger(
+                session,
+                ledger,
+                now=now,
+                planned_discharge_w=(
+                    plan.planned_discharge_w if plan is not None else None
+                ),
+            )
+        self._external_energy_ledger = ledger
+        store = getattr(self, "_external_energy_ledger_store", None)
+        if store is not None and hasattr(store, "async_save"):
+            try:
+                await store.async_save(ledger.to_dict())
+            except Exception:
+                _LOGGER.exception("External energy ledger save failed")
+        self._last_external_energy_allocation = allocation
+        return result
+
     async def _run_optimization(
         self,
         force: bool = False,
@@ -5720,6 +6022,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             prices = await self._get_price_forecast()
             solar = await self._get_solar_forecast()
             load = await self._get_load_forecast()
+            # Preserve the canonical house-only series before any planned EV
+            # overlay. The planning-only backup/V2X allowance may offset this
+            # native-home import, never EV charging or battery charging.
+            native_home_load_w = list(load or [])
             soc, capacity = await self._get_battery_state()
             self._observe_battery_efficiency(
                 timestamp=solve_timestamp,
@@ -6001,7 +6307,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._apply_provider_quota_optimizer_inputs(import_prices, export_prices)
             battery_export_allowed = self._battery_export_allowed_slots(
                 len(import_prices),
-                export_prices,
+                cost_neutral_export_prices,
             )
             battery_charge_blocked = self._battery_charge_blocked_slots(
                 len(import_prices),
@@ -6148,7 +6454,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ]
             priority_export_slots = self._priority_export_slots_for_run(
                 len(import_prices),
-                export_prices,
+                cost_neutral_export_prices,
             )
             # Keep the exact fresh-solve masks used by execution commitment
             # checks. Recomputing these later can observe a different quota or
@@ -6501,7 +6807,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             schedule = self._bridge_short_export_gaps(
                 schedule,
-                export_prices,
+                cost_neutral_export_prices,
                 authoritative_reserve_floor=post_solve_export_floor,
             )
             self._last_update_time = dt_util.now()
@@ -6612,7 +6918,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                 schedule = self._bridge_short_export_gaps(
                     schedule,
-                    export_prices,
+                    cost_neutral_export_prices,
                     authoritative_reserve_floor=post_solve_export_floor,
                 )
                 if self._should_apply_offgrid_overlay():
@@ -6675,6 +6981,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._last_optimizer_result = result
                 self._adopt_solved_ev_series(result)
                 self._last_update_time = dt_util.now()
+            result = await self._apply_external_energy_plan(
+                result,
+                timestamps=schedule_timestamps,
+                native_home_load_w=native_home_load_w,
+                solar_forecast_kw=solar_forecast,
+                avoided_import_prices=cost_neutral_import_prices,
+                now=solve_timestamp,
+            )
+            self._current_schedule = result.schedule
+            self._last_optimizer_result = result
             if cost_neutral_plan is not None:
                 effective_caps = {
                     str(day): max(0.0, float(value))
@@ -8004,6 +8320,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             ):
                 continue
+            min_export_price = normalize_min_export_price(
+                getattr(self._config, "min_export_price", 0.0)
+            )
+            if min_export_price > 0 and (
+                export_prices is None
+                or any(
+                not export_price_allows_battery_export(
+                    export_prices[slot] if slot < len(export_prices) else None,
+                    min_export_price,
+                )
+                for slot in range(gap_start, gap_end)
+                )
+            ):
+                continue
 
             export_action = (
                 "export"
@@ -8389,12 +8719,26 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             or self._should_block_export_for_demand()
         )
         export_price = None
-        if self._last_export_prices:
+        real_export_prices = (
+            getattr(self, "_last_settlement_export_prices", None)
+            or getattr(self, "_last_export_prices", None)
+        )
+        if real_export_prices:
             export_price = self._current_effective_export_price_for_action(
-                self._last_export_prices,
+                real_export_prices,
                 action,
             )
-        price_is_usable = export_price is None or export_price >= 0.01
+        min_export_price = normalize_min_export_price(
+            getattr(self._config, "min_export_price", 0.0)
+        )
+        price_is_usable = (
+            export_price is None or export_price >= 0.01
+            if min_export_price <= 0
+            else export_price_allows_battery_export(
+                export_price,
+                min_export_price,
+            )
+        )
         if hard_runtime_block or not price_is_usable:
             return None
 
@@ -9337,6 +9681,39 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         runtime_action = self._effective_runtime_action(
             getattr(action, "action", None),
         )
+        battery_export_price_blocked = False
+        min_export_price = normalize_min_export_price(
+            getattr(self._config, "min_export_price", 0.0)
+        )
+        if runtime_action in EXPORT_ACTIONS and min_export_price > 0:
+            real_export_prices = (
+                getattr(self, "_last_settlement_export_prices", None)
+                or getattr(self, "_last_export_prices", None)
+            )
+            real_export_price = (
+                self._current_effective_export_price_for_action(
+                    real_export_prices,
+                    action,
+                )
+                if real_export_prices
+                else None
+            )
+            if not export_price_allows_battery_export(
+                real_export_price,
+                min_export_price,
+            ):
+                _LOGGER.info(
+                    "Optimizer: battery export blocked by minimum real export "
+                    "price (price=%s, floor=%.1fc/kWh); restoring self_consumption",
+                    (
+                        f"{real_export_price * 100:.1f}c/kWh"
+                        if real_export_price is not None
+                        else "unavailable"
+                    ),
+                    min_export_price * 100,
+                )
+                runtime_action = "self_consumption"
+                battery_export_price_blocked = True
 
         solar_export_hold = getattr(self, "_solar_export_hold", None)
         solar_export_cleanup_failed = False
@@ -9429,7 +9806,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
 
                 preserve_active_for_force = self._scheduled_ev_preserve_active()
-                lp_matches_force = _action_matches_force(action)
+                lp_matches_force = (
+                    _action_matches_force(action)
+                    and not battery_export_price_blocked
+                )
                 bridged_export_gap = bool(
                     force_type == "discharge"
                     and getattr(action, "_optimizer_bridged_export_gap", False)
@@ -11120,6 +11500,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for idx, value in enumerate(slots[:n]):
                 allowed[idx] = allowed[idx] or value
 
+        min_export_price = normalize_min_export_price(
+            getattr(self._config, "min_export_price", 0.0)
+        )
+        if min_export_price > 0:
+            real_price_allowed = battery_export_allowed_slots(
+                (export_prices or [])[:n],
+                min_export_price,
+            )
+            allowed = [
+                bool(value) and idx < len(real_price_allowed) and real_price_allowed[idx]
+                for idx, value in enumerate(allowed)
+            ]
+
         allowed_count = sum(allowed)
         if allowed_count:
             _LOGGER.debug(
@@ -11154,6 +11547,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for slots in slot_sources:
             for idx, value in enumerate(slots[:n]):
                 allowed[idx] = allowed[idx] or value
+
+        min_export_price = normalize_min_export_price(
+            getattr(self._config, "min_export_price", 0.0)
+        )
+        if min_export_price > 0:
+            real_price_allowed = battery_export_allowed_slots(
+                (export_prices or [])[:n],
+                min_export_price,
+            )
+            allowed = [
+                bool(value) and idx < len(real_price_allowed) and real_price_allowed[idx]
+                for idx, value in enumerate(allowed)
+            ]
 
         allowed_count = sum(allowed)
         if allowed_count:
@@ -18053,6 +18459,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     else {}
                 ),
             },
+            "external_energy_resources": [
+                plan.as_dict()
+                for plan in getattr(
+                    self,
+                    "_last_external_energy_allocation",
+                    ExternalEnergyAllocationResult(reason="disabled"),
+                ).plans
+            ],
             "config": {
                 "battery_capacity_wh": self._config.battery_capacity_wh,
                 "max_charge_w": self._config.max_charge_w,
@@ -18064,6 +18478,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if self._config.max_grid_charge_price is not None
                     else 0
                 ),
+                "min_export_price": round(
+                    normalize_min_export_price(self._config.min_export_price) * 100,
+                    3,
+                ),
+                "backup_energy_wh": self._config.backup_energy_wh,
+                "backup_energy_max_power_w": self._config.backup_energy_max_power_w,
+                "backup_energy_start": self._config.backup_energy_start,
+                "backup_energy_end": self._config.backup_energy_end,
                 "grid_charge_soc_cap": int(
                     round(self._soc_ratio(self._config.grid_charge_soc_cap, 1.0) * 100)
                 ),
@@ -18699,9 +19121,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         config_keys = [
             "battery_capacity_wh", "max_charge_w", "max_discharge_w",
             "max_grid_import_w", "max_grid_export_w",
-            "max_grid_charge_price", "grid_charge_soc_cap",
+            "max_grid_charge_price", "min_export_price", "grid_charge_soc_cap",
             "grid_charge_blackout_windows",
             "allow_grid_charge", "backup_reserve", "horizon_hours",
+            "backup_energy_wh", "backup_energy_max_power_w",
+            "backup_energy_start", "backup_energy_end",
         ]
         raw_config_updates = {k: v for k, v in settings.items() if k in config_keys}
         config_updates = dict(raw_config_updates)
@@ -18719,6 +19143,85 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         config_updates["max_grid_charge_price"]
                     )
                 )
+            if "min_export_price" in config_updates:
+                try:
+                    min_export_price_cents = float(
+                        config_updates["min_export_price"] or 0.0
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    min_export_price_cents = -1.0
+                if (
+                    not math.isfinite(min_export_price_cents)
+                    or min_export_price_cents < 0
+                ):
+                    response["success"] = False
+                    response["error"] = (
+                        "min_export_price must be a non-negative number"
+                    )
+                    return response
+                config_updates["min_export_price"] = normalize_min_export_price(
+                    min_export_price_cents / 100.0
+                )
+            for key in ("backup_energy_wh", "backup_energy_max_power_w"):
+                if key not in config_updates:
+                    continue
+                try:
+                    config_updates[key] = max(
+                        0,
+                        int(float(config_updates[key] or 0)),
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    response["success"] = False
+                    response["error"] = f"{key} must be a non-negative number"
+                    return response
+            if any(
+                key in config_updates
+                for key in (
+                    "backup_energy_wh",
+                    "backup_energy_max_power_w",
+                    "backup_energy_start",
+                    "backup_energy_end",
+                )
+            ):
+                candidate_resource = ExternalEnergyResourceConfig(
+                    resource_id="configured_backup_v2x",
+                    usable_energy_wh=config_updates.get(
+                        "backup_energy_wh",
+                        getattr(self._config, "backup_energy_wh", 0),
+                    ),
+                    max_power_w=config_updates.get(
+                        "backup_energy_max_power_w",
+                        getattr(
+                            self._config,
+                            "backup_energy_max_power_w",
+                            DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+                        ),
+                    ),
+                    start_local=config_updates.get(
+                        "backup_energy_start",
+                        getattr(
+                            self._config,
+                            "backup_energy_start",
+                            DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START,
+                        ),
+                    ),
+                    end_local=config_updates.get(
+                        "backup_energy_end",
+                        getattr(
+                            self._config,
+                            "backup_energy_end",
+                            DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END,
+                        ),
+                    ),
+                )
+                resource_error = candidate_resource.validate()
+                if resource_error is not None:
+                    response["success"] = False
+                    response["error"] = (
+                        "Invalid backup / V2X planning resource: "
+                        f"{resource_error}"
+                    )
+                    return response
             if "grid_charge_soc_cap" in config_updates:
                 config_updates["grid_charge_soc_cap"] = self._soc_ratio(
                     config_updates["grid_charge_soc_cap"],
@@ -18788,6 +19291,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     CONF_OPTIMIZATION_MAX_GRID_IMPORT_W,
                     CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
                     CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
+                    CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_WH,
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_END,
                     CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
                     CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
                 )
@@ -18847,6 +19355,38 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     else:
                         new_options[CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE] = price_cap
                         new_data[CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE] = price_cap
+                if "min_export_price" in settings:
+                    min_export_price = config_updates["min_export_price"]
+                    new_options[CONF_OPTIMIZATION_MIN_EXPORT_PRICE] = min_export_price
+                    new_data[CONF_OPTIMIZATION_MIN_EXPORT_PRICE] = min_export_price
+                if "backup_energy_wh" in settings:
+                    backup_energy_wh = config_updates["backup_energy_wh"]
+                    new_options[CONF_OPTIMIZATION_BACKUP_ENERGY_WH] = backup_energy_wh
+                    new_data[CONF_OPTIMIZATION_BACKUP_ENERGY_WH] = backup_energy_wh
+                if "backup_energy_max_power_w" in settings:
+                    backup_energy_max_power_w = config_updates[
+                        "backup_energy_max_power_w"
+                    ]
+                    new_options[CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W] = (
+                        backup_energy_max_power_w
+                    )
+                    new_data[CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W] = (
+                        backup_energy_max_power_w
+                    )
+                if "backup_energy_start" in settings:
+                    new_options[CONF_OPTIMIZATION_BACKUP_ENERGY_START] = str(
+                        settings["backup_energy_start"]
+                    )
+                    new_data[CONF_OPTIMIZATION_BACKUP_ENERGY_START] = str(
+                        settings["backup_energy_start"]
+                    )
+                if "backup_energy_end" in settings:
+                    new_options[CONF_OPTIMIZATION_BACKUP_ENERGY_END] = str(
+                        settings["backup_energy_end"]
+                    )
+                    new_data[CONF_OPTIMIZATION_BACKUP_ENERGY_END] = str(
+                        settings["backup_energy_end"]
+                    )
                 if "grid_charge_soc_cap" in settings:
                     soc_cap = self._soc_ratio(settings["grid_charge_soc_cap"], 1.0)
                     new_options[CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP] = soc_cap

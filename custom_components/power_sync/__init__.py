@@ -448,6 +448,8 @@ from .const import (
     CONF_DAILY_SUPPLY_CHARGE,
     CONF_MONTHLY_SUPPLY_CHARGE,
     CONF_BATTERY_CURTAILMENT_ENABLED,
+    CONF_CURTAILMENT_CONTROL_IN_MONITORING_MODE,
+    DEFAULT_CURTAILMENT_CONTROL_IN_MONITORING_MODE,
     CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
     CONF_POWERWALL_LOCAL_PAIRED,
     CONF_POWERWALL_OFFGRID_AS_CURTAILMENT,
@@ -873,6 +875,11 @@ from .const import (
     CONF_OPTIMIZATION_MAX_GRID_EXPORT_W,
     CONF_NETWORK_EXPORT_PCC_MAX_AGE_SECONDS,
     CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE,
+    CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
+    CONF_OPTIMIZATION_BACKUP_ENERGY_WH,
+    CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+    CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+    CONF_OPTIMIZATION_BACKUP_ENERGY_END,
     CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
     CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS,
     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
@@ -888,6 +895,10 @@ from .const import (
     CONF_PROFIT_MAX_TARGET_SOC,
     DEFAULT_OPTIMIZATION_INTERVAL,
     DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
+    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_WH,
+    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START,
+    DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END,
     DEFAULT_CHARGE_BY_TIME_TARGET_TIME,
     DEFAULT_CHARGE_BY_TIME_TARGET_SOC,
     BATTERY_CAPACITY_DEFAULTS,
@@ -20853,6 +20864,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_MONITORING_MODE, False),
         )
 
+    def _monitoring_mode_allows_curtailment(
+        curtailment_enabled: bool,
+    ) -> bool:
+        """Return whether an enabled automatic curtailment route may write.
+
+        Monitoring Mode remains the global source of truth for all other
+        hardware commands.  Curtailment is the one explicitly opt-in,
+        narrowly scoped exception because its export-limit action is
+        independent of battery dispatch.  A reload handoff remains a hard
+        fence: the old setup must not issue a command while its replacement is
+        being prepared.
+        """
+        if not _is_monitoring_mode():
+            return True
+        if not curtailment_enabled:
+            return False
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        if isinstance(entry_data, dict) and entry_data.get(
+            "_monitoring_handoff_active", False
+        ):
+            return False
+        return bool(
+            _entry_value(
+                CONF_CURTAILMENT_CONTROL_IN_MONITORING_MODE,
+                DEFAULT_CURTAILMENT_CONTROL_IN_MONITORING_MODE,
+            )
+        )
+
     def _demand_grid_charging_protection_active(
         now: datetime | None = None,
         *,
@@ -28056,20 +28095,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         3. If export price < 1c: Set grid export rule to 'never'
         4. If export price >= 1c: Restore normal export ('battery_ok')
         """
-        if _is_monitoring_mode():
-            _LOGGER.info(
-                "[MONITORING] Would check solar curtailment — blocked by monitoring mode"
-            )
-            return
-
         # Check if curtailment is enabled
-        curtailment_enabled = entry.options.get(
+        curtailment_enabled = bool(entry.options.get(
             CONF_BATTERY_CURTAILMENT_ENABLED,
             entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
-        )
+        ))
 
         if not curtailment_enabled:
             _LOGGER.debug("Solar curtailment is disabled, skipping check")
+            return
+
+        if not _monitoring_mode_allows_curtailment(curtailment_enabled):
+            _LOGGER.info(
+                "[MONITORING] Would check solar curtailment — blocked by monitoring mode"
+            )
             return
 
         # Skip if EV charging has overridden curtailment to allow full solar production
@@ -28143,6 +28182,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 refresh = getattr(price_coord, "async_request_refresh", None)
                 if callable(refresh):
                     await refresh()
+
+            if not _monitoring_mode_allows_curtailment(curtailment_enabled):
+                _LOGGER.info(
+                    "[MONITORING] Solar curtailment permission changed during price refresh — blocked before control"
+                )
+                return
 
             feedin_price, import_price, price_source = get_current_prices_for_curtailment(
                 entry_data,
@@ -28431,21 +28476,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         EVENT-DRIVEN: Check solar curtailment using WebSocket price data.
         Called by WebSocket callback - uses price data directly without REST API refresh.
         """
-        if _is_monitoring_mode():
+        # Check if curtailment is enabled
+        curtailment_enabled = bool(entry.options.get(
+            CONF_BATTERY_CURTAILMENT_ENABLED,
+            entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
+        ))
+
+        if not curtailment_enabled:
+            _LOGGER.debug("Solar curtailment is disabled, skipping check")
+            return
+
+        if not _monitoring_mode_allows_curtailment(curtailment_enabled):
             _LOGGER.info(
                 "[MONITORING] Would check solar curtailment from WebSocket — "
                 "blocked by monitoring mode"
             )
-            return
-
-        # Check if curtailment is enabled
-        curtailment_enabled = entry.options.get(
-            CONF_BATTERY_CURTAILMENT_ENABLED,
-            entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
-        )
-
-        if not curtailment_enabled:
-            _LOGGER.debug("Solar curtailment is disabled, skipping check")
             return
 
         # Skip if EV charging has overridden curtailment to allow full solar production
@@ -40552,6 +40597,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Triggers at :01:00, :06:00, :11:00, etc. - 60s after Amber price updates
     async def auto_curtailment_check(now):
         """Automatically check curtailment if enabled."""
+        curtailment_enabled = bool(entry.options.get(
+            CONF_BATTERY_CURTAILMENT_ENABLED,
+            entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
+        ))
+        if not _monitoring_mode_allows_curtailment(curtailment_enabled):
+            _LOGGER.info(
+                "[MONITORING] Would run scheduled solar curtailment — blocked by monitoring mode"
+            )
+            return
         await handle_solar_curtailment_check(None)
 
     curtailment_cancel_timer = async_track_utc_time_change(
@@ -40568,6 +40622,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _startup_curtailment_check(_event=None) -> None:
         await asyncio.sleep(5)
         if entry.entry_id not in hass.data.get(DOMAIN, {}):
+            return
+        curtailment_enabled = bool(entry.options.get(
+            CONF_BATTERY_CURTAILMENT_ENABLED,
+            entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
+        ))
+        if not _monitoring_mode_allows_curtailment(curtailment_enabled):
+            _LOGGER.info(
+                "[MONITORING] Would run startup solar curtailment — blocked by monitoring mode"
+            )
             return
         await handle_solar_curtailment_check(None)
 
@@ -40702,19 +40765,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if entry_data is None:
                 return
 
-            if _is_monitoring_mode():
-                _LOGGER.debug(
-                    "[MONITORING] Would update inverter load-following limit — "
-                    "blocked by monitoring mode"
-                )
-                return
-
             # Check if AC curtailment is enabled
             inverter_curtailment_enabled = entry.options.get(
                 CONF_AC_INVERTER_CURTAILMENT_ENABLED,
                 entry.data.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
             )
             if not inverter_curtailment_enabled:
+                return
+
+            if not _monitoring_mode_allows_curtailment(
+                bool(inverter_curtailment_enabled)
+            ):
+                _LOGGER.debug(
+                    "[MONITORING] Would update inverter load-following limit — "
+                    "blocked by monitoring mode"
+                )
                 return
 
             # Get inverter config
@@ -40767,6 +40832,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
                 if _aemo_dispatch_entry_data() is not entry_data:
                     return
+                if not _monitoring_mode_allows_curtailment(
+                    bool(inverter_curtailment_enabled)
+                ):
+                    _LOGGER.debug(
+                        "[MONITORING] Load-following shutdown permission changed "
+                        "before write — blocked by monitoring mode"
+                    )
+                    return
                 target_power_w = entry_data.get("inverter_power_limit_w")
                 if hasattr(controller, 'curtail'):
                     success = await controller.curtail()
@@ -40784,6 +40857,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Get current home load from Tesla API
             live_status = await get_live_status()
             if _aemo_dispatch_entry_data() is not entry_data:
+                return
+            if not _monitoring_mode_allows_curtailment(
+                bool(inverter_curtailment_enabled)
+            ):
+                _LOGGER.debug(
+                    "[MONITORING] Load-following permission changed before control — "
+                    "blocked by monitoring mode"
+                )
                 return
             if not live_status or not live_status.get("load_power"):
                 return
@@ -40846,6 +40927,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Update power limit
             import inspect
             if _aemo_dispatch_entry_data() is not entry_data:
+                return
+            if not _monitoring_mode_allows_curtailment(
+                bool(inverter_curtailment_enabled)
+            ):
+                _LOGGER.debug(
+                    "[MONITORING] Load-following permission changed before write — "
+                    "blocked by monitoring mode"
+                )
                 return
             if hasattr(controller, 'curtail'):
                 sig = inspect.signature(controller.curtail)
@@ -42992,6 +43081,61 @@ class OptimizationSettingsView(HomeAssistantView):
                     "max_grid_charge_price": _entry_price_cents_setting(
                         CONF_OPTIMIZATION_MAX_GRID_CHARGE_PRICE
                     ),
+                    "min_export_price": (
+                        round(
+                            float(
+                                config_entry.options.get(
+                                    CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
+                                    config_entry.data.get(
+                                        CONF_OPTIMIZATION_MIN_EXPORT_PRICE,
+                                        0.0,
+                                    ),
+                                )
+                                or 0.0
+                            )
+                            * 100.0,
+                            3,
+                        )
+                        if config_entry
+                        else 0.0
+                    ),
+                    "backup_energy_wh": (
+                        _entry_optional_nonnegative_int_setting(
+                            CONF_OPTIMIZATION_BACKUP_ENERGY_WH
+                        )
+                        if config_entry
+                        else DEFAULT_OPTIMIZATION_BACKUP_ENERGY_WH
+                    ),
+                    "backup_energy_max_power_w": (
+                        _entry_int_setting(
+                            CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+                            DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+                        )
+                        if config_entry
+                        else DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W
+                    ),
+                    "backup_energy_start": (
+                        config_entry.options.get(
+                            CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+                            config_entry.data.get(
+                                CONF_OPTIMIZATION_BACKUP_ENERGY_START,
+                                DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START,
+                            ),
+                        )
+                        if config_entry
+                        else DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START
+                    ),
+                    "backup_energy_end": (
+                        config_entry.options.get(
+                            CONF_OPTIMIZATION_BACKUP_ENERGY_END,
+                            config_entry.data.get(
+                                CONF_OPTIMIZATION_BACKUP_ENERGY_END,
+                                DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END,
+                            ),
+                        )
+                        if config_entry
+                        else DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END
+                    ),
                     "grid_charge_soc_cap": _entry_percent_setting(
                         CONF_OPTIMIZATION_GRID_CHARGE_SOC_CAP,
                         1.0,
@@ -43135,6 +43279,16 @@ class OptimizationSettingsView(HomeAssistantView):
                     if opt_coordinator._config.max_grid_charge_price is not None
                     else 0
                 ),
+                "min_export_price": round(
+                    opt_coordinator._config.min_export_price * 100,
+                    3,
+                ),
+                "backup_energy_wh": opt_coordinator._config.backup_energy_wh,
+                "backup_energy_max_power_w": (
+                    opt_coordinator._config.backup_energy_max_power_w
+                ),
+                "backup_energy_start": opt_coordinator._config.backup_energy_start,
+                "backup_energy_end": opt_coordinator._config.backup_energy_end,
                 "grid_charge_soc_cap": max(
                     0,
                     min(
@@ -43587,6 +43741,81 @@ class OptimizationSettingsView(HomeAssistantView):
                     changes.append(
                         f"Set max_grid_charge_price to {round(price_cap * 100, 3)}c/kWh"
                     )
+
+            if "min_export_price" in settings:
+                try:
+                    min_export_price = float(settings.get("min_export_price") or 0.0)
+                except (TypeError, ValueError):
+                    min_export_price = -1.0
+                if not math.isfinite(min_export_price) or min_export_price < 0:
+                    return web.json_response(
+                        {
+                            "success": False,
+                            "error": "Minimum export price must be non-negative",
+                        },
+                        status=400,
+                    )
+                min_export_price = min_export_price / 100.0
+                new_data[CONF_OPTIMIZATION_MIN_EXPORT_PRICE] = min_export_price
+                new_options[CONF_OPTIMIZATION_MIN_EXPORT_PRICE] = min_export_price
+                changes.append(
+                    "Set minimum export price to "
+                    f"{round(min_export_price * 100, 3)}c/kWh"
+                )
+
+            backup_int_settings = (
+                (
+                    "backup_energy_wh",
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_WH,
+                    0,
+                    "backup energy allowance",
+                ),
+                (
+                    "backup_energy_max_power_w",
+                    CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W,
+                    1,
+                    "backup energy maximum power",
+                ),
+            )
+            for payload_key, option_key, minimum, description in backup_int_settings:
+                if payload_key not in settings:
+                    continue
+                try:
+                    value = int(float(settings[payload_key]))
+                except (TypeError, ValueError):
+                    value = minimum - 1
+                if value < minimum:
+                    return web.json_response(
+                        {
+                            "success": False,
+                            "error": f"Invalid {description}",
+                        },
+                        status=400,
+                    )
+                new_data[option_key] = value
+                new_options[option_key] = value
+                changes.append(f"Set {description} to {value}")
+
+            for payload_key, option_key in (
+                ("backup_energy_start", CONF_OPTIMIZATION_BACKUP_ENERGY_START),
+                ("backup_energy_end", CONF_OPTIMIZATION_BACKUP_ENERGY_END),
+            ):
+                if payload_key not in settings:
+                    continue
+                value = str(settings[payload_key]).strip()
+                try:
+                    datetime.strptime(value, "%H:%M")
+                except ValueError:
+                    return web.json_response(
+                        {
+                            "success": False,
+                            "error": f"Invalid {payload_key}; expected HH:MM",
+                        },
+                        status=400,
+                    )
+                new_data[option_key] = value
+                new_options[option_key] = value
+                changes.append(f"Set {payload_key} to {value}")
 
             if "grid_charge_soc_cap" in settings:
                 try:
