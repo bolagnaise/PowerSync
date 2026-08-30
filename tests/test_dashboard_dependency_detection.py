@@ -1177,7 +1177,7 @@ def test_dashboard_uses_power_sync_ev_power_attributes_for_presence():
 
 
 def test_dashboard_marks_generic_charger_load_as_including_ev_draw():
-    """Only generic-charger flows need EV draw removed from raw site load."""
+    """Home Load basis wins over the legacy generic-charger inference."""
     source = STRATEGY_PATH.read_text()
     helper = re.search(
         r"function _loadIncludesGenericEv\([^)]*\) \{.*?\n\}",
@@ -1201,6 +1201,35 @@ def test_dashboard_marks_generic_charger_load_as_including_ev_draw():
       }
     """
     subprocess.run(["node", "-e", f"{helper.group(0)}\n{checks}"], check=True)
+
+    basis_helper = re.search(
+        r"function _loadIncludesEv\([^)]*\) \{.*?\n\}",
+        source,
+        re.DOTALL,
+    )
+    assert basis_helper is not None
+    assert "const homeLoadAttrs = hass.states[config.entities.load_power]?.attributes || {};" in source
+    assert "_loadIncludesEv(homeLoadAttrs, evPowerAttrs)" in source
+
+    basis_checks = """
+      const generic = { vehicle_id: 'generic_ev' };
+      const cases = [
+        [{ home_load_basis: 'excludes_ev' }, generic, false],
+        [{ home_load_basis: 'includes_ev' }, generic, true],
+        [{ home_load_basis: 'unknown' }, generic, true],
+        [{}, generic, true],
+        [{ home_load_basis: 'excludes_ev' }, { charger_type: 'tesla' }, false],
+        [{}, { charger_type: 'tesla' }, false],
+      ];
+      for (const [homeLoad, ev, expected] of cases) {
+        const actual = _loadIncludesEv(homeLoad, ev);
+        if (actual !== expected) throw new Error(`${JSON.stringify(homeLoad)}/${JSON.stringify(ev)}: ${actual}`);
+      }
+    """
+    subprocess.run(
+        ["node", "-e", f"{helper.group(0)}\n{basis_helper.group(0)}\n{basis_checks}"],
+        check=True,
+    )
 
 
 def test_dashboard_layout_storage_reconciles_card_changes():

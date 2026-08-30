@@ -102,6 +102,9 @@ def test_energy_flow_can_remove_generic_ev_draw_from_reported_home_load():
         [8000, 0, true, 8000],
         [5000, 7000, true, 0],
         [12000, 9000, true, 3000],
+        // A basis-normalized Home Load must not lose the EV draw a second time.
+        [576, 6923, false, 576],
+        [7499, 6923, true, 576],
         [null, 7000, true, null],
       ];
       for (const [raw, ev, included, expected] of cases) {

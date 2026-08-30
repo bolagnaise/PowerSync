@@ -7834,6 +7834,13 @@ function _loadIncludesGenericEv(evPowerAttrs = {}) {
   );
 }
 
+function _loadIncludesEv(homeLoadAttrs = {}, evPowerAttrs = {}) {
+  const basis = String(homeLoadAttrs.home_load_basis || '').trim().toLowerCase();
+  if (basis === 'includes_ev') return true;
+  if (basis === 'excludes_ev') return false;
+  return _loadIncludesGenericEv(evPowerAttrs);
+}
+
 function _teslaStyleFlow(e, hass, findSensor) {
   // Auto-detect weather entity — try common patterns
   let weatherEntity = null;
@@ -7891,9 +7898,11 @@ function _teslaStyleFlow(e, hass, findSensor) {
       config.entities.ev_battery = evBattery;
     }
     const evPowerAttrs = hass.states[evPower]?.attributes || {};
-    if (_loadIncludesGenericEv(evPowerAttrs)) {
-      // Inverter/site load normally includes a generic charger's draw. The
-      // flow card renders EV as its own branch, so remove that draw from Home.
+    const homeLoadAttrs = hass.states[config.entities.load_power]?.attributes || {};
+    if (_loadIncludesEv(homeLoadAttrs, evPowerAttrs)) {
+      // Legacy inverter/site load normally includes a generic charger's draw.
+      // Canonically normalized Home Load declares its basis and must not be
+      // adjusted a second time by the flow card.
       config.load_includes_ev = true;
     }
     if (
