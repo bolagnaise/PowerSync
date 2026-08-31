@@ -7476,6 +7476,7 @@ class BatteryOptimizer:
             start_idx: int,
             *,
             require_grid_charge_surplus: bool = False,
+            minimum_grid_import_price: float | None = None,
         ) -> bool:
             for future_idx in range(start_idx + 1, n):
                 if future_idx >= len(battery_charge) or future_idx >= len(grid_import):
@@ -7497,6 +7498,14 @@ class BatteryOptimizer:
                         return True
                 net_load_kw = max(0.0, load[future_idx] - solar[future_idx])
                 if future_import_kw > net_load_kw + threshold_kw:
+                    if minimum_grid_import_price is not None:
+                        if (
+                            import_prices is None
+                            or future_idx >= len(import_prices)
+                            or import_prices[future_idx]
+                            < minimum_grid_import_price - 0.001
+                        ):
+                            continue
                     return True
             return False
 
@@ -7811,6 +7820,30 @@ class BatteryOptimizer:
                     # whenever that mode is allowed; otherwise reconciliation
                     # invents natural self-consumption, spending energy through
                     # round-trip losses and changing the LP objective.
+                    action = "idle"
+                elif (
+                    meaningful_hold
+                    and import_prices is not None
+                    and export_prices is not None
+                    and import_prices[t] > 0.001
+                    and export_prices[t] <= 0.001
+                    and _future_grid_charge_planned(
+                        t,
+                        require_grid_charge_surplus=True,
+                        minimum_grid_import_price=(
+                            import_prices[t]
+                            * self.economic_round_trip_efficiency
+                        ),
+                    )
+                ):
+                    # With no export value, a hold ahead of a planned recharge
+                    # must remain idle when that recharge is not cheap enough
+                    # to repay the optimizer's economic round-trip loss.
+                    # Otherwise mode projection invents natural self-consumption
+                    # and forces a
+                    # more expensive discharge/recharge cycle into the next LP
+                    # pass. A genuinely cheaper future recharge still keeps
+                    # the existing natural-use behavior.
                     action = "idle"
                 elif meaningful_hold and export_prices is not None and import_prices is not None:
                     # Check if upcoming export prices justify holding battery

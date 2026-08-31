@@ -861,6 +861,45 @@ def test_two_powerwall_flat_price_hold_survives_mode_projection(
     ]
 
 
+def test_zero_fit_hold_survives_mode_projection_before_same_price_recharge(
+    battery_optimizer_module,
+    monkeypatch,
+):
+    """A zero-FIT hold must not become a lossy natural-use cycle on projection."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, "highs")
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=13_500,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        efficiency=0.92,
+        backup_reserve=0.20,
+        hardware_reserve=0.05,
+        interval_minutes=60,
+        horizon_hours=12,
+        terminal_weight=0.30,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.082] * 4 + [0.33] * 8,
+        export_prices=[0.0] * 12,
+        solar_forecast=[0.0] * 12,
+        load_forecast=[1.0] * 12,
+        current_soc=0.50,
+        allow_battery_export=[False] * 12,
+        allow_grid_charge=True,
+        disable_idle=False,
+    )
+
+    actions = result.schedule.actions
+    assert result.lp_stats["mode_converged"] is True
+    assert [action.action for action in actions[:2]] == ["idle", "idle"]
+    assert [action.battery_discharge_w for action in actions[:2]] == pytest.approx(
+        [0.0, 0.0]
+    )
+    assert any(action.action == "charge" for action in actions[2:4])
+
+
 def test_modest_nonparity_premium_keeps_self_consumption_before_recharge(
     battery_optimizer_module,
 ):
