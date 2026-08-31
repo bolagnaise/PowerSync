@@ -8099,7 +8099,7 @@ class BatteryHealthView(HomeAssistantView):
         if local_ip and not is_loopback_host(local_ip):
             try:
                 from .powerwall_local.transport import get_insecure_ssl_context
-                from .powerwall_local import tedapi_combined_pb2 as _pb2
+                from tesla_protocol.energy_device import signed_message_pb2 as _pb2
                 ssl_ctx = await get_insecure_ssl_context(self._hass)
                 connector = _aio.TCPConnector(ssl=ssl_ctx, limit=2)
                 async with _aio.ClientSession(
@@ -8515,7 +8515,7 @@ class BatteryHealthView(HomeAssistantView):
             if local_ip and not is_loopback_host(local_ip):
                 try:
                     from .powerwall_local.transport import get_insecure_ssl_context
-                    from .powerwall_local import tedapi_combined_pb2 as _pb2
+                    from tesla_protocol.energy_device import signed_message_pb2 as _pb2
                     ssl_ctx = await get_insecure_ssl_context(self._hass)
                     connector = _aio.TCPConnector(ssl=ssl_ctx, limit=2)
                     async with _aio.ClientSession(
