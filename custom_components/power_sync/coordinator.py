@@ -1277,6 +1277,21 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
             if not isinstance(contract, dict):
                 return None
             prices = contract.get("prices") or {}
+            if prices.get("unit") == "dollars_per_kwh":
+                marginal = prices.get("marginal") or {}
+                try:
+                    buy_dollars = float(marginal.get("import"))
+                    sell_dollars = float(marginal.get("export"))
+                except (TypeError, ValueError):
+                    return None
+                if (
+                    not math.isfinite(buy_dollars)
+                    or not math.isfinite(sell_dollars)
+                    or buy_dollars < 0
+                    or sell_dollars < 0
+                ):
+                    return None
+                return (buy_dollars, sell_dollars)
             try:
                 buy_cents = float((prices.get("import") or {}).get("c_per_kwh"))
                 sell_cents = float((prices.get("export") or {}).get("c_per_kwh"))

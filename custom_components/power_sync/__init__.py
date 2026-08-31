@@ -27615,6 +27615,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if success:
                 entry_data["goodwe_curtailment_state"] = "normal"
                 entry_data.pop("_last_goodwe_curtailment_reapply", None)
+                entry_data.pop("_last_goodwe_curtailment_effect_retry", None)
+                entry_data.pop("_goodwe_curtailment_effect_retry_used", None)
                 async_dispatcher_send(
                     hass, f"power_sync_curtailment_updated_{entry.entry_id}"
                 )
@@ -27744,6 +27746,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _last_effect_retry = entry_data.get(
                     "_last_goodwe_curtailment_effect_retry", 0
                 )
+                _effect_retry_used = bool(
+                    entry_data.get("_goodwe_curtailment_effect_retry_used", False)
+                )
                 _now = _time_mod.monotonic()
                 _elapsed_since_reapply = _now - _last_reapply
                 _elapsed_since_effect_retry = _now - _last_effect_retry
@@ -27780,21 +27785,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     except (TypeError, ValueError, OverflowError):
                         pass
 
-                _needs_reapply = (
+                _needs_effect_retry = (
                     current_state == "curtailed"
-                    and (
-                        _elapsed_since_reapply >= _goodwe_reapply_interval
-                        or (
-                            _fresh_material_export
-                            and _elapsed_since_effect_retry
-                            >= _goodwe_effect_retry_interval
-                        )
-                    )
+                    and _fresh_material_export
+                    and not _effect_retry_used
+                    and _elapsed_since_effect_retry >= _goodwe_effect_retry_interval
+                )
+                _needs_reapply = current_state == "curtailed" and (
+                    _elapsed_since_reapply >= _goodwe_reapply_interval
+                    or _needs_effect_retry
                 )
 
                 if current_state != "curtailed" or _needs_reapply:
                     if current_state == "curtailed":
-                        if _fresh_material_export:
+                        if _needs_effect_retry:
                             _LOGGER.info(
                                 "GoodWe curtailment RE-APPLY: fresh direct telemetry still reports material export, %ds since last effect retry",
                                 int(_elapsed_since_effect_retry),
@@ -27816,6 +27820,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         entry_data["goodwe_curtailment_state"] = "curtailed"
                         entry_data["_last_goodwe_curtailment_reapply"] = _now
                         entry_data["_last_goodwe_curtailment_effect_retry"] = _now
+                        if current_state != "curtailed":
+                            entry_data.pop("_goodwe_curtailment_effect_retry_used", None)
+                        elif _needs_effect_retry:
+                            entry_data["_goodwe_curtailment_effect_retry_used"] = True
                     else:
                         entry_data["goodwe_curtailment_state"] = "pending"
                         _LOGGER.error("GoodWe curtail() failed")
@@ -27834,6 +27842,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         entry_data["goodwe_curtailment_state"] = "normal"
                         entry_data.pop("_last_goodwe_curtailment_reapply", None)
                         entry_data.pop("_last_goodwe_curtailment_effect_retry", None)
+                        entry_data.pop("_goodwe_curtailment_effect_retry_used", None)
                     else:
                         entry_data["goodwe_curtailment_state"] = "pending"
                         _LOGGER.error("GoodWe restore() failed")

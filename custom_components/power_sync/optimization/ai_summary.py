@@ -1177,7 +1177,7 @@ class AISummaryService:
                 "configured": True,
                 "state": "ready",
                 "summary": self._cache.summary,
-                "last_error": None,
+                "last_error": self._last_error,
             }
         if self._cache:
             return {

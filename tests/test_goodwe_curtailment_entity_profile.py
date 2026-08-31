@@ -120,6 +120,7 @@ def _run_goodwe_curtailment(
     last_reapply: float | None = None,
     last_effect_retry: float | None = None,
     repeat: int = 1,
+    monotonic_values: tuple[float, ...] | None = None,
 ):
     """Run the real handler against a fake coordinator and return its state."""
     entry_data: dict[str, Any] = {"goodwe_curtailment_state": initial_state}
@@ -165,7 +166,14 @@ def _run_goodwe_curtailment(
         "timedelta": timedelta,
         "math": math,
     }
-    exec(_nested_function_source("handle_goodwe_curtailment"), namespace)
+    handler_source = _nested_function_source("handle_goodwe_curtailment")
+    if monotonic_values is not None:
+        ticks = iter(monotonic_values)
+        namespace["_test_time"] = SimpleNamespace(monotonic=lambda: next(ticks))
+        handler_source = handler_source.replace(
+            "import time as _time_mod", "_time_mod = _test_time"
+        )
+    exec(handler_source, namespace)
     for _ in range(repeat):
         asyncio.run(
             namespace["handle_goodwe_curtailment"](
@@ -250,6 +258,31 @@ def test_direct_profile_retries_fresh_material_export_before_periodic_interval()
     assert entry_data["goodwe_curtailment_state"] == "curtailed"
     assert entry_data["_last_goodwe_curtailment_reapply"] > 0
     assert entry_data["_last_goodwe_curtailment_effect_retry"] > 0
+    assert logger.levels("fresh direct telemetry still reports material export") == [
+        "info"
+    ]
+
+
+def test_direct_profile_uses_only_one_early_effect_retry_per_episode():
+    """#29: persistent physical export must not produce a five-minute command loop."""
+    controller = _Controller()
+    entry_data, logger, _dispatches = _run_goodwe_curtailment(
+        controller,
+        feedin_price=6.0,
+        initial_state="curtailed",
+        coordinator_data={
+            "grid_power": -4.95,
+            "last_update": datetime.now(timezone.utc),
+        },
+        last_update_success=True,
+        last_reapply=1000.0,
+        last_effect_retry=0.0,
+        repeat=2,
+        monotonic_values=(1000.0, 1061.0),
+    )
+
+    assert controller.calls == ["curtail"]
+    assert entry_data["_goodwe_curtailment_effect_retry_used"] is True
     assert logger.levels("fresh direct telemetry still reports material export") == [
         "info"
     ]

@@ -938,12 +938,13 @@ SENSOR_TYPE_SAVING_SESSION_ACTIVE = "saving_session_active"
 SENSOR_TYPE_NEXT_SAVING_SESSION = "next_saving_session"
 SENSOR_TYPE_SAVING_SESSION_RATE = "saving_session_rate"
 
-# Flow Power state options with export rates
+# Flow Power NEM-region options. Plan rates are selected independently by the
+# explicit plan/plan-region contract and must not be inferred from this label.
 FLOW_POWER_STATES = {
-    "NSW1": "New South Wales (45c export)",
-    "VIC1": "Victoria (35c export)",
-    "QLD1": "Queensland (45c export)",
-    "SA1": "South Australia (45c export)",
+    "NSW1": "New South Wales",
+    "VIC1": "Victoria",
+    "QLD1": "Queensland",
+    "SA1": "South Australia",
     "TAS1": "Tasmania",
 }
 

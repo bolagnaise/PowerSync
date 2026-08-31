@@ -3604,9 +3604,13 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
         this._meta = {
           cacheHit: true,
           stale: status.state === 'stale',
+          refreshError: status.last_error?.code || null,
         };
         this._state = 'content';
         this._expanded = false;
+      } else if (status.last_error) {
+        this._errorCode = status.last_error.code || 'request_failed';
+        this._state = 'error';
       } else if (status.state === 'optimizer_unavailable' || status.state === 'plan_stale') {
         this._errorCode = status.last_error?.code || status.state;
         this._state = 'unavailable';

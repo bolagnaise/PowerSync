@@ -737,6 +737,20 @@ def test_malformed_refresh_keeps_last_valid_summary_as_fallback():
     status = service.status(snapshot=snapshot, provider="gemini", api_key="key")
     assert status["state"] == "ready"
     assert status["summary"] == first["summary"]
+    assert status["last_error"] == {
+        "code": "invalid_provider_response",
+        "message": "The AI provider returned an invalid structured response.",
+    }
+
+
+def test_timeout_status_is_rendered_after_the_ha_card_reloads():
+    """A retained provider error must not become a generic ready state on reload."""
+    source = (ROOT / "custom_components" / "power_sync" / "frontend" / "power-sync-strategy.js").read_text()
+    load_status = source[source.index("async _loadStatusOnce()"):source.index("  _retryStatus()")]
+
+    assert "else if (status.last_error)" in load_status
+    assert "this._errorCode = status.last_error.code || 'request_failed';" in load_status
+    assert "refreshError: status.last_error?.code || null" in load_status
 
 
 def test_http_views_register_explicit_generation_and_never_return_key():

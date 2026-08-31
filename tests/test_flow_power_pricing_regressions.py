@@ -84,6 +84,60 @@ def test_cost_tracking_uses_live_provider_contract_without_tariff_schedule():
         )
 
 
+def test_cost_tracking_uses_flow_marginal_contract_prices():
+    """The Flow plan contract is already in dollars, not the legacy cents shape."""
+    coordinator_path = COMPONENT_ROOT / "coordinator.py"
+    namespace = {
+        "Any": object,
+        "DOMAIN": "power_sync",
+        "HomeAssistant": object,
+        "_LOGGER": SimpleNamespace(debug=lambda *args, **kwargs: None),
+        "math": math,
+    }
+    exec(
+        "from __future__ import annotations\n"
+        + _function_source(coordinator_path, "_get_current_prices"),
+        namespace,
+    )
+    contract = {
+        "prices": {
+            "unit": "dollars_per_kwh",
+            "settlement": {"import": 0.21, "export": 0.10},
+            "marginal": {"import": 0.21, "export": 0.30},
+        }
+    }
+    hass = SimpleNamespace(
+        data={
+            "power_sync": {
+                "flow-entry": {
+                    "optimization_coordinator": SimpleNamespace(
+                        get_provider_contract=lambda: contract
+                    )
+                }
+            }
+        }
+    )
+
+    assert namespace["_get_current_prices"](hass, "flow-entry") == (0.21, 0.30)
+
+
+def test_flow_nem_region_labels_do_not_claim_a_plan_rate():
+    spec = importlib.util.spec_from_file_location(
+        "power_sync_flow_nem_regions", COMPONENT_ROOT / "const.py"
+    )
+    assert spec and spec.loader
+    const = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(const)
+
+    assert const.FLOW_POWER_STATES == {
+        "NSW1": "New South Wales",
+        "VIC1": "Victoria",
+        "QLD1": "Queensland",
+        "SA1": "South Australia",
+        "TAS1": "Tasmania",
+    }
+
+
 def test_flow_power_default_happy_hour_excludes_2130():
     """Regression: the legacy 19:30 default excludes the 21:30 slot."""
     spec = importlib.util.spec_from_file_location(
