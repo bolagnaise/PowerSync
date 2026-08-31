@@ -140,6 +140,13 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_OPTIMIZATION_LOAD_ENTITY = "optimization_load_entity"
     const_module.CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY = "optimization_planned_ev_load_entity"
     const_module.CONF_OPTIMIZATION_MANUAL_RESERVE = "optimization_manual_reserve"
+    const_module.CONF_OPTIMIZATION_MIN_EXPORT_PRICE = "optimization_min_export_price"
+    const_module.CONF_OPTIMIZATION_BACKUP_ENERGY_WH = "optimization_backup_energy_wh"
+    const_module.CONF_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W = (
+        "optimization_backup_energy_max_power_w"
+    )
+    const_module.CONF_OPTIMIZATION_BACKUP_ENERGY_START = "optimization_backup_energy_start"
+    const_module.CONF_OPTIMIZATION_BACKUP_ENERGY_END = "optimization_backup_energy_end"
     const_module.CONF_GENERIC_CHARGER_POWER_ENTITY = "generic_charger_power_entity"
     const_module.DEFAULT_SOLAR_FORECAST_PROVIDER = "solcast"
     const_module.DEFAULT_SOLCAST_ESTIMATE_TYPE = "estimate"
@@ -155,6 +162,12 @@ def _install_power_sync_stubs() -> None:
     const_module.SOLCAST_ESTIMATE10 = "estimate10"
     const_module.SOLCAST_ESTIMATE90 = "estimate90"
     const_module.DEFAULT_OPTIMIZATION_INTERVAL = 5
+    const_module.DEFAULT_OPTIMIZATION_MIN_EXPORT_PRICE = 0.0
+    const_module.DEFAULT_OPTIMIZATION_BACKUP_ENERGY_WH = 0
+    const_module.DEFAULT_OPTIMIZATION_BACKUP_ENERGY_MAX_POWER_W = 3600
+    const_module.DEFAULT_OPTIMIZATION_BACKUP_ENERGY_START = "18:00"
+    const_module.DEFAULT_OPTIMIZATION_BACKUP_ENERGY_END = "06:00"
+    const_module.normalize_grid_charge_blackout_windows = lambda value: []
     const_module.supports_no_idle_mode_provider = lambda provider: provider == "flow_power"
     const_module.FLOW_POWER_BENCHMARK = 1.7
     const_module.FLOW_POWER_DEFAULT_BASE_RATE = 34.0
@@ -1237,7 +1250,7 @@ def test_amber_dynamic_import_forecast_honors_configured_forecast_type(opt_modul
     assert coordinator._last_display_import_prices == pytest.approx([0.65] * 12)
 
 
-def test_amber_dynamic_import_missing_retail_price_does_not_use_wholesale(opt_module):
+def test_amber_dynamic_import_current_without_advanced_price_uses_settled_retail(opt_module):
     start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
     current = [
         _dynamic_price_entry(
@@ -1269,8 +1282,8 @@ def test_amber_dynamic_import_missing_retail_price_does_not_use_wholesale(opt_mo
 
     import_prices, _export_prices = asyncio.run(coordinator._get_price_forecast())
 
-    assert import_prices == pytest.approx([0.30] * 18)
-    assert coordinator._last_display_import_prices == pytest.approx([0.30] * 18)
+    assert import_prices == pytest.approx([0.04] * 6 + [0.30] * 12)
+    assert coordinator._last_display_import_prices == pytest.approx(import_prices)
 
 
 def test_amber_dynamic_export_forecast_uses_advanced_price_predicted(opt_module):
@@ -1344,7 +1357,7 @@ def test_amber_dynamic_export_forecast_honors_configured_forecast_type(opt_modul
     assert coordinator._last_display_export_prices == pytest.approx([0.65] * 12)
 
 
-def test_amber_dynamic_export_missing_retail_price_does_not_use_wholesale(opt_module):
+def test_amber_dynamic_export_current_without_advanced_price_uses_settled_retail(opt_module):
     start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
     current = [
         _dynamic_price_entry(
@@ -1392,8 +1405,69 @@ def test_amber_dynamic_export_missing_retail_price_does_not_use_wholesale(opt_mo
 
     _import_prices, export_prices = asyncio.run(coordinator._get_price_forecast())
 
-    assert export_prices == pytest.approx([0.30] * 18)
-    assert coordinator._last_display_export_prices == pytest.approx([0.30] * 18)
+    assert export_prices == pytest.approx([0.04] * 6 + [0.30] * 12)
+    assert coordinator._last_display_export_prices == pytest.approx(export_prices)
+
+
+def test_amber_dynamic_export_current_settled_price_preserves_current_slot(opt_module):
+    """Regression for ticket-24: do not forward-fill the next forecast."""
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    current = [
+        _dynamic_price_entry(
+            start,
+            30.0,
+            "general",
+            interval_type="CurrentInterval",
+            advanced_price={"predicted": 30.0},
+        ),
+        _dynamic_price_entry(
+            start,
+            0.23485,
+            "feedIn",
+            interval_type="CurrentInterval",
+        ),
+    ]
+    forecast = [
+        _dynamic_price_entry(
+            start + timedelta(minutes=30),
+            30.0,
+            "general",
+            advanced_price={"predicted": 30.0},
+        ),
+        _dynamic_price_entry(
+            start + timedelta(minutes=30),
+            0.47,
+            "feedIn",
+            advanced_price={"predicted": -0.47},
+        ),
+        _dynamic_price_entry(
+            start + timedelta(minutes=60),
+            30.0,
+            "general",
+            advanced_price={"predicted": 30.0},
+        ),
+        _dynamic_price_entry(
+            start + timedelta(minutes=60),
+            0.41,
+            "feedIn",
+            advanced_price={"predicted": -0.41},
+        ),
+    ]
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+        current=current,
+        horizon_hours=1.5,
+    )
+
+    import_prices, export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert import_prices == pytest.approx([0.30] * 18)
+    assert export_prices == pytest.approx(
+        [0.0023485] * 6 + [0.0047] * 6 + [0.0041] * 6
+    )
+    assert coordinator._last_display_export_prices == pytest.approx(export_prices)
 
 
 def test_non_amber_dynamic_import_forecast_still_uses_per_kwh(opt_module):

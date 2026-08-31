@@ -14190,7 +14190,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             price_cents = None
 
         if price_cents is None:
-            return None
+            # Amber can omit advancedPrice after the active interval is
+            # finalised.  Its perKwh is still the customer's settled retail
+            # price; dropping it would let the gap filler assign a later
+            # forecast to the current slot.
+            if interval_type == "CurrentInterval":
+                price_cents = entry.get("perKwh")
+                if price_cents is None:
+                    return None
+            else:
+                return None
         return price_cents / 100
 
     @staticmethod
@@ -14225,7 +14234,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             price_cents = None
 
         if price_cents is None:
-            return None
+            # See _dynamic_import_price_dollar: CurrentInterval.perKwh is the
+            # valid settled feed-in retail price when advancedPrice is absent.
+            if interval_type == "CurrentInterval":
+                price_cents = entry.get("perKwh")
+                if price_cents is None:
+                    return None
+            else:
+                return None
         return price_cents / 100
 
     def _epex_price_entity_id(self, conf_key: str) -> str | None:
