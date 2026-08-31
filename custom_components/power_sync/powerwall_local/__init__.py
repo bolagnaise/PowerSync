@@ -13,7 +13,8 @@ The RSA public key must be pre-registered via the pairing flow (see
 DC isolator as Tesla's physical-presence proof.
 
 Protobuf schema and signing approach derived from jasonacox/pypowerwall
-(MIT License). Compiled descriptor ships in ``tedapi_combined_pb2.py``.
+(MIT License). Message definitions come from the ``tesla-protocol`` package
+(``tesla_protocol.energy_device``).
 """
 
 from .client import PowerwallLocalClient, PowerwallVersion

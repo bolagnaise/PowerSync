@@ -17,6 +17,12 @@ from unittest.mock import AsyncMock
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from tesla_protocol.energy_device import (
+    authorization_types_pb2,
+    common_api_pb2,
+    device_pb2,
+    transport_pb2,
+)
 
 
 ROOT = (
@@ -41,7 +47,6 @@ sys.modules.setdefault(_LOCAL_PKG, local_pkg)
 transport_mod = importlib.import_module(f"{_LOCAL_PKG}.transport")
 client_mod = importlib.import_module(f"{_LOCAL_PKG}.client")
 host_mod = importlib.import_module(f"{_PKG}.powerwall_host")
-combined_pb2 = importlib.import_module(f"{_LOCAL_PKG}.tedapi_combined_pb2")
 tesla_pb2 = importlib.import_module(f"{_LOCAL_PKG}.tesla_local_pb2")
 
 
@@ -182,7 +187,7 @@ def test_existing_gateway_host_is_migrated_on_client_build(
     else:
         assert entry.data["powerwall_local_ip"] == expected_host
 def test_common_api_schema_uses_published_field_numbers_without_wifi_config():
-    common_fields = combined_pb2.CommonMessages.DESCRIPTOR.fields_by_name
+    common_fields = common_api_pb2.CommonMessages.DESCRIPTOR.fields_by_name
     assert common_fields["get_system_info_request"].number == 2
     assert common_fields["get_system_info_response"].number == 3
     assert common_fields["get_networking_status_request"].number == 22
@@ -191,7 +196,7 @@ def test_common_api_schema_uses_published_field_numbers_without_wifi_config():
     assert common_fields["check_internet_response"].number == 31
 
     networking_fields = (
-        combined_pb2.CommonAPIGetNetworkingStatusResponse.DESCRIPTOR.fields_by_name
+        common_api_pb2.CommonAPIGetNetworkingStatusResponse.DESCRIPTOR.fields_by_name
     )
     assert set(networking_fields) == {"wifi", "eth", "gsm"}
     assert 1 not in {
@@ -207,15 +212,15 @@ async def test_common_api_diagnostics_are_read_only_and_credential_free():
 
     async def post_v1r(envelope_bytes: bytes, din: str):
         assert din == "DIN--1"
-        request = combined_pb2.MessageEnvelope()
+        request = transport_pb2.MessageEnvelope()
         request.ParseFromString(envelope_bytes)
-        assert request.deliveryChannel == combined_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
-        assert request.sender.authorizedClient == 1
+        assert request.delivery_channel == transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        assert request.sender.authorized_client == 1
         assert request.recipient.din == "DIN--1"
         request_name = request.common.WhichOneof("message")
         observed_requests.append(request_name)
 
-        reply = combined_pb2.MessageEnvelope()
+        reply = transport_pb2.MessageEnvelope()
         if request_name == "get_system_info_request":
             response = reply.common.get_system_info_response
             response.device_id.part_number = "1234567-00-A"
@@ -223,7 +228,7 @@ async def test_common_api_diagnostics_are_read_only_and_credential_free():
             response.din.value = "DIN--1"
             response.firmare_version.version = "24.44.0"
             response.firmare_version.githash = b"\xaa\xbb"
-            response.device_type = combined_pb2.DEVICE_TYPE_SITECONTROLLER
+            response.device_type = device_pb2.DEVICE_TYPE_SITECONTROLLER
         elif request_name == "get_networking_status_request":
             wifi = reply.common.get_networking_status_response.wifi
             wifi.enabled = True
@@ -327,10 +332,10 @@ async def test_schedule_manual_backup_cancels_prior_and_sets_full_priority(monke
     monkeypatch.setattr(transport_mod.time, "time", lambda: 1_700_000_000)
 
     async def post_v1r(envelope_bytes: bytes, din: str):
-        request = combined_pb2.MessageEnvelope()
+        request = transport_pb2.MessageEnvelope()
         request.ParseFromString(envelope_bytes)
         captured["request"] = request
-        reply = combined_pb2.MessageEnvelope()
+        reply = transport_pb2.MessageEnvelope()
         reply.teg.schedule_manual_backup_event_response.SetInParent()
         return transport_mod.TEDAPIResponse(True, reply.SerializeToString())
 
@@ -339,7 +344,7 @@ async def test_schedule_manual_backup_cancels_prior_and_sets_full_priority(monke
     assert await transport.schedule_manual_backup("DIN--1", 3600) is True
     transport.cancel_manual_backup.assert_awaited_once_with("DIN--1")
     request = captured["request"]
-    assert isinstance(request, combined_pb2.MessageEnvelope)
+    assert isinstance(request, transport_pb2.MessageEnvelope)
     info = request.teg.schedule_manual_backup_event_request.scheduling_info
     assert info.start_time.seconds == 1_700_000_000
     assert info.duration_seconds == 3600
@@ -351,7 +356,7 @@ async def test_local_backup_events_are_decoded(monkeypatch):
     transport = _transport_without_key()
     monkeypatch.setattr(transport_mod.time, "time", lambda: 1_700_000_100)
 
-    reply = combined_pb2.MessageEnvelope()
+    reply = transport_pb2.MessageEnvelope()
     manual = reply.teg.get_backup_events_response.manual_backup_event.scheduling_info
     manual.start_time.seconds = 1_700_000_000
     manual.duration_seconds = 600
@@ -359,9 +364,10 @@ async def test_local_backup_events_are_decoded(monkeypatch):
     scheduled = reply.teg.get_backup_events_response.backup_events.add()
     scheduled.id = "event-1"
     scheduled.name = "Storm"
-    scheduled.scheduling_info.start_time.seconds = 1_700_001_000
-    scheduled.scheduling_info.duration_seconds = 300
-    scheduled.scheduling_info.priority = 10
+    # `sheduling_info` (sic) — misspelled upstream in BackupEvent.
+    scheduled.sheduling_info.start_time.seconds = 1_700_001_000
+    scheduled.sheduling_info.duration_seconds = 300
+    scheduled.sheduling_info.priority = 10
     transport.post_v1r = AsyncMock(
         return_value=transport_mod.TEDAPIResponse(True, reply.SerializeToString())
     )
@@ -391,17 +397,17 @@ async def test_local_backup_events_are_decoded(monkeypatch):
 @async_test
 async def test_authorized_clients_are_read_and_normalized_locally():
     transport = _transport_without_key()
-    reply = combined_pb2.MessageEnvelope()
+    reply = transport_pb2.MessageEnvelope()
     response = reply.authorization.list_authorized_clients_response
     response.enable_line_switch_off = True
     record = response.clients.add()
     record.public_key = b"public-key"
-    record.state = combined_pb2.AUTHORIZED_STATE_VERIFIED
-    record.type = combined_pb2.AUTHORIZED_CLIENT_TYPE_CUSTOMER_MOBILE_APP
+    record.state = authorization_types_pb2.AUTHORIZED_STATE_VERIFIED
+    record.type = authorization_types_pb2.AUTHORIZED_CLIENT_TYPE_CUSTOMER_MOBILE_APP
     record.description = "PowerSync Local Client"
-    record.key_type = combined_pb2.AUTHORIZED_KEY_TYPE_RSA
-    record.roles.append(combined_pb2.AUTHORIZATION_ROLE_CUSTOMER)
-    record.verification = combined_pb2.AUTHORIZED_VERIFICATION_TYPE_PRESENCE_PROOF
+    record.key_type = authorization_types_pb2.AUTHORIZED_KEY_TYPE_RSA
+    record.roles.append(authorization_types_pb2.AUTHORIZATION_ROLE_CUSTOMER)
+    record.verification = authorization_types_pb2.AUTHORIZED_VERIFICATION_TYPE_PRESENCE_PROOF
     record.added_time.seconds = 1234
     transport.post_v1r = AsyncMock(
         return_value=transport_mod.TEDAPIResponse(True, reply.SerializeToString())

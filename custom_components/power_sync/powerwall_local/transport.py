@@ -30,7 +30,14 @@ import aiohttp
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from . import tedapi_combined_pb2 as combined_pb2
+from tesla_protocol.energy_device import (
+    authorization_types_pb2,
+    device_pb2,
+    filestore_api_pb2,
+    signed_message_pb2,
+    transport_pb2,
+)
+
 from .exceptions import (
     PowerwallLocalError,
     PowerwallSignatureError,
@@ -237,8 +244,8 @@ class TEDAPIv1rTransport:
 
     async def post_v1r(self, envelope_bytes: bytes, din: str) -> TEDAPIResponse:
         """Wrap an envelope in a signed ``RoutableMessage`` and POST it."""
-        routable = combined_pb2.RoutableMessage()
-        routable.to_destination.domain = combined_pb2.DOMAIN_ENERGY_DEVICE
+        routable = signed_message_pb2.RoutableMessage()
+        routable.to_destination.domain = signed_message_pb2.DOMAIN_ENERGY_DEVICE
         routable.protobuf_message_as_bytes = envelope_bytes
         routable.uuid = str(uuid.uuid4()).encode()
 
@@ -278,19 +285,19 @@ class TEDAPIv1rTransport:
         except aiohttp.ClientError as err:
             raise PowerwallUnreachableError(str(err)) from err
 
-        resp_msg = combined_pb2.RoutableMessage()
+        resp_msg = signed_message_pb2.RoutableMessage()
         try:
             resp_msg.ParseFromString(raw)
         except Exception as err:
             raise PowerwallLocalError(f"Malformed v1r response: {err}") from err
 
         fault = resp_msg.signed_message_status.message_fault
-        if fault != combined_pb2.MESSAGEFAULT_ERROR_NONE:
-            fault_name = combined_pb2.MessageFault_E.Name(fault)
+        if fault != signed_message_pb2.MESSAGEFAULT_ERROR_NONE:
+            fault_name = signed_message_pb2.MessageFault_E.Name(fault)
             _LOGGER.warning("v1r response fault: %s (code %s)", fault_name, fault)
             if fault in (
-                combined_pb2.MESSAGEFAULT_ERROR_UNKNOWN_KEY_ID,
-                combined_pb2.MESSAGEFAULT_ERROR_INACTIVE_KEY,
+                signed_message_pb2.MESSAGEFAULT_ERROR_UNKNOWN_KEY_ID,
+                signed_message_pb2.MESSAGEFAULT_ERROR_INACTIVE_KEY,
             ):
                 raise PowerwallSignatureError(
                     f"Gateway rejected our RSA key ({fault_name}) — re-pairing required"
@@ -313,8 +320,8 @@ class TEDAPIv1rTransport:
         ``ttl_seconds`` overrides the default 12 s TTL. Use 300 for cloud
         relay calls where gateway round-trip latency is higher.
         """
-        routable = combined_pb2.RoutableMessage()
-        routable.to_destination.domain = combined_pb2.DOMAIN_ENERGY_DEVICE
+        routable = signed_message_pb2.RoutableMessage()
+        routable.to_destination.domain = signed_message_pb2.DOMAIN_ENERGY_DEVICE
         routable.protobuf_message_as_bytes = envelope_bytes
         routable.uuid = str(uuid.uuid4()).encode()
 
@@ -383,23 +390,22 @@ class TEDAPIv1rTransport:
 
     async def read_config(self, din: str) -> dict[str, Any] | None:
         """Read ``config.json`` from the gateway via FileStore readFileRequest."""
-        msg = combined_pb2.Message()
-        envelope = msg.message
-        envelope.deliveryChannel = combined_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
-        envelope.sender.authorizedClient = 1
+        envelope = transport_pb2.MessageEnvelope()
+        envelope.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        envelope.sender.authorized_client = 1
         envelope.recipient.din = din
-        req = envelope.filestore.readFileRequest
-        req.domain = combined_pb2.FILE_STORE_API_DOMAIN_CONFIG_JSON
+        req = envelope.filestore.read_file_request
+        req.domain = filestore_api_pb2.FILE_STORE_API_DOMAIN_CONFIG_JSON
         req.name = "config.json"
 
         resp = await self.post_v1r(envelope.SerializeToString(), din)
         if not resp.ok or not resp.inner_bytes:
             return None
         try:
-            env = combined_pb2.MessageEnvelope()
+            env = transport_pb2.MessageEnvelope()
             env.ParseFromString(resp.inner_bytes)
             if env.HasField("filestore"):
-                blob = env.filestore.readFileResponse.file.blob
+                blob = env.filestore.read_file_response.file.blob
                 return json.loads(blob.decode("utf-8"))
         except Exception as err:
             _LOGGER.debug("read_config parse error: %s", err)
@@ -411,13 +417,12 @@ class TEDAPIv1rTransport:
         ``updates`` keys use dotted paths, eg ``site_info.default_real_mode``.
         Failed optimistic-lock writes return False; caller may retry.
         """
-        read_msg = combined_pb2.Message()
-        read_env = read_msg.message
-        read_env.deliveryChannel = combined_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
-        read_env.sender.authorizedClient = 1
+        read_env = transport_pb2.MessageEnvelope()
+        read_env.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        read_env.sender.authorized_client = 1
         read_env.recipient.din = din
-        r = read_env.filestore.readFileRequest
-        r.domain = combined_pb2.FILE_STORE_API_DOMAIN_CONFIG_JSON
+        r = read_env.filestore.read_file_request
+        r.domain = filestore_api_pb2.FILE_STORE_API_DOMAIN_CONFIG_JSON
         r.name = "config.json"
 
         read_resp = await self.post_v1r(read_env.SerializeToString(), din)
@@ -425,12 +430,12 @@ class TEDAPIv1rTransport:
             return False
 
         try:
-            env = combined_pb2.MessageEnvelope()
+            env = transport_pb2.MessageEnvelope()
             env.ParseFromString(read_resp.inner_bytes)
             if not env.HasField("filestore"):
                 return False
-            blob = env.filestore.readFileResponse.file.blob
-            config_hash = env.filestore.readFileResponse.hash
+            blob = env.filestore.read_file_response.file.blob
+            config_hash = env.filestore.read_file_response.hash
             config = json.loads(blob.decode("utf-8"))
         except Exception as err:
             _LOGGER.error("write_config read-phase parse error: %s", err)
@@ -445,13 +450,12 @@ class TEDAPIv1rTransport:
                 node = node[k]
             node[keys[-1]] = value
 
-        write_msg = combined_pb2.Message()
-        w_env = write_msg.message
-        w_env.deliveryChannel = combined_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
-        w_env.sender.authorizedClient = 1
+        w_env = transport_pb2.MessageEnvelope()
+        w_env.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        w_env.sender.authorized_client = 1
         w_env.recipient.din = din
-        update_req = w_env.filestore.updateFileRequest
-        update_req.domain = combined_pb2.FILE_STORE_API_DOMAIN_CONFIG_JSON
+        update_req = w_env.filestore.update_file_request
+        update_req.domain = filestore_api_pb2.FILE_STORE_API_DOMAIN_CONFIG_JSON
         update_req.file.name = "config.json"
         update_req.file.blob = json.dumps(config).encode("utf-8")
         update_req.hash = config_hash
@@ -460,7 +464,7 @@ class TEDAPIv1rTransport:
         if not write_resp.ok or not write_resp.inner_bytes:
             return False
         try:
-            wenv = combined_pb2.MessageEnvelope()
+            wenv = transport_pb2.MessageEnvelope()
             wenv.ParseFromString(write_resp.inner_bytes)
             return wenv.HasField("filestore")
         except Exception:
@@ -479,8 +483,8 @@ class TEDAPIv1rTransport:
         This is the real islanding command — it physically opens or closes
         the grid contactor. Uses the ``teslapower`` proto schema (from
         pypowerwall's ``tesla_pb2.py``) because it defines
-        ``setIslandModeRequest`` at field 3 in ``TEGMessages``, which the
-        ``tedapi_combined`` proto didn't include. The wire format is
+        ``setIslandModeRequest`` at field 3 in ``TEGMessages``, which this
+        integration's own energy_device schema didn't include. The wire format is
         identical: same field numbers, same message layout. The gateway
         processes it the same way regardless of which proto package
         generated the bytes.
@@ -603,9 +607,9 @@ class TEDAPIv1rTransport:
         # is harmless; continue and let the schedule response decide success.
         await self.cancel_manual_backup(din)
 
-        env = combined_pb2.MessageEnvelope()
-        env.deliveryChannel = combined_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
-        env.sender.authorizedClient = 1
+        env = transport_pb2.MessageEnvelope()
+        env.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        env.sender.authorized_client = 1
         env.recipient.din = din
         teg_req = env.teg.schedule_manual_backup_event_request
         teg_req.scheduling_info.start_time.seconds = int(time.time())
@@ -616,7 +620,7 @@ class TEDAPIv1rTransport:
         if not resp.ok or not resp.inner_bytes:
             return False
         try:
-            reply = combined_pb2.MessageEnvelope()
+            reply = transport_pb2.MessageEnvelope()
             reply.ParseFromString(resp.inner_bytes)
             return reply.HasField("teg") and reply.teg.HasField(
                 "schedule_manual_backup_event_response"
@@ -626,9 +630,9 @@ class TEDAPIv1rTransport:
 
     async def cancel_manual_backup(self, din: str) -> bool:
         """Cancel an active manual backup event."""
-        env = combined_pb2.MessageEnvelope()
-        env.deliveryChannel = combined_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
-        env.sender.authorizedClient = 1
+        env = transport_pb2.MessageEnvelope()
+        env.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        env.sender.authorized_client = 1
         env.recipient.din = din
         env.teg.cancel_manual_backup_event_request.SetInParent()
 
@@ -636,7 +640,7 @@ class TEDAPIv1rTransport:
         if not resp.ok or not resp.inner_bytes:
             return False
         try:
-            reply = combined_pb2.MessageEnvelope()
+            reply = transport_pb2.MessageEnvelope()
             reply.ParseFromString(resp.inner_bytes)
             return reply.HasField("teg") and reply.teg.HasField(
                 "cancel_manual_backup_event_response"
@@ -646,9 +650,9 @@ class TEDAPIv1rTransport:
 
     async def get_backup_events(self, din: str) -> dict[str, Any] | None:
         """Return the active manual backup and scheduled backup events."""
-        env = combined_pb2.MessageEnvelope()
-        env.deliveryChannel = combined_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
-        env.sender.authorizedClient = 1
+        env = transport_pb2.MessageEnvelope()
+        env.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        env.sender.authorized_client = 1
         env.recipient.din = din
         env.teg.get_backup_events_request.SetInParent()
 
@@ -656,7 +660,7 @@ class TEDAPIv1rTransport:
         if not resp.ok or not resp.inner_bytes:
             return None
         try:
-            reply = combined_pb2.MessageEnvelope()
+            reply = transport_pb2.MessageEnvelope()
             reply.ParseFromString(resp.inner_bytes)
             if not reply.HasField("teg") or not reply.teg.HasField(
                 "get_backup_events_response"
@@ -678,9 +682,11 @@ class TEDAPIv1rTransport:
                 {
                     "id": event.id,
                     "name": event.name,
-                    "start_time": event.scheduling_info.start_time.seconds,
-                    "duration_seconds": event.scheduling_info.duration_seconds,
-                    "priority": event.scheduling_info.priority,
+                    # `sheduling_info` (sic) — the field is misspelled upstream
+                    # in tesla_protocol.energy_device.teg_api_pb2.BackupEvent.
+                    "start_time": event.sheduling_info.start_time.seconds,
+                    "duration_seconds": event.sheduling_info.duration_seconds,
+                    "priority": event.sheduling_info.priority,
                 }
                 for event in events.backup_events
             ]
@@ -696,9 +702,9 @@ class TEDAPIv1rTransport:
         response_field: str,
     ) -> Any | None:
         """Send a read-only Common API request and return its typed response."""
-        env = combined_pb2.MessageEnvelope()
-        env.deliveryChannel = combined_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
-        env.sender.authorizedClient = 1
+        env = transport_pb2.MessageEnvelope()
+        env.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        env.sender.authorized_client = 1
         env.recipient.din = din
         getattr(env.common, request_field).SetInParent()
 
@@ -706,7 +712,7 @@ class TEDAPIv1rTransport:
         if not resp.ok or not resp.inner_bytes:
             return None
         try:
-            reply = combined_pb2.MessageEnvelope()
+            reply = transport_pb2.MessageEnvelope()
             reply.ParseFromString(resp.inner_bytes)
             if not reply.HasField("common") or not reply.common.HasField(
                 response_field
@@ -737,7 +743,7 @@ class TEDAPIv1rTransport:
                 else None
             ),
             "device_type": _enum_suffix(
-                combined_pb2.DeviceType,
+                device_pb2.DeviceType,
                 response.device_type,
                 "DEVICE_TYPE_",
             ),
@@ -775,9 +781,9 @@ class TEDAPIv1rTransport:
 
     async def list_authorized_clients(self, din: str) -> dict[str, Any] | None:
         """Read paired authorized clients directly from the gateway over LAN."""
-        env = combined_pb2.MessageEnvelope()
-        env.deliveryChannel = combined_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
-        env.sender.authorizedClient = 1
+        env = transport_pb2.MessageEnvelope()
+        env.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        env.sender.authorized_client = 1
         env.recipient.din = din
         env.authorization.list_authorized_clients_request.SetInParent()
 
@@ -785,7 +791,7 @@ class TEDAPIv1rTransport:
         if not resp.ok or not resp.inner_bytes:
             return None
         try:
-            reply = combined_pb2.MessageEnvelope()
+            reply = transport_pb2.MessageEnvelope()
             reply.ParseFromString(resp.inner_bytes)
             if not reply.HasField("authorization") or not reply.authorization.HasField(
                 "list_authorized_clients_response"
@@ -796,31 +802,31 @@ class TEDAPIv1rTransport:
                 {
                     "public_key": base64.b64encode(record.public_key).decode("ascii"),
                     "state": _enum_suffix(
-                        combined_pb2.AuthorizedState,
+                        authorization_types_pb2.AuthorizedState,
                         record.state,
                         "AUTHORIZED_STATE_",
                     ),
                     "type": _enum_suffix(
-                        combined_pb2.AuthorizedClientType,
+                        authorization_types_pb2.AuthorizedClientType,
                         record.type,
                         "AUTHORIZED_CLIENT_TYPE_",
                     ),
                     "description": record.description,
                     "key_type": _enum_suffix(
-                        combined_pb2.AuthorizedKeyType,
+                        authorization_types_pb2.AuthorizedKeyType,
                         record.key_type,
                         "AUTHORIZED_KEY_TYPE_",
                     ),
                     "roles": [
                         _enum_suffix(
-                            combined_pb2.AuthorizationRole,
+                            authorization_types_pb2.AuthorizationRole,
                             role,
                             "AUTHORIZATION_ROLE_",
                         )
                         for role in record.roles
                     ],
                     "verification": _enum_suffix(
-                        combined_pb2.AuthorizedVerificationType,
+                        authorization_types_pb2.AuthorizedVerificationType,
                         record.verification,
                         "AUTHORIZED_VERIFICATION_TYPE_",
                     ),

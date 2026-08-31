@@ -1,7 +1,7 @@
 """DeviceControllerQuery envelope encoder + response extractor for Fleet API BMS reads.
 
-Hand-rolled protobuf wire encoder. The existing tedapi_combined_pb2 has field 16 bound
-to GraphQLMessages; this query needs field 16 = QueryType, so we can't reuse the
+Hand-rolled protobuf wire encoder. tesla_protocol.energy_device.transport_pb2 has field
+16 bound to GraphQLMessages; this query needs field 16 = QueryType, so we can't reuse the
 compiled module. ~40 lines of varint + length-delimited encoding mirrors the exact same
 wire format as powersync-cc/worker/src/protobuf.ts buildDeviceControllerQueryEnvelope.
 """
@@ -448,7 +448,7 @@ def build_signed_routable_message(
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import padding
 
-    from . import tedapi_combined_pb2 as combined_pb2
+    from tesla_protocol.energy_device import signed_message_pb2
 
     private_key = serialization.load_pem_private_key(private_key_pem, password=None)
     public_key_der = private_key.public_key().public_bytes(
@@ -456,8 +456,8 @@ def build_signed_routable_message(
         format=serialization.PublicFormat.PKCS1,
     )
 
-    routable = combined_pb2.RoutableMessage()
-    routable.to_destination.domain = combined_pb2.DOMAIN_ENERGY_DEVICE
+    routable = signed_message_pb2.RoutableMessage()
+    routable.to_destination.domain = signed_message_pb2.DOMAIN_ENERGY_DEVICE
     routable.protobuf_message_as_bytes = envelope_bytes
     routable.uuid = str(_uuid.uuid4()).encode()
 
