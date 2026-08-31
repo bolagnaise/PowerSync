@@ -186,7 +186,8 @@ def test_existing_gateway_host_is_migrated_on_client_build(
         assert "powerwall_local_ip" not in entry.data
     else:
         assert entry.data["powerwall_local_ip"] == expected_host
-def test_common_api_schema_uses_published_field_numbers_without_wifi_config():
+@async_test
+async def test_common_api_schema_uses_published_field_numbers_and_networking_status_drops_wifi_config():
     common_fields = common_api_pb2.CommonMessages.DESCRIPTOR.fields_by_name
     assert common_fields["get_system_info_request"].number == 2
     assert common_fields["get_system_info_response"].number == 3
@@ -195,14 +196,31 @@ def test_common_api_schema_uses_published_field_numbers_without_wifi_config():
     assert common_fields["check_internet_request"].number == 30
     assert common_fields["check_internet_response"].number == 31
 
-    networking_fields = (
-        common_api_pb2.CommonAPIGetNetworkingStatusResponse.DESCRIPTOR.fields_by_name
-    )
-    assert set(networking_fields) == {"wifi", "eth", "gsm"}
-    assert 1 not in {
-        field.number
-        for field in networking_fields.values()
-    }, "upstream WifiConfig field must remain structurally unavailable"
+    transport = _transport_without_key()
+
+    async def post_v1r(envelope_bytes: bytes, din: str):
+        request = transport_pb2.MessageEnvelope()
+        request.ParseFromString(envelope_bytes)
+        reply = transport_pb2.MessageEnvelope()
+        response = reply.common.get_networking_status_response
+        response.wifi_config.ssid = "MyHomeNetwork"
+        response.wifi_config.password.value = "hunter2-super-secret"
+        response.wifi.enabled = True
+        response.wifi.active_route = True
+        response.wifi.ipv4_config.dhcp_enabled = True
+        response.wifi.connectivity_status.connected_physical = True
+        response.wifi.connectivity_status.connected_internet = True
+        return transport_mod.TEDAPIResponse(True, reply.SerializeToString())
+
+    transport.post_v1r = post_v1r
+
+    networking = await transport.get_networking_status("DIN--1")
+
+    assert set(networking) == {"wifi"}, "must carry only the allowlisted interface keys"
+    assert "MyHomeNetwork" not in repr(networking), "SSID from wifi_config must not leak"
+    assert (
+        "hunter2-super-secret" not in repr(networking)
+    ), "password from wifi_config must not leak"
 
 
 @async_test
