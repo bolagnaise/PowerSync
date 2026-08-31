@@ -13,6 +13,9 @@ from __future__ import annotations
 import ast
 import asyncio
 import importlib.util
+import math
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -112,13 +115,27 @@ def _run_goodwe_curtailment(
     feedin_price: float,
     store=None,
     initial_state: str = "normal",
+    coordinator_data: dict[str, Any] | None = None,
+    last_update_success: bool = False,
+    last_reapply: float | None = None,
+    last_effect_retry: float | None = None,
+    repeat: int = 1,
 ):
     """Run the real handler against a fake coordinator and return its state."""
     entry_data: dict[str, Any] = {"goodwe_curtailment_state": initial_state}
     if store is not None:
         entry_data["store"] = store
+    if last_reapply is not None:
+        entry_data["_last_goodwe_curtailment_reapply"] = last_reapply
+    if last_effect_retry is not None:
+        entry_data["_last_goodwe_curtailment_effect_retry"] = last_effect_retry
     logger = _Logger()
-    entry_data["goodwe_coordinator"] = SimpleNamespace(_controller=controller)
+    entry_data["goodwe_coordinator"] = SimpleNamespace(
+        _controller=controller,
+        data=coordinator_data,
+        last_update_success=last_update_success,
+        update_interval=timedelta(seconds=30),
+    )
     hass = SimpleNamespace(data={"power_sync": {"entry": entry_data}})
     dispatches: list[tuple[Any, ...]] = []
     namespace: dict[str, Any] = {
@@ -143,13 +160,18 @@ def _run_goodwe_curtailment(
         "aemo_sensor_coordinator": None,
         "flow_power_kwatch_coordinator": None,
         "octopus_coordinator": None,
+        "datetime": datetime,
+        "timezone": timezone,
+        "timedelta": timedelta,
+        "math": math,
     }
     exec(_nested_function_source("handle_goodwe_curtailment"), namespace)
-    asyncio.run(
-        namespace["handle_goodwe_curtailment"](
-            feedin_price=feedin_price, import_price=17.22
+    for _ in range(repeat):
+        asyncio.run(
+            namespace["handle_goodwe_curtailment"](
+                feedin_price=feedin_price, import_price=17.22
+            )
         )
-    )
     return entry_data, logger, dispatches
 
 
@@ -204,6 +226,71 @@ def test_direct_control_profile_still_curtails():
     assert controller.calls == ["curtail"]
     assert entry_data["goodwe_curtailment_state"] == "curtailed"
     assert [call[1] for call in dispatches] == ["power_sync_curtailment_updated_entry"]
+
+
+def test_direct_profile_retries_fresh_material_export_before_periodic_interval():
+    """#29: an acknowledged GoodWe register write is not a physical effect."""
+    controller = _Controller()
+    entry_data, logger, _dispatches = _run_goodwe_curtailment(
+        controller,
+        feedin_price=6.0,
+        initial_state="curtailed",
+        coordinator_data={
+            "grid_power": -2.552,
+            "last_update": datetime.now(timezone.utc),
+        },
+        last_update_success=True,
+        repeat=2,
+    )
+
+    # The first pass retries because 2.552 kW export is fresh and material.
+    # The second is coalesced by the 60-second effect-retry timer, not the
+    # 15-minute periodic refresh timer.
+    assert controller.calls == ["curtail"]
+    assert entry_data["goodwe_curtailment_state"] == "curtailed"
+    assert entry_data["_last_goodwe_curtailment_reapply"] > 0
+    assert entry_data["_last_goodwe_curtailment_effect_retry"] > 0
+    assert logger.levels("fresh direct telemetry still reports material export") == [
+        "info"
+    ]
+
+
+def test_direct_profile_waits_for_periodic_retry_without_fresh_material_export():
+    controller = _Controller()
+    last_apply = time.monotonic()
+    _entry_data, _logger, _dispatches = _run_goodwe_curtailment(
+        controller,
+        feedin_price=6.0,
+        initial_state="curtailed",
+        coordinator_data={
+            "grid_power": -0.25,
+            "last_update": datetime.now(timezone.utc),
+        },
+        last_update_success=True,
+        last_reapply=last_apply,
+        last_effect_retry=last_apply,
+    )
+
+    assert controller.calls == []
+
+
+def test_direct_profile_waits_for_periodic_retry_with_stale_export_telemetry():
+    controller = _Controller()
+    last_apply = time.monotonic()
+    _entry_data, _logger, _dispatches = _run_goodwe_curtailment(
+        controller,
+        feedin_price=6.0,
+        initial_state="curtailed",
+        coordinator_data={
+            "grid_power": -2.552,
+            "last_update": datetime.now(timezone.utc) - timedelta(minutes=3),
+        },
+        last_update_success=True,
+        last_reapply=last_apply,
+        last_effect_retry=last_apply,
+    )
+
+    assert controller.calls == []
 
 
 def test_unverified_direct_command_stays_pending_and_persists_restore_baseline():

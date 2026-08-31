@@ -27732,21 +27732,79 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 import time as _time_mod
                 _goodwe_reapply_interval = 900
+                # A register echo only proves that GoodWe accepted the write.  It
+                # does not prove the inverter stopped exporting.  When fresh
+                # direct telemetry still shows material export, make one bounded
+                # retry instead of waiting for the periodic 15-minute refresh.
+                # Keep this separate from the periodic timer so frequent Amber
+                # WebSocket updates cannot turn an unconfirmed physical effect
+                # into a command storm.
+                _goodwe_effect_retry_interval = 60
                 _last_reapply = entry_data.get("_last_goodwe_curtailment_reapply", 0)
+                _last_effect_retry = entry_data.get(
+                    "_last_goodwe_curtailment_effect_retry", 0
+                )
                 _now = _time_mod.monotonic()
                 _elapsed_since_reapply = _now - _last_reapply
+                _elapsed_since_effect_retry = _now - _last_effect_retry
+
+                _fresh_material_export = False
+                coordinator_data = getattr(gw_coord, "data", None)
+                if (
+                    getattr(gw_coord, "last_update_success", False) is True
+                    and isinstance(coordinator_data, dict)
+                    and coordinator_data.get("telemetry_ready", True) is True
+                ):
+                    try:
+                        grid_power_kw = float(coordinator_data.get("grid_power"))
+                        last_update = coordinator_data.get("last_update")
+                        if isinstance(last_update, datetime):
+                            if last_update.tzinfo is None:
+                                last_update = last_update.replace(tzinfo=timezone.utc)
+                            update_interval = getattr(gw_coord, "update_interval", None)
+                            interval_seconds = (
+                                update_interval.total_seconds()
+                                if isinstance(update_interval, timedelta)
+                                else 0.0
+                            )
+                            telemetry_age = (
+                                datetime.now(timezone.utc)
+                                - last_update.astimezone(timezone.utc)
+                            ).total_seconds()
+                            _fresh_material_export = (
+                                math.isfinite(grid_power_kw)
+                                and 0.0 <= telemetry_age
+                                <= max(120.0, interval_seconds * 3.0)
+                                and -grid_power_kw * 1000.0 > 250.0
+                            )
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+
                 _needs_reapply = (
                     current_state == "curtailed"
-                    and _elapsed_since_reapply >= _goodwe_reapply_interval
+                    and (
+                        _elapsed_since_reapply >= _goodwe_reapply_interval
+                        or (
+                            _fresh_material_export
+                            and _elapsed_since_effect_retry
+                            >= _goodwe_effect_retry_interval
+                        )
+                    )
                 )
 
                 if current_state != "curtailed" or _needs_reapply:
                     if current_state == "curtailed":
-                        _LOGGER.info(
-                            "GoodWe curtailment RE-APPLY: export_earnings=%.2fc (<1c), %ds since last apply",
-                            export_earnings,
-                            int(_elapsed_since_reapply),
-                        )
+                        if _fresh_material_export:
+                            _LOGGER.info(
+                                "GoodWe curtailment RE-APPLY: fresh direct telemetry still reports material export, %ds since last effect retry",
+                                int(_elapsed_since_effect_retry),
+                            )
+                        else:
+                            _LOGGER.info(
+                                "GoodWe curtailment RE-APPLY: export_earnings=%.2fc (<1c), %ds since last apply",
+                                export_earnings,
+                                int(_elapsed_since_reapply),
+                            )
                     else:
                         _LOGGER.info(
                             "GoodWe curtailment TRIGGERED: export_earnings=%.2fc (<1c) → zero export",
@@ -27757,6 +27815,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if success:
                         entry_data["goodwe_curtailment_state"] = "curtailed"
                         entry_data["_last_goodwe_curtailment_reapply"] = _now
+                        entry_data["_last_goodwe_curtailment_effect_retry"] = _now
                     else:
                         entry_data["goodwe_curtailment_state"] = "pending"
                         _LOGGER.error("GoodWe curtail() failed")
@@ -27774,6 +27833,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if success:
                         entry_data["goodwe_curtailment_state"] = "normal"
                         entry_data.pop("_last_goodwe_curtailment_reapply", None)
+                        entry_data.pop("_last_goodwe_curtailment_effect_retry", None)
                     else:
                         entry_data["goodwe_curtailment_state"] = "pending"
                         _LOGGER.error("GoodWe restore() failed")
