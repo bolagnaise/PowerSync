@@ -7282,7 +7282,14 @@ class BatteryModeSensor(SensorEntity):
             attributes["description"] = "Battery is being force charged"
             _populate_timer_attrs(attributes, force_charge_state)
         elif mode == BATTERY_MODE_STATE_FORCE_DISCHARGE:
-            attributes["description"] = "Battery is being force discharged"
+            if force_discharge_state.get("command_status") == "entity_echo_unverified":
+                attributes["description"] = (
+                    "Force discharge command acknowledged; physical battery discharge is not verified"
+                )
+                attributes["command_status"] = "entity_echo"
+                attributes["physical_effect"] = "unverified"
+            else:
+                attributes["description"] = "Battery is being force discharged"
             _populate_timer_attrs(attributes, force_discharge_state)
         elif mode == BATTERY_MODE_STATE_HOLD_SOC:
             attributes["description"] = "Battery locked at current state of charge"

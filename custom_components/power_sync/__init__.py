@@ -31753,6 +31753,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if requested_battery_discharge_w > 0
             else 0
         )
+        force_discharge_state.pop("command_status", None)
 
         # Check if this is a Sigenergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
@@ -31937,7 +31938,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state["active"] = True
                     force_discharge_state["source"] = source
                     force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
-                    _LOGGER.info(f"GoodWe FORCE DISCHARGE ACTIVE for {duration} minutes (power_w={power_w})")
+                    if getattr(goodwe_coord, "_ems_prefix", None):
+                        # The upstream entity integration immediately echoes a
+                        # successful service call. That owns the manual
+                        # override, but it is not an inverter or physical-flow
+                        # readback.
+                        force_discharge_state["command_status"] = "entity_echo_unverified"
+                        _LOGGER.info(
+                            "GoodWe force-discharge command acknowledged by EMS entity "
+                            "for %d minutes (power_w=%s); physical effect is unverified",
+                            duration,
+                            power_w,
+                        )
+                    else:
+                        _LOGGER.info(
+                            f"GoodWe FORCE DISCHARGE ACTIVE for {duration} minutes (power_w={power_w})"
+                        )
 
                     async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
                         "active": True,
@@ -35535,17 +35551,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if restore_was_hold_soc:
                     _clear_hold_soc_state()
 
+                entity_restore_unverified = bool(
+                    getattr(goodwe_coord, "_ems_prefix", None)
+                )
                 force_charge_state["active"] = False
                 force_discharge_state["active"] = False
                 force_charge_state["expires_at"] = None
                 force_discharge_state["expires_at"] = None
+                force_discharge_state.pop("command_status", None)
 
-                _LOGGER.info("GoodWe NORMAL OPERATION RESTORED")
+                if entity_restore_unverified:
+                    _LOGGER.info(
+                        "GoodWe normal-operation command acknowledged by EMS entity; "
+                        "physical effect is unverified"
+                    )
+                else:
+                    _LOGGER.info("GoodWe NORMAL OPERATION RESTORED")
 
                 if not suppress_notification:
                     try:
                         from .automations.actions import _send_expo_push
-                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                        notification = (
+                            "Normal-operation command acknowledged; physical effect not verified"
+                            if entity_restore_unverified
+                            else "Normal operation restored"
+                        )
+                        await _send_expo_push(hass, "Battery", notification)
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send success notification: {notify_err}")
 

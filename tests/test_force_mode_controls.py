@@ -26,6 +26,7 @@ OPTIMIZATION_EXECUTOR_PATH = (
 OPTIMIZATION_BATTERY_CONTROLLER_PATH = (
     ROOT / "custom_components" / "power_sync" / "optimization" / "battery_controller.py"
 )
+SENSOR_PATH = ROOT / "custom_components" / "power_sync" / "sensor.py"
 SELECT_PATH = ROOT / "custom_components" / "power_sync" / "select.py"
 NUMBER_PATH = ROOT / "custom_components" / "power_sync" / "number.py"
 SWITCH_PATH = ROOT / "custom_components" / "power_sync" / "switch.py"
@@ -4146,6 +4147,67 @@ def test_goodwe_ems_entity_command_requires_mode_and_power_readback():
 
     subject.hass.services = _Services(True)
     assert asyncio.run(ems_set_mode(subject, "sell_power", 5000)) is True
+
+
+def test_goodwe_entity_echo_does_not_claim_physical_force_discharge():
+    """#398: an entity echo owns the override but does not prove battery flow."""
+    source = SENSOR_PATH.read_text()
+    tree = ast.parse(source)
+    method = _find_class_method(
+        tree, "BatteryModeSensor", "extra_state_attributes"
+    )
+    method_source = ast.get_source_segment(source, method)
+    assert method_source is not None
+
+    namespace = {
+        "DOMAIN": "power_sync",
+        "BATTERY_MODE_STATE_FORCE_CHARGE": "force_charge",
+        "BATTERY_MODE_STATE_FORCE_DISCHARGE": "force_discharge",
+        "BATTERY_MODE_STATE_HOLD_SOC": "hold_soc",
+        "BATTERY_MODE_STATE_SELF_CONSUMPTION": "self_consumption",
+    }
+    exec(textwrap.dedent(method_source), namespace)
+    extra_state_attributes = namespace["extra_state_attributes"]
+
+    force_state = {
+        "active": True,
+        "duration": 30,
+        "command_status": "entity_echo_unverified",
+    }
+    subject = SimpleNamespace(
+        hass=SimpleNamespace(
+            data={"power_sync": {"entry-1": {"force_discharge_state": force_state}}}
+        ),
+        _entry=SimpleNamespace(entry_id="entry-1"),
+        _get_current_mode=lambda: "force_discharge",
+    )
+
+    attributes = extra_state_attributes(subject)
+
+    assert attributes["mode"] == "force_discharge"
+    assert attributes["command_status"] == "entity_echo"
+    assert attributes["physical_effect"] == "unverified"
+    assert "acknowledged" in attributes["description"].lower()
+    assert "being force discharged" not in attributes["description"].lower()
+
+
+def test_goodwe_entity_force_discharge_marks_echo_as_unverified_before_ui_update():
+    """#398: the entity-control branch must propagate honest status to the UI."""
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    handler = _find_function(tree, "handle_force_discharge")
+    handler_source = ast.get_source_segment(source, handler)
+    assert handler_source is not None
+
+    goodwe_branch = handler_source.split("# Check if this is a GoodWe system", 1)[1]
+    goodwe_branch = goodwe_branch.split("# Check if this is an AlphaESS system", 1)[0]
+    status_assignment = 'force_discharge_state["command_status"] = "entity_echo_unverified"'
+
+    assert 'getattr(goodwe_coord, "_ems_prefix", None)' in goodwe_branch
+    assert status_assignment in goodwe_branch
+    assert goodwe_branch.index(status_assignment) < goodwe_branch.index(
+        'async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state"'
+    )
 
 
 def test_goodwe_hold_soc_dispatches_conserve_and_rejects_unverified_udp_path():
