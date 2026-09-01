@@ -248,6 +248,7 @@ class AmberWebSocketClient:
         self._running = False
         self._thread = None
         self._loop = None
+        self._polling_task = None
 
         # Price cache (thread-safe with lock)
         self._price_lock = threading.Lock()
@@ -263,6 +264,7 @@ class AmberWebSocketClient:
 
         # Stale cache warning debounce (only warn once until data is fresh again)
         self._stale_warning_logged = False
+        self._timeout_warning_logged = False
 
         # Tesla sync triggering
         self._sync_callback = sync_callback
@@ -295,14 +297,28 @@ class AmberWebSocketClient:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
             _LOGGER.info("WebSocket thread event loop created")
-            self._loop.run_until_complete(self._interval_polling_loop())
+            self._polling_task = self._loop.create_task(self._interval_polling_loop())
+            self._loop.run_until_complete(self._polling_task)
+        except asyncio.CancelledError:
+            _LOGGER.debug("WebSocket polling task cancelled during shutdown")
         except Exception as e:
             _LOGGER.error(f"Event loop error: {e}", exc_info=True)
             self._error_count += 1
             self._last_error = str(e)
         finally:
             if self._loop:
+                pending = [
+                    task for task in asyncio.all_tasks(self._loop) if not task.done()
+                ]
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    self._loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
                 self._loop.close()
+                self._loop = None
+            self._polling_task = None
             _LOGGER.info("WebSocket thread event loop closed")
 
     async def stop(self):
@@ -310,9 +326,22 @@ class AmberWebSocketClient:
         _LOGGER.info("Stopping WebSocket client")
         self._running = False
 
-        # Wait for thread to finish
+        # Cancel the in-flight receive on its owning loop.  Merely clearing
+        # _running leaves websocket.recv() alive for up to its 60-second
+        # timeout, which can overlap a replacement client after reload.
+        if (
+            self._loop is not None
+            and self._loop.is_running()
+            and self._polling_task is not None
+            and not self._polling_task.done()
+        ):
+            self._loop.call_soon_threadsafe(self._polling_task.cancel)
+
+        # Joining a background thread from Home Assistant's event loop must
+        # not block that loop.  Cancellation above gives the receive context a
+        # chance to close cleanly before a replacement client is created.
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
+            await asyncio.to_thread(self._thread.join)
 
         if self._sync_executor is not None:
             self._sync_executor.shutdown(wait=False, cancel_futures=True)
@@ -368,7 +397,8 @@ class AmberWebSocketClient:
         _LOGGER.info("Starting interval-based polling loop")
 
         # Do an immediate fetch on startup
-        await self._fetch_price_once()
+        if self._running:
+            await self._fetch_price_once()
 
         while self._running:
             try:
@@ -414,6 +444,9 @@ class AmberWebSocketClient:
         4. Store price in cache
         5. Disconnect
         """
+        if not self._running:
+            return
+
         self._fetch_count += 1
         self._connection_status = "connecting"
 
@@ -460,9 +493,27 @@ class AmberWebSocketClient:
                             websocket.recv(),
                             timeout=timeout - elapsed
                         )
-                        price_received = self._handle_message(message)
+                        if self._running:
+                            price_received = self._handle_message(message)
+                        else:
+                            _LOGGER.debug(
+                                "Discarding WebSocket message after client shutdown"
+                            )
+                            break
                     except asyncio.TimeoutError:
-                        _LOGGER.warning("Timeout waiting for WebSocket message")
+                        if not self._running:
+                            _LOGGER.debug(
+                                "WebSocket receive ended while client was stopping"
+                            )
+                        elif not self._timeout_warning_logged:
+                            _LOGGER.warning(
+                                "Amber WebSocket did not provide a price; using REST API fallback"
+                            )
+                            self._timeout_warning_logged = True
+                        else:
+                            _LOGGER.debug(
+                                "Amber WebSocket remains unavailable; using REST API fallback"
+                            )
                         break
 
                 # Connection will be closed by context manager
@@ -492,6 +543,10 @@ class AmberWebSocketClient:
         Returns:
             bool: True if this was a price update message
         """
+        if not self._running:
+            _LOGGER.debug("Discarding WebSocket message after client shutdown")
+            return False
+
         try:
             data = json.loads(message)
             self._message_count += 1
@@ -533,6 +588,7 @@ class AmberWebSocketClient:
                     self._cached_prices = converted_prices
                     self._last_update = datetime.now(timezone.utc)
                     self._stale_warning_logged = False
+                    self._timeout_warning_logged = False
 
                 # Log the price update
                 general_price = converted_prices.get("general", {}).get("perKwh")
@@ -597,7 +653,7 @@ class AmberWebSocketClient:
         Args:
             prices_data: Dictionary with price data to pass to coordinator
         """
-        if not self._sync_callback:
+        if not self._running or not self._sync_callback:
             return
 
         try:
