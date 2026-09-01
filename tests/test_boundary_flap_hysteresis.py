@@ -73,9 +73,11 @@ def _nested_function_source(name: str) -> str:
     raise AssertionError(f"{name} not found in {INIT_PATH}")
 
 
-def _build_should_curtail_ac_coupled(get_live_status, with_hysteresis):
+def _build_should_curtail_ac_coupled(
+    get_live_status, with_hysteresis, entry_data=None
+):
     """Extract and exec should_curtail_ac_coupled with a stub closure."""
-    entry_data = {}
+    entry_data = {} if entry_data is None else entry_data
 
     namespace = {
         "CONF_INVERTER_RESTORE_SOC": "inverter_restore_soc",
@@ -199,6 +201,48 @@ def test_ac_curtail_no_flap_while_export_earnings_hovers_at_boundary():
     assert results[4] is False, "flapped back to curtailing at 1.1c/kWh while still in the dead zone"
     # Clean re-entry at 0.99c.
     assert results[5] is True
+
+
+def test_ac_curtailment_holds_existing_limit_when_it_prevents_uneconomic_export():
+    """A non-export reading caused by the active limit must not trigger restore."""
+
+    async def get_live_status():
+        return {
+            "solar_power": 650,
+            "battery_power": -1,
+            "grid_power": 306.59,
+            "load_power": 684,
+            "battery_soc": 98.9,
+        }
+
+    with_hysteresis = _load_tariff_utils().with_hysteresis
+    entry_data = {"inverter_last_state": "curtailed"}
+    should_curtail = _build_should_curtail_ac_coupled(
+        get_live_status, with_hysteresis, entry_data
+    )
+
+    assert asyncio.run(should_curtail(8.84073, -1.51917)) is True
+
+
+def test_ac_curtailment_can_restore_for_verified_battery_absorption_with_room():
+    """The hold guard must retain the existing productive-charge exception."""
+
+    async def get_live_status():
+        return {
+            "solar_power": 4_000,
+            "battery_power": -1_200,
+            "grid_power": 50,
+            "load_power": 2_700,
+            "battery_soc": 75,
+        }
+
+    with_hysteresis = _load_tariff_utils().with_hysteresis
+    entry_data = {"inverter_last_state": "curtailed"}
+    should_curtail = _build_should_curtail_ac_coupled(
+        get_live_status, with_hysteresis, entry_data
+    )
+
+    assert asyncio.run(should_curtail(8.84073, -1.51917)) is False
 
 
 # ---------------------------------------------------------------------------

@@ -23988,6 +23988,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 return True
 
+        # An active limit can itself make the site appear not to be exporting.
+        # Do not treat that controlled result as evidence that it is safe to
+        # restore unrestricted generation while export remains uneconomic.
+        # A real battery charge with headroom remains an intentional exception.
+        if (
+            export_uneconomic
+            and entry_data.get("inverter_last_state") == "curtailed"
+        ):
+            battery_has_room = battery_soc is not None and battery_soc < 90
+            if battery_is_charging and battery_has_room:
+                _LOGGER.info(
+                    f"🔋 AC-COUPLED: Holding no export while battery charges "
+                    f"at {abs(battery_power):.0f}W with room (SOC={battery_soc:.0f}%) "
+                    f"- allowing inverter to run"
+                )
+                return False
+            _LOGGER.info(
+                f"🔌 AC-COUPLED: Existing curtailment is preventing export at "
+                f"uneconomic price ({export_earnings:.2f}c/kWh) - holding limit "
+                f"(battery={battery_power:.0f}W, SOC={battery_soc}%)"
+            )
+            return True
+
         # RESTORE CHECK: If battery SOC < restore threshold, allow inverter to run
         # This ensures battery stays topped up before evening peak
         # Only applies when NOT exporting at uneconomic price (checked above)
