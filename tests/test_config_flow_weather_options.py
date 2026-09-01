@@ -2613,6 +2613,10 @@ def test_custom_tariff_options_preserve_saved_explicit_periods_on_reopen():
     recover = namespace["_custom_tariff_periods"]
     recovered = recover(
         {
+            "power_sync_explicit_periods": [
+                {"name": "PEAK", "start": 16, "end": 17, "days": "weekdays", "import_rate": 0.4, "export_rate": 0.1},
+                {"name": "PEAK", "start": 17, "end": 20, "days": "weekdays", "import_rate": 0.5, "export_rate": 0.1},
+            ],
             "seasons": {
                 "All Year": {
                     "tou_periods": {
@@ -2640,6 +2644,10 @@ def test_custom_tariff_options_preserve_saved_explicit_periods_on_reopen():
 
     seasonal = recover(
         {
+            "power_sync_explicit_periods": [
+                {"name": "PEAK", "season": "High Season", "start": 16, "end": 20, "days": "weekdays", "import_rate": 0.68, "export_rate": 0.05},
+                {"name": "PEAK", "season": "Low Season", "start": 16, "end": 20, "days": "weekdays", "import_rate": 0.47, "export_rate": 0.05},
+            ],
             "seasons": {
                 "High Season": {
                     "fromMonth": 11,
@@ -2696,6 +2704,71 @@ def test_custom_tariff_options_preserve_saved_explicit_periods_on_reopen():
             "export_rate": 0.05,
         },
     ]
+
+
+def test_custom_tariff_options_round_trip_full_coverage_agl_periods():
+    """Reopening a full AGL tariff must not hide explicit off-peak rows."""
+    source = CONFIG_FLOW_PATH.read_text()
+    builder_source = ast.get_source_segment(
+        source,
+        _config_flow_method("_build_tariff_from_periods"),
+    )
+    recover_source = ast.get_source_segment(
+        source,
+        _options_flow_method("_custom_tariff_periods"),
+    )
+
+    assert builder_source is not None
+    assert recover_source is not None
+    builder_namespace = {
+        "normalize_currency": lambda value, fallback: value or fallback,
+        "currency_for_provider": lambda provider, hass: "AUD",
+        "DEFAULT_AGL_BATTERY_REWARDS_PEAK_EXPORT_RATE": 28.0,
+        "DEFAULT_AGL_BATTERY_REWARDS_OFFPEAK_EXPORT_RATE": 3.0,
+    }
+    exec(textwrap.dedent(builder_source), builder_namespace)
+    recover_namespace: dict[str, object] = {"Any": object}
+    exec(textwrap.dedent(recover_source).replace("@staticmethod\n", ""), recover_namespace)
+    build = builder_namespace["_build_tariff_from_periods"]
+    recover = recover_namespace["_custom_tariff_periods"]
+    periods = [
+        {"name": "PEAK", "start": 16, "end": 20, "days": "all_days", "import_rate": 0.42416, "export_rate": 0.03},
+        {"name": "SHOULDER", "start": 10, "end": 14, "days": "all_days", "import_rate": 0.1111, "export_rate": 0.03},
+        {"name": "OFF_PEAK", "start": 20, "end": 10, "days": "weekdays", "import_rate": 0.3212, "export_rate": 0.03},
+        {"name": "OFF_PEAK", "start": 14, "end": 16, "days": "weekdays", "import_rate": 0.3212, "export_rate": 0.03},
+        {"name": "OFF_PEAK", "start": 14, "end": 10, "days": "weekends", "import_rate": 0.3212, "export_rate": 0.03},
+    ]
+    context = type(
+        "TariffContext",
+        (),
+        {
+            "_tariff_offpeak_rate": 0.3212,
+            "_tariff_fit_rate": 0.03,
+            "_tariff_plan_name": "AGL Battery Rewards",
+            "_selected_electricity_provider": "other",
+            "_tariff_currency": "AUD",
+            "hass": None,
+        },
+    )()
+
+    saved = build(context, periods)
+    assert saved["power_sync_explicit_periods"] == periods
+    assert recover(saved) == periods
+
+    # The published v2.12.1217 format had no metadata. Its explicit full-
+    # coverage OFF_PEAK ranges must still be recovered rather than discarded.
+    legacy_saved = dict(saved)
+    legacy_saved.pop("power_sync_explicit_periods")
+    assert recover(legacy_saved) == periods
+
+    # A genuinely generated legacy OFF_PEAK must remain hidden in the editor.
+    generated = build(context, periods[:2])
+    generated.pop("power_sync_explicit_periods")
+    assert recover(generated) == periods[:2]
+
+    all_offpeak = build(context, [])
+    all_offpeak.pop("power_sync_explicit_periods")
+    assert recover(all_offpeak) == []
 
 
 def test_agl_custom_tariff_rates_preserve_hundredths_of_a_cent():

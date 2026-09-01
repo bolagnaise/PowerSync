@@ -354,6 +354,16 @@ def test_config_tariff_builder_applies_agl_overlay(agl_module):
         tariff["agl_base_tariff"]["energy_charges"]["All Year"]["OFF_PEAK"]
         == 0.0663
     )
+    assert tariff["agl_base_tariff"]["power_sync_explicit_periods"] == [
+        {
+            "name": "PEAK",
+            "start": 15,
+            "end": 22,
+            "days": "all_days",
+            "import_rate": 0.50,
+            "export_rate": 0.03,
+        }
+    ]
 
     reopened_offpeak = round(
         tariff["energy_charges"]["All Year"]["OFF_PEAK"] * 100,

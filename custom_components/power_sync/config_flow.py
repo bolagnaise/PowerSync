@@ -7481,6 +7481,12 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             "sell_tariff": {
                 "energy_charges": sell_energy_charges,
             },
+            # ``tou_periods`` deliberately groups ranges with the same rate
+            # and expands a weekend into separate Sunday/Saturday entries. It
+            # is therefore not a lossless representation of the options form.
+            # Keep the user-authored rows alongside the runtime tariff so an
+            # options reopen cannot replace them with generated off-peak gaps.
+            "power_sync_explicit_periods": [dict(period) for period in periods],
         }
         if getattr(self, "_selected_electricity_provider", "other") == "agl":
             from .agl import apply_battery_rewards_export_rates
@@ -17233,13 +17239,135 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     def _custom_tariff_periods(custom_tariff: dict | None) -> list[dict]:
         """Recover explicit TOU periods from a saved custom tariff.
 
-        The tariff format does not retain the original form fields, but every
-        explicit period is represented losslessly as a named TOU range.  The
-        only generated ranges are OFF_PEAK (or OFF_PEAK_AUTO when an explicit
-        OFF_PEAK period exists), which must not be re-added as user periods.
+        Newer tariffs retain the user-authored options rows separately because
+        the runtime TOU format groups matching rates and expands weekends. For
+        legacy tariffs, retain a plain OFF_PEAK unless it exactly matches the
+        generated uncovered-hour ranges from the other saved periods.
         """
         if not isinstance(custom_tariff, dict):
             return []
+
+        saved_periods = custom_tariff.get("power_sync_explicit_periods")
+        if isinstance(saved_periods, list):
+            recovered = []
+            for period in saved_periods:
+                if not isinstance(period, dict):
+                    recovered = []
+                    break
+                try:
+                    name = str(period["name"])
+                    start = int(period["start"])
+                    end = int(period["end"])
+                    days = str(period["days"])
+                    import_rate = float(period["import_rate"])
+                    export_rate = float(period["export_rate"])
+                except (KeyError, TypeError, ValueError):
+                    recovered = []
+                    break
+                if (
+                    name not in {"PEAK", "SHOULDER", "OFF_PEAK", "SUPER_OFF_PEAK"}
+                    or not 0 <= start <= 24
+                    or not 0 <= end <= 24
+                    or days not in {"weekdays", "weekends", "all_days"}
+                ):
+                    recovered = []
+                    break
+                recovered.append(
+                    {
+                        "name": name,
+                        "start": start,
+                        "end": end,
+                        "days": days,
+                        "import_rate": import_rate,
+                        "export_rate": export_rate,
+                        **(
+                            {"season": str(period["season"])}
+                            if "season" in period
+                            else {}
+                        ),
+                    }
+                )
+            if len(recovered) == len(saved_periods):
+                return recovered
+
+        def _legacy_offpeak_is_generated(tou_periods: dict[str, Any]) -> bool:
+            """Identify the exact uncovered-hour ranges written by the builder."""
+            offpeak = tou_periods.get("OFF_PEAK")
+            if not isinstance(offpeak, list):
+                return False
+
+            defined_hours_by_day = {day: set() for day in range(7)}
+            has_defined_period = False
+
+            def _days_between(start: int, end: int) -> list[int]:
+                start %= 7
+                end %= 7
+                if start <= end:
+                    return list(range(start, end + 1))
+                return list(range(start, 7)) + list(range(0, end + 1))
+
+            for name, ranges in tou_periods.items():
+                if name in {"OFF_PEAK", "OFF_PEAK_AUTO"} or not isinstance(ranges, list):
+                    continue
+                for item in ranges:
+                    if not isinstance(item, dict):
+                        return False
+                    try:
+                        start_hour = int(item["fromHour"])
+                        end_hour = int(item["toHour"])
+                        days = _days_between(
+                            int(item["fromDayOfWeek"]),
+                            int(item["toDayOfWeek"]),
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        return False
+                    has_defined_period = True
+                    for day in days:
+                        if start_hour == end_hour:
+                            defined_hours_by_day[day].update(range(24))
+                        elif start_hour < end_hour:
+                            defined_hours_by_day[day].update(range(start_hour, end_hour))
+                        else:
+                            defined_hours_by_day[day].update(range(start_hour, 24))
+                            defined_hours_by_day[(day + 1) % 7].update(range(end_hour))
+
+            gaps: dict[tuple[int, int], list[int]] = {}
+            for day, defined_hours in defined_hours_by_day.items():
+                gap_start = None
+                for hour in range(25):
+                    if hour < 24 and hour not in defined_hours:
+                        gap_start = hour if gap_start is None else gap_start
+                    elif gap_start is not None:
+                        gaps.setdefault((gap_start, hour), []).append(day)
+                        gap_start = None
+
+            expected = []
+            for (start, end), days in gaps.items():
+                range_start = previous_day = days[0]
+                for day in days[1:] + [None]:
+                    if day is not None and day == previous_day + 1:
+                        previous_day = day
+                        continue
+                    expected.append((range_start, previous_day, start, end))
+                    if day is not None:
+                        range_start = previous_day = day
+            if not expected and not has_defined_period:
+                expected = [(0, 6, 0, 24)]
+
+            try:
+                actual = sorted(
+                    (
+                        int(item["fromDayOfWeek"]),
+                        int(item["toDayOfWeek"]),
+                        int(item["fromHour"]),
+                        int(item["toHour"]),
+                    )
+                    for item in offpeak
+                    if isinstance(item, dict)
+                )
+            except (KeyError, TypeError, ValueError):
+                return False
+            return len(actual) == len(offpeak) and actual == sorted(expected)
 
         periods: list[dict] = []
         seasons = custom_tariff.get("seasons", {})
@@ -17269,12 +17397,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             if not isinstance(tou_periods, dict):
                 continue
 
+            weekend_ranges: set[tuple[str, int, int, float, float]] = set()
             for internal_name, ranges in tou_periods.items():
                 if internal_name == "OFF_PEAK_AUTO":
                     continue
                 if (
                     internal_name == "OFF_PEAK"
                     and "OFF_PEAK_AUTO" not in tou_periods
+                    and _legacy_offpeak_is_generated(tou_periods)
                 ):
                     continue
                 if not isinstance(ranges, list):
@@ -17298,13 +17428,22 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     }.get(day_range)
                     if days is None:
                         continue
+                    import_rate = float(import_rates.get(internal_name, 0))
+                    export_rate = float(export_rates.get(internal_name, 0))
+                    start = int(item.get("fromHour", 0))
+                    end = int(item.get("toHour", 24))
+                    weekend_key = (base_name, start, end, import_rate, export_rate)
+                    if days == "weekends" and weekend_key in weekend_ranges:
+                        continue
+                    if days == "weekends":
+                        weekend_ranges.add(weekend_key)
                     period = {
                         "name": base_name,
-                        "start": int(item.get("fromHour", 0)),
-                        "end": int(item.get("toHour", 24)),
+                        "start": start,
+                        "end": end,
                         "days": days,
-                        "import_rate": float(import_rates.get(internal_name, 0)),
-                        "export_rate": float(export_rates.get(internal_name, 0)),
+                        "import_rate": import_rate,
+                        "export_rate": export_rate,
                     }
                     if multiple_seasons:
                         period["season"] = str(season_name)
