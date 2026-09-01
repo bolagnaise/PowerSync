@@ -27640,6 +27640,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry_data.pop("_last_goodwe_curtailment_reapply", None)
                 entry_data.pop("_last_goodwe_curtailment_effect_retry", None)
                 entry_data.pop("_goodwe_curtailment_effect_retry_used", None)
+                entry_data.pop("_last_goodwe_curtailment_restore_attempt", None)
                 async_dispatcher_send(
                     hass, f"power_sync_curtailment_updated_{entry.entry_id}"
                 )
@@ -27699,6 +27700,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             export_earnings,
             entry_data.get("goodwe_curtail_export_uneconomic", False),
             entry,
+        )
+        was_export_uneconomic = bool(
+            entry_data.get("goodwe_curtail_export_uneconomic", False)
         )
         entry_data["goodwe_curtail_export_uneconomic"] = export_uneconomic
 
@@ -27819,7 +27823,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     or _needs_effect_retry
                 )
 
-                if current_state != "curtailed" or _needs_reapply:
+                # ``pending`` means an earlier direct write or readback did not
+                # complete. It is not a fresh episode: treating it as one made
+                # every price/telemetry callback issue another Modbus command.
+                # A genuinely new uneconomic interval can retry immediately;
+                # otherwise preserve the normal periodic cadence.
+                if (
+                    export_uneconomic
+                    and not was_export_uneconomic
+                    and current_state == "pending"
+                ):
+                    entry_data.pop("_last_goodwe_curtailment_reapply", None)
+                    entry_data.pop("_last_goodwe_curtailment_effect_retry", None)
+                    entry_data.pop("_goodwe_curtailment_effect_retry_used", None)
+                    _needs_reapply = True
+
+                _pending_retry_due = (
+                    current_state == "pending"
+                    and _elapsed_since_reapply >= _goodwe_reapply_interval
+                )
+                if (
+                    current_state not in {"curtailed", "pending"}
+                    or _needs_reapply
+                    or _pending_retry_due
+                ):
                     if current_state == "curtailed":
                         if _needs_effect_retry:
                             _LOGGER.info(
@@ -27837,16 +27864,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             "GoodWe curtailment TRIGGERED: export_earnings=%.2fc (<1c) → zero export",
                             export_earnings,
                         )
+                    # Record an attempt before awaiting the device. A false
+                    # result can still mean the inverter saw part of the write,
+                    # so it must consume the same retry budget as an accepted
+                    # command and leave the card honestly Pending.
+                    entry_data["_last_goodwe_curtailment_reapply"] = _now
+                    entry_data["_last_goodwe_curtailment_effect_retry"] = _now
+                    if _needs_effect_retry:
+                        entry_data["_goodwe_curtailment_effect_retry_used"] = True
                     success = await controller.curtail()
                     await _persist_restore_snapshot()
                     if success:
                         entry_data["goodwe_curtailment_state"] = "curtailed"
-                        entry_data["_last_goodwe_curtailment_reapply"] = _now
-                        entry_data["_last_goodwe_curtailment_effect_retry"] = _now
                         if current_state != "curtailed":
                             entry_data.pop("_goodwe_curtailment_effect_retry_used", None)
-                        elif _needs_effect_retry:
-                            entry_data["_goodwe_curtailment_effect_retry_used"] = True
                     else:
                         entry_data["goodwe_curtailment_state"] = "pending"
                         _LOGGER.error("GoodWe curtail() failed")
@@ -27855,21 +27886,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.debug("GoodWe already curtailed, no action needed")
             else:
                 if current_state != "normal":
-                    _LOGGER.info(
-                        "GoodWe curtailment RESTORED: export_earnings=%.2fc (>=1c) → normal export",
-                        export_earnings,
+                    import time as _time_mod
+                    _now = _time_mod.monotonic()
+                    _last_restore_attempt = entry_data.get(
+                        "_last_goodwe_curtailment_restore_attempt", 0
                     )
-                    success = await controller.restore()
-                    await _persist_restore_snapshot()
-                    if success:
-                        entry_data["goodwe_curtailment_state"] = "normal"
-                        entry_data.pop("_last_goodwe_curtailment_reapply", None)
-                        entry_data.pop("_last_goodwe_curtailment_effect_retry", None)
-                        entry_data.pop("_goodwe_curtailment_effect_retry_used", None)
+                    _restore_retry_due = (
+                        current_state != "pending"
+                        or _now - _last_restore_attempt >= 900
+                    )
+                    if _restore_retry_due:
+                        _LOGGER.info(
+                            "GoodWe curtailment RESTORED: export_earnings=%.2fc (>=1c) → normal export",
+                            export_earnings,
+                        )
+                        entry_data["_last_goodwe_curtailment_restore_attempt"] = _now
+                        success = await controller.restore()
+                        await _persist_restore_snapshot()
+                        if success:
+                            entry_data["goodwe_curtailment_state"] = "normal"
+                            entry_data.pop("_last_goodwe_curtailment_reapply", None)
+                            entry_data.pop("_last_goodwe_curtailment_effect_retry", None)
+                            entry_data.pop("_goodwe_curtailment_effect_retry_used", None)
+                            entry_data.pop("_last_goodwe_curtailment_restore_attempt", None)
+                        else:
+                            entry_data["goodwe_curtailment_state"] = "pending"
+                            _LOGGER.error("GoodWe restore() failed")
+                        _notify_curtailment_update()
                     else:
-                        entry_data["goodwe_curtailment_state"] = "pending"
-                        _LOGGER.error("GoodWe restore() failed")
-                    _notify_curtailment_update()
+                        _LOGGER.debug("GoodWe restore remains pending; waiting for retry cadence")
                 else:
                     _LOGGER.debug("GoodWe already in normal mode, no action needed")
         except Exception as e:
@@ -37194,6 +37239,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.info("GoodWe self-consumption mode set (GENERAL)")
                 else:
                     _LOGGER.error("Failed to set GoodWe self-consumption mode")
+                    if user_owned_override:
+                        _clear_self_consumption_state()
+                        await persist_force_mode_state()
                     raise HomeAssistantError(
                         "GoodWe self-consumption restore failed"
                     )

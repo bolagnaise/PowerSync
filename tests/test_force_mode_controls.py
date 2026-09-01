@@ -4078,7 +4078,74 @@ def test_goodwe_self_consumption_restore_failure_propagates_to_optimizer():
     assert "success = await _guarded_self_consumption_write(" in goodwe_branch
     assert "goodwe_coord.restore_normal" in goodwe_branch
     assert '"GoodWe self-consumption restore failed"' in goodwe_branch
+    assert "_clear_self_consumption_state()" in goodwe_branch
+    assert "await persist_force_mode_state()" in goodwe_branch
     assert "except HomeAssistantError:" in goodwe_branch
+
+
+def test_goodwe_ems_entity_command_requires_mode_and_power_readback():
+    """#398: an accepted HA service call is not a confirmed GoodWe EMS mode."""
+    source = COORDINATOR_PATH.read_text()
+    tree = ast.parse(source)
+    method = _find_class_method(tree, "GoodWeEnergyCoordinator", "_ems_set_mode")
+    method_source = ast.get_source_segment(source, method)
+    assert method_source is not None
+
+    records: list[str] = []
+    namespace = {
+        "_LOGGER": SimpleNamespace(
+            info=lambda message, *args: records.append(message % args if args else message),
+            warning=lambda message, *args: records.append(message % args if args else message),
+            error=lambda message, *args: records.append(message % args if args else message),
+        ),
+        "asyncio": asyncio,
+    }
+    exec(textwrap.dedent(method_source), namespace)
+    ems_set_mode = namespace["_ems_set_mode"]
+
+    class _State:
+        def __init__(self, state, attributes=None):
+            self.state = state
+            self.attributes = attributes or {}
+
+    class _States:
+        def __init__(self):
+            self.values = {
+                "select.goodwe_ems_mode": _State("auto", {"options": ["auto", "sell_power"]}),
+                "number.goodwe_ems_power_limit": _State("0", {"max": 10000}),
+            }
+
+        def get(self, entity_id):
+            return self.values.get(entity_id)
+
+    class _Services:
+        def __init__(self, update_entities: bool):
+            self.update_entities = update_entities
+
+        async def async_call(self, _domain, _service, data, **_kwargs):
+            # Simulate an integration that accepts the request but leaves its
+            # entities unchanged, the failure reported in #398.
+            if self.update_entities:
+                if data["entity_id"].startswith("select."):
+                    states.values[data["entity_id"]].state = data["option"]
+                else:
+                    states.values[data["entity_id"]].state = data["value"]
+            return None
+
+    states = _States()
+    subject = SimpleNamespace(
+        _ems_prefix="goodwe",
+        hass=SimpleNamespace(states=states, services=_Services(False)),
+        data={"rated_power_w": 5000},
+        _goodwe_ems_mode_attempts=lambda *_args: ["sell_power"],
+        _ems_restore_operation_mode=lambda: None,
+    )
+
+    assert asyncio.run(ems_set_mode(subject, "sell_power", 5000)) is False
+    assert any("readback" in record.lower() for record in records)
+
+    subject.hass.services = _Services(True)
+    assert asyncio.run(ems_set_mode(subject, "sell_power", 5000)) is True
 
 
 def test_goodwe_hold_soc_dispatches_conserve_and_rejects_unverified_udp_path():

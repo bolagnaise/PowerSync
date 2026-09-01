@@ -9620,6 +9620,7 @@ class GoodWeEnergyCoordinator(
         GOODWE_EMS_MAX_W = 32768
         try:
             power_limit_log: int | str = "unchanged"
+            expected_power_limit: int | None = None
             if power_w > 0:
                 capped_w = min(int(power_w), GOODWE_EMS_MAX_W)
                 await self.hass.services.async_call(
@@ -9628,6 +9629,7 @@ class GoodWeEnergyCoordinator(
                     blocking=True,
                 )
                 power_limit_log = capped_w
+                expected_power_limit = capped_w
             elif reset_power_limit:
                 state = self.hass.states.get(power_entity)
                 rated_power_w = (self.data or {}).get("rated_power_w")
@@ -9649,6 +9651,7 @@ class GoodWeEnergyCoordinator(
                         blocking=True,
                     )
                     power_limit_log = restore_limit
+                    expected_power_limit = restore_limit
                 except Exception as reset_exc:
                     _LOGGER.warning(
                         "GoodWe EMS control could not reset %s power limit to %dW: %s",
@@ -9656,6 +9659,7 @@ class GoodWeEnergyCoordinator(
                         restore_limit,
                         reset_exc,
                     )
+                    return False
 
             attempts = self._goodwe_ems_mode_attempts(
                 mode_entity,
@@ -9671,6 +9675,42 @@ class GoodWeEnergyCoordinator(
                         {"entity_id": mode_entity, "option": option},
                         blocking=True,
                     )
+                    # A completed HA service call is only transport
+                    # acknowledgement. Require the selected EMS mode and any
+                    # written power limit to appear in the entity state before
+                    # reporting this command successful.
+                    readback_confirmed = False
+                    for readback_attempt in range(3):
+                        mode_state = self.hass.states.get(mode_entity)
+                        actual_mode = (
+                            str(mode_state.state).strip().casefold()
+                            if mode_state is not None
+                            else ""
+                        )
+                        expected_mode = str(option).strip().casefold()
+                        power_confirmed = True
+                        if expected_power_limit is not None:
+                            power_state = self.hass.states.get(power_entity)
+                            try:
+                                power_confirmed = int(
+                                    round(float(power_state.state))
+                                ) == expected_power_limit
+                            except (AttributeError, TypeError, ValueError):
+                                power_confirmed = False
+                        if actual_mode == expected_mode and power_confirmed:
+                            readback_confirmed = True
+                            break
+                        if readback_attempt < 2:
+                            await asyncio.sleep(0.1)
+
+                    if not readback_confirmed:
+                        _LOGGER.warning(
+                            "GoodWe EMS control readback did not confirm %s=%s power_limit=%sW",
+                            mode_entity,
+                            option,
+                            power_limit_log,
+                        )
+                        continue
                     _LOGGER.info(
                         "GoodWe EMS control: set %s=%s power_limit=%sW",
                         mode_entity,

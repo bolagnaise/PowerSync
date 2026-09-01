@@ -343,6 +343,22 @@ def test_unverified_direct_command_stays_pending_and_persists_restore_baseline()
     assert [call[1] for call in dispatches] == ["power_sync_curtailment_updated_entry"]
 
 
+def test_failed_curtailment_is_throttled_while_pending():
+    """#29: a failed direct write must not become a callback command storm."""
+    controller = _UnverifiedController()
+
+    entry_data, _logger, _dispatches = _run_goodwe_curtailment(
+        controller,
+        feedin_price=6.0,
+        repeat=3,
+        monotonic_values=(1000.0, 1001.0, 1002.0),
+    )
+
+    assert controller.calls == ["curtail"]
+    assert entry_data["goodwe_curtailment_state"] == "pending"
+    assert entry_data["_last_goodwe_curtailment_reapply"] == 1000.0
+
+
 def test_failed_restore_stays_pending_and_refreshes_the_card():
     controller = _RestoreFailureController()
 
@@ -356,6 +372,22 @@ def test_failed_restore_stays_pending_and_refreshes_the_card():
     assert controller.calls == ["restore"]
     assert entry_data["goodwe_curtailment_state"] == "pending"
     assert [call[1] for call in dispatches] == ["power_sync_curtailment_updated_entry"]
+
+
+def test_failed_restore_is_throttled_while_pending():
+    """A failed release must likewise wait for the normal retry cadence."""
+    controller = _RestoreFailureController()
+
+    entry_data, _logger, _dispatches = _run_goodwe_curtailment(
+        controller,
+        feedin_price=-2.0,
+        initial_state="curtailed",
+        repeat=3,
+    )
+
+    assert controller.calls == ["restore"]
+    assert entry_data["goodwe_curtailment_state"] == "pending"
+    assert "_last_goodwe_curtailment_restore_attempt" in entry_data
 
 
 def test_entity_telemetry_profiles_build_no_control_surface():
