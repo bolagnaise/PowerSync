@@ -79,6 +79,7 @@ from .ev_phase_allocator import (
     normalize_home_power_settings,
     required_phases,
 )
+from ..ev_load import is_current_ev_power_observation
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1513,8 +1514,12 @@ async def _get_observed_ev_power_reading_kw(
     for key in power_entity_keys:
         entity_id = params.get(key)
         if entity_id:
-            power_kw, available = _power_state_kw_reading(
-                hass.states.get(str(entity_id))
+            state = hass.states.get(str(entity_id))
+            power_kw, available = _power_state_kw_reading(state)
+            available = available and is_current_ev_power_observation(
+                getattr(state, "last_reported", None)
+                or getattr(state, "last_updated", None)
+                or getattr(state, "last_changed", None)
             )
             if available:
                 return power_kw, True
@@ -1531,6 +1536,11 @@ async def _get_observed_ev_power_reading_kw(
                 if any(token in entity_id for token in ("voltage", "current", "energy", "frequency")):
                     continue
                 power_kw, available = _power_state_kw_reading(state)
+                available = available and is_current_ev_power_observation(
+                    getattr(state, "last_reported", None)
+                    or getattr(state, "last_updated", None)
+                    or getattr(state, "last_changed", None)
+                )
                 if available:
                     wall_power_available = True
                     wall_power_kw = max(wall_power_kw, power_kw)
@@ -1545,7 +1555,13 @@ async def _get_observed_ev_power_reading_kw(
                 warn_on_missing=False,
             )
             if entity:
-                power_kw, available = _power_state_kw_reading(hass.states.get(entity))
+                state = hass.states.get(entity)
+                power_kw, available = _power_state_kw_reading(state)
+                available = available and is_current_ev_power_observation(
+                    getattr(state, "last_reported", None)
+                    or getattr(state, "last_updated", None)
+                    or getattr(state, "last_changed", None)
+                )
                 if available:
                     return power_kw, True
         except Exception as err:

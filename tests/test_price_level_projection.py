@@ -102,6 +102,17 @@ def test_policy_boundaries_match_live_semantics(
     assert decision.mode == mode
 
 
+def test_optimizer_force_state_does_not_suppress_price_level_projection(
+    projection_module,
+):
+    assert projection_module.manual_force_block_reason(
+        {"active": True, "type": "charge", "source": "optimizer", "scope": "optimizer"}
+    ) is None
+    assert projection_module.manual_force_block_reason(
+        {"active": True, "type": "discharge", "source": "user"}
+    ) == "Manual force discharge is active"
+
+
 def test_recovery_energy_is_expected_and_final_slot_is_fractional(projection_module):
     # 1% of a 60 kWh battery at 90% efficiency requires 666.67 Wh from AC.
     result = _build(

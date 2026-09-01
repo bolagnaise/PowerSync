@@ -24,6 +24,7 @@ import re
 from homeassistant.util import dt as dt_util
 
 from ..sensitive_logging import obfuscate_log_arg, obfuscate_vin_tokens
+from ..ev_load import is_current_ev_power_observation
 from ..const import (
     CONF_SOLAR_FORECAST_PROVIDER,
     CONF_SOLCAST_ESTIMATE_TYPE,
@@ -38,6 +39,7 @@ from ..optimization.load_estimator import SolcastForecaster as SharedSolarForeca
 from ..optimization.price_level_projection import (
     PriceLevelVehicleSnapshot,
     classify_price_level_policy,
+    manual_force_block_reason,
 )
 from ..solar_surplus_config import (
     DEFAULT_SOLAR_SURPLUS_MIN_BATTERY_SOC,
@@ -519,6 +521,12 @@ def _cached_ble_plug_state(hass: "HomeAssistant", prefix: str) -> bool | None:
 
 def _tesla_ble_charge_power_kw(hass: "HomeAssistant", prefix: str) -> float:
     power_state = get_tesla_ble_charge_power_state(hass, prefix)
+    if not is_current_ev_power_observation(
+        getattr(power_state, "last_reported", None)
+        or getattr(power_state, "last_updated", None)
+        or getattr(power_state, "last_changed", None)
+    ):
+        return 0.0
     power_w = _state_power_w(power_state)
     return (power_w or 0.0) / 1000
 
@@ -9816,13 +9824,7 @@ class PriceLevelChargingExecutor:
         if optimizer is not None:
             try:
                 force_state = optimizer._get_active_force_state()
-                if force_state.get("active") and force_state.get("type") in {
-                    "charge",
-                    "discharge",
-                }:
-                    force_block_reason = (
-                        f"Manual force {force_state.get('type')} is active"
-                    )
+                force_block_reason = manual_force_block_reason(force_state)
             except Exception:
                 pass
 

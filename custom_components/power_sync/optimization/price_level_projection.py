@@ -16,6 +16,20 @@ FULL_EV_SOC = 100.0
 CHARGING_EFFICIENCY = 0.9
 
 
+def manual_force_block_reason(force_state: Any) -> str | None:
+    """Return a projection block only for a non-optimizer force state."""
+    if not isinstance(force_state, dict) or not force_state.get("active"):
+        return None
+    if force_state.get("type") not in {"charge", "discharge"}:
+        return None
+    if (
+        str(force_state.get("source") or "").strip().lower() == "optimizer"
+        or str(force_state.get("scope") or "").strip().lower() == "optimizer"
+    ):
+        return None
+    return f"Manual force {force_state.get('type')} is active"
+
+
 @dataclass(frozen=True)
 class PriceLevelPolicyDecision:
     """Deterministic price/SOC classification shared by live and forecast paths."""

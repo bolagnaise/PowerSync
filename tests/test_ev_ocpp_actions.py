@@ -2395,7 +2395,12 @@ def test_observed_wall_connector_power_does_not_probe_vehicle_sensor(monkeypatch
     monkeypatch.setattr(actions, "_get_tesla_ev_entity", fail_tesla_entity_lookup)
 
     hass = _Hass([
-        _State("sensor.tesla_wall_connector_power", "2.2", {"unit_of_measurement": "kW"}),
+        _State(
+            "sensor.tesla_wall_connector_power",
+            "2.2",
+            {"unit_of_measurement": "kW"},
+            last_updated=datetime.now(timezone.utc),
+        ),
         _State("sensor.tesla_wall_connector_phase_a_current", "9.1", {"unit_of_measurement": "A"}),
         _State("sensor.tesla_wall_connector_energy", "12.3", {"unit_of_measurement": "kWh"}),
     ])
@@ -2622,7 +2627,12 @@ def test_observed_wall_connector_power_is_counted_for_solar_surplus_stop(monkeyp
     }
 
     hass = _Hass([
-        _State("sensor.tesla_wall_connector_power", "5.4", {"unit_of_measurement": "kW"}),
+        _State(
+            "sensor.tesla_wall_connector_power",
+            "5.4",
+            {"unit_of_measurement": "kW"},
+            last_updated=datetime.now(timezone.utc),
+        ),
     ])
 
     asyncio.run(
@@ -2729,6 +2739,7 @@ def test_solar_surplus_active_tesla_uses_positive_measured_power_under_curtailme
                 "sensor.tesla_charger_power",
                 "3.11",
                 {"unit_of_measurement": "kW"},
+                last_updated=datetime.now(timezone.utc),
             ),
             _State(f"sensor.{vehicle_id}_charging_state", "charging"),
         ]
@@ -9500,7 +9511,12 @@ def test_solar_surplus_restarts_tesla_when_stopped_observation_replaces_commande
     """A stopped Tesla must not reserve its stale Solar Surplus amp target."""
     hass = _Hass([
         _State("sensor.VIN123_charging_state", "stopped"),
-        _State("sensor.VIN123_charger_power", "0", {"unit_of_measurement": "W"}),
+        _State(
+            "sensor.VIN123_charger_power",
+            "0",
+            {"unit_of_measurement": "W"},
+            last_updated=datetime.now(timezone.utc),
+        ),
     ])
     vehicle_id = "VIN123"
     actions._dynamic_ev_state.clear()
@@ -9595,6 +9611,39 @@ def test_stopped_tesla_requires_available_numeric_zero_power_for_stale_load_over
             params,
         )
     ) == (0.0, False)
+
+
+def test_solar_surplus_rejects_stale_ev_power_that_home_load_would_reject():
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State(
+            "sensor.VIN123_charger_power",
+            "2000",
+            {"unit_of_measurement": "W"},
+            last_updated=now - timedelta(seconds=91),
+        ),
+        _State(
+            "sensor.VIN456_charger_power",
+            "2000",
+            {"unit_of_measurement": "W"},
+            last_updated=now - timedelta(seconds=89),
+        ),
+    ])
+
+    assert asyncio.run(
+        actions._get_observed_ev_power_reading_kw(
+            hass,
+            "VIN123",
+            {"charger_power_entity": "sensor.VIN123_charger_power"},
+        )
+    ) == (0.0, False)
+    assert asyncio.run(
+        actions._get_observed_ev_power_reading_kw(
+            hass,
+            "VIN456",
+            {"charger_power_entity": "sensor.VIN456_charger_power"},
+        )
+    ) == (2.0, True)
 
 
 def test_solar_surplus_stopped_tesla_keeps_commanded_fallback_without_power_source(

@@ -30,6 +30,12 @@ class HomeLoadBasis(str, Enum):
     UNKNOWN = "unknown"
 
 
+# A current EV loadpoint reading is safe to use for control only while it is
+# also fresh enough for Home Load attribution.  Keep this in the provider-
+# neutral module so the two paths cannot silently adopt different cutoffs.
+EV_POWER_MAX_AGE = timedelta(seconds=90)
+
+
 @dataclass(frozen=True)
 class EvLoadObservation:
     """One timestamped power view for a physical charging loadpoint."""
@@ -121,11 +127,27 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def is_current_ev_power_observation(
+    observed_at: datetime | None,
+    *,
+    at: datetime | None = None,
+    max_age: timedelta = EV_POWER_MAX_AGE,
+) -> bool:
+    """Return whether a timestamped EV power observation is currently usable."""
+    if observed_at is None:
+        return False
+    try:
+        age = _as_utc(at or utc_now()) - _as_utc(observed_at)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return timedelta(0) <= age <= max_age
+
+
 def aggregate_ev_load(
     observations: Iterable[EvLoadObservation],
     *,
     at: datetime | None = None,
-    max_age: timedelta = timedelta(seconds=90),
+    max_age: timedelta = EV_POWER_MAX_AGE,
 ) -> ObservedEvLoadSnapshot:
     """Select one fresh reading per physical load and sum distinct loads."""
     target = _as_utc(at or utc_now())
@@ -138,8 +160,11 @@ def aggregate_ev_load(
         if not physical_key or not source_key:
             continue
         observed_at = _as_utc(observation.observed_at)
-        age = target - observed_at
-        if age < timedelta(0) or age > max_age:
+        if not is_current_ev_power_observation(
+            observed_at,
+            at=target,
+            max_age=max_age,
+        ):
             if observation.active:
                 unavailable_active.add(physical_key)
             continue
@@ -195,7 +220,7 @@ def reconcile_ev_load_snapshot(
     fallback_power_kw: Any = 0.0,
     fallback_by_physical_key: dict[str, Any] | None = None,
     fallback_observed_at: datetime | None = None,
-    max_age: timedelta = timedelta(seconds=90),
+    max_age: timedelta = EV_POWER_MAX_AGE,
 ) -> ObservedEvLoadSnapshot:
     """Fill missing physical loads from current backend-scoped direct meters.
 
