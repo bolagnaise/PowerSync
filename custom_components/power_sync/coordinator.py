@@ -9680,7 +9680,14 @@ class GoodWeEnergyCoordinator(
                     # written power limit to appear in the entity state before
                     # reporting this command successful.
                     readback_confirmed = False
-                    for readback_attempt in range(3):
+                    # Entity state changes from the upstream GoodWe integration
+                    # are asynchronous. A completed service call is only a
+                    # transport acknowledgement, but a fixed 200 ms sampling
+                    # window rejects an entity update that arrives shortly
+                    # afterwards. Keep the command fail-closed while allowing
+                    # a bounded, realistic state propagation interval.
+                    readback_deadline = asyncio.get_running_loop().time() + 2.0
+                    while True:
                         mode_state = self.hass.states.get(mode_entity)
                         actual_mode = (
                             str(mode_state.state).strip().casefold()
@@ -9700,8 +9707,13 @@ class GoodWeEnergyCoordinator(
                         if actual_mode == expected_mode and power_confirmed:
                             readback_confirmed = True
                             break
-                        if readback_attempt < 2:
-                            await asyncio.sleep(0.1)
+                        remaining = (
+                            readback_deadline
+                            - asyncio.get_running_loop().time()
+                        )
+                        if remaining <= 0:
+                            break
+                        await asyncio.sleep(min(0.1, remaining))
 
                     if not readback_confirmed:
                         _LOGGER.warning(

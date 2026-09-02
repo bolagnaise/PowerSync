@@ -250,6 +250,60 @@ def test_discovery_stays_inside_selected_config_entry_and_omits_controls():
     }
 
 
+def test_goodwe_entity_profile_accepts_standard_active_power_and_ppv_names():
+    """#398: profile validation must match the GoodWe entity bridge names."""
+    const, discovery = _load_discovery_module()
+    rows = [
+        _row(
+            "sensor.goodwe_battery_soc",
+            "goodwe_battery_soc",
+            platform="goodwe",
+        ),
+        _row(
+            "sensor.goodwe_battery_power",
+            "goodwe_battery_power",
+            platform="goodwe",
+        ),
+        _row(
+            "sensor.goodwe_active_power",
+            "goodwe_active_power",
+            platform="goodwe",
+        ),
+        _row("sensor.goodwe_ppv", "goodwe_ppv", platform="goodwe"),
+        _row(
+            "sensor.goodwe_house_consumption",
+            "goodwe_house_consumption",
+            platform="goodwe",
+        ),
+    ]
+    hass = SimpleNamespace(
+        entity_registry=_Registry(rows),
+        states=_States({row.entity_id: "1" for row in rows}),
+    )
+
+    catalog = discovery.discover_battery_sensor_catalog(
+        hass,
+        battery_system=const.BATTERY_SYSTEM_GOODWE,
+        profile_id="goodwe_ha",
+        allowed_domains=("goodwe",),
+        config_entry_id="selected",
+        display_mode=const.BATTERY_SENSOR_DISPLAY_ALL,
+    )
+    canonical, missing = discovery.discover_canonical_entities(
+        catalog,
+        battery_system=const.BATTERY_SYSTEM_GOODWE,
+    )
+
+    assert missing == []
+    assert canonical == {
+        "battery_level": "sensor.goodwe_battery_soc",
+        "battery_power": "sensor.goodwe_battery_power",
+        "grid_power": "sensor.goodwe_active_power",
+        "solar_power": "sensor.goodwe_ppv",
+        "load_power": "sensor.goodwe_house_consumption",
+    }
+
+
 def test_sungrow_anchor_limits_yaml_discovery_to_stable_unique_id_namespace():
     const, discovery = _load_discovery_module()
     rows = [

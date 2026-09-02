@@ -4120,17 +4120,26 @@ def test_goodwe_ems_entity_command_requires_mode_and_power_readback():
             return self.values.get(entity_id)
 
     class _Services:
-        def __init__(self, update_entities: bool):
+        def __init__(self, update_entities: bool, delay_seconds: float = 0.0):
             self.update_entities = update_entities
+            self.delay_seconds = delay_seconds
 
         async def async_call(self, _domain, _service, data, **_kwargs):
             # Simulate an integration that accepts the request but leaves its
             # entities unchanged, the failure reported in #398.
             if self.update_entities:
-                if data["entity_id"].startswith("select."):
-                    states.values[data["entity_id"]].state = data["option"]
+                def update_entity() -> None:
+                    if data["entity_id"].startswith("select."):
+                        states.values[data["entity_id"]].state = data["option"]
+                    else:
+                        states.values[data["entity_id"]].state = data["value"]
+
+                if self.delay_seconds:
+                    asyncio.get_running_loop().call_later(
+                        self.delay_seconds, update_entity
+                    )
                 else:
-                    states.values[data["entity_id"]].state = data["value"]
+                    update_entity()
             return None
 
     states = _States()
@@ -4147,6 +4156,67 @@ def test_goodwe_ems_entity_command_requires_mode_and_power_readback():
 
     subject.hass.services = _Services(True)
     assert asyncio.run(ems_set_mode(subject, "sell_power", 5000)) is True
+
+    states.values["select.goodwe_ems_mode"].state = "auto"
+    states.values["number.goodwe_ems_power_limit"].state = "0"
+    subject.hass.services = _Services(True, delay_seconds=0.25)
+    assert asyncio.run(ems_set_mode(subject, "sell_power", 5000)) is True
+
+
+def test_goodwe_manual_force_failures_are_service_errors_and_restore_retries():
+    """#398: dashboard/API calls must not turn a failed GoodWe action into success."""
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    discharge = ast.get_source_segment(source, _find_function(tree, "handle_force_discharge"))
+    charge = ast.get_source_segment(source, _find_function(tree, "handle_force_charge"))
+    restore = ast.get_source_segment(source, _find_function(tree, "handle_restore_normal"))
+    assert discharge is not None
+    assert charge is not None
+    assert restore is not None
+
+    discharge_branch = discharge.split("# Check if this is a GoodWe system", 1)[1].split(
+        "# Check if this is an AlphaESS system", 1
+    )[0]
+    charge_branch = charge.split("# Check if this is a GoodWe system", 1)[1].split(
+        "# Check if this is an AlphaESS system", 1
+    )[0]
+    restore_branch = restore.split("# Check if this is a GoodWe system", 1)[1].split(
+        "# Check if this is an AlphaESS system", 1
+    )[0]
+
+    for branch, action in (
+        (discharge_branch, "force discharge"),
+        (charge_branch, "force charge"),
+    ):
+        assert f'"GoodWe {action} was not confirmed"' in branch
+        assert "except HomeAssistantError:\n                raise" in branch
+    assert "def _schedule_goodwe_restore_retry(reason: str) -> bool:" in restore
+    assert "_schedule_goodwe_restore_retry(" in restore_branch
+    assert '"_restore_retry": next_retry' in restore
+
+
+def test_force_switches_follow_dispatcher_state_and_propagate_service_errors():
+    """#398: a switch cannot optimistically claim a failed force action worked."""
+    source = SWITCH_PATH.read_text()
+    tree = ast.parse(source)
+    for class_name in ("ForceDischargeSwitch", "ForceChargeSwitch"):
+        turn_on = ast.get_source_segment(
+            source, _find_class_method(tree, class_name, "async_turn_on")
+        )
+        turn_off = ast.get_source_segment(
+            source, _find_class_method(tree, class_name, "async_turn_off")
+        )
+        expiry = ast.get_source_segment(
+            source, _find_class_method(tree, class_name, "_schedule_expiry_check")
+        )
+        assert turn_on is not None
+        assert turn_off is not None
+        assert expiry is not None
+        assert "self._attr_is_on = True" not in turn_on
+        assert "self._attr_is_on = False" not in turn_off
+        assert "Failed to activate" in turn_on and "raise" in turn_on
+        assert "Failed to restore" in turn_off and "raise" in turn_off
+        assert "self._attr_is_on = False" not in expiry
 
 
 def test_goodwe_entity_echo_does_not_claim_physical_force_discharge():

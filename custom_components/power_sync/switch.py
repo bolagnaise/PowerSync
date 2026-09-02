@@ -887,17 +887,9 @@ class ForceDischargeSwitch(SwitchEntity):
                 blocking=True,
             )
 
-            self._attr_is_on = True
-            self._discharge_expires_at = datetime.now() + timedelta(minutes=duration)
-            self._duration_minutes = duration
-
-            # Set up expiry timer
-            self._schedule_expiry_check()
-
-            self.async_write_ha_state()
-
         except Exception as err:
             _LOGGER.error("Failed to activate force discharge: %s", err)
+            raise
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off force discharge mode (restore normal operation)."""
@@ -911,18 +903,9 @@ class ForceDischargeSwitch(SwitchEntity):
                 blocking=True,
             )
 
-            self._attr_is_on = False
-            self._discharge_expires_at = None
-
-            # Cancel any pending expiry timer
-            if self._cancel_expiry_timer:
-                self._cancel_expiry_timer()
-                self._cancel_expiry_timer = None
-
-            self.async_write_ha_state()
-
         except Exception as err:
             _LOGGER.error("Failed to restore normal operation: %s", err)
+            raise
 
     def _schedule_expiry_check(self) -> None:
         """Schedule periodic check for discharge expiry."""
@@ -938,10 +921,10 @@ class ForceDischargeSwitch(SwitchEntity):
                 and _datetime_now_for(self._discharge_expires_at) >= self._discharge_expires_at
             ):
                 _LOGGER.info("Force discharge expired, restoring normal operation")
-                self._attr_is_on = False
-                self._discharge_expires_at = None
+                # The service-side expiry callback owns the physical restore.
+                # If its confirmation fails, keep the dispatcher-owned state
+                # on until a confirmed restore changes it.
                 self._cancel_expiry_timer = None
-                self.async_write_ha_state()
             elif self._attr_is_on:
                 # Schedule next check
                 self._schedule_expiry_check()
@@ -1068,17 +1051,9 @@ class ForceChargeSwitch(SwitchEntity):
                 blocking=True,
             )
 
-            self._attr_is_on = True
-            self._charge_expires_at = datetime.now() + timedelta(minutes=duration)
-            self._duration_minutes = duration
-
-            # Set up expiry timer
-            self._schedule_expiry_check()
-
-            self.async_write_ha_state()
-
         except Exception as err:
             _LOGGER.error("Failed to activate force charge: %s", err)
+            raise
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off force charge mode (restore normal operation)."""
@@ -1092,18 +1067,9 @@ class ForceChargeSwitch(SwitchEntity):
                 blocking=True,
             )
 
-            self._attr_is_on = False
-            self._charge_expires_at = None
-
-            # Cancel any pending expiry timer
-            if self._cancel_expiry_timer:
-                self._cancel_expiry_timer()
-                self._cancel_expiry_timer = None
-
-            self.async_write_ha_state()
-
         except Exception as err:
             _LOGGER.error("Failed to restore normal operation: %s", err)
+            raise
 
     def _schedule_expiry_check(self) -> None:
         """Schedule periodic check for charge expiry."""
@@ -1119,10 +1085,10 @@ class ForceChargeSwitch(SwitchEntity):
                 and _datetime_now_for(self._charge_expires_at) >= self._charge_expires_at
             ):
                 _LOGGER.info("Force charge expired, restoring normal operation")
-                self._attr_is_on = False
-                self._charge_expires_at = None
+                # The service-side expiry callback owns the physical restore.
+                # If its confirmation fails, keep the dispatcher-owned state
+                # on until a confirmed restore changes it.
                 self._cancel_expiry_timer = None
-                self.async_write_ha_state()
             elif self._attr_is_on:
                 # Schedule next check
                 self._schedule_expiry_check()

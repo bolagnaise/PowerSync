@@ -10375,18 +10375,27 @@ class GoodWeSettingsView(HomeAssistantView):
             if action == "force_charge":
                 duration = body.get("duration", 30)
                 await self._hass.services.async_call(
-                    DOMAIN, "force_charge", {"duration": duration}, blocking=True
+                    DOMAIN,
+                    "force_charge",
+                    {"duration": duration, "source": "user"},
+                    blocking=True,
                 )
                 return web.json_response({"success": True, "action": "force_charge"})
             elif action == "force_discharge":
                 duration = body.get("duration", 30)
                 await self._hass.services.async_call(
-                    DOMAIN, "force_discharge", {"duration": duration}, blocking=True
+                    DOMAIN,
+                    "force_discharge",
+                    {"duration": duration, "source": "user"},
+                    blocking=True,
                 )
                 return web.json_response({"success": True, "action": "force_discharge"})
             elif action == "restore_normal":
                 await self._hass.services.async_call(
-                    DOMAIN, "restore_normal", {}, blocking=True
+                    DOMAIN,
+                    "restore_normal",
+                    {"source": "user"},
+                    blocking=True,
                 )
                 return web.json_response({"success": True, "action": "restore_normal"})
             elif action == "set_backup_reserve":
@@ -31911,8 +31920,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 goodwe_coord = entry_data.get("goodwe_coordinator")
                 if not goodwe_coord:
                     force_discharge_state["active"] = False
-                    _LOGGER.error("Force discharge: GoodWe coordinator not available")
-                    return
+                    raise HomeAssistantError(
+                        "GoodWe force discharge coordinator is not available"
+                    )
 
                 power_w = command_power_w
                 goodwe_curtailment_restore_result = await _guarded_force_discharge_write(
@@ -31924,10 +31934,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 if not goodwe_curtailment_restore_result:
                     force_discharge_state["active"] = False
-                    _LOGGER.error(
-                        "GoodWe force discharge blocked: curtailment restore was not confirmed"
+                    raise HomeAssistantError(
+                        "GoodWe force discharge blocked: curtailment restore "
+                        "was not confirmed"
                     )
-                    return
                 discharge_result = await _guarded_force_discharge_write(
                     lambda guarded_w: goodwe_coord.force_discharge(
                         duration, power_w=guarded_w
@@ -31980,13 +31990,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await persist_force_mode_state()
                 else:
                     force_discharge_state["active"] = False
-                    _LOGGER.error("GoodWe force discharge failed")
+                    raise HomeAssistantError(
+                        "GoodWe force discharge was not confirmed"
+                    )
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 force_discharge_state["active"] = False
                 _LOGGER.error(f"Error in GoodWe force discharge: {e}", exc_info=True)
                 hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "GoodWe communication error"))
-                return
+                raise HomeAssistantError(
+                    "GoodWe force discharge failed"
+                ) from e
 
         # Check if this is an AlphaESS system
         is_alphaess = entry.options.get(
@@ -33686,8 +33702,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 goodwe_coord = entry_data.get("goodwe_coordinator")
                 if not goodwe_coord:
                     force_charge_state["active"] = False
-                    _LOGGER.error("Force charge: GoodWe coordinator not available")
-                    return
+                    raise HomeAssistantError(
+                        "GoodWe force charge coordinator is not available"
+                    )
 
                 # Cancel active discharge mode if switching to charge
                 if force_discharge_state["active"]:
@@ -33732,13 +33749,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await persist_force_mode_state()
                 else:
                     force_charge_state["active"] = False
-                    _LOGGER.error("GoodWe force charge failed")
+                    raise HomeAssistantError(
+                        "GoodWe force charge was not confirmed"
+                    )
                 return
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 force_charge_state["active"] = False
                 _LOGGER.error(f"Error in GoodWe force charge: {e}", exc_info=True)
                 hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "GoodWe communication error"))
-                return
+                raise HomeAssistantError(
+                    "GoodWe force charge failed"
+                ) from e
 
         # Check if this is an AlphaESS system
         is_alphaess = entry.options.get(
@@ -35345,6 +35368,69 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return True
 
+        def _schedule_goodwe_restore_retry(reason: str) -> bool:
+            """Retry an unconfirmed GoodWe force-mode cleanup without stranding it."""
+            if restore_retry_count >= 3:
+                _LOGGER.error(
+                    "GoodWe restore_normal still failing after %d retries; "
+                    "leaving force state active for manual restore (%s)",
+                    restore_retry_count,
+                    reason,
+                )
+                return False
+
+            retry_state = (
+                force_charge_state
+                if restore_was_force_charging or force_charge_state.get("active")
+                else force_discharge_state
+            )
+            if not retry_state.get("active"):
+                return False
+
+            now = dt_util.utcnow()
+            retry_at = now + timedelta(seconds=60)
+            expires_at = retry_state.get("expires_at")
+            if isinstance(expires_at, datetime) and expires_at > now:
+                retry_at = min(retry_at, expires_at)
+            next_retry = restore_retry_count + 1
+
+            async def _retry_goodwe_restore(_now):
+                if not retry_state.get("active"):
+                    _LOGGER.debug(
+                        "GoodWe restore retry skipped; force state is no longer active"
+                    )
+                    return
+                _LOGGER.warning(
+                    "Retrying GoodWe restore_normal after incomplete restore "
+                    "(%s, attempt %d)",
+                    reason,
+                    next_retry,
+                )
+                await hass.services.async_call(
+                    DOMAIN,
+                    SERVICE_RESTORE_NORMAL,
+                    {
+                        "source": source,
+                        "_restore_retry": next_retry,
+                        "_allow_monitoring_restore": True,
+                    },
+                    blocking=True,
+                )
+
+            if retry_state.get("cancel_expiry_timer"):
+                retry_state["cancel_expiry_timer"]()
+            retry_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                hass,
+                _retry_goodwe_restore,
+                retry_at,
+            )
+            _LOGGER.warning(
+                "GoodWe restore_normal incomplete; retry %d scheduled (%s)",
+                next_retry,
+                reason,
+            )
+            return True
+
         def _saved_hold_soc_backup_reserve() -> int | None:
             saved = hold_soc_state.get("saved_backup_reserve")
             if saved is None:
@@ -35541,6 +35627,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
 
                 if not restore_succeeded:
+                    _schedule_goodwe_restore_retry(
+                        "hardware restore was not confirmed"
+                    )
+                    await persist_force_mode_state()
                     raise HomeAssistantError(
                         "GoodWe restore_normal was not confirmed; preserving active control state for retry"
                     )
@@ -35593,7 +35683,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raise
             except Exception as e:
                 _LOGGER.error(f"Error in GoodWe restore normal: {e}", exc_info=True)
-                return
+                _schedule_goodwe_restore_retry(str(e))
+                await persist_force_mode_state()
+                raise HomeAssistantError(
+                    "GoodWe restore_normal failed; preserving active control state for retry"
+                ) from e
 
         # Check if this is an AlphaESS system
         is_alphaess = entry.options.get(

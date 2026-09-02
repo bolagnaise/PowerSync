@@ -24,10 +24,10 @@ _CANONICAL_ALIASES: dict[str, tuple[str, ...]] = {
         "battery_power", "battery_charge_discharge_power", "battery_active_power", "bat_power",
     ),
     "grid_power": (
-        "grid_power", "meter_active_power", "grid_active_power", "export_power_raw", "export_power",
+        "grid_power", "active_power", "meter_active_power", "grid_active_power", "export_power_raw", "export_power",
     ),
     "solar_power": (
-        "pv_power", "total_pv_power", "solar_power", "total_dc_power", "photovoltaic_power",
+        "ppv", "pv_power", "total_pv_power", "solar_power", "total_dc_power", "photovoltaic_power",
     ),
     "load_power": (
         "load_power", "house_consumption", "consumption_power", "home_load", "loads_power",
