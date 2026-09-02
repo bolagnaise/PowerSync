@@ -12610,6 +12610,56 @@ def convert_custom_tariff_to_schedule(
         return {}
 
 
+def _bootstrap_static_tariff_schedule(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    automation_store: Any,
+    electricity_provider: str,
+) -> dict | None:
+    """Expose a persisted static tariff before the first energy refresh.
+
+    Existing entries keep their custom tariff in ``AutomationStore``. Energy
+    coordinators can refresh before the full setup dictionary is assembled, so
+    put the converted schedule in temporary entry data now rather than letting
+    the first measured intervals become deliberately unpriced.
+    """
+    if electricity_provider not in {
+        "agl",
+        "globird",
+        "aemo_vpp",
+        "other",
+        "tou_only",
+        "nz",
+    }:
+        return None
+
+    try:
+        custom_tariff = automation_store.get_custom_tariff()
+    except Exception as err:
+        _LOGGER.debug("Could not load persisted custom tariff during startup: %s", err)
+        return None
+    if not isinstance(custom_tariff, dict) or not custom_tariff:
+        custom_tariff = entry.data.get("initial_custom_tariff")
+    if not isinstance(custom_tariff, dict) or not custom_tariff:
+        return None
+
+    tariff_schedule = convert_custom_tariff_to_schedule(
+        custom_tariff,
+        currency=currency_for_entry(entry, hass),
+    )
+    if not tariff_schedule:
+        return None
+
+    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+    entry_data["tariff_schedule"] = tariff_schedule
+    _LOGGER.info(
+        "Restored persisted custom tariff before first energy refresh for %s: %s",
+        electricity_provider,
+        custom_tariff.get("name", "Custom Tariff"),
+    )
+    return tariff_schedule
+
+
 def get_current_price_from_tariff_schedule(tariff_schedule: dict) -> tuple[float, float, str]:
     """Calculate current buy/sell price from tariff_schedule TOU periods.
 
@@ -20741,6 +20791,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     automation_store = AutomationStore(hass)
     await automation_store.async_load()
+    _bootstrap_static_tariff_schedule(
+        hass,
+        entry,
+        automation_store,
+        electricity_provider,
+    )
     stored_automation_data = getattr(automation_store, "_data", {}) or {}
     stored_vehicle_configs = stored_automation_data.get(
         "vehicle_charging_configs",
@@ -23034,6 +23090,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # preserve those values when replacing the setup entry with the full data.
     existing_entry_data = hass.data.setdefault(DOMAIN, {}).get(entry.entry_id, {})
     powerwall_local_runtime = existing_entry_data.get("powerwall_local")
+    startup_tariff_schedule = existing_entry_data.get("tariff_schedule")
     tesla_capabilities = existing_entry_data.get("tesla_capabilities")
     if tesla_capabilities is None and tesla_coordinator:
         tesla_capabilities = dict(getattr(tesla_coordinator, "tesla_capabilities", {}) or {})
@@ -23075,6 +23132,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "epex_coordinator": epex_coordinator,  # For EPEX Day-Ahead EU pricing
         "ws_client": ws_client,  # Store for cleanup on unload
         "entry": entry,
+        "automation_store": automation_store,
+        "tariff_schedule": startup_tariff_schedule,
         "aemo_dispatch_generation": aemo_dispatch_generation,
         "aemo_dispatch_stopping": False,
         "aemo_dispatch_tasks": set(),
