@@ -56,6 +56,9 @@ class BatteryConnectionProfile:
     monitoring_only: bool = False
     requires_upstream: bool = False
     route_value: str | None = None
+    # Translate an upstream integration's power convention into PowerSync's
+    # canonical convention before telemetry is used for balances or display.
+    power_multipliers: tuple[tuple[str, float], ...] = ()
     controls_summary: str = "Existing PowerSync control route"
 
 
@@ -96,6 +99,9 @@ _PROFILES: tuple[BatteryConnectionProfile, ...] = (
         upstream_domains=("sigen",),
         monitoring_only=True,
         requires_upstream=True,
+        # Sigenergy Local Modbus keeps its native convention: negative is
+        # discharge and positive is charge. PowerSync uses the inverse.
+        power_multipliers=(("battery_power", -1.0),),
         controls_summary="Monitoring only; upstream writes are not inferred",
     ),
     _p(

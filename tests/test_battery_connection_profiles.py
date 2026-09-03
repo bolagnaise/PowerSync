@@ -156,6 +156,20 @@ def test_cross_brand_profile_is_rejected_by_resolution():
     assert profile.profile_id == "sigenergy_direct"
 
 
+def test_sigenergy_monitoring_profile_declares_native_battery_sign():
+    const, profiles = _load_profile_modules()
+
+    profile = profiles.resolve_connection_profile(
+        {
+            const.CONF_BATTERY_SYSTEM: const.BATTERY_SYSTEM_SIGENERGY,
+            const.CONF_BATTERY_CONNECTION_PROFILE: "sigenergy_ha_monitoring",
+        },
+        {},
+    )
+
+    assert profile.power_multipliers == (("battery_power", -1.0),)
+
+
 class _Registry:
     def __init__(self, rows):
         self.entities = {row.entity_id: row for row in rows}
@@ -373,6 +387,7 @@ def test_runtime_resolves_monitoring_profile_before_direct_construction():
         "tesla_coordinator = discovered_coordinator",
     ):
         assert assignment in monitoring_dispatch
+    assert "multipliers = dict(battery_connection_profile.power_multipliers)" in monitoring_dispatch
 
 
 def test_goodwe_entity_telemetry_does_not_construct_direct_controller():

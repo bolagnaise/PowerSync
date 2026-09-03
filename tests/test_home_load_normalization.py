@@ -98,6 +98,24 @@ def test_sigenergy_reconstructs_raw_balance_before_normalizing():
     assert result["load_power"] == 3.0
 
 
+def test_sigenergy_canonical_discharge_prevents_zero_home_load_clamp():
+    """#399: native negative discharge is normalized before this balance."""
+    result = normalize_energy_data(
+        {
+            "solar_power": 0.0,
+            "grid_power": 0.712,
+            "battery_power": 0.905,
+            "load_power": 0.0,
+        },
+        battery_system="sigenergy",
+        ev_load=ev(0.0),
+        at=NOW,
+    )
+
+    assert result["raw_home_load_power"] == 1.617
+    assert result["load_power"] == 1.617
+
+
 def test_fresh_complete_snapshot_recovers_after_incomplete_cycle():
     incomplete = normalize_energy_data(
         {"load_power": 5.67, "ev_power": 0.0},

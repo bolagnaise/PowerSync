@@ -105,7 +105,11 @@ def _state(value: str, unit: str = "") -> SimpleNamespace:
     )
 
 
-def _coordinator(states: dict[str, Any]):
+def _coordinator(
+    states: dict[str, Any],
+    *,
+    power_multipliers: dict[str, float] | None = None,
+):
     coordinator_class = _custom_coordinator_class()
     hass = SimpleNamespace(
         states=SimpleNamespace(get=lambda entity_id: states.get(entity_id))
@@ -120,6 +124,7 @@ def _coordinator(states: dict[str, Any]):
             "load_power": "sensor.source_load",
         },
         entry_id="custom-entry",
+        power_multipliers=power_multipliers,
     )
 
 
@@ -145,6 +150,25 @@ def test_custom_entity_coordinator_normalizes_mobile_energy_data():
     assert coordinator._energy_acc.updated_with == pytest.approx(
         (4.0, -1.1, -2.4, 1.8, 0.25, 0.08)
     )
+
+
+def test_sigenergy_monitoring_multiplier_normalizes_discharge_before_publish():
+    """A native negative discharge must become canonical positive discharge."""
+    coordinator = _coordinator(
+        {
+            "sensor.source_soc": _state("15.8", "%"),
+            "sensor.source_battery": _state("-905", "W"),
+            "sensor.source_grid": _state("712", "W"),
+            "sensor.source_solar": _state("0", "W"),
+            "sensor.source_load": _state("0", "W"),
+        },
+        power_multipliers={"battery_power": -1.0},
+    )
+
+    data = asyncio.run(coordinator._async_update_data())
+
+    assert data["battery_power"] == pytest.approx(0.905)
+    assert coordinator._energy_acc.updated_with[2] == pytest.approx(0.905)
 
 
 @pytest.mark.parametrize(

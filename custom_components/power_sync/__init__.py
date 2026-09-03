@@ -21502,9 +21502,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ", ".join(canonical_missing_roles),
             )
         else:
-            multipliers = {
-                "grid_power": float(canonical_catalog.get("grid_power_multiplier", 1.0))
-            }
+            multipliers = dict(battery_connection_profile.power_multipliers)
+            multipliers["grid_power"] = float(
+                canonical_catalog.get("grid_power_multiplier", 1.0)
+            )
             discovered_coordinator = DiscoveredEntityEnergyCoordinator(
                 hass,
                 canonical_source_entities,
