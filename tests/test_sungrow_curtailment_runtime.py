@@ -464,6 +464,7 @@ def _run_fast_load_following_case(
 
     namespace = {
         "Any": object,
+        "asyncio": asyncio,
         "DOMAIN": "power_sync",
         "hass": hass,
         "entry": entry,

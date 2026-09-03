@@ -24349,30 +24349,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("Inverter curtailment enabled but no host configured")
             return False
 
+        inverter_control_lock = entry_data.get("inverter_control_lock")
+        if inverter_control_lock is not None:
+            await inverter_control_lock.acquire()
         try:
-            controller = get_inverter_controller(
-                brand=inverter_brand,
-                host=inverter_host,
-                port=inverter_port,
-                slave_id=inverter_slave_id,
-                model=inverter_model,
-                token=inverter_token,
-                load_following=fronius_load_following,
-                enphase_username=enphase_username,
-                enphase_password=enphase_password,
-                enphase_serial=enphase_serial,
-                enphase_normal_profile=enphase_normal_profile,
-                enphase_zero_export_profile=enphase_zero_export_profile,
-                enphase_is_installer=enphase_is_installer,
-                max_export_limit_kw=entry.data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW),
-                rated_power_w=inverter_rated_power_w,
-                entity_prefix=entry.options.get(
-                    CONF_INVERTER_ENTITY_PREFIX,
-                    entry.data.get(CONF_INVERTER_ENTITY_PREFIX, ""),
-                ),
-                hass=hass,
-                entry_id=entry.entry_id,
-            )
+            controller = entry_data.get("inverter_controller")
+            if controller is None:
+                controller = get_inverter_controller(
+                    brand=inverter_brand,
+                    host=inverter_host,
+                    port=inverter_port,
+                    slave_id=inverter_slave_id,
+                    model=inverter_model,
+                    token=inverter_token,
+                    load_following=fronius_load_following,
+                    enphase_username=enphase_username,
+                    enphase_password=enphase_password,
+                    enphase_serial=enphase_serial,
+                    enphase_normal_profile=enphase_normal_profile,
+                    enphase_zero_export_profile=enphase_zero_export_profile,
+                    enphase_is_installer=enphase_is_installer,
+                    max_export_limit_kw=entry.data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW),
+                    rated_power_w=inverter_rated_power_w,
+                    entity_prefix=entry.options.get(
+                        CONF_INVERTER_ENTITY_PREFIX,
+                        entry.data.get(CONF_INVERTER_ENTITY_PREFIX, ""),
+                    ),
+                    hass=hass,
+                    entry_id=entry.entry_id,
+                )
 
             if not controller:
                 _LOGGER.error(f"Unsupported inverter brand: {inverter_brand}")
@@ -24587,6 +24592,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 except Exception:
                     pass
             return False
+        finally:
+            if inverter_control_lock is not None:
+                inverter_control_lock.release()
 
     # Migrate legacy entity IDs to power_sync_ prefix
     _migrate_entity_ids(hass, entry)
@@ -39430,30 +39438,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("No inverter host configured")
             return
 
+        entry_data = hass.data[DOMAIN][entry.entry_id]
+        inverter_control_lock = entry_data.get("inverter_control_lock")
+        if inverter_control_lock is None:
+            inverter_control_lock = asyncio.Lock()
+            entry_data["inverter_control_lock"] = inverter_control_lock
+        controller = None
+        success = False
+        await inverter_control_lock.acquire()
         try:
-            controller = get_inverter_controller(
-                brand=inverter_brand,
-                host=inverter_host,
-                port=inverter_port,
-                slave_id=inverter_slave_id,
-                model=inverter_model,
-                token=inverter_token,
-                load_following=fronius_load_following,
-                enphase_username=enphase_username,
-                enphase_password=enphase_password,
-                enphase_serial=enphase_serial,
-                enphase_normal_profile=enphase_normal_profile,
-                enphase_zero_export_profile=enphase_zero_export_profile,
-                enphase_is_installer=enphase_is_installer,
-                max_export_limit_kw=entry.data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW),
-                rated_power_w=inverter_rated_power_w,
-                entity_prefix=entry.options.get(
-                    CONF_INVERTER_ENTITY_PREFIX,
-                    entry.data.get(CONF_INVERTER_ENTITY_PREFIX, ""),
-                ),
-                hass=hass,
-                entry_id=entry.entry_id,
-            )
+            controller = entry_data.get("inverter_controller")
+            if controller is None:
+                controller = get_inverter_controller(
+                    brand=inverter_brand,
+                    host=inverter_host,
+                    port=inverter_port,
+                    slave_id=inverter_slave_id,
+                    model=inverter_model,
+                    token=inverter_token,
+                    load_following=fronius_load_following,
+                    enphase_username=enphase_username,
+                    enphase_password=enphase_password,
+                    enphase_serial=enphase_serial,
+                    enphase_normal_profile=enphase_normal_profile,
+                    enphase_zero_export_profile=enphase_zero_export_profile,
+                    enphase_is_installer=enphase_is_installer,
+                    max_export_limit_kw=entry.data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW),
+                    rated_power_w=inverter_rated_power_w,
+                    entity_prefix=entry.options.get(
+                        CONF_INVERTER_ENTITY_PREFIX,
+                        entry.data.get(CONF_INVERTER_ENTITY_PREFIX, ""),
+                    ),
+                    hass=hass,
+                    entry_id=entry.entry_id,
+                )
 
             home_load_w = None
 
@@ -39492,7 +39510,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.info(f"✅ Inverter curtailed (load-following to {home_load_w}W)")
                 else:
                     _LOGGER.info(f"✅ Inverter curtailed successfully")
-                hass.data[DOMAIN][entry.entry_id]["inverter_controller"] = controller
+                entry_data["inverter_controller"] = controller
                 _set_inverter_control_state(
                     mode,
                     home_load_w,
@@ -39500,10 +39518,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
             else:
                 _LOGGER.error("❌ Failed to curtail inverter")
-                await controller.disconnect()
 
         except Exception as e:
             _LOGGER.error(f"Error curtailing inverter: {e}")
+        finally:
+            if controller is not None and not success:
+                try:
+                    await controller.disconnect()
+                except Exception as err:
+                    _LOGGER.debug("Error closing failed inverter controller: %s", err)
+                if entry_data.get("inverter_controller") is controller:
+                    entry_data.pop("inverter_controller", None)
+            inverter_control_lock.release()
 
     async def handle_restore_inverter(call: ServiceCall) -> None:
         """Manually restore the AC-coupled inverter to normal operation."""
@@ -39587,30 +39613,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("No inverter host configured")
             return
 
+        entry_data = hass.data[DOMAIN][entry.entry_id]
+        inverter_control_lock = entry_data.get("inverter_control_lock")
+        if inverter_control_lock is None:
+            inverter_control_lock = asyncio.Lock()
+            entry_data["inverter_control_lock"] = inverter_control_lock
+        controller = None
+        success = False
+        await inverter_control_lock.acquire()
         try:
-            controller = get_inverter_controller(
-                brand=inverter_brand,
-                host=inverter_host,
-                port=inverter_port,
-                slave_id=inverter_slave_id,
-                model=inverter_model,
-                token=inverter_token,
-                load_following=fronius_load_following,
-                enphase_username=enphase_username,
-                enphase_password=enphase_password,
-                enphase_serial=enphase_serial,
-                enphase_normal_profile=enphase_normal_profile,
-                enphase_zero_export_profile=enphase_zero_export_profile,
-                enphase_is_installer=enphase_is_installer,
-                max_export_limit_kw=entry.data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW),
-                rated_power_w=inverter_rated_power_w,
-                entity_prefix=entry.options.get(
-                    CONF_INVERTER_ENTITY_PREFIX,
-                    entry.data.get(CONF_INVERTER_ENTITY_PREFIX, ""),
-                ),
-                hass=hass,
-                entry_id=entry.entry_id,
-            )
+            controller = entry_data.get("inverter_controller")
+            if controller is None:
+                controller = get_inverter_controller(
+                    brand=inverter_brand,
+                    host=inverter_host,
+                    port=inverter_port,
+                    slave_id=inverter_slave_id,
+                    model=inverter_model,
+                    token=inverter_token,
+                    load_following=fronius_load_following,
+                    enphase_username=enphase_username,
+                    enphase_password=enphase_password,
+                    enphase_serial=enphase_serial,
+                    enphase_normal_profile=enphase_normal_profile,
+                    enphase_zero_export_profile=enphase_zero_export_profile,
+                    enphase_is_installer=enphase_is_installer,
+                    max_export_limit_kw=entry.data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW),
+                    rated_power_w=inverter_rated_power_w,
+                    entity_prefix=entry.options.get(
+                        CONF_INVERTER_ENTITY_PREFIX,
+                        entry.data.get(CONF_INVERTER_ENTITY_PREFIX, ""),
+                    ),
+                    hass=hass,
+                    entry_id=entry.entry_id,
+                )
 
             _LOGGER.info(f"🟢 Restoring {inverter_brand} inverter at {inverter_host}")
 
@@ -39622,12 +39658,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             else:
                 _LOGGER.error("❌ Failed to restore inverter")
 
-            await controller.disconnect()
-            if success:
-                hass.data[DOMAIN][entry.entry_id].pop("inverter_controller", None)
-
         except Exception as e:
             _LOGGER.error(f"Error restoring inverter: {e}")
+        finally:
+            if controller is not None:
+                try:
+                    await controller.disconnect()
+                except Exception as err:
+                    _LOGGER.debug("Error closing restored inverter controller: %s", err)
+                if entry_data.get("inverter_controller") is controller:
+                    entry_data.pop("inverter_controller", None)
+            inverter_control_lock.release()
 
     hass.services.async_register(DOMAIN, SERVICE_CURTAIL_INVERTER, handle_curtail_inverter)
     hass.services.async_register(DOMAIN, SERVICE_RESTORE_INVERTER, handle_restore_inverter)
@@ -41143,6 +41184,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not controller:
                 return
 
+            async def _curtail_current_controller(**kwargs):
+                """Serialize refresh writes with manual and scheduled control."""
+                inverter_control_lock = entry_data.get("inverter_control_lock")
+                if inverter_control_lock is None:
+                    inverter_control_lock = asyncio.Lock()
+                    entry_data["inverter_control_lock"] = inverter_control_lock
+                async with inverter_control_lock:
+                    current_control_mode = entry_data.get("inverter_control_mode")
+                    if current_control_mode not in INVERTER_CONTROL_MODES:
+                        current_control_mode = (
+                            INVERTER_CONTROL_MODE_LOAD_FOLLOWING
+                            if entry_data.get("inverter_last_state") == "curtailed"
+                            else INVERTER_CONTROL_MODE_NORMAL
+                        )
+                    if (
+                        _aemo_dispatch_entry_data() is not entry_data
+                        or entry_data.get("inverter_controller") is not controller
+                        or current_control_mode != control_mode
+                    ):
+                        return None
+                    if kwargs:
+                        return await controller.curtail(**kwargs)
+                    return await controller.curtail()
+
             last_dpel_time = entry_data.get("last_dpel_update_time")
             now_time = datetime.now()
             force_reapply = False
@@ -41166,7 +41231,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
                 target_power_w = entry_data.get("inverter_power_limit_w")
                 if hasattr(controller, 'curtail'):
-                    success = await controller.curtail()
+                    success = await _curtail_current_controller()
+                    if success is None:
+                        return
                     if _aemo_dispatch_entry_data() is not entry_data:
                         return
                     if success:
@@ -41263,7 +41330,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if hasattr(controller, 'curtail'):
                 sig = inspect.signature(controller.curtail)
                 if 'home_load_w' in sig.parameters:
-                    success = await controller.curtail(home_load_w=home_load_w)
+                    success = await _curtail_current_controller(home_load_w=home_load_w)
+                    if success is None:
+                        return
                     if _aemo_dispatch_entry_data() is not entry_data:
                         return
                     if success:
@@ -44565,6 +44634,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if load_following_cancel := entry_data.get("load_following_cancel"):
         load_following_cancel()
         _LOGGER.debug("Cancelled load-following timer")
+
+    # The cached AC-inverter controller can hold an Enphase HTTP session while
+    # load following is active.  Closing it before the entry data is removed
+    # prevents a reload from leaving that session attached to the Envoy.
+    if inverter_controller := entry_data.pop("inverter_controller", None):
+        try:
+            await inverter_controller.disconnect()
+        except Exception as err:
+            _LOGGER.debug("AC inverter controller shutdown error: %s", err)
 
     # Cancel Flow Power v2 tariff timers
     if fp_cancel := entry_data.get("fp_tariff_cancel"):
