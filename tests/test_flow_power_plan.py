@@ -187,3 +187,18 @@ def test_plan_hash_changes_with_contract_or_timezone():
     )
     vic = _snapshot("happy_hour_2026", region="VIC")
     assert len({sydney.plan_hash, brisbane.plan_hash, vic.plan_hash}) == 3
+
+
+def test_active_official_plan_hash_ignores_inactive_legacy_fields():
+    """A legacy UI edit must not discard the active official-plan ledger."""
+    first = _snapshot(
+        "happy_hour_2026", region="VIC", legacy_rate=0.30, legacy_end="19:30"
+    )
+    changed_legacy = _snapshot(
+        "happy_hour_2026", region="VIC", legacy_rate=0.45, legacy_end="21:30"
+    )
+    legacy_first = _snapshot(legacy_rate=0.30, legacy_end="19:30")
+    legacy_changed = _snapshot(legacy_rate=0.45, legacy_end="21:30")
+
+    assert first.plan_hash == changed_legacy.plan_hash
+    assert legacy_first.plan_hash != legacy_changed.plan_hash

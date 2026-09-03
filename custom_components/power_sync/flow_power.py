@@ -192,9 +192,19 @@ def flow_power_plan_hash(
     payload = {
         "selection": selection.to_dict(),
         "timezone": timezone_token,
-        "legacy_export_rate_dollars": round(float(legacy_export_rate_dollars), 8),
-        "legacy_happy_hour_end": legacy_happy_hour_end,
     }
+    # Official plans own their tariff terms. Retaining compatibility fields in
+    # their state identity discards a valid quota ledger when an unrelated
+    # legacy UI setting changes.
+    if selection.plan_id not in OFFICIAL_PLAN_IDS:
+        payload.update(
+            {
+                "legacy_export_rate_dollars": round(
+                    float(legacy_export_rate_dollars), 8
+                ),
+                "legacy_happy_hour_end": legacy_happy_hour_end,
+            }
+        )
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode()).hexdigest()[:24]
 

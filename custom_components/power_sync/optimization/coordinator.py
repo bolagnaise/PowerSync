@@ -3421,7 +3421,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 continue
             total_kwh = self._energy_summary_total_kwh(data, direction)
             if total_kwh is not None:
-                settled[direction] = ledger.observe_cumulative(
+                # The energy summary is a daily counter (including the
+                # Sigenergy software accumulator), not a lifetime PCC meter.
+                # Its expected midnight reset needs its own provenance-aware
+                # settlement path.
+                settled[direction] = ledger.observe_daily_total(
                     direction, total_kwh, now
                 )
             else:

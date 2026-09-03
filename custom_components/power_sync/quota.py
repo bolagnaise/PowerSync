@@ -192,6 +192,62 @@ class QuotaLedger:
         self._restore_availability_if_ready(direction)
         return settled
 
+    def observe_daily_total(
+        self,
+        direction: Direction,
+        total_kwh: float,
+        observed_at: datetime,
+    ) -> float:
+        """Settle a metered daily total that normally resets at tariff midnight.
+
+        A coordinator can briefly expose yesterday's cached daily total after
+        midnight. A confirmed lower reading in the reset grace window replaces
+        that stale baseline; a later decrease remains unsafe and disables the
+        marginal benefit.
+        """
+        observed_at = _aware(observed_at)
+        total_kwh = max(0.0, _float(total_kwh))
+        self._rollover_if_needed(observed_at)
+        previous_at = _parse_datetime(self.state.last_sample_at[direction])
+        previous_total = self.state.last_meter_kwh[direction]
+
+        if previous_at is not None and observed_at < previous_at:
+            return 0.0
+        if previous_at is not None and observed_at == previous_at:
+            if previous_total is not None and abs(total_kwh - previous_total) > 1e-9:
+                self._mark_unknown("corrected reading reused an existing timestamp")
+            return 0.0
+
+        self.state.source_kind[direction] = "daily_resettable_total"
+        if previous_total is not None and previous_at is not None:
+            self._recover_initial_baseline(direction, previous_at)
+
+        if previous_total is None or previous_at is None:
+            self.state.last_sample_at[direction] = observed_at.isoformat()
+            self.state.last_meter_kwh[direction] = total_kwh
+            self._establish_baseline(direction, observed_at, authoritative=True)
+            self._restore_availability_if_ready(direction)
+            return 0.0
+        if abs(total_kwh - previous_total) <= 1e-12:
+            self._restore_availability_if_ready(direction)
+            return 0.0
+        if total_kwh < previous_total - 1e-9:
+            if self._within_reset_baseline_grace(observed_at):
+                self.state.last_sample_at[direction] = observed_at.isoformat()
+                self.state.last_meter_kwh[direction] = total_kwh
+                self._establish_baseline(direction, observed_at, authoritative=True)
+                self._restore_availability_if_ready(direction)
+                return 0.0
+            self._mark_unknown("daily energy counter reset or decreased")
+            return 0.0
+
+        delta = max(0.0, total_kwh - previous_total)
+        self.state.last_sample_at[direction] = observed_at.isoformat()
+        self.state.last_meter_kwh[direction] = total_kwh
+        settled = self._settle_interval(direction, previous_at, observed_at, delta)
+        self._restore_availability_if_ready(direction)
+        return settled
+
     def observe_power(
         self,
         direction: Direction,
@@ -332,7 +388,8 @@ class QuotaLedger:
             ):
                 previously_estimated = self.state.confidence == "estimated"
                 all_authoritative = all(
-                    self.state.source_kind.get(item) == "total_increasing"
+                    self.state.source_kind.get(item)
+                    in {"total_increasing", "daily_resettable_total"}
                     for item in required_directions
                 )
                 self.state.confidence = (
@@ -403,7 +460,8 @@ class QuotaLedger:
         ):
             return
         all_authoritative = all(
-            self.state.source_kind.get(item) == "total_increasing"
+            self.state.source_kind.get(item)
+            in {"total_increasing", "daily_resettable_total"}
             for item in self._required_directions()
         )
         self.state.confidence = "authoritative" if all_authoritative else "estimated"
@@ -418,6 +476,11 @@ class QuotaLedger:
             if rule.rule_id == rule_id:
                 return rule
         raise KeyError(rule_id)
+
+    def _within_reset_baseline_grace(self, observed_at: datetime) -> bool:
+        local = tariff_datetime(observed_at, self.state.timezone_token)
+        day_start = datetime.combine(local.date(), time.min, tzinfo=local.tzinfo)
+        return (local - day_start).total_seconds() <= RESET_BASELINE_GRACE_SECONDS
 
 
 def import_legacy_settled_state(

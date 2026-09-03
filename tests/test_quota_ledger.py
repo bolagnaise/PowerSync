@@ -52,6 +52,36 @@ def test_cumulative_readings_are_idempotent_and_cap_partial_interval() -> None:
     assert ledger.bucket("free").settled_kwh == 50
 
 
+def test_daily_counter_reset_within_midnight_grace_replaces_stale_baseline() -> None:
+    """A delayed yesterday total must not poison a new Flow quota day."""
+    rule = QuotaRule(
+        "premium", "export", "AEST", (("17:30", "21:30"),), 15, 10, 20
+    )
+    ledger = QuotaLedger((rule,))
+    just_after_midnight = datetime(2026, 7, 15, 0, 0, 2, tzinfo=AEST)
+
+    ledger.observe_daily_total("export", 5.0, just_after_midnight)
+    assert ledger.state.confidence == "authoritative"
+
+    ledger.observe_daily_total(
+        "export", 0.0, just_after_midnight + timedelta(seconds=20)
+    )
+    assert ledger.state.confidence == "authoritative"
+    assert ledger.state.reason is None
+    assert ledger.state.last_meter_kwh["export"] == 0.0
+
+    ledger.observe_daily_total(
+        "export", 0.1, just_after_midnight + timedelta(minutes=1)
+    )
+    assert ledger.state.last_meter_kwh["export"] == 0.1
+
+    ledger.observe_daily_total(
+        "export", 0.0, just_after_midnight + timedelta(hours=1)
+    )
+    assert ledger.state.confidence == "unknown"
+    assert ledger.state.reason == "daily energy counter reset or decreased"
+
+
 def test_interval_energy_is_split_at_window_boundary() -> None:
     ledger = QuotaLedger(_rules(), _authoritative_state())
     start = datetime(2026, 7, 14, 10, 55, tzinfo=AEST)
