@@ -249,3 +249,38 @@ def test_dashboard_prefers_backend_matched_ev_label():
 
     assert "attributes?.vehicle_name" in source
     assert "config.ev_label = matchedVehicleName" in source
+
+
+def test_dashboard_ev_formatters_preserve_unknown_values():
+    """Unknown BLE telemetry must not be rendered as measured zero."""
+    if shutil.which("node") is None:
+        return
+
+    script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const registry = {};
+class HTMLElement { attachShadow() { return { innerHTML: '', querySelector() { return null; } }; } }
+const context = {
+  HTMLElement,
+  customElements: { get(name) { return registry[name]; }, define(name, klass) { registry[name] = klass; } },
+  window: {},
+  ResizeObserver: class {},
+  requestAnimationFrame() {},
+};
+context.globalThis = context;
+vm.runInNewContext(fs.readFileSync('custom_components/power_sync/frontend/power-sync-strategy.js', 'utf8'), context);
+const strategy = new registry['power-sync-ev-panel']();
+console.log(JSON.stringify({
+  unknown: [strategy._kw(null), strategy._amps(null), strategy._soc(null)],
+  zero: [strategy._kw(0), strategy._amps(0), strategy._soc(0)],
+}));
+'''
+    result = subprocess.run(
+        ["node"], input=script, text=True, capture_output=True, cwd=ROOT, check=True
+    )
+
+    assert json.loads(result.stdout) == {
+        "unknown": ["--", "--", "--"],
+        "zero": ["0.00 kW", "0 A", "0%"],
+    }

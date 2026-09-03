@@ -16,11 +16,16 @@ from homeassistant.helpers.storage import Store
 from ..const import (
     CONF_SOLAR_FORECAST_PROVIDER,
     CONF_SOLCAST_ESTIMATE_TYPE,
+    CONF_ZAPTEC_STANDALONE_ENABLED,
+    CONF_ZAPTEC_USERNAME,
     DEFAULT_SOLAR_FORECAST_PROVIDER,
+    DOMAIN,
     DEFAULT_SOLCAST_ESTIMATE_TYPE,
     SOLAR_FORECAST_PROVIDERS,
 )
 from ..optimization.load_estimator import SolcastForecaster
+from ..ev_load import is_current_ev_power_observation
+from ..tesla_ble import get_tesla_ble_charge_power_state
 from .triggers import evaluate_trigger, evaluate_conditions, TriggerResult
 from .actions import execute_actions
 
@@ -1130,7 +1135,6 @@ class AutomationEngine:
         # Check Zaptec standalone FIRST — if configured with cached state, use it
         # immediately. This prevents Tesla sensor regex from matching a Zaptec HA
         # integration entity and short-circuiting into the Tesla code path.
-        from ..const import DOMAIN, CONF_ZAPTEC_STANDALONE_ENABLED, CONF_ZAPTEC_USERNAME
         for entry in self._hass.config_entries.async_entries(DOMAIN):
             opts = {**entry.data, **entry.options}
             if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and opts.get(CONF_ZAPTEC_USERNAME):
@@ -1152,29 +1156,29 @@ class AutomationEngine:
         all_states = self._hass.states.async_all()
         vehicle_prefix = None
 
-        # First pass: find the most active Tesla EV charging sensor to identify
-        # the vehicle prefix. Multi-vehicle installs can expose an unavailable
-        # or stopped bridge before the vehicle that is actually charging; using
-        # entity-registry order would make a global "charging starts" trigger
-        # miss that vehicle and lose the BLE id needed by the stop action.
-        # Tesla Fleet uses: sensor.primary_ev_charging (no _state suffix)
-        # Some versions use: sensor.primary_ev_charging_state
+        # First pass: find the most active Tesla EV charging signal to identify
+        # the vehicle prefix. Multi-vehicle installs can expose a disconnected
+        # bridge before a second BLE bridge that has fresh positive power but
+        # no usable charging-state sensor. Selecting only the state sensor
+        # would make a global "charging starts" trigger miss that vehicle and
+        # lose the BLE id needed by the stop action.
+        # Tesla Fleet uses: sensor.primary_ev_charging (no _state suffix).
+        # Tesla BLE also exposes legacy/current *_charge_power variants.
         best_charging_rank = (-1, -1)
         for state in all_states:
             entity_id = state.entity_id
-            # Try both patterns: _charging$ and _charging_state$
-            match = re.match(r"sensor\.(\w+)_charging(?:_state)?$", entity_id)
+            # State entities establish every Tesla provider candidate. Power
+            # entities can add only a targetable BLE candidate; this avoids
+            # treating unrelated numeric sensors as a vehicle state.
+            match = re.match(
+                r"sensor\.(\w+)_(charging(?:_state)?|charge_power|charger_power)$",
+                entity_id,
+            )
             if match:
                 candidate_prefix = match.group(1)
+                signal = match.group(2)
                 state_value = state.state
                 normalized_state = str(state_value or "").lower()
-                activity_rank = (
-                    2
-                    if normalized_state == "charging"
-                    else 1
-                    if normalized_state not in ("", "none", "unavailable", "unknown")
-                    else 0
-                )
                 targetable_rank = int(
                     "ble" in candidate_prefix.lower()
                     or self._hass.states.get(
@@ -1186,13 +1190,55 @@ class AutomationEngine:
                     )
                     is not None
                 )
+                if signal in ("charge_power", "charger_power") and not targetable_rank:
+                    continue
+
+                activity_rank = 0
+                if signal.startswith("charging"):
+                    activity_rank = (
+                        2
+                        if normalized_state == "charging"
+                        else 1
+                        if normalized_state not in ("", "none", "unavailable", "unknown")
+                        else 0
+                    )
+
+                # A BLE power signal is physical telemetry, but only when it
+                # is fresh. BLE bridge/status availability never counts as
+                # charging by itself.
+                power_active = False
+                if targetable_rank:
+                    power_state = get_tesla_ble_charge_power_state(
+                        self._hass, candidate_prefix
+                    )
+                    observed_at = (
+                        getattr(power_state, "last_reported", None)
+                        or getattr(power_state, "last_updated", None)
+                        or getattr(power_state, "last_changed", None)
+                    )
+                    if is_current_ev_power_observation(observed_at):
+                        try:
+                            power_w = float(power_state.state)
+                            if str(
+                                getattr(power_state, "attributes", {}).get(
+                                    "unit_of_measurement", "W"
+                                )
+                            ).lower() == "kw":
+                                power_w *= 1000
+                            power_active = power_w > 100
+                        except (AttributeError, TypeError, ValueError):
+                            pass
+                if power_active:
+                    activity_rank = 2
                 rank = (activity_rank, targetable_rank)
                 if rank <= best_charging_rank:
                     continue
                 best_charging_rank = rank
                 vehicle_prefix = candidate_prefix
                 ev_state["charging_state"] = (
-                    normalized_state if activity_rank > 0 else ""
+                    "charging"
+                    if power_active
+                    else normalized_state if activity_rank > 0 else ""
                 )
                 ev_state["is_charging"] = activity_rank == 2
                 _LOGGER.debug(

@@ -5277,11 +5277,13 @@ class PowerSyncEVPanel extends HTMLElement {
   }
 
   _kw(value) {
+    if (value === null || value === undefined || value === '') return '--';
     const number = Number(value);
     return Number.isFinite(number) ? `${number.toFixed(number >= 10 ? 1 : 2)} kW` : '--';
   }
 
   _amps(value, loadpoint = null) {
+    if (value === null || value === undefined || value === '') return '--';
     const number = Number(value);
     if (Number.isFinite(number) && number > 0) return `${Math.round(number)} A`;
     const power = Number(loadpoint?.current_power_kw);
@@ -5290,6 +5292,7 @@ class PowerSyncEVPanel extends HTMLElement {
   }
 
   _soc(value) {
+    if (value === null || value === undefined || value === '') return '--';
     const number = Number(value);
     return Number.isFinite(number) ? `${Math.round(number)}%` : '--';
   }

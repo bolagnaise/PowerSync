@@ -18,6 +18,24 @@ TRIGGERS_PATH = ROOT / "custom_components" / "power_sync" / "automations" / "tri
 
 
 def _load_engine_method(name: str, namespace: dict[str, Any]):
+    namespace.setdefault("DOMAIN", "power_sync")
+    namespace.setdefault("CONF_ZAPTEC_STANDALONE_ENABLED", "zaptec_standalone_enabled")
+    namespace.setdefault("CONF_ZAPTEC_USERNAME", "zaptec_username")
+    namespace.setdefault(
+        "get_tesla_ble_charge_power_state",
+        lambda hass, prefix: next(
+            (
+                hass.states.get(f"sensor.{prefix}{suffix}")
+                for suffix in ("_charge_power", "_charger_power")
+                if hass.states.get(f"sensor.{prefix}{suffix}") is not None
+            ),
+            None,
+        ),
+    )
+    namespace.setdefault(
+        "is_current_ev_power_observation",
+        lambda observed_at: observed_at is not None,
+    )
     tree = ast.parse(AUTOMATIONS_PATH.read_text())
     engine = next(
         node
@@ -566,6 +584,103 @@ def test_automation_ev_state_prefers_active_second_ble_vehicle():
     assert state["is_plugged_in"] is True
     assert state["battery_level"] == 46
     assert state["vehicle_id"] == "ble_tesla_flinn"
+
+
+def test_automation_ev_state_prefers_fresh_power_only_second_ble_vehicle():
+    """A fresh power reading must beat another bridge's disconnected state."""
+
+    class _States:
+        def __init__(self):
+            self._states = {
+                "sensor.tesla_flinn_charging_state": SimpleNamespace(
+                    entity_id="sensor.tesla_flinn_charging_state",
+                    state="Disconnected",
+                ),
+                "binary_sensor.tesla_flinn_charge_flap": SimpleNamespace(
+                    entity_id="binary_sensor.tesla_flinn_charge_flap",
+                    state="off",
+                ),
+                "binary_sensor.tesla_flinn_ble_status": SimpleNamespace(
+                    entity_id="binary_sensor.tesla_flinn_ble_status",
+                    state="on",
+                ),
+                "sensor.tesla_yf88_charging_state": SimpleNamespace(
+                    entity_id="sensor.tesla_yf88_charging_state",
+                    state="Unknown",
+                ),
+                "sensor.tesla_yf88_charger_power": SimpleNamespace(
+                    entity_id="sensor.tesla_yf88_charger_power",
+                    state="7.2",
+                    attributes={"unit_of_measurement": "kW"},
+                    last_updated=object(),
+                ),
+                "binary_sensor.tesla_yf88_ble_status": SimpleNamespace(
+                    entity_id="binary_sensor.tesla_yf88_ble_status",
+                    state="on",
+                ),
+                "switch.tesla_yf88_charger": SimpleNamespace(
+                    entity_id="switch.tesla_yf88_charger",
+                    state="on",
+                ),
+            }
+
+        def async_all(self):
+            return list(self._states.values())
+
+        def get(self, entity_id):
+            return self._states.get(entity_id)
+
+    engine_class = _load_engine_method(
+        "_async_get_ev_state",
+        {
+            "Any": Any,
+            "Dict": Dict,
+            "_LOGGER": logging.getLogger(__name__),
+            "__package__": "power_sync.automations",
+        },
+    )
+    engine = object.__new__(engine_class)
+    engine._hass = SimpleNamespace(
+        states=_States(),
+        config_entries=SimpleNamespace(async_entries=lambda _domain: []),
+        data={},
+    )
+
+    state = asyncio.run(engine._async_get_ev_state())
+
+    assert state["is_charging"] is True
+    assert state["is_plugged_in"] is True
+    assert state["charging_state"] == "charging"
+    assert state["vehicle_id"] == "ble_tesla_yf88"
+
+    class _Store:
+        def __init__(self):
+            self.updated = []
+
+        def update_trigger_state(self, automation_id, value):
+            self.updated.append((automation_id, value))
+
+    trigger = _load_trigger_function(
+        "_evaluate_ev_trigger",
+        {
+            "Dict": Dict,
+            "Optional": Optional,
+            "TriggerResult": SimpleNamespace,
+            "_LOGGER": logging.getLogger(__name__),
+        },
+    )
+    store = _Store()
+    result = trigger(
+        {"ev_condition": "charging_starts"},
+        {"ev_state": state},
+        4.0,
+        store,
+        36,
+    )
+
+    assert result.triggered is True
+    assert result.reason == "EV charging started"
+    assert store.updated == [(36, 7.0)]
 
 
 def test_automation_ev_state_prefers_targetable_ble_when_activity_ties():
