@@ -1129,13 +1129,18 @@ def _observed_loadpoint(
         observation.get("ev_power_kw", observation.get("current_power_kw")),
         0.0,
     )
+    power_available = observation.get("power_available") is not False
     if "is_charging" in observation:
         actually_charging = bool(observation.get("is_charging"))
     else:
         actually_charging = power_kw > ACTIVE_POWER_THRESHOLD_KW
     connected = bool(observation.get("is_connected")) or actually_charging
     current_amps = _int_value(observation.get("current_amps"), 0)
-    status = _loadpoint_status(connected, actually_charging, current_amps, False)
+    status = (
+        "unknown"
+        if not power_available and not connected and not actually_charging
+        else _loadpoint_status(connected, actually_charging, current_amps, False)
+    )
 
     return {
         "loadpoint_id": loadpoint_id,
@@ -1157,7 +1162,7 @@ def _observed_loadpoint(
             site_surplus_kw,
             (ownership or {}).get("owner_mode") or observation.get("owner_mode"),
         ),
-        "current_power_kw": round(power_kw, 2),
+        "current_power_kw": round(power_kw, 2) if power_available else None,
         "commanded_power_kw": None,
         "current_amps": current_amps,
         "target_amps": _int_value(observation.get("target_amps"), current_amps),
@@ -1171,7 +1176,7 @@ def _observed_loadpoint(
             or (ownership or {}).get("last_command")
             or last_command
         ),
-        "confidence": "observed",
+        "confidence": "observed" if power_available else "unknown",
         "source_mode": (ownership or {}).get("source_mode") or observation.get("source_mode"),
         "duration_minutes": (ownership or {}).get("duration_minutes") or observation.get("duration_minutes"),
         "expires_at": (ownership or {}).get("expires_at") or observation.get("expires_at"),

@@ -519,6 +519,37 @@ def test_ble_metadata_does_not_refresh_stale_power_measurement():
     assert snapshot.unavailable_active_keys == ("vehicle:ble_yf88",)
 
 
+def test_ble_unknown_power_reaches_the_loadpoint_as_unknown_not_idle_zero():
+    """Ticket 36: unavailable BLE power must not masquerade as an observation."""
+    power_sync = _power_sync_module()
+    loadpoint_status = importlib.import_module(
+        "power_sync.automations.loadpoint_status"
+    )
+    hass = _Hass([
+        _State("binary_sensor.yf88_status", "on"),
+        _State("sensor.yf88_charging_state", "unknown"),
+        _State("sensor.yf88_charge_power", "unknown"),
+    ])
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"tesla_ble_entity_prefix": "yf88"},
+    )
+
+    vehicle = next(
+        item
+        for item in power_sync._get_ev_vehicles_status(hass, entry)
+        if item["vehicle_id"] == "ble_yf88"
+    )
+    vehicle["include_idle"] = True
+    loadpoint = loadpoint_status.build_loadpoint_status({}, [vehicle])[0]
+
+    assert vehicle["ev_power_kw"] == 0.0
+    assert vehicle["power_available"] is False
+    assert loadpoint["current_power_kw"] is None
+    assert loadpoint["status"] == "unknown"
+
+
 def test_ev_vehicle_status_keeps_real_charging_power_when_charging():
     power_sync = _power_sync_module()
     hass = _tesla_hass([

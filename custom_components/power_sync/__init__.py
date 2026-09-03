@@ -2216,6 +2216,12 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 )
 
         power_state = get_tesla_ble_charge_power_state(hass, prefix)
+        try:
+            power_available = bool(
+                power_state and math.isfinite(float(power_state.state))
+            )
+        except (AttributeError, TypeError, ValueError):
+            power_available = False
         if power_state:
             ble_power_observed_at = _latest_ev_observed_at(
                 ble_power_observed_at,
@@ -2266,6 +2272,10 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             "vehicle_id": ble_vehicle_id,
             "vehicle_name": f"Tesla BLE ({prefix})",
             "ev_power_kw": ev_power_kw,
+            # Keep unavailable BLE power distinct from an explicit zero. The
+            # latter is a useful idle observation; the former must not render
+            # as measured 0.00 kW / Idle in the EV card.
+            "power_available": power_available,
             "ev_soc": ev_soc,
             "is_connected": is_connected,
             "is_charging": ev_power_kw > 0.05,

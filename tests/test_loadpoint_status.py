@@ -1271,6 +1271,27 @@ def test_generic_charger_observation_keeps_configured_idle_loadpoint():
     assert loadpoints[0]["owner"] == "external"
 
 
+def test_unavailable_ble_power_is_not_rendered_as_an_observed_idle_zero():
+    """Ticket 36: preserve unknown BLE telemetry through the EV card payload."""
+    loadpoints = build_loadpoint_status(
+        {},
+        [{
+            "vehicle_id": "ble_tesla_yf88",
+            "vehicle_name": "Tesla BLE (tesla_yf88)",
+            "ev_power_kw": 0.0,
+            "power_available": False,
+            "is_connected": False,
+            "is_charging": False,
+            "include_idle": True,
+        }],
+    )
+
+    assert len(loadpoints) == 1
+    assert loadpoints[0]["current_power_kw"] is None
+    assert loadpoints[0]["status"] == "unknown"
+    assert loadpoints[0]["confidence"] == "unknown"
+
+
 def test_configured_idle_fleet_vehicle_survives_ble_bridge_coalescing():
     """A sleeping configured Fleet car is not hidden by another car's BLE bridge."""
     primary_vin = "5YJTEST0000000001"

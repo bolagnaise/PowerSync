@@ -25,7 +25,10 @@ from ..const import (
 )
 from ..optimization.load_estimator import SolcastForecaster
 from ..ev_load import is_current_ev_power_observation
-from ..tesla_ble import get_tesla_ble_charge_power_state
+from ..tesla_ble import (
+    get_tesla_ble_charge_current_state,
+    get_tesla_ble_charge_power_state,
+)
 from .triggers import evaluate_trigger, evaluate_conditions, TriggerResult
 from .actions import execute_actions
 
@@ -1163,7 +1166,9 @@ class AutomationEngine:
         # would make a global "charging starts" trigger miss that vehicle and
         # lose the BLE id needed by the stop action.
         # Tesla Fleet uses: sensor.primary_ev_charging (no _state suffix).
-        # Tesla BLE also exposes legacy/current *_charge_power variants.
+        # Tesla BLE also exposes legacy/current measured power and current
+        # variants.  The writable charging-amps number is deliberately not a
+        # candidate here.
         best_charging_rank = (-1, -1)
         for state in all_states:
             entity_id = state.entity_id
@@ -1171,7 +1176,7 @@ class AutomationEngine:
             # entities can add only a targetable BLE candidate; this avoids
             # treating unrelated numeric sensors as a vehicle state.
             match = re.match(
-                r"sensor\.(\w+)_(charging(?:_state)?|charge_power|charger_power)$",
+                r"sensor\.(\w+)_(charging(?:_state)?|charge_power|charger_power|charge_current|charger_current)$",
                 entity_id,
             )
             if match:
@@ -1190,7 +1195,12 @@ class AutomationEngine:
                     )
                     is not None
                 )
-                if signal in ("charge_power", "charger_power") and not targetable_rank:
+                if signal in (
+                    "charge_power",
+                    "charger_power",
+                    "charge_current",
+                    "charger_current",
+                ) and not targetable_rank:
                     continue
 
                 activity_rank = 0
@@ -1207,6 +1217,7 @@ class AutomationEngine:
                 # is fresh. BLE bridge/status availability never counts as
                 # charging by itself.
                 power_active = False
+                current_active = False
                 if targetable_rank:
                     power_state = get_tesla_ble_charge_power_state(
                         self._hass, candidate_prefix
@@ -1228,7 +1239,21 @@ class AutomationEngine:
                             power_active = power_w > 100
                         except (AttributeError, TypeError, ValueError):
                             pass
-                if power_active:
+                    current_state = get_tesla_ble_charge_current_state(
+                        self._hass, candidate_prefix
+                    )
+                    observed_at = (
+                        getattr(current_state, "last_reported", None)
+                        or getattr(current_state, "last_updated", None)
+                        or getattr(current_state, "last_changed", None)
+                    )
+                    if is_current_ev_power_observation(observed_at):
+                        try:
+                            current_amps = float(current_state.state)
+                            current_active = 0 < current_amps <= 100
+                        except (AttributeError, TypeError, ValueError):
+                            pass
+                if power_active or current_active:
                     activity_rank = 2
                 rank = (activity_rank, targetable_rank)
                 if rank <= best_charging_rank:
@@ -1237,7 +1262,7 @@ class AutomationEngine:
                 vehicle_prefix = candidate_prefix
                 ev_state["charging_state"] = (
                     "charging"
-                    if power_active
+                    if power_active or current_active
                     else normalized_state if activity_rank > 0 else ""
                 )
                 ev_state["is_charging"] = activity_rank == 2
