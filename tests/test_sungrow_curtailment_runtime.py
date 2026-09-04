@@ -649,6 +649,72 @@ def test_hybrid_curtailment_handlers_use_tariff_schedule_fallback():
         assert "using feed-in price from tariff schedule" in handler
 
 
+def test_sigenergy_releases_zero_export_for_active_solar_surplus_ev():
+    """Ticket #38: zero export must not trap an internally-owned EV at its probe current."""
+    handler = _function_source("handle_sigenergy_curtailment")
+
+    headroom_index = handler.index("ev_needs_headroom = (")
+    restore_index = handler.index("Sigenergy curtailment RESTORED: solar surplus EV needs PV")
+    zero_export_index = handler.index("Sigenergy curtailment TRIGGERED")
+
+    assert "await _active_solar_surplus_ev_needs_inverter_headroom()" in handler
+    assert "if export_uneconomic and ev_needs_headroom:" in handler
+    assert "success = await controller.restore()" in handler[restore_index:zero_export_index]
+    assert 'entry_data["sigenergy_curtailment_state"] = "normal"' in handler[
+        restore_index:zero_export_index
+    ]
+    assert headroom_index < restore_index < zero_export_index
+
+    class _Controller:
+        def __init__(self):
+            self.curtail_calls = 0
+            self.restore_calls = 0
+
+        async def curtail(self):
+            self.curtail_calls += 1
+            return True
+
+        async def restore(self):
+            self.restore_calls += 1
+            return True
+
+    controller = _Controller()
+
+    async def _async_true():
+        return True
+
+    entry_data = {
+        "sigenergy_curtailment_state": "curtailed",
+        "sigenergy_coordinator": SimpleNamespace(_controller=controller),
+    }
+    entry = SimpleNamespace(
+        entry_id="entry-id",
+        options={"sigenergy_dc_curtailment_enabled": True},
+        data={},
+    )
+    namespace = {
+        "DOMAIN": "power_sync",
+        "CONF_SIGENERGY_DC_CURTAILMENT_ENABLED": "sigenergy_dc_curtailment_enabled",
+        "entry": entry,
+        "hass": SimpleNamespace(data={"power_sync": {entry.entry_id: entry_data}}),
+        "_LOGGER": SimpleNamespace(
+            debug=lambda *_args, **_kwargs: None,
+            info=lambda *_args, **_kwargs: None,
+            warning=lambda *_args, **_kwargs: None,
+            error=lambda *_args, **_kwargs: None,
+        ),
+        "export_earnings_are_uneconomic": lambda *_args: True,
+        "_active_solar_surplus_ev_needs_inverter_headroom": lambda: _async_true(),
+    }
+    exec(textwrap.dedent(handler), namespace)
+
+    asyncio.run(namespace["handle_sigenergy_curtailment"](feedin_price=0.0))
+
+    assert controller.restore_calls == 1
+    assert controller.curtail_calls == 0
+    assert entry_data["sigenergy_curtailment_state"] == "normal"
+
+
 def test_goodwe_curtailment_state_is_initialized():
     source = INIT_PATH.read_text()
 

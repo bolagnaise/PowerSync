@@ -27385,6 +27385,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         controller = sig_coord._controller
 
         try:
+            ev_needs_headroom = (
+                await _active_solar_surplus_ev_needs_inverter_headroom()
+            )
+            if export_uneconomic and ev_needs_headroom:
+                if current_state != "normal":
+                    _LOGGER.info(
+                        "Sigenergy curtailment RESTORED: solar surplus EV needs PV "
+                        "headroom (export_earnings=%.2fc)",
+                        export_earnings,
+                    )
+                    success = await controller.restore()
+                    if success:
+                        entry_data["sigenergy_curtailment_state"] = "normal"
+                        entry_data.pop("_last_sigenergy_curtailment_reapply", None)
+                    else:
+                        _LOGGER.error("Sigenergy restore() for solar surplus EV headroom failed")
+                else:
+                    _LOGGER.debug(
+                        "Sigenergy normal export retained: solar surplus EV needs PV headroom"
+                    )
+                return
+
             if export_uneconomic:
                 import time as _time_mod
 

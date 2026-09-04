@@ -6798,7 +6798,7 @@ def test_self_consumption_reapplies_tesla_reserve_floor_when_mode_matches(opt_mo
     assert coordinator._last_executed_action == "self_consumption"
 
 
-def test_self_consumption_initial_tesla_reserve_uses_soc_clamp(
+def test_self_consumption_keeps_authoritative_tesla_reserve_below_current_soc(
     opt_module,
 ):
     battery = _FakeBattery(hardware_mode="self_consumption", backup_reserve=20)
@@ -6810,13 +6810,17 @@ def test_self_consumption_initial_tesla_reserve_uses_soc_clamp(
         )
     )
 
-    assert battery.backup_reserve_calls == [19]
+    assert battery.backup_reserve_calls == []
 
 
-@pytest.mark.parametrize("current_reserve", [20, 25])
-def test_self_consumption_initial_tesla_reserve_clamp_avoids_grid_charging(
+@pytest.mark.parametrize(
+    ("current_reserve", "expected_calls"),
+    [(20, [25]), (25, [])],
+)
+def test_self_consumption_restores_authoritative_tesla_reserve_below_current_soc(
     opt_module,
     current_reserve,
+    expected_calls,
 ):
     battery = _FakeBattery(
         hardware_mode="self_consumption",
@@ -6831,7 +6835,7 @@ def test_self_consumption_initial_tesla_reserve_clamp_avoids_grid_charging(
         )
     )
 
-    assert battery.backup_reserve_calls == [11]
+    assert battery.backup_reserve_calls == expected_calls
 
 
 def test_self_consumption_raises_lower_tesla_reserve_toward_startup_floor(
@@ -6846,7 +6850,7 @@ def test_self_consumption_raises_lower_tesla_reserve_toward_startup_floor(
         )
     )
 
-    assert battery.backup_reserve_calls == [19]
+    assert battery.backup_reserve_calls == [20]
 
 
 def test_self_consumption_does_not_ratchet_tesla_reserve_down_after_raise(
@@ -6874,11 +6878,11 @@ def test_self_consumption_does_not_ratchet_tesla_reserve_down_after_raise(
         )
     )
 
-    assert battery.backup_reserve_calls == [19]
-    assert coordinator._last_optimizer_self_consumption_reserve_target == 19
+    assert battery.backup_reserve_calls == [20, 20]
+    assert coordinator._last_optimizer_self_consumption_reserve_target == 20
 
 
-def test_self_consumption_transition_uses_initial_tesla_soc_clamp(
+def test_self_consumption_transition_keeps_authoritative_tesla_reserve(
     opt_module,
 ):
     battery = _FakeBattery(hardware_mode="autonomous", backup_reserve=20)
@@ -6892,7 +6896,7 @@ def test_self_consumption_transition_uses_initial_tesla_soc_clamp(
     )
 
     assert battery.self_consumption_calls == 1
-    assert battery.backup_reserve_calls == [19]
+    assert battery.backup_reserve_calls == [20]
 
 
 def test_self_consumption_mode_failure_clears_reserve_provenance(
@@ -6912,7 +6916,7 @@ def test_self_consumption_mode_failure_clears_reserve_provenance(
     )
 
     assert battery.self_consumption_calls == 1
-    assert battery.backup_reserve_calls == [19]
+    assert battery.backup_reserve_calls == [20]
     assert coordinator._last_executed_action == "self_consumption"
     assert coordinator._last_optimizer_self_consumption_reserve_target is None
 
@@ -6937,7 +6941,7 @@ def test_self_consumption_reserve_write_failure_does_not_advance_provenance(
         )
     )
 
-    assert battery.backup_reserve_calls == [19]
+    assert battery.backup_reserve_calls == [20]
     assert (
         getattr(
             coordinator,
@@ -6966,8 +6970,8 @@ def test_self_consumption_reserve_provenance_clears_on_disable_reset(opt_module)
         await coordinator._execute_optimizer_action(
             SimpleNamespace(action="self_consumption", power_w=0)
         )
-        assert battery.backup_reserve_calls == [19]
-        assert coordinator._last_optimizer_self_consumption_reserve_target == 19
+        assert battery.backup_reserve_calls == [20]
+        assert coordinator._last_optimizer_self_consumption_reserve_target == 20
 
         coordinator._polling_task = None
         coordinator._initial_opt_task = None
@@ -6994,7 +6998,7 @@ def test_self_consumption_reserve_provenance_clears_on_disable_reset(opt_module)
             SimpleNamespace(action="self_consumption", power_w=0)
         )
 
-        assert battery.backup_reserve_calls == [19, 18]
+        assert battery.backup_reserve_calls == [20, 20]
 
     asyncio.run(_run())
 

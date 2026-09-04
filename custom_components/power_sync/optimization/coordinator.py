@@ -11399,10 +11399,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             reserve_pct = max(0, min(100, desired_reserve_pct))
                             if 81 <= reserve_pct <= 99:
                                 reserve_pct = 80
-                            if soc_pct < reserve_pct:
-                                reserve_pct = min(reserve_pct, soc_pct)
-                                if 81 <= reserve_pct <= 99:
-                                    reserve_pct = 80
                             if hasattr(battery, "read_backup_reserve"):
                                 current_reserve_reading = await battery.read_backup_reserve()
                                 current_reserve = current_reserve_reading.percent
@@ -11411,8 +11407,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 current_reserve = await battery.get_backup_reserve()
                             # Only protect a lower reserve that matches the target
                             # PowerSync successfully wrote earlier in this runtime.
-                            # A readable startup/manual reserve must still be lowered
-                            # to the SOC clamp on the first self-consumption command.
+                            # The authoritative startup/manual hardware reserve is
+                            # never lowered merely because current SOC is below it.
                             if (
                                 current_reserve is not None
                                 and last_optimizer_reserve_target is not None
@@ -11643,9 +11639,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 "skipping redundant API call"
                             )
                     # A mode transition skips the existing-mode verification
-                    # above, so resolve its Tesla target separately. Apply only
-                    # the provenance-aware ratchet guard here; the initial SOC
-                    # clamp must remain authoritative for stale/manual reserves.
+                    # above, so resolve its Tesla target separately. Apply the
+                    # provenance-aware ratchet guard without lowering the
+                    # authoritative hardware reserve to current SOC.
                     if (
                         apply_self_consumption
                         and reserve_pct is None
@@ -11662,10 +11658,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         reserve_pct = max(0, min(100, desired_reserve_pct))
                         if 81 <= reserve_pct <= 99:
                             reserve_pct = 80
-                        if soc_pct < reserve_pct:
-                            reserve_pct = min(reserve_pct, soc_pct)
-                            if 81 <= reserve_pct <= 99:
-                                reserve_pct = 80
                         if hasattr(battery, "read_backup_reserve"):
                             current_reserve = (
                                 await battery.read_backup_reserve()
@@ -11709,12 +11701,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             and hasattr(battery, "set_backup_reserve")
                         ):
                             await battery.set_backup_reserve(sungrow_reapply_reserve_pct)
-                        # Tesla only: reset hardware backup_reserve to prevent
-                        # grid charging when the user's hardware reserve
-                        # (restored by restore_normal after force_discharge) is
-                        # above the current SOC. Modbus batteries such as GoodWe
-                        # expose this as a real hardware/DOD setting, so ordinary
-                        # self-consumption must not rewrite it to the LP floor.
+                        # Tesla only: restore the authoritative hardware backup
+                        # reserve after an action transition. Modbus batteries
+                        # such as GoodWe expose this as a real hardware/DOD
+                        # setting, so ordinary self-consumption must not rewrite
+                        # it to the LP floor.
                         if (
                             self.battery_system == "tesla"
                             and hasattr(battery, "set_backup_reserve")
@@ -11730,10 +11721,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 reserve_pct = max(0, min(100, reserve_pct))
                                 if 81 <= reserve_pct <= 99:
                                     reserve_pct = 80
-                                if soc_pct < reserve_pct:
-                                    reserve_pct = min(reserve_pct, soc_pct)
-                                    if 81 <= reserve_pct <= 99:
-                                        reserve_pct = 80
                             reserve_result = await battery.set_backup_reserve(reserve_pct)
                             if reserve_result is not False:
                                 self._last_optimizer_self_consumption_reserve_target = (
