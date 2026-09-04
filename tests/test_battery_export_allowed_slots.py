@@ -3926,6 +3926,126 @@ def test_unknown_charge_provenance_keeps_median_import_acquisition_cost(
     assert acquisition_cost == pytest.approx(0.43)
 
 
+def test_dynamic_price_padding_does_not_reprice_unknown_inventory(opt_module):
+    """Ticket #334: repeated tail padding is not acquisition provenance.
+
+    Amber can extend its real forecast from one solve to the next.  The LP pads
+    the remaining 48-hour horizon with the final known price, but those copied
+    slots must not dominate the proxy cost assigned to energy already stored in
+    the battery.
+    """
+    coordinator = _coordinator(opt_module, "amber")
+    coordinator._grid_charge_tracking_known = False
+    real_prices = [0.10] * 195 + [0.40] * 31
+    padded_lp_prices = real_prices + [0.40] * (576 - len(real_prices))
+    coordinator._last_acquisition_reference_import_prices = real_prices
+
+    acquisition_cost = coordinator._acquisition_cost_for_run(
+        import_prices=coordinator._acquisition_reference_prices_for_run(
+            padded_lp_prices
+        ),
+        current_soc=0.80,
+        capacity_wh=10_000,
+    )
+
+    assert acquisition_cost == pytest.approx(0.10)
+    assert coordinator._last_acquisition_cost_diagnostics == {
+        "cost_kwh": 0.10,
+        "source": "median_reference_fallback",
+        "reference_price_slots": 226,
+        "reference_price_median_kwh": 0.10,
+        "tracking_known": False,
+        "current_stored_energy_kwh": 8.0,
+        "actual_charge_kwh_today": 0.0,
+        "actual_discharge_kwh_today": 0.0,
+        "actual_grid_charge_kwh_today": 0.0,
+        "actual_grid_charge_cost_today": 0.0,
+        "measured_grid_unit_cost_kwh": None,
+        "full_day_energy_summary": None,
+        "proven_solar_candidates_kwh": [],
+        "unknown_carry_over_kwh": 8.0,
+    }
+
+
+def test_acquisition_reference_falls_back_when_unpadded_prices_are_unavailable(
+    opt_module,
+):
+    """Legacy/lightweight coordinators retain the conservative fallback."""
+    coordinator = _coordinator(opt_module, "amber")
+
+    assert coordinator._acquisition_reference_prices_for_run([0.21, 0.34]) == [
+        0.21,
+        0.34,
+    ]
+
+
+def test_optimizer_solve_debug_record_contains_decisive_export_inputs(opt_module):
+    """Ticket #334: one DEBUG record carries provenance, arrays, and masks."""
+    coordinator = _coordinator(opt_module, "amber")
+    coordinator._last_acquisition_reference_import_prices = [0.10, 0.20]
+    coordinator._last_acquisition_cost_diagnostics = {
+        "source": "median_reference_fallback",
+        "reference_price_slots": 2,
+    }
+    timestamps = [
+        datetime(2026, 9, 4, 6, 0, tzinfo=timezone.utc),
+        datetime(2026, 9, 4, 6, 5, tzinfo=timezone.utc),
+    ]
+    result = SimpleNamespace(
+        solver_used="highs",
+        feasible=True,
+        objective_value=1.234567891,
+        lp_stats={
+            "battery_export_constraints": {
+                "active_reasons": ["acquisition_cost"],
+                "acquisition_blocked_periods": 1,
+            }
+        },
+        schedule=SimpleNamespace(
+            actions=[
+                SimpleNamespace(action="self_consumption"),
+                SimpleNamespace(action="export"),
+            ]
+        ),
+        battery_to_grid_w=[0.0, 5000.0],
+        grid_export_w=[0.0, 4500.0],
+    )
+
+    record = coordinator._optimizer_solve_debug_record(
+        solve_timestamp=timestamps[0],
+        schedule_timestamps=timestamps,
+        acquisition_cost_kwh=0.15,
+        effective_acquisition_costs=[0.15, 0.10],
+        import_prices=[0.10, 0.20],
+        export_prices=[0.12, 0.30],
+        export_bonus_prices=[0.0, 0.0],
+        import_bonus_prices=[0.0, 0.0],
+        battery_export_allowed=[True, True],
+        priority_export_slots=[False, True],
+        hard_battery_charge_blocked=[False, True],
+        profit_max_solar_export_slots=[False, True],
+        battery_charge_blocked=[False, True],
+        grid_charge_allowed=[True, False],
+        result=result,
+    )
+
+    assert record["schema"] == "powersync_optimizer_solve_v1"
+    assert record["acquisition"]["cost_kwh"] == pytest.approx(0.15)
+    assert record["acquisition"]["reference_import_prices"] == [0.10, 0.20]
+    assert record["lp_inputs"]["priority_export"] == [0, 1]
+    assert record["lp_inputs"]["effective_export_prices"] == [0.12, 0.30]
+    assert record["lp_inputs"]["base_effective_acquisition_costs"] == [
+        0.15,
+        0.10,
+    ]
+    assert record["lp_inputs"]["base_acquisition_blocked"] == [1, 0]
+    assert record["lp_inputs"]["combined_battery_charge_blocked"] == [0, 1]
+    assert record["result"]["battery_export_constraints"][
+        "acquisition_blocked_periods"
+    ] == 1
+    assert record["result"]["actions"] == ["self_consumption", "export"]
+
+
 def test_unknown_charge_provenance_blends_main_energy_summary(opt_module):
     """Use full-day counters when the private tracking state was lost."""
     coordinator = _coordinator(opt_module, "flow_power")

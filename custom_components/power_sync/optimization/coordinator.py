@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import json
 import logging
 import math
 from dataclasses import dataclass, field
@@ -5627,6 +5628,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.info("%s: released IDLE no-discharge mode", context)
         return True
 
+    def _acquisition_reference_prices_for_run(
+        self,
+        lp_import_prices: list[float],
+    ) -> list[float]:
+        """Return real provider prices without synthetic LP tail padding.
+
+        Dynamic providers commonly expose less than the configured 48-hour LP
+        horizon.  The price builder repeats the final real slot so the solver
+        still has a complete array.  Those copied future slots are useful to the
+        LP, but they are not evidence about what energy already in the battery
+        cost to acquire and must not dominate its fallback provenance proxy.
+        """
+        reference_prices = getattr(
+            self,
+            "_last_acquisition_reference_import_prices",
+            None,
+        )
+        if reference_prices:
+            return list(reference_prices)
+        return list(lp_import_prices)
+
     def _acquisition_cost_for_run(
         self,
         *,
@@ -5662,6 +5684,60 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             / 1000.0
         )
         proven_solar_candidates: list[float] = []
+        summary_totals: tuple[float, float, float] | None = None
+
+        def _finish(
+            cost: float,
+            source: str,
+            **components: float,
+        ) -> float:
+            self._last_acquisition_cost_diagnostics = {
+                "cost_kwh": round(float(cost), 8),
+                "source": source,
+                "reference_price_slots": len(import_prices),
+                "reference_price_median_kwh": round(
+                    float(median_import_cost), 8
+                ),
+                "tracking_known": tracking_known,
+                "current_stored_energy_kwh": round(
+                    current_stored_energy_kwh, 6
+                ),
+                "actual_charge_kwh_today": round(
+                    float(getattr(self, "_actual_charge_kwh_today", 0.0) or 0.0),
+                    6,
+                ),
+                "actual_discharge_kwh_today": round(
+                    float(
+                        getattr(self, "_actual_discharge_kwh_today", 0.0) or 0.0
+                    ),
+                    6,
+                ),
+                "actual_grid_charge_kwh_today": round(grid_charge_kwh, 6),
+                "actual_grid_charge_cost_today": round(grid_charge_cost, 8),
+                "measured_grid_unit_cost_kwh": (
+                    round(measured_grid_unit_cost, 8)
+                    if measured_grid_unit_cost is not None
+                    else None
+                ),
+                "full_day_energy_summary": (
+                    {
+                        "charge_kwh": round(summary_totals[0], 6),
+                        "discharge_kwh": round(summary_totals[1], 6),
+                        "grid_import_kwh": round(summary_totals[2], 6),
+                    }
+                    if summary_totals is not None
+                    else None
+                ),
+                "proven_solar_candidates_kwh": [
+                    round(value, 6) for value in proven_solar_candidates
+                ],
+                **{
+                    key: round(float(value), 6)
+                    for key, value in components.items()
+                },
+            }
+            return cost
+
         if tracking_known:
             # Known private counters are an independently authoritative lower
             # bound for the intervals they recorded.  Keep that candidate
@@ -5730,16 +5806,152 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 measured_grid_kwh * (measured_grid_unit_cost or 0.0)
                 + unknown_carry_over_kwh * median_import_cost
             ) / current_stored_energy_kwh
-            return blended_cost
+            return _finish(
+                blended_cost,
+                "blended_provenance",
+                proven_solar_kwh=proven_solar_kwh,
+                measured_grid_kwh=measured_grid_kwh,
+                unknown_carry_over_kwh=unknown_carry_over_kwh,
+            )
 
         # Keep the measured rate for a genuinely all-grid/no-solar inventory
         # (or when the live SOC is too small for a meaningful decomposition).
         if measured_grid_unit_cost is not None:
-            return measured_grid_unit_cost
+            return _finish(
+                measured_grid_unit_cost,
+                "measured_grid_charge",
+                measured_grid_kwh=grid_charge_kwh,
+            )
 
         # With no measured charge provenance for the current day, retain the
         # conservative proxy for energy that may have carried over overnight.
-        return median_import_cost
+        return _finish(
+            median_import_cost,
+            "median_reference_fallback",
+            unknown_carry_over_kwh=current_stored_energy_kwh,
+        )
+
+    def _optimizer_solve_debug_record(
+        self,
+        *,
+        solve_timestamp: datetime,
+        schedule_timestamps: list[datetime],
+        acquisition_cost_kwh: float,
+        effective_acquisition_costs: list[float],
+        import_prices: list[float],
+        export_prices: list[float],
+        export_bonus_prices: list[float] | None,
+        import_bonus_prices: list[float] | None,
+        battery_export_allowed: list[bool],
+        priority_export_slots: list[bool],
+        hard_battery_charge_blocked: list[bool],
+        profit_max_solar_export_slots: list[bool],
+        battery_charge_blocked: list[bool],
+        grid_charge_allowed: list[bool],
+        result: OptimizerResult,
+    ) -> dict[str, Any]:
+        """Build one machine-readable DEBUG record for the final solve.
+
+        Keep the large slot-level evidence out of entity attributes while making
+        a bounded pair of adjacent DEBUG records sufficient to explain export
+        plan creation or removal.
+        """
+
+        def _rounded(values: list[float] | None) -> list[float | None]:
+            rounded: list[float | None] = []
+            for raw in values or []:
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    rounded.append(None)
+                    continue
+                rounded.append(round(value, 8) if math.isfinite(value) else None)
+            return rounded
+
+        def _mask(values: list[bool] | None) -> list[int]:
+            return [1 if bool(value) else 0 for value in values or []]
+
+        schedule = getattr(result, "schedule", None)
+        actions = getattr(schedule, "actions", None) or []
+        effective_export_prices = [
+            float(price or 0.0)
+            + float(
+                export_bonus_prices[idx]
+                if export_bonus_prices and idx < len(export_bonus_prices)
+                else 0.0
+            )
+            for idx, price in enumerate(export_prices)
+        ]
+        base_acquisition_blocked = [
+            bool(battery_export_allowed[idx])
+            and acquisition_cost_kwh > 0
+            and idx < len(effective_acquisition_costs)
+            and effective_export_prices[idx] < effective_acquisition_costs[idx]
+            for idx in range(
+                min(len(battery_export_allowed), len(effective_export_prices))
+            )
+        ]
+        return {
+            "schema": "powersync_optimizer_solve_v1",
+            "solve_at": solve_timestamp.isoformat(),
+            "slot_timestamps": [value.isoformat() for value in schedule_timestamps],
+            "acquisition": {
+                **dict(
+                    getattr(self, "_last_acquisition_cost_diagnostics", {}) or {}
+                ),
+                "cost_kwh": round(float(acquisition_cost_kwh), 8),
+                "reference_import_prices": _rounded(
+                    getattr(
+                        self,
+                        "_last_acquisition_reference_import_prices",
+                        None,
+                    )
+                ),
+            },
+            "lp_inputs": {
+                "import_prices": _rounded(import_prices),
+                "export_prices": _rounded(export_prices),
+                "effective_export_prices": _rounded(effective_export_prices),
+                "base_effective_acquisition_costs": _rounded(
+                    effective_acquisition_costs
+                ),
+                "base_acquisition_blocked": _mask(base_acquisition_blocked),
+                "export_bonus_prices": _rounded(export_bonus_prices),
+                "import_bonus_prices": _rounded(import_bonus_prices),
+                "battery_export_allowed": _mask(battery_export_allowed),
+                "priority_export": _mask(priority_export_slots),
+                "hard_battery_charge_blocked": _mask(
+                    hard_battery_charge_blocked
+                ),
+                "profit_max_solar_export": _mask(
+                    profit_max_solar_export_slots
+                ),
+                "combined_battery_charge_blocked": _mask(
+                    battery_charge_blocked
+                ),
+                "grid_charge_allowed": _mask(grid_charge_allowed),
+            },
+            "result": {
+                "solver": getattr(result, "solver_used", None),
+                "feasible": bool(getattr(result, "feasible", False)),
+                "objective_value": round(
+                    float(getattr(result, "objective_value", 0.0) or 0.0), 8
+                ),
+                "battery_export_constraints": dict(
+                    (getattr(result, "lp_stats", {}) or {}).get(
+                        "battery_export_constraints", {}
+                    )
+                    or {}
+                ),
+                "actions": [getattr(action, "action", None) for action in actions],
+                "battery_to_grid_w": _rounded(
+                    getattr(result, "battery_to_grid_w", None)
+                ),
+                "grid_export_w": _rounded(
+                    getattr(result, "grid_export_w", None)
+                ),
+            },
+        }
 
     async def _async_load_external_energy_ledger(self) -> None:
         """Load the planning-only external-resource session ledger once."""
@@ -6059,7 +6271,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Collect forecast data
             self._last_export_boost_allowed_slots = []
             self._capture_provider_quota_measurements_before_plan()
+            # Price builders keep their real, unpadded provider horizon in the
+            # display series.  Preserve it before any provider quota mutation so
+            # unknown stored-energy provenance is not valued from repeated LP
+            # tail padding.
+            self._last_acquisition_reference_import_prices = []
             prices = await self._get_price_forecast()
+            if prices:
+                self._last_acquisition_reference_import_prices = list(
+                    getattr(self, "_last_display_import_prices", None) or []
+                )
             solar = await self._get_solar_forecast()
             load = await self._get_load_forecast()
             # Preserve the canonical house-only series before any planned EV
@@ -6280,7 +6501,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # solar charging with conservative unknown carry-over, and use the
             # median import proxy when today's provenance is unavailable.
             acq_cost = self._acquisition_cost_for_run(
-                import_prices=import_prices,
+                import_prices=self._acquisition_reference_prices_for_run(
+                    import_prices
+                ),
                 current_soc=soc,
                 capacity_wh=capacity,
             )
@@ -7031,6 +7254,41 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             self._current_schedule = result.schedule
             self._last_optimizer_result = result
+            if _LOGGER.isEnabledFor(logging.DEBUG):
+                solve_debug_record = self._optimizer_solve_debug_record(
+                    solve_timestamp=solve_timestamp,
+                    schedule_timestamps=schedule_timestamps,
+                    acquisition_cost_kwh=acq_cost,
+                    effective_acquisition_costs=(
+                        self._optimizer._effective_export_acquisition_costs(
+                            len(import_prices),
+                            import_prices,
+                            battery_charge_blocked,
+                            self._config.allow_grid_charge,
+                            acq_cost,
+                            grid_charge_allowed,
+                        )
+                    ),
+                    import_prices=import_prices,
+                    export_prices=export_prices,
+                    export_bonus_prices=self._last_zerohero_bonus_prices,
+                    import_bonus_prices=self._last_zerocharge_bonus_prices,
+                    battery_export_allowed=battery_export_allowed,
+                    priority_export_slots=priority_export_slots,
+                    hard_battery_charge_blocked=hard_battery_charge_blocked,
+                    profit_max_solar_export_slots=profit_max_solar_export_slots,
+                    battery_charge_blocked=battery_charge_blocked,
+                    grid_charge_allowed=grid_charge_allowed,
+                    result=result,
+                )
+                _LOGGER.debug(
+                    "Optimizer solve diagnostic: %s",
+                    json.dumps(
+                        solve_debug_record,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                )
             if cost_neutral_plan is not None:
                 effective_caps = {
                     str(day): max(0.0, float(value))
