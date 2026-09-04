@@ -54,6 +54,12 @@ _ha_event.async_track_time_change = lambda *args, **kwargs: lambda: None
 _ha_event.async_call_later = lambda *args, **kwargs: lambda: None
 _ha_helpers.event = _ha_event
 
+_ha_dispatcher = sys.modules.setdefault(
+    "homeassistant.helpers.dispatcher",
+    types.ModuleType("homeassistant.helpers.dispatcher"),
+)
+_ha_dispatcher.async_dispatcher_send = lambda *args, **kwargs: None
+
 _ha_storage = sys.modules.setdefault(
     "homeassistant.helpers.storage",
     types.ModuleType("homeassistant.helpers.storage"),
@@ -260,3 +266,85 @@ def test_install_handles_hacs_pending_restart_without_reinstalling():
         domain == "update" and service == "install"
         for domain, service, _data, _blocking in hass.services.calls
     )
+
+
+def test_install_retries_when_hacs_entity_appears_after_scheduler_starts():
+    state = _State(
+        "update.power_sync_update",
+        "on",
+        {
+            "friendly_name": "PowerSync Update",
+            "supported_features": 1,
+            "installed_version": "2.12.1231",
+            "latest_version": "2.12.1232",
+        },
+    )
+
+    class _DelayedStates(_States):
+        def __init__(self) -> None:
+            super().__init__([state])
+            self.discovery_count = 0
+
+        def async_all(self, domain: str) -> list[_State]:
+            assert domain == "update"
+            self.discovery_count += 1
+            return [] if self.discovery_count == 1 else self._states
+
+    hass = _Hass([])
+    hass.states = _DelayedStates()
+    original_interval = auto_update.HACS_REFRESH_INTERVAL_S
+    auto_update.HACS_REFRESH_INTERVAL_S = 0
+    try:
+        result = asyncio.run(auto_update.async_install_power_sync_update(hass))
+    finally:
+        auto_update.HACS_REFRESH_INTERVAL_S = original_interval
+
+    assert result == auto_update.AutoUpdateInstallResult(
+        entity_id="update.power_sync_update",
+        action=auto_update.AUTO_UPDATE_ACTION_INSTALLED,
+    )
+    assert hass.states.discovery_count == 2
+
+
+def test_scheduler_dispatches_state_refresh_for_already_ran_decision():
+    captured: dict[str, object] = {}
+
+    class _Entry:
+        entry_id = "ticket-213"
+        data: dict = {}
+        options = {
+            "auto_update_enabled": True,
+            "auto_update_time": "09:40",
+        }
+
+    class _ScheduleStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def async_load(self):
+            return {"last_run_date": "2026-09-04"}
+
+    original_store = auto_update.Store
+    original_tracker = auto_update.async_track_time_change
+    original_send = auto_update.async_dispatcher_send
+    auto_update.Store = _ScheduleStore
+    auto_update.async_track_time_change = (
+        lambda hass, callback, second=0: (
+            captured.update(callback=callback, second=second) or (lambda: None)
+        )
+    )
+    auto_update.async_dispatcher_send = (
+        lambda hass, signal: captured.setdefault("signals", []).append(signal)
+    )
+    try:
+        hass = _Hass([])
+        asyncio.run(auto_update.async_setup_auto_update(hass, _Entry()))
+        captured["callback"](datetime(2026, 9, 4, 9, 40))
+    finally:
+        auto_update.Store = original_store
+        auto_update.async_track_time_change = original_tracker
+        auto_update.async_dispatcher_send = original_send
+
+    entry_data = hass.data["power_sync"]["ticket-213"]
+    assert entry_data["auto_update_last_check_decision"] == "already_ran_today"
+    assert captured["signals"] == ["power_sync_ticket-213_auto_update_state"]

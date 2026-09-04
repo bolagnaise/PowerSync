@@ -13,6 +13,7 @@ from homeassistant.components.update import UpdateEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
@@ -207,24 +208,37 @@ async def async_install_power_sync_update(
     and must remain owned by HACS. Retry to give HACS's coordinator time to
     discover a release that was published near the scheduled run.
     """
-    entity_ids = find_power_sync_update_entities(
-        hass,
-        require_install=True,
-        exclude_entity_id=exclude_entity_id,
-    )
-    if not entity_ids:
-        _LOGGER.warning(
-            "PowerSync auto-update: no install-capable HACS update entity "
-            "found. Verify PowerSync is installed via HACS."
-        )
-        return None
-
-    _LOGGER.info(
-        "PowerSync auto-update: candidate HACS update entities: %s",
-        entity_ids,
-    )
-
     for attempt in range(1, HACS_REFRESH_RETRIES + 1):
+        # Rediscover on every attempt. During startup/reload HACS can add its
+        # update entity, or populate its supported features, after this
+        # scheduler has already started.
+        entity_ids = find_power_sync_update_entities(
+            hass,
+            require_install=True,
+            exclude_entity_id=exclude_entity_id,
+        )
+        if not entity_ids:
+            if attempt < HACS_REFRESH_RETRIES:
+                _LOGGER.info(
+                    "PowerSync auto-update: no install-capable HACS update "
+                    "entity yet (attempt %d/%d) — waiting %ds before retry",
+                    attempt,
+                    HACS_REFRESH_RETRIES,
+                    HACS_REFRESH_INTERVAL_S,
+                )
+                await asyncio.sleep(HACS_REFRESH_INTERVAL_S)
+                continue
+            _LOGGER.warning(
+                "PowerSync auto-update: no install-capable HACS update entity "
+                "found after %d attempts. Verify PowerSync is installed via HACS.",
+                HACS_REFRESH_RETRIES,
+            )
+            return None
+
+        _LOGGER.info(
+            "PowerSync auto-update: candidate HACS update entities: %s",
+            entity_ids,
+        )
         await _refresh_hacs_entities(hass, entity_ids)
 
         for entity_id in entity_ids:
@@ -363,6 +377,10 @@ async def async_setup_auto_update(
     def _record_check(decision: str) -> None:
         entry_data["auto_update_last_check_at"] = dt_util.utcnow().isoformat()
         entry_data["auto_update_last_check_decision"] = decision
+        async_dispatcher_send(
+            hass,
+            f"{DOMAIN}_{entry.entry_id}_auto_update_state",
+        )
 
     @callback
     def _check_schedule(now: datetime) -> None:

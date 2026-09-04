@@ -543,6 +543,21 @@ class AutoUpdateSwitch(SwitchEntity):
     def device_info(self):
         return family_device_info(self._entry.entry_id, SENSOR_FAMILY_CONTROLS)
 
+    async def async_added_to_hass(self) -> None:
+        """Publish scheduler decisions recorded outside the switch entity."""
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{DOMAIN}_{self._entry.entry_id}_auto_update_state",
+                self._handle_auto_update_state,
+            )
+        )
+
+    @callback
+    def _handle_auto_update_state(self) -> None:
+        """Refresh diagnostic attributes after each scheduler decision."""
+        self.async_write_ha_state()
+
     @property
     def is_on(self) -> bool:
         """Return True if scheduled auto-update is enabled."""

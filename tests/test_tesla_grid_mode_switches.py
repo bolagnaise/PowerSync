@@ -460,6 +460,33 @@ def test_force_switches_are_added_for_non_tesla_batteries():
     assert not any(isinstance(entity, switch.GridChargingSwitch) for entity in added)
 
 
+def test_auto_update_switch_refreshes_scheduler_diagnostic_attributes():
+    hass = _Hass("SystemGridConnected")
+    entry = _entry()
+    entity = switch.AutoUpdateSwitch(
+        hass,
+        entry,
+        _SwitchEntityDescription(
+            key="auto_update",
+            name="Auto-Update PowerSync",
+            icon="mdi:update",
+        ),
+    )
+    captured = {}
+    original_connect = switch.async_dispatcher_connect
+    switch.async_dispatcher_connect = lambda hass, signal, callback: (
+        captured.update(signal=signal, callback=callback) or (lambda: None)
+    )
+    try:
+        asyncio.run(entity.async_added_to_hass())
+    finally:
+        switch.async_dispatcher_connect = original_connect
+
+    assert captured["signal"] == "power_sync_entry-1_auto_update_state"
+    captured["callback"]()
+    assert entity.write_count == 1
+
+
 def test_monitoring_switch_reads_updated_config_entry_options():
     hass = _Hass("SystemGridConnected")
     entry = types.SimpleNamespace(
