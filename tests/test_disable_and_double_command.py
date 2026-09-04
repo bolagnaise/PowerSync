@@ -80,6 +80,70 @@ class _FakeTask:
         self.cancelled = True
 
 
+def _price_update_coordinator(opt_module, *, current_interval_end, last_generation):
+    """Build the narrow price-callback surface without optimizer I/O."""
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._enabled = True
+    coordinator._is_dynamic_pricing = True
+    coordinator._seconds_until_initial_optimization_allowed = lambda: 0
+    coordinator.price_coordinator = SimpleNamespace(
+        data={
+            "current": [
+                {
+                    "type": "CurrentInterval",
+                    "channelType": "general",
+                    "nemTime": current_interval_end,
+                },
+                {
+                    "type": "CurrentInterval",
+                    "channelType": "feedIn",
+                    "nemTime": current_interval_end,
+                },
+            ]
+        }
+    )
+    coordinator._last_aemo_dispatch_file = None
+    coordinator._get_active_force_state = lambda: {"active": False}
+    coordinator._config = SimpleNamespace(interval_minutes=5)
+    coordinator._last_price_triggered_optimization = datetime(
+        2026, 9, 4, 9, 41, 22, tzinfo=timezone.utc
+    )
+    coordinator._last_price_triggered_generation = last_generation
+    scheduled = []
+
+    def schedule(coro, name):
+        coro.close()
+        task = _FakeTask()
+        scheduled.append((name, task))
+        return task
+
+    coordinator.hass = SimpleNamespace(async_create_background_task=schedule)
+    return coordinator, scheduled
+
+
+def test_price_update_reoptimizes_for_new_settled_interval_inside_cooldown(opt_module, monkeypatch):
+    """Ticket-24: do not retain a previous price generation after a boundary."""
+    now = datetime(2026, 9, 4, 9, 45, 47, tzinfo=timezone.utc)
+    previous_generation = ("2026-09-04T09:45:00+00:00",)
+    current_generation = "2026-09-04T09:50:00+00:00"
+    coordinator, scheduled = _price_update_coordinator(
+        opt_module,
+        current_interval_end=current_generation,
+        last_generation=previous_generation,
+    )
+    monkeypatch.setattr(opt_module.dt_util, "utcnow", lambda: now)
+
+    coordinator._on_price_update()
+
+    assert [name for name, _task in scheduled] == ["powersync_price_reoptimize"]
+    assert coordinator._last_price_triggered_generation == (current_generation,)
+
+    # The companion usage/spot callback for the same settled interval must
+    # still be coalesced, so the repair cannot double-command force modes.
+    coordinator._on_price_update()
+    assert len(scheduled) == 1
+
+
 # ---------------------------------------------------------------------------
 # OB-10: price-triggered solve survives disable()
 # ---------------------------------------------------------------------------

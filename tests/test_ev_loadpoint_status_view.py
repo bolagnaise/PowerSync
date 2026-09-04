@@ -169,6 +169,14 @@ def test_ble_loadpoint_observations_use_current_entity_compatibility_helpers():
     assert "get_tesla_ble_plug_state(hass, prefix)" in source
 
 
+def test_ble_unavailable_power_survives_the_real_status_view_projection():
+    """Ticket-36: the endpoint must not turn unavailable BLE power into idle."""
+    source = ast.unparse(_get_method())
+
+    assert "'power_available': vehicle.get('power_available', True)" in source
+    assert "'current_amps': vehicle.get('current_amps')" in source
+
+
 def _get_async_class_method(class_name: str, method_name: str) -> ast.AsyncFunctionDef:
     tree = ast.parse(INIT_PATH.read_text())
     for node in ast.walk(tree):

@@ -763,6 +763,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # send both usage and spot-price updates in one billing window; running
         # the LP twice in quick succession can churn force mode commands.
         self._last_price_triggered_optimization: datetime | None = None
+        # The billing interval that caused the last non-AEMO price-triggered
+        # solve.  A new settled current interval is material even when it
+        # arrives shortly after the preceding solve, whereas two callbacks for
+        # the same interval are ordinarily duplicate usage/spot updates.
+        self._last_price_triggered_generation: tuple[str, ...] | None = None
 
         # Track last executed action for mode transitions and status reporting.
         self._last_executed_action: str | None = None
@@ -5039,6 +5044,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return self._generate_tou_price_forecast(tariff)
         return None
 
+    def _price_update_generation_key(self) -> tuple[str, ...] | None:
+        """Return the current dynamic-price interval identity when available.
+
+        Amber-format providers expose their settled current rows in ``current``
+        with an interval end (normally ``nemTime``).  Do not use price values
+        in the key: an in-window correction should still coalesce to one solve,
+        while crossing into the next billing interval must not be discarded by
+        the elapsed-time duplicate guard.
+        """
+        data = getattr(self.price_coordinator, "data", None)
+        current = data.get("current") if isinstance(data, dict) else None
+        if not isinstance(current, list):
+            return None
+
+        ends = {
+            str(end)
+            for row in current
+            if isinstance(row, dict)
+            and row.get("type", "CurrentInterval") == "CurrentInterval"
+            and (end := row.get("nemTime") or row.get("valid_to") or row.get("end"))
+        }
+        return tuple(sorted(ends)) or None
+
     def _on_price_update(self) -> None:
         """Callback when price coordinator updates."""
         if not self._enabled or not self._is_dynamic_pricing:
@@ -5075,18 +5103,26 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Rate-limit: Amber/Octopus can fire two coordinator updates per
         # billing window (usage price + spot price). Avoid duplicate LP runs
-        # and repeated force mode commands inside the same interval.
+        # and repeated force mode commands inside the same interval, but do
+        # not suppress a settled next billing interval that arrives shortly
+        # after a boundary solve.
         now = dt_util.utcnow()
+        generation = self._price_update_generation_key()
         min_interval_seconds = (self._config.interval_minutes if self._config else 5) * 60
         if self._last_price_triggered_optimization is not None:
             elapsed = (now - self._last_price_triggered_optimization).total_seconds()
-            if elapsed < min_interval_seconds:
+            same_generation = (
+                generation is None
+                or generation == getattr(self, "_last_price_triggered_generation", None)
+            )
+            if elapsed < min_interval_seconds and same_generation:
                 _LOGGER.debug(
                     "Price update: skipping LP (last ran %.0fs ago, interval %ds)",
                     elapsed, min_interval_seconds,
                 )
                 return
         self._last_price_triggered_optimization = now
+        self._last_price_triggered_generation = generation
 
         # Re-optimize with new prices and update dashboard sensors. Track the
         # task handle so disable() can cancel it — otherwise a price-solve

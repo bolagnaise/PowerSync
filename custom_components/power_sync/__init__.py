@@ -18931,7 +18931,13 @@ class EVLoadpointStatusView(HomeAssistantView):
                     "charger_type": "tesla",
                     "ev_power_kw": vehicle.get("ev_power_kw", 0),
                     "auxiliary_power_kw": vehicle.get("auxiliary_power_kw", 0),
+                    # Preserve the distinction between an unavailable BLE
+                    # measurement and a measured 0 W idle observation. The
+                    # normalizer otherwise treats an omitted field as usable
+                    # power and renders an unavailable vehicle as Idle/0.00.
+                    "power_available": vehicle.get("power_available", True),
                     "ev_soc": vehicle.get("ev_soc"),
+                    "current_amps": vehicle.get("current_amps"),
                     "is_connected": vehicle.get("is_connected", False),
                     "is_charging": vehicle.get("is_charging", False),
                     "observed_at": vehicle.get("_observed_at"),
