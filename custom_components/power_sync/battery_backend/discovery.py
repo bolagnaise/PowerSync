@@ -45,11 +45,45 @@ _CATEGORY_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("charger", ("charger", "evac", "evdc", "vehicle")),
 )
 
+# ``active_power`` is a brand-agnostic alias kept for the GoodWe entity bridge
+# (``sensor.goodwe_active_power``). It must never capture a plant/inverter AC
+# output or an ESS/PV entity that happens to share the suffix.
+_GENERIC_GRID_ALIASES = frozenset({"active_power"})
+
+_GRID_MARKERS = ("grid", "meter", "import", "export")
+
+# Matched as whole underscore-separated tokens so a manufacturer prefix such as
+# ``solaredge`` is not mistaken for a ``solar`` qualifier.
+_NON_GRID_QUALIFIERS = frozenset({
+    "battery", "bat", "ess", "pv", "photovoltaic", "solar", "inverter",
+    "plant", "load", "consumed", "consumption", "backup", "eps", "generator",
+})
+
 _RECOMMENDED_KEYWORDS = (
     "soc", "soh", "battery_power", "battery_temperature", "pv_power",
     "solar_power", "grid_power", "load_power", "today", "status", "fault",
     "work_mode", "backup", "firmware",
 )
+
+
+def _alias_in_identity(object_id: str, unique_id: str, alias: str) -> bool:
+    """Match an alias on word boundaries only.
+
+    A bare ``endswith`` treats ``reactive_power`` as ``active_power``, which let a
+    reactive-power entity win the grid role at full score.
+    """
+    if object_id == alias or unique_id == alias:
+        return True
+    suffix = f"_{alias}"
+    if object_id.endswith(suffix) or unique_id.endswith(suffix):
+        return True
+    return unique_id.startswith(f"{alias}_")
+
+
+def _has_non_grid_qualifier(object_id: str, unique_id: str) -> bool:
+    """True when either identity carries a whole-token non-grid qualifier."""
+    tokens = set(object_id.split("_")) | set(unique_id.split("_"))
+    return bool(tokens & _NON_GRID_QUALIFIERS)
 
 
 def _entry_config_ids(registry_entry: Any) -> set[str]:
@@ -223,20 +257,38 @@ def discover_canonical_entities(
         candidates: list[tuple[int, str]] = []
         for metric in metrics:
             entity_id = str(metric.get("entity_id") or "")
-            unique_id = str(metric.get("unique_id") or "")
-            identity = f"{entity_id.split('.', 1)[-1]} {unique_id}".lower()
+            object_id = entity_id.split(".", 1)[-1].lower()
+            unique_id = str(metric.get("unique_id") or "").lower()
+            identity = f"{object_id} {unique_id}"
+            grid_marked = any(marker in identity for marker in _GRID_MARKERS)
             for priority, alias in enumerate(aliases):
-                if identity.endswith(alias) or f"_{alias} " in identity or f" {alias}" in identity:
-                    available_bonus = 100 if metric.get("available") else 0
-                    exact_bonus = 50 if entity_id.split(".", 1)[-1].endswith(alias) else 0
-                    candidates.append((available_bonus + exact_bonus - priority, entity_id))
-                    break
+                if not _alias_in_identity(object_id, unique_id, alias):
+                    continue
+                if (
+                    role == "grid_power"
+                    and alias in _GENERIC_GRID_ALIASES
+                    and not grid_marked
+                    and _has_non_grid_qualifier(object_id, unique_id)
+                ):
+                    continue
+                available_bonus = 100 if metric.get("available") else 0
+                exact_bonus = 50 if object_id.endswith(alias) else 0
+                grid_bonus = 25 if role == "grid_power" and grid_marked else 0
+                candidates.append(
+                    (available_bonus + exact_bonus + grid_bonus - priority, entity_id)
+                )
+                break
         if candidates:
             candidates.sort(key=lambda item: (-item[0], item[1]))
             resolved[role] = candidates[0][1]
 
     missing = [role for role in _CANONICAL_ALIASES if role not in resolved]
-    if battery_system == BATTERY_SYSTEM_SUNGROW and "grid_power" in resolved:
+    if "grid_power" in resolved and (
+        battery_system == BATTERY_SYSTEM_SUNGROW
+        or "export_power" in resolved["grid_power"]
+    ):
+        # An export entity reads positive while exporting; PowerSync's grid
+        # convention is positive on import, so it always needs inverting.
         catalog["grid_power_multiplier"] = (
             -1.0 if "export_power" in resolved["grid_power"] else 1.0
         )

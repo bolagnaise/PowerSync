@@ -318,6 +318,115 @@ def test_goodwe_entity_profile_accepts_standard_active_power_and_ppv_names():
     }
 
 
+def test_sigen_grid_role_rejects_plant_and_inverter_active_power():
+    """#399: the generic active_power alias must not capture plant AC output."""
+    const, discovery = _load_discovery_module()
+    names = (
+        "sigen_plant_battery_soc",
+        "sigen_plant_battery_power",
+        "sigen_plant_pv_power",
+        "sigen_plant_load_power",
+        "sigen_plant_grid_sensor_active_power",
+        "sigen_plant_grid_export_power",
+        "sigen_plant_active_power",
+        "sigen_plant_reactive_power",
+        "sigen_inverter_active_power",
+    )
+    rows = [_row(f"sensor.{name}", name, platform="sigen") for name in names]
+    hass = SimpleNamespace(
+        entity_registry=_Registry(rows),
+        states=_States({row.entity_id: "1" for row in rows}),
+    )
+
+    catalog = discovery.discover_battery_sensor_catalog(
+        hass,
+        battery_system=const.BATTERY_SYSTEM_SIGENERGY,
+        profile_id="sigenergy_ha_monitoring",
+        allowed_domains=("sigen",),
+        config_entry_id="selected",
+        display_mode=const.BATTERY_SENSOR_DISPLAY_ALL,
+    )
+    canonical, missing = discovery.discover_canonical_entities(
+        catalog,
+        battery_system=const.BATTERY_SYSTEM_SIGENERGY,
+    )
+
+    assert missing == []
+    assert canonical["grid_power"] == "sensor.sigen_plant_grid_sensor_active_power"
+    assert catalog.get("grid_power_multiplier", 1.0) == 1.0
+
+
+def test_sigen_grid_role_falls_back_to_export_with_inverted_multiplier():
+    """#399: without a grid meter the export entity must still be sign-corrected."""
+    const, discovery = _load_discovery_module()
+    names = (
+        "sigen_plant_battery_soc",
+        "sigen_plant_battery_power",
+        "sigen_plant_pv_power",
+        "sigen_plant_load_power",
+        "sigen_plant_grid_export_power",
+        "sigen_plant_active_power",
+        "sigen_inverter_active_power",
+    )
+    rows = [_row(f"sensor.{name}", name, platform="sigen") for name in names]
+    hass = SimpleNamespace(
+        entity_registry=_Registry(rows),
+        states=_States({row.entity_id: "1" for row in rows}),
+    )
+
+    catalog = discovery.discover_battery_sensor_catalog(
+        hass,
+        battery_system=const.BATTERY_SYSTEM_SIGENERGY,
+        profile_id="sigenergy_ha_monitoring",
+        allowed_domains=("sigen",),
+        config_entry_id="selected",
+        display_mode=const.BATTERY_SENSOR_DISPLAY_ALL,
+    )
+    canonical, missing = discovery.discover_canonical_entities(
+        catalog,
+        battery_system=const.BATTERY_SYSTEM_SIGENERGY,
+    )
+
+    assert missing == []
+    assert canonical["grid_power"] == "sensor.sigen_plant_grid_export_power"
+    assert catalog["grid_power_multiplier"] == -1.0
+
+
+def test_sungrow_export_sign_correction_survives_generic_active_power():
+    """#399: the shared active_power alias must not disable the Sungrow inversion."""
+    const, discovery = _load_discovery_module()
+    names = (
+        "sg_battery_soc",
+        "sg_battery_power",
+        "sg_pv_power",
+        "sg_load_power",
+        "sg_active_power",
+        "sg_export_power",
+    )
+    rows = [_row(f"sensor.{name}", name, platform="modbus") for name in names]
+    hass = SimpleNamespace(
+        entity_registry=_Registry(rows),
+        states=_States({row.entity_id: "1" for row in rows}),
+    )
+
+    catalog = discovery.discover_battery_sensor_catalog(
+        hass,
+        battery_system=const.BATTERY_SYSTEM_SUNGROW,
+        profile_id="sungrow_ha_monitoring",
+        allowed_domains=("modbus",),
+        config_entry_id="selected",
+        display_mode=const.BATTERY_SENSOR_DISPLAY_ALL,
+    )
+    canonical, missing = discovery.discover_canonical_entities(
+        catalog,
+        battery_system=const.BATTERY_SYSTEM_SUNGROW,
+    )
+
+    assert missing == []
+    assert canonical["grid_power"] == "sensor.sg_export_power"
+    assert catalog["grid_power_multiplier"] == -1.0
+
+
 def test_sungrow_anchor_limits_yaml_discovery_to_stable_unique_id_namespace():
     const, discovery = _load_discovery_module()
     rows = [
