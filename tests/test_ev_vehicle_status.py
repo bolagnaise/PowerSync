@@ -474,7 +474,7 @@ def test_ble_steady_power_uses_its_own_last_reported_timestamp():
 
 
 def test_ble_metadata_does_not_refresh_stale_power_measurement():
-    """Connection and charging state updates cannot freshen measured power."""
+    """Stale BLE watts are withheld consistently from every status surface."""
     power_sync = _power_sync_module()
     ev_load = importlib.import_module("power_sync.ev_load")
     now = datetime.now(timezone.utc)
@@ -513,10 +513,33 @@ def test_ble_metadata_does_not_refresh_stale_power_measurement():
         ],
         at=now,
     )
+    loadpoint_status = importlib.import_module(
+        "power_sync.automations.loadpoint_status"
+    )
+    observed_loadpoint = loadpoint_status.build_loadpoint_status({}, [vehicle])[0]
+    dynamic_loadpoint = loadpoint_status.build_loadpoint_status(
+        {
+            "ble_yf88": {
+                "active": True,
+                "charging_started": True,
+                "current_amps": 10,
+                "target_amps": 10,
+                "params": {"charger_type": "tesla", "voltage": 230},
+            }
+        },
+        [vehicle],
+    )[0]
 
     assert vehicle["_observed_at"] == stale_power
+    assert vehicle["power_available"] is False
     assert snapshot.quality == ev_load.EvLoadQuality.INCOMPLETE
     assert snapshot.unavailable_active_keys == ("vehicle:ble_yf88",)
+    assert observed_loadpoint["actual_charging"] is True
+    assert observed_loadpoint["current_power_kw"] is None
+    assert observed_loadpoint["confidence"] == "unknown"
+    assert dynamic_loadpoint["actual_charging"] is True
+    assert dynamic_loadpoint["current_power_kw"] is None
+    assert dynamic_loadpoint["confidence"] == "unknown"
 
 
 def test_ble_unknown_power_reaches_the_loadpoint_as_unknown_not_idle_zero():

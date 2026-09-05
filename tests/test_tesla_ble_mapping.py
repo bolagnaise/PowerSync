@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import types
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -102,6 +103,27 @@ def test_current_yoziru_entities_replace_unavailable_legacy_telemetry():
     )
 
     assert get_tesla_ble_battery_state(hass, "my_model_y").state == "67"
+
+
+def test_charge_power_prefers_the_newest_finite_compatibility_reading():
+    older = SimpleNamespace(
+        state="2.0",
+        last_updated=datetime(2026, 9, 5, 4, 0),
+    )
+    newer = SimpleNamespace(
+        state="2.3",
+        last_updated=datetime(2026, 9, 5, 4, 1),
+    )
+    hass = SimpleNamespace(
+        states=SimpleNamespace(
+            get={
+                "sensor.my_model_y_charge_power": older,
+                "sensor.my_model_y_charger_power": newer,
+            }.get,
+        )
+    )
+
+    assert get_tesla_ble_charge_power_state(hass, "my_model_y") is newer
 
 
 def test_mapping_accepts_comma_and_newline_separators():

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from .const import (
@@ -32,6 +33,34 @@ def _first_available_state(hass: Any, entity_ids: tuple[str, ...]) -> Any | None
         if unavailable_state is None:
             unavailable_state = state
     return unavailable_state
+
+
+def _newest_finite_state(hass: Any, entity_ids: tuple[str, ...]) -> Any | None:
+    """Return the newest finite compatibility reading without trusting order."""
+    selected = None
+    selected_at = None
+    for entity_id in entity_ids:
+        state = hass.states.get(entity_id)
+        if state is None or state.state in ("unavailable", "unknown", "None", None):
+            continue
+        try:
+            if not math.isfinite(float(state.state)):
+                continue
+        except (TypeError, ValueError):
+            continue
+        observed_at = getattr(state, "last_reported", None) or getattr(
+            state, "last_updated", None
+        )
+        if (
+            selected is None
+            or (
+                observed_at is not None
+                and (selected_at is None or observed_at > selected_at)
+            )
+        ):
+            selected = state
+            selected_at = observed_at
+    return selected
 
 
 def tesla_ble_status_entity_ids(prefix: str) -> tuple[str, str]:
@@ -80,8 +109,8 @@ def get_tesla_ble_charging_state(hass: Any, prefix: str) -> Any | None:
 
 
 def get_tesla_ble_charge_power_state(hass: Any, prefix: str) -> Any | None:
-    """Resolve legacy and current Tesla BLE charger-power entities."""
-    return _first_available_state(
+    """Resolve the freshest finite legacy/current BLE power reading."""
+    return _newest_finite_state(
         hass,
         (
             TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix),
@@ -96,7 +125,7 @@ def get_tesla_ble_charge_current_state(hass: Any, prefix: str) -> Any | None:
     ``number.*_charging_amps`` is a writable requested-current control, not a
     physical-current readback, so it is deliberately not a fallback here.
     """
-    return _first_available_state(
+    return _newest_finite_state(
         hass,
         (
             TESLA_BLE_SENSOR_CHARGE_CURRENT.format(prefix=prefix),

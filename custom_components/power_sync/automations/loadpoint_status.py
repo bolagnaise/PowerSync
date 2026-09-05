@@ -1005,13 +1005,21 @@ def _dynamic_loadpoint(
     phases = _float_value(params.get("phases"), 1.0)
     commanded_power_kw = target_amps * voltage * phases / 1000
 
+    observed_power_available = (
+        observation is None or observation.get("power_available") is not False
+    )
     observed_power_kw = None
-    if observation is not None:
+    if observation is not None and observed_power_available:
         observed_power_kw = _float_value(
             observation.get("ev_power_kw", observation.get("current_power_kw")),
             0.0,
         )
-    power_kw = observed_power_kw if observed_power_kw is not None else commanded_power_kw
+    if observation is not None and not observed_power_available:
+        power_kw = 0.0
+    else:
+        power_kw = (
+            observed_power_kw if observed_power_kw is not None else commanded_power_kw
+        )
 
     if observation is not None and "is_charging" in observation:
         actually_charging = bool(observation.get("is_charging"))
@@ -1088,7 +1096,9 @@ def _dynamic_loadpoint(
             owner_mode,
             allocated_surplus_kw,
         ),
-        "current_power_kw": round(power_kw, 2),
+        "current_power_kw": (
+            round(power_kw, 2) if observed_power_available else None
+        ),
         "commanded_power_kw": round(commanded_power_kw, 2),
         "current_amps": current_amps,
         "target_amps": target_amps,
@@ -1099,7 +1109,11 @@ def _dynamic_loadpoint(
         "blocking_reason": blocking_reason,
         "session_id": session_id,
         "last_command": (ownership or {}).get("last_command"),
-        "confidence": "observed" if observation is not None else "commanded",
+        "confidence": (
+            "unknown"
+            if not observed_power_available
+            else "observed" if observation is not None else "commanded"
+        ),
         "source_mode": source_mode,
         "duration_minutes": duration_minutes,
         "expires_at": expires_at,

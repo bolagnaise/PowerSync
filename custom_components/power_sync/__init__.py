@@ -1877,6 +1877,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         charging_state_plugged_status,
         coalesce_vehicle_observations,
     )
+    from .ev_load import is_current_ev_power_observation
 
     vehicles = []
     entity_registry = er.async_get(hass)
@@ -2227,6 +2228,9 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 ble_power_observed_at,
                 _ev_power_observed_at(power_state),
             )
+        power_available = power_available and is_current_ev_power_observation(
+            ble_power_observed_at
+        )
         power_kw = _kw_from_power_state(power_state)
         if power_kw > 0:
             ev_power_kw = power_kw
