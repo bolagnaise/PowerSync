@@ -32614,6 +32614,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         force_discharge_state["expires_at"],
                     )
                     await persist_force_mode_state()
+                    return {"success": True}
                 else:
                     force_discharge_state["active"] = False
                     _LOGGER.error("SolarEdge force discharge failed")
@@ -34412,6 +34413,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         force_charge_state["expires_at"],
                     )
                     await persist_force_mode_state()
+                    return {"success": True}
                 else:
                     force_charge_state["active"] = False
                     _LOGGER.error("SolarEdge force charge failed")
@@ -36104,7 +36106,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 })
 
                 await persist_force_mode_state()
-                return
+                return {"success": True}
             except HomeAssistantError:
                 raise
             except Exception as e:
