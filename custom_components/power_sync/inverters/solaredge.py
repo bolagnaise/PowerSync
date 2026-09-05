@@ -862,11 +862,8 @@ class SolarEdgeEnergyController:
         if command in active_commands:
             return True
 
-        try:
-            timeout = float(saved.get("command_timeout") or 0)
-        except (TypeError, ValueError):
-            timeout = 0
-        return timeout > 0
+        # A configured lease does not activate a benign storage command.
+        return False
 
     async def set_backup_reserve(self, percent: int) -> bool:
         """Set SolarEdge backup reserve / minimum SOC when exposed by HA."""

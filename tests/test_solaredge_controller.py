@@ -1381,3 +1381,15 @@ def test_solaredge_missing_control_entities_keeps_telemetry_but_rejects_dispatch
     ]
     assert not asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
     assert hass.services.calls == []
+
+
+def test_solaredge_benign_msc_timeout_is_not_active_dispatch():
+    controller = SolarEdgeEnergyController(_SEHass(), entity_prefix="solaredge")
+    controller._saved_control_state = {
+        "storage_control_mode": "Remote Control",
+        "storage_command_mode": "Maximize Self Consumption",
+        "charge_power_limit": "11400",
+        "discharge_power_limit": "11400",
+        "command_timeout": "3600",
+    }
+    assert not controller._saved_control_state_contains_active_dispatch()
