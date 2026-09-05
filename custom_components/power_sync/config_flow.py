@@ -7868,9 +7868,18 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
         if entry_data.get("solaredge_curtailment_state") == "curtailed":
             controller = entry_data.get("solaredge_controller")
-            if controller and hasattr(controller, "restore"):
+            coordinator = entry_data.get("solaredge_coordinator")
+            if controller and hasattr(controller, "restore") and coordinator:
+                async def restore_solaredge():
+                    try:
+                        return await controller.restore()
+                    finally:
+                        await controller.disconnect()
+
                 try:
-                    success = await controller.restore()
+                    success = await coordinator.run_external_mutation(
+                        restore_solaredge, automatic=True
+                    )
                 except Exception as err:
                     _LOGGER.error("SolarEdge curtailment restore failed: %s", err)
                 else:

@@ -448,3 +448,21 @@ refresh_calibration:
     or to retry mode toggles immediately. Doesn't touch the Powerwall — purely
     resets the integration's local guard.
   fields: {}
+
+reconcile_solaredge_control:
+  name: Reconcile SolarEdge control
+  description: Read fresh storage settings through SolarEdge Modbus Multi and clear the persistent control block only when a safe baseline is verified. Run under supervision after inspecting the inverter. This service does not write inverter settings.
+  fields:
+    entry_id:
+      name: PowerSync entry
+      description: Config entry ID of the PowerSync SolarEdge battery.
+      required: true
+      selector:
+        text:
+    acknowledge:
+      name: Acknowledge supervised recovery
+      description: Confirm that you have inspected the inverter and are supervising this recovery.
+      required: true
+      default: false
+      selector:
+        boolean:

@@ -3159,6 +3159,31 @@ def _get_neovolt_entry_ids(
     return [legacy_entry_id] if legacy_entry_id else []
 
 
+def _solaredge_ac_inverter_matches_battery(entry: ConfigEntry) -> bool:
+    """Identify a duplicate AC control path for the SolarEdge battery inverter."""
+    if _active_battery_system(entry) != BATTERY_SYSTEM_SOLAREDGE:
+        return False
+
+    def value(key, default=None):
+        return entry.options.get(key, entry.data.get(key, default))
+
+    if value(CONF_INVERTER_BRAND) != "solaredge":
+        return False
+    host = str(value(CONF_INVERTER_HOST, "")).strip().lower()
+    battery_host = str(value(CONF_SOLAREDGE_HOST, "")).strip().lower()
+    if not host or not battery_host or host != battery_host:
+        return False
+    try:
+        return (
+            int(value(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT))
+            == int(value(CONF_SOLAREDGE_PORT, DEFAULT_SOLAREDGE_PORT))
+            and int(value(CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID))
+            == int(value(CONF_SOLAREDGE_SLAVE_ID, DEFAULT_SOLAREDGE_SLAVE_ID))
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def _active_battery_system(
     entry: ConfigEntry,
     hass: HomeAssistant | None = None,
@@ -8898,6 +8923,16 @@ class InverterStatusView(HomeAssistantView):
                 "success": True,
                 "enabled": False,
                 "message": "Inverter curtailment not enabled"
+            })
+
+        if _solaredge_ac_inverter_matches_battery(entry):
+            coordinator = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("solaredge_coordinator")
+            return web.json_response({
+                "success": True,
+                "enabled": False,
+                "brand": "solaredge",
+                "message": "AC inverter connection duplicates the battery connection; use battery telemetry",
+                "control_health": coordinator.control_health if coordinator else "unavailable",
             })
 
         # Get inverter configuration
@@ -21206,11 +21241,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry_data["solaredge_controller_key"] = controller_key
         return controller
 
+    async def _solaredge_curtailment_write(coordinator, controller, operation) -> bool:
+        """Close the curtailment client before releasing the battery mutation lock."""
+        async def write_and_disconnect() -> bool:
+            try:
+                return await operation()
+            finally:
+                await controller.disconnect()
+
+        return await coordinator.run_external_mutation(write_and_disconnect, automatic=True)
+
     async def _restore_solaredge_curtailment_for_dispatch(
         entry_data: dict,
         reason: str,
     ) -> bool:
         """Release SolarEdge active-power curtailment before force dispatch."""
+        coordinator = entry_data.get("solaredge_coordinator")
+        if coordinator is None or coordinator.control_health != "ready" or coordinator.mutation_active:
+            _LOGGER.error("SolarEdge curtailment release blocked while control is busy or requires reconciliation")
+            return False
         if entry_data.get("solaredge_curtailment_state", "normal") == "normal":
             return True
 
@@ -21220,7 +21269,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "SolarEdge curtailment RELEASED before %s: restoring active power",
                 reason,
             )
-            success = await controller.restore()
+            success = await _solaredge_curtailment_write(coordinator, controller, controller.restore)
             if success:
                 entry_data["solaredge_curtailment_state"] = "normal"
                 return True
@@ -21394,7 +21443,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     is_custom_battery = active_battery_system == BATTERY_SYSTEM_CUSTOM
 
     def ac_inverter_is_same_hybrid() -> bool:
-        """Return whether the AC path targets the active Sungrow connection."""
+        """Return whether the AC path duplicates the battery inverter connection."""
+        if _solaredge_ac_inverter_matches_battery(entry):
+            return True
         if not is_sungrow:
             return False
 
@@ -24256,6 +24307,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         entry_data = _aemo_dispatch_entry_data()
         if entry_data is None:
+            return False
+
+        if ac_inverter_is_same_hybrid():
+            _LOGGER.warning("AC inverter control blocked because it duplicates the battery connection")
             return False
 
         inverter_enabled = entry.options.get(
@@ -27648,6 +27703,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         entry_data["solaredge_curtail_export_uneconomic"] = export_uneconomic
 
+        coordinator = entry_data.get("solaredge_coordinator")
+        if coordinator is None or coordinator.control_health != "ready" or coordinator.mutation_active:
+            _LOGGER.warning("SolarEdge curtailment blocked while control is busy or requires reconciliation")
+            return
         controller = _get_solaredge_curtailment_controller(entry_data)
 
         try:
@@ -27669,7 +27728,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "SolarEdge curtailment TRIGGERED: export_earnings=%.2fc (<1c) -> active power 0%%",
                         export_earnings,
                     )
-                    success = await controller.curtail()
+                    success = await _solaredge_curtailment_write(coordinator, controller, controller.curtail)
                     if success:
                         entry_data["solaredge_curtailment_state"] = "curtailed"
                     else:
@@ -27682,7 +27741,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "SolarEdge curtailment RESTORED: export_earnings=%.2fc (>=1c) -> active power 100%%",
                         export_earnings,
                     )
-                    success = await controller.restore()
+                    success = await _solaredge_curtailment_write(coordinator, controller, controller.restore)
                     if success:
                         entry_data["solaredge_curtailment_state"] = "normal"
                     else:
@@ -29788,6 +29847,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def restore_force_mode_from_persistence():
         """Restore force charge/discharge state after HA restart."""
 
+        if active_battery_system == BATTERY_SYSTEM_SOLAREDGE:
+            _LOGGER.warning(
+                "SolarEdge startup will not replay persisted force commands or timers; "
+                "controller recovery state remains available for supervised reconciliation"
+            )
+            return
+
         if not persisted_force_state:
             # No force state to re-arm, but a previous run may still owe a
             # restore whose Tesla writes never verified. Finish it here: the
@@ -31772,19 +31838,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             solaredge_coord = entry_data.get("solaredge_coordinator")
             if solaredge_coord:
-                await _guarded_force_discharge_write(
+                release_result = await _guarded_force_discharge_write(
                     lambda _guarded_w: _restore_solaredge_curtailment_for_dispatch(
                         entry_data,
                         "optimizer force discharge",
                     )
                 )
-                await _guarded_force_discharge_write(
+                if not release_result:
+                    raise HomeAssistantError("SolarEdge curtailment release was not confirmed")
+                result = await _guarded_force_discharge_write(
                     lambda guarded_w: solaredge_coord.force_discharge(
-                        duration, power_w=guarded_w
+                        duration, power_w=guarded_w, automatic=True
                     )
                 )
+                if not result:
+                    raise HomeAssistantError("SolarEdge force discharge hardware refresh was not confirmed")
                 _LOGGER.debug(f"SolarEdge force discharge hardware refreshed ({duration}min, {power_w}W)")
-                return
+                return {"success": True}
             anker_coord = entry_data.get("anker_solix_coordinator")
             if anker_coord:
                 await _guarded_force_discharge_write(
@@ -32569,18 +32639,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state["active"] = False
                     _LOGGER.error("Force discharge: SolarEdge coordinator not available")
                     hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "SolarEdge control entities are unavailable"))
-                    return
+                    raise HomeAssistantError("SolarEdge control entities are unavailable")
 
                 power_w = command_power_w
-                await _guarded_force_discharge_write(
+                release_result = await _guarded_force_discharge_write(
                     lambda _guarded_w: _restore_solaredge_curtailment_for_dispatch(
                         entry_data,
                         "force discharge",
                     )
                 )
+                if not release_result:
+                    raise HomeAssistantError("SolarEdge curtailment release was not confirmed")
                 discharge_result = await _guarded_force_discharge_write(
                     lambda guarded_w: solaredge_coord.force_discharge(
-                        duration, power_w=guarded_w
+                        duration, power_w=guarded_w, automatic=source == "optimizer"
                     )
                 )
 
@@ -32600,13 +32672,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if force_discharge_state.get("cancel_expiry_timer"):
                         force_discharge_state["cancel_expiry_timer"]()
 
+                    controller_generation = solaredge_coord.generation
+
                     async def auto_restore_discharge_solaredge(_now):
                         if _command_generation[0] != _restore_gen:
                             _LOGGER.debug("SolarEdge force discharge timer superseded — skipping restore")
                             return
                         if force_discharge_state["active"]:
                             _LOGGER.info("SolarEdge force discharge expired, auto-restoring")
-                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {"source": "force_timer", "_allow_monitoring_restore": True}, blocking=True)
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {"source": "force_timer", "_allow_monitoring_restore": True, "_solaredge_generation": controller_generation}, blocking=True)
 
                     force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
                         hass,
@@ -32614,17 +32688,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         force_discharge_state["expires_at"],
                     )
                     await persist_force_mode_state()
-                    return {"success": True}
                 else:
                     force_discharge_state["active"] = False
                     _LOGGER.error("SolarEdge force discharge failed")
-                    hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "SolarEdge storage control entities are missing or rejected the command"))
-                return
+                    hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "SolarEdge command was not confirmed; check control health before retrying"))
+                    raise HomeAssistantError("SolarEdge force discharge was not confirmed; check control health")
+                return {"success": True}
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 force_discharge_state["active"] = False
                 _LOGGER.error(f"Error in SolarEdge force discharge: {e}", exc_info=True)
                 hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "SolarEdge entity write error"))
-                return
+                raise HomeAssistantError("SolarEdge force discharge failed; check control health") from e
 
         is_anker_solix_local = entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_ANKER_SOLIX
         if is_anker_solix_local:
@@ -33531,13 +33607,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             solaredge_coord = entry_data.get("solaredge_coordinator")
             if solaredge_coord:
-                await _restore_solaredge_curtailment_for_dispatch(
+                release_result = await _restore_solaredge_curtailment_for_dispatch(
                     entry_data,
                     "optimizer force charge",
                 )
-                await solaredge_coord.force_charge(duration, power_w=power_w)
+                if not release_result:
+                    raise HomeAssistantError("SolarEdge curtailment release was not confirmed")
+                result = await solaredge_coord.force_charge(duration, power_w=power_w, automatic=True)
+                if not result:
+                    raise HomeAssistantError("SolarEdge force charge hardware refresh was not confirmed")
                 _LOGGER.debug(f"SolarEdge force charge hardware refreshed ({duration}min, {power_w}W)")
-                return
+                return {"success": True}
             anker_coord = entry_data.get("anker_solix_coordinator")
             if anker_coord:
                 await anker_coord.force_charge(duration, power_w=power_w)
@@ -34366,7 +34446,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_charge_state["active"] = False
                     _LOGGER.error("Force charge: SolarEdge coordinator not available")
                     hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "SolarEdge control entities are unavailable"))
-                    return
+                    raise HomeAssistantError("SolarEdge control entities are unavailable")
 
                 if force_discharge_state["active"]:
                     _LOGGER.info("Canceling active discharge mode to enable SolarEdge charge mode")
@@ -34377,11 +34457,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state["expires_at"] = None
 
                 power_w = command_power_w
-                await _restore_solaredge_curtailment_for_dispatch(
+                release_result = await _restore_solaredge_curtailment_for_dispatch(
                     entry_data,
                     "force charge",
                 )
-                charge_result = await solaredge_coord.force_charge(duration, power_w=power_w)
+                if not release_result:
+                    raise HomeAssistantError("SolarEdge curtailment release was not confirmed")
+                charge_result = await solaredge_coord.force_charge(duration, power_w=power_w, automatic=source == "optimizer")
 
                 if charge_result:
                     force_charge_state["active"] = True
@@ -34399,13 +34481,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if force_charge_state.get("cancel_expiry_timer"):
                         force_charge_state["cancel_expiry_timer"]()
 
+                    controller_generation = solaredge_coord.generation
+
                     async def auto_restore_charge_solaredge(_now):
                         if _command_generation[0] != _restore_gen:
                             _LOGGER.debug("SolarEdge force charge timer superseded — skipping restore")
                             return
                         if force_charge_state["active"]:
                             _LOGGER.info("SolarEdge force charge expired, auto-restoring")
-                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {"source": "force_timer", "_allow_monitoring_restore": True}, blocking=True)
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {"source": "force_timer", "_allow_monitoring_restore": True, "_solaredge_generation": controller_generation}, blocking=True)
 
                     force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
                         hass,
@@ -34413,17 +34497,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         force_charge_state["expires_at"],
                     )
                     await persist_force_mode_state()
-                    return {"success": True}
                 else:
                     force_charge_state["active"] = False
                     _LOGGER.error("SolarEdge force charge failed")
-                    hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "SolarEdge storage control entities are missing or rejected the command"))
-                return
+                    hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "SolarEdge command was not confirmed; check control health before retrying"))
+                    raise HomeAssistantError("SolarEdge force charge was not confirmed; check control health")
+                return {"success": True}
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 force_charge_state["active"] = False
                 _LOGGER.error(f"Error in SolarEdge force charge: {e}", exc_info=True)
                 hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "SolarEdge entity write error"))
-                return
+                raise HomeAssistantError("SolarEdge force charge failed; check control health") from e
 
         is_anker_solix_local = entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_ANKER_SOLIX
         if is_anker_solix_local:
@@ -35169,6 +35255,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Log call context for debugging (helps identify if called by automation)
         context = call.context
         source = _control_call_source(call)
+        solaredge_restore_coordinator = (
+            hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("solaredge_coordinator")
+        )
+        if solaredge_restore_coordinator is not None:
+            expected = call.data.get("_solaredge_generation")
+            if expected is not None and expected != solaredge_restore_coordinator.generation:
+                raise HomeAssistantError("SolarEdge restore timer was superseded")
+            if solaredge_restore_coordinator.control_health != "ready":
+                raise HomeAssistantError("SolarEdge restore blocked pending supervised reconciliation")
         _LOGGER.info(f"🔄 Restore normal service called (context: user_id={context.user_id}, parent_id={context.parent_id}, source={source})")
         _LOGGER.info("🔄 RESTORE NORMAL: Restoring normal operation")
         force_restore = bool(call.data.get("_force_restore"))
@@ -35233,7 +35328,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # These are mobile-only visual flags; clearing them on user-sourced
         # restores keeps the Controls screen in sync without forcing the
         # optimizer to touch them.
-        if source in ("user", "manual", "unknown", "hold_soc_cleanup"):
+        if solaredge_restore_coordinator is None and source in ("user", "manual", "unknown", "hold_soc_cleanup"):
             if self_consumption_state.get("active"):
                 _clear_self_consumption_state()
             # GoodWe entity restore can report False without raising. Keep its
@@ -36075,7 +36170,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 solaredge_coord = entry_data.get("solaredge_coordinator")
                 if not solaredge_coord or not bool(
-                    await solaredge_coord.restore_normal()
+                    await solaredge_coord.restore_normal(
+                        automatic=source == "optimizer",
+                        expected_generation=call.data.get("_solaredge_generation"),
+                    )
                 ):
                     raise HomeAssistantError(
                         "SolarEdge did not confirm restore_normal"
@@ -36083,6 +36181,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 if _restore_superseded("SolarEdge restore"):
                     return
+
+                if source in ("user", "manual", "unknown", "hold_soc_cleanup"):
+                    if self_consumption_state.get("active"):
+                        _clear_self_consumption_state()
+                    if hold_soc_state.get("active"):
+                        _clear_hold_soc_state()
 
                 force_charge_state["active"] = False
                 force_discharge_state["active"] = False
@@ -36111,7 +36215,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raise
             except Exception as e:
                 _LOGGER.error(f"Error in SolarEdge restore normal: {e}", exc_info=True)
-                return
+                raise HomeAssistantError("SolarEdge restore failed; check control health") from e
 
         is_anker_solix_local = entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_ANKER_SOLIX
         if is_anker_solix_local:
@@ -37026,6 +37130,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hold_soc_state["locked_soc"] = locked_soc
             hold_soc_state["brand"] = brand
             hold_soc_state["pending"] = pending
+            solaredge_generation = coord.generation if brand == "solaredge" else None
             restore_generation = _command_generation[0]
             restore_reserve_generation = _tesla_reserve_generation[0]
 
@@ -37047,7 +37152,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await hass.services.async_call(
                         DOMAIN,
                         SERVICE_RESTORE_NORMAL,
-                        {"source": "hold_soc_cleanup", "_force_restore": True},
+                        {"source": "hold_soc_cleanup", "_force_restore": True, "_solaredge_generation": solaredge_generation},
                         blocking=True,
                     )
 
@@ -37177,13 +37282,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 return
             try:
-                result = await coord.set_backup_mode()
+                result = await coord.set_backup_mode(automatic=source == "optimizer") if brand == "solaredge" else await coord.set_backup_mode()
             except Exception as e:
                 _LOGGER.error("Hold SoC failed on %s: %s", brand, e, exc_info=True)
+                if brand == "solaredge":
+                    raise HomeAssistantError("SolarEdge hold failed; check control health") from e
                 return
 
         if not result:
             _LOGGER.error("Hold SoC: dispatch returned False on %s", brand)
+            if brand == "solaredge":
+                raise HomeAssistantError("SolarEdge hold was not confirmed; check control health")
             return
 
         # Optimizer source: skip state / timer / dispatcher. The LP manages
@@ -37390,6 +37499,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 blocking=True,
             )
 
+        # Check if this is a SolarEdge system
+        is_solaredge_sc = bool(
+            entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_SOLAREDGE
+            or entry.data.get(CONF_SOLAREDGE_HOST)
+            or entry.data.get(CONF_SOLAREDGE_ENTITY_PREFIX)
+        )
+        if is_solaredge_sc:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                solaredge_coord = entry_data.get("solaredge_coordinator")
+                if not solaredge_coord:
+                    _LOGGER.error("Self-consumption: SolarEdge coordinator not available")
+                    raise HomeAssistantError("SolarEdge coordinator unavailable")
+
+                success = await _guarded_self_consumption_write(
+                    lambda: solaredge_coord.restore_normal(automatic=source == "optimizer")
+                )
+                if success:
+                    _LOGGER.info("SolarEdge self-consumption mode restored")
+                else:
+                    raise HomeAssistantError("SolarEdge self-consumption was not confirmed; check control health")
+            except HomeAssistantError:
+                raise
+            except Exception as e:
+                _LOGGER.error(f"Error setting SolarEdge self-consumption: {e}", exc_info=True)
+                raise HomeAssistantError("SolarEdge self-consumption failed; check control health") from e
+
         # Mark the mobile toggle on for user-sourced calls. The hardware
         # calls below are idempotent so we set the flag up front; optimizer
         # calls skip this and go straight to executing the brand action.
@@ -37404,6 +37540,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             self_consumption_state["duration"] = duration
             self_consumption_state["source"] = source
             _restore_gen_self = _command_generation[0]
+            solaredge_generation = solaredge_coord.generation if is_solaredge_sc else None
 
             async def auto_restore_self_consumption(_now):
                 if _command_generation[0] != _restore_gen_self:
@@ -37412,7 +37549,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if self_consumption_state["active"]:
                     _LOGGER.info("⏰ Self-consumption override expired, auto-restoring")
                     await hass.services.async_call(
-                        DOMAIN, SERVICE_RESTORE_NORMAL, {"source": "user"}, blocking=True
+                        DOMAIN, SERVICE_RESTORE_NORMAL, ({"source": "force_timer", "_solaredge_generation": solaredge_generation} if is_solaredge_sc else {"source": "user"}), blocking=True
                     )
 
             self_consumption_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
@@ -37674,31 +37811,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error setting Neovolt self-consumption: {e}", exc_info=True)
                 return
 
-        # Check if this is a SolarEdge system
-        is_solaredge_sc = bool(
-            entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_SOLAREDGE
-            or entry.data.get(CONF_SOLAREDGE_HOST)
-            or entry.data.get(CONF_SOLAREDGE_ENTITY_PREFIX)
-        )
         if is_solaredge_sc:
-            try:
-                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-                solaredge_coord = entry_data.get("solaredge_coordinator")
-                if not solaredge_coord:
-                    _LOGGER.error("Self-consumption: SolarEdge coordinator not available")
-                    return
-
-                success = await _guarded_self_consumption_write(
-                    solaredge_coord.restore_normal
-                )
-                if success:
-                    _LOGGER.info("SolarEdge self-consumption mode restored")
-                else:
-                    _LOGGER.error("Failed to set SolarEdge self-consumption mode")
-                return
-            except Exception as e:
-                _LOGGER.error(f"Error setting SolarEdge self-consumption: {e}", exc_info=True)
-                return
+            return
 
         # Check if this is an Anker Solix system
         is_anker_solix_sc = entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_ANKER_SOLIX
@@ -38189,16 +38303,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 solaredge_coord = entry_data.get("solaredge_coordinator")
                 if not solaredge_coord:
                     _LOGGER.error("SolarEdge coordinator not available for set_backup_reserve")
-                    return
+                    raise HomeAssistantError("SolarEdge coordinator unavailable")
 
-                success = await solaredge_coord.set_backup_reserve(percent)
+                success = await solaredge_coord.set_backup_reserve(percent, automatic=_control_call_source(call) == "optimizer")
                 if success:
                     _LOGGER.info(f"SolarEdge backup reserve set to {percent}%")
                 else:
-                    _LOGGER.error("Failed to set SolarEdge backup reserve")
+                    raise HomeAssistantError("SolarEdge backup reserve was not confirmed; check control health")
 
+            except HomeAssistantError:
+                raise
             except Exception as e:
                 _LOGGER.error(f"Error setting SolarEdge backup reserve: {e}", exc_info=True)
+                raise HomeAssistantError("SolarEdge backup reserve failed; check control health") from e
         elif bool(
             entry.data.get(CONF_SOLAX_CONFIG_ENTRY_ID)
             or entry.data.get(CONF_SOLAX_ENTITY_PREFIX)
@@ -39310,6 +39427,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "set" if transition.was_active else "already clear",
         )
 
+    async def handle_reconcile_solaredge_control(call: ServiceCall) -> dict:
+        """Validate fresh upstream storage readback before clearing the safety latch."""
+        target_entry_id = call.data.get("entry_id")
+        target_data = hass.data.get(DOMAIN, {}).get(target_entry_id, {})
+        coordinator = target_data.get("solaredge_coordinator")
+        if coordinator is None:
+            raise HomeAssistantError("Select a PowerSync entry with SolarEdge battery control")
+        if call.data.get("acknowledge") is not True:
+            raise HomeAssistantError("Supervised SolarEdge reconciliation requires acknowledge: true")
+        if not await coordinator.reconcile():
+            raise HomeAssistantError(
+                "SolarEdge reconciliation failed. Control remains blocked; "
+                "inspect the upstream connection and storage settings"
+            )
+        return {"success": True, "control_health": coordinator.control_health}
+
+    hass.services.async_register(
+        DOMAIN,
+        "reconcile_solaredge_control",
+        handle_reconcile_solaredge_control,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
     # Register force discharge, force charge, and restore normal services
     hass.services.async_register(
         DOMAIN,
@@ -39417,7 +39557,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         if ac_inverter_is_same_hybrid():
             _LOGGER.warning(
-                "Manual inverter curtailment blocked: the configured Sungrow AC "
+                "Manual inverter curtailment blocked: the configured AC "
                 "endpoint matches the active battery/telemetry connection"
             )
             return
@@ -39592,7 +39732,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         if ac_inverter_is_same_hybrid():
             _LOGGER.warning(
-                "Manual inverter restore blocked: the configured Sungrow AC "
+                "Manual inverter restore blocked: the configured AC "
                 "endpoint matches the active battery/telemetry connection"
             )
             return
@@ -41174,6 +41314,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             entry_data = _aemo_dispatch_entry_data()
             if entry_data is None:
+                return
+
+            if ac_inverter_is_same_hybrid():
                 return
 
             # Check if AC curtailment is enabled
@@ -44684,6 +44827,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # The cached AC-inverter controller can hold an Enphase HTTP session while
     # load following is active.  Closing it before the entry data is removed
     # prevents a reload from leaving that session attached to the Envoy.
+    if solaredge_controller := entry_data.pop("solaredge_controller", None):
+        try:
+            await solaredge_controller.disconnect()
+        except Exception as err:
+            _LOGGER.debug("Could not close SolarEdge curtailment connection: %s", err)
+
     if inverter_controller := entry_data.pop("inverter_controller", None):
         try:
             await inverter_controller.disconnect()

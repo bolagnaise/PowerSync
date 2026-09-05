@@ -282,6 +282,7 @@ def _stale_ac_curtailment_case(kind: str, replace_during: str | None = None):
         ),
         namespace,
     )
+    namespace["ac_inverter_is_same_hybrid"] = lambda: False
     exec(_function_source("apply_inverter_curtailment"), namespace)
     result = asyncio.run(namespace["apply_inverter_curtailment"](True, -1.0, 0.0))
     return result, calls, domain_data, initial_domain_data, replacement_entry_data
@@ -505,6 +506,7 @@ def _run_fast_load_following_case(
         ),
         namespace,
     )
+    namespace["ac_inverter_is_same_hybrid"] = lambda: False
     exec(_function_source("fast_load_following_update"), namespace)
     result = asyncio.run(namespace["fast_load_following_update"](SimpleNamespace(second=0)))
     return result, status_calls, controller_calls, state_calls, replacement_entry_data
@@ -801,7 +803,7 @@ def test_solaredge_curtailment_releases_limit_during_force_dispatch():
     assert "force_charge_state.get(\"active\")" in active_helper
     assert "get_active_force_state" in active_helper
     assert "_optimizer_current_force_action_matches(\"charge\")" in active_helper
-    assert "controller.restore()" in restore_helper
+    assert "_solaredge_curtailment_write(coordinator, controller, controller.restore)" in restore_helper
     assert "solaredge_curtailment_state" in restore_helper
     assert "if _solaredge_force_dispatch_active(entry_data):" in handler
     assert '"active force dispatch"' in handler
@@ -817,13 +819,13 @@ def test_solaredge_force_dispatch_releases_active_power_curtailment_first():
         'await _restore_solaredge_curtailment_for_dispatch(\n                    entry_data,\n                    "optimizer force charge",'
     )
     optimizer_charge_call = charge_handler.index(
-        "await solaredge_coord.force_charge(duration, power_w=power_w)"
+        "await solaredge_coord.force_charge(duration, power_w=power_w, automatic=True)"
     )
     manual_charge_release = charge_handler.rindex(
         'await _restore_solaredge_curtailment_for_dispatch(\n                    entry_data,\n                    "force charge",'
     )
     manual_charge_call = charge_handler.rindex(
-        "charge_result = await solaredge_coord.force_charge(duration, power_w=power_w)"
+        'charge_result = await solaredge_coord.force_charge(duration, power_w=power_w, automatic=source == "optimizer")'
     )
 
     assert discharge_handler.count("lambda _guarded_w: _restore_solaredge_curtailment_for_dispatch(") >= 2

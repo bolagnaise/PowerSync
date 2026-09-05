@@ -8,6 +8,10 @@ available, falls back to known Home Assistant SolarEdge Modbus number entities.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import inspect
+from datetime import datetime, timezone
+from enum import Enum
 import logging
 import math
 import re
@@ -140,6 +144,7 @@ _CHARGE_OPTIONS = (
     "remote charge",
 )
 _DISCHARGE_OPTIONS = (
+    "discharge to maximize export",
     "discharge",
     "discharge battery",
     "discharging",
@@ -493,7 +498,10 @@ class SolarEdgeController(InverterController):
             return False
 
         if self._use_entity_mode:
-            entity = self._active_power_limit_entity or self._find_active_power_limit_entity()
+            entity = (
+                self._active_power_limit_entity
+                or self._find_active_power_limit_entity()
+            )
             if not entity or not self._hass:
                 return False
             try:
@@ -517,11 +525,15 @@ class SolarEdgeController(InverterController):
                     value=int(percent),
                 )
             else:
-                result = await self._try_modbus_call(
-                    self._client.write_register,
-                    address=self.REG_ACTIVE_POWER_LIMIT,
-                    value=int(percent),
-                )
+                # Select the API keyword before transmission. Retrying an awaited
+                # TypeError could repeat a write that already reached the inverter.
+                parameters = inspect.signature(self._client.write_register).parameters
+                kwargs = {"address": self.REG_ACTIVE_POWER_LIMIT, "value": int(percent)}
+                for keyword in ("device_id", "slave", "unit"):
+                    if keyword in parameters:
+                        kwargs[keyword] = self.slave_id
+                        break
+                result = await self._client.write_register(**kwargs)
             if result is None or result.isError():
                 _LOGGER.error("SolarEdge active power limit write rejected: %s", result)
                 return False
@@ -632,6 +644,29 @@ class SolarEdgeController(InverterController):
         return value - 0x10000 if value >= 0x8000 else value
 
 
+class SolarEdgeMutationOutcome(Enum):
+    CONFIRMED = "confirmed"
+    REJECTED = "rejected"
+    UNKNOWN = "unknown"
+
+
+class _ControlSession:
+    """Shared journal and lock for controllers resolving to one command entity."""
+
+    def __init__(self, identity):
+        self.identity = identity
+        self.lock = asyncio.Lock()
+        self.health = "initializing"
+        self.baseline = None
+        self.owned = {}
+        self.last_mutation = None
+        self.generation = 0
+        self.loaded = False
+        self.store = None
+        self.interrupted_at = None
+        self.pending_mutation = None
+
+
 class SolarEdgeEnergyController:
     """Bridge SolarEdge Home battery telemetry and control through HA entities."""
 
@@ -650,7 +685,7 @@ class SolarEdgeEnergyController:
         self._entity_map: dict[str, str] = {}
         self._control_entity_map: dict[str, str] = {}
         self._battery_power_entity_ids: list[str] = []
-        self._saved_control_state: dict[str, Any] | None = None
+        self._control_session: _ControlSession | None = None
 
     async def connect(self) -> bool:
         """Validate that at least SolarEdge battery SOC can be read."""
@@ -658,6 +693,10 @@ class SolarEdgeEnergyController:
         if not self._entity_exists("battery_level"):
             hint = self._expected_entity_hint("battery_level")
             raise ValueError(f"solaredge_missing_entities:{hint}")
+
+        session = self._coordinator()
+        async with session.lock:
+            await self._load_session(session)
 
         missing_control = self.missing_control_entities()
         if missing_control:
@@ -712,14 +751,22 @@ class SolarEdgeEnergyController:
             "total_grid_export_kwh": grid_export_kwh if grid_export_is_total else None,
             "daily_battery_charge_kwh": self._energy_kwh("daily_battery_charge"),
             "daily_battery_discharge_kwh": self._energy_kwh("daily_battery_discharge"),
+            "control_health": self.control_health,
+            "last_mutation": self.last_mutation,
+            "mutation_active": self.mutation_active,
+            "generation": self.generation,
             "control_entities": dict(self._control_entity_map),
             "control_available": self.control_available(),
             "missing_control_entities": self.missing_control_entities(),
         }
         if grid_import_is_total:
-            status["total_grid_import_entity_id"] = self._entity_map.get("daily_grid_import")
+            status["total_grid_import_entity_id"] = self._entity_map.get(
+                "daily_grid_import"
+            )
         if grid_export_is_total:
-            status["total_grid_export_entity_id"] = self._entity_map.get("daily_grid_export")
+            status["total_grid_export_entity_id"] = self._entity_map.get(
+                "daily_grid_export"
+            )
 
         for idx in range(1, 5):
             status[f"pv{idx}_power"] = self._power_kw(f"pv{idx}_power")
@@ -789,13 +836,14 @@ class SolarEdgeEnergyController:
         """No persistent connection to close."""
 
     def control_available(self) -> bool:
-        """Return whether the minimum writable surface for dispatch exists."""
+        """Return whether the required dispatch controls are mapped."""
         self._ensure_entity_map()
         required = (
             "storage_control_mode",
             "storage_command_mode",
             "charge_power_limit",
             "discharge_power_limit",
+            "command_timeout",
         )
         return all(self._control_entity_map.get(key) for key in required)
 
@@ -807,165 +855,780 @@ class SolarEdgeEnergyController:
             "storage_command_mode",
             "charge_power_limit",
             "discharge_power_limit",
+            "command_timeout",
         )
         return [key for key in required if not self._control_entity_map.get(key)]
 
-    async def force_charge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
-        """Force SolarEdge battery charging through HA control entities."""
-        return await self._force("charge", duration_minutes, power_w)
+    def _registry_entry(self, entity_id):
+        try:
+            from homeassistant.helpers import entity_registry as er
 
-    async def force_discharge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
-        """Force SolarEdge battery discharging through HA control entities."""
-        return await self._force("discharge", duration_minutes, power_w)
+            registry = er.async_get(self.hass)
+            return registry.async_get(entity_id)
+        except (ImportError, AttributeError):
+            return None
 
-    async def restore_normal(self) -> bool:
-        """Restore SolarEdge storage controls to the saved or self-use state."""
+    def _physical_identity(self, entry):
+        if entry is None or getattr(entry, "platform", None) != "solaredge_modbus_multi":
+            return None
+        try:
+            from homeassistant.helpers import device_registry as dr
+            device = dr.async_get(self.hass).async_get(entry.device_id)
+            identifiers = {identifier[1] for identifier in device.identifiers if identifier[0] == "solaredge_modbus_multi"}
+            if len(identifiers) == 1:
+                uid = next(iter(identifiers))
+                if entry.unique_id == f"{uid}_storage_command_mode":
+                    return f"solaredge_modbus_multi:{uid}"
+        except (ImportError, AttributeError, TypeError):
+            pass
+        return None
+
+    def _coordinator(self):
+        if self._control_session is not None:
+            return self._control_session
         self._ensure_entity_map()
-        saved_allow_grid_charge: Any = None
-        if self._saved_control_state:
-            if self._saved_control_state_contains_active_dispatch():
-                _LOGGER.info(
-                    "SolarEdge saved control state contains active dispatch; "
-                    "falling back to self-consumption restore"
-                )
-                saved_allow_grid_charge = self._saved_control_state.get(
-                    "allow_grid_charge"
-                )
-                self._saved_control_state = None
+        command_entity = self._control_entity_map.get("storage_command_mode")
+        entry = self._registry_entry(command_entity) if command_entity else None
+        identity = self._physical_identity(entry)
+        if identity is None:
+            if entry is not None and entry.config_entry_id and entry.unique_id:
+                # Legacy adapters retain registry identity across entity renames.
+                identity = f"{entry.config_entry_id}:{entry.unique_id}"
             else:
-                ok = await self._restore_saved_control_state()
-                if ok:
-                    self._saved_control_state = None
-                return ok
+                identity = command_entity or self._prefix or self._solaredge_entry_id
+        coordinators = self.hass.__dict__.setdefault(
+            "_powersync_solaredge_controls", {}
+        )
+        if identity not in coordinators:
+            coordinators[identity] = _ControlSession(identity)
+        session = coordinators[identity]
+        if command_entity:
+            # Registry churn must not move a live controller out of containment.
+            self._control_session = session
+        return session
 
-        ok = True
-        ok &= await self._set_number_if_mapped("charge_power_limit", 0)
-        ok &= await self._set_number_if_mapped("discharge_power_limit", 0)
-        ok &= await self._set_number_if_mapped("command_timeout", 0)
-        ok &= await self._set_select_by_alias("storage_command_mode", _IDLE_OPTIONS)
-        ok &= await self._set_select_by_alias("storage_control_mode", _SELF_USE_OPTIONS)
-        if saved_allow_grid_charge is not None:
-            ok &= await self._restore_control_value(
-                "allow_grid_charge", saved_allow_grid_charge
+    @property
+    def _saved_control_state(self):
+        return self._coordinator().baseline
+
+    @_saved_control_state.setter
+    def _saved_control_state(self, value):
+        self._coordinator().baseline = value
+
+    @property
+    def control_health(self) -> str:
+        return self._coordinator().health
+
+    @property
+    def last_mutation(self) -> dict[str, Any] | None:
+        result = self._coordinator().last_mutation
+        return dict(result) if result else None
+
+    @property
+    def mutation_active(self) -> bool:
+        return self._coordinator().lock.locked()
+
+    @property
+    def generation(self) -> int:
+        return self._coordinator().generation
+
+    def _create_store(self, identity):
+        from homeassistant.helpers.storage import Store
+
+        return Store(
+            self.hass,
+            1,
+            "power_sync_solaredge_" + hashlib.sha256(identity.encode()).hexdigest(),
+        )
+
+    async def _load_session(self, session):
+        if session.loaded:
+            return
+        try:
+            session.store = self._create_store(session.identity)
+            record = await session.store.async_load()
+            session.health = "ready"
+            if record:
+                if (
+                    not isinstance(record, dict)
+                    or not isinstance(record.get("owned", {}), dict)
+                    or not isinstance(record.get("baseline") or {}, dict)
+                    or not isinstance(record.get("generation", 0), int)
+                ):
+                    raise ValueError("Invalid SolarEdge control journal")
+                session.baseline = record.get("baseline")
+                session.owned = record.get("owned", {})
+                session.generation = record.get("generation", 0)
+                session.last_mutation = record.get("last_mutation")
+                session.pending_mutation = record.get("pending_mutation")
+                if record.get("in_progress") and session.pending_mutation:
+                    session.last_mutation = {
+                        **session.pending_mutation,
+                        "outcome": "unknown",
+                        "possibly_transmitted": True,
+                        "message": "Home Assistant stopped before the mutation completed",
+                    }
+                session.interrupted_at = record.get("recorded_at")
+                if (
+                    record.get("in_progress")
+                    or record.get("health") != "ready"
+                    or session.owned
+                ):
+                    session.health = "reconciliation_required"
+        except Exception:
+            session.health = "reconciliation_required"
+            _LOGGER.exception(
+                "SolarEdge control journal cannot be loaded; control is blocked"
             )
-        return bool(ok)
+        session.loaded = True
 
-    def _saved_control_state_contains_active_dispatch(self) -> bool:
-        """Return true when a saved snapshot would reapply forced dispatch."""
-        saved = self._saved_control_state or {}
+    async def _persist(self, session, *, in_progress=False):
+        if session.store is None:
+            raise RuntimeError("SolarEdge control journal unavailable")
+        await session.store.async_save(
+            {
+                "baseline": session.baseline,
+                "owned": session.owned,
+                "generation": session.generation,
+                "health": session.health,
+                "last_mutation": session.last_mutation,
+                "pending_mutation": session.pending_mutation,
+                "in_progress": in_progress,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
 
-        command = _normalize_option(str(saved.get("storage_command_mode") or ""))
-        active_commands = {
-            _normalize_option(alias)
-            for alias in (*_CHARGE_OPTIONS, *_DISCHARGE_OPTIONS)
+    def _result(
+        self,
+        session,
+        outcome,
+        operation,
+        *,
+        entity=None,
+        value=None,
+        message="",
+        possibly_transmitted=False,
+        confirmation_source=None,
+    ):
+        if outcome == SolarEdgeMutationOutcome.CONFIRMED:
+            session.pending_mutation = None
+        session.last_mutation = {
+            "outcome": outcome.value,
+            "operation": operation,
+            "operation_id": session.generation,
+            "entity_id": entity,
+            "intended_value": value,
+            "possibly_transmitted": possibly_transmitted,
+            "confirmation_source": confirmation_source,
+            "message": message,
         }
-        if command in active_commands:
-            return True
+        if outcome == SolarEdgeMutationOutcome.UNKNOWN:
+            session.health = "reconciliation_required"
+            session.interrupted_at = datetime.now(timezone.utc).isoformat()
+            _LOGGER.error(
+                "SolarEdge %s halted: unknown outcome for %s=%r (%s). No further inverter writes or rollback; baseline retained; reconciliation required",
+                operation,
+                entity,
+                value,
+                message,
+            )
+        return outcome == SolarEdgeMutationOutcome.CONFIRMED
 
-        # A configured lease does not activate a benign storage command.
-        return False
-
-    async def set_backup_reserve(self, percent: int) -> bool:
-        """Set SolarEdge backup reserve / minimum SOC when exposed by HA."""
-        self._ensure_entity_map()
-        if "backup_reserve" not in self._control_entity_map:
-            _LOGGER.error("SolarEdge backup reserve write failed: no backup reserve number entity")
+    async def _mutate(
+        self,
+        operation,
+        make_plan,
+        *,
+        automatic=False,
+        expected_generation=None,
+        restoring=False,
+    ):
+        session = self._coordinator()
+        if automatic and session.lock.locked():
+            # Do not replace the in-flight operation's diagnostic result.
             return False
-        return await self._set_number_if_mapped("backup_reserve", max(0, min(100, int(percent))))
+        async with session.lock:
+            await self._load_session(session)
+            if session.health != "ready":
+                if (
+                    not session.last_mutation
+                    or session.last_mutation["outcome"] != "unknown"
+                ):
+                    self._result(
+                        session,
+                        SolarEdgeMutationOutcome.REJECTED,
+                        "blocked",
+                        message="Control requires reconciliation",
+                    )
+                return False
+            if (
+                expected_generation is not None
+                and expected_generation != session.generation
+            ):
+                return self._result(
+                    session,
+                    SolarEdgeMutationOutcome.REJECTED,
+                    operation,
+                    message="Superseded operation",
+                )
+            try:
+                fresh = None
+                command_entry = self._registry_entry(self._control_entity_map.get("storage_command_mode"))
+                if command_entry is not None and command_entry.platform == "solaredge_modbus_multi":
+                    fresh = await self._fresh_storage_state()
+                    if fresh is None:
+                        raise ValueError("A fresh storage baseline is unavailable")
+                    for key, entity in self._control_entity_map.items():
+                        state = self.hass.states.get(entity)
+                        if key in fresh and state is not None and not self._control_values_match(entity, state.state, fresh[key]):
+                            raise ValueError(f"Cached {key} differs from fresh storage read")
+                plan = make_plan()
+                plan = [
+                    self._preflight(key, value, native=restoring) for key, value in plan
+                ]
+                if fresh is not None:
+                    required_readback = (
+                        {key for key, _, _ in plan} | session.owned.keys()
+                    )
+                    missing = required_readback - fresh.keys()
+                    if missing:
+                        raise ValueError(
+                            "Fresh storage read is missing planned or owned fields: "
+                            + ", ".join(sorted(missing))
+                        )
+                # Snapshot every intended field before any mutation, including optional controls.
+                for key, expected in session.owned.items():
+                    entity = self._control_entity_map.get(key)
+                    current = self.hass.states.get(entity) if entity else None
+                    original = (session.baseline or {}).get(key)
+                    if current is None or not (
+                        self._control_values_match(entity, current.state, expected)
+                        or self._control_values_match(entity, current.state, original)
+                    ):
+                        raise ValueError(f"External change to owned {key}")
+                baseline = (
+                    dict(session.baseline or {})
+                    if restoring
+                    else {
+                        key: session.baseline[key]
+                        for key in session.owned
+                        if session.baseline and key in session.baseline
+                    }
+                )
+                for key, entity in self._control_entity_map.items():
+                    if fresh is not None and key not in fresh:
+                        continue
+                    state = self.hass.states.get(entity)
+                    if state is not None and str(state.state) not in _UNAVAILABLE:
+                        baseline.setdefault(key, state.state)
+                for key, entity, value in plan:
+                    baseline.setdefault(key, self.hass.states.get(entity).state)
+                if not restoring and self._snapshot_is_active(baseline):
+                    raise ValueError("Active dispatch is not a safe baseline")
+            except (ValueError, TypeError, OverflowError) as err:
+                return self._result(
+                    session,
+                    SolarEdgeMutationOutcome.REJECTED,
+                    operation,
+                    message=str(err),
+                )
+            session.baseline = baseline or None
+            session.generation += 1
+            original_owned = dict(session.owned)
+            current_entity = None
+            current_value = None
+            possible = False
+            try:
+                for key, entity, value in plan:
+                    current = self.hass.states.get(entity)
+                    # Command timeout is a lease: equal values still renew it.
+                    if (
+                        key != "command_timeout" or restoring
+                    ) and self._control_values_match(entity, current.state, value):
+                        if restoring:
+                            session.owned.pop(key, None)
+                        continue
+                    current_entity, current_value = entity, value
+                    session.pending_mutation = {
+                        "operation": operation,
+                        "operation_id": session.generation,
+                        "entity_id": entity,
+                        "intended_value": value,
+                    }
+                    await self._persist(session, in_progress=True)
+                    possible = True
+                    domain = entity.split(".", 1)[0]
+                    if domain == "number":
+                        service, data = (
+                            "set_value",
+                            {"entity_id": entity, "value": value},
+                        )
+                    elif domain == "select":
+                        service, data = (
+                            "select_option",
+                            {"entity_id": entity, "option": value},
+                        )
+                    else:
+                        service, data = (
+                            ("turn_on" if value == "on" else "turn_off"),
+                            {"entity_id": entity},
+                        )
+                    await self.hass.services.async_call(
+                        domain, service, data, blocking=True
+                    )
+                    if not await self._confirm_mutation(key, entity, value):
+                        raise TimeoutError("Requested state was not reflected")
+                    if restoring:
+                        session.owned.pop(key, None)
+                    elif not self._control_values_match(entity, baseline[key], value):
+                        session.owned[key] = value
+                    else:
+                        session.owned.pop(key, None)
+                if restoring:
+                    session.baseline = None
+                command_entry = self._registry_entry(
+                    self._control_entity_map.get("storage_command_mode")
+                )
+                source = (
+                    "fresh_upstream_storage_poll"
+                    if command_entry
+                    and command_entry.platform == "solaredge_modbus_multi"
+                    else "service_return_and_entity_reflection"
+                )
+                self._result(
+                    session,
+                    SolarEdgeMutationOutcome.CONFIRMED,
+                    operation,
+                    confirmation_source=source,
+                )
+                await self._persist(session)
+                return True
+            except (Exception, asyncio.CancelledError) as err:
+                session.baseline = baseline or None
+                if restoring:
+                    session.owned = original_owned
+                self._result(
+                    session,
+                    SolarEdgeMutationOutcome.UNKNOWN
+                    if possible
+                    else SolarEdgeMutationOutcome.REJECTED,
+                    operation,
+                    entity=current_entity,
+                    value=current_value,
+                    possibly_transmitted=possible,
+                    message=str(err) or type(err).__name__,
+                )
+                if not possible:
+                    # A failed journal write also prevents safely issuing later commands.
+                    session.health = "reconciliation_required"
+                try:
+                    await asyncio.shield(self._persist(session, in_progress=possible))
+                except (Exception, asyncio.CancelledError):
+                    _LOGGER.error(
+                        "SolarEdge could not persist final control outcome; write-ahead record remains",
+                        exc_info=True,
+                    )
+                if isinstance(err, asyncio.CancelledError):
+                    raise
+                return False
+
+    def _preflight(self, key, value, *, native=False):
+        entity = self._control_entity_map.get(key)
+        state = self.hass.states.get(entity) if entity else None
+        if state is None or str(state.state) in _UNAVAILABLE:
+            raise ValueError(f"Missing or unavailable {key}")
+        command_entry = self._registry_entry(
+            self._control_entity_map.get("storage_command_mode")
+        )
+        entry = self._registry_entry(entity)
+        if command_entry is not None and (
+            entry is None
+            or not command_entry.device_id
+            or entry.device_id != command_entry.device_id
+            or entry.config_entry_id != command_entry.config_entry_id
+        ):
+            raise ValueError(f"{key} does not belong to the selected inverter")
+        attrs = state.attributes or {}
+        if self._control_candidate_rejection(entity, key):
+            raise ValueError(f"Unusable control for {key}")
+        if entity.startswith("number."):
+            value = float(value)
+            if (
+                not native
+                and key in {"charge_power_limit", "discharge_power_limit"}
+                and str(attrs.get("unit_of_measurement", "")).lower() == "kw"
+            ):
+                value /= 1000
+            if not math.isfinite(value) or not math.isfinite(float(state.state)):
+                raise ValueError(f"Invalid numeric {key}")
+            minimum = float(attrs.get("min", attrs.get("native_min_value", 0)))
+            maximum = float(attrs.get("max", attrs.get("native_max_value", math.inf)))
+            if not math.isfinite(minimum) or math.isnan(maximum) or maximum <= minimum:
+                raise ValueError(f"Invalid range for {key}")
+            if not minimum <= value <= maximum:
+                raise ValueError(f"{key} outside supported range")
+            step = attrs.get("step", attrs.get("native_step"))
+            if step is not None and float(step) > 0:
+                steps = (value - minimum) / float(step)
+                if not math.isclose(steps, round(steps), abs_tol=1e-6):
+                    raise ValueError(f"{key} does not match supported step")
+        elif entity.startswith("select."):
+            if (
+                value not in (attrs.get("options") or [])
+                or state.state not in attrs["options"]
+            ):
+                raise ValueError(f"Unsupported option or baseline for {key}")
+        elif entity.startswith("switch."):
+            if value not in {"on", "off"} or state.state not in {"on", "off"}:
+                raise ValueError(f"Unsupported switch state for {key}")
+        return key, entity, value
+
+    def _option(self, key, aliases):
+        entity = self._control_entity_map.get(key)
+        option = self._match_select_option(entity, aliases) if entity else None
+        if option is None:
+            raise ValueError(f"No supported option for {key}")
+        return option
+
+    async def force_charge(
+        self, duration_minutes=30, power_w=0, *, automatic=False
+    ) -> bool:
+        return await self._force(
+            "charge", duration_minutes, power_w, automatic=automatic
+        )
+
+    async def force_discharge(
+        self, duration_minutes=30, power_w=0, *, automatic=False
+    ) -> bool:
+        return await self._force(
+            "discharge", duration_minutes, power_w, automatic=automatic
+        )
+
+    async def _force(self, command, duration_minutes, power_w, *, automatic=False):
+        def plan():
+            option = self._option(
+                "storage_command_mode",
+                _CHARGE_OPTIONS if command == "charge" else _DISCHARGE_OPTIONS,
+            )
+            power_key = (
+                "charge_power_limit" if command == "charge" else "discharge_power_limit"
+            )
+            if (
+                not math.isfinite(float(power_w))
+                or float(power_w) < 0
+                or not math.isfinite(float(duration_minutes))
+                or float(duration_minutes) <= 0
+            ):
+                raise ValueError("Invalid power or duration")
+            result = [
+                (
+                    "storage_control_mode",
+                    self._option("storage_control_mode", _REMOTE_CONTROL_OPTIONS),
+                )
+            ]
+            # A bounded dispatch requires a writable lease.
+            result.append(("command_timeout", max(60, int(duration_minutes * 60))))
+            if command == "charge" and "allow_grid_charge" in self._control_entity_map:
+                entity = self._control_entity_map["allow_grid_charge"]
+                if entity.startswith("switch."):
+                    result.append(("allow_grid_charge", "on"))
+                else:
+                    policy = self._match_select_option(
+                        entity, ("always allowed", "enabled", "on", "allowed")
+                    )
+                    if policy is not None:
+                        result.append(("allow_grid_charge", policy))
+                    elif not self._is_explicit_grid_charge_option(option):
+                        raise ValueError("No supported grid-charge policy")
+            opposite = (
+                "discharge_power_limit" if command == "charge" else "charge_power_limit"
+            )
+            result.extend(
+                [
+                    (opposite, 0),
+                    (power_key, self._coerce_target_power(power_key, power_w)),
+                    ("storage_command_mode", option),
+                ]
+            )
+            return result
+
+        return await self._mutate("force_" + command, plan, automatic=automatic)
+
+    @staticmethod
+    def _snapshot_is_active(saved):
+        command = _normalize_option(str(saved.get("storage_command_mode") or ""))
+        return command in {
+            _normalize_option(alias)
+            for alias in (
+                *_CHARGE_OPTIONS,
+                *_DISCHARGE_OPTIONS,
+                "charge from clipped solar power",
+                "charge from solar power",
+                "discharge to minimize import",
+            )
+        }
+
+    def _saved_control_state_contains_active_dispatch(self):
+        return self._snapshot_is_active(self._saved_control_state or {})
+
+    async def restore_normal(
+        self, *, automatic=False, expected_generation=None
+    ) -> bool:
+        def plan():
+            session = self._coordinator()
+            if self._snapshot_is_active(session.baseline or {}):
+                raise ValueError("Saved dispatch cannot be restored")
+            if not session.owned:
+                command_entity = self._control_entity_map.get("storage_command_mode")
+                command_state = (
+                    self.hass.states.get(command_entity) if command_entity else None
+                )
+                if (
+                    command_state is None
+                    or str(command_state.state) in _UNAVAILABLE
+                    or self._snapshot_is_active(
+                        {"storage_command_mode": command_state.state}
+                    )
+                ):
+                    raise ValueError("Cannot stop dispatch without an owned baseline")
+            result = []
+            for key, expected in session.owned.items():
+                if not session.baseline or key not in session.baseline:
+                    raise ValueError("No baseline for owned field")
+                entity = self._control_entity_map.get(key)
+                state = self.hass.states.get(entity) if entity else None
+                baseline = session.baseline[key]
+                if state is None or not (
+                    self._control_values_match(entity, state.state, expected)
+                    or self._control_values_match(entity, state.state, baseline)
+                ):
+                    raise ValueError(
+                        f"External change to {key}; supervised reconciliation required"
+                    )
+                result.append((key, baseline))
+            # Restore the benign command before restoring its limits and lease.
+            result.sort(
+                key=lambda item: (
+                    item[0] != "storage_command_mode",
+                    item[0] == "storage_control_mode",
+                )
+            )
+            return result
+
+        return await self._mutate(
+            "restore_normal",
+            plan,
+            automatic=automatic,
+            expected_generation=expected_generation,
+            restoring=True,
+        )
+
+    async def set_backup_reserve(self, percent, *, automatic=False) -> bool:
+        return await self._mutate(
+            "set_backup_reserve",
+            lambda: [("backup_reserve", percent)],
+            automatic=automatic,
+        )
 
     async def get_backup_reserve(self) -> int | None:
-        """Read SolarEdge backup reserve / minimum SOC."""
+        self._ensure_entity_map()
         reserve = self._read_float("backup_reserve")
-        if reserve is None and "backup_reserve" in self._control_entity_map:
+        if reserve is None:
             reserve = self._read_control_float("backup_reserve")
         return int(round(reserve)) if reserve is not None else None
 
-    async def set_backup_mode(self) -> bool:
-        """Hold the battery at current SOC by raising reserve or idling dispatch."""
-        soc = self._read_float("battery_level")
-        if soc is not None and "backup_reserve" in self._control_entity_map:
-            return await self.set_backup_reserve(int(round(soc)))
+    async def set_backup_mode(self, *, automatic=False) -> bool:
+        def plan():
+            soc = self._read_float("battery_level")
+            if soc is not None and "backup_reserve" in self._control_entity_map:
+                return [("backup_reserve", int(round(soc)))]
+            return [
+                ("charge_power_limit", 0),
+                ("discharge_power_limit", 0),
+                (
+                    "storage_command_mode",
+                    self._option("storage_command_mode", _IDLE_OPTIONS),
+                ),
+                (
+                    "storage_control_mode",
+                    self._option("storage_control_mode", _REMOTE_CONTROL_OPTIONS),
+                ),
+            ]
 
-        self._ensure_entity_map()
-        if not self.control_available():
-            _LOGGER.error(
-                "SolarEdge hold SOC failed: missing control entities: %s",
-                ", ".join(self.missing_control_entities()),
-            )
-            return False
-        self._save_current_control_state()
-        ok = True
-        ok &= await self._set_number_if_mapped("charge_power_limit", 0)
-        ok &= await self._set_number_if_mapped("discharge_power_limit", 0)
-        ok &= await self._set_select_by_alias("storage_command_mode", _IDLE_OPTIONS)
-        ok &= await self._set_select_by_alias("storage_control_mode", _REMOTE_CONTROL_OPTIONS)
-        return bool(ok)
+        return await self._mutate("set_backup_mode", plan, automatic=automatic)
 
-    async def restore_work_mode_from_idle(self) -> bool:
-        """Exit optimizer idle hold."""
-        return await self.restore_normal()
+    async def restore_work_mode_from_idle(self, *, automatic=False) -> bool:
+        return await self.restore_normal(automatic=automatic)
 
     async def set_operation_mode(self, mode: str) -> bool:
-        """Map PowerSync operation modes onto SolarEdge self-use/normal mode."""
         if mode in {"self_consumption", "autonomous", "normal"}:
             return await self.restore_normal()
-        _LOGGER.debug("SolarEdge operation mode %s is not mapped", mode)
         return False
 
-    async def _force(self, command: str, duration_minutes: int, power_w: float) -> bool:
-        self._ensure_entity_map()
-        if not self.control_available():
-            _LOGGER.error(
-                "SolarEdge force %s failed: missing control entities: %s",
-                command,
-                ", ".join(self.missing_control_entities()),
-            )
+    async def run_external_mutation(self, callback, *, automatic=False) -> bool:
+        """Serialize one active-power mutation; its callback must not retry or clean up."""
+        session = self._coordinator()
+        if automatic and session.lock.locked():
+            # Do not replace the in-flight operation's diagnostic result.
             return False
+        async with session.lock:
+            await self._load_session(session)
+            if session.health != "ready":
+                if (
+                    not session.last_mutation
+                    or session.last_mutation["outcome"] != "unknown"
+                ):
+                    self._result(
+                        session,
+                        SolarEdgeMutationOutcome.REJECTED,
+                        "blocked",
+                        message="Control requires reconciliation",
+                    )
+                return False
+            session.generation += 1
+            possible = False
+            try:
+                session.pending_mutation = {"operation": "active_power", "operation_id": session.generation}
+                await self._persist(session, in_progress=True)
+                possible = True
+                if not await callback():
+                    raise RuntimeError(
+                        "External control returned an indeterminate failure"
+                    )
+                self._result(
+                    session,
+                    SolarEdgeMutationOutcome.CONFIRMED,
+                    "active_power",
+                    confirmation_source="service_return",
+                )
+                await self._persist(session)
+                return True
+            except (Exception, asyncio.CancelledError) as err:
+                self._result(
+                    session,
+                    SolarEdgeMutationOutcome.UNKNOWN
+                    if possible
+                    else SolarEdgeMutationOutcome.REJECTED,
+                    "active_power",
+                    possibly_transmitted=possible,
+                    message=str(err),
+                )
+                session.health = "reconciliation_required"
+                try:
+                    await asyncio.shield(self._persist(session, in_progress=possible))
+                except (Exception, asyncio.CancelledError):
+                    _LOGGER.error(
+                        "SolarEdge external outcome journal failed", exc_info=True
+                    )
+                if isinstance(err, asyncio.CancelledError):
+                    raise
+                return False
 
-        command_aliases = (
-            _CHARGE_OPTIONS if command == "charge" else _DISCHARGE_OPTIONS
+    def _native_readback(self, snapshot):
+        result = dict(snapshot)
+        for key in ("charge_power_limit", "discharge_power_limit"):
+            entity = self._control_entity_map.get(key)
+            state = self.hass.states.get(entity) if entity else None
+            if (
+                state
+                and str(state.attributes.get("unit_of_measurement", "")).lower() == "kw"
+            ):
+                result[key] /= 1000
+        policy = self._control_entity_map.get("allow_grid_charge", "")
+        if policy.startswith("switch.") and "allow_grid_charge" in result:
+            result["allow_grid_charge"] = {
+                "Always Allowed": "on",
+                "Disabled": "off",
+            }.get(result["allow_grid_charge"])
+            if result["allow_grid_charge"] is None:
+                del result["allow_grid_charge"]
+        return result
+
+    async def _fresh_storage_state(self):
+        from .solaredge_readback import async_read_storage_baseline
+
+        command_entity = self._control_entity_map.get("storage_command_mode")
+        if not command_entity:
+            return None
+        snapshot = await async_read_storage_baseline(self.hass, command_entity)
+        return self._native_readback(snapshot) if snapshot else None
+
+    async def _confirm_mutation(self, key, entity, value):
+        command_entry = self._registry_entry(
+            self._control_entity_map.get("storage_command_mode")
         )
-        command_entity_id = self._control_entity_map["storage_command_mode"]
-        command_option = self._match_select_option(command_entity_id, command_aliases)
-        if command_option is None:
-            _LOGGER.error(
-                "SolarEdge force %s failed: %s has no matching command option",
-                command,
-                command_entity_id,
+        if (
+            command_entry is not None
+            and command_entry.platform == "solaredge_modbus_multi"
+        ):
+            snapshot = await self._fresh_storage_state()
+            return snapshot is not None and self._control_values_match(
+                entity, snapshot.get(key), value
             )
-            return False
+        return await self._wait_for_reflected_state(entity, value)
 
-        self._save_current_control_state()
-        duration_seconds = max(60, int(duration_minutes) * 60)
-        target_power = self._coerce_target_power("charge_power_limit" if command == "charge" else "discharge_power_limit", power_w)
+    async def reconcile(self) -> bool:
+        """Check a fresh upstream register poll without writing inverter controls.
 
-        try:
-            ok = True
-            ok &= await self._set_select_by_alias("storage_control_mode", _REMOTE_CONTROL_OPTIONS)
-            ok &= await self._set_number_if_mapped("command_timeout", duration_seconds)
-            if command == "charge":
-                if not await self._set_optional_grid_charge(True):
-                    if self._is_explicit_grid_charge_option(command_option):
-                        _LOGGER.warning(
-                            "SolarEdge AC charge policy write failed; continuing with "
-                            "the explicit storage grid-charge command"
-                        )
-                    else:
-                        ok = False
-                ok &= await self._set_number_if_mapped("discharge_power_limit", 0)
-                ok &= await self._set_number_if_mapped("charge_power_limit", target_power)
-                ok &= await self._select_option(command_entity_id, command_option)
-            else:
-                ok &= await self._set_number_if_mapped("charge_power_limit", 0)
-                ok &= await self._set_number_if_mapped("discharge_power_limit", target_power)
-                ok &= await self._select_option(command_entity_id, command_option)
-            if not ok:
-                await self.restore_normal()
-            return bool(ok)
-        except Exception as err:
-            _LOGGER.error("SolarEdge force %s failed: %s", command, err, exc_info=True)
-            await self.restore_normal()
-            return False
+        Existing baselines must match in full. Without a saved baseline, a benign
+        storage snapshot can be adopted. Storage polls cannot clear uncertain
+        active-power writes. Unsupported readback contracts remain blocked.
+        """
+        session = self._coordinator()
+        async with session.lock:
+            await self._load_session(session)
+            if (
+                session.last_mutation
+                and session.last_mutation.get("operation") == "active_power"
+                and session.health != "ready"
+            ):
+                return False
+            observed = await self._fresh_storage_state()
+            if observed is None or self._snapshot_is_active(observed):
+                return False
+            command = _normalize_option(str(observed.get("storage_command_mode", "")))
+            control = _normalize_option(str(observed.get("storage_control_mode", "")))
+            benign_command = command in {
+                _normalize_option(value)
+                for value in (
+                    *_SELF_USE_OPTIONS,
+                    *_IDLE_OPTIONS,
+                    "solar power only (off)",
+                )
+            }
+            if not benign_command or control not in {
+                _normalize_option(value)
+                for value in (*_REMOTE_CONTROL_OPTIONS, *_SELF_USE_OPTIONS)
+            }:
+                return False
+            if session.baseline:
+                for key, value in session.baseline.items():
+                    entity = self._control_entity_map.get(key)
+                    if not entity or not self._control_values_match(
+                        entity, observed.get(key), value
+                    ):
+                        return False
+            old_owned, old_baseline = session.owned, session.baseline
+            old_result = session.last_mutation
+            session.owned, session.baseline = {}, None
+            session.health = "ready"
+            session.generation += 1
+            self._result(
+                session,
+                SolarEdgeMutationOutcome.CONFIRMED,
+                "reconcile",
+                confirmation_source="fresh_upstream_storage_poll",
+            )
+            try:
+                await self._persist(session)
+            except (Exception, asyncio.CancelledError) as err:
+                session.owned, session.baseline = old_owned, old_baseline
+                session.last_mutation = old_result
+                session.health = "reconciliation_required"
+                if isinstance(err, asyncio.CancelledError):
+                    raise
+                return False
+            return True
 
     def _ensure_entity_map(self) -> None:
         if not self._entity_map and not self._control_entity_map:
@@ -1225,34 +1888,6 @@ class SolarEdgeEnergyController:
         prefix_penalty = 0 if not self._prefix or body.startswith(f"{self._prefix.lower()}_") else 1
         return (role + prefix_penalty, len(entity_id), entity_id)
 
-    def _save_current_control_state(self) -> None:
-        if self._saved_control_state is not None:
-            return
-        self._saved_control_state = {}
-        for key, entity_id in self._control_entity_map.items():
-            state = self.hass.states.get(entity_id)
-            if state and str(state.state) not in _UNAVAILABLE:
-                self._saved_control_state[key] = state.state
-
-    async def _restore_saved_control_state(self) -> bool:
-        ok = True
-        for key, value in (self._saved_control_state or {}).items():
-            ok &= await self._restore_control_value(key, value)
-        return bool(ok)
-
-    async def _restore_control_value(self, key: str, value: Any) -> bool:
-        entity_id = self._control_entity_map.get(key)
-        if not entity_id:
-            return True
-        domain = entity_id.split(".", 1)[0]
-        if domain == "number":
-            return await self._set_number_if_mapped(key, value)
-        if domain == "select":
-            return await self._select_option(entity_id, str(value))
-        if domain == "switch":
-            return await self._set_switch(entity_id, str(value).lower() == "on")
-        return True
-
     def _read_control_float(self, key: str) -> float | None:
         entity_id = self._control_entity_map.get(key)
         state = self.hass.states.get(entity_id) if entity_id else None
@@ -1285,51 +1920,9 @@ class SolarEdgeEnergyController:
                 return max_value * 1000.0 if unit == "kw" else max_value
         return 5000.0
 
-    async def _set_number_if_mapped(self, key: str, value: Any) -> bool:
-        entity_id = self._control_entity_map.get(key)
-        if not entity_id:
-            return key not in {"charge_power_limit", "discharge_power_limit"}
-        state = self.hass.states.get(entity_id)
-        attrs = getattr(state, "attributes", {}) or {}
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            _LOGGER.error("SolarEdge number write failed for %s: invalid value %r", entity_id, value)
-            return False
-        unit = str(attrs.get("unit_of_measurement", "")).lower()
-        if unit == "kw" and abs(numeric) > 100:
-            numeric = numeric / 1000.0
-        try:
-            await self.hass.services.async_call(
-                "number",
-                "set_value",
-                {"entity_id": entity_id, "value": numeric},
-                blocking=True,
-            )
-            return True
-        except Exception as err:
-            if await self._wait_for_reflected_state(entity_id, numeric):
-                _LOGGER.warning(
-                    "SolarEdge number write for %s raised %s, but the requested "
-                    "state was subsequently reflected",
-                    entity_id,
-                    err,
-                )
-                return True
-            _LOGGER.error("SolarEdge number write failed for %s: %s", entity_id, err)
-            return False
-
-    async def _set_select_by_alias(self, key: str, aliases: tuple[str, ...]) -> bool:
-        entity_id = self._control_entity_map.get(key)
-        if not entity_id:
-            return False
-        option = self._match_select_option(entity_id, aliases)
-        if option is None:
-            _LOGGER.error("SolarEdge select %s has no matching option for %s", entity_id, aliases)
-            return False
-        return await self._select_option(entity_id, option)
-
-    def _match_select_option(self, entity_id: str, aliases: tuple[str, ...]) -> str | None:
+    def _match_select_option(
+        self, entity_id: str, aliases: tuple[str, ...]
+    ) -> str | None:
         state = self.hass.states.get(entity_id)
         attrs = getattr(state, "attributes", {}) or {}
         options = attrs.get("options") or []
@@ -1340,88 +1933,21 @@ class SolarEdgeEnergyController:
         # several charge variants before "Charge from Solar Power and Grid";
         # matching the generic "charge" alias inline would select the first
         # clipped-solar option instead of the requested grid-charge command.
-        for option in options:
-            normalized_option = _normalize_option(str(option))
-            if normalized_option in normalized_aliases:
-                return str(option)
-        for option in options:
-            normalized_option = _normalize_option(str(option))
-            if any(
-                re.search(
-                    rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])",
-                    normalized_option,
-                )
-                for alias in normalized_aliases
-            ):
-                return str(option)
+        for alias in aliases:
+            for option in options:
+                if _normalize_option(str(option)) == _normalize_option(alias):
+                    return str(option)
         current = getattr(state, "state", None)
         if current and _normalize_option(str(current)) in normalized_aliases:
             return str(current)
         return None
-
-    async def _select_option(self, entity_id: str, option: str) -> bool:
-        try:
-            await self.hass.services.async_call(
-                "select",
-                "select_option",
-                {"entity_id": entity_id, "option": option},
-                blocking=True,
-            )
-            return True
-        except Exception as err:
-            if await self._wait_for_reflected_state(entity_id, option):
-                _LOGGER.warning(
-                    "SolarEdge select write for %s=%s raised %s, but the requested "
-                    "state was subsequently reflected",
-                    entity_id,
-                    option,
-                    err,
-                )
-                return True
-            _LOGGER.error("SolarEdge select write failed for %s=%s: %s", entity_id, option, err)
-            return False
-
-    async def _set_optional_grid_charge(self, enabled: bool) -> bool:
-        entity_id = self._control_entity_map.get("allow_grid_charge")
-        if not entity_id:
-            return True
-        domain = entity_id.split(".", 1)[0]
-        if domain == "switch":
-            return await self._set_switch(entity_id, enabled)
-        if domain == "select":
-            aliases = (
-                ("always allowed", "on", "enabled", "enable", "allowed", "allow")
-                if enabled
-                else (
-                    "disabled",
-                    "off",
-                    "disable",
-                    "not allowed",
-                    "disallow",
-                )
-            )
-            return await self._set_select_by_alias("allow_grid_charge", aliases)
-        return True
-
-    async def _set_switch(self, entity_id: str, enabled: bool) -> bool:
-        try:
-            await self.hass.services.async_call(
-                "switch",
-                "turn_on" if enabled else "turn_off",
-                {"entity_id": entity_id},
-                blocking=True,
-            )
-            return True
-        except Exception as err:
-            _LOGGER.error("SolarEdge switch write failed for %s: %s", entity_id, err)
-            return False
 
     async def _wait_for_reflected_state(
         self,
         entity_id: str,
         expected: Any,
     ) -> bool:
-        """Confirm an ambiguous service-call outcome from the HA state machine."""
+        """Check supporting entity reflection after a successful service return."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.WRITE_CONFIRM_TIMEOUT_SECONDS
         while True:
