@@ -35,6 +35,11 @@ async def async_prepare_monitoring_handoff(hass: Any, entry: Any) -> None:
     }
 
     try:
+        solaredge = entry_data.get("solaredge_coordinator")
+        if solaredge is not None and solaredge.control_health != "ready":
+            # Monitoring must remain available when device writes are unsafe.
+            # Keep the existing state for supervised recovery.
+            return
         await hass.services.async_call(
             DOMAIN,
             SERVICE_RESTORE_NORMAL,

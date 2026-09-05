@@ -87,6 +87,20 @@ class _Services:
         return self.response
 
 
+class _FailingServices(_Services):
+    async def async_call(
+        self,
+        domain,
+        service,
+        data,
+        blocking=False,
+        return_response=False,
+    ):
+        self.calls.append((domain, service, data, blocking))
+        self.return_response_requests.append(return_response)
+        raise RuntimeError("SolarEdge command was not confirmed")
+
+
 def test_tesla_force_charge_uses_native_service_response():
     module, restore = _load_controller_module()
     try:
@@ -122,6 +136,27 @@ def test_non_tesla_force_charge_keeps_fire_and_wait_service_contract():
         controller = module.BatteryControllerWrapper(hass, "sungrow")
 
         assert asyncio.run(controller.force_charge(30, 5000)) is True
+        assert services.return_response_requests == [False]
+    finally:
+        restore()
+
+
+def test_solaredge_optimizer_service_failure_returns_false():
+    module, restore = _load_controller_module()
+    try:
+        services = _FailingServices()
+        hass = SimpleNamespace(services=services)
+        controller = module.BatteryControllerWrapper(hass, "solaredge")
+
+        assert asyncio.run(controller.force_charge(30, 5000)) is False
+        assert services.calls == [
+            (
+                "power_sync",
+                "force_charge",
+                {"duration": 30, "power_w": 5000, "source": "optimizer"},
+                True,
+            )
+        ]
         assert services.return_response_requests == [False]
     finally:
         restore()

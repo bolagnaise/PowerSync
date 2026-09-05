@@ -10158,6 +10158,9 @@ class SolarEdgeEnergyCoordinator(
             "backup_reserve": status.get("backup_reserve"),
             "min_soc": status.get("min_soc"),
             "control_available": status.get("control_available", False),
+            "control_health": status.get("control_health", "reconciliation_required"),
+            "last_mutation": status.get("last_mutation"),
+            "mutation_active": status.get("mutation_active", False),
             "missing_control_entities": status.get("missing_control_entities", []),
             "control_entities": status.get("control_entities", {}),
             "energy_summary": energy_summary,
@@ -10424,35 +10427,67 @@ class SolarEdgeEnergyCoordinator(
     async def async_shutdown(self) -> None:
         await self._controller.disconnect()
 
-    async def force_charge(self, duration_minutes: int = 30, power_w: int = 0) -> bool:
+    @property
+    def control_health(self) -> str:
+        return self._controller.control_health
+
+    @property
+    def mutation_active(self) -> bool:
+        return self._controller.mutation_active
+
+    @property
+    def generation(self) -> int:
+        return self._controller.generation
+
+    async def _control_result(self, operation) -> bool:
+        """Publish control health even when the requested mutation fails."""
+        try:
+            return bool(await operation)
+        finally:
+            if self.data is not None:
+                status = self._controller.get_status()
+                self.async_set_updated_data({
+                    **self.data,
+                    "control_health": status.get("control_health"),
+                    "last_mutation": status.get("last_mutation"),
+                    "mutation_active": status.get("mutation_active", False),
+                })
+
+    async def force_charge(self, duration_minutes: int = 30, power_w: int = 0, *, automatic: bool = False) -> bool:
         if not self._native_control_allowed("SolarEdge force_charge"):
             return False
-        return await self._controller.force_charge(duration_minutes, power_w)
+        return await self._control_result(self._controller.force_charge(duration_minutes, power_w, automatic=automatic))
 
-    async def force_discharge(self, duration_minutes: int = 30, power_w: int = 0) -> bool:
+    async def force_discharge(self, duration_minutes: int = 30, power_w: int = 0, *, automatic: bool = False) -> bool:
         if not self._native_control_allowed("SolarEdge force_discharge"):
             return False
-        return await self._controller.force_discharge(duration_minutes, power_w)
+        return await self._control_result(self._controller.force_discharge(duration_minutes, power_w, automatic=automatic))
 
-    async def restore_normal(self) -> bool:
+    async def restore_normal(self, *, automatic: bool = False, expected_generation: int | None = None) -> bool:
         if not self._native_control_allowed("SolarEdge restore_normal"):
             return False
-        return await self._controller.restore_normal()
+        return await self._control_result(self._controller.restore_normal(automatic=automatic, expected_generation=expected_generation))
 
-    async def set_backup_mode(self) -> bool:
+    async def set_backup_mode(self, *, automatic: bool = False) -> bool:
         if not self._native_control_allowed("SolarEdge set_backup_mode"):
             return False
-        return await self._controller.set_backup_mode()
+        return await self._control_result(self._controller.set_backup_mode(automatic=automatic))
 
-    async def restore_work_mode_from_idle(self) -> bool:
-        if not self._native_control_allowed("SolarEdge restore_work_mode_from_idle"):
-            return False
-        return await self._controller.restore_work_mode_from_idle()
+    async def restore_work_mode_from_idle(self, *, automatic: bool = False, expected_generation: int | None = None) -> bool:
+        return await self.restore_normal(automatic=automatic, expected_generation=expected_generation)
 
-    async def set_backup_reserve(self, percent: int) -> bool:
+    async def set_backup_reserve(self, percent: int, *, automatic: bool = False) -> bool:
         if not self._native_control_allowed("SolarEdge set_backup_reserve"):
             return False
-        return await self._controller.set_backup_reserve(percent)
+        return await self._control_result(self._controller.set_backup_reserve(percent, automatic=automatic))
+
+    async def run_external_mutation(self, operation, *, automatic: bool = False) -> bool:
+        if not self._native_control_allowed("SolarEdge curtailment"):
+            return False
+        return await self._control_result(self._controller.run_external_mutation(operation, automatic=automatic))
+
+    async def reconcile(self) -> bool:
+        return await self._control_result(self._controller.reconcile())
 
     async def get_backup_reserve(self) -> int | None:
         return await self._controller.get_backup_reserve()
@@ -10460,7 +10495,7 @@ class SolarEdgeEnergyCoordinator(
     async def set_operation_mode(self, mode: str) -> bool:
         if not self._native_control_allowed("SolarEdge set_operation_mode"):
             return False
-        return await self._controller.set_operation_mode(mode)
+        return await self._control_result(self._controller.set_operation_mode(mode))
 
 
 class SajH2EnergyCoordinator(

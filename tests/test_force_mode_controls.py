@@ -2569,9 +2569,10 @@ def test_solaredge_dispatch_is_routed_through_services_and_coordinator():
     assert 'solaredge_coord = entry_data.get("solaredge_coordinator")' in force_discharge_source
     assert "lambda guarded_w: solaredge_coord.force_discharge(" in force_discharge_source
     assert "await _guarded_force_discharge_write(" in force_discharge_source
-    assert "await solaredge_coord.force_charge(duration, power_w=power_w)" in force_charge_source
-    assert "await solaredge_coord.restore_normal()" in restore_source
-    assert "await solaredge_coord.set_backup_reserve(percent)" in reserve_source
+    assert "await solaredge_coord.force_charge(duration, power_w=power_w, automatic=True)" in force_charge_source
+    assert "await solaredge_coord.restore_normal(" in restore_source
+    assert 'expected_generation=call.data.get("_solaredge_generation")' in restore_source
+    assert 'await solaredge_coord.set_backup_reserve(percent, automatic=_control_call_source(call) == "optimizer")' in reserve_source
     assert '("solaredge_coordinator", "solaredge")' in hold_source
 
 
@@ -4333,7 +4334,28 @@ def test_goodwe_hold_cleanup_waits_for_success_and_bypasses_monitoring_gate():
     assert hold is not None
     assert persisted is not None
     cleanup_payload = '{"source": "hold_soc_cleanup", "_force_restore": True}'
-    assert cleanup_payload in hold
+    hold_payloads = [
+        node
+        for node in ast.walk(ast.parse(hold))
+        if isinstance(node, ast.Dict)
+        and any(
+            isinstance(key, ast.Constant)
+            and key.value == "source"
+            and isinstance(value, ast.Constant)
+            and value.value == "hold_soc_cleanup"
+            for key, value in zip(node.keys, node.values)
+        )
+    ]
+    assert len(hold_payloads) == 1
+    hold_payload = {
+        key.value: value
+        for key, value in zip(hold_payloads[0].keys, hold_payloads[0].values)
+        if isinstance(key, ast.Constant)
+    }
+    assert ast.literal_eval(hold_payload["_force_restore"]) is True
+    assert isinstance(hold_payload["_solaredge_generation"], ast.Name)
+    assert hold_payload["_solaredge_generation"].id == "solaredge_generation"
+    assert 'solaredge_generation = coord.generation if brand == "solaredge" else None' in hold
     assert cleanup_payload in persisted
     assert 'source in ("user", "manual", "unknown", "hold_soc_cleanup")' in restore
 

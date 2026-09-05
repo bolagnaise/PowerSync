@@ -86,8 +86,8 @@ BRAND_CASES = [
     ),
     (
         "SolarEdge",
-        "await solaredge_coord.restore_normal()",
-        "await solaredge_coord.restore_normal()",
+        "await solaredge_coord.restore_normal(",
+        "await solaredge_coord.restore_normal(",
         '_restore_superseded("SolarEdge restore")',
         'force_charge_state["active"] = False',
     ),

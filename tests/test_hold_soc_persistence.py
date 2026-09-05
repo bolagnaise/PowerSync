@@ -174,6 +174,8 @@ def test_restore_force_mode_from_persistence_hold_soc_future_expiry_rearms_timer
         return lambda: timer_calls.append(("cancelled", when))
 
     namespace = {
+        "active_battery_system": "tesla",
+        "BATTERY_SYSTEM_SOLAREDGE": "solaredge",
         "persisted_force_state": {
             "mode": "hold_soc",
             "expires_at": expires_at.isoformat(),
@@ -267,6 +269,8 @@ def test_restore_force_mode_from_persistence_hold_soc_expired_restores_normal():
     fake_store = _FakeStore()
 
     namespace = {
+        "active_battery_system": "tesla",
+        "BATTERY_SYSTEM_SOLAREDGE": "solaredge",
         "persisted_force_state": {
             "mode": "hold_soc",
             "expires_at": expires_at.isoformat(),

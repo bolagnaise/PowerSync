@@ -1759,7 +1759,18 @@ class BatteryIntegrationDetailsSensor(SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         metrics = self._catalog.get("metrics", [])
+        domain_data = self._hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        solaredge = domain_data.get("solaredge_coordinator")
+        control = {}
+        if solaredge is not None:
+            control = {
+                "control_health": solaredge.control_health,
+                "control_mutation_active": solaredge.mutation_active,
+                "last_control_mutation": (solaredge.data or {}).get("last_mutation"),
+                "reconciliation_service": "power_sync.reconcile_solaredge_control",
+            }
         return {
+            **control,
             "catalog_version": self._catalog.get("version", 1),
             "connection_profile": self._catalog.get("profile_id", ""),
             "battery_system": self._catalog.get("battery_system", ""),
@@ -2357,7 +2368,13 @@ async def async_setup_entry(
         CONF_AC_INVERTER_CURTAILMENT_ENABLED,
         entry.data.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
     )
-    if inverter_enabled and not _sungrow_ac_inverter_matches_battery(entry):
+    from . import _solaredge_ac_inverter_matches_battery
+
+    if (
+        inverter_enabled
+        and not _sungrow_ac_inverter_matches_battery(entry)
+        and not _solaredge_ac_inverter_matches_battery(entry)
+    ):
         entities.append(
             InverterStatusSensor(
                 hass=hass,
@@ -2367,8 +2384,8 @@ async def async_setup_entry(
         _LOGGER.info("Inverter status sensor added")
     elif inverter_enabled:
         _LOGGER.warning(
-            "Skipping AC inverter status poller because the Sungrow inverter "
-            "curtailment endpoint matches the configured Sungrow battery endpoint"
+            "Skipping AC inverter status poller because the inverter "
+            "curtailment endpoint matches the configured battery endpoint"
         )
 
     # Add Flow Power price sensors if Flow Power provider is selected

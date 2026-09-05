@@ -847,6 +847,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         )
 
+    async def _call_optimizer_energy_control(
+        self, method_name: str, *args: Any
+    ) -> Any:
+        """Call a direct energy control method for an optimizer action."""
+        method = getattr(self.energy_coordinator, method_name)
+        if self.battery_system == "solaredge":
+            return await method(*args, automatic=True)
+        return await method(*args)
+
     async def _restore_pre_idle_backup_reserve(
         self, battery, context: str = "", bypass_monitoring: bool = False
     ) -> bool:
@@ -961,7 +970,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.energy_coordinator
                 and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
             ):
-                ok = await self.energy_coordinator.restore_work_mode_from_idle()
+                ok = await self._call_optimizer_energy_control(
+                    "restore_work_mode_from_idle"
+                )
             elif (
                 self._executor
                 and hasattr(self._executor.battery_controller, "restore_normal")
@@ -1166,13 +1177,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.energy_coordinator
             and hasattr(self.energy_coordinator, "set_backup_mode")
         ):
-            await self.energy_coordinator.set_backup_mode()
+            backup_mode_result = await self._call_optimizer_energy_control(
+                "set_backup_mode"
+            )
+            if self.battery_system == "solaredge" and backup_mode_result is False:
+                _LOGGER.warning(
+                    "Optimizer: SolarEdge IDLE hold mode was not confirmed; "
+                    "keeping the previous action marker"
+                )
+                return False
             if hasattr(battery, "set_backup_reserve") and self.battery_system != "sigenergy":
                 self._idle_reserve_adjustment = True
                 try:
-                    await battery.set_backup_reserve(non_tesla_hold_pct)
+                    reserve_result = await battery.set_backup_reserve(
+                        non_tesla_hold_pct
+                    )
                 finally:
                     self._idle_reserve_adjustment = False
+                if self.battery_system == "solaredge" and reserve_result is False:
+                    _LOGGER.warning(
+                        "Optimizer: SolarEdge IDLE backup reserve was not confirmed; "
+                        "keeping the previous action marker"
+                    )
+                    return False
             _LOGGER.info(
                 "Optimizer: IDLE — holding SOC at %d%% (hold mode)",
                 non_tesla_hold_pct,
@@ -1211,12 +1238,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return True
 
         if hasattr(battery, "set_self_consumption_mode"):
-            await battery.set_self_consumption_mode()
+            mode_result = await battery.set_self_consumption_mode()
+            if self.battery_system == "solaredge" and mode_result is False:
+                return False
             _LOGGER.info("Optimizer: IDLE — self-consumption (no set_backup_reserve)")
             self._idle_hold_reserve = None
             return True
         if hasattr(battery, "restore_normal"):
-            await battery.restore_normal()
+            restore_result = await battery.restore_normal()
+            if self.battery_system == "solaredge" and restore_result is False:
+                return False
             self._idle_hold_reserve = None
             return True
         return False
@@ -5434,10 +5465,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             and not _force_active
         ):
             try:
-                await self.energy_coordinator.restore_work_mode_from_idle()
+                restored = await self._call_optimizer_energy_control(
+                    "restore_work_mode_from_idle"
+                )
+                if self.battery_system == "solaredge" and restored is False:
+                    raise RuntimeError(
+                        "SolarEdge did not confirm the startup work-mode restore"
+                    )
                 _LOGGER.info("Optimizer startup: ensured normal operation mode")
             except Exception as e:
                 _LOGGER.warning("Failed to restore work mode on enable: %s", e)
+                if self.battery_system == "solaredge":
+                    raise
 
         # Safety: if the Powerwall was left off-grid from a prior session
         # (e.g. HA crashed while off-grid curtailment was active), reconnect
@@ -5530,6 +5569,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "pre-IDLE backup reserve restore"
             )
 
+        idle_work_mode_restore_failed = False
+
         # FoxESS/Sungrow: restore from IDLE hold mode to normal operation.
         # Stays gated on _last_executed_action == "idle" only — the EV
         # no-discharge path restores its own work mode via
@@ -5543,9 +5584,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
             ):
                 try:
-                    await self.energy_coordinator.restore_work_mode_from_idle()
-                    _LOGGER.info("Optimizer disable: restored work mode from IDLE")
+                    restored = await self._call_optimizer_energy_control(
+                        "restore_work_mode_from_idle"
+                    )
+                    if self.battery_system == "solaredge" and restored is False:
+                        idle_work_mode_restore_failed = True
+                        _LOGGER.warning(
+                            "Optimizer disable: SolarEdge work-mode restore was "
+                            "not confirmed; retaining the IDLE action marker"
+                        )
+                    else:
+                        _LOGGER.info(
+                            "Optimizer disable: restored work mode from IDLE"
+                        )
                 except Exception as e:
+                    if self.battery_system == "solaredge":
+                        idle_work_mode_restore_failed = True
                     _LOGGER.warning("Failed to restore work mode on disable: %s", e)
         elif monitoring_mode and self._last_executed_action == "idle":
             _LOGGER.info(
@@ -5559,7 +5613,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 await self._release_scheduled_ev_no_discharge_mode("optimizer disabled")
         self._last_optimizer_self_consumption_reserve_target = None
-        self._last_executed_action = None
+        if not idle_work_mode_restore_failed:
+            self._last_executed_action = None
 
         # Cancel background tasks first so they can't run optimization
         # after _enabled is set to False (e.g. polling loop waking from sleep)
@@ -10507,6 +10562,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     )
                                 )
                                 if not allowed:
+                                    if self.battery_system == "solaredge":
+                                        _LOGGER.warning(
+                                            "Optimizer: SolarEdge force-discharge "
+                                            "refresh was not confirmed; retaining "
+                                            "the prior force state"
+                                        )
+                                        return
                                     if force_scope == "optimizer":
                                         self._clear_optimizer_force_state()
                                     elif self._force_state_clearer:
@@ -10530,6 +10592,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 _ext_state["power_w"] = force_power_w
                         except Exception as ext_err:
                             _LOGGER.warning("Optimizer: failed to re-issue %s for extension: %s", force_type, ext_err)
+                            if self.battery_system == "solaredge":
+                                return
+
+                    solaredge_restore_generation = (
+                        getattr(self.energy_coordinator, "generation", None)
+                        if self.battery_system == "solaredge"
+                        else None
+                    )
 
                     if force_scope != "optimizer":
                         effective_expiry = self._as_utc_datetime(
@@ -10550,8 +10620,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             if _ext_state.get("active"):
                                 _LOGGER.info("⏰ Force %s expired (extended timer), auto-restoring", force_type)
                                 from ..const import DOMAIN as _SVC_DOMAIN
+                                restore_data = {}
+                                if self.battery_system == "solaredge":
+                                    restore_data = {
+                                        "source": "optimizer",
+                                        "_allow_monitoring_restore": True,
+                                        "_solaredge_generation": (
+                                            solaredge_restore_generation
+                                        ),
+                                    }
                                 await self.hass.services.async_call(
-                                    _SVC_DOMAIN, "restore_normal", {}, blocking=True,
+                                    _SVC_DOMAIN,
+                                    "restore_normal",
+                                    restore_data,
+                                    blocking=True,
                                 )
 
                         from homeassistant.helpers.event import async_track_point_in_utc_time
@@ -10859,7 +10941,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
                 ):
                     work_mode_restored = (
-                        await self.energy_coordinator.restore_work_mode_from_idle()
+                        await self._call_optimizer_energy_control(
+                            "restore_work_mode_from_idle"
+                        )
                     )
                     if work_mode_restored is False:
                         _LOGGER.warning(
@@ -11284,12 +11368,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             discharge_duration,
                             discharge_power,
                         )
-                    _LOGGER.info(
-                        "Optimizer: Discharging/exporting at %.0fW for %dmin",
-                        discharge_power, discharge_duration,
-                    )
                     if not force_result:
+                        if self.battery_system == "solaredge":
+                            _LOGGER.warning(
+                                "Optimizer: SolarEdge force-discharge command was "
+                                "not confirmed; keeping the previous action marker"
+                            )
+                            return
                         effective_action = "self_consumption"
+                    else:
+                        _LOGGER.info(
+                            "Optimizer: Discharging/exporting at %.0fW for %dmin",
+                            discharge_power,
+                            discharge_duration,
+                        )
             elif effective_action == "no_discharge":
                 await self._set_scheduled_ev_no_discharge_mode(
                     battery,

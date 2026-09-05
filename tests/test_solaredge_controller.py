@@ -19,7 +19,38 @@ _inverters = types.ModuleType("power_sync.inverters")
 _inverters.__path__ = [str(ROOT / "inverters")]
 sys.modules.setdefault("power_sync.inverters", _inverters)
 
-from power_sync.inverters.solaredge import SolarEdgeController, SolarEdgeEnergyController
+from power_sync.inverters.solaredge import (
+    SolarEdgeController,
+    SolarEdgeEnergyController,
+)
+
+
+class _MemoryStore:
+    def __init__(self):
+        self.data = None
+        self.history = []
+
+    async def async_load(self):
+        import copy
+
+        return copy.deepcopy(self.data)
+
+    async def async_save(self, data):
+        import copy
+
+        self.data = copy.deepcopy(data)
+        self.history.append(self.data)
+
+
+@pytest.fixture(autouse=True)
+def control_journal(monkeypatch):
+    stores = {}
+
+    def create(controller, identity):
+        return stores.setdefault((id(controller.hass), identity), _MemoryStore())
+
+    monkeypatch.setattr(SolarEdgeEnergyController, "_create_store", create)
+    return stores
 
 
 def test_solaredge_load_following_maps_watts_to_percent():
@@ -1179,7 +1210,7 @@ def test_solaredge_force_charge_uses_grid_command_and_ac_policy_entities(
     )
 
 
-def test_solaredge_force_charge_does_not_rollback_when_ac_policy_fails():
+def test_solaredge_force_charge_halts_when_optional_ac_policy_fails():
     hass = _SEHass()
     command_mode = hass.states.get("select.solaredge_storage_command_mode")
     command_mode.state = "Maximize Self Consumption"
@@ -1200,14 +1231,16 @@ def test_solaredge_force_charge_does_not_rollback_when_ac_policy_fails():
     controller.WRITE_CONFIRM_TIMEOUT_SECONDS = 0
 
     assert asyncio.run(controller.connect())
-    assert asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
-    assert hass.states.get(policy_entity_id).state == "Disabled"
-    assert hass.states.get("select.solaredge_storage_command_mode").state == (
-        "Charge from Solar Power and Grid"
+    assert not asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
+    assert hass.services.calls[-1][2]["entity_id"] == policy_entity_id
+    assert controller.control_health == "reconciliation_required"
+    assert (
+        hass.states.get("select.solaredge_storage_command_mode").state
+        == "Maximize Self Consumption"
     )
 
 
-def test_solaredge_force_charge_rolls_back_when_required_ac_policy_fails():
+def test_solaredge_force_charge_halts_when_required_ac_policy_fails():
     hass = _SEHass()
     hass.states._states.pop("switch.solaredge_allow_grid_charge")
     policy_entity_id = "select.solaredge_i1_ac_charge_policy"
@@ -1222,13 +1255,18 @@ def test_solaredge_force_charge_rolls_back_when_required_ac_policy_fails():
 
     assert asyncio.run(controller.connect())
     assert not asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
-    assert hass.states.get("select.solaredge_storage_control_mode").state == (
-        "Maximize Self Consumption"
+    assert (
+        hass.states.get("select.solaredge_storage_control_mode").state
+        == "Remote Control"
     )
-    assert hass.states.get("select.solaredge_storage_command_mode").state == "Stop"
+    assert hass.services.calls[-1][2]["entity_id"] == policy_entity_id
+    assert (
+        controller._saved_control_state["storage_control_mode"]
+        == "Maximize Self Consumption"
+    )
 
 
-def test_solaredge_force_charge_accepts_timeout_when_state_is_reflected():
+def test_solaredge_force_charge_rejects_timeout_even_if_state_is_reflected():
     hass = _SEHass()
     command_entity_id = "select.solaredge_storage_command_mode"
     hass.services = _SEFailingServices(
@@ -1239,11 +1277,12 @@ def test_solaredge_force_charge_accepts_timeout_when_state_is_reflected():
     controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
 
     assert asyncio.run(controller.connect())
-    assert asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
-    assert hass.states.get(command_entity_id).state == "Charge"
+    assert not asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
+    assert controller.last_mutation["outcome"] == "unknown"
+    assert hass.services.calls[-1][2]["entity_id"] == command_entity_id
 
 
-def test_solaredge_force_charge_accepts_number_timeout_when_state_is_reflected():
+def test_solaredge_force_charge_rejects_number_timeout_even_if_state_is_reflected():
     hass = _SEHass()
     timeout_entity_id = "number.solaredge_storage_command_timeout"
     hass.services = _SEFailingServices(
@@ -1254,11 +1293,12 @@ def test_solaredge_force_charge_accepts_number_timeout_when_state_is_reflected()
     controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
 
     assert asyncio.run(controller.connect())
-    assert asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
-    assert hass.states.get(timeout_entity_id).state == "1800.0"
+    assert not asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
+    assert controller.last_mutation["outcome"] == "unknown"
+    assert hass.services.calls[-1][2]["entity_id"] == timeout_entity_id
 
 
-def test_solaredge_stale_dispatch_restore_preserves_saved_ac_policy():
+def test_solaredge_stale_dispatch_is_rejected_before_mutation():
     hass = _SEHass()
     command_mode = hass.states.get("select.solaredge_storage_command_mode")
     command_mode.state = "Charge from Solar Power and Grid"
@@ -1278,17 +1318,9 @@ def test_solaredge_stale_dispatch_restore_preserves_saved_ac_policy():
     controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
 
     assert asyncio.run(controller.connect())
-    assert asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
-    assert hass.states.get(policy_entity_id).state == "Always Allowed"
-
-    assert asyncio.run(controller.restore_normal())
-    assert hass.states.get(policy_entity_id).state == "Disabled"
-    assert hass.states.get("select.solaredge_storage_control_mode").state == (
-        "Maximize Self Consumption"
-    )
-    assert hass.states.get("select.solaredge_storage_command_mode").state == (
-        "Solar Power Only (Off)"
-    )
+    assert not asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
+    assert hass.services.calls == []
+    assert controller.last_mutation["outcome"] == "rejected"
 
 
 def test_solaredge_charge_alias_does_not_match_discharge_option():
@@ -1306,7 +1338,7 @@ def test_solaredge_charge_alias_does_not_match_discharge_option():
     )
 
 
-def test_solaredge_restore_normal_discards_saved_active_dispatch_snapshot():
+def test_solaredge_restore_normal_retains_and_rejects_active_dispatch_snapshot():
     hass = _SEHass()
     controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
 
@@ -1320,15 +1352,9 @@ def test_solaredge_restore_normal_discards_saved_active_dispatch_snapshot():
         "allow_grid_charge": "on",
     }
 
-    assert asyncio.run(controller.restore_normal())
-
-    assert hass.states.get("select.solaredge_storage_control_mode").state == (
-        "Maximize Self Consumption"
-    )
-    assert hass.states.get("select.solaredge_storage_command_mode").state == "Stop"
-    assert hass.states.get("number.solaredge_storage_charge_limit").state == "0.0"
-    assert hass.states.get("number.solaredge_storage_discharge_limit").state == "0.0"
-    assert hass.states.get("number.solaredge_storage_command_timeout").state == "0.0"
+    assert not asyncio.run(controller.restore_normal())
+    assert hass.services.calls == []
+    assert controller._saved_control_state["storage_command_mode"] == "Charge"
 
 
 def test_solaredge_force_discharge_writes_remote_discharge_entities():
@@ -1338,18 +1364,26 @@ def test_solaredge_force_discharge_writes_remote_discharge_entities():
     assert asyncio.run(controller.connect())
     assert asyncio.run(controller.force_discharge(duration_minutes=15, power_w=3500))
 
-    assert ("number", "set_value", {
-        "entity_id": "number.solaredge_storage_charge_limit",
-        "value": 0.0,
-    }) in hass.services.calls
-    assert ("number", "set_value", {
-        "entity_id": "number.solaredge_storage_discharge_limit",
-        "value": 3500.0,
-    }) in hass.services.calls
-    assert ("select", "select_option", {
-        "entity_id": "select.solaredge_storage_command_mode",
-        "option": "Discharge",
-    }) in hass.services.calls
+    assert not any(
+        call[2]["entity_id"] == "number.solaredge_storage_charge_limit"
+        for call in hass.services.calls
+    )
+    assert (
+        "number",
+        "set_value",
+        {
+            "entity_id": "number.solaredge_storage_discharge_limit",
+            "value": 3500.0,
+        },
+    ) in hass.services.calls
+    assert (
+        "select",
+        "select_option",
+        {
+            "entity_id": "select.solaredge_storage_command_mode",
+            "option": "Discharge",
+        },
+    ) in hass.services.calls
 
 
 def test_solaredge_backup_reserve_and_hold_soc_use_writable_reserve():
@@ -1378,6 +1412,744 @@ def test_solaredge_missing_control_entities_keeps_telemetry_but_rejects_dispatch
         "storage_command_mode",
         "charge_power_limit",
         "discharge_power_limit",
+        "command_timeout",
     ]
     assert not asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
     assert hass.services.calls == []
+
+
+def test_solaredge_benign_msc_timeout_is_not_active_dispatch():
+    controller = SolarEdgeEnergyController(_SEHass(), entity_prefix="solaredge")
+    controller._saved_control_state = {
+        "storage_control_mode": "Remote Control",
+        "storage_command_mode": "Maximize Self Consumption",
+        "charge_power_limit": "11400",
+        "discharge_power_limit": "11400",
+        "command_timeout": "3600",
+    }
+    assert not controller._saved_control_state_contains_active_dispatch()
+
+
+def test_solaredge_unknown_first_write_halts_without_rollback():
+    hass = _SEHass()
+    entity = "select.solaredge_storage_control_mode"
+    hass.services = _SEFailingServices(hass.states, entity)
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    controller.WRITE_CONFIRM_TIMEOUT_SECONDS = 0
+    assert not asyncio.run(controller.force_discharge(15, 2000))
+    assert len(hass.services.calls) == 1
+    assert controller.control_health == "reconciliation_required"
+    assert controller.last_mutation["outcome"] == "unknown"
+    assert controller._saved_control_state["storage_command_mode"] == "Stop"
+    assert not asyncio.run(controller.restore_normal())
+    assert len(hass.services.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("number.solaredge_storage_discharge_limit", "nan"),
+        ("select.solaredge_storage_command_mode", "unavailable"),
+    ],
+)
+def test_solaredge_complete_preflight_rejects_before_any_write(key, value):
+    hass = _SEHass()
+    hass.states.get(key).state = value
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    assert not asyncio.run(controller.force_discharge(15, 2000))
+    assert hass.services.calls == []
+    assert controller.last_mutation["outcome"] == "rejected"
+    assert controller.control_health == "ready"
+
+
+@pytest.mark.parametrize("power", [7000, float("nan"), -1])
+def test_solaredge_out_of_range_power_rejected_before_write(power):
+    hass = _SEHass()
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    assert not asyncio.run(controller.force_discharge(15, power))
+    assert hass.services.calls == []
+
+
+def test_solaredge_no_substring_grid_charge_fallback():
+    hass = _SEHass()
+    state = hass.states.get("select.solaredge_storage_command_mode")
+    state.attributes["options"] = [
+        "Stop",
+        "Charge from Clipped Solar Power",
+        "Charge from Solar Power",
+    ]
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    assert not asyncio.run(controller.force_charge(15, 2000))
+    assert hass.services.calls == []
+
+
+def test_solaredge_unknown_middle_stops_all_waiting_mutators():
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        entered, release = asyncio.Event(), asyncio.Event()
+        service = hass.services.async_call
+
+        async def pause(domain, action, data, blocking=False):
+            if data["entity_id"].endswith("command_timeout"):
+                hass.services.calls.append((domain, action, data))
+                entered.set()
+                await release.wait()
+                raise TimeoutError("transaction_id mismatch")
+            return await service(domain, action, data, blocking)
+
+        hass.services.async_call = pause
+        first = asyncio.create_task(controller.force_discharge(15, 2000))
+        await entered.wait()
+        queued = [
+            asyncio.create_task(method())
+            for method in [
+                controller.restore_normal,
+                controller.set_backup_mode,
+                lambda: controller.set_backup_reserve(22),
+                lambda: controller.force_charge(15, 3000),
+            ]
+        ]
+        await asyncio.sleep(0)
+        assert len(hass.services.calls) == 2
+        assert not await controller.force_charge(15, 3000, automatic=True)
+        release.set()
+        assert not await first
+        assert not any(await asyncio.gather(*queued))
+        assert len(hass.services.calls) == 2
+        assert not controller.mutation_active
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("during_confirmation", [False, True])
+def test_solaredge_cancellation_latches_and_releases_lock(during_confirmation):
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        entered = asyncio.Event()
+        if during_confirmation:
+
+            async def wait(*args):
+                entered.set()
+                await asyncio.Future()
+
+            controller._wait_for_reflected_state = wait
+        else:
+
+            async def call(domain, service, data, blocking=False):
+                hass.services.calls.append((domain, service, data))
+                entered.set()
+                await asyncio.Future()
+
+            hass.services.async_call = call
+        task = asyncio.create_task(controller.force_discharge(15, 2000))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert controller.control_health == "reconciliation_required"
+        assert not controller.mutation_active
+        assert not await controller.restore_normal()
+        assert len(hass.services.calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_same_inverter_shares_lock_health_baseline():
+    async def scenario():
+        hass = _SEHass()
+        first = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        second = SolarEdgeEnergyController(hass, entity_prefix="solaredge_*")
+        assert first._coordinator() is second._coordinator()
+        hass.services = _SEFailingServices(
+            hass.states, "select.solaredge_storage_control_mode"
+        )
+        assert not await first.force_discharge(15, 2000)
+        assert second.control_health == "reconciliation_required"
+        assert second._saved_control_state == first._saved_control_state
+        assert not await second.set_backup_reserve(25)
+        assert len(hass.services.calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_separate_inverters_do_not_share_lock():
+    async def scenario():
+        hass = _SEHass()
+        other = _SEHass()
+        for entity, state in list(other.states._states.items()):
+            state.entity_id = entity.replace("solaredge", "other")
+            hass.states._states[state.entity_id] = state
+        first = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        second = SolarEdgeEnergyController(hass, entity_prefix="other")
+        async with first._coordinator().lock:
+            assert await second.force_discharge(15, 2000)
+        assert first.generation == 0
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_reflection_failure_is_unknown():
+    hass = _SEHass()
+
+    async def no_reflection(domain, service, data, blocking=False):
+        hass.services.calls.append((domain, service, data))
+
+    hass.services.async_call = no_reflection
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    controller.WRITE_CONFIRM_TIMEOUT_SECONDS = 0
+    assert not asyncio.run(controller.force_discharge(15, 2000))
+    assert len(hass.services.calls) == 1
+    assert controller.last_mutation["outcome"] == "unknown"
+
+
+def test_solaredge_restore_only_owned_fields_and_renew_equal_timeout():
+    hass = _SEHass()
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    assert asyncio.run(controller.force_discharge(15, 2000))
+    first = len(hass.services.calls)
+    assert asyncio.run(controller.force_discharge(15, 2000))
+    assert [call[2]["entity_id"] for call in hass.services.calls[first:]] == [
+        "number.solaredge_storage_command_timeout"
+    ]
+    first = len(hass.services.calls)
+    assert asyncio.run(controller.restore_normal())
+    restored = {call[2]["entity_id"] for call in hass.services.calls[first:]}
+    assert "number.solaredge_backup_reserve" not in restored
+    assert "switch.solaredge_allow_grid_charge" not in restored
+    assert "number.solaredge_storage_charge_limit" not in restored
+    first = len(hass.services.calls)
+    assert asyncio.run(controller.restore_normal())
+    assert len(hass.services.calls) == first
+
+
+def test_solaredge_restore_preserves_kw_native_baseline():
+    hass = _SEHass()
+    state = hass.states.get("number.solaredge_storage_discharge_limit")
+    state.state = "5.5"
+    state.attributes.update(unit_of_measurement="kW", max=6)
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    assert asyncio.run(controller.force_discharge(15, 2000))
+    assert state.state == "2.0"
+    assert asyncio.run(controller.restore_normal())
+    assert state.state == "5.5"
+
+
+def test_solaredge_restore_external_change_rejected_without_writes():
+    hass = _SEHass()
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    assert asyncio.run(controller.force_discharge(15, 2000))
+    hass.states.get("number.solaredge_storage_discharge_limit").state = "3000"
+    count = len(hass.services.calls)
+    assert not asyncio.run(controller.restore_normal())
+    assert len(hass.services.calls) == count
+    assert controller._saved_control_state
+
+
+def test_solaredge_write_ahead_record_precedes_service_and_restart_blocks():
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        original = hass.services.async_call
+
+        async def call(domain, service, data, blocking=False):
+            store = controller._coordinator().store
+            assert store.data["in_progress"] is True
+            assert store.data["baseline"]
+            return await original(domain, service, data, blocking)
+
+        hass.services.async_call = call
+        assert await controller.force_discharge(15, 2000)
+        store = controller._coordinator().store
+        hass._powersync_solaredge_controls.clear()
+        restarted = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        restarted._create_store = lambda identity: store
+        await restarted.connect()
+        assert restarted.control_health == "reconciliation_required"
+        before = len(hass.services.calls)
+        assert not await restarted.force_charge(15, 2000)
+        assert len(hass.services.calls) == before
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_journal_failure_prevents_first_write():
+    hass = _SEHass()
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    store = _MemoryStore()
+
+    async def fail(data):
+        raise OSError("disk full")
+
+    store.async_save = fail
+    controller._create_store = lambda identity: store
+    assert not asyncio.run(controller.force_discharge(15, 2000))
+    assert hass.services.calls == []
+    assert controller.control_health == "reconciliation_required"
+
+
+def test_solaredge_unknown_survives_restart_without_replay():
+    hass = _SEHass()
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    hass.services = _SEFailingServices(
+        hass.states, "number.solaredge_storage_command_timeout"
+    )
+    assert not asyncio.run(controller.force_discharge(15, 2000))
+    store = controller._coordinator().store
+    baseline = controller._saved_control_state.copy()
+    hass._powersync_solaredge_controls.clear()
+    restarted = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    restarted._create_store = lambda identity: store
+    assert asyncio.run(restarted.connect())
+    assert restarted.control_health == "reconciliation_required"
+    assert restarted._saved_control_state == baseline
+    count = len(hass.services.calls)
+    assert not asyncio.run(restarted.restore_normal())
+    assert len(hass.services.calls) == count
+
+
+def test_solaredge_restore_already_baseline_clears_owned_fields():
+    hass = _SEHass()
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    assert asyncio.run(controller.force_discharge(15, 2000))
+    for key, value in controller._saved_control_state.items():
+        hass.states.get(controller._control_entity_map[key]).state = value
+    count = len(hass.services.calls)
+    assert asyncio.run(controller.restore_normal())
+    assert controller._coordinator().owned == {}
+    assert controller._saved_control_state is None
+    assert len(hass.services.calls) == count
+    assert asyncio.run(controller.restore_normal())
+
+
+def test_solaredge_reserve_rejects_unsaved_active_dispatch():
+    hass = _SEHass()
+    hass.states.get("select.solaredge_storage_command_mode").state = "Charge"
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    assert not asyncio.run(controller.set_backup_reserve(25))
+    assert hass.services.calls == []
+
+
+def test_solaredge_explicit_grid_charge_omits_unsupported_optional_policy():
+    hass = _SEHass()
+    command = hass.states.get("select.solaredge_storage_command_mode")
+    command.attributes["options"].append("Charge from Solar Power and Grid")
+    hass.states._states.pop("switch.solaredge_allow_grid_charge")
+    entity = "select.solaredge_storage_ac_charge_policy"
+    hass.states._states[entity] = _SEState(
+        entity, "Disabled", {"options": ["Disabled", "Fixed Energy Limit"]}
+    )
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    assert asyncio.run(controller.force_charge(15, 2000))
+    assert not any(call[2]["entity_id"] == entity for call in hass.services.calls)
+    assert command.state == "Charge from Solar Power and Grid"
+
+
+def test_solaredge_restore_journal_failure_retains_baseline():
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        assert await controller.force_discharge(15, 2000)
+        baseline = dict(controller._saved_control_state)
+        store = controller._coordinator().store
+        save = store.async_save
+
+        async def fail_final(data):
+            if not data["in_progress"]:
+                raise OSError("journal failure")
+            await save(data)
+
+        store.async_save = fail_final
+        assert not await controller.restore_normal()
+        assert controller._saved_control_state == baseline
+        assert controller.control_health == "reconciliation_required"
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_external_unknown_blocks_storage_control():
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+
+        async def callback():
+            return False
+
+        assert not await controller.run_external_mutation(callback)
+        assert controller.control_health == "reconciliation_required"
+        assert not await controller.force_discharge(15, 2000)
+        assert hass.services.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_direct_write_typeerror_is_not_retried():
+    class Client:
+        connected = True
+
+        def __init__(self):
+            self.calls = 0
+
+        async def write_register(self, address, value, slave=1):
+            self.calls += 1
+            raise TypeError("failure after possible transmission")
+
+    controller = SolarEdgeController(host="test")
+    controller._client = Client()
+    controller._connected = True
+    assert not asyncio.run(controller.restore())
+    assert controller._client.calls == 1
+
+
+def test_solaredge_entity_rename_keeps_physical_journal_identity():
+    hass = _SEHass()
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    entry = types.SimpleNamespace(
+        config_entry_id="hub", unique_id="inverter_serial_storage_command_mode"
+    )
+    controller._registry_entry = lambda entity: entry
+    first = controller._coordinator()
+    first.health = "reconciliation_required"
+    controller._control_entity_map["storage_command_mode"] = (
+        "select.renamed_storage_command"
+    )
+    assert controller._coordinator() is first
+    assert controller.control_health == "reconciliation_required"
+
+
+def test_solaredge_cross_inverter_control_map_rejected():
+    hass = _SEHass()
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+
+    def registry(entity):
+        return types.SimpleNamespace(
+            config_entry_id="hub",
+            unique_id=entity,
+            device_id="i2" if entity and entity.endswith("discharge_limit") else "i1",
+            platform="test",
+        )
+
+    controller._registry_entry = registry
+    assert not asyncio.run(controller.force_discharge(15, 2000))
+    assert hass.services.calls == []
+
+
+def test_solaredge_newly_owned_field_captures_current_baseline():
+    hass = _SEHass()
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    assert asyncio.run(controller.set_backup_reserve(20))
+    hass.states.get("number.solaredge_storage_discharge_limit").state = "4500"
+    assert asyncio.run(controller.force_discharge(15, 2000))
+    assert asyncio.run(controller.restore_normal())
+    assert hass.states.get("number.solaredge_storage_discharge_limit").state == "4500.0"
+    assert hass.states.get("number.solaredge_backup_reserve").state == "15.0"
+
+
+@pytest.mark.parametrize("readback", [None, "active", "mismatch", "baseline"])
+def test_solaredge_reconcile_requires_fresh_matching_benign_baseline(readback):
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        hass.services = _SEFailingServices(
+            hass.states, "select.solaredge_storage_control_mode"
+        )
+        assert not await controller.force_discharge(15, 2000)
+        snapshot = dict(controller._saved_control_state)
+        if readback == "active":
+            snapshot["storage_command_mode"] = "Charge"
+        elif readback == "mismatch":
+            snapshot["backup_reserve"] = "30"
+
+        async def fresh():
+            return None if readback is None else snapshot
+
+        controller._fresh_storage_state = fresh
+        count = len(hass.services.calls)
+        assert await controller.reconcile() is (readback == "baseline")
+        assert len(hass.services.calls) == count
+        assert controller.control_health == (
+            "ready" if readback == "baseline" else "reconciliation_required"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_storage_reconcile_cannot_clear_external_unknown():
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+
+        async def callback():
+            return False
+
+        assert not await controller.run_external_mutation(callback)
+
+        async def fresh():
+            raise AssertionError("Storage read cannot resolve active power")
+
+        controller._fresh_storage_state = fresh
+        assert not await controller.reconcile()
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_native_readback_conversion():
+    hass = _SEHass()
+    hass.states.get("number.solaredge_storage_discharge_limit").attributes[
+        "unit_of_measurement"
+    ] = "kW"
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    controller._ensure_entity_map()
+    assert controller._native_readback(
+        {
+            "charge_power_limit": 2000,
+            "discharge_power_limit": 5500,
+            "allow_grid_charge": "Disabled",
+        }
+    ) == {
+        "charge_power_limit": 2000,
+        "discharge_power_limit": 5.5,
+        "allow_grid_charge": "off",
+    }
+
+
+def test_solaredge_restore_without_baseline_cannot_claim_external_dispatch_stopped():
+    hass = _SEHass()
+    hass.states.get("select.solaredge_storage_command_mode").state = "Charge"
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    assert not asyncio.run(controller.restore_normal())
+    assert hass.services.calls == []
+
+
+def test_solaredge_stale_timer_generation_does_not_restore_new_dispatch():
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        assert await controller.force_discharge(15, 2000)
+        previous = controller.generation
+        assert await controller.force_charge(15, 3000)
+        count = len(hass.services.calls)
+        assert not await controller.restore_normal(expected_generation=previous)
+        assert len(hass.services.calls) == count
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_successful_dispatches_are_contiguous():
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        entered, release = asyncio.Event(), asyncio.Event()
+        service = hass.services.async_call
+
+        async def pause(domain, action, data, blocking=False):
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+            return await service(domain, action, data, blocking)
+
+        hass.services.async_call = pause
+        first = asyncio.create_task(controller.force_discharge(15, 2000))
+        await entered.wait()
+        second = asyncio.create_task(controller.force_charge(15, 3000))
+        await asyncio.sleep(0)
+        assert hass.services.calls == []
+        release.set()
+        assert all(await asyncio.gather(first, second))
+        commands = [
+            call[2].get("option")
+            for call in hass.services.calls
+            if call[2]["entity_id"].endswith("storage_command_mode")
+        ]
+        assert commands == ["Discharge", "Charge"]
+        first_command_index = next(
+            index
+            for index, call in enumerate(hass.services.calls)
+            if call[2].get("option") == "Discharge"
+        )
+        assert all(
+            call[2].get("value") != 3000
+            for call in hass.services.calls[:first_command_index]
+        )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["preflight", "confirmation"])
+def test_solaredge_supported_multi_requires_fresh_register_reads(failure):
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        def registry(entity):
+            return types.SimpleNamespace(config_entry_id="hub", unique_id=entity, device_id="i1", platform="solaredge_modbus_multi")
+        controller._registry_entry = registry
+        controller._ensure_entity_map()
+        snapshot = {key: hass.states.get(entity).state for key, entity in controller._control_entity_map.items()}
+        reads = 0
+        async def fresh():
+            nonlocal reads
+            reads += 1
+            return snapshot if reads == 1 and failure == "confirmation" else None
+        controller._fresh_storage_state = fresh
+        assert not await controller.force_discharge(15, 2000)
+        assert len(hass.services.calls) == (1 if failure == "confirmation" else 0)
+        assert controller.last_mutation["outcome"] == ("unknown" if failure == "confirmation" else "rejected")
+    asyncio.run(scenario())
+
+
+def test_solaredge_stale_unchanged_mode_rejected_before_write():
+    async def scenario():
+        hass = _SEHass()
+        hass.states.get("select.solaredge_storage_control_mode").state = "Remote Control"
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        controller._registry_entry = lambda entity: types.SimpleNamespace(config_entry_id="hub", unique_id=entity, device_id="i1", platform="solaredge_modbus_multi")
+        controller._ensure_entity_map()
+        snapshot = {key: hass.states.get(entity).state for key, entity in controller._control_entity_map.items()}
+        snapshot["storage_control_mode"] = "Maximize Self Consumption"
+        async def fresh():
+            return snapshot
+        controller._fresh_storage_state = fresh
+        assert not await controller.force_discharge(15, 2000)
+        assert hass.services.calls == []
+        assert controller.last_mutation["outcome"] == "rejected"
+    asyncio.run(scenario())
+
+
+def test_solaredge_physical_identity_survives_entry_recreation(monkeypatch):
+    hass = _SEHass()
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    device = types.SimpleNamespace(identifiers={("solaredge_modbus_multi", "model_serial")})
+    dr = types.ModuleType("homeassistant.helpers.device_registry")
+    dr.async_get = lambda hass: types.SimpleNamespace(async_get=lambda device_id: device)
+    helpers = types.ModuleType("homeassistant.helpers")
+    helpers.device_registry = dr
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers", helpers)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", dr)
+    entry = types.SimpleNamespace(config_entry_id="old", unique_id="model_serial_storage_command_mode", device_id="old_device", platform="solaredge_modbus_multi")
+    controller._registry_entry = lambda entity: entry
+    session = controller._coordinator()
+    session.health = "reconciliation_required"
+    entry.config_entry_id = "new"
+    entry.device_id = "new_device"
+    replacement = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    replacement._registry_entry = lambda entity: entry
+    assert replacement._coordinator() is session
+
+
+def test_solaredge_cancelled_reconciliation_save_keeps_containment():
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        hass.services = _SEFailingServices(hass.states, "select.solaredge_storage_control_mode")
+        assert not await controller.force_discharge(15, 2000)
+        baseline = dict(controller._saved_control_state)
+        async def fresh():
+            return baseline
+        controller._fresh_storage_state = fresh
+        saving = asyncio.Event()
+        async def save(data):
+            saving.set()
+            await asyncio.Future()
+        controller._coordinator().store.async_save = save
+        task = asyncio.create_task(controller.reconcile())
+        await saving.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert controller.control_health == "reconciliation_required"
+        assert controller.last_mutation["outcome"] == "unknown"
+        assert controller._saved_control_state == baseline
+        assert not controller.mutation_active
+    asyncio.run(scenario())
+
+
+def test_solaredge_missing_timeout_disables_dispatch_capability():
+    hass = _SEHass()
+    hass.states._states.pop("number.solaredge_storage_command_timeout")
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    assert asyncio.run(controller.connect())
+    assert not controller.control_available()
+    assert controller.missing_control_entities() == ["command_timeout"]
+    assert not asyncio.run(controller.force_discharge(15, 500))
+    assert hass.services.calls == []
+
+
+def _native_controller_with_optional_readback(hass, omitted):
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    controller._ensure_entity_map()
+    controller._registry_entry = lambda entity: types.SimpleNamespace(
+        platform="solaredge_modbus_multi", config_entry_id="hub",
+        device_id="inverter", unique_id=entity,
+    )
+
+    async def fresh():
+        return {
+            key: hass.states.get(entity).state
+            for key, entity in controller._control_entity_map.items()
+            if key not in omitted
+        }
+
+    controller._fresh_storage_state = fresh
+    return controller
+
+
+def test_solaredge_discharge_omits_unreadable_optional_baseline():
+    hass = _SEHass()
+    controller = _native_controller_with_optional_readback(
+        hass, {"allow_grid_charge", "backup_reserve"}
+    )
+    assert asyncio.run(controller.force_discharge(15, 500))
+    assert "allow_grid_charge" not in controller._saved_control_state
+    assert "backup_reserve" not in controller._saved_control_state
+    assert asyncio.run(controller.restore_normal())
+
+
+def test_solaredge_optional_write_requires_fresh_baseline_before_any_write():
+    hass = _SEHass()
+    controller = _native_controller_with_optional_readback(hass, {"allow_grid_charge"})
+    assert not asyncio.run(controller.force_charge(15, 500))
+    assert hass.services.calls == []
+    assert controller.last_mutation["outcome"] == "rejected"
+
+
+def test_solaredge_optional_readback_lost_after_write_remains_unknown():
+    hass = _SEHass()
+    omitted = set()
+    controller = _native_controller_with_optional_readback(hass, omitted)
+    original_call = hass.services.async_call
+
+    async def call(domain, service, data, blocking=False):
+        await original_call(domain, service, data, blocking)
+        if data["entity_id"] == "switch.solaredge_allow_grid_charge":
+            omitted.add("allow_grid_charge")
+
+    hass.services.async_call = call
+    assert not asyncio.run(controller.force_charge(15, 500))
+    assert hass.services.calls[-1][2]["entity_id"] == "switch.solaredge_allow_grid_charge"
+    assert controller.control_health == "reconciliation_required"
+    assert controller.last_mutation["outcome"] == "unknown"
+    assert controller.last_mutation["possibly_transmitted"] is True
+    assert "allow_grid_charge" in controller._saved_control_state
+    calls = len(hass.services.calls)
+    assert not asyncio.run(controller.restore_normal())
+    assert len(hass.services.calls) == calls
+
+
+def test_solaredge_unknown_grid_policy_is_not_coerced_to_switch_off():
+    controller = SolarEdgeEnergyController(_SEHass(), entity_prefix="solaredge")
+    controller._ensure_entity_map()
+    assert controller._native_readback({}) == {}
+    assert controller._native_readback({"allow_grid_charge": "Unknown policy"}) == {}
+
+
+def test_solaredge_missing_owned_optional_readback_rejects_further_writes():
+    hass = _SEHass()
+    omitted = set()
+    controller = _native_controller_with_optional_readback(hass, omitted)
+    assert asyncio.run(controller.set_backup_reserve(20))
+    omitted.add("backup_reserve")
+    calls = len(hass.services.calls)
+    assert not asyncio.run(controller.force_discharge(15, 500))
+    assert len(hass.services.calls) == calls
+    assert controller.last_mutation["outcome"] == "rejected"

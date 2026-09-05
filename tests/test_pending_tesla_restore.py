@@ -155,7 +155,8 @@ def test_startup_finishes_an_unfinished_restore_without_force_state():
     """The hole: force_mode_state null but a restore still owed."""
     source = _function_source("restore_force_mode_from_persistence")
 
-    guard = source[: source.index("return")]
+    guard_start = source.index("if not persisted_force_state:")
+    guard = source[guard_start : source.index("return", guard_start)]
     assert "if not persisted_force_state:" in guard
     assert "persisted_pending_restore" in guard
     assert "SERVICE_RESTORE_NORMAL" in source
