@@ -43,6 +43,12 @@ from .schedule_reader import ScheduleAction, OptimizationSchedule
 _LOGGER = logging.getLogger(__name__)
 
 BELOW_RESERVE_RECOVERY_HOLD_MARGIN_SOC = 0.02
+
+# Marks an IDLE slot the optimizer chose because discharging now and buying the
+# same energy back later fails its own round-trip test. Execution must not
+# remap these holds to self-consumption; doing so reinstates the exact cycle
+# the hold was emitted to avoid.
+RTE_ECONOMIC_HOLD_REASON = "rte_economic_hold"
 PRE_WINDOW_REACHABLE_TARGET_MARGIN_SOC = 0.005
 PRE_WINDOW_REACHABILITY_MARGIN_SOC = 1e-6
 # Most horizons stabilize in two passes. A realistic two-day provider window
@@ -7691,6 +7697,7 @@ class BatteryOptimizer:
                 if schedule_timestamps and t < len(schedule_timestamps)
                 else now + timedelta(minutes=t * self.interval_minutes)
             )
+            action_reason: str | None = None
             configured_export_floor = self._configured_export_reserve_floor_for_range(
                 t, t + 1
             )
@@ -7788,6 +7795,15 @@ class BatteryOptimizer:
             ):
                 # Battery idle while home draws from grid.
                 meaningful_hold = soc > self.backup_reserve + 0.05
+                # The +0.05 band is a heuristic for "enough charge to be worth
+                # holding for a later export window". The two guards below do
+                # not need it: they already prove economic harm through the
+                # optimizer's own round-trip test, and energy anywhere above
+                # the reserve is real usable energy. Gating them on the band
+                # left them inert within 5 SOC points of the floor, which is
+                # exactly where a discharge-to-floor then same-price recharge
+                # happens.
+                economic_hold = soc > self.backup_reserve
                 preserve_charge_by_time_hold = (
                     not disable_idle
                     and _charge_by_time_hold_required(t, soc)
@@ -7805,7 +7821,7 @@ class BatteryOptimizer:
                 elif disable_idle:
                     action = "self_consumption"
                 elif (
-                    meaningful_hold
+                    economic_hold
                     and import_prices is not None
                     and export_prices is not None
                     and abs(export_prices[t] - import_prices[t]) <= 0.001
@@ -7821,8 +7837,9 @@ class BatteryOptimizer:
                     # invents natural self-consumption, spending energy through
                     # round-trip losses and changing the LP objective.
                     action = "idle"
+                    action_reason = RTE_ECONOMIC_HOLD_REASON
                 elif (
-                    meaningful_hold
+                    economic_hold
                     and import_prices is not None
                     and export_prices is not None
                     and import_prices[t] > 0.001
@@ -7845,6 +7862,7 @@ class BatteryOptimizer:
                     # pass. A genuinely cheaper future recharge still keeps
                     # the existing natural-use behavior.
                     action = "idle"
+                    action_reason = RTE_ECONOMIC_HOLD_REASON
                 elif meaningful_hold and export_prices is not None and import_prices is not None:
                     # Check if upcoming export prices justify holding battery
                     # over letting it serve load (avoiding import cost).
@@ -8040,7 +8058,7 @@ class BatteryOptimizer:
                 reason=(
                     "profit_max_solar_export"
                     if action == "solar_export"
-                    else None
+                    else (action_reason if action == "idle" else None)
                 ),
                 ev_charge_w=round(
                     max(0.0, (ev_charge_kw[t] if ev_charge_kw and t < len(ev_charge_kw) else 0.0))

@@ -1501,6 +1501,7 @@ async def _get_observed_ev_power_reading_kw(
     params: dict,
     *,
     allow_wall_connector_fallback: bool = False,
+    charger_meter_power_kw: Optional[float] = None,
 ) -> tuple[float, bool]:
     """Return measured EV power and whether a numeric source was available."""
     power_entity_keys = (
@@ -1525,6 +1526,18 @@ async def _get_observed_ev_power_reading_kw(
                 return power_kw, True
 
     charger_type = params.get("charger_type", "tesla")
+
+    # Sigenergy exposes no power *meter* entity — only charge/discharge power
+    # *limit* entities — so the loop above can never resolve a reading for it.
+    # Without one, surplus accounting falls back to commanded amps, which are
+    # zero after a reload while the charger keeps delivering. The caller reads
+    # the charger's own meter over Modbus and supplies it here.
+    if charger_type == "sigenergy" and charger_meter_power_kw is not None:
+        try:
+            return max(0.0, float(charger_meter_power_kw)), True
+        except (TypeError, ValueError):
+            pass
+
     if charger_type == "tesla" and vehicle_id != DEFAULT_VEHICLE_ID:
         wall_power_kw = 0.0
         wall_power_available = False
@@ -1578,6 +1591,7 @@ async def _get_observed_ev_power_kw(
     params: dict,
     *,
     allow_wall_connector_fallback: bool = False,
+    charger_meter_power_kw: Optional[float] = None,
 ) -> float:
     """Return measured EV charging power for dynamic surplus control."""
     power_kw, _available = await _get_observed_ev_power_reading_kw(
@@ -1585,8 +1599,45 @@ async def _get_observed_ev_power_kw(
         vehicle_id,
         params,
         allow_wall_connector_fallback=allow_wall_connector_fallback,
+        charger_meter_power_kw=charger_meter_power_kw,
     )
     return power_kw
+
+
+async def _read_sigenergy_charger_power_kw(
+    hass: Optional[HomeAssistant],
+    config_entry: ConfigEntry,
+    params: Dict[str, Any],
+) -> Optional[float]:
+    """Return the Sigenergy charger's own measured power, in kW.
+
+    This is the charger's meter, not the site EV total, so it stays correct
+    when several EV sources contribute to the site aggregate.  Returns None
+    when the charger is not Sigenergy or the reading is unavailable, so a
+    missing meter is never mistaken for a measured zero.
+    """
+    if hass is None or str(params.get("charger_type") or "").lower() != "sigenergy":
+        return None
+
+    config = _sigenergy_charger_config(config_entry, params)
+    if not config.get("host"):
+        return None
+
+    controller = _new_sigenergy_charger(config)
+    try:
+        state = await controller.read_state()
+    except Exception as err:
+        _LOGGER.debug("Solar surplus EV: Sigenergy charger power read failed: %s", err)
+        return None
+    finally:
+        await controller.disconnect()
+
+    if state is None or state.power_kw is None:
+        return None
+    try:
+        return max(0.0, float(state.power_kw))
+    except (TypeError, ValueError):
+        return None
 
 
 async def _wake_tesla_ev(
@@ -8637,6 +8688,28 @@ async def _dynamic_ev_update_surplus(
     current_vehicle_power_available = False
     current_vehicle_charging_state = None
     current_vehicle_charging_state_changed_at = None
+    # Sigenergy publishes no power meter entity, so read its charger meter
+    # once per tick and share it across the loop. Without it, surplus
+    # accounting falls back to commanded amps, which are zero after a reload
+    # while the charger keeps delivering.
+    sigenergy_charger_power_kw = None
+    sigenergy_params = next(
+        (
+            v_state.get("params") or {}
+            for _vid, v_state in active_vehicles
+            if str((v_state.get("params") or {}).get("charger_type") or "").lower()
+            == "sigenergy"
+        ),
+        None,
+    )
+    if sigenergy_params is not None:
+        sigenergy_charger_power_kw = await _read_sigenergy_charger_power_kw(
+            hass,
+            config_entry,
+            sigenergy_params,
+        )
+        if _session_was_replaced("Sigenergy charger-power read"):
+            return
     for vid, v_state in all_vehicles.items():
         if not v_state.get("active") or v_state.get("paused"):
             continue
@@ -8650,6 +8723,7 @@ async def _dynamic_ev_update_surplus(
             vid,
             v_params,
             allow_wall_connector_fallback=len(active_vehicles) == 1,
+            charger_meter_power_kw=sigenergy_charger_power_kw,
         )
         if _session_was_replaced("charger-power lookup"):
             return
@@ -10591,6 +10665,11 @@ async def _dynamic_ev_update_sigenergy_evdc_native_solar(
         vehicle_id,
         params,
         allow_wall_connector_fallback=False,
+        charger_meter_power_kw=await _read_sigenergy_charger_power_kw(
+            hass,
+            config_entry,
+            params,
+        ),
     )
     tolerance_kw = params.get("grid_import_tolerance_kw", 0.1)
     state["current_amps"] = 0

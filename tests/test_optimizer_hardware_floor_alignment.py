@@ -3200,3 +3200,119 @@ def test_negative_import_does_not_create_same_slot_charge_export_loop(
     assert first.battery_charge_w == pytest.approx(1000.0, abs=0.1)
     assert first.battery_discharge_w == pytest.approx(0.0, abs=0.1)
     assert result.grid_export_w[0] == pytest.approx(0.0, abs=0.1)
+
+
+def test_zero_fit_hold_survives_projection_just_above_the_reserve_floor(
+    battery_optimizer_module,
+    monkeypatch,
+):
+    """Ticket #391: the zero-FIT RTE hold must work near the reserve too.
+
+    The guard used to inherit the ``backup_reserve + 0.05`` band, so it was
+    inert exactly where the reporter saw the battery drain to its floor and
+    then buy the same energy back inside the same price window.
+    """
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, "highs")
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=27_000,
+        max_charge_w=10_000,
+        max_discharge_w=10_000,
+        efficiency=0.92,
+        backup_reserve=0.20,
+        hardware_reserve=0.20,
+        interval_minutes=60,
+        horizon_hours=12,
+        terminal_weight=0.30,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.081] * 4 + [0.55] * 8,
+        export_prices=[0.0] * 12,
+        solar_forecast=[0.0] * 12,
+        load_forecast=[1.0] * 12,
+        current_soc=0.22,
+        allow_battery_export=[False] * 12,
+        allow_grid_charge=True,
+        disable_idle=False,
+    )
+
+    actions = result.schedule.actions
+    assert result.lp_stats["mode_converged"] is True
+    assert actions[0].action == "idle"
+    assert actions[0].battery_discharge_w == pytest.approx(0.0)
+    assert actions[0].reason == module.RTE_ECONOMIC_HOLD_REASON
+    # The later grid charge in the same window is still planned; only the
+    # avoidable drain to the floor ahead of it is gone.
+    assert any(action.action == "charge" for action in actions[1:4])
+
+
+def test_zero_fit_hold_does_not_flip_on_a_hairline_soc_difference(
+    battery_optimizer_module,
+    monkeypatch,
+):
+    """Ticket #391: emitted action must not flip across ``reserve + 0.05``."""
+    module = battery_optimizer_module
+    _select_backend(module, monkeypatch, "highs")
+
+    def _slot_zero(current_soc):
+        optimizer = module.BatteryOptimizer(
+            capacity_wh=27_000,
+            max_charge_w=10_000,
+            max_discharge_w=10_000,
+            efficiency=0.92,
+            backup_reserve=0.20,
+            hardware_reserve=0.20,
+            interval_minutes=60,
+            horizon_hours=12,
+            terminal_weight=0.30,
+        )
+        result = optimizer.optimize(
+            import_prices=[0.081] * 4 + [0.55] * 8,
+            export_prices=[0.0] * 12,
+            solar_forecast=[0.0] * 12,
+            load_forecast=[1.0] * 12,
+            current_soc=current_soc,
+            allow_battery_export=[False] * 12,
+            allow_grid_charge=True,
+            disable_idle=False,
+        )
+        return result.schedule.actions[0]
+
+    above_band = _slot_zero(0.2501)
+    inside_band = _slot_zero(0.2500)
+
+    assert above_band.action == inside_band.action == "idle"
+    assert above_band.battery_discharge_w == pytest.approx(0.0)
+    assert inside_band.battery_discharge_w == pytest.approx(0.0)
+
+
+def test_hold_at_the_reserve_floor_still_uses_self_consumption(
+    battery_optimizer_module,
+):
+    """At or below the optimizer reserve the natural-use mapping is unchanged."""
+    module = battery_optimizer_module
+    optimizer = _optimizer(
+        module,
+        backup_reserve=0.20,
+        hardware_reserve=0.05,
+        horizon_hours=2,
+    )
+
+    schedule = optimizer._build_schedule(
+        n=2,
+        grid_import=[0.7, 1.7],
+        grid_export=[0.0, 0.0],
+        battery_charge=[0.0, 1.0],
+        battery_discharge=[0.0, 0.0],
+        solar=[0.0, 0.0],
+        load=[0.7, 0.7],
+        soc_0=0.20,
+        import_prices=[0.10, 0.10],
+        export_prices=[0.0, 0.0],
+        allow_grid_charge=True,
+        grid_charge_allowed=[True, True],
+        disable_idle=False,
+    )
+
+    assert schedule.actions[0].action == "self_consumption"

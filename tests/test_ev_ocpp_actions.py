@@ -10919,3 +10919,120 @@ def test_self_stop_disqualification_is_scoped_to_the_stopped_vehicle(monkeypatch
     assert len(timer_calls) == 1
     assert actions._dynamic_ev_state["entry-1"][stopped_vin]["active"] is True
     assert actions._dynamic_ev_state["entry-1"][other_vin]["active"] is True
+
+
+def test_sigenergy_surplus_control_reads_the_charger_meter():
+    """Ticket #38: Sigenergy has no power meter entity, only limit entities.
+
+    Without a meter reading the control path falls back to commanded amps,
+    which are zero after a reload while the charger keeps delivering.
+    """
+    hass = _Hass([])
+    params = {"charger_type": "sigenergy", "sigenergy_charger_type": "evac"}
+
+    assert asyncio.run(
+        actions._get_observed_ev_power_reading_kw(hass, "sigenergy_charger", params)
+    ) == (0.0, False)
+    assert asyncio.run(
+        actions._get_observed_ev_power_reading_kw(
+            hass,
+            "sigenergy_charger",
+            params,
+            charger_meter_power_kw=1.46,
+        )
+    ) == (1.46, True)
+
+
+def test_sigenergy_charger_power_read_is_scoped_and_fails_closed(monkeypatch):
+    """The Modbus read is Sigenergy-only and never invents a measured zero."""
+    entry = _Entry()
+    params = {
+        "charger_type": "sigenergy",
+        "sigenergy_charger_type": "evac",
+        "sigenergy_charger_host": "192.168.0.234",
+        "sigenergy_charger_port": 502,
+        "sigenergy_charger_slave_id": 2,
+    }
+
+    class _Controller:
+        def __init__(self, state):
+            self._state = state
+
+        async def read_state(self):
+            if isinstance(self._state, Exception):
+                raise self._state
+            return self._state
+
+        async def disconnect(self):
+            return None
+
+    def _install(state):
+        monkeypatch.setattr(
+            actions, "_new_sigenergy_charger", lambda config: _Controller(state)
+        )
+
+    _install(SimpleNamespace(power_kw=1.46))
+    assert asyncio.run(
+        actions._read_sigenergy_charger_power_kw(_Hass([]), entry, params)
+    ) == 1.46
+
+    # Not Sigenergy, no read at all.
+    assert asyncio.run(
+        actions._read_sigenergy_charger_power_kw(
+            _Hass([]), entry, {"charger_type": "tesla"}
+        )
+    ) is None
+
+    # Unavailable readings stay absent rather than becoming a measured zero.
+    _install(SimpleNamespace(power_kw=None))
+    assert asyncio.run(
+        actions._read_sigenergy_charger_power_kw(_Hass([]), entry, params)
+    ) is None
+    _install(None)
+    assert asyncio.run(
+        actions._read_sigenergy_charger_power_kw(_Hass([]), entry, params)
+    ) is None
+    _install(OSError("modbus down"))
+    assert asyncio.run(
+        actions._read_sigenergy_charger_power_kw(_Hass([]), entry, params)
+    ) is None
+
+
+def test_sigenergy_solar_surplus_adds_back_the_live_charger_draw():
+    """Ticket #38: the reporter's 15:47:31 site state, with and without a meter.
+
+    Production logged ``available=1.17kW`` — export only — and the EV stayed
+    pinned at the 6 A floor while the site exported 1.67 kW.
+    """
+    live_status = {
+        "battery_soc": 100,
+        "grid_power": -1670,
+        "battery_power": 0,
+        "solar_power": 3250,
+        "load_power": 0,
+        "is_curtailed": False,
+    }
+    config = {"surplus_calculation": "grid_based", "household_buffer_kw": 0.5}
+    voltage, phases, min_amps = 240, 1, 6
+
+    commanded_only_kw = actions._calculate_solar_surplus(
+        live_status,
+        current_ev_power_kw=0.0,
+        config=config,
+    )
+    with_meter_kw = actions._calculate_solar_surplus(
+        live_status,
+        current_ev_power_kw=1.46,
+        config=config,
+    )
+
+    assert commanded_only_kw == pytest.approx(1.17)
+    assert (commanded_only_kw * 1000) / (voltage * phases) < min_amps
+
+    assert with_meter_kw == pytest.approx(2.63)
+    assert int(round((with_meter_kw * 1000) / (voltage * phases))) == 11
+
+    # The meter is what makes the charger's own draw visible: with commanded
+    # amps at zero after a reload, only an available reading recovers it.
+    assert actions._effective_ev_power_kw(0.0, 1.46, True) == 1.46
+    assert actions._effective_ev_power_kw(0.0, 0.0, False) == 0.0

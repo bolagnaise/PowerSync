@@ -3,6 +3,8 @@ import importlib.util
 from pathlib import Path
 import sys
 
+import pytest
+
 _SPEC = importlib.util.spec_from_file_location(
     "power_sync_ev_load_home",
     Path(__file__).parents[1] / "custom_components/power_sync/ev_load.py",
@@ -135,3 +137,22 @@ def test_fresh_complete_snapshot_recovers_after_incomplete_cycle():
     )
     assert recovered["raw_home_load_power"] == 5.67
     assert recovered["load_power"] == 4.67
+
+
+def test_ticket_371_double_counted_ev_would_clamp_home_load_to_zero():
+    """A duplicated Wall Connector row hides the whole household load.
+
+    The reporter's site: 1.7 kW solar, 15.0 kW import, 10.0 kW battery charge
+    gives a 6.7 kW gross load with one 5.7 kW car.  Counting the BLE row and
+    the Wall Connector row as two cars over-subtracts, and the ``max(0.0, …)``
+    clamp turns that into a plausible-looking measured ``0 W``.
+    """
+    double_counted = normalize_home_load(
+        6.7, HomeLoadBasis.INCLUDES_EV, ev(11.7), at=NOW
+    )
+    assert double_counted.non_ev_home_load_kw == 0.0
+
+    coalesced = normalize_home_load(
+        6.7, HomeLoadBasis.INCLUDES_EV, ev(5.7), at=NOW
+    )
+    assert coalesced.non_ev_home_load_kw == pytest.approx(1.0)

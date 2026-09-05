@@ -485,7 +485,14 @@ def _merge_single_bridge_loadpoint(
             index not in bridge_indexes
             and not _is_generic_observation(observation)
             and not _is_bridge_loadpoint(observation)
-            and _is_physical_tesla_observation(observation)
+            # A Wall Connector measures the same physical session as the
+            # site's only Tesla row, whether that row came from Fleet or
+            # from a local BLE bridge. Excluding BLE here left a BLE-only
+            # site rendering two loadpoints and double-counting the car.
+            and (
+                _is_physical_tesla_observation(observation)
+                or _is_tesla_ble_observation(observation)
+            )
             and (
                 bool(observation.get("is_connected"))
                 or bool(observation.get("is_charging"))

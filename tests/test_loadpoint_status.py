@@ -1439,3 +1439,112 @@ def test_dynamic_loadpoint_reports_null_load_management_when_unmanaged():
 
     assert "load_management" in loadpoints[0]
     assert loadpoints[0]["load_management"] is None
+
+
+def test_loadpoint_status_merges_wall_connector_into_single_ble_tesla():
+    """Ticket #371: a BLE-only Tesla plus its Wall Connector is one car."""
+    loadpoints = build_loadpoint_status(
+        {},
+        [
+            {
+                "vehicle_id": "ble_esphome_web_51ea4c",
+                "vehicle_name": "Tesla BLE (esphome_web_51ea4c)",
+                "charger_type": "tesla_ble",
+                "ev_power_kw": 6.0,
+                "ev_soc": 71,
+                "is_connected": True,
+                "is_charging": True,
+            },
+            {
+                "vehicle_id": "wall_connector_1",
+                "charger_id": "wall_connector_1",
+                "vehicle_name": "Wall Connector",
+                "ev_power_kw": 5.7,
+                "is_connected": True,
+                "is_charging": True,
+            },
+        ],
+    )
+
+    assert [loadpoint["vehicle_name"] for loadpoint in loadpoints] == [
+        "Tesla BLE (esphome_web_51ea4c)"
+    ]
+    assert loadpoints[0]["current_power_kw"] == 5.7
+    assert loadpoints[0]["status"] == "charging"
+
+
+def test_loadpoint_status_keeps_wall_connector_with_two_ble_vehicles():
+    """Two BLE cars stay separate: merging would hide a real second car."""
+    loadpoints = build_loadpoint_status(
+        {},
+        [
+            {
+                "vehicle_id": "ble_esphome_web_51ea4c",
+                "vehicle_name": "Tesla BLE (esphome_web_51ea4c)",
+                "charger_type": "tesla_ble",
+                "ev_power_kw": 6.0,
+                "is_connected": True,
+                "is_charging": True,
+            },
+            {
+                "vehicle_id": "ble_esphome_web_9f21bb",
+                "vehicle_name": "Tesla BLE (esphome_web_9f21bb)",
+                "charger_type": "tesla_ble",
+                "ev_power_kw": 0.0,
+                "is_connected": True,
+                "is_charging": False,
+            },
+            {
+                "vehicle_id": "wall_connector_1",
+                "charger_id": "wall_connector_1",
+                "vehicle_name": "Wall Connector",
+                "ev_power_kw": 5.7,
+                "is_connected": True,
+                "is_charging": True,
+            },
+        ],
+    )
+
+    assert [loadpoint["vehicle_name"] for loadpoint in loadpoints] == [
+        "Tesla BLE (esphome_web_51ea4c)",
+        "Tesla BLE (esphome_web_9f21bb)",
+        "Wall Connector",
+    ]
+
+
+def test_loadpoint_status_keeps_generic_charger_out_of_ble_bridge_merge():
+    """A generic charger must not absorb, or be absorbed by, the connector."""
+    loadpoints = build_loadpoint_status(
+        {},
+        [
+            {
+                "vehicle_id": "ble_esphome_web_51ea4c",
+                "vehicle_name": "Tesla BLE (esphome_web_51ea4c)",
+                "charger_type": "tesla_ble",
+                "ev_power_kw": 6.0,
+                "is_connected": True,
+                "is_charging": True,
+            },
+            {
+                "vehicle_id": "generic_charger",
+                "vehicle_name": "Garage Charger",
+                "charger_type": "generic",
+                "ev_power_kw": 2.2,
+                "is_connected": True,
+                "is_charging": True,
+            },
+            {
+                "vehicle_id": "wall_connector_1",
+                "charger_id": "wall_connector_1",
+                "vehicle_name": "Wall Connector",
+                "ev_power_kw": 5.7,
+                "is_connected": True,
+                "is_charging": True,
+            },
+        ],
+    )
+
+    names = [loadpoint["vehicle_name"] for loadpoint in loadpoints]
+    assert "Garage Charger" in names
+    assert "Wall Connector" not in names
+    assert len(loadpoints) == 2
