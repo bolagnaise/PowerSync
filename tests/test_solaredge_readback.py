@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from pathlib import Path
 import sys
 import types
+from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -140,15 +140,25 @@ def _install_ha_modules(monkeypatch, entry, device):
     custom_components = types.ModuleType("custom_components")
     upstream = types.ModuleType("custom_components.solaredge_modbus_multi")
     const = types.ModuleType("custom_components.solaredge_modbus_multi.const")
-    const.STORAGE_CONTROL_MODE = {0: "Disabled", 4: "Remote Control"}
+    const.STORAGE_CONTROL_MODE = {
+        0: "Disabled",
+        1: "Maximize Self Consumption",
+        2: "Time of Use",
+        3: "Backup Only",
+        4: "Remote Control",
+    }
     const.STORAGE_AC_CHARGE_POLICY = {0: "Disabled", 1: "Always Allowed"}
     const.STORAGE_MODE = {
         0: "Solar Power Only (Off)",
         7: "Maximize Self Consumption",
     }
     monkeypatch.setitem(sys.modules, "custom_components", custom_components)
-    monkeypatch.setitem(sys.modules, "custom_components.solaredge_modbus_multi", upstream)
-    monkeypatch.setitem(sys.modules, "custom_components.solaredge_modbus_multi.const", const)
+    monkeypatch.setitem(
+        sys.modules, "custom_components.solaredge_modbus_multi", upstream
+    )
+    monkeypatch.setitem(
+        sys.modules, "custom_components.solaredge_modbus_multi.const", const
+    )
 
 
 def _hass(coordinator, inverters):
@@ -243,7 +253,9 @@ def test_readback_returns_copied_translated_state_without_mutation(monkeypatch):
     assert coordinator.refreshes == 1
 
 
-@pytest.mark.parametrize("field", ["ac_charge_limit", "default_mode", "ac_charge_policy", "backup_reserve"])
+@pytest.mark.parametrize(
+    "field", ["ac_charge_limit", "ac_charge_policy", "backup_reserve"]
+)
 @pytest.mark.parametrize("value", [None, -1, float("nan"), True])
 def test_readback_ignores_unsupported_optional_field(monkeypatch, field, value):
     inverter = _Inverter("SE5000_SERIAL-A")
@@ -252,12 +264,23 @@ def test_readback_ignores_unsupported_optional_field(monkeypatch, field, value):
     else:
         inverter.decoded_storage_control[field] = value
     result = _read(monkeypatch, _Coordinator(), [inverter])
-    assert result is not None
-    assert result["command_mode"] == "Maximize Self Consumption"
-    assert field not in result
+    if value is None or (field != "ac_charge_policy" and isinstance(value, float)):
+        assert result is not None
+        assert field not in result
+    else:
+        assert result is None
 
 
-@pytest.mark.parametrize("field", ["control_mode", "command_mode", "command_timeout", "charge_limit", "discharge_limit"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "control_mode",
+        "command_mode",
+        "command_timeout",
+        "charge_limit",
+        "discharge_limit",
+    ],
+)
 @pytest.mark.parametrize("value", [None, float("nan"), True, -1])
 def test_readback_rejects_invalid_essential_field(monkeypatch, field, value):
     inverter = _Inverter("SE5000_SERIAL-A")
@@ -275,7 +298,7 @@ def test_readback_rejects_unknown_required_enum(monkeypatch, field):
     assert _read(monkeypatch, _Coordinator(), [inverter]) is None
 
 
-@pytest.mark.parametrize("field", ["ac_charge_policy", "default_mode"])
+@pytest.mark.parametrize("field", ["ac_charge_policy"])
 def test_readback_omits_unknown_optional_enum(monkeypatch, field):
     inverter = _Inverter("SE5000_SERIAL-A")
     inverter.decoded_storage_control[field] = 65535
@@ -289,17 +312,19 @@ def test_readback_baseline_omits_unsupported_optional_fields(monkeypatch):
     inverter.decoded_storage_control.pop("backup_reserve")
     inverter.decoded_storage_control["ac_charge_policy"] = 65535
     _install_ha_modules(
-        monkeypatch, _Entry(),
+        monkeypatch,
+        _Entry(),
         _Device({"entry-a"}, {("solaredge_modbus_multi", "SE5000_SERIAL-A")}),
     )
     from power_sync.inverters.solaredge_readback import async_read_storage_baseline
 
-    result = asyncio.run(async_read_storage_baseline(
-        _hass(_Coordinator(), [inverter]), "select.command"
-    ))
+    result = asyncio.run(
+        async_read_storage_baseline(_hass(_Coordinator(), [inverter]), "select.command")
+    )
     assert result == {
         "storage_control_mode": "Remote Control",
         "storage_command_mode": "Maximize Self Consumption",
+        "storage_default_mode": "Maximize Self Consumption",
         "command_timeout": 3600,
         "charge_power_limit": 4200.0,
         "discharge_power_limit": 3800.0,
@@ -308,13 +333,20 @@ def test_readback_baseline_omits_unsupported_optional_fields(monkeypatch):
 
 @pytest.mark.parametrize(
     ("keep_open", "connected", "expected_delay"),
-    [(False, False, True), (True, False, False), (False, True, False),
-     (None, False, False), (False, None, False), (None, None, False)],
+    [
+        (False, False, True),
+        (True, False, False),
+        (False, True, False),
+        (None, False, False),
+        (False, None, False),
+        (None, None, False),
+    ],
 )
 def test_readback_transport_settle_only_for_explicitly_closed_connection(
     monkeypatch, keep_open, connected, expected_delay
 ):
     from unittest.mock import AsyncMock
+
     from power_sync.inverters import solaredge_readback
 
     coordinator = _Coordinator()
@@ -322,12 +354,15 @@ def test_readback_transport_settle_only_for_explicitly_closed_connection(
     coordinator._hub.keep_modbus_open = keep_open
     coordinator._hub.is_connected = connected
     _install_ha_modules(
-        monkeypatch, _Entry(),
+        monkeypatch,
+        _Entry(),
         _Device({"entry-a"}, {("solaredge_modbus_multi", "SE5000_SERIAL-A")}),
     )
     sleep = AsyncMock()
     monkeypatch.setattr(solaredge_readback.asyncio, "sleep", sleep)
-    result = asyncio.run(solaredge_readback.async_read_storage_state(hass, "select.command"))
+    result = asyncio.run(
+        solaredge_readback.async_read_storage_state(hass, "select.command")
+    )
     assert result is not None
     if expected_delay:
         sleep.assert_awaited_once_with(2.0)
@@ -342,6 +377,7 @@ def test_readback_transport_settle_preserves_failure_and_cancellation(
     monkeypatch, interruption
 ):
     from unittest.mock import AsyncMock
+
     from power_sync.inverters import solaredge_readback
 
     coordinator = _Coordinator()
@@ -349,7 +385,8 @@ def test_readback_transport_settle_preserves_failure_and_cancellation(
     coordinator._hub.keep_modbus_open = False
     coordinator._hub.is_connected = False
     _install_ha_modules(
-        monkeypatch, _Entry(),
+        monkeypatch,
+        _Entry(),
         _Device({"entry-a"}, {("solaredge_modbus_multi", "SE5000_SERIAL-A")}),
     )
 
@@ -367,9 +404,16 @@ def test_readback_transport_settle_preserves_failure_and_cancellation(
     monkeypatch.setattr(solaredge_readback.asyncio, "sleep", sleep)
     if interruption == "cancel":
         with pytest.raises(asyncio.CancelledError):
-            asyncio.run(solaredge_readback.async_read_storage_state(hass, "select.command"))
+            asyncio.run(
+                solaredge_readback.async_read_storage_state(hass, "select.command")
+            )
     else:
-        assert asyncio.run(solaredge_readback.async_read_storage_state(hass, "select.command")) is None
+        assert (
+            asyncio.run(
+                solaredge_readback.async_read_storage_state(hass, "select.command")
+            )
+            is None
+        )
     sleep.assert_awaited_once_with(2.0)
     assert coordinator.refreshes == 1
     assert coordinator.listeners == []
@@ -377,6 +421,7 @@ def test_readback_transport_settle_preserves_failure_and_cancellation(
 
 def test_readback_transport_settle_uses_remaining_refresh_deadline(monkeypatch):
     from unittest.mock import AsyncMock, Mock
+
     from power_sync.inverters import solaredge_readback
 
     coordinator = _Coordinator()
@@ -384,12 +429,301 @@ def test_readback_transport_settle_uses_remaining_refresh_deadline(monkeypatch):
     coordinator._hub.keep_modbus_open = False
     coordinator._hub.is_connected = False
     _install_ha_modules(
-        monkeypatch, _Entry(),
+        monkeypatch,
+        _Entry(),
         _Device({"entry-a"}, {("solaredge_modbus_multi", "SE5000_SERIAL-A")}),
     )
     wait_for = AsyncMock(side_effect=asyncio.wait_for)
     monkeypatch.setattr(solaredge_readback.asyncio, "wait_for", wait_for)
     monkeypatch.setattr(solaredge_readback.asyncio, "sleep", AsyncMock())
     monkeypatch.setattr(solaredge_readback, "_remaining", Mock(side_effect=[30.0, 0.5]))
-    assert asyncio.run(solaredge_readback.async_read_storage_state(hass, "select.command")) is not None
+    assert (
+        asyncio.run(solaredge_readback.async_read_storage_state(hass, "select.command"))
+        is not None
+    )
     assert [call.kwargs["timeout"] for call in wait_for.await_args_list] == [30.0, 0.5]
+
+
+@pytest.mark.parametrize("value", [None, 0xFFFF, "missing"])
+def test_native_readback_omits_inapplicable_remote_fields(monkeypatch, value):
+    inverter = _Inverter("SE5000_SERIAL-A")
+    inverter.decoded_storage_control["control_mode"] = 1
+    for field in ("command_mode", "command_timeout", "charge_limit", "discharge_limit"):
+        inverter.decoded_storage_control.pop(field)
+    if value != "missing":
+        inverter.decoded_storage_control["command_mode"] = value
+    result = _read(monkeypatch, _Coordinator(), [inverter])
+    assert result is not None
+    assert result["control_mode"] == "Maximize Self Consumption"
+    assert not set(result) & {
+        "command_mode",
+        "command_timeout",
+        "charge_limit",
+        "discharge_limit",
+    }
+
+
+def _result(monkeypatch, coordinator, inverter):
+    _install_ha_modules(
+        monkeypatch,
+        _Entry(),
+        _Device({"entry-a"}, {("solaredge_modbus_multi", "SE5000_SERIAL-A")}),
+    )
+    from power_sync.inverters.solaredge_readback import async_read_storage_result
+
+    return asyncio.run(
+        async_read_storage_result(_hass(coordinator, [inverter]), "select.command")
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("command_mode", 0xFFFF),
+        ("default_mode", 0xFFFF),
+        ("command_timeout", 0xFFFFFFFF),
+        ("charge_limit", float("nan")),
+        ("discharge_limit", float("nan")),
+    ],
+)
+def test_native_accepts_known_sentinel_but_never_returns_remote_value(
+    monkeypatch, field, value
+):
+    inverter = _Inverter("SE5000_SERIAL-A")
+    inverter.decoded_storage_control.update(control_mode=1)
+    inverter.decoded_storage_control[field] = value
+    result = _result(monkeypatch, _Coordinator(), inverter)
+    assert result.reason == "fresh_upstream_storage_poll"
+    assert result.state is not None
+    assert not set(result.state) & {
+        "command_mode",
+        "default_mode",
+        "command_timeout",
+        "charge_limit",
+        "discharge_limit",
+    }
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("command_mode", "unavailable"),
+        ("command_mode", 999),
+        ("command_timeout", 1.5),
+        ("command_timeout", -1),
+        ("charge_limit", True),
+        ("charge_limit", float("inf")),
+        ("discharge_limit", -1),
+        ("default_mode", "bad"),
+    ],
+)
+def test_native_rejects_malformed_remote_data(monkeypatch, field, value):
+    inverter = _Inverter("SE5000_SERIAL-A")
+    inverter.decoded_storage_control.update(control_mode=1)
+    inverter.decoded_storage_control[field] = value
+    result = _result(monkeypatch, _Coordinator(), inverter)
+    assert result.state is None
+    assert result.reason == "malformed_snapshot"
+    assert result.fields == (field,)
+
+
+def test_native_rejects_unknown_nan_payload(monkeypatch):
+    import struct
+
+    inverter = _Inverter("SE5000_SERIAL-A")
+    inverter.decoded_storage_control.update(control_mode=1)
+    inverter.decoded_storage_control["charge_limit"] = struct.unpack(
+        "<f", struct.pack("<I", 0x7FC00001)
+    )[0]
+    result = _result(monkeypatch, _Coordinator(), inverter)
+    assert result.reason == "malformed_snapshot"
+    assert result.fields == ("charge_limit",)
+
+
+@pytest.mark.parametrize(
+    "coordinator,uid,reason",
+    [
+        (_Coordinator(advances=False), "SE5000_SERIAL-A", "readback_not_fresh"),
+        (_Coordinator(succeeds=False), "SE5000_SERIAL-A", "readback_not_fresh"),
+        (_Coordinator(replaces_storage=False), "SE5000_SERIAL-A", "readback_not_fresh"),
+        (_Coordinator(), "SE5000_OTHER", "identity_mismatch"),
+    ],
+)
+def test_structured_readback_reason(monkeypatch, coordinator, uid, reason):
+    result = _result(monkeypatch, coordinator, _Inverter(uid))
+    assert result.state is None
+    assert result.reason == reason
+    assert result.fields == ()
+
+
+@pytest.mark.parametrize("mode", [0, 2, 3])
+def test_known_unsupported_mode_reports_distinct_reason(monkeypatch, mode):
+    inverter = _Inverter("SE5000_SERIAL-A")
+    inverter.decoded_storage_control["control_mode"] = mode
+    result = _result(monkeypatch, _Coordinator(), inverter)
+    assert result.reason == "unsupported_storage_mode"
+    assert result.state is None
+
+
+@pytest.mark.parametrize(
+    "failure,reason",
+    [
+        ("busy", "upstream_write_busy"),
+        ("unavailable", "readback_unavailable"),
+        ("timeout", "readback_not_fresh"),
+    ],
+)
+def test_readback_distinguishes_busy_unavailable_and_timeout(
+    monkeypatch, failure, reason
+):
+    from unittest.mock import AsyncMock
+
+    from power_sync.inverters.solaredge_readback import async_read_storage_result
+
+    coordinator = _Coordinator()
+    hass = _hass(coordinator, [_Inverter("SE5000_SERIAL-A")])
+    _install_ha_modules(
+        monkeypatch,
+        _Entry(),
+        _Device({"entry-a"}, {("solaredge_modbus_multi", "SE5000_SERIAL-A")}),
+    )
+    hass.services = types.SimpleNamespace(async_call=AsyncMock())
+    if failure == "busy":
+        coordinator._hub.has_write = True
+    elif failure == "unavailable":
+        hass.data.clear()
+    else:
+        coordinator.async_request_refresh = AsyncMock(side_effect=TimeoutError)
+    result = asyncio.run(async_read_storage_result(hass, "select.command"))
+    assert result.state is None
+    assert result.reason == reason
+    assert coordinator.listeners == []
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", [1, 4])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("backup_reserve", -1),
+        ("ac_charge_policy", 999),
+        ("ac_charge_limit", True),
+        ("charge_limit", 1000001),
+    ],
+)
+def test_readback_rejects_present_malformed_applicable_fields(
+    monkeypatch, mode, field, value
+):
+    inverter = _Inverter("SE5000_SERIAL-A")
+    inverter.decoded_storage_control.update(control_mode=mode)
+    inverter.decoded_storage_control[field] = value
+    result = _result(monkeypatch, _Coordinator(), inverter)
+    assert result.reason == "malformed_snapshot"
+    assert result.fields == (field,)
+
+
+def test_remote_requires_default_mode(monkeypatch):
+    inverter = _Inverter("SE5000_SERIAL-A")
+    inverter.decoded_storage_control.pop("default_mode")
+    result = _result(monkeypatch, _Coordinator(), inverter)
+    assert result.reason == "malformed_snapshot"
+    assert result.fields == ("default_mode",)
+
+
+def test_captured_native_register_snapshot_is_read_only(monkeypatch):
+    """Replay the native-mode register values captured on the supervised site."""
+    import struct
+    from unittest.mock import AsyncMock
+
+    from power_sync.inverters.solaredge_readback import async_read_storage_result
+
+    def float32(bits):
+        return struct.unpack("<f", struct.pack("<I", bits))[0]
+
+    inverter = _Inverter("SE5000_SERIAL-A")
+    inverter.decoded_storage_control = {
+        "control_mode": 1,
+        "ac_charge_policy": 1,
+        "default_mode": 7,
+        "command_mode": 0xFFFF,
+        "ac_charge_limit": float32(0),
+        "backup_reserve": float32(0x41200000),
+        "charge_limit": float32(0x46322000),
+        "discharge_limit": float32(0x46322000),
+        "command_timeout": 0xE10,
+    }
+    before = dict(inverter.decoded_storage_control)
+    coordinator = _Coordinator()
+    hass = _hass(coordinator, [inverter])
+    hass.services = types.SimpleNamespace(async_call=AsyncMock())
+    _install_ha_modules(
+        monkeypatch,
+        _Entry(),
+        _Device({"entry-a"}, {("solaredge_modbus_multi", "SE5000_SERIAL-A")}),
+    )
+    result = asyncio.run(async_read_storage_result(hass, "select.command"))
+    assert result.reason == "fresh_upstream_storage_poll"
+    assert result.state == {
+        "control_mode": "Maximize Self Consumption",
+        "ac_charge_policy": "Always Allowed",
+        "ac_charge_limit": 0.0,
+        "backup_reserve": 10.0,
+    }
+    assert inverter.decoded_storage_control == before
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "runtime",
+        "runtime_removed",
+        "hub",
+        "coordinator",
+        "entity",
+        "device",
+        "inverter_uid",
+        "inverter_removed",
+        "inverter_replaced",
+    ],
+)
+def test_readback_rechecks_bindings_after_poll(monkeypatch, change):
+    from power_sync.inverters.solaredge_readback import async_read_storage_result
+
+    inverter = _Inverter("SE5000_SERIAL-A")
+    coordinator = _Coordinator()
+    hass = _hass(coordinator, [inverter])
+    entry = _Entry()
+    device = _Device({"entry-a"}, {("solaredge_modbus_multi", "SE5000_SERIAL-A")})
+    _install_ha_modules(monkeypatch, entry, device)
+    refresh = coordinator.async_request_refresh
+
+    async def refresh_and_replace():
+        await refresh()
+        if change == "runtime":
+            hass.data["solaredge_modbus_multi"]["entry-a"] = {}
+        elif change == "runtime_removed":
+            hass.data["solaredge_modbus_multi"].pop("entry-a")
+        elif change == "hub":
+            hass.data["solaredge_modbus_multi"]["entry-a"]["hub"] = _Hub([inverter])
+        elif change == "coordinator":
+            hass.data["solaredge_modbus_multi"]["entry-a"]["coordinator"] = (
+                _Coordinator()
+            )
+        elif change == "inverter_replaced":
+            coordinator._hub.inverters = [_Inverter("SE5000_SERIAL-A")]
+        elif change == "entity":
+            entry.unique_id = "SE5000_OTHER_storage_command_mode"
+        elif change == "device":
+            device.identifiers = {("solaredge_modbus_multi", "SE5000_OTHER")}
+        elif change == "inverter_uid":
+            inverter.uid_base = "SE5000_OTHER"
+        else:
+            coordinator._hub.inverters = []
+
+    coordinator.async_request_refresh = refresh_and_replace
+    result = asyncio.run(async_read_storage_result(hass, "select.command"))
+    assert result.state is None
+    assert result.reason == (
+        "readback_unavailable" if change == "runtime_removed" else "identity_mismatch"
+    )

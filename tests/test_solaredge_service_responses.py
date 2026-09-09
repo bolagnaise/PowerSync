@@ -357,3 +357,69 @@ def test_manual_restore_response_requires_confirmed_write(outcome):
     else:
         namespace["_cancel_all_force_timers"].assert_not_called()
     coordinator.restore_normal.assert_awaited_once()
+
+
+def _reconcile_service(result):
+    coordinator = SimpleNamespace(reconcile_result=AsyncMock(return_value=result))
+    namespace = {
+        "ServiceCall": SimpleNamespace,
+        "HomeAssistantError": RuntimeError,
+        "DOMAIN": "power_sync",
+        "hass": SimpleNamespace(data={"power_sync": {"entry": {"solaredge_coordinator": coordinator}}}),
+    }
+    return _load_setup_helper("handle_reconcile_solaredge_control", namespace), coordinator
+
+
+@pytest.mark.parametrize("reason", [
+    "readback_unavailable", "readback_not_fresh", "identity_mismatch",
+    "controller_write_busy", "upstream_write_busy", "malformed_snapshot",
+    "active_command", "unsupported_storage_mode", "baseline_mismatch", "persistence_failed",
+])
+def test_reconcile_service_reports_safe_rejection(reason):
+    result = {"success": False, "control_health": "reconciliation_required", "reason": reason}
+    if reason == "baseline_mismatch":
+        result["fields"] = ["backup_reserve"]
+    invoke, coordinator = _reconcile_service(result)
+    call = SimpleNamespace(data={"entry_id": "entry", "acknowledge": True})
+    with pytest.raises(RuntimeError, match=reason) as failure:
+        asyncio.run(invoke(call))
+    if reason == "baseline_mismatch":
+        assert "backup_reserve" in str(failure.value)
+    coordinator.reconcile_result.assert_awaited_once_with()
+
+
+def test_reconcile_service_returns_confirmation_source():
+    result = {"success": True, "control_health": "ready", "reason": "native_self_consumption", "confirmation_source": "fresh_upstream_storage_poll"}
+    invoke, coordinator = _reconcile_service(result)
+    assert asyncio.run(invoke(SimpleNamespace(data={"entry_id": "entry", "acknowledge": True}))) == result
+    coordinator.reconcile_result.assert_awaited_once_with()
+
+
+@pytest.mark.parametrize("acknowledge", [None, False, "true", 1])
+def test_reconcile_service_requires_explicit_acknowledgement(acknowledge):
+    invoke, coordinator = _reconcile_service({})
+    with pytest.raises(RuntimeError, match="acknowledge: true"):
+        asyncio.run(invoke(SimpleNamespace(data={"entry_id": "entry", "acknowledge": acknowledge})))
+    coordinator.reconcile_result.assert_not_awaited()
+
+
+def test_reconcile_service_rejects_missing_entry():
+    invoke, coordinator = _reconcile_service({})
+    with pytest.raises(RuntimeError, match="Select a PowerSync entry"):
+        asyncio.run(invoke(SimpleNamespace(data={"entry_id": "missing", "acknowledge": True})))
+    coordinator.reconcile_result.assert_not_awaited()
+
+
+@pytest.mark.parametrize("reason", [
+    "readback_unavailable", "readback_not_fresh", "identity_mismatch",
+    "controller_write_busy", "upstream_write_busy", "malformed_snapshot",
+    "active_command", "unsupported_storage_mode", "baseline_mismatch", "persistence_failed",
+])
+def test_reconcile_service_returns_failure_to_response_clients(reason):
+    result = {"success": False, "control_health": "reconciliation_required", "reason": reason}
+    if reason == "baseline_mismatch":
+        result["fields"] = ["backup_reserve"]
+    invoke, coordinator = _reconcile_service(result)
+    call = SimpleNamespace(data={"entry_id": "entry", "acknowledge": True}, return_response=True)
+    assert asyncio.run(invoke(call)) == result
+    coordinator.reconcile_result.assert_awaited_once_with()

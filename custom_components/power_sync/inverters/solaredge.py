@@ -1093,6 +1093,16 @@ class SolarEdgeEnergyController:
                         state = self.hass.states.get(entity)
                         if key in fresh and state is not None and not self._control_values_match(entity, state.state, fresh[key]):
                             raise ValueError(f"Cached {key} differs from fresh storage read")
+                if (
+                    restoring
+                    and not session.owned
+                    and not session.baseline
+                    and fresh is not None
+                    and fresh.get("storage_control_mode") == "Maximize Self Consumption"
+                ):
+                    # The fresh native poll already confirms the requested state.
+                    # Keep this inside the lock and after health/generation checks.
+                    return True
                 plan = make_plan()
                 plan = [
                     self._preflight(key, value, native=restoring) for key, value in plan
@@ -1545,7 +1555,8 @@ class SolarEdgeEnergyController:
             entity = self._control_entity_map.get(key)
             state = self.hass.states.get(entity) if entity else None
             if (
-                state
+                key in result
+                and state
                 and str(state.attributes.get("unit_of_measurement", "")).lower() == "kw"
             ):
                 result[key] /= 1000
@@ -1560,13 +1571,37 @@ class SolarEdgeEnergyController:
         return result
 
     async def _fresh_storage_state(self):
-        from .solaredge_readback import async_read_storage_baseline
+        from .solaredge_readback import async_read_storage_result
 
         command_entity = self._control_entity_map.get("storage_command_mode")
         if not command_entity:
+            self._readback_rejection = ("readback_unavailable", ())
             return None
-        snapshot = await async_read_storage_baseline(self.hass, command_entity)
-        return self._native_readback(snapshot) if snapshot else None
+        session = self._coordinator()
+        identity = self._physical_identity(self._registry_entry(command_entity))
+        if identity is None or identity != session.identity:
+            self._readback_rejection = ("identity_mismatch", ())
+            return None
+        result = await async_read_storage_result(self.hass, command_entity)
+        if self._physical_identity(self._registry_entry(command_entity)) != session.identity:
+            self._readback_rejection = ("identity_mismatch", ())
+            return None
+        self._readback_rejection = (result.reason, result.fields)
+        if result.state is None:
+            return None
+        fields = {
+            "storage_control_mode": "control_mode",
+            "storage_command_mode": "command_mode",
+            "storage_default_mode": "default_mode",
+            "allow_grid_charge": "ac_charge_policy",
+            "charge_power_limit": "charge_limit",
+            "discharge_power_limit": "discharge_limit",
+            "command_timeout": "command_timeout",
+            "backup_reserve": "backup_reserve",
+        }
+        return self._native_readback({
+            key: result.state[raw] for key, raw in fields.items() if raw in result.state
+        })
 
     async def _confirm_mutation(self, key, entity, value):
         command_entry = self._registry_entry(
@@ -1583,13 +1618,29 @@ class SolarEdgeEnergyController:
         return await self._wait_for_reflected_state(entity, value)
 
     async def reconcile(self) -> bool:
-        """Check a fresh upstream register poll without writing inverter controls.
+        """Compatibility wrapper for callers requiring a boolean outcome."""
+        return (await self.reconcile_result())["success"]
 
-        Existing baselines must match in full. Without a saved baseline, a benign
-        storage snapshot can be adopted. Storage polls cannot clear uncertain
-        active-power writes. Unsupported readback contracts remain blocked.
+    async def reconcile_result(self) -> dict:
+        """Reconcile fresh decoded registers without issuing inverter writes.
+
+        Native self-consumption retires a saved Remote Control mode and ignores
+        remote-only registers, discarding the baseline on success. Applicable
+        reserve and grid-charge policy must still match. Dispatch must capture every planned
+        field afresh; unavailable remote controls cannot reuse retained limits.
         """
         session = self._coordinator()
+
+        def response(success, reason, fields=(), source=None):
+            result = {"success": success, "control_health": session.health, "reason": reason}
+            if fields:
+                result["fields"] = list(fields)
+            if source:
+                result["confirmation_source"] = source
+            return result
+
+        if session.lock.locked():
+            return response(False, "controller_write_busy")
         async with session.lock:
             await self._load_session(session)
             if (
@@ -1597,54 +1648,79 @@ class SolarEdgeEnergyController:
                 and session.last_mutation.get("operation") == "active_power"
                 and session.health != "ready"
             ):
-                return False
+                return response(False, "unresolved_active_power")
+            self._readback_rejection = None
             observed = await self._fresh_storage_state()
-            if observed is None or self._snapshot_is_active(observed):
-                return False
-            command = _normalize_option(str(observed.get("storage_command_mode", "")))
+            if observed is None:
+                reason, fields = self._readback_rejection or ("readback_unavailable", ())
+                return response(False, reason, fields)
             control = _normalize_option(str(observed.get("storage_control_mode", "")))
-            benign_command = command in {
-                _normalize_option(value)
-                for value in (
-                    *_SELF_USE_OPTIONS,
-                    *_IDLE_OPTIONS,
-                    "solar power only (off)",
-                )
-            }
-            if not benign_command or control not in {
-                _normalize_option(value)
-                for value in (*_REMOTE_CONTROL_OPTIONS, *_SELF_USE_OPTIONS)
+            native = control == _normalize_option("Maximize Self Consumption")
+            if not native and control not in {
+                _normalize_option(value) for value in _REMOTE_CONTROL_OPTIONS
             }:
-                return False
-            if session.baseline:
-                for key, value in session.baseline.items():
-                    entity = self._control_entity_map.get(key)
-                    if not entity or not self._control_values_match(
-                        entity, observed.get(key), value
-                    ):
-                        return False
+                return response(False, "unsupported_storage_mode")
+            if not native:
+                if self._snapshot_is_active(observed):
+                    return response(False, "active_command")
+                benign = {
+                    _normalize_option(value)
+                    for value in (*_SELF_USE_OPTIONS, *_IDLE_OPTIONS, "solar power only (off)")
+                }
+                for key in ("storage_command_mode", "storage_default_mode"):
+                    if observed.get(key) is None:
+                        return response(False, "malformed_snapshot", (key,))
+                    if _normalize_option(str(observed[key])) not in benign:
+                        return response(False, "active_command", (key,))
+            remote_fields = {
+                "storage_command_mode", "storage_default_mode", "command_timeout",
+                "charge_power_limit", "discharge_power_limit",
+            }
+            mismatches = []
+            for key, value in (session.baseline or {}).items():
+                if native and key in remote_fields:
+                    continue
+                if (
+                    native
+                    and key == "storage_control_mode"
+                    and _normalize_option(str(value)) in {
+                        _normalize_option(mode) for mode in _REMOTE_CONTROL_OPTIONS
+                    }
+                ):
+                    # Native self-consumption supersedes the saved remote mode.
+                    # Retire this baseline below; never replay its hidden limits.
+                    continue
+                entity = self._control_entity_map.get(key)
+                if not entity or not self._control_values_match(entity, observed.get(key), value):
+                    mismatches.append(key)
+            if mismatches:
+                return response(False, "baseline_mismatch", sorted(mismatches))
             old_owned, old_baseline = session.owned, session.baseline
-            old_result = session.last_mutation
+            old_result, old_health = session.last_mutation, session.health
+            old_pending = session.pending_mutation
+            old_generation, old_intent = session.generation, session.intent_generation
             session.owned, session.baseline = {}, None
             session.health = "ready"
             session.generation += 1
             session.intent_generation = session.generation
+            source = "fresh_native_self_consumption_poll" if native else "fresh_upstream_storage_poll"
             self._result(
                 session,
                 SolarEdgeMutationOutcome.CONFIRMED,
                 "reconcile",
-                confirmation_source="fresh_upstream_storage_poll",
+                confirmation_source=source,
             )
             try:
                 await self._persist(session)
             except (Exception, asyncio.CancelledError) as err:
                 session.owned, session.baseline = old_owned, old_baseline
-                session.last_mutation = old_result
-                session.health = "reconciliation_required"
+                session.last_mutation, session.health = old_result, old_health
+                session.pending_mutation = old_pending
+                session.generation, session.intent_generation = old_generation, old_intent
                 if isinstance(err, asyncio.CancelledError):
                     raise
-                return False
-            return True
+                return response(False, "persistence_failed")
+            return response(True, "reconciled", source=source)
 
     def _ensure_entity_map(self) -> None:
         if not self._entity_map and not self._control_entity_map:
