@@ -15849,6 +15849,21 @@ class EVVehicleCommandView(HomeAssistantView):
                 params["vehicle_vin"] = None
                 params["vehicle_id"] = stored_config.get("vehicle_id") or manual_vehicle_id
 
+        # Integration options are authoritative for the single Generic Charger.
+        # A legacy app profile can retain scheduling metadata, but not entity IDs
+        # that the user has replaced or deleted in the options flow.
+        if manual_params.get("charger_type") == "generic":
+            for key in (
+                "charger_switch_entity",
+                "charger_amps_entity",
+                "charger_status_entity",
+                "charger_power_entity",
+            ):
+                params[key] = manual_params.get(key, "")
+            params["charger_type"] = "generic"
+            params["vehicle_id"] = "generic_ev"
+            params["vehicle_vin"] = None
+
         return params
 
     def _generic_charger_ready_for_start(self, params: dict) -> tuple[bool, str]:

@@ -507,6 +507,37 @@ def test_auto_schedule_sync_normalizes_stale_synthetic_backend():
     )
 
 
+def test_generic_options_override_stale_app_profile_entities():
+    """A saved Generic Charger replacement wins over legacy generic_ev data."""
+    opts = {
+        "generic_charger_enabled": True,
+        "generic_charger_switch_entity": "switch.replacement",
+        "generic_charger_amps_entity": "number.replacement_amps",
+        "generic_charger_status_entity": "sensor.replacement_status",
+        "generic_charger_power_entity": "sensor.replacement_power",
+    }
+    params = ev_planner._with_configured_charger_entities(
+        types.SimpleNamespace(),
+        {
+            "vehicle_id": "generic_ev",
+            "charger_switch_entity": "input_boolean.deleted",
+            "charger_amps_entity": "number.old_amps",
+            "charger_status_entity": "sensor.old_status",
+            "charger_power_entity": "sensor.old_power",
+        },
+        opts,
+        "generic",
+    )
+
+    assert params == {
+        "vehicle_id": "generic_ev",
+        "charger_switch_entity": "switch.replacement",
+        "charger_amps_entity": "number.replacement_amps",
+        "charger_status_entity": "sensor.replacement_status",
+        "charger_power_entity": "sensor.replacement_power",
+    }
+
+
 def test_auto_schedule_sync_matches_ble_prefix_alias():
     automation_store = types.SimpleNamespace(
         _data={

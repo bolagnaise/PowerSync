@@ -5773,6 +5773,10 @@ class AutoScheduleExecutor:
                                 opts,
                             )
                         )
+                        if settings.charger_type == "generic":
+                            _with_configured_charger_entities(
+                                self.hass, settings.__dict__, opts, "generic"
+                            )
                         return
         except Exception:
             pass
@@ -8528,22 +8532,19 @@ def _with_configured_charger_entities(
             CONF_GENERIC_CHARGER_SWITCH_ENTITY,
         )
 
-        params["charger_switch_entity"] = params.get("charger_switch_entity") or opts.get(
-            CONF_GENERIC_CHARGER_SWITCH_ENTITY,
-            "",
-        )
-        params["charger_amps_entity"] = params.get("charger_amps_entity") or opts.get(
-            CONF_GENERIC_CHARGER_AMPS_ENTITY,
-            "",
-        )
-        params["charger_status_entity"] = params.get("charger_status_entity") or opts.get(
-            CONF_GENERIC_CHARGER_STATUS_ENTITY,
-            "",
-        )
-        params["charger_power_entity"] = params.get("charger_power_entity") or opts.get(
-            CONF_GENERIC_CHARGER_POWER_ENTITY,
-            "",
-        )
+        for param_key, option_key in (
+            ("charger_switch_entity", CONF_GENERIC_CHARGER_SWITCH_ENTITY),
+            ("charger_amps_entity", CONF_GENERIC_CHARGER_AMPS_ENTITY),
+            ("charger_status_entity", CONF_GENERIC_CHARGER_STATUS_ENTITY),
+            ("charger_power_entity", CONF_GENERIC_CHARGER_POWER_ENTITY),
+        ):
+            # The synthetic single Generic Charger is configured through the
+            # entry options.  Per-vehicle generic profiles retain their own
+            # entity overrides for multi-loadpoint/app configurations.
+            if str(params.get("vehicle_id") or "").lower() == "generic_ev":
+                params[param_key] = opts.get(option_key) or params.get(param_key, "")
+            else:
+                params[param_key] = params.get(param_key) or opts.get(option_key, "")
     elif charger_type == "ocpp":
         params["ocpp_charger_id"] = _resolve_ocpp_charger_id(
             hass,

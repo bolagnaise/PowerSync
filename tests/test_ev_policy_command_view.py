@@ -63,7 +63,7 @@ def _command_view_method(name: str, namespace: dict):
     )
     method = copy.deepcopy(next(
         node for node in command_view.body
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == name
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == name
     ))
     method.decorator_list = []
     method.returns = None
@@ -105,6 +105,38 @@ def test_manual_generic_service_failure_reaches_command_response_safely():
 
     assert success is False
     assert message == "Generic Charger switch service for switch.garage_ev failed"
+
+
+def test_manual_generic_options_override_a_stale_app_profile():
+    manual_params = {
+        "charger_type": "generic",
+        "charger_switch_entity": "switch.replacement",
+        "charger_amps_entity": "number.replacement_amps",
+        "charger_status_entity": "sensor.replacement_status",
+        "charger_power_entity": "sensor.replacement_power",
+    }
+    method = _command_view_method("_manual_action_params", {})
+
+    class _View:
+        @staticmethod
+        def _manual_session_identity(_vehicle):
+            return "generic_ev", manual_params
+
+        @staticmethod
+        def _get_vehicle_charging_config(*_vehicle_ids):
+            return {
+                "vehicle_id": "generic_ev",
+                "charger_type": "generic",
+                "charger_switch_entity": "input_boolean.deleted",
+                "charger_amps_entity": "number.old_amps",
+            }
+
+    params = method(_View(), "generic_ev")
+
+    assert params["charger_switch_entity"] == "switch.replacement"
+    assert params["charger_amps_entity"] == "number.replacement_amps"
+    assert params["vehicle_id"] == "generic_ev"
+    assert params["vehicle_vin"] is None
 
 
 def test_manual_start_returns_the_safe_generic_failure_to_the_ui():

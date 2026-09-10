@@ -4790,7 +4790,7 @@ async def _action_start_ev_charging(
         if not switch_entity:
             _LOGGER.error("Generic charger start: no switch entity configured")
             return False
-        if "." not in switch_entity:
+        if not switch_entity.startswith("switch."):
             _LOGGER.error("Generic charger start: invalid switch entity %s", switch_entity)
             return False
         if not await _run_pre_charge_wake_sequence(hass, params, "generic"):
@@ -5092,8 +5092,11 @@ async def _action_stop_ev_charging(
         if not switch_entity:
             _LOGGER.error("Generic charger stop: no switch entity configured")
             return False
-        if "." not in switch_entity:
+        if not switch_entity.startswith("switch."):
             _LOGGER.error("Generic charger stop: invalid switch entity %s", switch_entity)
+            return False
+        if not hass.states.get(switch_entity):
+            _LOGGER.error("Generic charger stop: switch entity %s is not available", switch_entity)
             return False
         try:
             await hass.services.async_call("switch", "turn_off", {"entity_id": switch_entity}, blocking=True)

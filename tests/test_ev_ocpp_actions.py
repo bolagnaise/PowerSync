@@ -4565,6 +4565,24 @@ def test_generic_switch_stop_does_not_require_zero_amp_write():
     ]
 
 
+def test_generic_stop_fails_closed_when_the_configured_switch_is_missing():
+    hass = _Hass([])
+
+    result = asyncio.run(
+        actions._action_stop_ev_charging(
+            hass,
+            _Entry(),
+            {
+                "charger_type": "generic",
+                "charger_switch_entity": "switch.deleted_control",
+            },
+        )
+    )
+
+    assert result is False
+    assert hass.services.calls == []
+
+
 def test_generic_amps_only_stop_sets_input_number_to_zero():
     hass = _Hass([_State("input_number.smart_charge_set_amps", "6")])
 
