@@ -255,8 +255,14 @@ def test_degraded_monitoring_handoff_performs_no_cleanup_writes(service_availabl
 
 
 def test_reconciliation_service_is_explicit_and_scoped():
+    response = {
+        "success": True,
+        "control_health": "ready",
+        "reason": "reconciled",
+        "confirmation_source": "fresh_native_self_consumption_poll",
+    }
     coordinator = SimpleNamespace(
-        reconcile=AsyncMock(return_value=True), control_health="ready"
+        reconcile_result=AsyncMock(return_value=response), control_health="ready"
     )
     namespace = {
         "hass": SimpleNamespace(
@@ -268,12 +274,12 @@ def test_reconciliation_service_is_explicit_and_scoped():
     call = _load_node(_setup_node("handle_reconcile_solaredge_control"), namespace)
     with pytest.raises(RuntimeError, match="acknowledge"):
         asyncio.run(call(SimpleNamespace(data={"entry_id": "entry"})))
-    coordinator.reconcile.assert_not_awaited()
+    coordinator.reconcile_result.assert_not_awaited()
     result = asyncio.run(
         call(SimpleNamespace(data={"entry_id": "entry", "acknowledge": True}))
     )
-    assert result == {"success": True, "control_health": "ready"}
-    coordinator.reconcile.assert_awaited_once_with()
+    assert result == response
+    coordinator.reconcile_result.assert_awaited_once_with()
 
 
 def test_solaredge_restore_forwards_timer_generation_and_failure():
@@ -699,3 +705,52 @@ def test_solaredge_self_consumption_expiry_releases_only_matching_override(outco
             coordinator.restore_normal.assert_not_awaited()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("success", [False, True])
+def test_reconciliation_service_uses_real_coordinator_forwarding(success):
+    path = ROOT / "custom_components" / "power_sync" / "coordinator.py"
+    klass = next(
+        node for node in ast.parse(path.read_text()).body
+        if getattr(node, "name", None) == "SolarEdgeEnergyCoordinator"
+    )
+    methods = {}
+    for name in ("reconcile_result", "reconcile", "_control_result"):
+        methods[name] = _load_node(
+            next(node for node in klass.body if getattr(node, "name", None) == name), {}
+        )
+    coordinator_type = type("CoordinatorMethods", (), methods)
+    coordinator = coordinator_type()
+    health = "ready" if success else "reconciliation_required"
+    response = {
+        "success": success,
+        "control_health": health,
+        "reason": "reconciled" if success else "baseline_mismatch",
+    }
+    if not success:
+        response["fields"] = ["backup_reserve"]
+    status = {"control_health": health, "last_mutation": {"outcome": "confirmed" if success else "unknown"}}
+    coordinator._controller = SimpleNamespace(
+        reconcile_result=AsyncMock(return_value=response),
+        reconcile=AsyncMock(return_value=success),
+        get_status=lambda: status,
+    )
+    coordinator.data = {"battery_level": 50}
+    coordinator.async_set_updated_data = Mock()
+    namespace = {
+        "hass": SimpleNamespace(data={"power_sync": {"entry": {"solaredge_coordinator": coordinator}}}),
+        "DOMAIN": "power_sync",
+        "HomeAssistantError": RuntimeError,
+    }
+    handler = _load_node(_setup_node("handle_reconcile_solaredge_control"), namespace)
+    result = asyncio.run(handler(SimpleNamespace(data={"entry_id": "entry", "acknowledge": True}, return_response=True)))
+    assert result is response
+    assert result["success"] is success
+    coordinator._controller.reconcile_result.assert_awaited_once_with()
+    assert coordinator.async_set_updated_data.call_args.args[0] == {
+        "battery_level": 50, **status, "mutation_active": False,
+    }
+    # The existing boolean API also remains false on rejection.
+    assert asyncio.run(coordinator.reconcile()) is success
+    coordinator._controller.reconcile.assert_awaited_once_with()
+    assert coordinator.async_set_updated_data.call_count == 2

@@ -1964,6 +1964,7 @@ def test_solaredge_reconcile_requires_fresh_matching_benign_baseline(readback):
         snapshot = dict(controller._saved_control_state)
         if readback == "active":
             snapshot["storage_command_mode"] = "Charge"
+            snapshot["storage_control_mode"] = "Remote Control"
         elif readback == "mismatch":
             snapshot["backup_reserve"] = "30"
 
@@ -2158,6 +2159,7 @@ def test_solaredge_cancelled_reconciliation_save_keeps_containment():
             saving.set()
             await asyncio.Future()
         controller._coordinator().store.async_save = save
+        pending = dict(controller._coordinator().pending_mutation)
         task = asyncio.create_task(controller.reconcile())
         await saving.wait()
         task.cancel()
@@ -2166,6 +2168,7 @@ def test_solaredge_cancelled_reconciliation_save_keeps_containment():
         assert controller.control_health == "reconciliation_required"
         assert controller.last_mutation["outcome"] == "unknown"
         assert controller._saved_control_state == baseline
+        assert controller._coordinator().pending_mutation == pending
         assert not controller.mutation_active
     asyncio.run(scenario())
 
@@ -2431,3 +2434,271 @@ def test_native_benign_baseline_round_trip_preserves_nonzero_timeout(command):
     for field in ("charge_limit", "discharge_limit"):
         assert float(hass.states.get(f"number.solaredge_storage_{field}").state) == 4200
     assert float(hass.states.get("number.solaredge_storage_command_timeout").state) == 3600
+
+
+@pytest.mark.parametrize("remote_fields", [{}, {"command_timeout": 3600}, {"storage_command_mode": "Charge", "discharge_power_limit": 5000}])
+def test_native_reconciliation_discards_inapplicable_baseline(remote_fields):
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        session = controller._coordinator()
+        await controller._load_session(session)
+        session.health = "reconciliation_required"
+        session.baseline = {"storage_control_mode": "Maximize Self Consumption", "discharge_power_limit": 5000}
+        session.owned = {"discharge_power_limit": 5000}
+        session.last_mutation = {"operation": "force_discharge", "outcome": "unknown"}
+        async def fresh():
+            return {"storage_control_mode": "Maximize Self Consumption", **remote_fields}
+        controller._fresh_storage_state = fresh
+        result = await controller.reconcile_result()
+        assert result == {"success": True, "control_health": "ready", "reason": "reconciled", "confirmation_source": "fresh_native_self_consumption_poll"}
+        assert session.baseline is None
+        assert session.owned == {}
+        assert session.store.data["baseline"] is None
+        assert hass.services.calls == []
+        # Modbus Multi operations require each planned field from a fresh poll,
+        # even if cached entities still hold the old numeric limits.
+        controller._registry_entry = lambda entity: types.SimpleNamespace(platform="solaredge_modbus_multi", device_id="inverter", config_entry_id="upstream")
+        async def incomplete():
+            return {"storage_control_mode": "Maximize Self Consumption"}
+        controller._fresh_storage_state = incomplete
+        assert not await controller.force_discharge(15, 2000)
+        assert session.baseline is None
+        assert hass.services.calls == []
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("reason", ["readback_unavailable", "readback_not_fresh", "identity_mismatch", "upstream_write_busy", "malformed_snapshot"])
+def test_reconciliation_preserves_readback_diagnostic_and_safety_record(reason):
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        session = controller._coordinator()
+        await controller._load_session(session)
+        session.health = "reconciliation_required"
+        session.last_mutation = {"operation": "force_discharge", "outcome": "unknown"}
+        old = dict(session.last_mutation)
+        async def fresh():
+            controller._readback_rejection = (reason, ("command_mode",))
+        controller._fresh_storage_state = fresh
+        result = await controller.reconcile_result()
+        assert result["reason"] == reason
+        assert result["fields"] == ["command_mode"]
+        assert not result["success"]
+        assert session.last_mutation == old
+        assert session.health == "reconciliation_required"
+        assert hass.services.calls == []
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("mode,command,default,reason", [
+    ("Time of Use", "Maximize Self Consumption", "Maximize Self Consumption", "unsupported_storage_mode"),
+    ("Backup Only", "Maximize Self Consumption", "Maximize Self Consumption", "unsupported_storage_mode"),
+    ("Remote Control", "Charge", "Maximize Self Consumption", "active_command"),
+    ("Remote Control", "Maximize Self Consumption", "Charge", "active_command"),
+    ("Remote Control", "Maximize Self Consumption", None, "malformed_snapshot"),
+])
+def test_reconciliation_rejects_active_and_unsupported_modes(mode, command, default, reason):
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        session = controller._coordinator()
+        await controller._load_session(session)
+        session.health = "reconciliation_required"
+        async def fresh():
+            return {"storage_control_mode": mode, "storage_command_mode": command, "storage_default_mode": default}
+        controller._fresh_storage_state = fresh
+        result = await controller.reconcile_result()
+        assert result["reason"] == reason
+        assert not result["success"]
+        assert session.health == "reconciliation_required"
+        assert hass.services.calls == []
+    asyncio.run(scenario())
+
+
+def test_reconciliation_busy_does_not_wait_for_mutation():
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        session = controller._coordinator()
+        async with session.lock:
+            result = await controller.reconcile_result()
+        assert result["reason"] == "controller_write_busy"
+        assert not result["success"]
+        assert hass.services.calls == []
+    asyncio.run(scenario())
+
+
+def test_reconciliation_persistence_failure_restores_entire_session():
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        session = controller._coordinator()
+        await controller._load_session(session)
+        session.health = "reconciliation_required"
+        session.last_mutation = {"operation": "force_discharge", "outcome": "unknown"}
+        session.baseline = {"storage_control_mode": "Maximize Self Consumption"}
+        session.owned = {"discharge_power_limit": 5000}
+        session.pending_mutation = {"operation": "force_discharge", "intended_value": 5000}
+        pending = dict(session.pending_mutation)
+        before = (session.health, dict(session.last_mutation), dict(session.baseline), dict(session.owned), session.generation, session.intent_generation)
+        async def fresh():
+            return {"storage_control_mode": "Maximize Self Consumption"}
+        async def save(data):
+            raise OSError("cannot save")
+        controller._fresh_storage_state = fresh
+        session.store.async_save = save
+        result = await controller.reconcile_result()
+        assert result["reason"] == "persistence_failed"
+        assert not result["success"]
+        assert (session.health, session.last_mutation, session.baseline, session.owned, session.generation, session.intent_generation) == before
+        assert session.pending_mutation == pending
+        assert hass.services.calls == []
+    asyncio.run(scenario())
+
+
+def test_reconciliation_reports_applicable_baseline_mismatch_without_values():
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        session = controller._coordinator()
+        await controller._load_session(session)
+        session.health = "reconciliation_required"
+        session.last_mutation = {"operation": "force_discharge", "outcome": "unknown"}
+        session.baseline = {"storage_control_mode": "Remote Control", "backup_reserve": 30}
+        baseline = dict(session.baseline)
+        mutation = dict(session.last_mutation)
+        async def fresh():
+            return {"storage_control_mode": "Maximize Self Consumption", "backup_reserve": 15}
+        controller._fresh_storage_state = fresh
+        result = await controller.reconcile_result()
+        assert result == {"success": False, "control_health": "reconciliation_required", "reason": "baseline_mismatch", "fields": ["backup_reserve"]}
+        assert session.last_mutation == mutation
+        assert session.baseline == baseline
+        assert hass.services.calls == []
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("blocked,stale", [(False, False), (True, False), (False, True)])
+def test_native_restore_without_owned_baseline_is_read_only(blocked, stale):
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        session = controller._coordinator()
+        await controller._load_session(session)
+        session.health = "reconciliation_required" if blocked else "ready"
+        session.intent_generation = 5
+        controller._registry_entry = lambda entity: types.SimpleNamespace(
+            platform="solaredge_modbus_multi", device_id="inverter", config_entry_id="upstream"
+        )
+        hass.states.get("select.solaredge_storage_command_mode").state = "unavailable"
+        async def fresh():
+            assert session.lock.locked()
+            return {"storage_control_mode": "Maximize Self Consumption"}
+        controller._fresh_storage_state = fresh
+        generation = session.generation
+        result = await controller.restore_normal(expected_generation=4 if stale else 5)
+        assert result is (not blocked and not stale)
+        assert session.generation == generation
+        assert session.intent_generation == 5
+        assert session.baseline is None
+        assert session.owned == {}
+        assert hass.services.calls == []
+    asyncio.run(scenario())
+
+
+def test_native_reconciliation_retires_live_remote_baseline_without_replaying_limits():
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        session = controller._coordinator()
+        await controller._load_session(session)
+        session.health = "reconciliation_required"
+        session.baseline = {
+            "storage_control_mode": "Remote Control",
+            "storage_command_mode": "Maximize Self Consumption",
+            "charge_power_limit": 11400,
+            "discharge_power_limit": 11400,
+            "command_timeout": 3600,
+            "backup_reserve": 10,
+            "allow_grid_charge": "Always Allowed",
+        }
+        session.owned = {"command_timeout": 240, "charge_power_limit": 0}
+        session.last_mutation = {
+            "operation": "force_discharge", "outcome": "unknown", "intended_value": 5000,
+        }
+        async def fresh():
+            return {
+                "storage_control_mode": "Maximize Self Consumption",
+                "backup_reserve": 10,
+                "allow_grid_charge": "Always Allowed",
+            }
+        controller._fresh_storage_state = fresh
+        result = await controller.reconcile_result()
+        assert result["success"]
+        assert result["confirmation_source"] == "fresh_native_self_consumption_poll"
+        assert session.baseline is None
+        assert session.owned == {}
+        assert session.store.data["baseline"] is None
+        assert hass.services.calls == []
+        controller._registry_entry = lambda entity: types.SimpleNamespace(
+            platform="solaredge_modbus_multi", device_id="inverter", config_entry_id="upstream"
+        )
+        # Neither the saved 11,400 W limit nor the ambiguous 5,000 W write
+        # becomes a baseline for a later operation.
+        assert not await controller.force_charge(15, 2000)
+        assert not await controller.force_discharge(15, 2000)
+        assert session.baseline is None
+        assert hass.services.calls == []
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("old_mode", ["Time of Use", "Backup Only", "unknown"])
+def test_native_reconciliation_does_not_retire_unrecognized_baseline_mode(old_mode):
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        session = controller._coordinator()
+        await controller._load_session(session)
+        session.health = "reconciliation_required"
+        session.baseline = {"storage_control_mode": old_mode}
+        async def fresh():
+            return {"storage_control_mode": "Maximize Self Consumption"}
+        controller._fresh_storage_state = fresh
+        result = await controller.reconcile_result()
+        assert result["reason"] == "baseline_mismatch"
+        assert result["fields"] == ["storage_control_mode"]
+        assert not result["success"]
+        assert session.baseline == {"storage_control_mode": old_mode}
+        assert hass.services.calls == []
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("change_during_poll", [False, True])
+def test_reconciliation_keeps_session_bound_to_original_inverter(monkeypatch, change_during_poll):
+    async def scenario():
+        from power_sync.inverters import solaredge_readback
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        entry = types.SimpleNamespace(inverter="A")
+        controller._registry_entry = lambda entity: entry
+        controller._physical_identity = lambda current: f"solaredge_modbus_multi:{current.inverter}"
+        session = controller._coordinator()
+        await controller._load_session(session)
+        session.health = "reconciliation_required"
+        session.last_mutation = {"operation": "force_discharge", "outcome": "unknown"}
+        original = dict(session.last_mutation)
+        if not change_during_poll:
+            entry.inverter = "B"
+        async def readback(hass, entity):
+            assert change_during_poll, "Identity mismatch must reject before polling"
+            entry.inverter = "B"
+            return types.SimpleNamespace(state={"control_mode": "Maximize Self Consumption"}, reason="fresh_upstream_storage_poll", fields=())
+        monkeypatch.setattr(solaredge_readback, "async_read_storage_result", readback)
+        result = await controller.reconcile_result()
+        assert result == {"success": False, "reason": "identity_mismatch", "control_health": "reconciliation_required"}
+        assert controller._coordinator() is session
+        assert session.identity == "solaredge_modbus_multi:A"
+        assert session.last_mutation == original
+        assert hass.services.calls == []
+    asyncio.run(scenario())
