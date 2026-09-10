@@ -67,6 +67,16 @@ def test_obfuscate_log_arg_preserves_non_string_types() -> None:
     assert obfuscate_log_arg(True, _mask) is True
 
 
+def test_obfuscate_log_arg_masks_vins_in_mapping_keys_before_log_formatting() -> None:
+    """A %-style dictionary argument must not bypass the log filter."""
+    value = {VIN: False, "nested": [VIN]}
+
+    assert obfuscate_log_arg(value, lambda text: obfuscate_vin_tokens(text, _mask)) == {
+        MASKED_VIN: False,
+        "nested": [MASKED_VIN],
+    }
+
+
 def test_expo_push_logging_never_contains_registered_token() -> None:
     """A diagnostic log must not disclose the credential used to send pushes."""
     actions_path = (

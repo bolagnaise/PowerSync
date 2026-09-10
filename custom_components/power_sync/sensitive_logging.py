@@ -27,11 +27,16 @@ def obfuscate_log_arg(
     arg: Any,
     obfuscate_string: Callable[[str], str],
 ) -> Any:
-    """Redact string log args while preserving non-string formatting types."""
-    if not isinstance(arg, str):
-        return arg
-
-    obfuscated = obfuscate_string(arg)
-    if obfuscated != arg:
-        return obfuscated
+    """Redact strings nested in log args while preserving formatting types."""
+    if isinstance(arg, str):
+        return obfuscate_string(arg)
+    if isinstance(arg, dict):
+        return {
+            obfuscate_log_arg(key, obfuscate_string): obfuscate_log_arg(value, obfuscate_string)
+            for key, value in arg.items()
+        }
+    if isinstance(arg, tuple):
+        return tuple(obfuscate_log_arg(value, obfuscate_string) for value in arg)
+    if isinstance(arg, list):
+        return [obfuscate_log_arg(value, obfuscate_string) for value in arg]
     return arg

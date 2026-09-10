@@ -1247,16 +1247,26 @@ def _flow_power_export_rate_dollars(config_entry: Any, state: str) -> float:
 def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | None, float | None]:
     """Get current buy/sell prices in $/kWh for cost tracking.
 
-    Priority: Amber coordinator → AEMO/Flow Power KWatch coordinator → tariff schedule.
+    Priority: Amber-compatible dynamic coordinators → AEMO/Flow Power KWatch
+    coordinator → tariff schedule.
     Returns (buy_price_per_kwh, sell_price_per_kwh) or (None, None) on failure.
     """
     try:
         entry_data = hass.data.get(DOMAIN, {}).get(entry_id, {})
 
-        # Try Amber coordinator first (real-time market prices)
-        amber_coordinator = entry_data.get("amber_coordinator")
-        if amber_coordinator and amber_coordinator.data:
-            current_prices = amber_coordinator.data.get("current", [])
+        # Amber, Localvolts, Octopus and EPEX publish the same real-time
+        # current-price shape. Cost tracking must accept each of them just as
+        # the optimizer and EV-pricing paths do.
+        for coordinator_key in (
+            "amber_coordinator",
+            "localvolts_coordinator",
+            "octopus_coordinator",
+            "epex_coordinator",
+        ):
+            dynamic_coordinator = entry_data.get(coordinator_key)
+            if not dynamic_coordinator or not dynamic_coordinator.data:
+                continue
+            current_prices = dynamic_coordinator.data.get("current", [])
             buy_cents = None
             sell_cents = None
             for price in current_prices:
@@ -1266,9 +1276,16 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                 elif channel == "feedIn":
                     sell_cents = price.get("perKwh")
             if buy_cents is not None:
+                try:
+                    buy_cents = float(buy_cents)
+                    sell_cents = float(sell_cents) if sell_cents is not None else 0.0
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(buy_cents) or not math.isfinite(sell_cents):
+                    continue
                 # Amber perKwh is in cents → convert to $/kWh
                 buy_dollar = buy_cents / 100.0
-                sell_dollar = (sell_cents / 100.0) if sell_cents is not None else 0.0
+                sell_dollar = sell_cents / 100.0
                 # Amber feedIn: negative = you earn, positive = you pay to export
                 # Negate so sell_price is positive when earning, negative when paying
                 return (buy_dollar, -sell_dollar)

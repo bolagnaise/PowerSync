@@ -84,6 +84,57 @@ def test_cost_tracking_uses_live_provider_contract_without_tariff_schedule():
         )
 
 
+def test_cost_tracking_uses_all_amber_compatible_dynamic_coordinators():
+    """Daily cost coverage must use live prices from every supported adapter."""
+    coordinator_path = COMPONENT_ROOT / "coordinator.py"
+    namespace = {
+        "Any": object,
+        "DOMAIN": "power_sync",
+        "HomeAssistant": object,
+        "_LOGGER": SimpleNamespace(debug=lambda *args, **kwargs: None),
+        "math": math,
+    }
+    exec(
+        "from __future__ import annotations\n"
+        + _function_source(coordinator_path, "_get_current_prices"),
+        namespace,
+    )
+    current = [
+        {"channelType": "general", "perKwh": 30.0},
+        {"channelType": "feedIn", "perKwh": -5.0},
+    ]
+    for coordinator_key in (
+        "localvolts_coordinator",
+        "octopus_coordinator",
+        "epex_coordinator",
+    ):
+        hass = SimpleNamespace(
+            data={
+                "power_sync": {
+                    "dynamic-entry": {
+                        coordinator_key: SimpleNamespace(data={"current": current})
+                    }
+                }
+            }
+        )
+        assert namespace["_get_current_prices"](hass, "dynamic-entry") == (0.30, 0.05)
+
+    hass = SimpleNamespace(
+        data={
+            "power_sync": {
+                "dynamic-entry": {
+                    "localvolts_coordinator": SimpleNamespace(
+                        data={
+                            "current": [{"channelType": "general", "perKwh": float("nan")}]
+                        }
+                    )
+                }
+            }
+        }
+    )
+    assert namespace["_get_current_prices"](hass, "dynamic-entry") == (None, None)
+
+
 def test_cost_tracking_uses_flow_marginal_contract_prices():
     """The Flow plan contract is already in dollars, not the legacy cents shape."""
     coordinator_path = COMPONENT_ROOT / "coordinator.py"
