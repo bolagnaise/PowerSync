@@ -21377,7 +21377,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry_data["solaredge_controller_key"] = controller_key
         return controller
 
-    async def _solaredge_curtailment_write(coordinator, controller, operation) -> bool:
+    async def _solaredge_curtailment_write(
+        coordinator, controller, operation, *, write_allowed=None
+    ) -> bool:
         """Close the curtailment client before releasing the battery mutation lock."""
         async def write_and_disconnect() -> bool:
             try:
@@ -21385,7 +21387,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             finally:
                 await controller.disconnect()
 
-        return await coordinator.run_external_mutation(write_and_disconnect, automatic=True)
+        return await coordinator.run_external_mutation(
+            write_and_disconnect, automatic=True, write_allowed=write_allowed
+        )
 
     async def _restore_solaredge_curtailment_for_dispatch(
         entry_data: dict,
@@ -27925,12 +27929,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
         controller = _get_solaredge_curtailment_controller(entry_data)
 
-        async def _checked_direct_operation(operation) -> bool:
-            """Recheck permission after the coordinator mutation lock is held."""
-            if not _direct_dc_curtailment_write_allowed():
-                return False
-            return await operation()
-
         try:
             if export_uneconomic:
                 if _solaredge_force_dispatch_active(entry_data):
@@ -27953,7 +27951,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     success = await _solaredge_curtailment_write(
                         coordinator,
                         controller,
-                        lambda: _checked_direct_operation(controller.curtail),
+                        controller.curtail,
+                        write_allowed=_direct_dc_curtailment_write_allowed,
                     )
                     if success:
                         entry_data["solaredge_curtailment_state"] = "curtailed"
@@ -27970,7 +27969,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     success = await _solaredge_curtailment_write(
                         coordinator,
                         controller,
-                        lambda: _checked_direct_operation(controller.restore),
+                        controller.restore,
+                        write_allowed=_direct_dc_curtailment_write_allowed,
                     )
                     if success:
                         entry_data["solaredge_curtailment_state"] = "normal"

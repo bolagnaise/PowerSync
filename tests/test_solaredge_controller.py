@@ -1784,6 +1784,112 @@ def test_solaredge_external_unknown_blocks_storage_control():
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("curtailed", [False, True])
+@pytest.mark.parametrize("permission_lost_during_save", [False, True])
+def test_solaredge_curtailment_permission_rejection_does_not_latch(
+    curtailed, permission_lost_during_save
+):
+    """A denied runtime request must not become an uncertain inverter write."""
+    import ast
+    import logging
+    from unittest.mock import AsyncMock
+
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        session = controller._coordinator()
+        await controller._load_session(session)
+        allowed = permission_lost_during_save
+        save = session.store.async_save
+
+        async def revoke_during_save(data):
+            nonlocal allowed
+            await save(data)
+            if data.get("in_progress"):
+                allowed = False
+
+        session.store.async_save = revoke_during_save
+        direct = types.SimpleNamespace(
+            curtail=AsyncMock(return_value=True),
+            restore=AsyncMock(return_value=True),
+            disconnect=AsyncMock(),
+        )
+        entry_data = {
+            "solaredge_coordinator": controller,
+            "solaredge_curtailment_state": "curtailed" if curtailed else "normal",
+        }
+        hass.data = {"power_sync": {"entry": entry_data}}
+        namespace = {
+            "hass": hass,
+            "entry": types.SimpleNamespace(entry_id="entry", options={"enabled": True}, data={}),
+            "DOMAIN": "power_sync",
+            "CONF_SOLAREDGE_DC_CURTAILMENT_ENABLED": "enabled",
+            "battery_connection_profile": types.SimpleNamespace(profile_id="solaredge_composite"),
+            "_LOGGER": logging.getLogger(__name__),
+            "_get_solaredge_curtailment_controller": lambda _: direct,
+            "_direct_dc_curtailment_write_allowed": lambda: allowed,
+            "_solaredge_force_dispatch_active": lambda _: False,
+            "export_earnings_are_uneconomic": lambda *_: not curtailed,
+        }
+        source = ROOT / "__init__.py"
+        setup = next(n for n in ast.parse(source.read_text()).body if getattr(n, "name", None) == "async_setup_entry")
+        for name in ("_solaredge_curtailment_write", "handle_solaredge_curtailment"):
+            node = next(n for n in setup.body if getattr(n, "name", None) == name)
+            exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), "exec"), namespace)
+
+        await namespace["handle_solaredge_curtailment"](feedin_price=-10 if curtailed else 26)
+        direct.curtail.assert_not_awaited()
+        direct.restore.assert_not_awaited()
+        assert controller.control_health == "ready"
+        assert controller.last_mutation["outcome"] == "rejected"
+        assert controller.last_mutation["possibly_transmitted"] is False
+        assert session.pending_mutation is None
+        assert not session.store.data["in_progress"]
+        assert entry_data["solaredge_curtailment_state"] == ("curtailed" if curtailed else "normal")
+        # A restart after a definite rejection must not resurrect an uncertain journal.
+        hass._powersync_solaredge_controls.clear()
+        restarted = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        restarted._create_store = lambda _: session.store
+        assert await restarted.connect()
+        assert restarted.control_health == "ready"
+        assert restarted.last_mutation["possibly_transmitted"] is False
+        entry_data["solaredge_coordinator"] = restarted
+        # Re-enabling permission can perform one ordinary request without reconciliation.
+        allowed = True
+        session.store.async_save = save
+        await namespace["handle_solaredge_curtailment"](feedin_price=-10 if curtailed else 26)
+        (direct.restore if curtailed else direct.curtail).assert_awaited_once()
+        assert controller.control_health == "ready"
+        assert entry_data["solaredge_curtailment_state"] == ("normal" if curtailed else "curtailed")
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_rejected_external_journal_failure_still_blocks_control():
+    from unittest.mock import AsyncMock
+
+    async def scenario():
+        controller = SolarEdgeEnergyController(_SEHass(), entity_prefix="solaredge")
+        session = controller._coordinator()
+        await controller._load_session(session)
+        save = session.store.async_save
+
+        async def fail_final_save(data):
+            if not data["in_progress"]:
+                raise OSError("journal unavailable")
+            await save(data)
+
+        session.store.async_save = fail_final_save
+        callback = AsyncMock(return_value=True)
+        assert not await controller.run_external_mutation(callback, write_allowed=lambda: False)
+        callback.assert_not_awaited()
+        assert controller.control_health == "reconciliation_required"
+        assert controller.last_mutation["possibly_transmitted"] is False
+        assert session.store.data["in_progress"] is True
+
+    asyncio.run(scenario())
+
+
 def test_solaredge_direct_write_typeerror_is_not_retried():
     class Client:
         connected = True

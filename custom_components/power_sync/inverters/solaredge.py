@@ -1480,7 +1480,9 @@ class SolarEdgeEnergyController:
             return await self.restore_normal()
         return False
 
-    async def run_external_mutation(self, callback, *, automatic=False) -> bool:
+    async def run_external_mutation(
+        self, callback, *, automatic=False, write_allowed=None
+    ) -> bool:
         """Serialize one active-power mutation; its callback must not retry or clean up."""
         session = self._coordinator()
         if automatic and session.lock.locked():
@@ -1505,6 +1507,18 @@ class SolarEdgeEnergyController:
             try:
                 session.pending_mutation = {"operation": "active_power", "operation_id": session.generation}
                 await self._persist(session, in_progress=True)
+                # Permission can change while the journal is saved. Reject before
+                # invoking the actuator; no write has become uncertain at this point.
+                if write_allowed is not None and not write_allowed():
+                    session.pending_mutation = None
+                    self._result(
+                        session,
+                        SolarEdgeMutationOutcome.REJECTED,
+                        "active_power",
+                        message="Curtailment permission changed before the inverter write",
+                    )
+                    await self._persist(session)
+                    return False
                 possible = True
                 if not await callback():
                     raise RuntimeError(

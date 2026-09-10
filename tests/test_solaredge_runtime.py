@@ -410,7 +410,7 @@ def test_curtailment_client_closes_before_mutation_lock_is_released(result):
     async def disconnect():
         events.append("disconnect")
 
-    async def protected(callback, *, automatic):
+    async def protected(callback, *, automatic, write_allowed=None):
         assert automatic is True
         events.append("lock")
         success = await callback()
