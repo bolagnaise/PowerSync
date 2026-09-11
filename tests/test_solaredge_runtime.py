@@ -343,7 +343,7 @@ def test_solaredge_coordinator_publishes_failure_health():
 @pytest.mark.parametrize(
     "service, method, marker",
     [
-        ("handle_set_self_consumption", "restore_normal", "is_solaredge_sc"),
+        ("handle_set_self_consumption", "set_self_consumption", "is_solaredge_sc"),
         ("handle_set_backup_reserve", "set_backup_reserve", None),
     ],
 )

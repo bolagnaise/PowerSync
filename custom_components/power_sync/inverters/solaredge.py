@@ -1146,7 +1146,11 @@ class SolarEdgeEnergyController:
             session.baseline = baseline or None
             session.generation += 1
             if operation in {
-                "force_charge", "force_discharge", "restore_normal", "set_backup_mode"
+                "force_charge",
+                "force_discharge",
+                "restore_normal",
+                "set_backup_mode",
+                "set_self_consumption",
             }:
                 session.intent_generation = session.generation
             original_owned = dict(session.owned)
@@ -1475,8 +1479,23 @@ class SolarEdgeEnergyController:
     async def restore_work_mode_from_idle(self, *, automatic=False) -> bool:
         return await self.restore_normal(automatic=automatic)
 
+    async def set_self_consumption(self, *, automatic=False) -> bool:
+        """Select the native SolarEdge self-use command with readback."""
+        return await self._mutate(
+            "set_self_consumption",
+            lambda: [
+                (
+                    "storage_command_mode",
+                    self._option("storage_command_mode", _SELF_USE_OPTIONS),
+                )
+            ],
+            automatic=automatic,
+        )
+
     async def set_operation_mode(self, mode: str) -> bool:
-        if mode in {"self_consumption", "autonomous", "normal"}:
+        if mode == "self_consumption":
+            return await self.set_self_consumption()
+        if mode in {"autonomous", "normal"}:
             return await self.restore_normal()
         return False
 

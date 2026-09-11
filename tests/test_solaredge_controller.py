@@ -2431,3 +2431,34 @@ def test_native_benign_baseline_round_trip_preserves_nonzero_timeout(command):
     for field in ("charge_limit", "discharge_limit"):
         assert float(hass.states.get(f"number.solaredge_storage_{field}").state) == 4200
     assert float(hass.states.get("number.solaredge_storage_command_timeout").state) == 3600
+
+
+def test_solaredge_self_consumption_selects_and_confirms_native_self_use():
+    hass = _SEHass()
+    command_state = hass.states.get("select.solaredge_storage_command_mode")
+    command_state.attributes["options"] = [
+        "Stop",
+        "Maximize Self Consumption",
+        "Discharge to Minimize Import",
+    ]
+    hass.states.get("select.solaredge_storage_control_mode").state = "Remote Control"
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+
+    assert asyncio.run(controller.connect())
+    assert asyncio.run(controller.set_operation_mode("self_consumption"))
+    assert command_state.state == "Maximize Self Consumption"
+    assert hass.services.calls == [
+        (
+            "select",
+            "select_option",
+            {
+                "entity_id": "select.solaredge_storage_command_mode",
+                "option": "Maximize Self Consumption",
+            },
+        )
+    ]
+    assert controller.last_mutation["operation"] == "set_self_consumption"
+    assert controller.last_mutation["outcome"] == "confirmed"
+
+    assert asyncio.run(controller.restore_normal())
+    assert command_state.state == "Stop"

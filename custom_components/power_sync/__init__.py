@@ -37868,7 +37868,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     raise HomeAssistantError("SolarEdge coordinator unavailable")
 
                 success = await _guarded_self_consumption_write(
-                    lambda: solaredge_coord.restore_normal(automatic=source == "optimizer")
+                    lambda: solaredge_coord.set_self_consumption(
+                        automatic=source == "optimizer"
+                    )
                 )
                 if success:
                     _LOGGER.info("SolarEdge self-consumption mode restored")
