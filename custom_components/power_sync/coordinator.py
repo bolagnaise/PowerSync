@@ -3519,10 +3519,20 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 fallback_observed_at=sample_observed_at,
             )
 
-            # Map Teslemetry API response to our data structure
+            # A partial non-empty Tesla response is not a valid battery sample.
+            # In particular, treating an omitted battery_power as 0 W makes a
+            # missing measurement look like an observed idle Powerwall and lets
+            # it enter optimizer planning.  Preserve an explicit numeric zero.
+            battery_power_w = _finite_float(live_status.get("battery_power"))
+            if battery_power_w is None:
+                raise UpdateFailed(
+                    "Tesla live_status response omitted valid battery_power"
+                )
+
+            # Map Teslemetry API response to our data structure.
             solar_kw = live_status.get("solar_power", 0) / 1000
             grid_kw = live_status.get("grid_power", 0) / 1000
-            battery_kw = live_status.get("battery_power", 0) / 1000
+            battery_kw = battery_power_w / 1000
             raw_load_kw = live_status.get("load_power", 0) / 1000
             load_kw = (
                 max(0.0, raw_load_kw - ev_power_kw)

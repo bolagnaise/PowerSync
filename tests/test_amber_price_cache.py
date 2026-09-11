@@ -526,6 +526,68 @@ def test_tesla_battery_level_missing_without_cache_returns_none():
     assert tesla._resolve_battery_level_pct({"wall_connectors": []}) is None
 
 
+def test_tesla_partial_live_status_missing_battery_power_fails_instead_of_publishing_zero(
+    monkeypatch,
+):
+    tesla = coordinator.TeslaEnergyCoordinator(
+        _FakeHass(),
+        "site-1",
+        "token",
+        entry_id="entry-1",
+    )
+    tesla._energy_acc._last_update = datetime.now(timezone.utc)
+    tesla._lifetime_totals_restored = True
+
+    async def partial_live_status(*args, **kwargs):
+        return {
+            "response": {
+                "solar_power": 1300,
+                "grid_power": -1100,
+                "load_power": 240,
+                "percentage_charged": 0,
+            }
+        }
+
+    monkeypatch.setattr(coordinator, "_fetch_with_retry", partial_live_status)
+
+    try:
+        asyncio.run(tesla._async_update_data())
+    except coordinator.UpdateFailed as err:
+        assert "battery_power" in str(err)
+    else:
+        raise AssertionError("Expected partial battery telemetry to fail")
+
+
+def test_tesla_explicit_zero_battery_power_remains_a_valid_measurement(monkeypatch):
+    tesla = coordinator.TeslaEnergyCoordinator(
+        _FakeHass(),
+        "site-1",
+        "token",
+        entry_id="entry-1",
+    )
+    tesla._energy_acc._last_update = datetime.now(timezone.utc)
+    tesla._lifetime_totals_restored = True
+    tesla._energy_acc.update = lambda *args, **kwargs: None
+
+    async def zero_battery_power(*args, **kwargs):
+        return {
+            "response": {
+                "solar_power": 1300,
+                "grid_power": -1100,
+                "battery_power": 0,
+                "load_power": 240,
+                "percentage_charged": 0,
+            }
+        }
+
+    monkeypatch.setattr(coordinator, "_fetch_with_retry", zero_battery_power)
+
+    data = asyncio.run(tesla._async_update_data())
+
+    assert data["battery_power"] == 0.0
+    assert data["battery_level"] == 0.0
+
+
 def test_tesla_uses_powerwall_local_snapshot_when_cloud_status_is_empty():
     snap = SimpleNamespace(
         soc=76.5,
