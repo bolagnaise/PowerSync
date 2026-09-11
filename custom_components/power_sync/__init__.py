@@ -9681,7 +9681,15 @@ class SungrowDiagnosticsView(HomeAssistantView):
                                 {"success": False, "error": "export_limit_w must be 0-100000"},
                                 status=400
                             )
-                        success = await sungrow_coordinator.set_export_limit(val)
+                        # The Controls API has always documented null as the
+                        # unlimited sentinel, while older mobile clients sent
+                        # their displayed "0 / Unlimited" value.  Do not let
+                        # that UI alias become an enabled 50 W WiNet floor.
+                        # Internal curtailment still calls the coordinator
+                        # directly and retains its explicit zero-export path.
+                        success = await sungrow_coordinator.set_export_limit(
+                            None if val == 0 else val
+                        )
                     except (ValueError, TypeError):
                         return web.json_response(
                             {"success": False, "error": "Invalid export_limit_w value"},

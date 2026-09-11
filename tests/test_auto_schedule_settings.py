@@ -1043,6 +1043,41 @@ def test_missing_vehicle_id_updates_canonical_generic_settings():
     assert set(executor._settings) == {"generic_ev"}
 
 
+def test_generic_charger_load_provisions_disabled_runtime_schedule_candidate(monkeypatch):
+    """A first Generic Charger schedule can be configured without a saved row."""
+    class Store:
+        saved = []
+
+        async def async_load(self):
+            return {}
+
+        async def async_save(self, data):
+            self.saved.append(data)
+
+    async def no_fleet_vehicles(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", no_fleet_vehicles)
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = types.SimpleNamespace(data={})
+    executor.config_entry = types.SimpleNamespace(
+        data={},
+        options={"generic_charger_enabled": True},
+        entry_id="entry-1",
+    )
+    executor._settings = {}
+    executor._state = {}
+
+    store = Store()
+    asyncio.run(executor.load_settings(store))
+
+    assert set(executor._settings) == {"generic_ev"}
+    assert executor._settings["generic_ev"].enabled is False
+    assert executor._settings["generic_ev"].charger_type == "generic"
+    assert set(executor._state) == {"generic_ev"}
+    assert store.saved == []
+
+
 def test_configured_generic_backend_overrides_stale_ocpp_synthetic_type():
     settings = ev_planner.AutoScheduleSettings(
         vehicle_id="generic_ev",

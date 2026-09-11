@@ -5035,6 +5035,27 @@ class AutoScheduleExecutor:
                 )
                 self._state[vehicle_id] = AutoScheduleState(vehicle_id=vehicle_id)
 
+            # A configured Generic Charger is a supported Smart Schedule
+            # loadpoint even before it has saved schedule settings.  Expose a
+            # disabled runtime candidate so the UI can create its first
+            # departure schedule; do not persist it or evaluate a command.
+            opts = {
+                **getattr(self.config_entry, "data", {}),
+                **getattr(self.config_entry, "options", {}),
+            }
+            if (
+                _configured_charger_type(opts) == "generic"
+                and "generic_ev" not in self._settings
+            ):
+                self._settings["generic_ev"] = AutoScheduleSettings(
+                    vehicle_id="generic_ev",
+                    charger_type="generic",
+                    enabled=False,
+                )
+                self._state["generic_ev"] = AutoScheduleState(
+                    vehicle_id="generic_ev"
+                )
+
             # Physical charger settings are stored in AutomationStore by the app,
             # while auto_schedule_settings live in the HA Store passed here.
             # Sync them immediately so restored plans do not fall back to 32A.
