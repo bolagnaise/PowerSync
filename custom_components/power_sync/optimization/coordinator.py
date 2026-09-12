@@ -7707,6 +7707,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             planned_action,
             getattr(current_action, "timestamp", None),
         )
+        if not self._cached_solar_export_has_settled_feed_in_price(
+            current_action, action_name
+        ):
+            _LOGGER.info(
+                "Optimizer: deferring cached solar_export until the settled "
+                "feed-in price for its current interval is available"
+            )
+            return
         if (
             action_name == getattr(self, "_last_executed_action", None)
             and (
@@ -7751,6 +7759,48 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             applied_action = getattr(self, "_last_executed_action", None)
             if applied_action == action_name or applied_action != previous_action:
                 self._record_boundary_execution(current_action, applied_action)
+
+    def _cached_solar_export_has_settled_feed_in_price(
+        self, action: Any, action_name: str
+    ) -> bool:
+        """Require live feed-in identity before a dynamic cached solar-export hold.
+
+        A cached solar-export action blocks battery charging.  At a dynamic
+        tariff boundary, its forecast can belong to the preceding price
+        generation, so it must not be applied until the provider's current
+        feed-in row identifies the action's interval.  The fresh price solve
+        then chooses and executes the current action normally.
+        """
+        if action_name != "solar_export" or not getattr(
+            self, "_is_dynamic_pricing", False
+        ):
+            return True
+
+        slot_start = getattr(action, "timestamp", None)
+        if not isinstance(slot_start, datetime):
+            return False
+        interval = max(1, int(getattr(self._config, "interval_minutes", 5) or 5))
+        slot_end = slot_start + timedelta(minutes=interval)
+        data = getattr(getattr(self, "price_coordinator", None), "data", None)
+        current = data.get("current") if isinstance(data, dict) else None
+        if not isinstance(current, list):
+            return False
+
+        for row in current:
+            if not isinstance(row, dict) or row.get("channelType") != "feedIn":
+                continue
+            if row.get("type", "CurrentInterval") != "CurrentInterval":
+                continue
+            end = self._get_entry_end_time(row)
+            try:
+                settled_end = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            if settled_end.tzinfo is None or slot_end.tzinfo is None:
+                continue
+            if settled_end == slot_end:
+                return True
+        return False
 
     def _boundary_execution_matches_action(
         self,

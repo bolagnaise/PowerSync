@@ -140,6 +140,9 @@ def _install_power_sync_stubs() -> None:
     const_module.DOMAIN = "power_sync"
     const_module.TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
     const_module.CONF_ELECTRICITY_PROVIDER = "electricity_provider"
+    const_module.CONF_DISPLAY_CURRENCY = "display_currency"
+    const_module.DISPLAY_CURRENCIES = {"AUD", "EUR", "GBP", "NZD", "SEK"}
+    const_module.DISPLAY_CURRENCY_AUTOMATIC = "automatic"
     const_module.CONF_MONITORING_MODE = "monitoring_mode"
     const_module.CONF_FLOW_POWER_STATE = "flow_power_state"
     const_module.CONF_FLOW_POWER_EXPORT_RATE = "flow_power_export_rate"
@@ -4871,6 +4874,47 @@ def test_solar_export_action_records_effective_only_after_hold_confirmation(opt_
     assert coordinator._last_executed_action == "solar_export"
     assert battery.force_charge_calls == []
     assert battery.force_discharge_calls == []
+
+
+def test_cached_dynamic_solar_export_waits_for_its_settled_feed_in_interval(opt_module):
+    """A prior forecast must not block charging at an unpriced tariff boundary."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator._enabled = True
+    coordinator._is_dynamic_pricing = True
+    coordinator._optimization_lock = asyncio.Lock()
+    coordinator._execute_lock = asyncio.Lock()
+    boundary = datetime(2026, 9, 12, 21, 35, tzinfo=timezone.utc)
+    action = SimpleNamespace(action="solar_export", power_w=0, timestamp=boundary)
+    coordinator._get_current_action = lambda: action
+    coordinator.price_coordinator = SimpleNamespace(
+        data={
+            "current": [
+                {
+                    "channelType": "feedIn",
+                    "type": "CurrentInterval",
+                    "nemTime": boundary.isoformat(),
+                }
+            ]
+        }
+    )
+    executed = []
+
+    async def execute(candidate):
+        executed.append(candidate)
+
+    coordinator._execute_optimizer_action = execute
+
+    asyncio.run(coordinator._execute_cached_current_action_if_changed())
+
+    assert executed == []
+
+    coordinator.price_coordinator.data["current"][0]["nemTime"] = (
+        boundary + timedelta(minutes=5)
+    ).isoformat()
+    asyncio.run(coordinator._execute_cached_current_action_if_changed())
+
+    assert executed == [action]
 
 
 @pytest.mark.parametrize(
