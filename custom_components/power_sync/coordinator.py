@@ -10553,6 +10553,13 @@ class SolarEdgeEnergyCoordinator(
             return False
         return await self._control_result(self._controller.restore_normal(automatic=automatic, expected_generation=expected_generation))
 
+    async def set_self_consumption(self, *, automatic: bool = False) -> bool:
+        if not self._native_control_allowed("SolarEdge set_self_consumption"):
+            return False
+        return await self._control_result(
+            self._controller.set_self_consumption(automatic=automatic)
+        )
+
     async def set_backup_mode(self, *, automatic: bool = False) -> bool:
         if not self._native_control_allowed("SolarEdge set_backup_mode"):
             return False

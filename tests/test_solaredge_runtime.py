@@ -341,6 +341,42 @@ def test_solaredge_coordinator_publishes_failure_health():
 
 
 @pytest.mark.parametrize(
+    ("allowed", "controller_result"),
+    [(True, True), (True, False), (False, True)],
+)
+def test_solaredge_coordinator_forwards_self_consumption_with_control_gate(
+    allowed, controller_result
+):
+    """The public coordinator surface used by the service reaches the controller."""
+    path = ROOT / "custom_components" / "power_sync" / "coordinator.py"
+    klass = next(
+        n
+        for n in ast.parse(path.read_text()).body
+        if getattr(n, "name", None) == "SolarEdgeEnergyCoordinator"
+    )
+    call = _load_node(
+        next(n for n in klass.body if getattr(n, "name", None) == "set_self_consumption"),
+        {},
+    )
+    operation = AsyncMock(return_value=controller_result)
+
+    async def control_result(awaitable):
+        return await awaitable
+
+    coord = SimpleNamespace(
+        _native_control_allowed=Mock(return_value=allowed),
+        _controller=SimpleNamespace(set_self_consumption=operation),
+        _control_result=control_result,
+    )
+    assert asyncio.run(call(coord, automatic=True)) is (allowed and controller_result)
+    coord._native_control_allowed.assert_called_once_with("SolarEdge set_self_consumption")
+    if allowed:
+        operation.assert_awaited_once_with(automatic=True)
+    else:
+        operation.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
     "service, method, marker",
     [
         ("handle_set_self_consumption", "set_self_consumption", "is_solaredge_sc"),
