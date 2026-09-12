@@ -9670,7 +9670,8 @@ def test_solar_surplus_restarts_tesla_when_stopped_observation_replaces_commande
     state = _solar_surplus_state(current_amps=24)
     state["params"]["vehicle_vin"] = vehicle_id
     state["params"]["charger_power_entity"] = "sensor.VIN123_charger_power"
-    state["params"]["household_buffer_kw"] = 0.3
+    # A 1.5 kW export cap with no buffer is a reachable 240 V / 6 A start.
+    state["params"]["household_buffer_kw"] = 0
     state["high_surplus_start"] = datetime.now() - timedelta(minutes=4)
     actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
 
@@ -9686,7 +9687,7 @@ def test_solar_surplus_restarts_tesla_when_stopped_observation_replaces_commande
         monkeypatch,
         {
             "battery_soc": 100,
-            "grid_power": -2100,
+            "grid_power": -1500,
             "battery_power": 0,
             "solar_power": 0,
             "load_power": 0,
@@ -9698,10 +9699,13 @@ def test_solar_surplus_restarts_tesla_when_stopped_observation_replaces_commande
     )
 
     assert start_calls and start_calls[0]["vehicle_vin"] == vehicle_id
-    assert set_amps_calls == [8]
-    assert actions._dynamic_ev_state["entry-1"][vehicle_id]["current_amps"] == 8
-    assert actions._dynamic_ev_state["entry-1"][vehicle_id]["target_amps"] == 8
-    assert "Target: 8A" in actions._dynamic_ev_state["entry-1"][vehicle_id]["reason"]
+    # A stopped Tesla with no prior charge rate needs the computed Solar
+    # Surplus target during start settlement, before the later rate update.
+    assert start_calls[0]["amps"] == 6
+    assert set_amps_calls == [6]
+    assert actions._dynamic_ev_state["entry-1"][vehicle_id]["current_amps"] == 6
+    assert actions._dynamic_ev_state["entry-1"][vehicle_id]["target_amps"] == 6
+    assert "Target: 6A" in actions._dynamic_ev_state["entry-1"][vehicle_id]["reason"]
     assert actions._dynamic_ev_state["entry-1"][vehicle_id]["high_surplus_start"] is None
 
     # Stale stopped telemetry after the restart must not replay the start
@@ -9711,7 +9715,7 @@ def test_solar_surplus_restarts_tesla_when_stopped_observation_replaces_commande
         actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
     )
     assert len(start_calls) == 1
-    assert set_amps_calls == [8]
+    assert set_amps_calls == [6]
     assert state["high_surplus_start"] is not None
 
 

@@ -9504,7 +9504,7 @@ async def _dynamic_ev_update_surplus(
 
                 # Send the actual start-charging command to the vehicle.
                 start_params = dict(params)
-                if start_params.get("charger_type") == "sigenergy":
+                if start_params.get("charger_type") in {"sigenergy", "tesla"}:
                     start_params["amps"] = new_amps
                 start_success = await _action_start_ev_charging(
                     hass,
