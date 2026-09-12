@@ -660,6 +660,7 @@ class _ControlSession:
         self.baseline = None
         self.owned = {}
         self.last_mutation = None
+        self.last_reconciliation = None
         self.generation = 0
         self.intent_generation = 0
         self.loaded = False
@@ -754,6 +755,7 @@ class SolarEdgeEnergyController:
             "daily_battery_discharge_kwh": self._energy_kwh("daily_battery_discharge"),
             "control_health": self.control_health,
             "last_mutation": self.last_mutation,
+            "last_reconciliation": self._coordinator().last_reconciliation,
             "mutation_active": self.mutation_active,
             "generation": self.generation,
             "control_entities": dict(self._control_entity_map),
@@ -970,6 +972,7 @@ class SolarEdgeEnergyController:
                     "intent_generation", session.generation
                 )
                 session.last_mutation = record.get("last_mutation")
+                session.last_reconciliation = record.get("last_reconciliation")
                 session.pending_mutation = record.get("pending_mutation")
                 if record.get("in_progress") and session.pending_mutation:
                     session.last_mutation = {
@@ -1003,6 +1006,7 @@ class SolarEdgeEnergyController:
                 "intent_generation": session.intent_generation,
                 "health": session.health,
                 "last_mutation": session.last_mutation,
+                "last_reconciliation": session.last_reconciliation,
                 "pending_mutation": session.pending_mutation,
                 "in_progress": in_progress,
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
@@ -1044,6 +1048,14 @@ class SolarEdgeEnergyController:
                 message,
             )
         return outcome == SolarEdgeMutationOutcome.CONFIRMED
+
+    def _reconciliation_result(self, session, outcome, reason, *, field=None):
+        """Record why a read-only reconciliation did or did not clear containment."""
+        session.last_reconciliation = {
+            "outcome": outcome,
+            "reason": reason,
+            "field": field,
+        }
 
     async def _mutate(
         self,
@@ -1625,15 +1637,28 @@ class SolarEdgeEnergyController:
         session = self._coordinator()
         async with session.lock:
             await self._load_session(session)
+
+            async def blocked(reason, *, field=None):
+                self._reconciliation_result(session, "blocked", reason, field=field)
+                try:
+                    await self._persist(session)
+                except Exception:
+                    self._reconciliation_result(
+                        session, "blocked", "journal_persist_failed"
+                    )
+                return False
+
             if (
                 session.last_mutation
                 and session.last_mutation.get("operation") == "active_power"
                 and session.health != "ready"
             ):
-                return False
+                return await blocked("unresolved_active_power")
             observed = await self._fresh_storage_state()
-            if observed is None or self._snapshot_is_active(observed):
-                return False
+            if observed is None:
+                return await blocked("fresh_storage_unavailable")
+            if self._snapshot_is_active(observed):
+                return await blocked("storage_command_active")
             command = _normalize_option(str(observed.get("storage_command_mode", "")))
             control = _normalize_option(str(observed.get("storage_control_mode", "")))
             benign_command = command in {
@@ -1648,14 +1673,14 @@ class SolarEdgeEnergyController:
                 _normalize_option(value)
                 for value in (*_REMOTE_CONTROL_OPTIONS, *_SELF_USE_OPTIONS)
             }:
-                return False
+                return await blocked("unsupported_storage_mode")
             if session.baseline:
                 for key, value in session.baseline.items():
                     entity = self._control_entity_map.get(key)
                     if not entity or not self._control_values_match(
                         entity, observed.get(key), value
                     ):
-                        return False
+                        return await blocked("baseline_mismatch", field=key)
             old_owned, old_baseline = session.owned, session.baseline
             old_result = session.last_mutation
             session.owned, session.baseline = {}, None
@@ -1668,12 +1693,14 @@ class SolarEdgeEnergyController:
                 "reconcile",
                 confirmation_source="fresh_upstream_storage_poll",
             )
+            self._reconciliation_result(session, "confirmed", "matching_baseline")
             try:
                 await self._persist(session)
             except (Exception, asyncio.CancelledError) as err:
                 session.owned, session.baseline = old_owned, old_baseline
                 session.last_mutation = old_result
                 session.health = "reconciliation_required"
+                self._reconciliation_result(session, "blocked", "journal_persist_failed")
                 if isinstance(err, asyncio.CancelledError):
                     raise
                 return False

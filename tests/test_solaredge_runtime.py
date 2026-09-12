@@ -272,8 +272,25 @@ def test_reconciliation_service_is_explicit_and_scoped():
     result = asyncio.run(
         call(SimpleNamespace(data={"entry_id": "entry", "acknowledge": True}))
     )
-    assert result == {"success": True, "control_health": "ready"}
+    assert result == {
+        "success": True,
+        "control_health": "ready",
+        "reconciliation": None,
+    }
     coordinator.reconcile.assert_awaited_once_with()
+
+    coordinator.reconcile = AsyncMock(return_value=False)
+    coordinator.data = {
+        "last_reconciliation": {
+            "outcome": "blocked",
+            "reason": "baseline_mismatch",
+            "field": "backup_reserve",
+        }
+    }
+    with pytest.raises(RuntimeError, match="baseline_mismatch"):
+        asyncio.run(
+            call(SimpleNamespace(data={"entry_id": "entry", "acknowledge": True}))
+        )
 
 
 def test_solaredge_restore_forwards_timer_generation_and_failure():
@@ -318,6 +335,7 @@ def test_solaredge_coordinator_publishes_failure_health():
         get_status=lambda: {
             "control_health": "reconciliation_required",
             "last_mutation": {"outcome": "unknown"},
+            "last_reconciliation": None,
             "mutation_active": False,
         }
     )
@@ -336,6 +354,7 @@ def test_solaredge_coordinator_publishes_failure_health():
         "battery_level": 50,
         "control_health": "reconciliation_required",
         "last_mutation": {"outcome": "unknown"},
+        "last_reconciliation": None,
         "mutation_active": False,
     }
 

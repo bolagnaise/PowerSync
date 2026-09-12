@@ -1777,6 +1777,7 @@ class BatteryIntegrationDetailsSensor(SensorEntity):
                 "control_health": solaredge.control_health,
                 "control_mutation_active": solaredge.mutation_active,
                 "last_control_mutation": (solaredge.data or {}).get("last_mutation"),
+                "last_reconciliation": (solaredge.data or {}).get("last_reconciliation"),
                 "reconciliation_service": "power_sync.reconcile_solaredge_control",
             }
         return {

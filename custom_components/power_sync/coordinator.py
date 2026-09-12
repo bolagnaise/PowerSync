@@ -10241,6 +10241,7 @@ class SolarEdgeEnergyCoordinator(
             "control_available": status.get("control_available", False),
             "control_health": status.get("control_health", "reconciliation_required"),
             "last_mutation": status.get("last_mutation"),
+            "last_reconciliation": status.get("last_reconciliation"),
             "mutation_active": status.get("mutation_active", False),
             "missing_control_entities": status.get("missing_control_entities", []),
             "control_entities": status.get("control_entities", {}),
@@ -10535,6 +10536,7 @@ class SolarEdgeEnergyCoordinator(
                     **self.data,
                     "control_health": status.get("control_health"),
                     "last_mutation": status.get("last_mutation"),
+                    "last_reconciliation": status.get("last_reconciliation"),
                     "mutation_active": status.get("mutation_active", False),
                 })
 

@@ -39801,11 +39801,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if call.data.get("acknowledge") is not True:
             raise HomeAssistantError("Supervised SolarEdge reconciliation requires acknowledge: true")
         if not await coordinator.reconcile():
+            detail = (getattr(coordinator, "data", None) or {}).get("last_reconciliation") or {}
+            reason = detail.get("reason", "unknown")
             raise HomeAssistantError(
-                "SolarEdge reconciliation failed. Control remains blocked; "
+                f"SolarEdge reconciliation failed ({reason}). Control remains blocked; "
                 "inspect the upstream connection and storage settings"
             )
-        return {"success": True, "control_health": coordinator.control_health}
+        return {
+            "success": True,
+            "control_health": coordinator.control_health,
+            "reconciliation": (getattr(coordinator, "data", None) or {}).get("last_reconciliation"),
+        }
 
     hass.services.async_register(
         DOMAIN,

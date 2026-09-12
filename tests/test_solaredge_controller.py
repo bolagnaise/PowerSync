@@ -1952,8 +1952,16 @@ def test_solaredge_newly_owned_field_captures_current_baseline():
     assert hass.states.get("number.solaredge_backup_reserve").state == "15.0"
 
 
-@pytest.mark.parametrize("readback", [None, "active", "mismatch", "baseline"])
-def test_solaredge_reconcile_requires_fresh_matching_benign_baseline(readback):
+@pytest.mark.parametrize(
+    ("readback", "reason"),
+    [
+        (None, "fresh_storage_unavailable"),
+        ("active", "storage_command_active"),
+        ("mismatch", "baseline_mismatch"),
+        ("baseline", "matching_baseline"),
+    ],
+)
+def test_solaredge_reconcile_requires_fresh_matching_benign_baseline(readback, reason):
     async def scenario():
         hass = _SEHass()
         controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
@@ -1977,6 +1985,13 @@ def test_solaredge_reconcile_requires_fresh_matching_benign_baseline(readback):
         assert controller.control_health == (
             "ready" if readback == "baseline" else "reconciliation_required"
         )
+        assert controller._coordinator().last_reconciliation["reason"] == reason
+        assert controller._coordinator().last_reconciliation["outcome"] == (
+            "confirmed" if readback == "baseline" else "blocked"
+        )
+        assert controller.get_status()["last_reconciliation"]["reason"] == reason
+        if readback == "mismatch":
+            assert controller._coordinator().last_reconciliation["field"] == "backup_reserve"
 
     asyncio.run(scenario())
 
