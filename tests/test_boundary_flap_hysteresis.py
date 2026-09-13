@@ -172,6 +172,20 @@ def test_with_hysteresis_active_when_low_enter_and_exit():
 # HD-15: should_curtail_ac_coupled
 # ---------------------------------------------------------------------------
 
+def test_ac_curtail_defers_when_live_status_is_unavailable():
+    """An unavailable sample is not evidence that a curtailment may restore."""
+
+    async def get_live_status():
+        return None
+
+    with_hysteresis = _load_tariff_utils().with_hysteresis
+    should_curtail = _build_should_curtail_ac_coupled(
+        get_live_status, with_hysteresis
+    )
+
+    assert asyncio.run(should_curtail(15.0, -2.13)) is None
+
+
 def test_ac_curtail_no_flap_while_custom_export_earnings_hovers_at_boundary():
     """A price hovering around a custom 1c/kWh boundary must not flap
     the curtail decision every tick -- only decisive crossings should."""

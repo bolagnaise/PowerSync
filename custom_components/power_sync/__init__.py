@@ -24248,7 +24248,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry_data["last_dpel_update_time"] = None
 
     # Smart AC-coupled curtailment check
-    async def should_curtail_ac_coupled(import_price: float | None, export_earnings: float | None) -> bool:
+    async def should_curtail_ac_coupled(import_price: float | None, export_earnings: float | None) -> bool | None:
         """Smart curtailment logic for AC-coupled solar systems.
 
         For AC-coupled systems, we curtail the inverter when:
@@ -24262,7 +24262,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             export_earnings: Current export earnings in c/kWh
 
         Returns:
-            True if we should curtail, False if we should allow production
+            True if we should curtail, False if fresh telemetry shows that
+            production may be allowed, or None when telemetry is unavailable.
         """
         entry_data = _aemo_dispatch_entry_data()
         if entry_data is None:
@@ -24275,8 +24276,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return False
 
         if live_status is None:
-            _LOGGER.debug("Could not get live status - not curtailing AC solar (conservative approach)")
-            return False
+            _LOGGER.debug(
+                "Could not get live status - deferring AC solar curtailment "
+                "without changing the existing inverter limit"
+            )
+            return None
 
         grid_power = live_status.get("grid_power")  # Negative = exporting
         battery_soc = live_status.get("battery_soc")
@@ -24683,6 +24687,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 should_curtail = await should_curtail_ac_coupled(import_price, export_earnings)
                 if _aemo_dispatch_entry_data() is not entry_data:
                     return False
+
+                if should_curtail is None:
+                    # Unknown telemetry is neither evidence that the battery
+                    # is absorbing solar nor permission to restore a limit.
+                    # Keep any confirmed curtailment in place until a fresh
+                    # sample makes an affirmative restore decision.
+                    _LOGGER.info(
+                        "⚡ AC-COUPLED: Deferring inverter change because "
+                        "live status is unavailable"
+                    )
+                    return True
 
                 if not should_curtail:
                     # Smart logic says don't curtail - battery can still absorb solar

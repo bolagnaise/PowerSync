@@ -158,11 +158,19 @@ class _Logger:
         return _log
 
 
-def _run_fronius_curtailment(*, load_following: bool) -> dict:
+def _run_fronius_curtailment(
+    *,
+    load_following: bool,
+    should_curtail_result: bool | None = True,
+    inverter_last_state: str | None = None,
+    expect_state: bool = True,
+) -> dict:
     """Drive the real apply_inverter_curtailment() fronius success branch."""
     entry_id = "entry-id"
     generation = object()
     entry_data = {"aemo_dispatch_generation": generation}
+    if inverter_last_state is not None:
+        entry_data["inverter_last_state"] = inverter_last_state
     hass = SimpleNamespace(data={"power_sync": {entry_id: entry_data}})
     entry = SimpleNamespace(
         entry_id=entry_id,
@@ -174,9 +182,16 @@ def _run_fronius_curtailment(*, load_following: bool) -> dict:
         },
         data={},
     )
-    recorded: dict = {"state": None, "constructed": 0}
+    recorded: dict = {"state": None, "constructed": 0, "restore_calls": 0}
 
     controller, _writes = _recording_controller(load_following=load_following)
+    original_restore = controller.restore
+
+    async def _record_restore():
+        recorded["restore_calls"] += 1
+        return await original_restore()
+
+    controller.restore = _record_restore
     if load_following:
         # get_rated_capacity() reads the SunSpec model block; the reported site
         # is a Primo GEN24 10.0 Plus.
@@ -190,7 +205,7 @@ def _run_fronius_curtailment(*, load_following: bool) -> dict:
         return controller
 
     async def _should_curtail(*_args):
-        return True
+        return should_curtail_result
 
     async def _get_live_status():
         # Site is exporting 8,477 W with the battery full: curtail is correct.
@@ -217,6 +232,7 @@ def _run_fronius_curtailment(*, load_following: bool) -> dict:
         "DOMAIN": "power_sync",
         "hass": hass,
         "entry": entry,
+        "ac_inverter_is_same_hybrid": lambda: False,
         "aemo_dispatch_generation": generation,
         "_LOGGER": _Logger(),
         "get_inverter_controller": _get_inverter_controller,
@@ -259,8 +275,10 @@ def _run_fronius_curtailment(*, load_following: bool) -> dict:
 
     assert result is True
     assert recorded["constructed"] == 1
-    assert recorded["state"] is not None
-    return recorded["state"]
+    if expect_state:
+        assert recorded["state"] is not None
+        return recorded["state"]
+    return recorded
 
 
 def test_simple_mode_never_records_a_confirmed_device_limit():
@@ -303,3 +321,15 @@ def test_recurring_simple_mode_cycles_never_accumulate_a_false_limit():
         state = _run_fronius_curtailment(load_following=False)
         assert state["device_limit_confirmed"] is False
         assert state["target_power_w"] is None
+
+
+def test_unavailable_live_status_never_restores_an_existing_curtailment():
+    """A missing sample must defer, rather than treating it as absorption."""
+    recorded = _run_fronius_curtailment(
+        load_following=True,
+        should_curtail_result=None,
+        inverter_last_state="curtailed",
+        expect_state=False,
+    )
+    assert recorded["state"] is None
+    assert recorded["restore_calls"] == 0
