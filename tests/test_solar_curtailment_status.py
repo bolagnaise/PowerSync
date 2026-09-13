@@ -267,6 +267,27 @@ def _load_goodwe_status_helper():
     return namespace["_goodwe_curtailment_visible_status"]
 
 
+def _load_sigenergy_status_helper():
+    tree = ast.parse(SENSOR_PATH.read_text())
+    helpers = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name
+        in {"_foxess_curtailment_visible_status", "_sigenergy_curtailment_visible_status"}
+    ]
+    namespace = {
+        "Any": Any,
+        "datetime": datetime,
+        "math": math,
+        "timedelta": timedelta,
+        "timezone": timezone,
+    }
+    module = ast.fix_missing_locations(ast.Module(body=helpers, type_ignores=[]))
+    exec(compile(module, str(SENSOR_PATH), "exec"), namespace)
+    return namespace["_sigenergy_curtailment_visible_status"]
+
+
 def _load_goodwe_description_helper():
     tree = ast.parse(SENSOR_PATH.read_text())
     helper = next(
@@ -307,6 +328,23 @@ def _goodwe_status(**overrides):
     }
     values.update(overrides)
     return _load_goodwe_status_helper()(**values)
+
+
+def _sigenergy_status(**overrides):
+    now = datetime(2026, 9, 13, 3, 0, tzinfo=timezone.utc)
+    values = {
+        "curtailment_enabled": True,
+        "is_curtailed": True,
+        "export_limit_kw": 0.0,
+        "grid_power_kw": -0.03,
+        "telemetry_ready": True,
+        "last_update_success": True,
+        "last_update": now - timedelta(seconds=15),
+        "update_interval": timedelta(seconds=30),
+        "now": now,
+    }
+    values.update(overrides)
+    return _load_sigenergy_status_helper()(**values)
 
 
 def test_uncommanded_curtailment_is_pending_for_non_foxess_brands():
@@ -373,6 +411,26 @@ def test_goodwe_unsupported_status_does_not_claim_a_command_was_acknowledged():
         control_state="pending",
         force_dispatch_active=False,
     ) == "Curtailment command acknowledged, but physical zero-export is not confirmed"
+
+
+def test_sigenergy_readback_confirms_effect_without_claiming_command_ownership():
+    """#352: manual or pre-restart zero limit still has physical proof."""
+    assert _sigenergy_status() == ("Active", 30.0, True)
+    assert _sigenergy_status(is_curtailed=False) == ("Pending", None, False)
+    assert _sigenergy_status(export_limit_kw=5.0) == ("Pending", None, False)
+    assert _sigenergy_status(grid_power_kw=-0.3) == ("Pending", 300.0, False)
+    assert _sigenergy_status(
+        last_update=datetime(2026, 9, 13, 2, 50, tzinfo=timezone.utc)
+    ) == ("Pending", None, False)
+
+
+def test_sigenergy_status_uses_live_readback_and_listens_for_updates():
+    source = SENSOR_PATH.read_text()
+    assert "return self._sigenergy_status()[0]" in source
+    assert 'coordinator_data.get("is_curtailed")' in source
+    assert 'coordinator_data.get("export_limit_kw")' in source
+    assert 'self._unsub_sigenergy = sigenergy_coordinator.async_add_listener(' in source
+    assert '"control_owner": "curtailment" if owned_by_powersync else "external"' in source
 
 
 def test_status_marker_consults_every_brand_control_state_key():

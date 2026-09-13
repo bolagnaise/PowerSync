@@ -5149,6 +5149,50 @@ def _goodwe_curtailment_description(
     return "Normal solar export allowed"
 
 
+def _sigenergy_curtailment_visible_status(
+    *,
+    curtailment_enabled: bool,
+    is_curtailed: Any,
+    export_limit_kw: Any,
+    grid_power_kw: Any,
+    telemetry_ready: bool,
+    last_update_success: bool,
+    last_update: Any,
+    update_interval: Any = None,
+    now: datetime | None = None,
+) -> tuple[str, float | None, bool]:
+    """Return Sigenergy status from fresh limit readback and site telemetry.
+
+    The register readback proves the inverter is set to a zero export limit;
+    fresh grid telemetry then establishes the separately required physical
+    effect.  This intentionally does not infer that PowerSync owns a manual
+    or pre-restart limit -- ownership remains a separate lifecycle attribute.
+    """
+    if not curtailment_enabled:
+        return "Normal", None, False
+    if is_curtailed is not True:
+        return "Pending", None, False
+    try:
+        if isinstance(export_limit_kw, bool) or not math.isfinite(float(export_limit_kw)):
+            raise ValueError
+        if float(export_limit_kw) >= 0.1:
+            return "Pending", None, False
+    except (TypeError, ValueError, OverflowError):
+        return "Pending", None, False
+    return _foxess_curtailment_visible_status(
+        curtailment_enabled=True,
+        control_state="curtailed",
+        grid_power_kw=grid_power_kw,
+        grid_power_valid=True,
+        telemetry_ready=telemetry_ready,
+        last_update_success=last_update_success,
+        force_dispatch_active=False,
+        last_update=last_update,
+        update_interval=update_interval,
+        now=now,
+    )
+
+
 def _foxess_curtailment_visible_status(
     *,
     curtailment_enabled: bool,
@@ -5270,6 +5314,14 @@ class SolarCurtailmentSensor(SensorEntity):
         else:
             self._unsub_foxess = None
 
+        sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
+        if self._is_sigenergy() and sigenergy_coordinator:
+            self._unsub_sigenergy = sigenergy_coordinator.async_add_listener(
+                _handle_curtailment_update
+            )
+        else:
+            self._unsub_sigenergy = None
+
         self._unsub_force_charge = async_dispatcher_connect(
             self.hass,
             f"{DOMAIN}_force_charge_state",
@@ -5289,6 +5341,8 @@ class SolarCurtailmentSensor(SensorEntity):
             self._unsub_amber()
         if hasattr(self, '_unsub_foxess') and self._unsub_foxess:
             self._unsub_foxess()
+        if hasattr(self, '_unsub_sigenergy') and self._unsub_sigenergy:
+            self._unsub_sigenergy()
         if self._unsub_force_charge:
             self._unsub_force_charge()
         if self._unsub_force_discharge:
@@ -5305,6 +5359,11 @@ class SolarCurtailmentSensor(SensorEntity):
             entry_data.get("is_foxess") is True
             or battery_system == BATTERY_SYSTEM_FOXESS
         )
+
+    def _is_sigenergy(self) -> bool:
+        """Return whether this sensor has direct Sigenergy telemetry."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        return entry_data.get("sigenergy_coordinator") is not None
 
     def _get_feedin_price(self) -> float | None:
         """Get current feed-in price from Amber coordinator."""
@@ -5354,6 +5413,8 @@ class SolarCurtailmentSensor(SensorEntity):
             return self._foxess_status()[0]
         if self._is_goodwe():
             return self._goodwe_status()[0]
+        if self._is_sigenergy():
+            return self._sigenergy_status()[0]
         return _generic_curtailment_visible_status(
             curtailment_enabled=self._curtailment_enabled(),
             control_state=self._control_command_state(),
@@ -5389,6 +5450,26 @@ class SolarCurtailmentSensor(SensorEntity):
     def _is_curtailed(self) -> bool:
         """Determine whether curtailment is confirmed active."""
         return self._visible_status() == "Active"
+
+    def _sigenergy_status(self) -> tuple[str, float | None, bool]:
+        """Return Sigenergy status from live export-limit readback."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        coordinator = entry_data.get("sigenergy_coordinator")
+        coordinator_data = getattr(coordinator, "data", None)
+        if not isinstance(coordinator_data, dict):
+            coordinator_data = {}
+        return _sigenergy_curtailment_visible_status(
+            curtailment_enabled=self._curtailment_enabled(),
+            is_curtailed=coordinator_data.get("is_curtailed"),
+            export_limit_kw=coordinator_data.get("export_limit_kw"),
+            grid_power_kw=coordinator_data.get("grid_power"),
+            telemetry_ready=coordinator_data.get("telemetry_ready", True) is True,
+            last_update_success=(
+                getattr(coordinator, "last_update_success", False) is True
+            ),
+            last_update=coordinator_data.get("last_update"),
+            update_interval=getattr(coordinator, "update_interval", None),
+        )
 
     def _foxess_status(self) -> tuple[str, float | None, bool]:
         """Return FoxESS lifecycle state reconciled with live grid telemetry."""
@@ -5527,6 +5608,32 @@ class SolarCurtailmentSensor(SensorEntity):
                     visible_state=visible_state,
                     control_state=entry_data.get("goodwe_curtailment_state", "normal"),
                     force_dispatch_active=force_dispatch_active,
+                ),
+            }
+
+        if self._is_sigenergy():
+            visible_state, grid_export_w, effect_confirmed = self._sigenergy_status()
+            coordinator = entry_data.get("sigenergy_coordinator")
+            coordinator_data = getattr(coordinator, "data", None)
+            if not isinstance(coordinator_data, dict):
+                coordinator_data = {}
+            control_state = entry_data.get("sigenergy_curtailment_state", "normal")
+            owned_by_powersync = control_state == "curtailed"
+            return {
+                "export_rule": cached_rule,
+                "curtailment_enabled": curtailment_enabled,
+                "feedin_price": feedin_price,
+                "export_earnings": export_earnings,
+                "export_uneconomic": self._export_uneconomic(),
+                "control_state": control_state,
+                "control_owner": "curtailment" if owned_by_powersync else "external",
+                "export_limit_kw": coordinator_data.get("export_limit_kw"),
+                "grid_export_w": grid_export_w,
+                "effect_confirmed": effect_confirmed,
+                "description": (
+                    "Curtailment confirmed by fresh Sigenergy limit readback and grid telemetry"
+                    if visible_state == "Active"
+                    else "Export limiting is not confirmed by fresh Sigenergy readback and grid telemetry"
                 ),
             }
 
