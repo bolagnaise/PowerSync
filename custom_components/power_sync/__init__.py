@@ -15666,6 +15666,27 @@ class EVVehicleCommandView(HomeAssistantView):
             if 0 <= age < 7200 and cached.get("is_plugged_in") is True:
                 return True
 
+        # The dashboard derives `is_connected` from the normalized vehicle
+        # status, which includes identity-safe Wall Connector observations.
+        # Reuse that same current resolution before rejecting a manual start,
+        # otherwise a card can say CONNECTED while this narrower provider-only
+        # check returns "Vehicle is not plugged in". `_get_ev_vehicles_status`
+        # already fences away vehicles, ambiguous connectors, and older direct
+        # observations, so this does not weaken the command safety boundary.
+        entry = self._get_powersync_entry()
+        if entry and vehicle_vin:
+            for vehicle in _get_ev_vehicles_status(self._hass, entry):
+                if (
+                    _vehicle_matches_identifier(vehicle, vehicle_vin)
+                    and vehicle.get("site_presence") != "away"
+                    and vehicle.get("is_connected") is True
+                ):
+                    _LOGGER.debug(
+                        "Vehicle plugged in from normalized current status for %s",
+                        vehicle_vin,
+                    )
+                    return True
+
         if negative_binary_evidence:
             _LOGGER.debug(
                 "Vehicle unplugged from %s with no overriding charging-state or BLE evidence",

@@ -3148,3 +3148,47 @@ def test_manual_start_cannot_borrow_other_vehicles_ble_plug_cache():
             "cached_at": datetime.now(timezone.utc) - timedelta(seconds=age),
         }
         assert asyncio.run(view._is_vehicle_plugged_in(vin)) is expected
+
+
+def test_manual_start_accepts_current_exact_vin_wall_connector_status():
+    """Ticket-57: manual readiness matches the connected loadpoint card."""
+    power_sync = _power_sync_module()
+    vin = "5YJTEST0000000001"
+    observed_at = datetime.now(timezone.utc)
+    charger = _State(
+        "binary_sensor.primary_ev_charger",
+        "off",
+        last_updated=observed_at - timedelta(minutes=5),
+    )
+    states = [charger]
+    hass = _Hass(
+        states,
+        {charger.entity_id: _entity(charger.entity_id, "fleet")},
+        {
+            "fleet": SimpleNamespace(
+                id="fleet",
+                name="Primary EV",
+                identifiers={("tesla_fleet", vin)},
+            ),
+        },
+        entry_data={
+            "tesla_coordinator": SimpleNamespace(
+                data={
+                    "wall_connectors_raw": [{
+                        "wall_connector_state": 11,
+                        "wall_connector_power": 0,
+                        "vin": vin,
+                    }],
+                    "last_update": observed_at,
+                }
+            )
+        },
+        config_entries=[_Entry()],
+    )
+
+    status = power_sync._get_ev_vehicles_status(hass, _Entry())
+    assert status[0]["is_connected"] is True
+
+    view = power_sync.EVVehicleCommandView(hass)
+    view._get_powersync_config = lambda: {}
+    assert asyncio.run(view._is_vehicle_plugged_in(vin)) is True
