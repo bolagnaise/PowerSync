@@ -246,11 +246,15 @@ def test_optimizer_force_discharge_preserves_battery_target_and_pcc_ceiling(sige
     async def connect():
         return True
 
+    async def get_status():
+        return types.SimpleNamespace(attributes={"pv_power_kw": 0.0})
+
     async def write(address, values, slave_id=None):
         writes.append((address, list(values)))
         return True
 
     controller.connect = connect
+    controller.get_status = get_status
     controller._write_holding_registers = write
 
     assert asyncio.run(
@@ -266,6 +270,70 @@ def test_optimizer_force_discharge_preserves_battery_target_and_pcc_ceiling(sige
         (controller.REG_REMOTE_EMS_ENABLE, [1]),
         (controller.REG_REMOTE_EMS_CONTROL_MODE, [controller.REMOTE_EMS_MODE_DISCHARGE_ESS]),
     ]
+
+
+def test_optimizer_force_discharge_preserves_active_pv_before_battery_target(
+    sigenergy_module,
+):
+    """Ticket #352: do not suppress PV to satisfy an export battery target."""
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    _stub_force_discharge_reads(controller)
+    writes: list[tuple[int, list[int]]] = []
+
+    async def connect():
+        return True
+
+    async def get_status():
+        return types.SimpleNamespace(attributes={"pv_power_kw": 3.69})
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, list(values)))
+        return True
+
+    controller.connect = connect
+    controller.get_status = get_status
+    controller._write_holding_registers = write
+
+    assert asyncio.run(
+        controller.force_discharge(
+            power_kw=2.501,
+            battery_discharge_kw=1.089,
+        )
+    )
+    assert writes[-1] == (
+        controller.REG_REMOTE_EMS_CONTROL_MODE,
+        [controller.REMOTE_EMS_MODE_DISCHARGE_PV],
+    )
+    assert writes[:3] == [
+        (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(2501)),
+        (controller.REG_ESS_MAX_DISCHARGE_LIMIT, controller._from_unsigned32(1089)),
+        (controller.REG_REMOTE_EMS_ENABLE, [1]),
+    ]
+
+
+def test_optimizer_force_discharge_refuses_without_fresh_pv_status(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    _stub_force_discharge_reads(controller)
+    writes: list[tuple[int, list[int]]] = []
+
+    async def connect():
+        return True
+
+    async def get_status():
+        raise RuntimeError("Modbus unavailable")
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, list(values)))
+        return True
+
+    controller.connect = connect
+    controller.get_status = get_status
+    controller._write_holding_registers = write
+
+    assert not asyncio.run(
+        controller.force_discharge(power_kw=2.501, battery_discharge_kw=1.089)
+    )
+    assert writes == []
 
 
 def test_force_discharge_caps_ess_without_reducing_grid_export_ceiling(sigenergy_module):
