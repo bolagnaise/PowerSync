@@ -1106,7 +1106,7 @@ class SolarEdgeEnergyController:
                         if key in fresh and state is not None and not self._control_values_match(entity, state.state, fresh[key]):
                             raise ValueError(f"Cached {key} differs from fresh storage read")
                 if (
-                    restoring
+                    (restoring or operation == "set_self_consumption")
                     and not session.owned
                     and not session.baseline
                     and fresh is not None
@@ -1114,7 +1114,12 @@ class SolarEdgeEnergyController:
                 ):
                     # The fresh native poll already confirms the requested state.
                     # Keep this inside the lock and after health/generation checks.
-                    return True
+                    return self._result(
+                        session,
+                        SolarEdgeMutationOutcome.CONFIRMED,
+                        operation,
+                        confirmation_source="fresh_native_self_consumption_poll",
+                    )
                 plan = make_plan()
                 plan = [
                     self._preflight(key, value, native=restoring) for key, value in plan

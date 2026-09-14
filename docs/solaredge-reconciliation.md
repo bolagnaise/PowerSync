@@ -24,7 +24,7 @@ Successful reconciliation clears the saved baseline and owned fields, then persi
 
 A later forced operation must obtain fresh values for every field it will change or restore. PowerSync rejects the operation before writes when that complete baseline is unavailable. This change does not introduce an automatic transition from native mode into Remote Control. It cannot make forced dispatch available on hardware that hides the required controls.
 
-With no baseline or owned fields, a fresh native poll makes `restore_normal` a successful read-only operation. The existing health, lock and generation checks still apply.
+With no baseline or owned fields, a fresh native poll makes `restore_normal` and `set_self_consumption` successful read-only operations. The existing health, lock and generation checks still apply. The result records fresh native confirmation so an earlier rejected attempt is no longer reported as the latest outcome. Repeated optimizer self-consumption cycles can then advance their action marker without requiring Remote Control entities or transmitting inverter writes.
 
 ## Service results
 

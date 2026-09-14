@@ -129,6 +129,134 @@ def test_native_site_snapshot_reconciles_then_blocks_stale_dispatch(system):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("automatic", [False, True])
+def test_native_self_consumption_is_read_only_and_repeatable(system, automatic):
+    async def scenario():
+        controller, hass, _, upstream, _, store, _ = system
+        assert (await controller.reconcile_result())["success"]
+        before = copy.deepcopy(store.data)
+        refreshes = upstream.refreshes
+        for _ in range(3):
+            assert await controller.set_self_consumption(automatic=automatic)
+        assert upstream.refreshes == refreshes + 3
+        assert store.data == before
+        assert hass.services.calls == []
+        assert not await controller.force_charge(15, 2000, automatic=True)
+        assert not await controller.force_discharge(15, 2000, automatic=True)
+        assert hass.services.calls == []
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", [
+    "identity", "timestamp", "object", "poll", "upstream_busy", "controller_busy",
+    "health", "baseline", "owned", "remote", "malformed", "unsupported", "cached_mode",
+])
+def test_native_self_consumption_does_not_bypass_safety(system, failure):
+    async def scenario():
+        controller, hass, inverter, upstream, hub, store, entry = system
+        assert (await controller.reconcile_result())["success"]
+        session = controller._coordinator()
+        if failure == "identity":
+            entry.unique_id = "other_storage_command_mode"
+        elif failure == "timestamp":
+            upstream.advances = False
+        elif failure == "object":
+            upstream.replaces_storage = False
+        elif failure == "poll":
+            upstream.succeeds = False
+        elif failure == "upstream_busy":
+            hub.has_write = 57358
+        elif failure == "health":
+            session.health = "reconciliation_required"
+        elif failure == "baseline":
+            session.baseline = {"storage_control_mode": "Remote Control"}
+        elif failure == "owned":
+            session.owned = {"backup_reserve": 10}
+        elif failure == "remote":
+            inverter.decoded_storage_control.update(control_mode=4, command_mode=7)
+            hass.states.get("select.solaredge_storage_control_mode").state = "Remote Control"
+        elif failure == "malformed":
+            inverter.decoded_storage_control["backup_reserve"] = float("inf")
+        elif failure == "unsupported":
+            inverter.decoded_storage_control["control_mode"] = 0
+        elif failure == "cached_mode":
+            hass.states.get("select.solaredge_storage_control_mode").state = "Remote Control"
+        before = copy.deepcopy({key: getattr(session, key) for key in (
+            "health", "generation", "intent_generation", "baseline", "owned", "pending_mutation",
+        )})
+        persisted = copy.deepcopy(store.data)
+        if failure == "controller_busy":
+            async with session.lock:
+                assert not await controller.set_self_consumption(automatic=True)
+        else:
+            assert not await controller.set_self_consumption(automatic=True)
+        assert {key: getattr(session, key) for key in before} == before
+        assert store.data == persisted
+        assert hass.services.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_native_self_consumption_recovers_after_stale_poll(system):
+    async def scenario():
+        controller, hass, _, upstream, _, _, _ = system
+        assert (await controller.reconcile_result())["success"]
+        upstream.advances = False
+        assert not await controller.set_self_consumption(automatic=True)
+        assert controller.last_mutation["outcome"] == "rejected"
+        upstream.advances = True
+        assert await controller.set_self_consumption(automatic=True)
+        assert controller.last_mutation["operation"] == "set_self_consumption"
+        assert controller.last_mutation["outcome"] == "confirmed"
+        assert controller.last_mutation["confirmation_source"] == "fresh_native_self_consumption_poll"
+        assert controller.last_mutation["possibly_transmitted"] is False
+        assert hass.services.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_native_self_consumption_accepts_documented_optional_sentinel(system):
+    async def scenario():
+        controller, hass, inverter, _, _, _, _ = system
+        assert (await controller.reconcile_result())["success"]
+        inverter.decoded_storage_control["backup_reserve"] = float("nan")
+        assert await controller.set_self_consumption(automatic=True)
+        assert hass.services.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_native_self_consumption_serializes_a_delayed_poll(system, monkeypatch):
+    async def scenario():
+        controller, hass, _, upstream, _, _, _ = system
+        assert (await controller.reconcile_result())["success"]
+        started, release = asyncio.Event(), asyncio.Event()
+        original_refresh = upstream.async_request_refresh
+
+        async def delayed_refresh():
+            started.set()
+            await release.wait()
+            await original_refresh()
+
+        monkeypatch.setattr(upstream, "async_request_refresh", delayed_refresh)
+        first = asyncio.create_task(controller.set_self_consumption(automatic=True))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1)
+            before = copy.deepcopy(controller.last_mutation)
+            assert not await controller.set_self_consumption(automatic=True)
+            assert controller.last_mutation == before
+        finally:
+            release.set()
+        assert await asyncio.wait_for(first, timeout=1)
+        assert controller.last_mutation["outcome"] == "confirmed"
+        assert controller.last_mutation["operation"] == "set_self_consumption"
+        assert not controller._coordinator().lock.locked()
+        assert hass.services.calls == []
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     "failure,reason",
     [
