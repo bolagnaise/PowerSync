@@ -10589,6 +10589,21 @@ class SolarEdgeEnergyCoordinator(
     async def reconcile(self) -> bool:
         return await self._control_result(self._controller.reconcile())
 
+    async def reconcile_result(self) -> dict:
+        """Forward reconciliation diagnostics and publish updated control health."""
+        try:
+            return await self._controller.reconcile_result()
+        finally:
+            if self.data is not None:
+                status = self._controller.get_status()
+                self.async_set_updated_data({
+                    **self.data,
+                    "control_health": status.get("control_health"),
+                    "last_mutation": status.get("last_mutation"),
+                    "last_reconciliation": status.get("last_reconciliation"),
+                    "mutation_active": status.get("mutation_active", False),
+                })
+
     async def get_backup_reserve(self) -> int | None:
         return await self._controller.get_backup_reserve()
 
