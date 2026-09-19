@@ -22,6 +22,35 @@ INIT_PATH = (
 )
 
 
+def test_dc_curtailment_card_distinguishes_command_from_physical_confirmation():
+    """#66: acknowledged Sungrow control must not claim export stopped."""
+    source = STRATEGY_PATH.read_text()
+    start = source.index("function _curtailmentStatus(")
+    end = source.index("\nfunction ", start + 1)
+    runtime = r"""
+      const card = _curtailmentStatus(name => `sensor.${name}`, true, false);
+      const dc = card.cards[0];
+      const label = new Function('states', dc.label.slice(3, -3));
+      function render(state, attributes = {}) {
+        return label({'sensor.solar_curtailment': {state, attributes}});
+      }
+      for (const proof of [undefined, false, 'true']) {
+        const text = render('Active', {effect_confirmed: proof});
+        if (!text.includes('Command acknowledged') || !text.includes('export unverified')) {
+          throw new Error(`Command-only state overstated physical effect: ${text}`);
+        }
+      }
+      if (!render('Active', {effect_confirmed: true}).includes('Export confirmed below threshold')) {
+        throw new Error('Verified physical effect was not distinguished');
+      }
+      if (render('Pending', {effect_confirmed: true}).includes('Export confirmed')) {
+        throw new Error('Old effect flag overrode pending control');
+      }
+      if (!render('Normal').startsWith('Normal')) throw new Error('Normal changed');
+    """
+    subprocess.run(["node", "-e", source[start:end] + runtime], check=True)
+
+
 def test_button_card_resource_fallback_accepts_dashed_hacs_url():
     """button-card HACS URLs include dashes and must not be normalized away."""
     source = STRATEGY_PATH.read_text()

@@ -82,8 +82,10 @@ from .ev_phase_allocator import (
 )
 from ..ev_load import is_current_ev_power_observation
 from ..registry_compat import iter_device_entries
+from ..sensitive_logging import install_vin_log_filter
 
 _LOGGER = logging.getLogger(__name__)
+install_vin_log_filter(_LOGGER)
 
 # Tesla integrations supported for EV control via Fleet API
 from ..const import TESLA_INTEGRATIONS

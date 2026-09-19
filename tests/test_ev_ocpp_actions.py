@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import logging
 import importlib
 import sys
 import types
@@ -15,6 +17,32 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
+
+
+@pytest.mark.parametrize('matched', [True, False])
+def test_tesla_discovery_masks_vins_on_child_logger_without_parent_filter(matched):
+    vin = 'LRW3F7FS1NC484342'
+    other = 'LRW3F7FS1NC484343'
+    device = SimpleNamespace(id='test-device', name=vin, identifiers={('tesla_fleet', vin)})
+    hass = _Hass([], registry_devices={device.id: device})
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    logger = actions._LOGGER
+    old_level, old_propagate = logger.level, logger.propagate
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    try:
+        asyncio.run(actions._get_tesla_ev_entity(
+            hass, r'switch\..*charge$', vin if matched else other))
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+        logger.propagate = old_propagate
+    text = stream.getvalue()
+    assert 'Tesla domain device' in text
+    assert vin not in text
+    assert other not in text
 
 
 def _install_ha_stubs() -> None:

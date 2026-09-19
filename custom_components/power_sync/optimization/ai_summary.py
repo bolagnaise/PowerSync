@@ -1466,7 +1466,8 @@ class OpenRouterAISummaryProvider:
                         "content": f"PLAN_CONTEXT_JSON:\n{canonical_context_json(context)}",
                     },
                 ],
-                "temperature": 0.2,
+                # Temperature is optional and unsupported by some reasoning
+                # routes. Requiring it excludes otherwise schema-capable models.
                 "max_tokens": 1200,
                 "response_format": {
                     "type": "json_schema",

@@ -77,6 +77,21 @@ def test_obfuscate_log_arg_masks_vins_in_mapping_keys_before_log_formatting() ->
     }
 
 
+def test_child_vin_filter_preserves_format_types_and_is_reload_idempotent():
+    logger = logging.Logger('powersync.test.child', level=logging.DEBUG)
+    stream = io.StringIO()
+    logger.addHandler(logging.StreamHandler(stream))
+    _MODULE.install_vin_log_filter(logger)
+    _MODULE.install_vin_log_filter(logger)
+    assert len(logger.filters) == 1
+    logger.info('vehicle %s at %.2f kW: %s', VIN, 7.0, {VIN: True})
+    logger.debug(f'discovered {VIN}')
+    text = stream.getvalue()
+    assert VIN not in text
+    assert MASKED_VIN in text
+    assert '7.00 kW' in text
+
+
 def test_expo_push_logging_never_contains_registered_token() -> None:
     """A diagnostic log must not disclose the credential used to send pushes."""
     actions_path = (

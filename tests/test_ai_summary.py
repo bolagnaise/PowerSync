@@ -611,6 +611,26 @@ class _FakeSession:
         return self.response
 
 
+def test_openrouter_reasoning_route_does_not_require_unsupported_temperature():
+    """#63: require_parameters must not exclude a route lacking temperature."""
+    module = _load_module()
+    class ReasoningRoute(_FakeSession):
+        def post(self, url, **kwargs):
+            # Public OpenRouter model capabilities for the reported route list
+            # structured outputs and max_tokens, but no temperature support.
+            if 'temperature' in kwargs['json']:
+                return _FakeResponse(400, {'error': {'message': 'Unsupported temperature'}})
+            return super().post(url, **kwargs)
+    session = ReasoningRoute(_FakeResponse(200, {
+        'choices': [{'message': {'content': json.dumps(_model_output())}}]}))
+    result = asyncio.run(module.OpenRouterAISummaryProvider().generate(
+        session=session, api_key='test-only', model='openai/gpt-5.6-sol', context={}))
+    assert result == _model_output()
+    payload = session.calls[0][1]['json']
+    assert payload['provider'] == {'require_parameters': True}
+    assert payload['response_format']['json_schema']['strict'] is True
+
+
 class _TimeoutContext:
     async def __aenter__(self):
         raise asyncio.TimeoutError

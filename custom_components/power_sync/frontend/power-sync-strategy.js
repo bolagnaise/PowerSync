@@ -8390,7 +8390,12 @@ function _curtailmentStatus(e, hasDC, hasAC) {
       show_label: true,
       label: `[[[
         const state = states['${dcEntity}']?.state;
-        if (state === 'Active') return 'CURTAILED - Export confirmed stopped';
+        if (state === 'Active') {
+          const confirmed = states['${dcEntity}']?.attributes?.effect_confirmed === true;
+          return confirmed
+            ? 'CURTAILED - Export confirmed below threshold'
+            : 'CURTAILMENT - Command acknowledged; export unverified';
+        }
         if (state === 'Pending') return 'PENDING - Export not confirmed';
         return 'Normal - Export allowed';
       ]]]`,

@@ -5084,8 +5084,9 @@ def _generic_curtailment_visible_status(
 ) -> str:
     """Return an honest non-FoxESS curtailment state.
 
-    ``Active`` renders as "CURTAILED - Export confirmed stopped", so it needs
-    an acknowledged control command behind it.  Reporting it from the feed-in
+    ``Active`` records an acknowledged control command, not a physical effect.
+    The dashboard requires a separate ``effect_confirmed`` flag before it claims
+    export confirmation. Reporting Active from the feed-in
     price alone claimed a curtailment on entries where none had been attempted
     - including brands whose control surface does not exist on the configured
     profile, where the handler returns without issuing anything (Discord #386,
@@ -5659,7 +5660,7 @@ class SolarCurtailmentSensor(SensorEntity):
         control_state = self._control_command_state()
         visible_state = self._visible_status()
         descriptions = {
-            "Active": "Export blocked due to negative feed-in price",
+            "Active": "Curtailment command acknowledged; physical export is not verified",
             "Pending": (
                 "Export limiting is not supported on this control profile"
                 if control_state == "unsupported"
@@ -5679,6 +5680,7 @@ class SolarCurtailmentSensor(SensorEntity):
             "export_earnings": export_earnings,
             "export_uneconomic": self._export_uneconomic(),
             "control_state": control_state,
+            "effect_confirmed": False,
             "description": descriptions[visible_state],
         }
 
