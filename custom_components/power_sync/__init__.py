@@ -24256,10 +24256,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 return False
 
-            # --- Execute the initial mode bounce ---
-            _LOGGER.info("Charge kick (%s): mode bounce starting", reason)
-            bounce_ok = await _mode_bounce()
-            if not bounce_ok:
+            async def _restore_after_failed_bounce() -> None:
+                """Recover either bounce without overwriting a newer owner."""
                 if not _charge_kick_is_current():
                     _LOGGER.info(
                         "Charge kick (%s) superseded during confirmation; skipping stale cleanup",
@@ -24280,13 +24278,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                 except Exception:
                     pass
-                # Auto-restore: the battery is stuck in wrong mode, restore to normal
+                # Notification delivery yields; a new command may now own the mode.
+                if not _charge_kick_is_current():
+                    return
+                # Reuse normal restoration and its persisted, bounded retry path.
                 try:
                     await hass.services.async_call(
                         DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True,
                     )
                 except Exception as restore_err:
                     _LOGGER.error("Auto-restore after charge kick failure also failed: %s", restore_err)
+                return
+
+            # --- Execute the initial mode bounce ---
+            _LOGGER.info("Charge kick (%s): mode bounce starting", reason)
+            if not await _mode_bounce():
+                await _restore_after_failed_bounce()
                 return
 
             # --- Background verification task ---
@@ -24327,7 +24334,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 reason,
                             )
                             retry_bounce_done = True
-                            await _mode_bounce()
+                            if not await _mode_bounce():
+                                await _restore_after_failed_bounce()
+                                return
                             if not _charge_kick_is_current():
                                 return
 
