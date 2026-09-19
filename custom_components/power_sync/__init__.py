@@ -42642,28 +42642,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             if vc_phases is None:
                                 vc_phases = 1
 
-                            # Determine charger_type: vehicle config > config entry > default
-                            vc_charger_type = vc.get("charger_type")
+                            # Determine charger_type: vehicle config > config entry > default.
+                            # A persisted Generic Charger profile can already carry its type
+                            # while inheriting one or more entity ids from entry options.
+                            from .automations.generic_charger_config import (
+                                resolve_generic_charger_profile,
+                            )
+
+                            _opts = {**entry.data, **entry.options}
+                            vc_charger_type = resolve_generic_charger_profile(vc, _opts)
                             if not vc_charger_type:
-                                from .const import (
-                                    CONF_GENERIC_CHARGER_AMPS_ENTITY,
-                                    CONF_GENERIC_CHARGER_ENABLED,
-                                    CONF_GENERIC_CHARGER_POWER_ENTITY,
-                                    CONF_GENERIC_CHARGER_STATUS_ENTITY,
-                                    CONF_GENERIC_CHARGER_SWITCH_ENTITY,
-                                )
-                                _opts = {**entry.data, **entry.options}
-                                if _opts.get(CONF_GENERIC_CHARGER_ENABLED):
-                                    vc_charger_type = "generic"
-                                    if not vc.get("charger_switch_entity"):
-                                        vc["charger_switch_entity"] = _opts.get(CONF_GENERIC_CHARGER_SWITCH_ENTITY, "")
-                                    if not vc.get("charger_amps_entity"):
-                                        vc["charger_amps_entity"] = _opts.get(CONF_GENERIC_CHARGER_AMPS_ENTITY, "")
-                                    if not vc.get("charger_status_entity"):
-                                        vc["charger_status_entity"] = _opts.get(CONF_GENERIC_CHARGER_STATUS_ENTITY, "")
-                                    if not vc.get("charger_power_entity"):
-                                        vc["charger_power_entity"] = _opts.get(CONF_GENERIC_CHARGER_POWER_ENTITY, "")
-                                elif _opts.get("ocpp_enabled"):
+                                if _opts.get("ocpp_enabled"):
                                     vc_charger_type = "ocpp"
                                 else:
                                     vc_charger_type = "tesla"
