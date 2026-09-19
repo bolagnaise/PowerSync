@@ -200,8 +200,8 @@ def _should_control_battery_target(source: str, force_max_rate: bool) -> bool:
     optimizer-planned battery charge, so the battery-target controller must be
     armed for all of them. Scoping this to ``grid_*`` sources previously left
     other sessions reading the battery's own grid-charge draw as spare surplus.
-    ``force_max_rate`` deadline sessions opt out deliberately: they run at a
-    fixed rate with no dynamic balancing.
+    ``force_max_rate`` deadline sessions do not reserve a battery-charge target,
+    but still use dynamic balancing to respect the site import capacity.
     """
     return bool(source != "solar_surplus" and not force_max_rate)
 
@@ -7703,6 +7703,7 @@ class AutoScheduleExecutor:
             max_grid_import_kw = await _resolve_max_grid_import_kw(
                 self.hass,
                 self.config_entry,
+                battery_params,
             )
 
         if source == "solar_surplus":
@@ -7785,7 +7786,8 @@ class AutoScheduleExecutor:
         if force_max_rate:
             params.update({
                 "start_amps": effective_max_amps,
-                "fixed_charge_amps": effective_max_amps,
+                # A deadline requests the fastest safe rate; it cannot bypass
+                # initial site headroom or subsequent shared-load adjustment.
                 "target_battery_charge_kw": 0,
             })
 

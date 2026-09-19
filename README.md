@@ -143,6 +143,16 @@ Or manually:
 | **Services** | Force charge/discharge, hold SOC, TOU sync, backup reserve, inverter curtailment, **off-grid/reconnect** | [Reference](https://github.com/bolagnaise/PowerSync/wiki/Services-Reference) |
 | **Troubleshooting** | Connection issues, debug logging, common fixes | [Guide](https://github.com/bolagnaise/PowerSync/wiki/Troubleshooting) |
 
+### EV site import limits
+
+Smart Schedule passes the optimizer's configured grid-import limit to the live EV controller.
+The controller uses the lowest available positive limit from the EV session, optimizer, Tesla site and Home Power settings.
+Deadline charging remains dynamically adjustable; reaching a departure target does not override site capacity.
+An explicit EV session limit can reduce the site limit but cannot increase it.
+
+Whole-site power balancing uses site power telemetry.
+Optional per-phase current protection additionally requires fresh mains-current sensors in amps; a grid-power sensor in kW cannot be selected as a phase-current sensor.
+
 ### Custom tariff daily supply charge
 
 For a static custom tariff uploaded to Tesla, `daily_supply_charge` is an

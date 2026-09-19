@@ -7221,6 +7221,69 @@ def test_optimizer_import_limit_yields_to_lower_home_power_cap():
     ) == 12.0
 
 
+@pytest.mark.parametrize("force_max_rate", [False, True])
+def test_smart_schedule_start_preserves_optimizer_import_limit(monkeypatch, force_max_rate):
+    """Exercise the planner-to-action limit handoff, not just the resolver."""
+    optimization = types.ModuleType("power_sync.optimization")
+    optimization.__path__ = [str(ROOT / "optimization")]
+    monkeypatch.setitem(sys.modules, "power_sync.optimization", optimization)
+    planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+    monkeypatch.setitem(sys.modules, "power_sync.automations.actions", actions)
+    monkeypatch.setattr(
+        planner.dt_util, "now", lambda: SimpleNamespace(weekday=lambda: 0)
+    )
+    hass = _Hass([])
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
+        _config=SimpleNamespace(
+            max_charge_w=11000, max_discharge_w=11000, max_grid_import_w=13500
+        )
+    )
+    monkeypatch.setattr(
+        actions, "_get_tesla_max_site_meter_power_kw",
+        AsyncMock(return_value=1000000.0),
+    )
+    limits = []
+
+    async def start(hass, entry, params, context=None):
+        limits.append(await actions._resolve_max_grid_import_kw(hass, entry, params))
+        assert not params.get("fixed_charge_amps")
+        return True
+
+    monkeypatch.setattr(actions, "_action_start_ev_charging_dynamic", start)
+    executor = object.__new__(planner.AutoScheduleExecutor)
+    executor.hass = hass
+    executor.config_entry = _Entry()
+    executor._last_external_smart_schedule_stops = {}
+    executor._resolve_vehicle_vin = lambda vehicle_id: None
+    settings = planner.AutoScheduleSettings(
+        enabled=True, vehicle_id="generic_ev", charger_type="generic"
+    )
+    state = planner.AutoScheduleState(vehicle_id="generic_ev")
+
+    assert asyncio.run(executor._start_charging(
+        "generic_ev", settings, state, "grid_offpeak", force_max_rate=force_max_rate
+    )) is True
+    assert limits == [13.5]
+
+
+@pytest.mark.parametrize(
+    ("explicit", "optimizer", "tesla", "expected"),
+    [(1000000, 13.5, 1000000, 13.5), (10, 13.5, 1000000, 10),
+     (20, 13.5, 12, 12), (20, None, 1000000, 15), (None, None, None, 15)],
+)
+def test_grid_import_constraints_cannot_be_widened(
+    monkeypatch, explicit, optimizer, tesla, expected
+):
+    hass = _Hass([])
+    monkeypatch.setattr(actions, "_get_tesla_max_site_meter_power_kw", AsyncMock(return_value=tesla))
+    monkeypatch.setattr(actions, "_get_home_power_max_grid_import_kw", lambda *args: 15)
+    result = asyncio.run(actions._resolve_max_grid_import_kw(
+        hass, _Entry(),
+        {"max_grid_import_kw": explicit, "optimizer_max_grid_import_kw": optimizer},
+    ))
+    assert result == expected
+
+
 def test_scheduled_sigenergy_start_waits_without_minimum_headroom(monkeypatch):
     """No Sigenergy register write is safe when the site has no EV budget."""
     set_amps_calls: list[int] = []
