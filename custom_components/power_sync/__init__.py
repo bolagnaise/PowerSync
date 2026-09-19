@@ -31613,129 +31613,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         reason: str,
         prefer_local: bool = True,
     ) -> dict[str, list[str]]:
-        """Apply Tesla reserve locally first without service-layer side effects."""
-        from .const import CONF_POWERWALL_LOCAL_DIN
-        from .powerwall_local.dispatch import dispatch_powerwall_write
-        from .powerwall_local.normalization import (
-            detect_local_backup_reserve_offset,
-            local_backup_reserve_write_percent,
-            normalize_local_backup_reserve_percent,
-        )
+        """Apply user-scale reserve through the independently verified cloud path.
 
+        Local config uses a different reserve scale. Neither cached cloud/local
+        pairs nor reading back our own converted payload establishes its offset.
+        Until the gateway supplies that conversion authoritatively, fail closed
+        on local reserve writes, including restore and optimizer callers.
+        ``prefer_local`` is retained for compatibility with those callers.
+        """
         result: dict[str, list[str]] = {
             "confirmed_sites": [],
             "accepted_sites": [],
             "failed_sites": [],
         }
-        remaining = list(site_configs)
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        for key in (
+            "powerwall_local_low_soe_reserve_pct",
+            "powerwall_local_backup_reserve_write_local_pct",
+            "powerwall_local_backup_reserve_write_user_pct",
+        ):
+            entry_data.pop(key, None)
+        coordinator = entry_data.get("tesla_coordinator")
+        if coordinator is not None:
+            coordinator.invalidate_site_info_cache()
         session = async_get_clientsession(hass)
-        if prefer_local and remaining:
-            site_id, current_token, provider = remaining.pop(0)
-            din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
-            entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
-            }
-            api_base = get_tesla_api_base_url(
-                provider,
-                entry.data.get(CONF_FLEET_API_BASE_URL),
-            )
-
-            async def _local(transport) -> bool:
-                if not din:
-                    return False
-                low_soe_reserve = entry_data.get(
-                    "powerwall_local_low_soe_reserve_pct"
-                )
-                if low_soe_reserve is None:
-                    config = await transport.read_config(din)
-                    local_reserve = (
-                        ((config or {}).get("site_info") or {}).get(
-                            "backup_reserve_percent"
-                        )
-                    )
-                    coordinator = entry_data.get("tesla_coordinator")
-                    site_info = getattr(coordinator, "_site_info_cache", None)
-                    cloud_reserve = (
-                        site_info.get("backup_reserve_percent")
-                        if isinstance(site_info, dict)
-                        else None
-                    )
-                    detected = detect_local_backup_reserve_offset(
-                        local_reserve,
-                        cloud_reserve,
-                    )
-                    if detected is not None:
-                        low_soe_reserve = detected
-                        entry_data["powerwall_local_low_soe_reserve_pct"] = detected
-                local_percent = local_backup_reserve_write_percent(
-                    percent,
-                    low_soe_reserve,
-                )
-                if local_percent is None or not await transport.write_config(
-                    din,
-                    {"site_info.backup_reserve_percent": local_percent},
-                ):
-                    return False
-                entry_data[
-                    "powerwall_local_backup_reserve_write_local_pct"
-                ] = local_percent
-                entry_data[
-                    "powerwall_local_backup_reserve_write_user_pct"
-                ] = percent
-                detected = detect_local_backup_reserve_offset(
-                    local_percent,
-                    percent,
-                )
-                if detected is not None:
-                    low_soe_reserve = detected
-                    entry_data["powerwall_local_low_soe_reserve_pct"] = detected
-                for attempt in range(1, 4):
-                    if attempt > 1:
-                        await asyncio.sleep(2)
-                    config = await transport.read_config(din)
-                    local_value = (
-                        ((config or {}).get("site_info") or {}).get(
-                            "backup_reserve_percent"
-                        )
-                    )
-                    observed = normalize_local_backup_reserve_percent(
-                        local_value,
-                        low_soe_reserve,
-                    )
-                    if observed == percent:
-                        return True
-                if site_id not in result["accepted_sites"]:
-                    result["accepted_sites"].append(site_id)
-                return False
-
-            async def _cloud() -> bool:
-                return await _tesla_force_set_backup_reserve_cloud(
-                    session,
-                    site_id,
-                    current_token,
-                    provider,
-                    percent,
-                    reason=reason,
-                )
-
-            if await dispatch_powerwall_write(
-                hass,
-                entry,
-                local_call=_local,
-                cloud_call=_cloud,
-                label=f"{reason} backup reserve",
-                timeout=15.0,
-                retry_local_once=False,
-            ):
-                result["confirmed_sites"].append(site_id)
-                if site_id in result["accepted_sites"]:
-                    result["accepted_sites"].remove(site_id)
-            else:
-                result["failed_sites"].append(site_id)
-
-        for site_id, current_token, provider in remaining:
+        for site_id, current_token, provider in site_configs:
             if await _tesla_force_set_backup_reserve_cloud(
                 session,
                 site_id,
@@ -38923,7 +38825,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except Exception as e:
                 _LOGGER.error(f"Error setting Anker Solix backup reserve: {e}", exc_info=True)
         else:
-            # Tesla Powerwall — local V1R first when paired, cloud Fleet API as fallback.
+            # Tesla reserve uses the verified user-scale cloud API.
             tesla_success = False
             try:
                 # Tesla constraint (July 2025): only 0-80% and 100% are valid.

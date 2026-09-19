@@ -38,10 +38,6 @@ from .exceptions import (
     PowerwallSignatureError,
     PowerwallUnreachableError,
 )
-from .normalization import (
-    detect_local_backup_reserve_offset,
-    normalize_local_backup_reserve_percent,
-)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,13 +55,6 @@ POWERWALL_CALIBRATION_CLEAR_POLLS = 3
 _BACKUP_RESERVE_WRITE_LOCAL_KEY = "powerwall_local_backup_reserve_write_local_pct"
 _BACKUP_RESERVE_WRITE_USER_KEY = "powerwall_local_backup_reserve_write_user_pct"
 _CLOUD_FALLBACK_PENDING_KEY = "powerwall_local_cloud_fallback_pending"
-
-
-def _reserve_matches(left: Any, right: Any) -> bool:
-    try:
-        return abs(float(left) - float(right)) <= 0.5
-    except (TypeError, ValueError):
-        return False
 
 
 class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None]):
@@ -220,7 +209,7 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
             self._last_success_ts = time.time()
             self._last_success_monotonic = time.monotonic()
         self._consecutive_failures = 0
-        self._update_backup_reserve_offset(snap)
+        self._discard_unverified_backup_reserve(snap)
         await self._sync_calibration_alert(snap)
         self._schedule_v1r_diagnostics_if_due()
         return snap
@@ -453,86 +442,22 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         except asyncio.CancelledError:
             pass
 
-    def _update_backup_reserve_offset(self, snap: PowerwallSnapshot) -> None:
-        """Detect the local reserve offset by comparing local and cloud readbacks."""
+    def _discard_unverified_backup_reserve(self, snap: PowerwallSnapshot) -> None:
+        """Retire inferred offsets and pending targets from older versions.
+
+        Local and cloud samples have no shared setting revision. Even recent
+        samples can straddle an external change, and matching our own raw write
+        is circular evidence. Keep raw config for diagnostics, not reserve policy.
+        """
+        snap.backup_reserve_percent = None
         entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
-        if not isinstance(entry_data, dict):
-            return
-
-        config = (snap.raw or {}).get("config") or {}
-        site_info = config.get("site_info") or {}
-        local_reserve = site_info.get("backup_reserve_percent")
-        tesla_coord = entry_data.get("tesla_coordinator")
-        cloud_site_info = getattr(tesla_coord, "_site_info_cache", None)
-        cloud_reserve = (
-            cloud_site_info.get("backup_reserve_percent")
-            if isinstance(cloud_site_info, dict)
-            else None
-        )
-
-        pending_local_write = entry_data.get(_BACKUP_RESERVE_WRITE_LOCAL_KEY)
-        pending_user_reserve = entry_data.get(_BACKUP_RESERVE_WRITE_USER_KEY)
-        pending_offset = detect_local_backup_reserve_offset(
-            pending_local_write,
-            pending_user_reserve,
-        )
-        if (
-            pending_offset is not None
-            and _reserve_matches(local_reserve, pending_local_write)
-        ):
-            previous = entry_data.get("powerwall_local_low_soe_reserve_pct")
-            entry_data["powerwall_local_low_soe_reserve_pct"] = pending_offset
-            normalized = normalize_local_backup_reserve_percent(
-                local_reserve,
-                pending_offset,
-            )
-            if normalized is not None:
-                snap.backup_reserve_percent = normalized
-            if _reserve_matches(cloud_reserve, pending_user_reserve):
-                entry_data.pop(_BACKUP_RESERVE_WRITE_LOCAL_KEY, None)
-                entry_data.pop(_BACKUP_RESERVE_WRITE_USER_KEY, None)
-            if previous != pending_offset:
-                _LOGGER.info(
-                    "Using Powerwall local backup reserve write offset: %.1f%% "
-                    "(local=%s%%, requested=%s%%, Tesla site_info=%s%%)",
-                    pending_offset,
-                    local_reserve,
-                    pending_user_reserve,
-                    cloud_reserve,
-                )
-            return
-        if pending_local_write is not None or pending_user_reserve is not None:
-            entry_data.pop(_BACKUP_RESERVE_WRITE_LOCAL_KEY, None)
-            entry_data.pop(_BACKUP_RESERVE_WRITE_USER_KEY, None)
-
-        detected = detect_local_backup_reserve_offset(local_reserve, cloud_reserve)
-        if detected is None:
-            persisted = entry_data.get("powerwall_local_low_soe_reserve_pct")
-            if persisted is not None:
-                normalized = normalize_local_backup_reserve_percent(
-                    local_reserve,
-                    persisted,
-                )
-                if normalized is not None:
-                    snap.backup_reserve_percent = normalized
-            return
-
-        previous = entry_data.get("powerwall_local_low_soe_reserve_pct")
-        entry_data["powerwall_local_low_soe_reserve_pct"] = detected
-        normalized = normalize_local_backup_reserve_percent(
-            local_reserve,
-            detected,
-        )
-        if normalized is not None:
-            snap.backup_reserve_percent = normalized
-        if previous != detected:
-            _LOGGER.info(
-                "Detected Powerwall local backup reserve offset: %.1f%% "
-                "(local=%s%%, Tesla site_info=%s%%)",
-                detected,
-                local_reserve,
-                cloud_reserve,
-            )
+        if isinstance(entry_data, dict):
+            for key in (
+                "powerwall_local_low_soe_reserve_pct",
+                _BACKUP_RESERVE_WRITE_LOCAL_KEY,
+                _BACKUP_RESERVE_WRITE_USER_KEY,
+            ):
+                entry_data.pop(key, None)
 
     async def _handle_key_rejected(self, err: Exception) -> None:
         """Mark the entry as unpaired and prompt the user to re-pair.

@@ -21,7 +21,6 @@ from ..const import TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS
 _LOGGER = logging.getLogger(__name__)
 
 TESLA_SITE_INFO_MAX_AGE_SECONDS = 900
-_BACKUP_RESERVE_WRITE_USER_KEY = "powerwall_local_backup_reserve_write_user_pct"
 
 
 class ReserveTrust(enum.Enum):
@@ -45,15 +44,6 @@ def _coerce_reserve_percent(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return max(0, min(100, reserve))
-
-
-def _pending_powerwall_local_reserve_write(
-    entry_data: dict[str, Any],
-) -> int | None:
-    """Return the user-facing target for an in-flight local reserve write."""
-    if not isinstance(entry_data, dict):
-        return None
-    return _coerce_reserve_percent(entry_data.get(_BACKUP_RESERVE_WRITE_USER_KEY))
 
 
 def _fresh_powerwall_local_snapshot(
@@ -328,27 +318,8 @@ class BatteryControllerWrapper:
             for entry_id, entry_data in self.hass.data.get(DOMAIN, {}).items():
                 if not isinstance(entry_data, dict):
                     continue
-                if self.battery_system == "tesla":
-                    pending_reserve = _pending_powerwall_local_reserve_write(
-                        entry_data
-                    )
-                    if pending_reserve is not None:
-                        return ReserveReading(pending_reserve, ReserveTrust.LIVE, "pending_local_write")
-
-                    local_snap = _fresh_powerwall_local_snapshot(entry_data)
-                    local_reserve = getattr(
-                        local_snap,
-                        "backup_reserve_percent",
-                        None,
-                    )
-                    if local_reserve is not None:
-                        coerced = _coerce_reserve_percent(local_reserve)
-                        if coerced is not None:
-                            return ReserveReading(coerced, ReserveTrust.LIVE, "local_snapshot")
-
-                # Tesla: prefer cached site_info over the HA number entity
-                # because the entity can fall back to a stale persisted user
-                # reserve during setup. Fresh local readback above wins.
+                # Local reserve conversion and pending targets are not readback
+                # evidence. Use the cloud's user-facing value with its true age.
                 tesla_coord = entry_data.get("tesla_coordinator") or entry_data.get("coordinator")
                 if tesla_coord and hasattr(tesla_coord, "_site_info_cache") and tesla_coord._site_info_cache:
                     reserve = tesla_coord._site_info_cache.get("backup_reserve_percent")
@@ -357,7 +328,7 @@ class BatteryControllerWrapper:
                         age = time.monotonic() - last_fetch
                         trust = (
                             ReserveTrust.CLOUD_FRESH
-                            if age <= TESLA_SITE_INFO_MAX_AGE_SECONDS
+                            if last_fetch > 0 and 0 <= age <= TESLA_SITE_INFO_MAX_AGE_SECONDS
                             else ReserveTrust.CLOUD_STALE
                         )
                         return ReserveReading(int(reserve), trust, "site_info_cache")

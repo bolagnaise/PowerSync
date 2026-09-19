@@ -307,7 +307,7 @@ def test_restore_normal_hold_soc_counts_as_restorable_state():
     assert has_saved_index < hold_state_index < guard_index
 
 
-def test_restore_normal_hold_soc_uses_local_first_verified_reserve_primitive():
+def test_restore_normal_hold_soc_uses_verified_reserve_primitive():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
     function = _find_function(tree, "handle_restore_normal")
@@ -1992,7 +1992,7 @@ def test_tesla_force_modes_use_local_first_operation_mode_dispatch():
     assert "response.status in (429, 500, 502, 503, 504)" in force_set_mode_source
 
 
-def test_tesla_force_discharge_nudge_uses_local_first_backup_reserve_primitive():
+def test_tesla_force_discharge_nudge_uses_cloud_verified_backup_reserve_primitive():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
     force_discharge = _find_function(tree, "handle_force_discharge")
@@ -2015,9 +2015,9 @@ def test_tesla_force_discharge_nudge_uses_local_first_backup_reserve_primitive()
     assert "_tesla_force_pulse_backup_reserve(" in force_discharge_source
     assert "force discharge final reserve pulse" in force_discharge_source
     assert 'f"{api_base}/api/1/energy_sites/{site_id}/backup"' not in force_discharge_source
-    assert "dispatch_powerwall_write(" in reserve_helper_source
-    assert "local_backup_reserve_write_percent(" in reserve_helper_source
-    assert "normalize_local_backup_reserve_percent(" in reserve_helper_source
+    assert "_tesla_force_set_backup_reserve_cloud(" in reserve_helper_source
+    assert "dispatch_powerwall_write(" not in reserve_helper_source
+    assert "local_backup_reserve_write_percent(" not in reserve_helper_source
     assert "hass.services.async_call" not in reserve_helper_source
     assert "_tesla_reserve_write_lock" in pulse_helper_source
     assert "finally:" in pulse_helper_source
@@ -3735,7 +3735,7 @@ def test_optimizer_backup_reserve_writes_do_not_persist_as_user_reserve():
     assert 'new_opts.pop("_user_backup_reserve", None)' in persistence_branch
 
 
-def test_tesla_local_backup_reserve_write_uses_hidden_reserve_offset():
+def test_tesla_backup_reserve_write_requires_cloud_confirmation():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
     setter_source = ast.get_source_segment(
@@ -3751,11 +3751,9 @@ def test_tesla_local_backup_reserve_write_uses_hidden_reserve_offset():
     assert helper_source is not None
     assert "_tesla_force_apply_backup_reserve(" in setter_source
     assert "_tesla_force_result_all_confirmed(" in setter_source
-    assert "detect_local_backup_reserve_offset" in helper_source
-    assert '"powerwall_local_low_soe_reserve_pct"' in helper_source
-    assert "local_backup_reserve_write_percent" in helper_source
-    assert "local_percent = local_backup_reserve_write_percent(" in helper_source
-    assert '"site_info.backup_reserve_percent": local_percent' in helper_source
+    assert "detect_local_backup_reserve_offset" not in helper_source
+    assert "local_backup_reserve_write_percent" not in helper_source
+    assert "_tesla_force_set_backup_reserve_cloud(" in helper_source
     cloud_source = ast.get_source_segment(
         source,
         _find_function(tree, "_tesla_force_set_backup_reserve_cloud"),

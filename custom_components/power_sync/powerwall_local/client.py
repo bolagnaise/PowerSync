@@ -31,7 +31,6 @@ from .fleet_api_bms import (
 )
 from ..powerwall_host import normalize_powerwall_gateway_host
 from .normalization import (
-    normalize_local_backup_reserve_percent,
     normalize_local_soc_percent,
 )
 from .pairing import _authorization_command_payload
@@ -881,12 +880,10 @@ def _snapshot_from_dcq(
     operation_mode = (cfg or {}).get("default_real_mode") or (
         site_info.get("default_real_mode") if isinstance(site_info, dict) else None
     )
-    raw_backup_reserve_percent = _int_or_none(
-        site_info.get("backup_reserve_percent") if isinstance(site_info, dict) else None
-    )
-    backup_reserve_percent = normalize_local_backup_reserve_percent(
-        raw_backup_reserve_percent
-    )
+    # Raw config reserve includes a device-specific hidden reserve. There is no
+    # authoritative conversion in this response; don't publish a guessed target.
+    # The raw value remains in snapshot.raw["config"] for diagnostics.
+    backup_reserve_percent = None
     disallow_grid_charging = (
         site_info.get("disallow_charge_from_grid_with_solar_installed")
         if isinstance(site_info, dict)

@@ -168,7 +168,7 @@ def _hass(local_data=None, *, local_age_seconds=0, cloud_site_info=None):
     )
 
 
-def test_backup_reserve_number_prefers_fresh_local_readback():
+def test_backup_reserve_number_ignores_unverified_local_conversion():
     number, restore = _load_platform_module("number")
     try:
         entity = number.BackupReserveNumber(
@@ -179,7 +179,7 @@ def test_backup_reserve_number_prefers_fresh_local_readback():
             _entry(),
         )
 
-        assert entity.native_value == 42.0
+        assert entity.native_value == 5.0
     finally:
         restore()
 

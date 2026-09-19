@@ -319,7 +319,7 @@ def test_tesla_backup_reserve_uses_cloud_site_info_cache_as_user_facing():
         restore()
 
 
-def test_tesla_backup_reserve_prefers_fresh_local_readback_over_cloud_cache():
+def test_tesla_backup_reserve_ignores_unverified_local_conversion():
     module, restore = _load_controller_module()
     try:
         hass = SimpleNamespace(
@@ -346,19 +346,13 @@ def test_tesla_backup_reserve_prefers_fresh_local_readback_over_cloud_cache():
         )
         controller = module.BatteryControllerWrapper(hass, "tesla")
 
-        assert asyncio.run(controller.get_backup_reserve()) == 10
+        assert asyncio.run(controller.get_backup_reserve()) == 18
     finally:
         restore()
 
 
-def test_tesla_backup_reserve_local_readback_survives_wall_clock_jump(monkeypatch):
-    """HD-26: freshness must be judged on a monotonic clock, not wall-clock.
-
-    An NTP step on the HA host can jump time.time() far ahead without any
-    real time passing. A freshness gate based on wall-clock would then
-    treat a snapshot taken moments ago as stale and wrongly fall back to
-    the cloud-cached reserve.
-    """
+def test_tesla_backup_reserve_cloud_trust_survives_wall_clock_jump(monkeypatch):
+    """Cloud provenance uses monotonic age even across an NTP step."""
     module, restore = _load_controller_module()
     try:
         real_wall = time.time()
@@ -379,7 +373,8 @@ def test_tesla_backup_reserve_local_readback_survives_wall_clock_jump(monkeypatc
                             _site_info_cache={
                                 "default_real_mode": "self_consumption",
                                 "backup_reserve_percent": 18,
-                            }
+                            },
+                            _site_info_last_fetch=real_mono
                         ),
                     }
                 }
@@ -391,12 +386,14 @@ def test_tesla_backup_reserve_local_readback_survives_wall_clock_jump(monkeypatc
         # snapshot was stamped, while the monotonic clock barely advances.
         monkeypatch.setattr(module.time, "time", lambda: real_wall + 10_000)
 
-        assert asyncio.run(controller.get_backup_reserve()) == 10
+        reading = asyncio.run(controller.read_backup_reserve())
+        assert reading.percent == 18
+        assert reading.trust == module.ReserveTrust.CLOUD_FRESH
     finally:
         restore()
 
 
-def test_tesla_backup_reserve_prefers_pending_local_write_over_readbacks():
+def test_tesla_backup_reserve_ignores_pending_target():
     module, restore = _load_controller_module()
     try:
         hass = SimpleNamespace(
@@ -424,7 +421,7 @@ def test_tesla_backup_reserve_prefers_pending_local_write_over_readbacks():
         )
         controller = module.BatteryControllerWrapper(hass, "tesla")
 
-        assert asyncio.run(controller.get_backup_reserve()) == 10
+        assert asyncio.run(controller.get_backup_reserve()) == 18
     finally:
         restore()
 
@@ -520,7 +517,7 @@ def test_backup_reserve_reads_coordinator_data_before_controller():
         restore()
 
 
-def test_read_backup_reserve_pending_local_write_is_live():
+def test_read_backup_reserve_pending_target_cannot_override_fresh_cloud():
     module, restore = _load_controller_module()
     try:
         hass = SimpleNamespace(
@@ -548,14 +545,14 @@ def test_read_backup_reserve_pending_local_write_is_live():
 
         reading = asyncio.run(controller.read_backup_reserve())
 
-        assert reading.percent == 10
-        assert reading.trust == module.ReserveTrust.LIVE
+        assert reading.percent == 18
+        assert reading.trust == module.ReserveTrust.CLOUD_FRESH
         assert asyncio.run(controller.get_backup_reserve()) == reading.percent
     finally:
         restore()
 
 
-def test_read_backup_reserve_fresh_local_snapshot_is_live():
+def test_read_backup_reserve_local_conversion_cannot_override_fresh_cloud():
     module, restore = _load_controller_module()
     try:
         hass = SimpleNamespace(
@@ -582,8 +579,8 @@ def test_read_backup_reserve_fresh_local_snapshot_is_live():
 
         reading = asyncio.run(controller.read_backup_reserve())
 
-        assert reading.percent == 10
-        assert reading.trust == module.ReserveTrust.LIVE
+        assert reading.percent == 18
+        assert reading.trust == module.ReserveTrust.CLOUD_FRESH
         assert asyncio.run(controller.get_backup_reserve()) == reading.percent
     finally:
         restore()
@@ -716,5 +713,31 @@ def test_read_backup_reserve_non_tesla_coordinator_data_is_live():
         assert reading.percent == 15
         assert reading.trust == module.ReserveTrust.LIVE
         assert asyncio.run(controller.get_backup_reserve()) == reading.percent
+    finally:
+        restore()
+
+
+def test_reserve_unknown_or_future_cloud_age_never_becomes_trusted(monkeypatch):
+    module, restore = _load_controller_module()
+    try:
+        monkeypatch.setattr(module.time, 'monotonic', lambda: 100)
+        coord = SimpleNamespace(_site_info_cache={'backup_reserve_percent': 50})
+        hass = SimpleNamespace(states=_States({}), data={'power_sync': {'entry': {
+            'tesla_coordinator': coord,
+            'powerwall_local_backup_reserve_write_user_pct': 40,
+            'powerwall_local': {'coordinator': SimpleNamespace(
+                data=SimpleNamespace(backup_reserve_percent=40), last_success_monotonic=100)},
+        }}})
+        controller = module.BatteryControllerWrapper(hass, 'tesla')
+        for timestamp in (None, 0, 101):
+            coord._site_info_last_fetch = timestamp
+            reading = asyncio.run(controller.read_backup_reserve())
+            assert reading.percent == 50
+            assert reading.trust == module.ReserveTrust.CLOUD_STALE
+            assert reading.trust not in module.TRUSTED_FOR_PERSIST
+        coord._site_info_cache = None
+        reading = asyncio.run(controller.read_backup_reserve())
+        assert reading.percent is None
+        assert reading.trust == module.ReserveTrust.NONE
     finally:
         restore()

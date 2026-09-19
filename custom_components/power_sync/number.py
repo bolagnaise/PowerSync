@@ -226,11 +226,7 @@ class BackupReserveNumber(_TeslaSiteNumberBase):
 
     @property
     def native_value(self) -> float | None:
-        local_snap = _fresh_powerwall_local_snapshot(self.hass, self._entry)
-        local_reserve = getattr(local_snap, "backup_reserve_percent", None)
-        if local_reserve is not None:
-            return float(local_reserve)
-
+        # Local raw reserve has no authoritative user-scale conversion.
         coord = self._tesla_coord()
         site_info = getattr(coord, "_site_info_cache", None) if coord else None
         if site_info and "backup_reserve_percent" in site_info:
