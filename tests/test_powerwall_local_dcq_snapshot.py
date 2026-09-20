@@ -133,6 +133,80 @@ coordinator_mod = _load_module(
 calibration_mod = sys.modules[f"{PKG}.tesla_calibration"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("listener_removed", [False, True])
+@pytest.mark.parametrize("concurrent", [False, True])
+async def test_shutdown_completes_after_entry_listener_removal(listener_removed, concurrent):
+    """HA can remove entry listeners before explicit local shutdown/unpair."""
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    listeners = {} if listener_removed else {1: object()}
+    removals = []
+
+    def unsubscribe():
+        removals.append(1)
+        del listeners[1]
+
+    coord._keepalive_unsub = unsubscribe
+    notification = asyncio.create_task(asyncio.Event().wait())
+    diagnostic = asyncio.create_task(asyncio.Event().wait())
+    coord._calibration_notification_tasks = {notification}
+    coord._v1r_diagnostics_task = diagnostic
+    await asyncio.sleep(0)
+    try:
+        if concurrent:
+            await asyncio.gather(coord.async_shutdown(), coord.async_shutdown())
+        else:
+            await coord.async_shutdown()
+            await coord.async_shutdown()
+        assert not listeners
+        assert removals == [1]
+        assert coord._keepalive_unsub is None
+        assert notification.cancelled()
+        assert diagnostic.cancelled()
+        assert not coord._calibration_notification_tasks
+    finally:
+        for task in (notification, diagnostic):
+            task.cancel()
+        await asyncio.gather(notification, diagnostic, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_unpair_clears_runtime_after_listener_already_removed():
+    """Exercise the real unpair handler through local coordinator shutdown."""
+    import ast
+
+    tree = ast.parse((ROOT / "powerwall_local" / "views.py").read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef)
+               and n.name == "PowerwallPairUnpairView")
+    post = next(n for n in cls.body if isinstance(n, ast.AsyncFunctionDef)
+                and n.name == "post")
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord._keepalive_unsub = lambda: {}.pop(1)
+    runtime = {"coordinator": coord, "client": object(), "pairing_manager": None}
+    entry = SimpleNamespace(data={"keep": "value", "powerwall_local_paired": True})
+    updates = []
+    hass = SimpleNamespace(config_entries=SimpleNamespace(
+        async_update_entry=lambda entry, **kwargs: updates.append(kwargs)))
+    namespace = {"_get_entry": lambda hass: entry, "_runtime": lambda hass, entry: runtime,
+                 "web": SimpleNamespace(json_response=lambda payload, **kwargs: payload)}
+    for node in ast.walk(post):
+        if isinstance(node, ast.Name) and node.id.startswith("CONF_"):
+            namespace[node.id] = node.id.removeprefix("CONF_").lower()
+    post.returns = None
+    for arg in post.args.args:
+        arg.annotation = None
+    exec(compile(ast.Module(body=[post], type_ignores=[]), "<unpair>", "exec"), namespace)
+    result = await namespace["post"](SimpleNamespace(_hass=hass), None)
+    assert result == {"success": True}
+    assert runtime == {"coordinator": None, "client": None, "pairing_manager": None}
+    assert updates == [{"data": {"keep": "value"}}]
+    assert coord.update_interval is None
+
+
 def test_loopback_host_is_not_treated_as_local_access():
     assert client_mod.is_loopback_host("127.0.0.1")
     assert client_mod.is_loopback_host("localhost")

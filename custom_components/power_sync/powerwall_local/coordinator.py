@@ -422,9 +422,14 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
     async def async_shutdown(self) -> None:
         """Cancel any in-flight background diagnostics during entry unload."""
         keepalive_unsub = getattr(self, "_keepalive_unsub", None)
+        self._keepalive_unsub = None
         if callable(keepalive_unsub):
-            keepalive_unsub()
-            self._keepalive_unsub = None
+            try:
+                keepalive_unsub()
+            except KeyError:
+                # HA entry cleanup may already have removed this listener.
+                # Repeated shutdown must still cancel our background tasks.
+                pass
         notification_tasks = list(
             getattr(self, "_calibration_notification_tasks", set())
         )
