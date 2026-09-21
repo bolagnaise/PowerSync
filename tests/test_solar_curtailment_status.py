@@ -347,6 +347,72 @@ def _sigenergy_status(**overrides):
     return _load_sigenergy_status_helper()(**values)
 
 
+def test_sigenergy_ordinary_operation_reports_normal():
+    """Ticket #410: the Sigenergy branch had no ``Normal`` outcome at all.
+
+    Once DC curtailment was enabled, every non-curtailed condition -- including
+    exporting profitably -- rendered as ``Pending``, so the card claimed a
+    permanently half-finished curtailment on an entry that had never attempted
+    one.  The only route back to ``Normal`` was turning curtailment off.
+    """
+    # The reporter's live values: nothing curtailed, export earning 8.37 c.
+    assert _sigenergy_status(
+        is_curtailed=False,
+        export_limit_kw=5.0,
+        grid_power_kw=0.21,
+        export_uneconomic=False,
+    )[0] == "Normal"
+    # Exporting happily is likewise normal, not pending.
+    assert _sigenergy_status(
+        is_curtailed=False,
+        export_limit_kw=5.0,
+        grid_power_kw=-4.2,
+        export_uneconomic=False,
+    )[0] == "Normal"
+    # An unknown readback after a force-window restore is still normal when
+    # PowerSync holds no curtailment command.
+    assert _sigenergy_status(
+        is_curtailed=None,
+        export_limit_kw=5.0,
+        export_uneconomic=False,
+    )[0] == "Normal"
+
+
+def test_sigenergy_pending_still_covers_unconfirmed_and_uneconomic():
+    """``Pending`` must keep its meaning: wanted or commanded, not confirmed."""
+    # Uneconomic export with no acknowledged command.
+    assert _sigenergy_status(
+        is_curtailed=False,
+        export_limit_kw=5.0,
+        export_uneconomic=True,
+    )[0] == "Pending"
+    # A command PowerSync has issued but the readback has not confirmed.
+    assert _sigenergy_status(
+        is_curtailed=False,
+        export_limit_kw=5.0,
+        control_state="curtailed",
+        export_uneconomic=False,
+    )[0] == "Pending"
+    assert _sigenergy_status(
+        is_curtailed=False,
+        export_limit_kw=5.0,
+        control_state="pending",
+        export_uneconomic=False,
+    )[0] == "Pending"
+
+
+def test_sigenergy_active_still_requires_readback_and_physical_effect():
+    """#352/#364 honesty contract: only the Normal/Pending boundary moved."""
+    # Confirmed zero limit plus residual export within tolerance.
+    assert _sigenergy_status()[0] == "Active"
+    # Confirmed zero limit but the site is still exporting 300 W.
+    assert _sigenergy_status(grid_power_kw=-0.3)[0] == "Pending"
+    # A non-zero export limit is never Active, whatever the lifecycle says.
+    assert _sigenergy_status(
+        export_limit_kw=5.0, control_state="curtailed"
+    )[0] == "Pending"
+
+
 def test_uncommanded_curtailment_is_pending_for_non_foxess_brands():
     """#386: a GoodWe ESA exported 5.92 kW under a "CURTAILED" marker.
 
@@ -416,7 +482,12 @@ def test_goodwe_unsupported_status_does_not_claim_a_command_was_acknowledged():
 def test_sigenergy_readback_confirms_effect_without_claiming_command_ownership():
     """#352: manual or pre-restart zero limit still has physical proof."""
     assert _sigenergy_status() == ("Active", 30.0, True)
-    assert _sigenergy_status(is_curtailed=False) == ("Pending", None, False)
+    # An unconfirmed readback is Pending while curtailment is still wanted.
+    # It is Normal when nothing is wanted or commanded -- see
+    # test_sigenergy_ordinary_operation_reports_normal (#410).
+    assert _sigenergy_status(
+        is_curtailed=False, export_uneconomic=True
+    ) == ("Pending", None, False)
     assert _sigenergy_status(export_limit_kw=5.0) == ("Pending", None, False)
     assert _sigenergy_status(grid_power_kw=-0.3) == ("Pending", 300.0, False)
     assert _sigenergy_status(

@@ -5180,6 +5180,8 @@ def _sigenergy_curtailment_visible_status(
     last_update: Any,
     update_interval: Any = None,
     now: datetime | None = None,
+    control_state: str = "normal",
+    export_uneconomic: bool = False,
 ) -> tuple[str, float | None, bool]:
     """Return Sigenergy status from fresh limit readback and site telemetry.
 
@@ -5187,11 +5189,19 @@ def _sigenergy_curtailment_visible_status(
     fresh grid telemetry then establishes the separately required physical
     effect.  This intentionally does not infer that PowerSync owns a manual
     or pre-restart limit -- ownership remains a separate lifecycle attribute.
+
+    Ordinary, economic, non-curtailed operation is ``Normal``, matching every
+    other brand.  Reporting ``Pending`` there made the card claim a permanent
+    half-finished curtailment on entries that had never attempted one
+    (Discord #410).  ``Pending`` still means uneconomic export, or a command
+    acknowledged but not physically confirmed.
     """
     if not curtailment_enabled:
         return "Normal", None, False
     if is_curtailed is not True:
-        return "Pending", None, False
+        if control_state in ("pending", "curtailed") or export_uneconomic:
+            return "Pending", None, False
+        return "Normal", None, False
     try:
         if isinstance(export_limit_kw, bool) or not math.isfinite(float(export_limit_kw)):
             raise ValueError
@@ -5489,6 +5499,8 @@ class SolarCurtailmentSensor(SensorEntity):
             ),
             last_update=coordinator_data.get("last_update"),
             update_interval=getattr(coordinator, "update_interval", None),
+            control_state=entry_data.get("sigenergy_curtailment_state", "normal"),
+            export_uneconomic=self._export_uneconomic(),
         )
 
     def _foxess_status(self) -> tuple[str, float | None, bool]:
