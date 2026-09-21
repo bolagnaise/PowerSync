@@ -28729,7 +28729,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # inverter load-follow internally while blocking paid export.
                 export_limit_w = 0
                 current_limit = entry_data.get("sungrow_power_limit_w")
-                if current_state == "curtailed" and current_limit == export_limit_w:
+                # The cached pair is not evidence the limit is still in force:
+                # any optimizer restore that consumed the ownership record left
+                # the inverter exporting while this cache still read
+                # "curtailed", so re-apply unless PowerSync still owns it.
+                still_owned = bool(
+                    getattr(
+                        sungrow_coord, "curtailment_export_limit_owned", True
+                    )
+                )
+                if (
+                    current_state == "curtailed"
+                    and current_limit == export_limit_w
+                    and still_owned
+                ):
                     _LOGGER.debug(
                         "Sungrow already curtailed at %dW, no action needed",
                         export_limit_w,
@@ -28768,6 +28781,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             None
                         )
                     else:
+                        # Leaving the state at "curtailed" latched the handler:
+                        # the apply branch then saw no work and the card kept
+                        # showing Active.  "pending" renders honestly and lets
+                        # the next negative-price window re-apply.
+                        hass.data[DOMAIN][entry.entry_id][
+                            "sungrow_curtailment_state"
+                        ] = "pending"
+                        hass.data[DOMAIN][entry.entry_id]["sungrow_power_limit_w"] = (
+                            None
+                        )
                         _LOGGER.error("Sungrow set_export_limit(None) failed")
                 else:
                     _LOGGER.debug("Sungrow already in normal mode, no action needed")

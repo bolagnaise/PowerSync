@@ -922,8 +922,11 @@ def test_solaredge_force_dispatch_releases_active_power_curtailment_first():
     manual_charge_release = charge_handler.rindex(
         'await _restore_solaredge_curtailment_for_dispatch(\n                entry_data,\n                "force charge",'
     )
+    # Commit 72621ea9 ("fix(solaredge): preserve force lifecycle until
+    # confirmation") moved the manual call into a lambda handed to
+    # _commit_solaredge_force_transition, so anchor on the call itself.
     manual_charge_call = charge_handler.rindex(
-        'charge_result = await solaredge_coord.force_charge(duration, power_w=power_w, automatic=source == "optimizer")'
+        "lambda: solaredge_coord.force_charge("
     )
 
     assert discharge_handler.count("lambda _guarded_w: _restore_solaredge_curtailment_for_dispatch(") >= 2
@@ -1360,3 +1363,313 @@ def test_startup_tesla_tariff_fetch_requires_tesla_site():
     assert not should_fetch("globird", False, object())
     assert not should_fetch("other", True, object())
     assert not should_fetch("nz", True, object())
+
+
+# ---------------------------------------------------------------------------
+# Discord #364: an optimizer restore consumed the curtailment-owned export
+# limit, then the handler latched on its in-memory idempotence check.
+#
+# Sequence reproduced in production: negative feed-in ⇒
+# set_curtailment_export_limit(0) captures the user's baseline and enables the
+# limit; the optimizer then emits self-consumption, whose restore_normal()
+# unconditionally called _restore_captured_export_limit() and *disabled* the
+# limit while sungrow_curtailment_state still read "curtailed"; the next
+# negative-price tick short-circuited on the cached pair, and price recovery
+# could not restore because the ownership record was already consumed — so the
+# state latched at "curtailed" (card: "Active") with nothing in force.
+#
+# Sigenergy already had this contract via restore_normal(preserve_export_limit=…)
+# (__init__.py force-restore/self-consumption paths); Sungrow had no equivalent.
+# ---------------------------------------------------------------------------
+
+COORDINATOR_PATH = ROOT / "custom_components" / "power_sync" / "coordinator.py"
+
+SUNGROW_COORD_MEMBERS = (
+    "set_curtailment_export_limit",
+    "restore_curtailment_export_limit",
+    "restore_normal",
+    "_restore_captured_export_limit",
+    "_capture_export_limit_for_restore",
+    "_persist_export_control_state",
+    "_clear_persisted_export_control_state",
+)
+
+
+def _coordinator_member_source(name: str) -> str:
+    source = COORDINATOR_PATH.read_text()
+    module = ast.parse(source)
+    for node in module.body:
+        if isinstance(node, ast.ClassDef) and node.name == "SungrowEnergyCoordinator":
+            for child in node.body:
+                if (
+                    isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef))
+                    and child.name == name
+                ):
+                    segment = ast.get_source_segment(source, child)
+                    assert segment is not None
+                    return textwrap.dedent(segment)
+    raise AssertionError(f"SungrowEnergyCoordinator.{name} not found")
+
+
+class _FakeLock:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+class _FakeSungrowController:
+    """Records export-limit requests without touching Modbus."""
+
+    def __init__(self) -> None:
+        self.export_limit_requests: list[int | None] = []
+        self.restore_normal_calls = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+    async def set_export_limit(self, watts):
+        self.export_limit_requests.append(watts)
+        return True
+
+    async def restore_normal(self):
+        self.restore_normal_calls += 1
+        return True
+
+    async def get_battery_data(self):
+        return {"export_limit_enabled": False, "export_limit_w": None}
+
+
+class _FakeStore:
+    def __init__(self) -> None:
+        self.saved: list[dict] = []
+
+    async def async_save(self, state):
+        self.saved.append(dict(state))
+
+
+def _sungrow_coordinator_under_test():
+    """Build an object whose export-ownership methods are the real source."""
+    namespace: dict = {
+        "_LOGGER": SimpleNamespace(
+            debug=lambda *a, **k: None,
+            info=lambda *a, **k: None,
+            warning=lambda *a, **k: None,
+            error=lambda *a, **k: None,
+        ),
+    }
+    for member in SUNGROW_COORD_MEMBERS:
+        exec(_coordinator_member_source(member), namespace)
+    owned_source = _coordinator_member_source("curtailment_export_limit_owned")
+
+    class _Coordinator:
+        def __init__(self) -> None:
+            self._controller = _FakeSungrowController()
+            self._modbus_lock = _FakeLock()
+            self._export_control_store = _FakeStore()
+            self._pre_control_export_limit_w = None
+            self._pre_control_export_limit_captured = False
+            self._export_limit_capture_source = None
+            self._optimizer_restore_retry_pending = False
+            self.data = {"export_limit_enabled": False, "export_limit_w": None}
+
+        def _native_control_allowed(self, _label):
+            return True
+
+        async def _restore_captured_charge_limit(self):
+            return True
+
+        async def _restore_captured_discharge_limit(self):
+            return True
+
+    for member in SUNGROW_COORD_MEMBERS:
+        setattr(_Coordinator, member, namespace[member])
+    exec(owned_source, namespace)
+    _Coordinator.curtailment_export_limit_owned = property(
+        namespace["curtailment_export_limit_owned"]
+    )
+    return _Coordinator()
+
+
+def test_sungrow_restore_normal_preserves_a_curtailment_owned_export_limit():
+    """The reported clobber: self-consumption must not disable the limit."""
+    coordinator = _sungrow_coordinator_under_test()
+
+    async def scenario():
+        assert await coordinator.set_curtailment_export_limit(0) is True
+        assert coordinator.curtailment_export_limit_owned is True
+        return await coordinator.restore_normal()
+
+    assert asyncio.run(scenario()) is True
+
+    controller = coordinator._controller
+    assert controller.export_limit_requests == [0]
+    assert None not in controller.export_limit_requests
+    assert controller.restore_normal_calls == 1
+    # Ownership must survive so price recovery can still restore it.
+    assert coordinator._pre_control_export_limit_captured is True
+    assert coordinator.curtailment_export_limit_owned is True
+    assert coordinator._export_control_store.saved[-1]["active"] is True
+
+
+def test_sungrow_restore_normal_still_restores_an_optimizer_owned_limit():
+    """The pre-existing optimizer restore contract is unchanged."""
+    coordinator = _sungrow_coordinator_under_test()
+
+    async def scenario():
+        await coordinator._capture_export_limit_for_restore()
+        await coordinator._persist_export_control_state(1500, source="optimizer")
+        return await coordinator.restore_normal()
+
+    assert asyncio.run(scenario()) is True
+
+    assert coordinator._controller.export_limit_requests == [None]
+    assert coordinator._pre_control_export_limit_captured is False
+    assert coordinator.curtailment_export_limit_owned is False
+
+
+def test_sungrow_curtailment_restore_releases_its_own_ownership():
+    """Price recovery still ends curtailment ownership cleanly."""
+    coordinator = _sungrow_coordinator_under_test()
+
+    async def scenario():
+        await coordinator.set_curtailment_export_limit(0)
+        return await coordinator.restore_curtailment_export_limit()
+
+    assert asyncio.run(scenario()) is True
+    assert coordinator._controller.export_limit_requests == [0, None]
+    assert coordinator.curtailment_export_limit_owned is False
+    assert coordinator._export_limit_capture_source is None
+
+
+def test_sungrow_curtailment_does_not_relabel_an_existing_capture():
+    """An optimizer-owned baseline must not be renamed curtailment-owned."""
+    coordinator = _sungrow_coordinator_under_test()
+
+    async def scenario():
+        await coordinator._capture_export_limit_for_restore()
+        await coordinator.set_curtailment_export_limit(0)
+
+    asyncio.run(scenario())
+    assert coordinator.curtailment_export_limit_owned is False
+
+
+def _load_sungrow_handler(entry_data: dict, *, live_status=None):
+    """Exec the real handle_sungrow_curtailment with closure fakes."""
+    entry = SimpleNamespace(options={}, data={}, entry_id="entry-1")
+    hass = SimpleNamespace(data={"power_sync": {"entry-1": entry_data}})
+
+    async def _no_ev_headroom():
+        return False
+
+    async def _get_live_status(*_a, **_k):
+        return live_status
+
+    async def _apply_inverter_curtailment(**_kwargs):
+        return None
+
+    namespace = {
+        "DOMAIN": "power_sync",
+        "hass": hass,
+        "entry": entry,
+        "CONF_AC_INVERTER_CURTAILMENT_ENABLED": "ac_inverter_curtailment_enabled",
+        "_LOGGER": SimpleNamespace(
+            debug=lambda *a, **k: None,
+            info=lambda *a, **k: None,
+            warning=lambda *a, **k: None,
+            error=lambda *a, **k: None,
+        ),
+        "get_current_prices_for_curtailment": lambda *a, **k: (None, None, None),
+        "amber_coordinator": None,
+        "localvolts_coordinator": None,
+        "aemo_sensor_coordinator": None,
+        "flow_power_kwatch_coordinator": None,
+        "octopus_coordinator": None,
+        "export_earnings_are_uneconomic": lambda value, _active, _entry: value < 0.0,
+        "_active_solar_surplus_ev_needs_inverter_headroom": _no_ev_headroom,
+        "get_live_status": _get_live_status,
+        "apply_inverter_curtailment": _apply_inverter_curtailment,
+        "ac_inverter_is_same_hybrid": lambda: True,
+    }
+    exec(_function_source("handle_sungrow_curtailment"), namespace)
+    return namespace["handle_sungrow_curtailment"], hass
+
+
+class _OwnershipAwareSungrowCoordinator:
+    """Minimal coordinator exposing the ownership probe and apply/restore."""
+
+    def __init__(self, *, owned: bool, restore_ok: bool = True) -> None:
+        self.curtailment_export_limit_owned = owned
+        self.apply_calls: list[int] = []
+        self.restore_calls = 0
+        self._restore_ok = restore_ok
+
+    async def set_export_limit(self, watts):  # marks native_available
+        return True
+
+    async def set_curtailment_export_limit(self, watts):
+        self.apply_calls.append(watts)
+        self.curtailment_export_limit_owned = True
+        return True
+
+    async def restore_curtailment_export_limit(self):
+        self.restore_calls += 1
+        return self._restore_ok
+
+
+# feedin_price=5.0 ⇒ export_earnings=-5.0 c/kWh (paying to export)
+SUNGROW_NEGATIVE_FEEDIN_PRICE = 5.0
+SUNGROW_POSITIVE_FEEDIN_PRICE = -5.0
+
+
+def test_sungrow_curtailment_reapplies_after_ownership_was_consumed():
+    """The cached 'curtailed at 0W' pair is not evidence the limit is live."""
+    coordinator = _OwnershipAwareSungrowCoordinator(owned=False)
+    entry_data = {
+        "sungrow_curtailment_state": "curtailed",
+        "sungrow_power_limit_w": 0,
+        "sungrow_coordinator": coordinator,
+    }
+    handler, hass = _load_sungrow_handler(entry_data)
+
+    asyncio.run(handler(feedin_price=SUNGROW_NEGATIVE_FEEDIN_PRICE, import_price=10.0))
+
+    assert coordinator.apply_calls == [0]
+    assert hass.data["power_sync"]["entry-1"]["sungrow_curtailment_state"] == "curtailed"
+
+
+def test_sungrow_curtailment_stays_idempotent_while_it_still_owns_the_limit():
+    """No extra Modbus write when the curtailment limit is genuinely in force."""
+    coordinator = _OwnershipAwareSungrowCoordinator(owned=True)
+    entry_data = {
+        "sungrow_curtailment_state": "curtailed",
+        "sungrow_power_limit_w": 0,
+        "sungrow_coordinator": coordinator,
+    }
+    handler, _hass = _load_sungrow_handler(entry_data)
+
+    asyncio.run(handler(feedin_price=SUNGROW_NEGATIVE_FEEDIN_PRICE, import_price=10.0))
+
+    assert coordinator.apply_calls == []
+
+
+def test_sungrow_failed_curtailment_restore_does_not_latch_curtailed():
+    """A restore with no ownership record must leave an honest 'pending'."""
+    coordinator = _OwnershipAwareSungrowCoordinator(owned=False, restore_ok=False)
+    entry_data = {
+        "sungrow_curtailment_state": "curtailed",
+        "sungrow_power_limit_w": 0,
+        "sungrow_coordinator": coordinator,
+    }
+    handler, hass = _load_sungrow_handler(entry_data)
+
+    asyncio.run(handler(feedin_price=SUNGROW_POSITIVE_FEEDIN_PRICE, import_price=10.0))
+
+    assert coordinator.restore_calls == 1
+    state = hass.data["power_sync"]["entry-1"]
+    assert state["sungrow_curtailment_state"] == "pending"
+    assert state["sungrow_power_limit_w"] is None

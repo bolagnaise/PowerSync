@@ -6349,6 +6349,10 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._pre_control_discharge_limit_kw: float | None = None
         self._pre_control_export_limit_w: int | None = None
         self._pre_control_export_limit_captured = False
+        # Which subsystem owns the captured export-limit baseline.  Solar
+        # curtailment must survive an optimizer self-consumption/force-window
+        # restore, otherwise the restore disables the limit mid-curtailment.
+        self._export_limit_capture_source: str | None = None
         self._optimizer_restore_retry_pending = False
         self._persisted_export_control_recovery_pending = not self._telemetry_only
 
@@ -7220,6 +7224,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             if persisted_ok:
                 self._pre_control_export_limit_w = None
                 self._pre_control_export_limit_captured = False
+                self._export_limit_capture_source = None
                 self._optimizer_restore_retry_pending = False
         else:
             self._optimizer_restore_retry_pending = True
@@ -7234,14 +7239,30 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         if not self._native_control_allowed("Sungrow restore normal"):
             return False
         async with self._modbus_lock, self._controller:
+            # Solar curtailment owns its own export-limit lifecycle.  Restoring
+            # (i.e. disabling) that limit here left the site exporting at a
+            # negative feed-in price while the curtailment state still read
+            # "curtailed", which then latched because the handler saw no work
+            # to do and the price-recovery restore had no ownership record.
+            curtailment_owned = self.curtailment_export_limit_owned
             optimizer_restore_owned = bool(
-                getattr(self, "_pre_control_export_limit_captured", False)
-                or getattr(self, "_optimizer_restore_retry_pending", False)
+                not curtailment_owned
+                and (
+                    getattr(self, "_pre_control_export_limit_captured", False)
+                    or getattr(self, "_optimizer_restore_retry_pending", False)
+                )
             )
             normal_ok = await self._controller.restore_normal()
-            export_limit_ok = await self._restore_captured_export_limit(
-                clear_persisted=False
-            )
+            if curtailment_owned:
+                _LOGGER.info(
+                    "Sungrow restore normal preserving the active curtailment "
+                    "export limit"
+                )
+                export_limit_ok = True
+            else:
+                export_limit_ok = await self._restore_captured_export_limit(
+                    clear_persisted=False
+                )
             charge_limit_ok = await self._restore_captured_charge_limit()
             limit_ok = await self._restore_captured_discharge_limit()
             restore_ok = bool(
@@ -7814,6 +7835,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             if clear_persisted:
                 self._pre_control_export_limit_w = None
                 self._pre_control_export_limit_captured = False
+                self._export_limit_capture_source = None
         return bool(limit_ok and persisted_ok)
 
     async def restore_work_mode_from_idle(self) -> bool:
@@ -7868,12 +7890,27 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         async with self._modbus_lock, self._controller:
             return await self._controller.set_export_limit(watts)
 
+    @property
+    def curtailment_export_limit_owned(self) -> bool:
+        """Whether a curtailment-owned export limit is still held by PowerSync."""
+        return bool(
+            getattr(self, "_pre_control_export_limit_captured", False)
+            and getattr(self, "_export_limit_capture_source", None) == "curtailment"
+        )
+
     async def set_curtailment_export_limit(self, watts: int) -> bool:
         """Apply a temporary optimizer curtailment limit with recoverable ownership."""
         if not self._native_control_allowed("Sungrow curtailment export limit"):
             return False
         async with self._modbus_lock, self._controller:
+            already_captured = bool(
+                getattr(self, "_pre_control_export_limit_captured", False)
+            )
             await self._capture_export_limit_for_restore()
+            if not already_captured:
+                # Only the capturing subsystem owns the baseline; never relabel
+                # an optimizer-owned capture as curtailment-owned.
+                self._export_limit_capture_source = "curtailment"
             if not await self._persist_export_control_state(
                 watts, source="curtailment"
             ):
