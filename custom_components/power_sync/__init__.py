@@ -16099,6 +16099,9 @@ class EVVehicleCommandView(HomeAssistantView):
         params = self._manual_action_params(vehicle_vin)
         params.update(params_extra or {})
         params["reason"] = reason
+        # Explicit user command: control paths must not silently drop it in
+        # favour of a backoff armed by an automatic optimizer loop.
+        params["_user_initiated"] = True
         manual_failure: dict[str, str] = {}
         params["_manual_command_failure"] = manual_failure
         try:

@@ -12061,3 +12061,188 @@ def test_ble_stop_confirmation_stays_prefix_and_timestamp_scoped(monkeypatch, co
     result = asyncio.run(actions._stop_ev_charging_ble(hass, "car"))
     assert result is (True if confirmation == "fresh_own" else None)
     assert hass.services.calls == [("switch", "turn_off", {"entity_id": "switch.car_charger"})]
+
+
+class _WakeRespondingServices(_Services):
+    """A BLE bridge that publishes a fresh awake observation when pressed."""
+
+    def __init__(self, asleep_state: _State) -> None:
+        super().__init__()
+        self._asleep_state = asleep_state
+
+    async def async_call(self, domain: str, service: str, data: dict, blocking: bool = True):
+        await super().async_call(domain, service, data, blocking)
+        if domain == "button" and service == "press":
+            self._asleep_state.last_updated = datetime.now(timezone.utc) + timedelta(
+                seconds=1
+            )
+
+
+def _stale_awake_ble_hass(services_factory=None):
+    """Reporter's #56 snapshot: charging, 'awake', telemetry hours stale."""
+    stale = datetime.now(timezone.utc) - timedelta(hours=3)
+    asleep = _State("binary_sensor.car_asleep", "off", last_updated=stale)
+    hass = _Hass([
+        _State("switch.car_charger", "on", last_updated=stale),
+        _State("button.car_wake_up", "unknown", last_updated=stale),
+        asleep,
+        _State("sensor.car_charging_state", "Charging", last_updated=stale),
+    ])
+    if services_factory is not None:
+        hass.services = services_factory(asleep)
+    return hass, asleep
+
+
+def _arm_wake_backoff(hass, prefix: str = "car", seconds: float = 60.0) -> None:
+    loop = asyncio.get_running_loop()
+    hass.data.setdefault("power_sync", {})["_ev_ble_wake_retry_after"] = {
+        prefix: loop.time() + seconds
+    }
+
+
+def _captured_actions_logs(level=logging.WARNING):
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    logger = actions._LOGGER
+    old_level, old_propagate = logger.level, logger.propagate
+    logger.addHandler(handler)
+    logger.setLevel(level)
+    logger.propagate = False
+    return stream, handler, logger, old_level, old_propagate
+
+
+def test_ble_wake_backoff_suppression_is_logged_for_an_automatic_request():
+    """A suppressed automatic wake must leave a trace in the log."""
+    hass, _asleep = _stale_awake_ble_hass()
+    stream, handler, logger, old_level, old_propagate = _captured_actions_logs()
+
+    async def run():
+        _arm_wake_backoff(hass)
+        return await actions._wake_tesla_ble(hass, "car", wait_timeout=0)
+
+    try:
+        result = asyncio.run(run())
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+        logger.propagate = old_propagate
+
+    assert result is False
+    assert hass.services.calls == []
+    assert "skipping wake" in stream.getvalue()
+    assert "was not sent" in stream.getvalue()
+
+
+def test_ble_wake_backoff_never_blocks_an_explicit_user_command():
+    """The automatic loop's backoff must not discard a user command."""
+    hass, _asleep = _stale_awake_ble_hass()
+
+    async def run():
+        _arm_wake_backoff(hass)
+        return await actions._wake_tesla_ble(
+            hass, "car", wait_timeout=0, allow_backoff=False
+        )
+
+    result = asyncio.run(run())
+
+    assert result is False  # the bridge is still down, but it was attempted
+    assert ("button", "press", {"entity_id": "button.car_wake_up"}) in hass.services.calls
+
+
+def test_ble_user_stop_dispatches_switch_off_through_an_armed_backoff(monkeypatch):
+    """Discord #56: a user stop was discarded before dispatch, unlogged."""
+    monkeypatch.setattr(
+        actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0, raising=False
+    )
+
+    async def _no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    hass, _asleep = _stale_awake_ble_hass(_WakeRespondingServices)
+
+    async def run():
+        _arm_wake_backoff(hass)
+        return await actions._stop_ev_charging_ble(
+            hass, "car", allow_backoff=False
+        )
+
+    result = asyncio.run(run())
+
+    assert result is not False  # dispatched (confirmation is a separate gate)
+    assert ("button", "press", {"entity_id": "button.car_wake_up"}) in hass.services.calls
+    assert (
+        "switch",
+        "turn_off",
+        {"entity_id": "switch.car_charger"},
+    ) in hass.services.calls
+
+
+def test_ble_automatic_stop_keeps_the_backoff_but_reports_the_block():
+    """Automatic stops stay throttled, and the block is no longer silent."""
+    hass, _asleep = _stale_awake_ble_hass(_WakeRespondingServices)
+    stream, handler, logger, old_level, old_propagate = _captured_actions_logs()
+
+    async def run():
+        _arm_wake_backoff(hass)
+        first = await actions._stop_ev_charging_ble(hass, "car")
+        second = await actions._stop_ev_charging_ble(hass, "car")
+        return first, second
+
+    try:
+        first, second = asyncio.run(run())
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+        logger.propagate = old_propagate
+
+    assert first is False and second is False
+    assert hass.services.calls == []
+    logged = stream.getvalue()
+    assert "stop not dispatched" in logged
+    # Reported, but not once per 10s optimizer tick.
+    assert logged.count("stop not dispatched") == 1
+    assert logged.count("skipping wake") == 1
+
+
+@pytest.mark.parametrize(
+    "params_extra, expected_allow_backoff",
+    [
+        ({"_user_initiated": True}, False),
+        ({"manual_stop": True}, False),
+        ({"quick_control": True}, False),
+        ({}, True),
+    ],
+)
+def test_stop_action_bypasses_wake_backoff_only_for_user_commands(
+    monkeypatch, params_extra, expected_allow_backoff
+):
+    recorded: list[bool] = []
+
+    async def fake_stop_ble(_hass, _prefix, *, allow_backoff=True):
+        recorded.append(allow_backoff)
+        return True
+
+    monkeypatch.setattr(
+        actions,
+        "_get_ev_config",
+        lambda _entry: {"ev_provider": actions.EV_PROVIDER_TESLA_BLE},
+    )
+    monkeypatch.setattr(
+        actions, "_resolve_ble_prefix_for_vehicle", lambda *_a, **_k: "car"
+    )
+    monkeypatch.setattr(actions, "_is_ble_available", lambda *_a: True)
+
+    async def no_charging_entity(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", no_charging_entity)
+    monkeypatch.setattr(actions, "_stop_ev_charging_ble", fake_stop_ble)
+
+    hass = _Hass([_State("switch.car_charger", "on")])
+    params = {"charger_type": "tesla", **params_extra}
+
+    assert asyncio.run(
+        actions._action_stop_ev_charging(hass, _tesla_entry(), params)
+    ) is True
+    assert recorded == [expected_allow_backoff]

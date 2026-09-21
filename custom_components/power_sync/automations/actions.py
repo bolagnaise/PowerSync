@@ -2196,13 +2196,44 @@ async def _wait_for_ble_command_readback(
         await asyncio.sleep(min(1, remaining))
 
 
-async def _wake_tesla_ble(hass: HomeAssistant, ble_prefix: str, wait_timeout: int = 30) -> bool:
+def _ble_block_report_due(
+    hass: HomeAssistant, ble_prefix: str, reason: str, interval: float = 60.0
+) -> bool:
+    """Rate-limit a repeated "command not sent" report to once per interval.
+
+    The automatic surplus loop can request the same blocked command every
+    tick. Reporting each one at WARNING buried the real evidence in the very
+    logs support asks for, so keep the report but not the flood.
+    """
+    reported = hass.data.setdefault(DOMAIN, {}).setdefault(
+        "_ev_ble_block_reported_at", {}
+    )
+    key = f"{ble_prefix}:{reason}"
+    now = time.monotonic()
+    last = reported.get(key)
+    if last is not None and (now - last) < interval:
+        return False
+    reported[key] = now
+    return True
+
+
+async def _wake_tesla_ble(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    wait_timeout: int = 30,
+    *,
+    allow_backoff: bool = True,
+) -> bool:
     """Wake up Tesla via BLE and wait for it to be awake.
 
     Args:
         hass: Home Assistant instance
         ble_prefix: The BLE entity prefix (e.g., "tesla_ble")
         wait_timeout: Maximum seconds to wait for car to wake up (default 30)
+        allow_backoff: Whether the shared failed-bridge backoff may skip the
+            wake attempt. The backoff exists to stop a repeating automatic loop
+            from spending a full wake timeout every tick, so an explicit user
+            command must never be dropped by it.
     """
     import asyncio
 
@@ -2227,8 +2258,27 @@ async def _wake_tesla_ble(hass: HomeAssistant, ble_prefix: str, wait_timeout: in
         hass.data.get(DOMAIN, {}).get("_ev_ble_wake_retry_after", {}).pop(ble_prefix, None)
         return True
     retry_after = hass.data.setdefault(DOMAIN, {}).setdefault("_ev_ble_wake_retry_after", {})
-    if asyncio.get_running_loop().time() < retry_after.get(ble_prefix, 0):
-        return False
+    backoff_until = retry_after.get(ble_prefix, 0)
+    now = asyncio.get_running_loop().time()
+    if now < backoff_until:
+        if not allow_backoff:
+            _LOGGER.info(
+                "Tesla BLE %s: wake backoff bypassed for an explicit user "
+                "command (%.0fs remaining)",
+                ble_prefix,
+                backoff_until - now,
+            )
+        else:
+            # Suppressing silently made every blocked command invisible in the
+            # very logs support asks for (Discord #56).
+            if _ble_block_report_due(hass, ble_prefix, "wake_backoff"):
+                _LOGGER.warning(
+                    "Tesla BLE %s: skipping wake for %.0fs after a failed "
+                    "bridge wake; the requested command was not sent",
+                    ble_prefix,
+                    backoff_until - now,
+                )
+            return False
     wake_started_at = datetime.now(dt_timezone.utc)
 
     try:
@@ -2370,7 +2420,7 @@ async def _start_ev_charging_ble(hass: HomeAssistant, ble_prefix: str) -> Option
 
 
 async def _stop_ev_charging_ble(
-    hass: HomeAssistant, ble_prefix: str
+    hass: HomeAssistant, ble_prefix: str, *, allow_backoff: bool = True
 ) -> Optional[bool]:
     """Stop Tesla BLE charging; do not treat service acceptance as readback."""
     charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
@@ -2381,7 +2431,17 @@ async def _stop_ev_charging_ble(
 
     command_dispatched = False
     try:
-        if not await _wake_tesla_ble(hass, ble_prefix):
+        if not await _wake_tesla_ble(
+            hass, ble_prefix, allow_backoff=allow_backoff
+        ):
+            # The start path already reports a blocked dispatch; without the
+            # same line here a dropped stop left no trace at all.
+            if _ble_block_report_due(hass, ble_prefix, "stop_not_dispatched"):
+                _LOGGER.warning(
+                    "Tesla BLE %s: stop not dispatched - no confirmed vehicle "
+                    "wake",
+                    ble_prefix,
+                )
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
@@ -5326,7 +5386,17 @@ async def _action_stop_ev_charging(
     # Prefer the free, explicitly paired ESPHome BLE control path.
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
-            result = await _stop_ev_charging_ble(hass, ble_prefix)
+            # An explicit user stop must always attempt the wake: the shared
+            # failed-bridge backoff is armed by the automatic surplus loop and
+            # would otherwise discard the command before dispatch.
+            user_initiated = bool(
+                params.get("_user_initiated")
+                or params.get("manual_stop")
+                or params.get("quick_control")
+            )
+            result = await _stop_ev_charging_ble(
+                hass, ble_prefix, allow_backoff=not user_initiated
+            )
             if result or ev_provider == EV_PROVIDER_TESLA_BLE:
                 return result
 
