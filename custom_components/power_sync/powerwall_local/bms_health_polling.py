@@ -7,11 +7,15 @@ from datetime import timedelta
 from typing import Any, Awaitable, Callable
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 
 _LOGGER = logging.getLogger(__name__)
 
 POWERWALL_BMS_HEALTH_POLL_INTERVAL = timedelta(minutes=5)
+# ``async_track_time_interval`` does not fire on arming, so without a prompt
+# first poll the sensor publishes whatever the restore path put there for a
+# full interval after every reload (Discord ticket 64).
+POWERWALL_BMS_HEALTH_INITIAL_POLL_DELAY = timedelta(seconds=30)
 
 BatteryHealthFetcher = Callable[[], Awaitable[dict[str, Any] | None]]
 BatteryHealthSyncer = Callable[[dict[str, Any]], Awaitable[None]]
@@ -24,6 +28,7 @@ def async_start_powerwall_bms_health_polling(
     sync: BatteryHealthSyncer,
     *,
     interval: timedelta = POWERWALL_BMS_HEALTH_POLL_INTERVAL,
+    initial_delay: timedelta = POWERWALL_BMS_HEALTH_INITIAL_POLL_DELAY,
 ) -> Callable[[], None]:
     """Poll BMS health periodically and publish successful samples to sensors."""
     in_progress = False
@@ -44,4 +49,11 @@ def async_start_powerwall_bms_health_polling(
         finally:
             in_progress = False
 
-    return async_track_time_interval(hass, _poll, interval)
+    cancel_interval = async_track_time_interval(hass, _poll, interval)
+    cancel_initial = async_call_later(hass, initial_delay, _poll)
+
+    def _cancel() -> None:
+        cancel_initial()
+        cancel_interval()
+
+    return _cancel

@@ -40627,10 +40627,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "value": payload,
                 "expires_at": _time.monotonic() + 3600,
             }
+            # ``battery_health_cloud`` is in-memory only, so leaving the Store
+            # holding an older mobile WiFi-scan snapshot meant every reload
+            # republished that stale capacity until the next poll landed
+            # (Discord ticket 64).  Persist the authoritative Fleet aggregate,
+            # but only when it actually differs, to avoid a Store write on
+            # every poll.
+            stored = entry_data.get("battery_health") or {}
+            persist = any(
+                stored.get(key) != payload.get(key)
+                for key in (
+                    "current_capacity_wh",
+                    "original_capacity_wh",
+                    "battery_count",
+                )
+            ) or stored.get("source") != payload.get("source", "ha_local_tedapi")
             await battery_health_view._sync_live_battery_health_to_sensor(
                 entry,
                 payload,
-                persist=False,
+                persist=persist,
             )
 
         hass.data[DOMAIN][entry.entry_id]["powerwall_bms_health_poll_cancel"] = (
