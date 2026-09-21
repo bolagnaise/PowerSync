@@ -2831,3 +2831,203 @@ def test_resolved_amber_forecast_tail_still_counts_as_real_forecast(opt_module):
 
     assert import_prices == pytest.approx([0.20] * 6 + [0.40] * 6)
     assert coordinator._last_display_import_prices == pytest.approx(import_prices)
+
+
+_T334_AEST = timezone(timedelta(hours=10))
+_T334_NOW = datetime(2026, 9, 21, 15, 45, tzinfo=_T334_AEST)
+
+
+def _amber_forecast_with_gaps(
+    opt_module,
+    monkeypatch,
+    plan: list[float | None],
+    omit: tuple[int, ...] = (),
+):
+    """Build a coordinator whose Amber forecast has priced and unpriced holes.
+
+    Entries are anchored to a patched ``dt_util.now()`` so the production
+    timestamped ``_entry_slot_bounds`` path runs rather than the legacy
+    no-timestamp append fallback.  ``None`` in ``plan`` is an interval the
+    provider returned with no usable ``advancedPrice``; an index in ``omit``
+    is an interval the provider did not return at all.
+    """
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda *args, **kwargs: _T334_NOW)
+    forecast = []
+    for index, cents in enumerate(plan):
+        slot_start = _T334_NOW + timedelta(minutes=30 * index)
+        if index not in omit:
+            forecast.append(
+                _dynamic_price_entry(
+                    slot_start,
+                    33.0,
+                    "general",
+                    advanced_price=(
+                        {"predicted": cents, "low": cents, "high": cents}
+                        if cents is not None
+                        else None
+                    ),
+                )
+            )
+        forecast.append(_dynamic_price_entry(slot_start, 8.0, "feedIn"))
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+        horizon_hours=len(plan) * 0.5,
+    )
+    lp_import_prices, _export = asyncio.run(coordinator._get_price_forecast())
+    return coordinator, lp_import_prices
+
+
+def _median(values: list[float]) -> float:
+    return sorted(values)[len(values) // 2]
+
+
+def test_interior_unpriced_interval_is_excluded_from_acquisition_reference(
+    opt_module, monkeypatch
+):
+    """Discord #334: the trailing trim left interior gap fill contaminating it.
+
+    v2.12.1324 stopped an unpriced interval extending the coverage boundary,
+    but a later priced interval still carries that boundary past an interior
+    hole.  _fill_price_gaps then copies the preceding price across the hole and
+    the copies become indistinguishable from provider data, so they set the
+    median that values unknown carry-over energy.  Here 12 copied slots at
+    40 c/kWh would move the median from 10 c/kWh to 40 c/kWh.
+    """
+    coordinator, _lp = _amber_forecast_with_gaps(
+        opt_module, monkeypatch, [10, 10, 40, None, None, 10]
+    )
+
+    # The chart keeps the contiguous filled series over the real horizon.
+    assert len(coordinator._last_display_import_prices) == 36
+    assert coordinator._last_display_import_prices[18:30] == pytest.approx([0.40] * 12)
+
+    # The acquisition reference keeps only intervals Amber actually priced.
+    reference = coordinator._provider_priced_reference_prices()
+    assert reference == pytest.approx([0.10] * 12 + [0.40] * 6 + [0.10] * 6)
+    assert _median(reference) == pytest.approx(0.10)
+
+
+def test_absent_interior_interval_is_excluded_from_acquisition_reference(
+    opt_module, monkeypatch
+):
+    """A hole the provider simply omitted contaminates identically."""
+    coordinator, _lp = _amber_forecast_with_gaps(
+        opt_module, monkeypatch, [10, 10, 40, None, None, 10], omit=(3, 4)
+    )
+
+    assert coordinator._last_display_import_prices[18:30] == pytest.approx([0.40] * 12)
+    reference = coordinator._provider_priced_reference_prices()
+    assert reference == pytest.approx([0.10] * 12 + [0.40] * 6 + [0.10] * 6)
+    assert _median(reference) == pytest.approx(0.10)
+
+
+def test_leading_unpriced_interval_is_excluded_from_acquisition_reference(
+    opt_module, monkeypatch
+):
+    """_fill_price_gaps back-fills a leading hole from a *later* price."""
+    coordinator, _lp = _amber_forecast_with_gaps(
+        opt_module, monkeypatch, [None, 40, 10, 10, 10, 10]
+    )
+
+    assert coordinator._last_display_import_prices[:6] == pytest.approx([0.40] * 6)
+    reference = coordinator._provider_priced_reference_prices()
+    assert reference == pytest.approx([0.40] * 6 + [0.10] * 24)
+
+
+def test_fully_priced_forecast_keeps_every_slot_in_acquisition_reference(
+    opt_module, monkeypatch
+):
+    """The mask must not drop anything when the provider priced every slot."""
+    coordinator, _lp = _amber_forecast_with_gaps(
+        opt_module, monkeypatch, [10, 10, 40, 40, 10, 10]
+    )
+
+    reference = coordinator._provider_priced_reference_prices()
+    assert reference == pytest.approx(coordinator._last_display_import_prices)
+    assert all(coordinator._last_priced_import_mask)
+
+
+def test_unpriced_trailing_tail_reference_is_unchanged_by_the_mask(
+    opt_module, monkeypatch
+):
+    """The v2.12.1324 trailing trim keeps working; the mask adds nothing there."""
+    coordinator, _lp = _amber_forecast_with_gaps(
+        opt_module, monkeypatch, [10, 10, 40, None, None, None]
+    )
+
+    assert coordinator._last_display_import_prices == pytest.approx(
+        [0.10] * 12 + [0.40] * 6
+    )
+    assert coordinator._provider_priced_reference_prices() == pytest.approx(
+        coordinator._last_display_import_prices
+    )
+
+
+def test_stale_priced_mask_cannot_filter_a_later_display_series(opt_module):
+    """A mask that does not describe the current series is ignored."""
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._last_display_import_prices = [0.10, 0.20, 0.30]
+    coordinator._last_priced_import_mask = [True, False]
+
+    assert coordinator._provider_priced_reference_prices() == pytest.approx(
+        [0.10, 0.20, 0.30]
+    )
+
+
+def test_all_unpriced_mask_falls_back_to_the_display_series(opt_module):
+    """An empty sample is not usable evidence about acquisition cost."""
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._last_display_import_prices = [0.10, 0.20]
+    coordinator._last_priced_import_mask = [False, False]
+
+    assert coordinator._provider_priced_reference_prices() == pytest.approx(
+        [0.10, 0.20]
+    )
+
+
+def test_gap_filled_prices_do_not_reach_the_acquisition_cost(
+    opt_module, monkeypatch
+):
+    """Discord #334: close the payload -> acquisition-cost seam.
+
+    The trailing-trim tests assert only the published forecast length, and the
+    acquisition-median test in tests/test_battery_export_allowed_slots.py
+    pre-seeds a clean reference.  Neither joins a provider payload containing
+    unpriced intervals to the resulting acquisition cost, which is the property
+    the export floor actually consumes.
+    """
+    coordinator, lp_import_prices = _amber_forecast_with_gaps(
+        opt_module, monkeypatch, [10, 10, 40, None, None, 10]
+    )
+    coordinator._full_day_battery_energy_summary = lambda: None
+    coordinator._last_acquisition_reference_import_prices = (
+        coordinator._provider_priced_reference_prices()
+    )
+
+    cost = coordinator._acquisition_cost_for_run(
+        import_prices=coordinator._acquisition_reference_prices_for_run(
+            lp_import_prices
+        ),
+        current_soc=0.8,
+        capacity_wh=20000.0,
+    )
+
+    diagnostics = coordinator._last_acquisition_cost_diagnostics
+    assert diagnostics["source"] == "median_reference_fallback"
+    assert diagnostics["reference_price_slots"] == 24
+    # 0.40 was the contaminated median; only Amber-priced slots count now.
+    assert cost == pytest.approx(0.10)
+
+
+def test_solve_captures_the_acquisition_reference_through_the_priced_mask(
+    opt_module,
+):
+    """The solve must use the filtered helper, not the raw display series."""
+    source = inspect.getsource(
+        opt_module.OptimizationCoordinator._run_optimization
+    )
+    assert "_provider_priced_reference_prices()" in source
+    # and the stale-mask clear that makes the capture safe across solves
+    assert "self._last_priced_import_mask = None" in source

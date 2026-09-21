@@ -615,6 +615,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_export_prices: list[float] | None = None     # $/kWh values (LP-adjusted)
         self._last_display_import_prices: list[float] | None = None  # $/kWh actual tariff
         self._last_display_export_prices: list[float] | None = None  # $/kWh actual tariff
+        # Parallel to _last_display_import_prices: True where the provider
+        # actually published a price for that slot, False where _fill_price_gaps
+        # copied a neighbour into a hole. Only the acquisition reference reads
+        # it; the chart keeps the contiguous filled series. None when the
+        # builder for this solve cannot describe the series (non-dynamic
+        # providers, entity overrides).
+        self._last_priced_import_mask: list[bool] | None = None
         # Contractual rates before optimizer-only overlays and bounded quota
         # bonuses. Cost Neutral uses these to value each local settlement day.
         self._last_settlement_import_prices: list[float] | None = None
@@ -5710,6 +5717,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.info("%s: released IDLE no-discharge mode", context)
         return True
 
+    def _provider_priced_reference_prices(self) -> list[float]:
+        """Return the display import series with gap-filled copies removed.
+
+        The display series is already clipped to the provider's real horizon,
+        so trailing LP padding is gone.  _fill_price_gaps still carries a
+        neighbouring price across any interior hole and back-fills a leading
+        one, and those copies are indistinguishable from real data afterwards.
+        Left in, they set the median that values unknown carry-over energy.
+        Discord #334.
+        """
+        display = list(getattr(self, "_last_display_import_prices", None) or [])
+        mask = getattr(self, "_last_priced_import_mask", None)
+        if not mask or len(mask) != len(display):
+            return display
+        priced = [
+            price
+            for price, is_real in zip(display, mask, strict=False)
+            if is_real
+        ]
+        # A mask that excludes every slot is not usable evidence about
+        # acquisition cost; keep the previous series rather than valuing
+        # stored energy from an empty sample.
+        return priced or display
+
     def _acquisition_reference_prices_for_run(
         self,
         lp_import_prices: list[float],
@@ -6358,10 +6389,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # unknown stored-energy provenance is not valued from repeated LP
             # tail padding.
             self._last_acquisition_reference_import_prices = []
+            # Cleared first so a mask left by an earlier solve can never be
+            # applied to this solve's display series.
+            self._last_priced_import_mask = None
             prices = await self._get_price_forecast()
             if prices:
-                self._last_acquisition_reference_import_prices = list(
-                    getattr(self, "_last_display_import_prices", None) or []
+                self._last_acquisition_reference_import_prices = (
+                    self._provider_priced_reference_prices()
                 )
             solar = await self._get_solar_forecast()
             load = await self._get_load_forecast()
@@ -15391,6 +15425,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             )
 
                     import_slots: list[float | None] = [None] * n_steps
+                    # True only where the provider published a usable price for
+                    # that slot. _fill_price_gaps copies a neighbour into every
+                    # remaining hole, and those copies must not be mistaken for
+                    # provider evidence when valuing stored energy. Discord #334.
+                    priced_mask: list[bool] = [False] * n_steps
+                    mask_describes_series = True
                     entry_positions = []  # start index for each general entry
                     entry_expands_general = []  # parallel: actual expand count per entry
                     write_cursor = 0
@@ -15495,6 +15535,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 continue
                         for pos in range(start_idx, end_idx):
                             import_slots[pos] = price_dollar
+                            priced_mask[pos] = True
                         last_import_slot = max(last_import_slot, end_idx)
 
                     import_prices = self._fill_price_gaps(import_slots)
@@ -15619,6 +15660,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
                         if epex_import_override is not None:
                             import_prices, display_import_steps = epex_import_override
+                            # The entity supplies its own series and coverage,
+                            # so the provider mask no longer describes it.
+                            mask_describes_series = False
 
                         epex_override = self._read_epex_export_price_entity(n_steps)
                         if epex_override is not None:
@@ -15654,6 +15698,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         # (Amber feedIn perKwh > 0 → you pay to export).
                         self._last_display_import_prices = list(
                             import_prices[:display_import_steps]
+                        )
+                        self._last_priced_import_mask = (
+                            list(priced_mask[:display_import_steps])
+                            if mask_describes_series
+                            else None
                         )
                         self._last_display_export_prices = list(
                             display_export_raw[:display_export_steps]
