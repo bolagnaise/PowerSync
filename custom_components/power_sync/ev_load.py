@@ -35,6 +35,12 @@ class HomeLoadBasis(str, Enum):
 # neutral module so the two paths cannot silently adopt different cutoffs.
 EV_POWER_MAX_AGE = timedelta(seconds=90)
 
+# Vehicle-reported states that explicitly assert "not charging".  Shared so the
+# display and control paths cannot disagree about what disproves a watt value.
+EXPLICIT_NON_CHARGING_STATES = frozenset(
+    {"stopped", "complete", "completed", "disconnected"}
+)
+
 
 @dataclass(frozen=True)
 class EvLoadObservation:
@@ -141,6 +147,68 @@ def is_current_ev_power_observation(
     except (AttributeError, TypeError, ValueError):
         return False
     return timedelta(0) <= age <= max_age
+
+
+def _as_optional_utc(value: Any) -> datetime | None:
+    """Return a comparable UTC timestamp, or None for anything else."""
+    if not isinstance(value, datetime):
+        return None
+    return _as_utc(value)
+
+
+def is_ev_power_contradicted_by_state(
+    power_kw: float | None,
+    charging_state: Any,
+    *,
+    state_changed_at: Any,
+    state_reported_at: Any,
+    power_value_updated_at: Any,
+    at: datetime | None = None,
+    max_age: timedelta = EV_POWER_MAX_AGE,
+) -> bool:
+    """Return whether an explicit non-charging state disproves positive watts.
+
+    A BLE bridge may keep re-reporting an unchanged watt value while the
+    vehicle reports an explicit non-charging state.  ``last_reported`` then
+    keeps the power looking fresh forever, so ordinary staleness checks never
+    retire it (Discord #409: 7.0 kW of phantom EV load pinned Home Load to
+    0.0 kW until the integration was reloaded).
+
+    Two independent shapes disprove the watts:
+
+    * the vehicle entered the non-charging state *after* the power value last
+      changed, so the stop is the newer observation; or
+    * the vehicle has held the non-charging state for longer than the
+      attribution window, so no positive reading can still be current.
+
+    The second shape requires the state entity to be currently reporting, so a
+    bridge that has gone silent cannot veto a genuine reading.
+    """
+    try:
+        watts = float(power_kw)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(watts) or watts <= 0:
+        return False
+    if str(charging_state).strip().lower() not in EXPLICIT_NON_CHARGING_STATES:
+        return False
+    changed_at = _as_optional_utc(state_changed_at)
+    if changed_at is None:
+        return False
+    value_updated_at = _as_optional_utc(power_value_updated_at)
+    if value_updated_at is None or changed_at > value_updated_at:
+        return True
+    if not is_current_ev_power_observation(
+        _as_optional_utc(state_reported_at) or changed_at,
+        at=at,
+        max_age=max_age,
+    ):
+        return False
+    try:
+        held_for = _as_utc(at or utc_now()) - changed_at
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return held_for > max_age
 
 
 def aggregate_ev_load(

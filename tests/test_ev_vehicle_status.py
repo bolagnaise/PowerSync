@@ -1088,6 +1088,129 @@ def test_ble_newer_stopped_state_suppresses_re_reported_stale_power():
     assert vehicle["power_available"] is False
 
 
+def _stopped_ble_vehicle(power_last_updated, state_last_updated, now):
+    """Build the Ticket #409 bridge shape with the two stamps under test."""
+    prefix = "garage_ble"
+    hass = _Hass([
+        _State(f"binary_sensor.{prefix}_status", "on", last_updated=now),
+        _State(
+            f"sensor.{prefix}_charging_state",
+            "Stopped",
+            last_updated=state_last_updated,
+            # The bridge keeps re-reporting the unchanged Stopped state, so it
+            # is demonstrably alive.
+            last_reported=now,
+        ),
+        _State(
+            f"sensor.{prefix}_charge_power",
+            "7.0",
+            {"unit_of_measurement": "kW"},
+            last_updated=power_last_updated,
+            last_reported=now,
+        ),
+    ])
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"tesla_ble_entity_prefix": prefix},
+    )
+    return hass, entry
+
+
+def test_ble_persisted_stopped_state_suppresses_newer_stale_power_value():
+    """Ticket #409: the stop predates the last power value change.
+
+    The ordering-only guard never fired for this shape, so 7.0 kW of phantom
+    EV load survived every poll and pinned Home Load to 0.0 kW until the
+    integration was reloaded.
+    """
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    hass, entry = _stopped_ble_vehicle(
+        power_last_updated=now - timedelta(minutes=5),
+        state_last_updated=now - timedelta(minutes=10),
+        now=now,
+    )
+
+    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+
+    assert vehicle["ev_power_kw"] == 0.0
+    assert vehicle["is_charging"] is False
+    assert vehicle["power_available"] is False
+
+
+def test_ble_equal_timestamp_stopped_state_suppresses_stale_power_value():
+    """The strict ``>`` comparison also leaked when both stamps matched."""
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    stamp = now - timedelta(minutes=10)
+    hass, entry = _stopped_ble_vehicle(
+        power_last_updated=stamp,
+        state_last_updated=stamp,
+        now=now,
+    )
+
+    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+
+    assert vehicle["ev_power_kw"] == 0.0
+    assert vehicle["is_charging"] is False
+    assert vehicle["power_available"] is False
+
+
+def test_ble_recent_stopped_state_still_allows_a_newer_power_value():
+    """A stop inside the attribution window must not veto live watts.
+
+    Guards against over-correcting: a bridge that reports the watt value a
+    moment before flipping the state to Charging keeps its reading.
+    """
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    hass, entry = _stopped_ble_vehicle(
+        power_last_updated=now,
+        state_last_updated=now - timedelta(seconds=30),
+        now=now,
+    )
+
+    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+
+    assert vehicle["ev_power_kw"] == 7.0
+    assert vehicle["is_charging"] is True
+    assert vehicle["power_available"] is True
+
+
+def test_ble_silent_state_entity_cannot_veto_a_live_power_value():
+    """A bridge that stopped reporting its state must not veto the meter."""
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    prefix = "garage_ble"
+    hass = _Hass([
+        _State(f"binary_sensor.{prefix}_status", "on", last_updated=now),
+        _State(
+            f"sensor.{prefix}_charging_state",
+            "Stopped",
+            last_updated=now - timedelta(minutes=10),
+            last_reported=now - timedelta(minutes=10),
+        ),
+        _State(
+            f"sensor.{prefix}_charge_power",
+            "7.0",
+            {"unit_of_measurement": "kW"},
+            last_updated=now - timedelta(minutes=5),
+            last_reported=now,
+        ),
+    ])
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"tesla_ble_entity_prefix": prefix},
+    )
+
+    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+
+    assert vehicle["ev_power_kw"] == 7.0
+    assert vehicle["power_available"] is True
+
+
 def test_autodetected_ble_bridge_pairs_with_single_fleet_vehicle_and_commands():
     power_sync = _power_sync_module()
     vin = "5YJTEST0000000001"

@@ -80,7 +80,10 @@ from .ev_phase_allocator import (
     normalize_home_power_settings,
     required_phases,
 )
-from ..ev_load import is_current_ev_power_observation
+from ..ev_load import (
+    is_current_ev_power_observation,
+    is_ev_power_contradicted_by_state,
+)
 from ..registry_compat import iter_device_entries
 from ..sensitive_logging import install_vin_log_filter
 
@@ -1615,7 +1618,10 @@ async def _get_observed_ev_power_reading_kw(
     # observed draw into zero: an already-charging session needs it to retain
     # its existing draw when calculating the next rate.
     if charger_type == "tesla" and vehicle_id.startswith("ble_"):
-        from ..tesla_ble import get_tesla_ble_charge_power_state
+        from ..tesla_ble import (
+            get_tesla_ble_charge_power_state,
+            get_tesla_ble_charging_state,
+        )
 
         state = get_tesla_ble_charge_power_state(hass, vehicle_id[4:])
         power_kw, available = _power_state_kw_reading(state)
@@ -1625,6 +1631,20 @@ async def _get_observed_ev_power_reading_kw(
             or getattr(state, "last_changed", None)
         )
         if available:
+            # The bridge keeps re-reporting an unchanged watt value, so the
+            # freshness gate above cannot retire it.  An explicit non-charging
+            # state disproves it; surplus accounting must not spend phantom
+            # kilowatts (Discord #409).  This is the same invariant the
+            # display path applies, via the same provider-neutral helper.
+            charging = get_tesla_ble_charging_state(hass, vehicle_id[4:])
+            if is_ev_power_contradicted_by_state(
+                power_kw,
+                getattr(charging, "state", ""),
+                state_changed_at=getattr(charging, "last_updated", None),
+                state_reported_at=getattr(charging, "last_reported", None),
+                power_value_updated_at=getattr(state, "last_updated", None),
+            ):
+                return 0.0, True
             return power_kw, True
 
     # Sigenergy exposes no power *meter* entity — only charge/discharge power

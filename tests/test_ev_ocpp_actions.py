@@ -320,12 +320,16 @@ class _State:
         *,
         last_changed: datetime | None = None,
         last_updated: datetime | None = None,
+        last_reported: datetime | None = None,
     ) -> None:
         self.entity_id = entity_id
         self.state = state
         self.attributes = attributes or {}
         self.last_changed = last_changed
         self.last_updated = last_updated or last_changed
+        # A bridge re-reporting an unchanged value advances ``last_reported``
+        # without advancing ``last_updated``.
+        self.last_reported = last_reported
 
 
 class _States:
@@ -12246,3 +12250,57 @@ def test_stop_action_bypasses_wake_backoff_only_for_user_commands(
         actions._action_stop_ev_charging(hass, _tesla_entry(), params)
     ) is True
     assert recorded == [expected_allow_backoff]
+
+
+def test_ble_observed_power_reading_rejects_persisted_stopped_phantom_load():
+    """Ticket #409: surplus accounting spent 7 kW the car was not drawing.
+
+    The bridge kept re-reporting an unchanged 7.0 kW while the vehicle
+    reported ``Stopped``, so the ``last_reported`` freshness gate never
+    retired it.  The inflated reading raised computed solar surplus by 7 kW
+    and drove repeated 32 A start attempts.
+    """
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State(
+            "sensor.snowflake_charging_state",
+            "Stopped",
+            last_updated=now - timedelta(minutes=10),
+            last_reported=now,
+        ),
+        _State(
+            "sensor.snowflake_charge_power",
+            "7.0",
+            {"unit_of_measurement": "kW"},
+            last_updated=now - timedelta(minutes=5),
+            last_reported=now,
+        ),
+    ])
+
+    assert asyncio.run(actions._get_observed_ev_power_reading_kw(
+        hass, "ble_snowflake", {"charger_type": "tesla"},
+    )) == (0.0, True)
+
+
+def test_ble_observed_power_reading_keeps_a_live_charging_reading():
+    """A charging vehicle's meter must still be spent on surplus accounting."""
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State(
+            "sensor.snowflake_charging_state",
+            "Charging",
+            last_updated=now - timedelta(minutes=10),
+            last_reported=now,
+        ),
+        _State(
+            "sensor.snowflake_charge_power",
+            "7.0",
+            {"unit_of_measurement": "kW"},
+            last_updated=now - timedelta(minutes=5),
+            last_reported=now,
+        ),
+    ])
+
+    assert asyncio.run(actions._get_observed_ev_power_reading_kw(
+        hass, "ble_snowflake", {"charger_type": "tesla"},
+    )) == (7.0, True)

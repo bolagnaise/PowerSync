@@ -1911,7 +1911,10 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         charging_state_plugged_status,
         coalesce_vehicle_observations,
     )
-    from .ev_load import is_current_ev_power_observation
+    from .ev_load import (
+        is_current_ev_power_observation,
+        is_ev_power_contradicted_by_state,
+    )
 
     vehicles = []
     entity_registry = er.async_get(hass)
@@ -2300,25 +2303,20 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         # therefore wins over a positive value whose last value update
         # predates it.  Keep the power unavailable rather than claiming a
         # measured zero: command acknowledgement is still not hardware proof.
+        # A vehicle that has *held* an explicit non-charging state for longer
+        # than the attribution window also disproves the watts, even when the
+        # power value happened to change last.  Without that, the veto is
+        # decided purely by the order of two ``last_updated`` stamps and can
+        # never re-arm while both entities hold steady (Discord #409).
         power_value_updated_at = _ev_observed_at(
             getattr(power_state, "last_updated", None)
         )
-        explicit_non_charging = str(
-            getattr(charge_state, "state", "")
-        ).strip().lower() in {
-            "stopped",
-            "complete",
-            "completed",
-            "disconnected",
-        }
-        stale_power_contradicted_by_state = (
-            power_kw > 0
-            and explicit_non_charging
-            and ble_state_observed_at is not None
-            and (
-                power_value_updated_at is None
-                or ble_state_observed_at > power_value_updated_at
-            )
+        stale_power_contradicted_by_state = is_ev_power_contradicted_by_state(
+            power_kw,
+            getattr(charge_state, "state", ""),
+            state_changed_at=ble_state_observed_at,
+            state_reported_at=_ev_power_observed_at(charge_state),
+            power_value_updated_at=power_value_updated_at,
         )
         if stale_power_contradicted_by_state:
             power_kw = 0.0
