@@ -12304,3 +12304,104 @@ def test_ble_observed_power_reading_keeps_a_live_charging_reading():
     assert asyncio.run(actions._get_observed_ev_power_reading_kw(
         hass, "ble_snowflake", {"charger_type": "tesla"},
     )) == (7.0, True)
+
+
+# Discord #284: Tesla's cloud live_status caches the site aggregate for ~62s
+# while wall_connector_power in the same payload refreshes every ~16s poll.
+# Two real epochs from the reporter's 2026-09-20 capture, each held byte
+# identical across four polls while the car ramped.
+_T284_EPOCHS = {
+    "13:51": {
+        "site": {
+            "battery_soc": 100,
+            "solar_power": 7168,
+            "grid_power": -852,
+            "battery_power": 0,
+            "load_power": 6316,
+        },
+        "sampled_ev_w": 5090.2,
+        "observed_ev_w": [5090.2, 7707.5, 7707.5, 7707.5],
+    },
+    "14:06": {
+        "site": {
+            "battery_soc": 100,
+            "solar_power": 6791,
+            "grid_power": -2425,
+            "battery_power": 0,
+            "load_power": 4366,
+        },
+        "sampled_ev_w": 3148.5,
+        "observed_ev_w": [3148.5, 7707.0, 7707.0, 7707.0],
+    },
+}
+
+_T284_CONFIG = {
+    "surplus_calculation": "grid_based",
+    "household_buffer_kw": 0.10,
+    "allow_parallel_charging": True,
+    "max_battery_charge_rate_kw": 5.0,
+    "min_battery_soc": 0,
+}
+
+
+def _t284_surplus(epoch, observed_ev_w, *, coherent=True):
+    live_status = dict(epoch["site"])
+    live_status["ev_power"] = observed_ev_w
+    if coherent:
+        live_status["ev_power_at_site_sample"] = epoch["sampled_ev_w"]
+    return actions._calculate_solar_surplus(
+        live_status,
+        current_ev_power_kw=observed_ev_w / 1000,
+        config=_T284_CONFIG,
+    )
+
+
+@pytest.mark.parametrize("epoch_name", sorted(_T284_EPOCHS))
+def test_solar_surplus_is_stable_while_site_telemetry_is_unchanged(epoch_name):
+    """Surplus is a property of the site, not of the EV's own draw.
+
+    Every watt the car takes is a watt the meter stops exporting, so the grid
+    term and the EV add-back cancel.  Mixing a fresh EV reading into a cached
+    aggregate broke that: surplus tracked the car one-for-one, drove the amps
+    up, and collapsed when the aggregate finally refreshed.
+    """
+    epoch = _T284_EPOCHS[epoch_name]
+    values = [_t284_surplus(epoch, ev) for ev in epoch["observed_ev_w"]]
+
+    assert max(values) - min(values) < 0.01
+
+
+@pytest.mark.parametrize("epoch_name", sorted(_T284_EPOCHS))
+def test_solar_surplus_never_exceeds_site_solar_with_an_idle_battery(epoch_name):
+    """With the battery idle the site cannot offer more than it is producing."""
+    epoch = _T284_EPOCHS[epoch_name]
+    solar_kw = epoch["site"]["solar_power"] / 1000
+
+    for ev in epoch["observed_ev_w"]:
+        assert _t284_surplus(epoch, ev) <= solar_kw + 1e-9
+
+
+@pytest.mark.parametrize("epoch_name", sorted(_T284_EPOCHS))
+def test_solar_surplus_without_a_sample_vintage_is_left_alone(epoch_name):
+    """Coordinators with single-vintage telemetry keep the original arithmetic.
+
+    This is the shape the defect produced, pinned so the correction cannot be
+    mistaken for a change of policy on brands that never had the split.
+    """
+    epoch = _T284_EPOCHS[epoch_name]
+    values = [
+        _t284_surplus(epoch, ev, coherent=False) for ev in epoch["observed_ev_w"]
+    ]
+    drift_kw = (epoch["observed_ev_w"][-1] - epoch["observed_ev_w"][0]) / 1000
+
+    assert values[-1] - values[0] == pytest.approx(drift_kw, abs=0.01)
+
+
+def test_solar_surplus_restores_a_downward_ev_ramp_symmetrically():
+    """A car that ramped down since the sample under-reports the true surplus."""
+    epoch = _T284_EPOCHS["14:06"]
+    sampled = epoch["sampled_ev_w"]
+
+    assert _t284_surplus(epoch, sampled) == pytest.approx(
+        _t284_surplus(epoch, sampled - 2000), abs=0.01
+    )

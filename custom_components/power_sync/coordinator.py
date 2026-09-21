@@ -3540,6 +3540,19 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 else None
             )
 
+            # Tesla caches the site aggregate upstream for ~60s while the wall
+            # connector reading in the same payload refreshes every poll. Record
+            # the EV power observed when the aggregate last moved so consumers
+            # can keep both terms the same vintage; splicing a newer EV number
+            # into an older aggregate breaks its energy balance. Discord #284.
+            aggregate_sample = (solar_kw, grid_kw, battery_kw, raw_load_kw)
+            if aggregate_sample != getattr(self, "_site_aggregate_sample", None):
+                self._site_aggregate_sample = aggregate_sample
+                self._site_aggregate_ev_power_kw = ev_power_kw
+            aggregate_ev_power_kw = getattr(
+                self, "_site_aggregate_ev_power_kw", ev_power_kw
+            )
+
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
             if load_kw is not None:
@@ -3682,6 +3695,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 "battery_level": soc_pct,
                 "grid_status": grid_status,
                 "ev_power": ev_power_kw,
+                "ev_power_at_site_sample": aggregate_ev_power_kw,
                 "ev_power_fallback_by_physical_key": dict(
                     wall_connector_power_by_load_key
                 ),

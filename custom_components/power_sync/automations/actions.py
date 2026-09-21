@@ -6642,6 +6642,23 @@ def _curtailed_full_battery_idle_ev_probe_kw(
     return max(0.0, (min_amps * voltage * phases) / 1000)
 
 
+def _ev_power_drift_since_site_sample_kw(live_status: dict) -> float:
+    """Return how far the EV draw has moved since the site aggregate was measured.
+
+    Positive means the car is drawing more now than the cached site telemetry
+    accounted for. Zero when the coordinator publishes single-vintage telemetry
+    or the reading is unusable, so brands without the split are unaffected.
+    """
+    sampled_w = live_status.get("ev_power_at_site_sample")
+    observed_w = live_status.get("ev_power")
+    if sampled_w is None or observed_w is None:
+        return 0.0
+    try:
+        return (float(observed_w) - float(sampled_w)) / 1000
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _calculate_solar_surplus(
     live_status: dict,
     current_ev_power_kw: float,
@@ -6693,14 +6710,27 @@ def _calculate_solar_surplus(
         # Add battery charging power (we can redirect it to EV instead)
         battery_charge_kw = max(0, -battery_kw)  # Only count when charging (negative = charging)
         battery_discharge_kw = max(0, battery_kw)  # Positive = discharging
+        # The grid term and the EV term have to describe the same instant: the
+        # formula adds the EV draw back precisely because the meter already
+        # netted it off. Tesla's cloud aggregate is cached ~60s while the wall
+        # connector reading updates every poll, so every watt the car ramped up
+        # since the aggregate was measured was added to a grid reading that
+        # never saw it - surplus tracked the car's own draw one-for-one and
+        # drove the amps up until the aggregate refreshed and collapsed them.
+        # Discount that drift when the coordinator reports both. Discord #284.
+        ev_term_kw = current_ev_power_kw
+        ev_drift_kw = _ev_power_drift_since_site_sample_kw(live_status)
+        if ev_drift_kw:
+            ev_term_kw = max(0.0, current_ev_power_kw - ev_drift_kw)
         # Subtract battery discharge: grid export from battery isn't solar surplus
-        surplus = -grid_kw + current_ev_power_kw + battery_charge_kw - battery_discharge_kw
+        surplus = -grid_kw + ev_term_kw + battery_charge_kw - battery_discharge_kw
         battery_reserve_kw = _parallel_battery_reserve_kw(
             live_status, config, method, battery_charge_kw
         )
         available_kw = max(0, surplus - buffer_kw - battery_reserve_kw)
         _LOGGER.debug(
-            f"Surplus calc (grid_based): grid={grid_kw:.2f}kW, ev={current_ev_power_kw:.2f}kW, "
+            f"Surplus calc (grid_based): grid={grid_kw:.2f}kW, ev={ev_term_kw:.2f}kW "
+            f"(observed={current_ev_power_kw:.2f}kW, drift={ev_drift_kw:.2f}kW), "
             f"bat_charge={battery_charge_kw:.2f}kW, bat_discharge={battery_discharge_kw:.2f}kW → "
             f"raw={surplus:.2f}kW, buffer={buffer_kw:.2f}kW, "
             f"battery_reserve={battery_reserve_kw:.2f}kW, available={available_kw:.2f}kW"

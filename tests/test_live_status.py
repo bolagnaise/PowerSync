@@ -38,9 +38,22 @@ def test_coordinator_data_to_ev_live_status_converts_kw_to_watts():
         "load_power": 3750.0,
         "site_load_power": 3750.0,
         "ev_power": 7100.0,
+        # Absent from the payload: this coordinator's telemetry is one vintage.
+        "ev_power_at_site_sample": None,
         "home_load_basis": "includes_ev",
         "is_curtailed": True,
     }
+
+
+def test_ev_power_at_site_sample_is_passed_through_when_published():
+    """Tesla publishes the EV draw as of the cached site aggregate (Discord #284)."""
+    live_status = coordinator_data_to_ev_live_status({
+        "ev_power": 7.7,
+        "ev_power_at_site_sample": 5.09,
+    })
+
+    assert live_status["ev_power"] == 7700.0
+    assert live_status["ev_power_at_site_sample"] == 5090.0
 
 
 def test_normalized_home_load_keeps_gross_site_load_for_ev_headroom():
