@@ -1367,7 +1367,12 @@ def test_amber_dynamic_import_current_without_advanced_price_uses_settled_retail
     import_prices, _export_prices = asyncio.run(coordinator._get_price_forecast())
 
     assert import_prices == pytest.approx([0.04] * 6 + [0.30] * 12)
-    assert coordinator._last_display_import_prices == pytest.approx(import_prices)
+    # The LP pads the horizon, but the trailing forecast entry carried no
+    # advancedPrice, so it is fill rather than forecast and is clipped out of
+    # the published window (Discord #71).
+    assert coordinator._last_display_import_prices == pytest.approx(
+        [0.04] * 6 + [0.30] * 6
+    )
 
 
 def test_amber_dynamic_export_forecast_uses_advanced_price_predicted(opt_module):
@@ -2759,3 +2764,70 @@ def test_optimizer_direct_meter_keeps_distinct_missing_ev_incomplete(opt_module)
     assert result["observed_ev_power"] == 10.8
     assert result["load_power"] is None
     assert result["home_load_normalization_quality"] == "incomplete"
+
+
+def test_unresolved_amber_forecast_tail_is_not_counted_as_real_forecast(opt_module):
+    """Discord #71: carry-forward fill was published as real provider prices.
+
+    A ForecastInterval whose advancedPrice is missing resolves to None, but the
+    loop still advanced the "actual forecast length" past it.  _fill_price_gaps
+    then back-filled those slots with the last resolved price, so the flat tail
+    the display clip exists to remove was kept - and the acquisition reference
+    window, documented as "real provider prices without synthetic LP tail
+    padding", valued unknown carry-over energy from that padding.
+    """
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    forecast = []
+    for offset, advanced in (
+        (0, {"predicted": 20.0, "low": 10.0, "high": 30.0}),
+        (30, None),
+    ):
+        slot_start = start + timedelta(minutes=offset)
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                33.0,
+                "general",
+                advanced_price=advanced,
+            )
+        )
+        forecast.append(_dynamic_price_entry(slot_start, 8.0, "feedIn"))
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+    )
+
+    import_prices, _export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    # The LP still runs on a full padded horizon.
+    assert import_prices == pytest.approx([0.20] * 12)
+    # The published window stops at the last slot Amber actually priced.
+    assert coordinator._last_display_import_prices == pytest.approx([0.20] * 6)
+
+
+def test_resolved_amber_forecast_tail_still_counts_as_real_forecast(opt_module):
+    """The trim must only drop intervals whose price never resolved."""
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    forecast = []
+    for offset, predicted in ((0, 20.0), (30, 40.0)):
+        slot_start = start + timedelta(minutes=offset)
+        forecast.append(
+            _dynamic_price_entry(
+                slot_start,
+                33.0,
+                "general",
+                advanced_price={"predicted": predicted, "low": 10.0, "high": 50.0},
+            )
+        )
+        forecast.append(_dynamic_price_entry(slot_start, 8.0, "feedIn"))
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module,
+        "amber",
+        forecast,
+    )
+
+    import_prices, _export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert import_prices == pytest.approx([0.20] * 6 + [0.40] * 6)
+    assert coordinator._last_display_import_prices == pytest.approx(import_prices)

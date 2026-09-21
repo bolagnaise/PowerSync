@@ -15485,7 +15485,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 amber_forecast_type,
                             )
                             if price_dollar is None:
-                                last_import_slot = max(last_import_slot, end_idx)
+                                # An interval whose price did not resolve is not
+                                # forecast length. Counting it made the trailing
+                                # carry-forward fill from _fill_price_gaps look
+                                # like real provider data, which padded the app
+                                # chart and inflated the acquisition-reference
+                                # median that values unknown carry-over energy.
+                                # Discord #71.
                                 continue
                         for pos in range(start_idx, end_idx):
                             import_slots[pos] = price_dollar
