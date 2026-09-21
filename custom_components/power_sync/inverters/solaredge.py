@@ -338,6 +338,15 @@ class SolarEdgeController(InverterController):
         self._slave_param = "device_id"
         self._use_entity_mode = False
         self._active_power_limit_entity: str | None = None
+        # True while the most recent limit write is known to have changed
+        # nothing: either it never reached the inverter, or the inverter
+        # answered with an exception response. Only an indeterminate write
+        # may contain control.
+        self._limit_write_was_determinate = False
+
+    def last_limit_write_was_determinate(self) -> bool:
+        """Report whether the last limit write definitively changed nothing."""
+        return self._limit_write_was_determinate
 
     async def connect(self) -> bool:
         """Connect to SolarEdge via direct Modbus, falling back to HA entities."""
@@ -493,8 +502,11 @@ class SolarEdgeController(InverterController):
         )
 
     async def _set_active_power_limit(self, percent: int) -> bool:
+        # Assume the worst until a branch proves the limit is unchanged.
+        self._limit_write_was_determinate = False
         if not self._connected and not await self.connect():
             _LOGGER.error("SolarEdge active power limit write failed: not connected")
+            self._limit_write_was_determinate = True
             return False
 
         if self._use_entity_mode:
@@ -503,6 +515,7 @@ class SolarEdgeController(InverterController):
                 or self._find_active_power_limit_entity()
             )
             if not entity or not self._hass:
+                self._limit_write_was_determinate = True
                 return False
             try:
                 await self._hass.services.async_call(
@@ -517,6 +530,7 @@ class SolarEdgeController(InverterController):
                 return False
 
         if not self._client or not self._client.connected:
+            self._limit_write_was_determinate = True
             return False
         try:
             if self._slave_in_client:
@@ -536,6 +550,10 @@ class SolarEdgeController(InverterController):
                 result = await self._client.write_register(**kwargs)
             if result is None or result.isError():
                 _LOGGER.error("SolarEdge active power limit write rejected: %s", result)
+                # An exception response is the inverter answering that it did
+                # not apply the register. A missing response tells us nothing,
+                # so only the former is safe to treat as determinate.
+                self._limit_write_was_determinate = result is not None
                 return False
             return True
         except Exception as err:
@@ -1527,7 +1545,7 @@ class SolarEdgeEnergyController:
         return False
 
     async def run_external_mutation(
-        self, callback, *, automatic=False, write_allowed=None
+        self, callback, *, automatic=False, write_allowed=None, determinate=None
     ) -> bool:
         """Serialize one active-power mutation; its callback must not retry or clean up."""
         session = self._coordinator()
@@ -1567,6 +1585,22 @@ class SolarEdgeEnergyController:
                     return False
                 possible = True
                 if not await callback():
+                    if determinate is not None and determinate():
+                        # The actuator proved the limit is unchanged - it never
+                        # reached the inverter, or the inverter refused it. There
+                        # is nothing to reconcile, so containment must not latch:
+                        # latching it blocked the *release* write as hard as the
+                        # application and left the inverter curtailed with no
+                        # exit but deleting the journal. Discord #70.
+                        session.pending_mutation = None
+                        self._result(
+                            session,
+                            SolarEdgeMutationOutcome.REJECTED,
+                            "active_power",
+                            message="Inverter did not apply the limit; nothing to reconcile",
+                        )
+                        await self._persist(session)
+                        return False
                     raise RuntimeError(
                         "External control returned an indeterminate failure"
                     )
@@ -1720,12 +1754,19 @@ class SolarEdgeEnergyController:
                     return response(False, "persistence_failed")
                 return response(False, reason, fields)
 
-            if (
+            # An uncertain active-power write used to return blocked here. The
+            # storage registers cannot evidence that limit, but nothing else
+            # could rewrite the record either, so the refusal was permanent and
+            # replayed across restarts: the only exit was deleting the journal
+            # (Discord #70). The limit is a single absolute register with no
+            # partial state, and the five-minute curtailment check rewrites it
+            # from the current prices, so a clean storage reconciliation
+            # resolves it. Report it in the diagnostic instead of refusing.
+            unresolved_active_power = bool(
                 session.last_mutation
                 and session.last_mutation.get("operation") == "active_power"
                 and session.health != "ready"
-            ):
-                return await blocked("unresolved_active_power")
+            )
             self._readback_rejection = None
             observed = await self._fresh_storage_state()
             if observed is None:
@@ -1789,8 +1830,16 @@ class SolarEdgeEnergyController:
             )
             self._reconciliation_result(
                 session, "confirmed",
-                "native_self_consumption" if native else "matching_baseline",
+                "active_power_limit_deferred_to_curtailment_check"
+                if unresolved_active_power
+                else ("native_self_consumption" if native else "matching_baseline"),
             )
+            if unresolved_active_power:
+                _LOGGER.warning(
+                    "SolarEdge reconciliation cleared an unresolved active-power "
+                    "limit write; the next curtailment check re-asserts the limit "
+                    "for the current prices"
+                )
             try:
                 await self._persist(session)
             except (Exception, asyncio.CancelledError) as err:

@@ -21547,6 +21547,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry_data["solaredge_controller_key"] = controller_key
         return controller
 
+    async def _persist_solaredge_curtailment_marker(entry_data: dict, curtailed: bool) -> None:
+        """Record across restarts that PowerSync owns the active power limit.
+
+        ``solaredge_curtailment_state`` lives in ``entry_data`` only, so a reload
+        reset it to "normal" while the inverter kept the 0% limit. The release is
+        level-triggered on price, so the economic branch then saw "already in
+        normal mode" and never wrote 100% back. Discord #70.
+        """
+        store = entry_data.get("store")
+        if not store:
+            return
+        try:
+            stored_data = await store.async_load() or {}
+            if curtailed:
+                stored_data["solaredge_curtailment_owned"] = True
+            else:
+                stored_data.pop("solaredge_curtailment_owned", None)
+            await store.async_save(stored_data)
+        except Exception as err:
+            _LOGGER.warning(
+                "Could not persist SolarEdge curtailment ownership marker: %s", err
+            )
+
     async def _solaredge_curtailment_write(
         coordinator, controller, operation, *, write_allowed=None
     ) -> bool:
@@ -21558,7 +21581,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await controller.disconnect()
 
         return await coordinator.run_external_mutation(
-            write_and_disconnect, automatic=True, write_allowed=write_allowed
+            write_and_disconnect,
+            automatic=True,
+            write_allowed=write_allowed,
+            determinate=getattr(
+                controller, "last_limit_write_was_determinate", None
+            ),
         )
 
     async def _restore_solaredge_curtailment_for_dispatch(
@@ -21582,6 +21610,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             success = await _solaredge_curtailment_write(coordinator, controller, controller.restore)
             if success:
                 entry_data["solaredge_curtailment_state"] = "normal"
+                await _persist_solaredge_curtailment_marker(entry_data, False)
                 return True
             _LOGGER.error("SolarEdge curtailment release before %s failed", reason)
         except Exception as err:
@@ -23461,6 +23490,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         else:
             stored_goodwe_curtailment_restore_state = None
 
+    # A saved marker means a previous process left the SolarEdge active power
+    # limit applied. Starting at "normal" made the price-recovery restore a
+    # no-op and stranded the inverter at 0%, so start at "pending" and let the
+    # next check write the limit the current prices call for. Discord #70.
+    stored_solaredge_curtailment_owned = bool(
+        stored_data.get("solaredge_curtailment_owned")
+    )
+    if stored_solaredge_curtailment_owned:
+        _LOGGER.warning(
+            "SolarEdge active power limit was still owned by PowerSync at the "
+            "last shutdown; the next curtailment check will re-evaluate it"
+        )
+
     last_restorable_tesla_tariff = _select_restorable_tesla_tariff(
         stored_data.get("last_restorable_tesla_tariff")
     )
@@ -23564,7 +23606,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # place. Never render that as confirmed until this process has read it
         # back after a fresh command.
         "goodwe_curtailment_state": "normal" if not stored_goodwe_curtailment_restore_state else "pending",
-        "solaredge_curtailment_state": "normal",  # Track SolarEdge active-power curtailment state
+        # "pending" when a prior process left the limit applied: never render an
+        # unverified baseline as confirmed, and never as finished work either.
+        "solaredge_curtailment_state": (
+            "pending" if stored_solaredge_curtailment_owned else "normal"
+        ),
         "sungrow_curtailment_state": "normal",  # Track Sungrow export-limit curtailment state
         "sungrow_power_limit_w": None,  # Current Sungrow load-following export limit
         "amber_usage_coordinator": amber_usage_coordinator,  # For actual metered cost data
@@ -28186,7 +28232,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         )
                     return
 
-                if current_state == "normal":
+                if current_state != "curtailed":
+                    # "pending" is an unverified limit from a previous process.
+                    # The limit is an absolute register, so re-asserting it is
+                    # idempotent and cheaper than trusting a stale marker.
                     _LOGGER.info(
                         "SolarEdge curtailment TRIGGERED: export_earnings=%.2fc (below threshold) -> active power 0%%",
                         export_earnings,
@@ -28199,6 +28248,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     if success:
                         entry_data["solaredge_curtailment_state"] = "curtailed"
+                        await _persist_solaredge_curtailment_marker(entry_data, True)
                     else:
                         _LOGGER.error("SolarEdge curtail() failed")
                 else:
@@ -28217,7 +28267,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     if success:
                         entry_data["solaredge_curtailment_state"] = "normal"
+                        await _persist_solaredge_curtailment_marker(entry_data, False)
                     else:
+                        # Leave the state and the marker alone: it still reads
+                        # non-"normal", so the next five-minute check retries
+                        # the release rather than seeing finished work.
                         _LOGGER.error("SolarEdge restore() failed")
                 else:
                     _LOGGER.debug("SolarEdge already in normal mode, no action needed")

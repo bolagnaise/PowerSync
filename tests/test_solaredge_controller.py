@@ -1997,7 +1997,9 @@ def test_solaredge_reconcile_requires_fresh_matching_benign_baseline(readback, r
     asyncio.run(scenario())
 
 
-def test_solaredge_storage_reconcile_cannot_clear_external_unknown():
+def test_solaredge_storage_reconcile_still_needs_a_readback_after_external_unknown():
+    """An unresolved limit no longer short-circuits, but cannot skip the readback."""
+
     async def scenario():
         hass = _SEHass()
         controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
@@ -2008,10 +2010,159 @@ def test_solaredge_storage_reconcile_cannot_clear_external_unknown():
         assert not await controller.run_external_mutation(callback)
 
         async def fresh():
-            raise AssertionError("Storage read cannot resolve active power")
+            return None
 
         controller._fresh_storage_state = fresh
         assert not await controller.reconcile()
+        assert controller.control_health == "reconciliation_required"
+        assert (
+            controller._coordinator().last_reconciliation["reason"]
+            == "fresh_storage_unavailable"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_reconcile_releases_an_indeterminate_active_power_write():
+    """Discord #70: containment on an uncertain limit write had no exit at all.
+
+    reconcile_result() refused while last_mutation was an ``active_power``
+    record, and nothing else could replace that record, so the service could
+    never clear it and the journal replayed the same trap on every restart.
+    """
+
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        assert await controller.force_discharge(15, 2000)
+        baseline = dict(controller._saved_control_state)
+
+        async def callback():
+            return False
+
+        # An indeterminate limit write contains control, as designed.
+        assert not await controller.run_external_mutation(callback)
+        assert controller.control_health == "reconciliation_required"
+        assert controller._coordinator().last_mutation["operation"] == "active_power"
+        assert controller._coordinator().last_mutation["outcome"] == "unknown"
+
+        # Survives a restart: a fresh controller replays the same journal.
+        restarted = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        assert restarted.control_health != "ready"
+
+        async def fresh():
+            return baseline
+
+        restarted._fresh_storage_state = fresh
+        assert await restarted.reconcile()
+        assert restarted.control_health == "ready"
+        assert (
+            restarted._coordinator().last_reconciliation["reason"]
+            == "active_power_limit_deferred_to_curtailment_check"
+        )
+        # The release write that containment used to block indefinitely can run.
+        async def succeed():
+            return True
+
+        assert await restarted.run_external_mutation(succeed)
+        assert restarted.control_health == "ready"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("determinate", "expected_health", "expected_outcome"),
+    [
+        (True, "ready", "rejected"),
+        (False, "reconciliation_required", "unknown"),
+    ],
+)
+def test_solaredge_determinate_limit_failure_does_not_contain_control(
+    determinate, expected_health, expected_outcome
+):
+    """Discord #70: a write that provably changed nothing must stay releasable.
+
+    A refused TCP connect on a Modbus port shared with solaredge_modbus_multi
+    returned False from the actuator, which was recorded as an uncertain write.
+    Containment then blocked the five-minute *release* as hard as the
+    application, stranding the inverter at a 0% active power limit.
+    """
+
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+
+        async def callback():
+            return False
+
+        assert not await controller.run_external_mutation(
+            callback, determinate=lambda: determinate
+        )
+        assert controller.control_health == expected_health
+        assert controller._coordinator().last_mutation["outcome"] == expected_outcome
+
+        # The next five-minute tick must be able to retry the release.
+        async def succeed():
+            return True
+
+        assert await controller.run_external_mutation(
+            succeed, determinate=lambda: False
+        ) is (determinate is True)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("failure", "determinate"),
+    [
+        ("not_connected", True),
+        ("no_client", True),
+        ("rejected", True),
+        ("no_response", False),
+        ("raised", False),
+    ],
+)
+def test_solaredge_limit_write_reports_whether_the_limit_is_unchanged(
+    failure, determinate
+):
+    """Only positive evidence that nothing changed may downgrade containment."""
+
+    class _Result:
+        def __init__(self, error):
+            self._error = error
+
+        def isError(self):
+            return self._error
+
+    class _Client:
+        def __init__(self, outcome):
+            self.connected = True
+            self._outcome = outcome
+
+        async def write_register(self, **kwargs):
+            if self._outcome == "raised":
+                raise OSError("connection reset mid-write")
+            return None if self._outcome == "no_response" else _Result(True)
+
+        def close(self):
+            self.connected = False
+
+    async def scenario():
+        controller = SolarEdgeController(host="", rated_power_w=5000)
+        controller._slave_in_client = True
+        if failure == "not_connected":
+            async def refuse():
+                return False
+
+            controller.connect = refuse
+        else:
+            controller._connected = True
+            controller._client = (
+                None if failure == "no_client" else _Client(failure)
+            )
+
+        assert not await controller._set_active_power_limit(100)
+        assert controller.last_limit_write_was_determinate() is determinate
 
     asyncio.run(scenario())
 
@@ -2746,3 +2897,150 @@ def test_solaredge_self_consumption_selects_and_confirms_native_self_use():
 
     assert asyncio.run(controller.restore_normal())
     assert command_state.state == "Stop"
+
+
+@pytest.mark.parametrize("marker_persisted", [False, True])
+def test_solaredge_curtailment_release_survives_a_reload(marker_persisted):
+    """Discord #70: a reload lost the in-memory state and stranded the limit.
+
+    ``solaredge_curtailment_state`` lived only in ``entry_data``. A reload while
+    curtailed reset it to "normal", and because the release is level-triggered
+    on price the economic branch then logged "already in normal mode" and never
+    wrote the active power limit back to 100%. The inverter stayed at 0% until
+    a fresh negative-price episode re-entered and left the state machine.
+    """
+    import ast
+    import logging
+    from unittest.mock import AsyncMock
+
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        await controller._load_session(controller._coordinator())
+        direct = types.SimpleNamespace(
+            curtail=AsyncMock(return_value=True),
+            restore=AsyncMock(return_value=True),
+            disconnect=AsyncMock(),
+        )
+        store = _MemoryStore()
+        # The post-reload value: setup always rebuilt entry_data from scratch.
+        entry_data = {
+            "solaredge_coordinator": controller,
+            "solaredge_curtailment_state": "pending" if marker_persisted else "normal",
+            "store": store,
+        }
+        hass.data = {"power_sync": {"entry": entry_data}}
+        namespace = {
+            "hass": hass,
+            "entry": types.SimpleNamespace(
+                entry_id="entry", options={"enabled": True}, data={}
+            ),
+            "DOMAIN": "power_sync",
+            "CONF_SOLAREDGE_DC_CURTAILMENT_ENABLED": "enabled",
+            "battery_connection_profile": types.SimpleNamespace(
+                profile_id="solaredge_composite"
+            ),
+            "_LOGGER": logging.getLogger(__name__),
+            "_get_solaredge_curtailment_controller": lambda _: direct,
+            "_direct_dc_curtailment_write_allowed": lambda: True,
+            "_solaredge_force_dispatch_active": lambda _: False,
+            "export_earnings_are_uneconomic": lambda *_: False,
+        }
+        source = ROOT / "__init__.py"
+        setup = next(
+            n
+            for n in ast.parse(source.read_text()).body
+            if getattr(n, "name", None) == "async_setup_entry"
+        )
+        for name in (
+            "_persist_solaredge_curtailment_marker",
+            "_solaredge_curtailment_write",
+            "handle_solaredge_curtailment",
+        ):
+            node = next(n for n in setup.body if getattr(n, "name", None) == name)
+            exec(
+                compile(ast.Module(body=[node], type_ignores=[]), str(source), "exec"),
+                namespace,
+            )
+
+        # Export is economic (+3.9c/kWh earnings), so the limit must be released.
+        await namespace["handle_solaredge_curtailment"](feedin_price=-3.9, import_price=20.4)
+
+        if marker_persisted:
+            direct.restore.assert_awaited_once()
+            assert entry_data["solaredge_curtailment_state"] == "normal"
+            assert "solaredge_curtailment_owned" not in (store.data or {})
+        else:
+            direct.restore.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_curtailment_records_ownership_across_a_restart():
+    """A curtail must leave a marker so the next process can still release it."""
+    import ast
+    import logging
+    from unittest.mock import AsyncMock
+
+    async def scenario():
+        hass = _SEHass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        await controller._load_session(controller._coordinator())
+        direct = types.SimpleNamespace(
+            curtail=AsyncMock(return_value=True),
+            restore=AsyncMock(return_value=True),
+            disconnect=AsyncMock(),
+        )
+        store = _MemoryStore()
+        entry_data = {
+            "solaredge_coordinator": controller,
+            "solaredge_curtailment_state": "normal",
+            "store": store,
+        }
+        hass.data = {"power_sync": {"entry": entry_data}}
+        namespace = {
+            "hass": hass,
+            "entry": types.SimpleNamespace(
+                entry_id="entry", options={"enabled": True}, data={}
+            ),
+            "DOMAIN": "power_sync",
+            "CONF_SOLAREDGE_DC_CURTAILMENT_ENABLED": "enabled",
+            "battery_connection_profile": types.SimpleNamespace(
+                profile_id="solaredge_composite"
+            ),
+            "_LOGGER": logging.getLogger(__name__),
+            "_get_solaredge_curtailment_controller": lambda _: direct,
+            "_direct_dc_curtailment_write_allowed": lambda: True,
+            "_solaredge_force_dispatch_active": lambda _: False,
+            "export_earnings_are_uneconomic": lambda *_: True,
+        }
+        source = ROOT / "__init__.py"
+        setup = next(
+            n
+            for n in ast.parse(source.read_text()).body
+            if getattr(n, "name", None) == "async_setup_entry"
+        )
+        for name in (
+            "_persist_solaredge_curtailment_marker",
+            "_solaredge_curtailment_write",
+            "handle_solaredge_curtailment",
+        ):
+            node = next(n for n in setup.body if getattr(n, "name", None) == name)
+            exec(
+                compile(ast.Module(body=[node], type_ignores=[]), str(source), "exec"),
+                namespace,
+            )
+
+        await namespace["handle_solaredge_curtailment"](feedin_price=10.0, import_price=5.0)
+        direct.curtail.assert_awaited_once()
+        assert entry_data["solaredge_curtailment_state"] == "curtailed"
+        assert store.data["solaredge_curtailment_owned"] is True
+
+        # A stale "pending" marker must still re-assert the limit: the absolute
+        # register write is idempotent and cheaper than trusting the marker.
+        entry_data["solaredge_curtailment_state"] = "pending"
+        await namespace["handle_solaredge_curtailment"](feedin_price=10.0, import_price=5.0)
+        assert direct.curtail.await_count == 2
+        assert entry_data["solaredge_curtailment_state"] == "curtailed"
+
+    asyncio.run(scenario())

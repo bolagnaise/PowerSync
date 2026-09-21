@@ -474,8 +474,11 @@ def test_curtailment_client_closes_before_mutation_lock_is_released(result):
     async def disconnect():
         events.append("disconnect")
 
-    async def protected(callback, *, automatic, write_allowed=None):
+    async def protected(callback, *, automatic, write_allowed=None, determinate=None):
         assert automatic is True
+        # The determinacy probe must come from the curtailment controller so a
+        # write that provably changed nothing cannot contain control.
+        assert determinate is None
         events.append("lock")
         success = await callback()
         events.append("unlock")
