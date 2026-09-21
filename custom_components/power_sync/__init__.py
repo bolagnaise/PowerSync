@@ -27557,10 +27557,50 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         current_state = entry_data.get("foxess_curtailment_state", "normal")
 
+        def _foxess_force_charge_owns_export() -> bool:
+            """Whether an active FoxESS force charge can still justify the guard.
+
+            ``force_charge()`` writes ``REMOTE_CONTROL_AC``, which commands the
+            inverter's AC output and — unlike the ``REMOTE_CONTROL_GRID`` mode
+            used by ``curtail()`` and ``force_discharge()`` — does not hold grid
+            feed-in.  With the battery effectively full the charge additionally
+            absorbs nothing, because the grid-charge SOC cap self-disables at its
+            default 100% setting.  Such a charge is inert in both directions, so
+            it must not suppress negative-price curtailment.  A configured cap
+            below 100% is already enforced before the charge is issued, and
+            unreadable or stale SOC stays conservative (guard remains active).
+            """
+            full_soc_pct = 99.0
+            foxess_coord = entry_data.get("foxess_coordinator")
+            if getattr(foxess_coord, "last_update_success", False) is not True:
+                return True
+            coord_data = getattr(foxess_coord, "data", None)
+            if not isinstance(coord_data, Mapping):
+                return True
+            raw_soc = coord_data.get("battery_level")
+            if isinstance(raw_soc, bool):
+                return True
+            try:
+                soc_pct = float(raw_soc)
+            except (TypeError, ValueError):
+                return True
+            if not math.isfinite(soc_pct):
+                return True
+            if soc_pct < full_soc_pct:
+                return True
+            _LOGGER.info(
+                "FoxESS force charge at %.1f%% SOC cannot absorb or hold grid "
+                "export (AC-mode remote control); curtailment may proceed",
+                soc_pct,
+            )
+            return False
+
         def _foxess_force_dispatch_active() -> bool:
             """Return true while FoxESS force dispatch owns remote control."""
-            if force_charge_state.get("active") or force_discharge_state.get("active"):
+            if force_discharge_state.get("active"):
                 return True
+            if force_charge_state.get("active"):
+                return _foxess_force_charge_owns_export()
 
             active_getter = getattr(entry_data.get("optimization_coordinator"), "get_active_force_state", None)
             if callable(active_getter):
@@ -27569,15 +27609,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 except Exception as err:
                     _LOGGER.debug("FoxESS curtailment: active force check failed: %s", err)
                 else:
-                    return bool(active_force.get("active")) and active_force.get("type") in {
-                        "charge",
-                        "discharge",
-                        "export",
-                    }
+                    if not active_force.get("active"):
+                        return False
+                    active_type = active_force.get("type")
+                    if active_type == "charge":
+                        return _foxess_force_charge_owns_export()
+                    return active_type in {"discharge", "export"}
 
+            if _optimizer_current_force_action_matches("discharge"):
+                return True
             return (
                 _optimizer_current_force_action_matches("charge")
-                or _optimizer_current_force_action_matches("discharge")
+                and _foxess_force_charge_owns_export()
             )
 
         # Get prices from any available price coordinator if not provided

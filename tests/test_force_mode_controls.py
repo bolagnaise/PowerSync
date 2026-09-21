@@ -4002,7 +4002,11 @@ def test_foxess_curtailment_restore_defers_during_force_remote_control():
     assert handler_source is not None
     assert force_discharge_source is not None
     assert force_charge_source is not None
-    assert 'force_charge_state.get("active") or force_discharge_state.get("active")' in handler_source
+    # Discord #69 split the charge branch out: a FoxESS force charge only owns
+    # remote control while it can still absorb (AC mode does not hold feed-in).
+    assert 'if force_discharge_state.get("active"):' in handler_source
+    assert 'if force_charge_state.get("active"):' in handler_source
+    assert "return _foxess_force_charge_owns_export()" in handler_source
     assert "remote-control override remains owned by force mode" in handler_source
     assert 'entry_data["foxess_curtailment_state"] = "normal"' in force_discharge_source
     assert 'entry_data.pop("_last_foxess_curtailment_reapply", None)' in force_discharge_source
