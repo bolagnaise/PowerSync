@@ -12209,6 +12209,166 @@ def test_ble_automatic_stop_keeps_the_backoff_but_reports_the_block():
     assert logged.count("skipping wake") == 1
 
 
+def _awake_charging_ble_hass(
+    *,
+    current_amps: str = "26.0",
+    power_kw: str = "6.0",
+    telemetry_age_seconds: float = 5.0,
+    charging_state: str = "Charging",
+    charging_state_age_seconds: float = 10800.0,
+):
+    """Discord #56: a car that never slept, so ``asleep`` never republishes.
+
+    The vehicle is awake and measurably drawing current, but the ESPHome
+    bridge has no ``asleep`` transition to publish, so no wake acknowledgement
+    can ever arrive.
+    """
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(hours=3)
+    measured_at = now - timedelta(seconds=telemetry_age_seconds)
+    asleep = _State("binary_sensor.car_asleep", "off", last_updated=stale)
+    states = [
+        _State("switch.car_charger", "on", last_updated=stale),
+        _State("button.car_wake_up", "unknown", last_updated=stale),
+        asleep,
+        _State(
+            "sensor.car_charging_state",
+            charging_state,
+            last_updated=now - timedelta(seconds=charging_state_age_seconds),
+        ),
+        _State(
+            "sensor.car_charge_current",
+            current_amps,
+            {"unit_of_measurement": "A"},
+            last_updated=measured_at,
+        ),
+        _State(
+            "sensor.car_charge_power",
+            power_kw,
+            {"unit_of_measurement": "kW"},
+            last_updated=measured_at,
+        ),
+    ]
+    return _Hass(states), asleep
+
+
+def test_ble_user_stop_dispatches_when_an_awake_car_cannot_acknowledge_a_wake(
+    monkeypatch,
+):
+    """Discord #56 retest: the stop died at a gate an awake car cannot pass."""
+    monkeypatch.setattr(
+        actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0, raising=False
+    )
+    hass, _asleep = _awake_charging_ble_hass()
+    stream, handler, logger, old_level, old_propagate = _captured_actions_logs(
+        logging.INFO
+    )
+
+    try:
+        result = asyncio.run(
+            actions._stop_ev_charging_ble(hass, "car", allow_backoff=False)
+        )
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+        logger.propagate = old_propagate
+
+    logged = stream.getvalue()
+    assert result is not False  # dispatched; readback is a separate gate
+    assert (
+        "switch",
+        "turn_off",
+        {"entity_id": "switch.car_charger"},
+    ) in hass.services.calls
+    # The unobtainable wake is not waited on, so the user is not made to sit
+    # through a 30s timeout before a stop that was always safe to send.
+    assert ("button", "press", {"entity_id": "button.car_wake_up"}) not in hass.services.calls
+    assert "fresh measured charging evidence" in logged
+    assert "stop not dispatched" not in logged
+
+
+def test_ble_automatic_stop_also_dispatches_on_measured_charging_evidence(
+    monkeypatch,
+):
+    """The same deadlock blocked the optimizer's own stop, not just the user."""
+    monkeypatch.setattr(
+        actions, "_TESLA_BLE_COMMAND_CONFIRMATION_SECONDS", 0, raising=False
+    )
+    hass, _asleep = _awake_charging_ble_hass()
+
+    async def run():
+        _arm_wake_backoff(hass)
+        return await actions._stop_ev_charging_ble(hass, "car")
+
+    result = asyncio.run(run())
+
+    assert result is not False
+    assert (
+        "switch",
+        "turn_off",
+        {"entity_id": "switch.car_charger"},
+    ) in hass.services.calls
+
+
+def _failing_wake(monkeypatch):
+    """Stub the wake so a blocked case asserts the gate, not a 30s timeout."""
+    attempts = []
+
+    async def _wake(hass, prefix, wait_timeout=30, *, allow_backoff=True):
+        attempts.append(prefix)
+        return False
+
+    monkeypatch.setattr(actions, "_wake_tesla_ble", _wake)
+    return attempts
+
+
+@pytest.mark.parametrize(
+    "snapshot_kwargs",
+    [
+        pytest.param(
+            {
+                "telemetry_age_seconds": 30.0,
+                "charging_state": "stopped",
+                "charging_state_age_seconds": 5.0,
+            },
+            id="newer_stopped_status_vetoes_the_bypass",
+        ),
+        pytest.param(
+            {"telemetry_age_seconds": 600.0}, id="stale_draw_proves_nothing"
+        ),
+        pytest.param(
+            {"current_amps": "0.0", "power_kw": "0.0"}, id="zero_draw_proves_nothing"
+        ),
+    ],
+)
+def test_ble_stop_stays_blocked_without_fresh_measured_charging(
+    monkeypatch, snapshot_kwargs
+):
+    """Only fresh, positive, uncontradicted telemetry may stand in for a wake."""
+    attempts = _failing_wake(monkeypatch)
+    hass, _asleep = _awake_charging_ble_hass(**snapshot_kwargs)
+
+    result = asyncio.run(
+        actions._stop_ev_charging_ble(hass, "car", allow_backoff=False)
+    )
+
+    assert result is False
+    assert attempts == ["car"]  # the normal wake requirement still applied
+    assert hass.services.calls == []
+
+
+def test_ble_start_still_requires_an_explicit_wake_acknowledgement(monkeypatch):
+    """The bypass is stop/rate only; a start has no measured draw to trust."""
+    attempts = _failing_wake(monkeypatch)
+    hass, _asleep = _awake_charging_ble_hass()
+
+    result = asyncio.run(actions._start_ev_charging_ble(hass, "car"))
+
+    assert result is False
+    assert attempts == ["car"]  # not short-circuited by charging evidence
+    assert hass.services.calls == []
+
+
 @pytest.mark.parametrize(
     "params_extra, expected_allow_backoff",
     [

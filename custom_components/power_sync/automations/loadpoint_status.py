@@ -46,6 +46,26 @@ def _float_value(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def resolve_loadpoint_surplus_power_kw(
+    loadpoints: Iterable[Mapping[str, Any]] | None,
+) -> float:
+    """Sum the EV load that grid-based surplus has to add back.
+
+    The grid meter has already netted off whatever the cars are drawing, so an
+    active loadpoint whose reading is momentarily unavailable must never be
+    counted as a measured 0 kW — that understates surplus by the whole EV draw.
+    Fall back to the loadpoint's own commanded power, mirroring
+    ``_effective_ev_power_kw`` on the Solar Surplus control path.
+    """
+    total = 0.0
+    for loadpoint in loadpoints or ():
+        power_kw = loadpoint.get("current_power_kw")
+        if power_kw is None and loadpoint.get("actual_charging"):
+            power_kw = loadpoint.get("commanded_power_kw")
+        total += max(0.0, _float_value(power_kw, 0.0))
+    return total
+
+
 def _int_value(value: Any, default: int = 0) -> int:
     """Return an int for loosely typed integration state."""
     if value is None:

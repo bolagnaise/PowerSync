@@ -19008,16 +19008,16 @@ def _get_ev_display_coordinator(hass, entry):
             "is_curtailed": site["is_curtailed"],
         }
         from .automations.actions import _calculate_solar_surplus
+        from .automations.loadpoint_status import resolve_loadpoint_surplus_power_kw
         from .solar_surplus_config import get_stored_solar_surplus_config
 
         # ``ev_power_kw`` is a display value: it remains None whenever an
         # active loadpoint has unavailable power so consumers cannot mistake
         # unknown demand for a measured zero.  Surplus arithmetic instead
-        # needs the finite sum of the known loadpoints, matching the first
-        # loadpoint-status calculation above.
-        known_loadpoint_power_kw = sum(
-            max(0.0, float(loadpoint.get("current_power_kw") or 0))
-            for loadpoint in payload.get("loadpoints", [])
+        # needs the resolved EV load, matching the first loadpoint-status
+        # calculation above.
+        known_loadpoint_power_kw = resolve_loadpoint_surplus_power_kw(
+            payload.get("loadpoints", [])
         )
         site["surplus_kw"] = round(
             _calculate_solar_surplus(
@@ -19167,6 +19167,7 @@ class EVLoadpointStatusView(HomeAssistantView):
             from .automations.actions import _dynamic_ev_state, _calculate_solar_surplus
             from .automations.loadpoint_status import (
                 build_loadpoint_status,
+                resolve_loadpoint_surplus_power_kw,
             )
             from .automations.ev_ownership import (
                 EXTERNAL_CONTROL_POLICY_YIELD,
@@ -19436,9 +19437,8 @@ class EVLoadpointStatusView(HomeAssistantView):
                 and loadpoint.get("current_power_kw") is None
                 for loadpoint in preliminary_loadpoints
             )
-            total_ev_power_kw = sum(
-                max(0.0, float(loadpoint.get("current_power_kw") or 0))
-                for loadpoint in preliminary_loadpoints
+            total_ev_power_kw = resolve_loadpoint_surplus_power_kw(
+                preliminary_loadpoints
             )
             # Never turn an active unavailable reading into a false site-wide
             # 0 kW observation. Keep the numeric sum private to the surplus

@@ -2335,14 +2335,15 @@ async def _wake_tesla_ble(
         return False
 
 
-def _ble_rate_update_has_fresh_charging_evidence(
+def _ble_command_has_fresh_charging_evidence(
     hass: HomeAssistant, ble_prefix: str
 ) -> bool:
-    """Whether vehicle-originated telemetry proves a BLE rate update is safe.
+    """Whether vehicle-originated telemetry proves the vehicle is awake.
 
-    This deliberately applies only to an already-charging rate adjustment.  A
-    start, stop, or charge-limit request still needs the normal explicit wake
-    acknowledgement.  The current/power corroboration prevents a writable
+    This applies only to a command on an already-charging vehicle — a rate
+    adjustment or a stop.  A start or charge-limit request still needs the
+    normal explicit wake acknowledgement, because neither implies a measured
+    draw to corroborate.  The current/power corroboration prevents a writable
     entity, bridge status, or stale ``Charging`` state from standing in for the
     vehicle itself.
     """
@@ -2451,7 +2452,19 @@ async def _stop_ev_charging_ble(
 
     command_dispatched = False
     try:
-        if not await _wake_tesla_ble(
+        # A vehicle that is already awake never changes ``asleep``, so the
+        # bridge has nothing to publish and the wake acknowledgement can never
+        # arrive — which is exactly the car that is charging and needs
+        # stopping (Discord #56).  Fresh, measured, positive vehicle
+        # current/power is stronger proof of wakefulness than the binary, and
+        # is already trusted to carry a rate update on the same vehicle.
+        if _ble_command_has_fresh_charging_evidence(hass, ble_prefix):
+            _LOGGER.info(
+                "Tesla BLE %s: stop proceeding on fresh measured charging "
+                "evidence without a wake acknowledgement",
+                ble_prefix,
+            )
+        elif not await _wake_tesla_ble(
             hass, ble_prefix, allow_backoff=allow_backoff
         ):
             # The start path already reports a blocked dispatch; without the
@@ -2570,7 +2583,7 @@ async def _set_ev_charging_amps_ble(
 
     command_dispatched = False
     try:
-        if not _ble_rate_update_has_fresh_charging_evidence(
+        if not _ble_command_has_fresh_charging_evidence(
             hass, ble_prefix
         ) and not await _wake_tesla_ble(hass, ble_prefix):
             return False

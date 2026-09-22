@@ -23,6 +23,7 @@ from power_sync.automations.loadpoint_status import (  # noqa: E402
     build_loadpoint_status,
     charging_state_plugged_status,
     coalesce_ev_widget_data,
+    resolve_loadpoint_surplus_power_kw,
     resolve_vehicle_display_name,
 )
 from power_sync.automations.generic_charger_soc import (  # noqa: E402
@@ -1634,3 +1635,62 @@ def test_loadpoint_status_keeps_generic_charger_out_of_ble_bridge_merge():
     assert "Garage Charger" in names
     assert "Wall Connector" not in names
     assert len(loadpoints) == 2
+
+
+def test_surplus_power_falls_back_to_commanded_for_an_unavailable_active_ev():
+    """Discord #56: a false measured zero understated surplus by the EV draw.
+
+    Grid-based surplus adds the EV term back because the meter already netted
+    it off, so treating an unavailable active reading as 0 kW drops the whole
+    car out of the calculation.
+    """
+    loadpoints = [
+        {
+            "loadpoint_id": "bleteslable",
+            "actual_charging": True,
+            "current_power_kw": None,
+            "commanded_power_kw": 7.68,
+        }
+    ]
+
+    assert resolve_loadpoint_surplus_power_kw(loadpoints) == 7.68
+
+
+def test_surplus_power_prefers_a_measured_reading_over_the_command():
+    loadpoints = [
+        {
+            "loadpoint_id": "bleteslable",
+            "actual_charging": True,
+            "current_power_kw": 6.0,
+            "commanded_power_kw": 7.68,
+        }
+    ]
+
+    assert resolve_loadpoint_surplus_power_kw(loadpoints) == 6.0
+
+
+def test_surplus_power_ignores_an_idle_loadpoint_with_a_stale_command():
+    """A car that is not charging contributes nothing to the grid reading."""
+    loadpoints = [
+        {
+            "loadpoint_id": "bleteslable",
+            "actual_charging": False,
+            "current_power_kw": None,
+            "commanded_power_kw": 7.68,
+        }
+    ]
+
+    assert resolve_loadpoint_surplus_power_kw(loadpoints) == 0.0
+
+
+def test_surplus_power_sums_loadpoints_and_clamps_negatives():
+    loadpoints = [
+        {"actual_charging": True, "current_power_kw": 3.0},
+        {"actual_charging": True, "current_power_kw": None, "commanded_power_kw": 7.0},
+        {"actual_charging": True, "current_power_kw": -1.5},
+        {"actual_charging": True, "current_power_kw": None, "commanded_power_kw": None},
+    ]
+
+    assert resolve_loadpoint_surplus_power_kw(loadpoints) == 10.0
+    assert resolve_loadpoint_surplus_power_kw(None) == 0.0
+    assert resolve_loadpoint_surplus_power_kw([]) == 0.0
