@@ -35402,7 +35402,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ):
                 _LOGGER.warning(
                     "Force charge proceeding because Tesla accepted grid charging "
-                    "and every valid site_info readback omitted the field"
+                    "and site_info did not report the grid-charging field"
                 )
                 grid_confirmed = True
             if not grid_confirmed:
@@ -37412,7 +37412,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     restore_grid_confirmed = True
                     _LOGGER.warning(
                         "Tesla accepted grid charging restore for site %s and "
-                        "every valid site_info readback omitted the field",
+                        "site_info did not report the grid-charging field",
                         site_id,
                     )
                 if restore_grid_confirmed:
@@ -39651,8 +39651,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ):
                 grid_confirmed = True
                 _LOGGER.warning(
-                    "Tesla %s grid charging command accepted and every valid "
-                    "site_info readback omitted the field",
+                    "Tesla %s grid charging command accepted and site_info did "
+                    "not report the grid-charging field",
                     source,
                 )
             if not grid_confirmed:

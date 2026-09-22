@@ -455,3 +455,241 @@ def test_grid_charging_field_presence_distinguishes_absent_from_invalid():
         {"disallow_charge_from_grid_with_solar_installed": "unsupported"}
     )
     assert not present({"components": {"grid_status": "SystemGridConnected"}})
+
+
+def test_stale_present_reads_before_field_absence_still_tolerate_enable():
+    """The reported ticket-61 variant: a stale readback precedes the omission.
+
+    Tesla omits ``disallow_charge_from_grid_with_solar_installed`` from
+    ``site_info`` while grid charging is allowed, so an enable can never read
+    back its own desired value.  When the first reads still carry the previous
+    (disallowed) state and the later reads omit the field, the omission is the
+    newest evidence and describes the requested state.
+    """
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[
+            _site_info(False),
+            _site_info(False),
+            _site_info_without_grid_charging_field(),
+            _site_info_without_grid_charging_field(),
+        ],
+    )
+
+    outcome = asyncio.run(_set(session, clock))
+
+    assert (
+        outcome.status
+        is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_FIELD_ABSENT
+    )
+    assert len(session.get_calls) == 4
+
+
+def test_field_absent_warning_reports_how_many_reads_omitted_the_field(caplog):
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[
+            _site_info(False),
+            _site_info(False),
+            _site_info_without_grid_charging_field(),
+            _site_info_without_grid_charging_field(),
+        ],
+    )
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(_set(session, clock))
+
+    message = "\n".join(record.getMessage() for record in caplog.records)
+    assert "the newest direct site_info readback omitted" in message
+    assert "2 of 4 valid readback(s) omitted it" in message
+
+
+def test_disable_keeps_the_unanimous_field_absence_rule():
+    """The relaxed ordering rule is deliberately enable-only.
+
+    An omission does not describe a requested *disable*, so this direction keeps
+    the stricter unanimous rule: a site that never exposes the field at all must
+    still be able to complete a restore instead of being left force-active.
+    """
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[_site_info_without_grid_charging_field() for _ in range(4)],
+    )
+
+    outcome = asyncio.run(_set(session, clock, enabled=False))
+
+    assert (
+        outcome.status
+        is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_FIELD_ABSENT
+    )
+
+
+def test_disable_after_a_present_read_is_not_tolerated_by_ordering():
+    """Guard: the enable-only relaxation must not leak into the disable path."""
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[
+            _site_info(True),
+            _site_info(True),
+            _site_info_without_grid_charging_field(),
+            _site_info_without_grid_charging_field(),
+        ],
+    )
+
+    outcome = asyncio.run(_set(session, clock, enabled=False))
+
+    assert (
+        outcome.status
+        is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
+    )
+    assert not outcome.applied
+
+
+def test_present_field_still_confirms_a_disable():
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[_site_info(False)],
+    )
+
+    outcome = asyncio.run(_set(session, clock, enabled=False))
+
+    assert outcome.status is tesla_grid_control.TeslaGridWriteStatus.APPLIED
+
+
+def test_stale_present_read_after_field_absence_stays_unconfirmed_for_enable():
+    """A contradicting read that arrives last is not overridden by an earlier omission."""
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[
+            _site_info_without_grid_charging_field(),
+            _site_info_without_grid_charging_field(),
+            _site_info(False),
+            _site_info(False),
+        ],
+    )
+
+    outcome = asyncio.run(_set(session, clock))
+
+    assert (
+        outcome.status
+        is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
+    )
+
+
+def test_unconfirmed_warning_reports_the_readback_census(caplog):
+    """The failure line must distinguish its sub-causes for support captures."""
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[_site_info(False) for _ in range(4)],
+    )
+
+    with caplog.at_level("WARNING"):
+        outcome = asyncio.run(_set(session, clock))
+
+    assert (
+        outcome.status
+        is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
+    )
+    message = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING"
+    )
+    assert "4 valid readback(s)" in message
+    assert "0 omitted the field" in message
+    assert "last observed enabled=False" in message
+
+
+def _thin_site_info() -> _Response:
+    """An HTTP 200 that carries a top-level marker but no components block."""
+    return _Response(200, {"response": {"site_name": "Home"}})
+
+
+def test_thin_payload_cannot_override_an_explicit_contrary_readback():
+    """A response that never reported components is not evidence of omission.
+
+    ``{"site_name": ...}`` satisfies tesla_site_info_has_structure through a
+    top-level marker alone.  Treating its missing grid-charging field as an
+    omission would let one truncated response outweigh the only readback that
+    actually carried grid information.
+    """
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[
+            _site_info(False),
+            _site_info(False),
+            _site_info(False),
+            _thin_site_info(),
+        ],
+    )
+
+    outcome = asyncio.run(_set(session, clock))
+
+    assert (
+        outcome.status
+        is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
+    )
+
+
+def test_thin_payload_after_a_real_omission_does_not_grant_tolerance():
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[
+            _site_info(False),
+            _site_info(False),
+            _site_info_without_grid_charging_field(),
+            _thin_site_info(),
+        ],
+    )
+
+    outcome = asyncio.run(_set(session, clock))
+
+    assert (
+        outcome.status
+        is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
+    )
+
+
+def test_components_reported_probe_separates_thin_from_real_payloads():
+    assert not tesla_grid_control.tesla_site_info_reports_components(
+        {"site_name": "Home"}
+    )
+    assert not tesla_grid_control.tesla_site_info_reports_components(
+        {"components": {"unrelated": True}}
+    )
+    assert tesla_grid_control.tesla_site_info_reports_components(
+        {"components": {"grid_status": "SystemGridConnected"}}
+    )
+
+
+def test_last_observed_is_not_reset_by_a_structurally_invalid_payload(caplog):
+    clock = _Clock()
+    session = _Session(
+        posts=[_Response(200, {"response": {"result": True}})],
+        gets=[
+            _site_info_without_grid_charging_field(),
+            _site_info_without_grid_charging_field(),
+            _site_info(False),
+            _Response(200, {"response": {}}),
+        ],
+    )
+
+    with caplog.at_level("WARNING"):
+        outcome = asyncio.run(_set(session, clock))
+
+    assert (
+        outcome.status
+        is tesla_grid_control.TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED
+    )
+    message = "\n".join(record.getMessage() for record in caplog.records)
+    assert "last observed enabled=False" in message
+    assert "invalid readback=True" in message

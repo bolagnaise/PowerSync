@@ -86,6 +86,16 @@ def tesla_grid_charging_field_present(
     ) or field in site_info
 
 
+_COMPONENT_MARKERS = {
+    "battery",
+    "grid_status",
+    "load_meter",
+    "site_meter",
+    "solar",
+    "disallow_charge_from_grid_with_solar_installed",
+}
+
+
 def tesla_site_info_has_structure(site_info: dict[str, Any]) -> bool:
     """Return whether a payload resembles Tesla's site_info response.
 
@@ -94,14 +104,7 @@ def tesla_site_info_has_structure(site_info: dict[str, Any]) -> bool:
     field-absence compatibility outcome can be used.
     """
     components = site_info.get("components")
-    component_markers = {
-        "battery",
-        "grid_status",
-        "load_meter",
-        "site_meter",
-        "solar",
-        "disallow_charge_from_grid_with_solar_installed",
-    }
+    component_markers = _COMPONENT_MARKERS
     return (
         isinstance(components, dict)
         and bool(component_markers.intersection(components))
@@ -114,6 +117,21 @@ def tesla_site_info_has_structure(site_info: dict[str, Any]) -> bool:
             "timezone",
             "site_id",
         )
+    )
+
+
+def tesla_site_info_reports_components(site_info: dict[str, Any]) -> bool:
+    """Return whether site_info carried the block that holds grid charging.
+
+    A thin payload such as ``{"site_name": ...}`` satisfies
+    ``tesla_site_info_has_structure`` through a top-level marker alone, but it
+    never carried the ``components`` block, so its missing grid-charging field
+    is not evidence that Tesla omitted the field.  Only a response that did
+    report components can be read as a deliberate omission.
+    """
+    components = site_info.get("components")
+    return isinstance(components, dict) and bool(
+        _COMPONENT_MARKERS.intersection(components)
     )
 
 
@@ -241,6 +259,8 @@ async def async_set_tesla_grid_charging_confirmed(
     valid_site_info_reads = 0
     field_absent_reads = 0
     invalid_site_info_read = False
+    last_valid_read_omitted_field = False
+    last_observed: bool | None = None
     for offset in poll_offsets:
         if is_current is not None and not is_current():
             return TeslaGridWriteOutcome(
@@ -292,8 +312,18 @@ async def async_set_tesla_grid_charging_confirmed(
                         and tesla_site_info_has_structure(site_info)
                     ):
                         valid_site_info_reads += 1
-                        if not tesla_grid_charging_field_present(site_info):
+                        last_observed = observed
+                        field_absent = not tesla_grid_charging_field_present(
+                            site_info
+                        )
+                        if field_absent:
                             field_absent_reads += 1
+                        # Only a response that actually reported components can
+                        # be read as Tesla deliberately omitting the field.
+                        last_valid_read_omitted_field = (
+                            field_absent
+                            and tesla_site_info_reports_components(site_info)
+                        )
                     else:
                         invalid_site_info_read = True
                     if observed is bool(enabled):
@@ -328,18 +358,40 @@ async def async_set_tesla_grid_charging_confirmed(
             "superseded",
         )
 
+    # Tesla omits the grid-charging field from site_info while grid charging is
+    # allowed, so an enable can never read back its own desired value and has to
+    # rely on the omission itself.  Only the newest valid readback describes the
+    # current state: an earlier read may still carry the pre-write value, and
+    # requiring *every* read to omit the field turned an ordinary
+    # stale-then-applied transition into a fail-closed revert of a write Tesla
+    # had already accepted.  A disable keeps the stricter unanimous rule -- for
+    # that direction an omission does not describe the requested state, and a
+    # site that never exposes the field must still be able to restore.
     if (
         valid_site_info_reads >= 2
-        and field_absent_reads == valid_site_info_reads
         and not invalid_site_info_read
-    ):
-        _LOGGER.warning(
-            "Tesla accepted grid charging %s for site %s but %d direct site_info "
-            "readback(s) omitted the grid-charging field",
-            "enable" if enabled else "disable",
-            site_id,
-            valid_site_info_reads,
+        and (
+            last_valid_read_omitted_field
+            if enabled
+            else field_absent_reads == valid_site_info_reads
         )
+    ):
+        if enabled:
+            _LOGGER.warning(
+                "Tesla accepted grid charging enable for site %s but the newest "
+                "direct site_info readback omitted the grid-charging field "
+                "(%d of %d valid readback(s) omitted it)",
+                site_id,
+                field_absent_reads,
+                valid_site_info_reads,
+            )
+        else:
+            _LOGGER.warning(
+                "Tesla accepted grid charging disable for site %s but all %d "
+                "direct site_info readback(s) omitted the grid-charging field",
+                site_id,
+                valid_site_info_reads,
+            )
         return TeslaGridWriteOutcome(
             TeslaGridWriteStatus.ACCEPTED_FIELD_ABSENT,
             last_status,
@@ -347,10 +399,16 @@ async def async_set_tesla_grid_charging_confirmed(
         )
 
     _LOGGER.warning(
-        "Tesla accepted grid charging %s for site %s but direct readback did not confirm within %.1fs",
+        "Tesla accepted grid charging %s for site %s but direct readback did not "
+        "confirm within %.1fs (%d valid readback(s), %d omitted the field, "
+        "invalid readback=%s, last observed enabled=%s)",
         "enable" if enabled else "disable",
         site_id,
         confirmation_deadline,
+        valid_site_info_reads,
+        field_absent_reads,
+        invalid_site_info_read,
+        last_observed,
     )
     return TeslaGridWriteOutcome(
         TeslaGridWriteStatus.ACCEPTED_UNCONFIRMED,

@@ -3450,7 +3450,7 @@ def test_tesla_force_charge_enables_grid_charging_before_tariff_upload():
         not in function_source
     )
     assert (
-        "every valid site_info readback omitted the field"
+        "site_info did not report the grid-charging field"
         in function_source
     )
     assert "if not grid_confirmed:" in function_source
