@@ -1527,43 +1527,21 @@ class SigenergyController(InverterController):
                     effective_kw,
                     ess_cap_kw,
                 )
-            # Register 40034 is an ESS *capability* ceiling, so clamping it to
-            # the optimizer's planned battery figure hands any load-forecast
-            # shortfall to the grid: the house keeps drawing what the battery
-            # is no longer allowed to supply, and an export action turns into
-            # priced import (Discord #410).  Floor the ceiling with the demand
-            # the site is currently meeting from battery plus grid -- the
-            # non-solar part of home load -- so the plan can only ever add
-            # export headroom on top of what the house already needs.
-            #
-            # These are raw Sigenergy Modbus signs, not the PowerSync/Tesla
-            # convention the coordinator normalises to: ``battery_power_kw`` is
-            # positive when *charging*, and ``grid_power_kw`` is positive when
-            # importing.  Battery discharge is therefore ``-battery_power_kw``.
-            ess_floor_kw = 0.0
-            if "grid_power_kw" in attrs and "battery_power_kw" in attrs:
-                try:
-                    ess_floor_kw = max(
-                        0.0,
-                        float(attrs.get("grid_power_kw") or 0)
-                        - float(attrs.get("battery_power_kw") or 0),
-                    )
-                except (TypeError, ValueError):
-                    ess_floor_kw = 0.0
-            if requested_battery_kw is not None and requested_battery_kw > 0:
-                ess_limit_kw = min(
-                    ess_cap_kw, max(requested_battery_kw, ess_floor_kw)
-                )
-                if ess_floor_kw > requested_battery_kw:
-                    _LOGGER.info(
-                        "Sigenergy ESS discharge ceiling raised from the "
-                        "planned %.2f kW to %.2f kW to cover live home demand "
-                        "and avoid grid import during export",
-                        requested_battery_kw,
-                        ess_limit_kw,
-                    )
-            else:
-                ess_limit_kw = ess_cap_kw
+            # Register 40034 is an ESS *capability* ceiling, never an export
+            # target: it can only ever forbid the battery from discharging.
+            # Narrowing it to the optimizer's planned battery figure therefore
+            # cannot improve export accuracy -- register 40038 below already
+            # bounds the grid point -- but it does hand every kW of home load
+            # above that figure to the grid, turning a planned high-price
+            # export into priced import (Discord #72, #410).  A live-load
+            # floor does not rescue it either: it is sampled once per dispatch,
+            # so a step load (oven, air-conditioner) applied mid-window is
+            # uncovered until the next optimizer run, and when live demand
+            # already exceeds the plan the floor *replaces* the export target
+            # instead of adding to it.  Keep the full rated/configured
+            # headroom for every caller.  ``requested_battery_kw`` stays in use
+            # for mode selection above, which is what actually preserves PV.
+            ess_limit_kw = ess_cap_kw
 
             # 1. Install the grid-export ceiling before enabling discharge mode,
             # preventing the existing ESS limit from causing a transient overshoot.

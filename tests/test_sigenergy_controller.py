@@ -238,7 +238,12 @@ def test_force_discharge_uses_pv_first_mode_when_solar_can_cover_target(sigenerg
 
 
 def test_optimizer_force_discharge_preserves_battery_target_and_pcc_ceiling(sigenergy_module):
-    """Ticket #52: PV must not satisfy a battery-export request by itself."""
+    """Ticket #52: PV must not satisfy a battery-export request by itself.
+
+    The battery-origin target selects ESS-first mode; it is not a ceiling.
+    Register 40034 keeps full rated headroom so live home load cannot eat the
+    export allowance (#72), and 40038 alone bounds the grid point.
+    """
     controller = sigenergy_module.SigenergyController(host="127.0.0.1")
     _stub_force_discharge_reads(controller)
     writes: list[tuple[int, list[int]]] = []
@@ -266,7 +271,7 @@ def test_optimizer_force_discharge_preserves_battery_target_and_pcc_ceiling(sige
 
     assert writes == [
         (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(10000)),
-        (controller.REG_ESS_MAX_DISCHARGE_LIMIT, controller._from_unsigned32(5590)),
+        (controller.REG_ESS_MAX_DISCHARGE_LIMIT, controller._from_unsigned32(19200)),
         (controller.REG_REMOTE_EMS_ENABLE, [1]),
         (controller.REG_REMOTE_EMS_CONTROL_MODE, [controller.REMOTE_EMS_MODE_DISCHARGE_ESS]),
     ]
@@ -331,10 +336,122 @@ def test_optimizer_force_discharge_covers_live_home_demand(sigenergy_module):
     )
 
 
-def test_optimizer_force_discharge_keeps_plan_target_when_home_is_solar_fed(
+def test_optimizer_force_discharge_survives_a_step_load_mid_window(sigenergy_module):
+    """Ticket #72: the ESS ceiling must not be a snapshot-derived shared cap.
+
+    The optimizer dispatches once per window and never re-reads live load, so
+    an oven or air-conditioner switched on after the write is not covered
+    until the next run.  Any ceiling below rated therefore hands the step load
+    to the grid for the rest of a high-price export block.  Register 40038
+    already bounds the grid point, so the battery keeps full rated headroom.
+    """
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    _stub_force_discharge_reads(controller, rated_discharge_w=12000)
+    writes: list[tuple[int, list[int]]] = []
+
+    async def connect():
+        return True
+
+    async def get_status():
+        # Dusk: no PV, a modest 1.0 kW house already served by the battery.
+        # Raw Sigenergy signs: battery negative while discharging, grid
+        # positive while importing.
+        return types.SimpleNamespace(
+            attributes={
+                "pv_power_kw": 0.0,
+                "battery_power_kw": -1.0,
+                "grid_power_kw": 0.0,
+            }
+        )
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, list(values)))
+        return True
+
+    controller.connect = connect
+    controller.get_status = get_status
+    controller._write_holding_registers = write
+
+    # Plan: 5.0 kW PCC export on a 6.0 kW battery target (1.0 kW forecast home
+    # load plus the export), against a 12.0 kW rated battery.
+    assert asyncio.run(
+        controller.force_discharge(power_kw=5.0, battery_discharge_kw=6.0)
+    )
+
+    by_register = dict(writes)
+    ess_regs = by_register[controller.REG_ESS_MAX_DISCHARGE_LIMIT]
+    ess_limit_w = controller._to_unsigned32(ess_regs[0], ess_regs[1])
+
+    # Full rated headroom: a later 8 kW step load is served from the battery,
+    # not bought from the grid at the price the export window exists to sell at.
+    assert ess_limit_w == 12000
+    # The PCC ceiling still owns export, unchanged.
+    assert by_register[controller.REG_GRID_EXPORT_LIMIT] == (
+        controller._from_unsigned32(5000)
+    )
+    # No PV to preserve, so mode selection stays ESS-first (#352).
+    assert by_register[controller.REG_REMOTE_EMS_CONTROL_MODE] == [
+        controller.REMOTE_EMS_MODE_DISCHARGE_ESS
+    ]
+
+
+def test_optimizer_force_discharge_adds_export_on_top_of_live_home_demand(
     sigenergy_module,
 ):
-    """Solar already covers the house, so the plan target must stand."""
+    """Ticket #72: a live-load floor must not replace the planned export.
+
+    ``max(plan, live demand)`` leaves a perfectly fresh snapshot broken: with
+    8.0 kW of house load and a 5.0 kW export plan the ceiling lands at 8.0 kW,
+    the house consumes all of it, and the planned export delivers nothing.
+    """
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    _stub_force_discharge_reads(controller, rated_discharge_w=12000)
+    writes: list[tuple[int, list[int]]] = []
+
+    async def connect():
+        return True
+
+    async def get_status():
+        # 8.0 kW of house load on the grid, no PV, battery idle.
+        return types.SimpleNamespace(
+            attributes={
+                "pv_power_kw": 0.0,
+                "battery_power_kw": 0.0,
+                "grid_power_kw": 8.0,
+            }
+        )
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, list(values)))
+        return True
+
+    controller.connect = connect
+    controller.get_status = get_status
+    controller._write_holding_registers = write
+
+    assert asyncio.run(
+        controller.force_discharge(power_kw=5.0, battery_discharge_kw=5.0)
+    )
+
+    by_register = dict(writes)
+    ess_regs = by_register[controller.REG_ESS_MAX_DISCHARGE_LIMIT]
+    ess_limit_w = controller._to_unsigned32(ess_regs[0], ess_regs[1])
+
+    # The ceiling must leave room for the house *and* the planned export, so
+    # it cannot sit at the 8.0 kW live demand the floor alone would produce.
+    assert ess_limit_w > 8000
+    assert ess_limit_w == 12000
+
+
+def test_optimizer_force_discharge_keeps_ess_headroom_when_home_is_solar_fed(
+    sigenergy_module,
+):
+    """Ticket #72: the plan target never becomes the ESS capability ceiling.
+
+    Solar covers the house and the site is already exporting, so the battery
+    owes the house nothing right now -- but the ceiling still stays at rated
+    so a cloud transient cannot push the house onto the grid mid-window.
+    """
     controller = sigenergy_module.SigenergyController(host="127.0.0.1")
     _stub_force_discharge_reads(controller)
     writes: list[tuple[int, list[int]]] = []
@@ -367,7 +484,11 @@ def test_optimizer_force_discharge_keeps_plan_target_when_home_is_solar_fed(
 
     by_register = dict(writes)
     assert by_register[controller.REG_ESS_MAX_DISCHARGE_LIMIT] == (
-        controller._from_unsigned32(1500)
+        controller._from_unsigned32(19200)
+    )
+    # Export is still bounded by the PCC ceiling alone.
+    assert by_register[controller.REG_GRID_EXPORT_LIMIT] == (
+        controller._from_unsigned32(2000)
     )
 
 
@@ -405,7 +526,7 @@ def test_optimizer_force_discharge_preserves_active_pv_before_battery_target(
     )
     assert writes[:3] == [
         (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(2501)),
-        (controller.REG_ESS_MAX_DISCHARGE_LIMIT, controller._from_unsigned32(1089)),
+        (controller.REG_ESS_MAX_DISCHARGE_LIMIT, controller._from_unsigned32(19200)),
         (controller.REG_REMOTE_EMS_ENABLE, [1]),
     ]
 
@@ -440,7 +561,7 @@ def test_optimizer_force_discharge_keeps_active_pv_below_pcc_ceiling(
     )
     assert writes == [
         (controller.REG_GRID_EXPORT_LIMIT, controller._from_unsigned32(5000)),
-        (controller.REG_ESS_MAX_DISCHARGE_LIMIT, controller._from_unsigned32(1327)),
+        (controller.REG_ESS_MAX_DISCHARGE_LIMIT, controller._from_unsigned32(19200)),
         (controller.REG_REMOTE_EMS_ENABLE, [1]),
         (controller.REG_REMOTE_EMS_CONTROL_MODE, [controller.REMOTE_EMS_MODE_DISCHARGE_PV]),
     ]
