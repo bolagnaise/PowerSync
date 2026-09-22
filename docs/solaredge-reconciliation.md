@@ -1,6 +1,8 @@
 # SolarEdge control reconciliation
 
-PowerSync blocks further control after an uncertain SolarEdge write. Supervised reconciliation checks a fresh upstream poll before it clears that block. It does not write inverter registers or clear the block after a timeout.
+PowerSync blocks further control after an uncertain SolarEdge write, and also whenever a dispatch it owns is still outstanding when Home Assistant starts. Supervised reconciliation checks a fresh upstream poll before it clears that block. It does not clear the block after a timeout.
+
+It writes inverter registers in one case only: the fresh poll shows the inverter still holding a dispatch PowerSync itself completed and recorded, with no uncertain write outstanding and nothing else moved. Restoring the saved baseline is then the only way out of the block, because a readback can confirm only hardware that already matches the baseline. Every other outcome remains read-only.
 
 ## Mode rules
 
@@ -37,7 +39,7 @@ data:
   acknowledge: true
 ```
 
-A successful response includes `success`, `control_health`, `reason` and `confirmation_source`. Native success reports `fresh_native_self_consumption_poll`; remote success reports `fresh_upstream_storage_poll`.
+A successful response includes `success`, `control_health`, `reason` and `confirmation_source`. Native success reports `fresh_native_self_consumption_poll`; remote success reports `fresh_upstream_storage_poll`. A release of PowerSync's own outstanding dispatch reports `released_owned_dispatch` and records the same reason in `last_reconciliation`.
 
 Clients that request response data receive failures as structured results with `success: false` and a reason code. Other callers receive a Home Assistant service error with that code. Field-specific results contain field names, without connection details or register values.
 
@@ -55,7 +57,8 @@ Blocked reconciliation saves its diagnostic while retaining the safety record, i
 | `malformed_snapshot` | A required field is missing or a decoded value is invalid |
 | `active_command` | Remote current or default command can dispatch battery power |
 | `unsupported_storage_mode` | Fresh control mode is not explicitly supported for reconciliation |
-| `baseline_mismatch` | Applicable saved fields differ from the fresh snapshot |
+| `baseline_mismatch` | Applicable saved fields differ from the fresh snapshot, and the difference is not PowerSync's own completed dispatch |
+| `release_failed` | The saved baseline could not be restored; control stays blocked |
 | `unresolved_active_power` | Storage registers cannot resolve the uncertain active-power write |
 | `persistence_failed` | PowerSync could not save the reconciled state |
 

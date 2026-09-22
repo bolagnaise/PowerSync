@@ -662,6 +662,10 @@ class SolarEdgeController(InverterController):
         return value - 0x10000 if value >= 0x8000 else value
 
 
+_SUPERVISED_RELEASE = object()
+"""Marker: the readback qualifies for a supervised release of owned fields."""
+
+
 class SolarEdgeMutationOutcome(Enum):
     CONFIRMED = "confirmed"
     REJECTED = "rejected"
@@ -685,6 +689,8 @@ class _ControlSession:
         self.store = None
         self.interrupted_at = None
         self.pending_mutation = None
+        # Set only by supervised reconciliation, for exactly one restore.
+        self.supervised_release = False
 
 
 class SolarEdgeEnergyController:
@@ -1090,7 +1096,14 @@ class SolarEdgeEnergyController:
             return False
         async with session.lock:
             await self._load_session(session)
-            if session.health != "ready":
+            # Supervised reconciliation grants exactly one release of the fields
+            # PowerSync itself owns. Nothing else escapes containment, and the
+            # grant never survives the attempt it was issued for.
+            supervised_release = bool(
+                restoring and getattr(session, "supervised_release", False)
+            )
+            session.supervised_release = False
+            if session.health != "ready" and not supervised_release:
                 if (
                     not session.last_mutation
                     or session.last_mutation["outcome"] != "unknown"
@@ -1250,6 +1263,10 @@ class SolarEdgeEnergyController:
                         session.owned.pop(key, None)
                 if restoring:
                     session.baseline = None
+                    if supervised_release and not session.owned:
+                        # Every owned field is back at its baseline and the
+                        # journal holds nothing further to reconcile.
+                        session.health = "ready"
                 command_entry = self._registry_entry(
                     self._control_entity_map.get("storage_command_mode")
                 )
@@ -1706,6 +1723,98 @@ class SolarEdgeEnergyController:
         return (await self.reconcile_result())["success"]
 
     async def reconcile_result(self) -> dict:
+        """Reconcile fresh decoded registers, releasing an owned dispatch if needed.
+
+        The readback pass never writes. When it proves the inverter is still
+        holding PowerSync's own confirmed dispatch, containment is resolved by
+        restoring the recorded baseline, because nothing else can: the readback
+        can only confirm hardware that already matches the baseline, and every
+        other operation is blocked while containment is latched (Discord #70).
+        """
+        result = await self._reconcile_readback()
+        if result is not _SUPERVISED_RELEASE:
+            return result
+        return await self._release_owned_dispatch()
+
+    def _owned_dispatch_is_intact(self, session, observed) -> bool:
+        """Report whether the inverter still holds exactly what PowerSync wrote.
+
+        An outstanding ownership record contains control after a restart even
+        when the dispatch that created it completed cleanly. That record is also
+        the evidence needed to undo it: when a fresh register read shows every
+        owned field still at PowerSync's value, or already back at the baseline
+        captured before it was written, and no other saved field has moved, the
+        contained state is PowerSync's own completed work rather than an
+        uncertain write, so it can be released rather than reconciled.
+
+        A write-ahead record or an unknown outcome means a write may have been
+        transmitted without confirmation; that stays contained. So does a
+        readback that already matches the baseline everywhere, which the
+        read-only pass resolves on its own.
+        """
+        if not session.owned or not session.baseline:
+            return False
+        if session.pending_mutation is not None:
+            return False
+        if (session.last_mutation or {}).get(
+            "outcome"
+        ) == SolarEdgeMutationOutcome.UNKNOWN.value:
+            return False
+        outstanding = False
+        for key, value in session.owned.items():
+            entity = self._control_entity_map.get(key)
+            baseline = session.baseline.get(key)
+            if not entity or baseline is None or key not in observed:
+                return False
+            at_owned = self._control_values_match(entity, observed[key], value)
+            at_baseline = self._control_values_match(entity, observed[key], baseline)
+            if not (at_owned or at_baseline):
+                return False
+            outstanding = outstanding or (at_owned and not at_baseline)
+        if not outstanding:
+            return False
+        for key, value in session.baseline.items():
+            if key in session.owned or key not in observed:
+                continue
+            entity = self._control_entity_map.get(key)
+            if not entity or not self._control_values_match(
+                entity, observed[key], value
+            ):
+                return False
+        return True
+
+    async def _release_owned_dispatch(self) -> dict:
+        """Return PowerSync's own contained dispatch to its recorded baseline."""
+        session = self._coordinator()
+        await self.restore_normal()
+        session.supervised_release = False
+        if session.owned or session.health != "ready":
+            # Keep any write-ahead record the failed restore left behind.
+            self._reconciliation_result(session, "blocked", "release_failed")
+            return {
+                "success": False,
+                "control_health": session.health,
+                "reason": "release_failed",
+            }
+        self._reconciliation_result(session, "confirmed", "released_owned_dispatch")
+        try:
+            await self._persist(session)
+        except (Exception, asyncio.CancelledError) as err:
+            _LOGGER.error(
+                "SolarEdge released a contained dispatch but could not journal "
+                "the reconciliation outcome",
+                exc_info=True,
+            )
+            if isinstance(err, asyncio.CancelledError):
+                raise
+        return {
+            "success": True,
+            "control_health": session.health,
+            "reason": "reconciled",
+            "confirmation_source": "released_owned_dispatch",
+        }
+
+    async def _reconcile_readback(self) -> Any:
         """Reconcile fresh decoded registers without issuing inverter writes.
 
         Native self-consumption retires a saved Remote Control mode and ignores
@@ -1778,6 +1887,13 @@ class SolarEdgeEnergyController:
                 _normalize_option(value) for value in _REMOTE_CONTROL_OPTIONS
             }:
                 return await blocked("unsupported_storage_mode")
+            if (
+                session.health != "ready"
+                and not native
+                and self._owned_dispatch_is_intact(session, observed)
+            ):
+                session.supervised_release = True
+                return _SUPERVISED_RELEASE
             if not native:
                 if self._snapshot_is_active(observed):
                     return await blocked("active_command")

@@ -3044,3 +3044,210 @@ def test_solaredge_curtailment_records_ownership_across_a_restart():
         assert entry_data["solaredge_curtailment_state"] == "curtailed"
 
     asyncio.run(scenario())
+
+
+def _se_reporter_hass():
+    """Model the SolarEdge site from Discord #70: permanent Remote Control."""
+    hass = _SEHass()
+    hass.states.get("select.solaredge_storage_control_mode").state = "Remote Control"
+    command = hass.states.get("select.solaredge_storage_command_mode")
+    command.attributes["options"] = [
+        "Stop",
+        "Charge from Solar Power and Grid",
+        "Charge from Solar Power",
+        "Discharge to Maximize Export",
+        "Maximize Self Consumption",
+        "Solar Power Only (Off)",
+    ]
+    command.state = "Maximize Self Consumption"
+    for key in ("charge", "discharge"):
+        limit = hass.states.get(f"number.solaredge_storage_{key}_limit")
+        limit.state = "11400"
+        limit.attributes["max"] = 11400
+    hass.states.get("number.solaredge_storage_command_timeout").state = "3600"
+    return hass
+
+
+def _se_restart(hass, controller):
+    """Replay the persisted journal in a fresh controller, as HA does on start."""
+    store = controller._coordinator().store
+    hass._powersync_solaredge_controls.clear()
+    restarted = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    restarted._create_store = lambda identity: store
+    return restarted
+
+
+def _se_observed(controller):
+    """Decode the registers the way a fresh upstream storage read would."""
+
+    async def fresh():
+        snapshot = {"storage_default_mode": "Maximize Self Consumption"}
+        for key, entity in controller._control_entity_map.items():
+            state = controller.hass.states.get(entity)
+            if state is not None:
+                snapshot[key] = state.state
+        return snapshot
+
+    return fresh
+
+
+def test_solaredge_supervised_release_restores_a_contained_dispatch():
+    """Discord #70: a clean restart mid-dispatch stranded the battery for good.
+
+    The dispatch completed and was confirmed, but the outstanding ownership
+    record contained control on the next start, and containment refused the
+    restore, every other write and the supervised service alike — leaving the
+    discharge limit at 0 W with no software path back.
+    """
+
+    async def scenario():
+        hass = _se_reporter_hass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        assert await controller.force_charge(30, 5000)
+        assert hass.states.get("number.solaredge_storage_discharge_limit").state == "0.0"
+        assert (
+            hass.states.get("select.solaredge_storage_control_mode").state
+            == "Remote Control"
+        )
+
+        restarted = _se_restart(hass, controller)
+        assert await restarted.connect()
+        assert restarted.control_health == "reconciliation_required"
+
+        # Containment still refuses a new dispatch before reconciliation.
+        writes = len(hass.services.calls)
+        assert not await restarted.force_discharge(15, 2000)
+        assert len(hass.services.calls) == writes
+
+        restarted._fresh_storage_state = _se_observed(restarted)
+        result = await restarted.reconcile_result()
+        assert result == {
+            "success": True,
+            "control_health": "ready",
+            "reason": "reconciled",
+            "confirmation_source": "released_owned_dispatch",
+        }
+        assert (
+            restarted._coordinator().last_reconciliation["reason"]
+            == "released_owned_dispatch"
+        )
+        assert restarted._coordinator().owned == {}
+        assert restarted._saved_control_state is None
+        states = hass.states
+        assert states.get("number.solaredge_storage_discharge_limit").state == "11400.0"
+        assert states.get("number.solaredge_storage_charge_limit").state == "11400.0"
+        assert states.get("number.solaredge_storage_command_timeout").state == "3600.0"
+        assert states.get("switch.solaredge_allow_grid_charge").state == "off"
+        assert (
+            states.get("select.solaredge_storage_command_mode").state
+            == "Maximize Self Consumption"
+        )
+        # The reporter's own permanent setting is never written.
+        assert states.get("select.solaredge_storage_control_mode").state == "Remote Control"
+        # Control is usable again without a power cycle.
+        assert await restarted.force_discharge(15, 2000)
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_supervised_release_after_the_command_lease_expires():
+    """The inverter reverts the command mode itself; the limits stay where PowerSync left them."""
+
+    async def scenario():
+        hass = _se_reporter_hass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        assert await controller.force_charge(30, 5000)
+        restarted = _se_restart(hass, controller)
+        assert await restarted.connect()
+
+        # SolarEdge's command-timeout lease expires: the command mode returns to
+        # the default while charge/discharge limits do not.
+        hass.states.get("select.solaredge_storage_command_mode").state = (
+            "Maximize Self Consumption"
+        )
+        restarted._fresh_storage_state = _se_observed(restarted)
+        result = await restarted.reconcile_result()
+        assert result["success"] is True
+        assert result["confirmation_source"] == "released_owned_dispatch"
+        assert restarted.control_health == "ready"
+        assert (
+            hass.states.get("number.solaredge_storage_discharge_limit").state
+            == "11400.0"
+        )
+        assert (
+            hass.states.get("number.solaredge_storage_charge_limit").state == "11400.0"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_supervised_release_recovers_reserve_only_ownership():
+    """A single reserve write is enough to contain control across a restart."""
+
+    async def scenario():
+        hass = _se_reporter_hass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        assert await controller.set_backup_reserve(25)
+        restarted = _se_restart(hass, controller)
+        assert await restarted.connect()
+        assert restarted.control_health == "reconciliation_required"
+
+        restarted._fresh_storage_state = _se_observed(restarted)
+        assert (await restarted.reconcile_result())["success"] is True
+        assert restarted.control_health == "ready"
+        assert hass.states.get("number.solaredge_backup_reserve").state == "15.0"
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_supervised_release_refuses_an_uncertain_write():
+    """A possibly-transmitted write is still contained; only confirmed work is released."""
+
+    async def scenario():
+        hass = _se_reporter_hass()
+        hass.services = _SEFailingServices(
+            hass.states, "select.solaredge_storage_command_mode"
+        )
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        assert not await controller.force_charge(30, 5000)
+        assert controller._coordinator().last_mutation["outcome"] == "unknown"
+
+        restarted = _se_restart(hass, controller)
+        assert await restarted.connect()
+        assert restarted.control_health == "reconciliation_required"
+        restarted._fresh_storage_state = _se_observed(restarted)
+        writes = len(hass.services.calls)
+        result = await restarted.reconcile_result()
+        assert result["success"] is False
+        assert result["reason"] == "baseline_mismatch"
+        assert len(hass.services.calls) == writes
+        assert restarted.control_health == "reconciliation_required"
+
+    asyncio.run(scenario())
+
+
+def test_solaredge_supervised_release_refuses_an_externally_changed_field():
+    """Anything PowerSync did not write still requires supervised reconciliation."""
+
+    async def scenario():
+        hass = _se_reporter_hass()
+        controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+        assert await controller.force_charge(30, 5000)
+        restarted = _se_restart(hass, controller)
+        assert await restarted.connect()
+
+        hass.states.get("select.solaredge_storage_command_mode").state = (
+            "Maximize Self Consumption"
+        )
+        # Neither PowerSync's value nor the baseline it captured.
+        hass.states.get("number.solaredge_storage_discharge_limit").state = "7000"
+        restarted._fresh_storage_state = _se_observed(restarted)
+        writes = len(hass.services.calls)
+        result = await restarted.reconcile_result()
+        assert result["success"] is False
+        assert result["reason"] == "baseline_mismatch"
+        assert "discharge_power_limit" in result["fields"]
+        assert len(hass.services.calls) == writes
+        assert restarted.control_health == "reconciliation_required"
+
+    asyncio.run(scenario())
