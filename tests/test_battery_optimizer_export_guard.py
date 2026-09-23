@@ -1963,6 +1963,62 @@ def test_charge_block_mask_prevents_charging_during_export_window(
     assert all(action.action != "charge" for action in blocked.schedule.actions)
 
 
+def test_synthetic_price_tail_does_not_pin_solar_charge(
+    battery_optimizer_module,
+):
+    """Forward-filled dynamic prices must not hard-block solar charging."""
+    common = {
+        "import_prices": [0.15] * 6 + [0.2410967] * 18,
+        "export_prices": [0.15] * 6 + [0.0733648] * 18,
+        "solar_forecast": [0.0] * 4 + [4.0] * 3 + [0.0] * 17,
+        "load_forecast": [0.0] * 7 + [1.0] * 8 + [0.0] * 9,
+        "current_soc": 0.85,
+        "acquisition_cost_kwh": 0.05,
+        "allow_battery_export": [True] * 24,
+        "allow_grid_charge": False,
+    }
+
+    synthetic_tail_optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        interval_minutes=60,
+        horizon_hours=24,
+        terminal_weight=0.0,
+    )
+    synthetic_tail = synthetic_tail_optimizer.optimize(
+        **common,
+        price_valid_slots=[True] * 6 + [False] * 18,
+    )
+
+    real_flat_tail_optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.10,
+        hardware_reserve=0.10,
+        interval_minutes=60,
+        horizon_hours=24,
+        terminal_weight=0.0,
+    )
+    real_flat_tail = real_flat_tail_optimizer.optimize(
+        **common,
+        price_valid_slots=[True] * 24,
+    )
+
+    assert synthetic_tail.feasible is True
+    assert real_flat_tail.feasible is True
+    assert synthetic_tail.battery_to_grid_w[0] > 1000
+    assert real_flat_tail.battery_to_grid_w[0] <= 1e-6
+    assert sum(
+        action.battery_charge_w for action in synthetic_tail.schedule.actions[4:7]
+    ) > sum(
+        action.battery_charge_w for action in real_flat_tail.schedule.actions[4:7]
+    )
+
+
 def test_charge_block_mask_prevents_greedy_fallback_charging(
     battery_optimizer_module,
     monkeypatch,

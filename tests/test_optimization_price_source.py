@@ -2963,6 +2963,9 @@ def test_unpriced_trailing_tail_reference_is_unchanged_by_the_mask(
     assert coordinator._provider_priced_reference_prices() == pytest.approx(
         coordinator._last_display_import_prices
     )
+    assert coordinator._last_optimizer_price_valid_slots == (
+        [True] * 18 + [False] * 18
+    )
 
 
 def test_stale_priced_mask_cannot_filter_a_later_display_series(opt_module):

@@ -622,6 +622,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # builder for this solve cannot describe the series (non-dynamic
         # providers, entity overrides).
         self._last_priced_import_mask: list[bool] | None = None
+        # Parallel to the LP price arrays: False where a dynamic provider's
+        # price builder carried a neighbour into a gap or beyond its horizon.
+        # The optimizer uses this to keep synthetic prices from hard-pinning
+        # solar charging.
+        self._last_optimizer_price_valid_slots: list[bool] | None = None
         # Contractual rates before optimizer-only overlays and bounded quota
         # bonuses. Cost Neutral uses these to value each local settlement day.
         self._last_settlement_import_prices: list[float] | None = None
@@ -6392,6 +6397,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Cleared first so a mask left by an earlier solve can never be
             # applied to this solve's display series.
             self._last_priced_import_mask = None
+            self._last_optimizer_price_valid_slots = None
             prices = await self._get_price_forecast()
             if prices:
                 self._last_acquisition_reference_import_prices = (
@@ -6989,6 +6995,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         solar_export_slots or profit_max_solar_export_slots,
                         manual_control_payload,
                         ev_charge_plan,
+                        self._last_optimizer_price_valid_slots,
                     )
                 finally:
                     if reserve_floor is not None:
@@ -15701,6 +15708,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
                         self._last_priced_import_mask = (
                             list(priced_mask[:display_import_steps])
+                            if mask_describes_series
+                            else None
+                        )
+                        self._last_optimizer_price_valid_slots = (
+                            list(priced_mask)
                             if mask_describes_series
                             else None
                         )

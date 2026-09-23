@@ -802,6 +802,7 @@ class BatteryOptimizer:
         profit_max_solar_export_slots: bool | list[bool] | None = None,
         manual_control: dict[str, Any] | None = None,
         ev_plan: EVChargePlan | None = None,
+        price_valid_slots: list[bool] | None = None,
     ) -> OptimizerResult:
         """
         Run the LP optimization.
@@ -854,6 +855,9 @@ class BatteryOptimizer:
                 export credit when the final plan's import cost is substituted.
             cost_neutral_plan: Provider-neutral date-partitioned budgets. When
                 supplied, this replaces the legacy scalar/mask constraint.
+            price_valid_slots: Optional per-step mask identifying slots whose
+                prices came from the provider rather than LP padding. When
+                omitted, every supplied price is treated as valid.
 
         Returns:
             OptimizerResult with schedule and metadata
@@ -880,6 +884,16 @@ class BatteryOptimizer:
         )
         solar_forecast = self._pad_array(solar_forecast, n_steps, 0.0)
         load_forecast = self._pad_array(load_forecast, n_steps, 0.0)
+        if price_valid_slots is None:
+            price_valid_slots = [True] * n_steps
+        else:
+            price_valid_slots = [
+                bool(value) for value in price_valid_slots[:n_steps]
+            ]
+            if len(price_valid_slots) < n_steps:
+                price_valid_slots.extend(
+                    [False] * (n_steps - len(price_valid_slots))
+                )
         # Pad/truncate the EV window to the solve horizon. A plan whose window
         # falls entirely outside the horizon normalizes to None so every EV
         # code path below is skipped and the model keeps its previous size.
@@ -1084,6 +1098,7 @@ class BatteryOptimizer:
                             manual_required_charge_kw,
                             manual_required_discharge_kw,
                             ev_plan,
+                            price_valid_slots,
                         )
 
                     seeded_plan = cost_neutral_plan
@@ -1598,14 +1613,27 @@ class BatteryOptimizer:
         import_prices: list[float],
         solar: list[float],
         load: list[float],
+        *,
+        price_valid_slots: list[bool] | None = None,
     ) -> list[bool]:
-        """Precompute whether each period has later higher-price net load."""
+        """Precompute whether each period has later higher-price net load.
+
+        Synthetic LP tail prices must not create future value or make a
+        synthetic export-profitable period pin solar charging.
+        """
+        price_valid_slots = price_valid_slots or [True] * n
         future_values = [False] * n
         best_future_price = float("-inf")
 
         for t in range(n - 1, -1, -1):
-            future_values[t] = best_future_price > import_prices[t] + 0.001
-            if max(0.0, load[t] - solar[t]) > 0.05:
+            future_values[t] = (
+                price_valid_slots[t]
+                and best_future_price > import_prices[t] + 0.001
+            )
+            if (
+                price_valid_slots[t]
+                and max(0.0, load[t] - solar[t]) > 0.05
+            ):
                 best_future_price = max(best_future_price, import_prices[t])
 
         return future_values
@@ -2386,6 +2414,7 @@ class BatteryOptimizer:
         manual_required_charge_kw: list[float] | None = None,
         manual_required_discharge_kw: list[float] | None = None,
         ev_plan: EVChargePlan | None = None,
+        price_valid_slots: list[bool] | None = None,
     ) -> OptimizerResult:
         """
         Solve the LP formulation using the HiGHS solver (highspy).
@@ -2493,6 +2522,7 @@ class BatteryOptimizer:
                     required_charge_kw=fixed_manual_charge,
                     required_discharge_kw=fixed_manual_discharge,
                     ev_plan=ev_plan,
+                    price_valid_slots=price_valid_slots,
                 )
                 result.lp_stats["mode_iterations"] = iteration + 1
                 if result.solver_used != "highs":
@@ -2750,6 +2780,7 @@ class BatteryOptimizer:
         required_charge_kw: list[float] | None = None,
         required_discharge_kw: list[float] | None = None,
         ev_plan: EVChargePlan | None = None,
+        price_valid_slots: list[bool] | None = None,
     ) -> OptimizerResult:
         """Inner LP solver (separated for SOC-below-reserve guard in _solve_lp)."""
         formulation_start = time.monotonic()
@@ -2775,6 +2806,13 @@ class BatteryOptimizer:
         manual_control_slots = manual_control_slots or [None] * n
         required_charge_kw = required_charge_kw or [0.0] * n
         required_discharge_kw = required_discharge_kw or [0.0] * n
+        price_valid_slots = (
+            [True] * n
+            if price_valid_slots is None
+            else [bool(value) for value in price_valid_slots[:n]]
+        )
+        if len(price_valid_slots) < n:
+            price_valid_slots.extend([False] * (n - len(price_valid_slots)))
         if cost_neutral_plan is None:
             cost_neutral_plan = CostNeutralPlan.from_legacy(
                 length=n,
@@ -2814,6 +2852,10 @@ class BatteryOptimizer:
             ev_plan=ev_plan,
         )
         p_n = len(periods)
+        p_price_valid_slots = [
+            all(price_valid_slots[idx] for idx in range(period.start, period.end))
+            for period in periods
+        ]
         p_import = [period.import_price for period in periods]
         p_export = [period.export_price for period in periods]
         p_export_bonus = [period.export_bonus_price for period in periods]
@@ -2963,7 +3005,11 @@ class BatteryOptimizer:
             )
 
         future_self_consumption_values = self._future_self_consumption_values(
-            p_n, p_import, p_solar, p_load
+            p_n,
+            p_import,
+            p_solar,
+            p_load,
+            price_valid_slots=p_price_valid_slots,
         )
         future_self_consumption_reservations = (
             self._future_self_consumption_reservations(
@@ -3004,6 +3050,7 @@ class BatteryOptimizer:
                 or _priority_export_slot(t)
                 or (
                     export_profitable_slot
+                    and p_price_valid_slots[t]
                     and not future_self_consumption_values[t]
                 )
             )
@@ -3856,6 +3903,7 @@ class BatteryOptimizer:
                         or _priority_export_slot(t)
                         or (
                             export_profitable_slot
+                            and p_price_valid_slots[t]
                             and not future_self_consumption_values[t]
                         )
                     ):
@@ -4563,7 +4611,9 @@ class BatteryOptimizer:
             priority_export_slot = _priority_export_slot(t)
             future_self_consumption_value = future_self_consumption_values[t]
             if p_block_charge[t] or priority_export_slot or (
-                export_profitable_slot and not future_self_consumption_value
+                export_profitable_slot
+                and p_price_valid_slots[t]
+                and not future_self_consumption_value
             ):
                 # Do not charge during explicitly blocked export windows
                 # (for example fixed Flow Power Happy Hour export windows).
