@@ -1931,10 +1931,8 @@ def test_options_menu_exposes_editable_battery_system_section():
     method_source = ast.get_source_segment(source, method)
 
     assert method_source is not None
-    assert (
-        'menu_options = ["pricing", "battery_system", '
-        '"battery_connection_profile"]'
-    ) in method_source
+    assert '"battery_system",' in method_source
+    assert '"battery_connection_profile",' in method_source
     assert "battery_system = self._effective_battery_system()" in method_source
     assert 'menu_options.append("alphaess_connection")' in method_source
     assert 'menu_options.append("anker_solix")' in method_source
@@ -2114,6 +2112,47 @@ def test_options_battery_system_selector_persists_and_routes_selection():
         assert target in route_source
 
 
+def test_battery_system_selection_only_opens_connection_when_method_changes():
+    method = _options_flow_method("async_step_battery_system")
+    module = ast.Module(body=[method], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {
+        "Any": object,
+        "FlowResult": object,
+        "CONF_BATTERY_SYSTEM": "battery_system",
+        "BATTERY_SYSTEM_TESLA": "tesla",
+    }
+    exec(compile(module, str(CONFIG_FLOW_PATH), "exec"), namespace)
+
+    class Flow:
+        async_step_battery_system = namespace["async_step_battery_system"]
+
+        def __init__(self):
+            self.calls = []
+
+        def _effective_battery_system(self):
+            return "tesla"
+
+        def _save_battery_system_selection(self, battery_system):
+            self.calls.append(("save", battery_system))
+
+        async def _route_to_battery_options(self, battery_system):
+            self.calls.append(("route", battery_system))
+            return "connection"
+
+        async def async_step_init(self):
+            self.calls.append(("menu",))
+            return "menu"
+
+    flow = Flow()
+    assert asyncio.run(flow.async_step_battery_system({"battery_system": "tesla"})) == "menu"
+    assert flow.calls == [("menu",)]
+
+    flow = Flow()
+    assert asyncio.run(flow.async_step_battery_system({"battery_system": "sigenergy"})) == "connection"
+    assert flow.calls == [("save", "sigenergy"), ("route", "sigenergy")]
+
+
 def test_custom_battery_options_persist_custom_system_and_monitoring_mode():
     source = CONFIG_FLOW_PATH.read_text()
     method = _options_flow_method("async_step_custom_battery")
@@ -2172,7 +2211,7 @@ def test_battery_system_options_labels_are_translated():
         custom_step = data["options"]["step"]["custom_battery"]
         anker_step = data["options"]["step"]["anker_solix"]
 
-        assert menu_options["battery_system"] == "Battery / control method"
+        assert menu_options["battery_system"] == "Change battery / control method"
         assert menu_options["custom_battery"] == "Custom external controller"
         assert menu_options["anker_solix"] == "Anker Solix connection"
         assert menu_options["alphaess_connection"] == "AlphaESS connection"

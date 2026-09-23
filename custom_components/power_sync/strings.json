@@ -1280,7 +1280,7 @@
         "menu_options": {
           "display_currency": "Display currency",
           "pricing": "Electricity pricing & provider",
-          "battery_system": "Battery / control method",
+          "battery_system": "Change battery / control method",
           "battery_connection_profile": "Battery connection method & sensors",
           "provider_portal": "Provider portal login",
           "tesla_connection": "Tesla API connection",
@@ -1331,7 +1331,7 @@
       },
       "battery_system": {
         "title": "Battery / control method",
-        "description": "Change the battery or hybrid inverter that PowerSync controls. The selected method is saved before the connection page opens, and the integration reloads after the connection settings are saved.",
+        "description": "Change the battery or hybrid inverter that PowerSync controls. Choosing the current method returns to settings; choose its separate connection page to edit API or device settings. A new method opens its connection page, and the integration reloads after those settings are saved.",
         "data": {
           "battery_system": "Battery / control method"
         },

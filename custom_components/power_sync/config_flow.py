@@ -8899,6 +8899,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             battery_system = user_input.get(
                 CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA
             )
+            if battery_system == self._effective_battery_system():
+                return await self.async_step_init()
             self._save_battery_system_selection(battery_system)
             return await self._route_to_battery_options(battery_system)
 
