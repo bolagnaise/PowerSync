@@ -4009,7 +4009,7 @@ class PowerSyncEVPanel extends HTMLElement {
     this._selectedLoadpointId = null;
     this._durationMinutes = 60;
     this._policy = 'solar_only';
-    this._modesExpanded = false;
+    this._modesExpanded = true;
   }
 
   setConfig(config) {

@@ -786,19 +786,19 @@ def test_dashboard_strategy_resource_uses_incremented_cache_buster():
 
     version = re.search(r'DASHBOARD_JS_VERSION = "(\d+)"', const_source)
     assert version is not None
-    assert int(version.group(1)) > 48
+    assert version.group(1) == "51"
     assert "url = f\"{base_path}?v={POWER_SYNC_VERSION}.{DASHBOARD_JS_VERSION}\"" in source
 
 
-def test_dashboard_ev_modes_are_collapsed_with_enabled_summary():
-    """Mode settings should roll up without hiding which automations are enabled."""
+def test_dashboard_ev_modes_start_expanded_and_can_be_collapsed_with_summary():
+    """Mode settings start visible but can roll up without hiding active automations."""
     source = STRATEGY_PATH.read_text()
     panel_source = source[
         source.index("class PowerSyncEVPanel extends HTMLElement"):
         source.index("customElements.define('power-sync-ev-panel'")
     ]
 
-    assert "this._modesExpanded = false;" in panel_source
+    assert "this._modesExpanded = true;" in panel_source
     assert 'data-action="toggle-modes"' in panel_source
     assert 'aria-expanded="${expanded ? \'true\' : \'false\'}"' in panel_source
     assert 'aria-controls="ev-mode-grid"' in panel_source
@@ -825,6 +825,7 @@ def test_dashboard_ev_modes_are_collapsed_with_enabled_summary():
         re.DOTALL,
     )
     assert toggle_method is not None
+    assert "callApi" not in toggle_method.group("body")
     runtime = f"""
       const attrs = {{}};
       const iconAttrs = {{}};
@@ -833,13 +834,13 @@ def test_dashboard_ev_modes_are_collapsed_with_enabled_summary():
         setAttribute: (key, value) => {{ attrs[key] = value; }},
         querySelector: () => icon,
       }};
-      const grid = {{hidden: true}};
+      const grid = {{hidden: false}};
       let resizeEvent = null;
       global.CustomEvent = class {{
         constructor(type, options) {{ this.type = type; this.options = options; }}
       }};
       const card = {{
-        _modesExpanded: false,
+        _modesExpanded: true,
         _lastRenderSignature: '',
         shadowRoot: {{querySelector: (selector) => selector === '#ev-mode-grid' ? grid : toggle}},
         _renderSignature: () => 'expanded-signature',
@@ -847,12 +848,12 @@ def test_dashboard_ev_modes_are_collapsed_with_enabled_summary():
         toggle() {{{toggle_method.group('body')}\n  }},
       }};
       card.toggle();
-      if (!card._modesExpanded || grid.hidden || attrs['aria-expanded'] !== 'true') throw new Error('expand failed');
-      if (iconAttrs.icon !== 'mdi:chevron-up') throw new Error('expand icon failed');
-      if (resizeEvent?.type !== 'power-sync-card-resize' || !resizeEvent.options?.composed) throw new Error('resize event failed');
-      card.toggle();
       if (card._modesExpanded || !grid.hidden || attrs['aria-expanded'] !== 'false') throw new Error('collapse failed');
       if (iconAttrs.icon !== 'mdi:chevron-down') throw new Error('collapse icon failed');
+      if (resizeEvent?.type !== 'power-sync-card-resize' || !resizeEvent.options?.composed) throw new Error('resize event failed');
+      card.toggle();
+      if (!card._modesExpanded || grid.hidden || attrs['aria-expanded'] !== 'true') throw new Error('expand failed');
+      if (iconAttrs.icon !== 'mdi:chevron-up') throw new Error('expand icon failed');
     """
     subprocess.run(["node", "-e", runtime], check=True)
 
