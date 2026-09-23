@@ -7,6 +7,8 @@ import types
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
 _ps = types.ModuleType("power_sync")
@@ -638,6 +640,54 @@ def test_dynamic_state_uses_observed_power_for_matched_vehicle():
     assert loadpoints[0]["commanded_power_kw"] == 7.2
     assert loadpoints[0]["status"] == "charging"
     assert loadpoints[0]["confidence"] == "observed"
+
+
+@pytest.mark.parametrize(
+    ("power_available", "expected_power", "expected_source"),
+    [
+        (False, None, "unknown"),
+        (True, 7.0, "solar"),
+    ],
+)
+def test_dynamic_solar_surplus_keeps_source_consistent_with_power_quality(
+    power_available, expected_power, expected_source
+):
+    """Ticket #56: active BLE charging must not look idle when watts are unknown."""
+    loadpoints = build_loadpoint_status(
+        {
+            "bleteslable": {
+                "active": True,
+                "current_amps": 31,
+                "target_amps": 31,
+                "charging_started": True,
+                "allocated_surplus_kw": 8.7,
+                "params": {
+                    "dynamic_mode": "solar_surplus",
+                    "charger_type": "tesla_ble",
+                    "voltage": 240,
+                    "phases": 1,
+                },
+            }
+        },
+        [
+            {
+                "vehicle_id": "bleteslable",
+                "vehicle_name": "Tesla BLE",
+                "charger_type": "tesla_ble",
+                "ev_power_kw": 7.0,
+                "power_available": power_available,
+                "current_amps": 31,
+                "ev_soc": 84,
+                "is_connected": True,
+                "is_charging": True,
+            }
+        ],
+    )
+
+    assert loadpoints[0]["status"] == "charging"
+    assert loadpoints[0]["actual_charging"] is True
+    assert loadpoints[0]["current_power_kw"] == expected_power
+    assert loadpoints[0]["source"] == expected_source
 
 
 def test_dynamic_state_keeps_tesla_ble_target_separate_from_observed_current():

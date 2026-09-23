@@ -1160,11 +1160,15 @@ def _dynamic_loadpoint(
         "status": status,
         "owner": owner,
         "owner_mode": owner_mode,
-        "source": _loadpoint_source(
-            power_kw,
-            site_surplus_kw,
-            owner_mode,
-            allocated_surplus_kw,
+        "source": (
+            "unknown"
+            if not observed_power_available
+            else _loadpoint_source(
+                power_kw,
+                site_surplus_kw,
+                owner_mode,
+                allocated_surplus_kw,
+            )
         ),
         "current_power_kw": (
             round(power_kw, 2) if observed_power_available else None
