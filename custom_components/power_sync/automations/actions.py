@@ -7486,16 +7486,78 @@ def _hardware_min_charge_amps(
     return _effective_min_charge_amps(params, hass)
 
 
-async def _set_ocpp_charging_amps(hass: HomeAssistant, charger_id: int, amps: int) -> bool:
-    """Set charging amps for an OCPP charger."""
+async def _set_ocpp_charging_amps(
+    hass: HomeAssistant,
+    charger_id: int,
+    amps: int,
+) -> bool:
+    """Set charging amps for an OCPP charger.
+
+    HACS OCPP 0.12+ exposes a transaction-bound session-current API alongside
+    the station-wide maximum API.  Per-EV rate control must use the former
+    whenever it is available; a station maximum is not connector-scoped and
+    OCPP 2.x rejects its default relative profile.
+    """
     from ..const import DOMAIN
 
     charger_id = str(charger_id)
     base_id, connector_id = _ocpp_charger_base_and_connector(charger_id)
     server_found = False
     hacs_server_found = False
+    session_api_found = False
 
-    for central_system in (hass.data.get("ocpp") or {}).values():
+    central_systems = tuple((hass.data.get("ocpp") or {}).values())
+
+    for central_system in central_systems:
+        session_rate_api = getattr(central_system, "set_session_charge_rate_amps", None)
+        if session_rate_api is not None:
+            session_api_found = True
+            target_connector = connector_id or 1
+            session_available = getattr(central_system, "session_limit_available", None)
+            if session_available is None:
+                _LOGGER.warning(
+                    "OCPP charger %s exposes transaction current control without "
+                    "an availability check; refusing a station-wide fallback",
+                    charger_id,
+                )
+                continue
+            try:
+                if not session_available(base_id, target_connector):
+                    _LOGGER.debug(
+                        "OCPP charger %s session current limit is unavailable for connector %s; "
+                        "an active transaction is required",
+                        charger_id,
+                        target_connector,
+                    )
+                    continue
+                success = await session_rate_api(
+                    base_id,
+                    target_connector,
+                    float(amps),
+                )
+                if success:
+                    _LOGGER.info(
+                        "Set OCPP charger %s connector %s to %dA via HACS OCPP session API",
+                        charger_id,
+                        target_connector,
+                        amps,
+                    )
+                    return True
+            except Exception as e:
+                _LOGGER.error(
+                    "Failed to set OCPP session charging amps through HACS OCPP API: %s",
+                    e,
+                )
+
+    if session_api_found:
+        _LOGGER.warning(
+            "OCPP charger %s transaction current limit was unavailable or rejected; "
+            "not using the station-wide maximum API",
+            charger_id,
+        )
+        return False
+
+    for central_system in central_systems:
         if not hasattr(central_system, "set_max_charge_rate_amps"):
             continue
         hacs_server_found = True

@@ -2190,6 +2190,25 @@ class _OcppCentralSystem:
         return self.state_accepted
 
 
+class _OcppSessionCentralSystem(_OcppCentralSystem):
+    def __init__(self, available: bool, accepted: bool = True) -> None:
+        super().__init__(accepted=accepted)
+        self.session_available = available
+        self.session_calls: list[tuple[str, int, float]] = []
+
+    def session_limit_available(self, charger_id: str, connector_id: int) -> bool:
+        return self.session_available
+
+    async def set_session_charge_rate_amps(
+        self,
+        charger_id: str,
+        connector_id: int,
+        amps: float,
+    ) -> bool:
+        self.session_calls.append((charger_id, connector_id, amps))
+        return self.accepted
+
+
 def _zaptec_entry(installation_id: str = ""):
     return SimpleNamespace(
         entry_id="entry-1",
@@ -4247,6 +4266,34 @@ def test_ocpp_amps_uses_hacs_api_connector_id_for_multi_connector_prefix():
     ) is True
 
     assert central.calls == [("evse_1", 16.0, 2)]
+    assert hass.services.calls == []
+
+
+def test_ocpp_amps_prefers_transaction_session_api_for_active_connector():
+    central = _OcppSessionCentralSystem(available=True)
+    hass = _Hass([_State("number.evse_1_session_current_limit", "unknown")])
+    hass.data["ocpp"] = {"ocpp-entry": central}
+
+    assert asyncio.run(actions._set_ocpp_charging_amps(hass, "evse_1", 16)) is True
+
+    assert central.session_calls == [("evse_1", 1, 16.0)]
+    assert central.calls == []
+    assert hass.services.calls == []
+
+
+def test_ocpp_amps_fails_closed_before_transaction_without_station_fallback():
+    central = _OcppSessionCentralSystem(available=False)
+    hass = _Hass([_State("switch.evse_1_charge_control", "off")])
+    hass.data["ocpp"] = {"ocpp-entry": central}
+    params = {"charger_type": "ocpp", "ocpp_charger_id": "evse_1"}
+
+    assert asyncio.run(
+        actions._set_vehicle_amps(hass, _Entry(), "ocpp_evse_1", 16, params)
+    ) is False
+
+    assert central.session_calls == []
+    assert central.calls == []
+    assert central.state_calls == []
     assert hass.services.calls == []
 
 
