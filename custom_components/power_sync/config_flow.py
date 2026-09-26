@@ -4359,7 +4359,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors=errors,
                 description_placeholders={
                     "station_help": "Station list unavailable. Enter your Station ID manually. "
-                    "To find it, ask SigenAI 'Tell me my StationID' in the Sigenergy app.",
+                    "To find it, ask SigenAI 'Tell me my SN code' in the Sigenergy app.",
                 },
             )
 
