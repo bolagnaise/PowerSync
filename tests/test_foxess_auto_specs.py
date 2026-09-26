@@ -37,6 +37,25 @@ def _load_power_limit_helper():
     return namespace["_foxess_auto_power_limits"]
 
 
+def _load_source_helpers():
+    tree = ast.parse(OPTIMIZATION_PATH.read_text())
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"_positive_battery_spec_value", "_apply_auto_battery_spec"}
+    ]
+    assert {node.name for node in functions} == {
+        "_positive_battery_spec_value",
+        "_apply_auto_battery_spec",
+    }
+    module = ast.Module(body=functions, type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace: dict[str, Any] = {"Any": Any}
+    exec(compile(module, str(OPTIMIZATION_PATH), "exec"), namespace)
+    return namespace["_apply_auto_battery_spec"]
+
+
 def _auto_detect_method_source() -> str:
     source = OPTIMIZATION_PATH.read_text()
     tree = ast.parse(source)
@@ -126,8 +145,36 @@ def test_invalid_or_nonfinite_power_and_current_inputs_fail_closed():
 def test_auto_detection_checks_manual_overrides_before_live_foxess_data():
     source = _auto_detect_method_source()
 
-    assert source.index(
-        "if saved_capacity or saved_charge or saved_discharge"
-    ) < source.index("_foxess_auto_power_limits(data)")
-    assert "_battery_specs_source = \"manual\"" in source
+    assert "_entry_battery_spec_value" in source
+    assert "_apply_auto_battery_spec" in source
+    assert source.index("self._refresh_battery_specs_source()") < source.index(
+        "if not self.energy_coordinator"
+    )
     assert "FoxESSEntityEnergyCoordinator" in source
+
+
+def test_capacity_override_does_not_block_foxess_power_detection():
+    apply_auto = _load_source_helpers()
+
+    class Config:
+        battery_capacity_wh = 41930
+        max_charge_w = 5000
+        max_discharge_w = 5000
+
+    sources = {
+        "battery_capacity_wh": "manual",
+        "max_charge_w": "default",
+        "max_discharge_w": "default",
+    }
+
+    assert apply_auto(Config, sources, "battery_capacity_wh", 13500) is False
+    assert apply_auto(Config, sources, "max_charge_w", 10000) is True
+    assert apply_auto(Config, sources, "max_discharge_w", 10000) is True
+    assert Config.battery_capacity_wh == 41930
+    assert Config.max_charge_w == 10000
+    assert Config.max_discharge_w == 10000
+    assert sources == {
+        "battery_capacity_wh": "manual",
+        "max_charge_w": "auto",
+        "max_discharge_w": "auto",
+    }

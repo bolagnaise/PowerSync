@@ -235,6 +235,69 @@ def _foxess_auto_power_limits(data: dict[str, Any] | None) -> tuple[int, int] | 
     return charge_w, discharge_w
 
 
+_BATTERY_SPEC_FIELDS = (
+    "battery_capacity_wh",
+    "max_charge_w",
+    "max_discharge_w",
+)
+
+
+def _positive_battery_spec_value(value: Any) -> int | None:
+    """Return a positive persisted battery specification, or ``None``."""
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _apply_auto_battery_spec(
+    config: Any,
+    sources: dict[str, str],
+    field: str,
+    value: Any,
+    *,
+    scale: float = 1.0,
+) -> bool:
+    """Apply one detected specification unless that field is manually owned."""
+    if sources.get(field) == "manual":
+        return False
+    parsed = _positive_battery_spec_value(value)
+    if parsed is None:
+        return False
+    setattr(config, field, int(round(parsed * scale)))
+    sources[field] = "auto"
+    return True
+
+
+def _entry_battery_spec_value(entry: Any, field: str) -> Any:
+    """Read a persisted battery setting, preferring options over legacy data."""
+    if entry is None:
+        return None
+    options = getattr(entry, "options", {}) or {}
+    if field in options:
+        return options.get(field)
+    data = getattr(entry, "data", {}) or {}
+    return data.get(field)
+
+
+def battery_specs_source_by_field(entry: Any | None) -> dict[str, str]:
+    """Return manual/default provenance for persisted battery fields."""
+    return {
+        field: (
+            "manual"
+            if _positive_battery_spec_value(
+                _entry_battery_spec_value(entry, field)
+            )
+            is not None
+            else "default"
+        )
+        for field in _BATTERY_SPEC_FIELDS
+    }
+
+
 def _grid_status_is_terminal_off_grid(value: Any) -> bool:
     """Return True only for a confirmed terminal off-grid state."""
     if not isinstance(value, str):
@@ -678,8 +741,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ResolvedOptimizerParameters.legacy()
         )
 
-        # Battery specs source tracking
+        # Battery specs source tracking. Keep the legacy aggregate for older
+        # clients, but retain provenance per field so a capacity override does
+        # not suppress live power detection (or claim that every field is manual).
+        self._battery_specs_source_by_field = battery_specs_source_by_field(entry)
         self._battery_specs_source = "default"  # "default", "auto", or "manual"
+        self._refresh_battery_specs_source()
 
         # Daily cost tracking (midnight-to-midnight), persisted via Store
         self._actual_cost_today = 0.0        # Accumulated actual cost since midnight ($)
@@ -16610,37 +16677,26 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
     async def _auto_detect_battery_specs(self) -> None:
-        """Auto-detect battery capacity and power from Tesla site_info.
+        """Auto-detect battery capacity and power from available telemetry.
 
         User overrides saved in config entry take priority over auto-detection.
         """
-        # Check for user overrides in config entry first
-        if self._entry:
-            from ..const import (
-                CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
-                CONF_OPTIMIZATION_MAX_CHARGE_W,
-                CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+        # Apply persisted ownership one field at a time. A single manual
+        # setting must not short-circuit detection of the other fields.
+        sources = getattr(self, "_battery_specs_source_by_field", None)
+        if not isinstance(sources, dict):
+            sources = battery_specs_source_by_field(self._entry)
+            self._battery_specs_source_by_field = sources
+        for field in _BATTERY_SPEC_FIELDS:
+            saved_value = _positive_battery_spec_value(
+                _entry_battery_spec_value(self._entry, field)
             )
-            opts = self._entry.options
-            saved_capacity = opts.get(CONF_OPTIMIZATION_BATTERY_CAPACITY_WH)
-            saved_charge = opts.get(CONF_OPTIMIZATION_MAX_CHARGE_W)
-            saved_discharge = opts.get(CONF_OPTIMIZATION_MAX_DISCHARGE_W)
-
-            if saved_capacity or saved_charge or saved_discharge:
-                if saved_capacity:
-                    self._config.battery_capacity_wh = int(saved_capacity)
-                if saved_charge:
-                    self._config.max_charge_w = int(saved_charge)
-                if saved_discharge:
-                    self._config.max_discharge_w = int(saved_discharge)
-                self._battery_specs_source = "manual"
-                _LOGGER.info(
-                    "Using saved battery specs (manual): %.1f kWh, charge %.1f kW, discharge %.1f kW",
-                    self._config.battery_capacity_wh / 1000,
-                    self._config.max_charge_w / 1000,
-                    self._config.max_discharge_w / 1000,
-                )
-                return
+            if saved_value is not None:
+                setattr(self._config, field, saved_value)
+                sources[field] = "manual"
+            elif sources.get(field) == "manual":
+                sources[field] = "default"
+        self._refresh_battery_specs_source()
 
         if not self.energy_coordinator:
             return
@@ -16656,9 +16712,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 foxess_limits = _foxess_auto_power_limits(data)
                 if foxess_limits is not None:
                     charge_w, discharge_w = foxess_limits
-                    self._config.max_charge_w = charge_w
-                    self._config.max_discharge_w = discharge_w
-                    self._battery_specs_source = "auto"
+                    _apply_auto_battery_spec(
+                        self._config,
+                        sources,
+                        "max_charge_w",
+                        charge_w,
+                    )
+                    _apply_auto_battery_spec(
+                        self._config,
+                        sources,
+                        "max_discharge_w",
+                        discharge_w,
+                    )
+                    self._refresh_battery_specs_source()
 
                     _LOGGER.info(
                         "Auto-detected battery power from live FoxESS telemetry: "
@@ -16666,7 +16732,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         charge_w / 1000,
                         discharge_w / 1000,
                     )
-                    return
+                else:
+                    self._refresh_battery_specs_source()
+                return
 
             # AlphaESS auto-detection: the coordinator exposes BMS-reported
             # max charge/discharge power (watts) and rated capacity (kWh) directly
@@ -16675,12 +16743,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ae_max_discharge_w = data.get("battery_max_discharge_power_w")
             ae_capacity_kwh = data.get("battery_capacity_kwh")
 
-            if ae_max_charge_w and ae_max_charge_w > 0:
-                self._config.max_charge_w = int(ae_max_charge_w)
-                self._config.max_discharge_w = int(ae_max_discharge_w or ae_max_charge_w)
-                if ae_capacity_kwh and ae_capacity_kwh > 0:
-                    self._config.battery_capacity_wh = int(ae_capacity_kwh * 1000)
-                self._battery_specs_source = "auto"
+            if _positive_battery_spec_value(ae_max_charge_w) is not None:
+                _apply_auto_battery_spec(
+                    self._config,
+                    sources,
+                    "max_charge_w",
+                    ae_max_charge_w,
+                )
+                _apply_auto_battery_spec(
+                    self._config,
+                    sources,
+                    "max_discharge_w",
+                    ae_max_discharge_w or ae_max_charge_w,
+                )
+                _apply_auto_battery_spec(
+                    self._config,
+                    sources,
+                    "battery_capacity_wh",
+                    ae_capacity_kwh,
+                    scale=1000.0,
+                )
+                self._refresh_battery_specs_source()
 
                 _LOGGER.info(
                     "Auto-detected AlphaESS battery specs from Modbus: "
@@ -16713,10 +16796,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Estimate capacity: battery_count * 13.5 kWh per unit
             capacity_wh = int(battery_count * 13500)
 
-            self._config.battery_capacity_wh = capacity_wh
-            self._config.max_charge_w = charge_w
-            self._config.max_discharge_w = discharge_w
-            self._battery_specs_source = "auto"
+            _apply_auto_battery_spec(
+                self._config,
+                sources,
+                "battery_capacity_wh",
+                capacity_wh,
+            )
+            _apply_auto_battery_spec(
+                self._config,
+                sources,
+                "max_charge_w",
+                charge_w,
+            )
+            _apply_auto_battery_spec(
+                self._config,
+                sources,
+                "max_discharge_w",
+                discharge_w,
+            )
+            self._refresh_battery_specs_source()
 
             _LOGGER.info(
                 "Auto-detected battery specs from site_info: "
@@ -16732,10 +16830,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             charge_w = int(battery_count * 5000)
             discharge_w = int(battery_count * 5000)
 
-            self._config.battery_capacity_wh = capacity_wh
-            self._config.max_charge_w = charge_w
-            self._config.max_discharge_w = discharge_w
-            self._battery_specs_source = "auto"
+            _apply_auto_battery_spec(
+                self._config,
+                sources,
+                "battery_capacity_wh",
+                capacity_wh,
+            )
+            _apply_auto_battery_spec(
+                self._config,
+                sources,
+                "max_charge_w",
+                charge_w,
+            )
+            _apply_auto_battery_spec(
+                self._config,
+                sources,
+                "max_discharge_w",
+                discharge_w,
+            )
+            self._refresh_battery_specs_source()
 
             _LOGGER.info(
                 "Estimated battery specs from count: "
@@ -16745,6 +16858,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 charge_w / 1000,
                 discharge_w / 1000,
             )
+
+    def _refresh_battery_specs_source(self) -> None:
+        """Refresh the backward-compatible aggregate source label."""
+        sources = set(
+            getattr(self, "_battery_specs_source_by_field", {}).values()
+        )
+        if "manual" in sources:
+            self._battery_specs_source = "manual"
+        elif "auto" in sources:
+            self._battery_specs_source = "auto"
+        else:
+            self._battery_specs_source = "default"
 
     async def _get_battery_state(self) -> tuple[float, float]:
         """Get current battery state (SOC, capacity)."""
@@ -19244,6 +19369,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "auto_apply_reserve_enabled": self.auto_apply_reserve_enabled,
                 "manual_backup_reserve": self.manual_backup_reserve,
                 "battery_specs_source": self._battery_specs_source,
+                "battery_specs_source_by_field": dict(
+                    self._battery_specs_source_by_field
+                ),
                 "backup_reserve": self._config.backup_reserve,
                 "hardware_backup_reserve": (self._startup_backup_reserve if self._startup_backup_reserve is not None else 0) / 100,
                 "idle_hold_active": (
@@ -19803,7 +19931,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             }
             for key in cleared_battery_specs:
                 setattr(self._config, key, defaults_by_setting[key])
-            self._battery_specs_source = "default"
+                self._battery_specs_source_by_field[key] = "default"
+            self._refresh_battery_specs_source()
             await self._auto_detect_battery_specs()
             if self._optimizer:
                 self._optimizer.update_config(
@@ -20183,7 +20312,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Mark as manual when user explicitly sets battery specs
             if any(k in settings for k in ("battery_capacity_wh", "max_charge_w", "max_discharge_w")):
-                self._battery_specs_source = "manual"
+                for key in _BATTERY_SPEC_FIELDS:
+                    if key in raw_config_updates:
+                        self._battery_specs_source_by_field[key] = "manual"
+                self._refresh_battery_specs_source()
 
         # Handle hardware backup reserve
         if "hardware_backup_reserve" in settings:

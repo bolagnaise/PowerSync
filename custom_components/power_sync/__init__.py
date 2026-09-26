@@ -951,6 +951,7 @@ from .network_envelope import (
 )
 from .optimization.coordinator import (
     OptimizationCoordinator,
+    battery_specs_source_by_field,
     sigenergy_capped_optimizer_limit_w,
 )
 from .coordinator import (
@@ -43254,7 +43255,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 saved_manual_reserve
             )
             if any(v is not None for v in (saved_capacity_wh, saved_max_charge_w, saved_max_discharge_w)):
-                optimization_coordinator._battery_specs_source = "manual"
+                optimization_coordinator._refresh_battery_specs_source()
             _LOGGER.info(
                 "Smart Optimization cost function: %s, interval: %smin, "
                 "backup_reserve: %.0f%%, battery specs: %.1fkWh charge %.1fkW discharge %.1fkW (%s)",
@@ -44455,6 +44456,9 @@ class OptimizationSettingsView(HomeAssistantView):
                         or config_entry.data.get(CONF_OPTIMIZATION_MAX_DISCHARGE_W)
                     )
                     else "default",
+                    "battery_specs_source_by_field": battery_specs_source_by_field(
+                        config_entry
+                    ),
                 },
                 "settings_groups": _optimizer_settings_groups(),
                 "settings_schema": optimizer_settings_schema(),
@@ -44553,6 +44557,13 @@ class OptimizationSettingsView(HomeAssistantView):
                 "backup_reserve": round(displayed_backup_reserve * 100),
                 "hardware_backup_reserve": opt_coordinator._startup_backup_reserve if opt_coordinator._startup_backup_reserve is not None else 0,
                 "battery_specs_source": opt_coordinator._battery_specs_source,
+                "battery_specs_source_by_field": dict(
+                    getattr(
+                        opt_coordinator,
+                        "_battery_specs_source_by_field",
+                        battery_specs_source_by_field(config_entry),
+                    )
+                ),
                 "interval_minutes": opt_coordinator._config.interval_minutes,
                 "horizon_hours": opt_coordinator._config.horizon_hours,
                 "charge_by_time_target_time": opt_coordinator._config.charge_by_time_target_time,
