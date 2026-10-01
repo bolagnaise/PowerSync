@@ -12018,6 +12018,254 @@ def test_app_surplus_inherited_meter_controls_external_generic_charge(monkeypatc
     assert state["current_amps"] == 0
 
 
+@pytest.mark.parametrize("control", ["switch", "amps"])
+@pytest.mark.parametrize("stale", [False, True])
+def test_solar_surplus_reconciles_external_generic_below_floor(
+    monkeypatch, control, stale
+):
+    """A fresh external Generic session must not bypass the battery-floor stop."""
+    now = datetime.now(timezone.utc)
+    power = _State(
+        "sensor.charger_power",
+        "3000",
+        {"unit_of_measurement": "W"},
+        last_updated=now - timedelta(seconds=120 if stale else 0),
+    )
+    states = [
+        power,
+        _State("number.charger_amps", "12", {"min": 6, "max": 32}),
+    ]
+    if control == "switch":
+        states.append(_State("switch.charger", "on"))
+    hass = _Hass(states)
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_soc": 20,
+            "grid_power": 3000,
+            "battery_power": 0,
+            "solar_power": 0,
+            "load_power": 0,
+        }
+
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_dynamic_ev_full_soc_reason", AsyncMock(return_value=None))
+    monkeypatch.setattr(actions, "_get_current_ev_export_price", lambda *args: 8.0)
+
+    params = {
+        "dynamic_mode": "solar_surplus",
+        "owner_mode": "solar_surplus",
+        "charger_type": "generic",
+        "charger_power_entity": "sensor.charger_power",
+        "charger_amps_entity": "number.charger_amps",
+        "charger_switch_entity": "switch.charger" if control == "switch" else None,
+        "min_charge_amps": 6,
+        "max_charge_amps": 32,
+        "min_battery_soc": 80,
+        "pause_below_soc": 70,
+        "stop_at_battery_floor": True,
+        "household_buffer_kw": 0,
+        "sustained_surplus_minutes": 2,
+        "stop_delay_minutes": 5,
+        "voltage": 240,
+        "phases": 1,
+        "notify_on_error": False,
+        "notify_on_complete": False,
+    }
+    state = {
+        "active": True,
+        "current_amps": 0,
+        "target_amps": 0,
+        "charging_started": False,
+        "paused": False,
+        "params": params,
+    }
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {"generic_ev": state}
+
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, "entry-1", "generic_ev"))
+
+    if stale:
+        assert hass.services.calls == []
+        assert state["charging_started"] is False
+        return
+
+    assert state["paused"] is True
+    assert state["charging_started"] is True
+    assert state["current_amps"] == 12
+    assert state["stop_outcome"]["status"] == "unconfirmed"
+    assert hass.services.calls == [
+        (
+            "switch" if control == "switch" else "number",
+            "turn_off" if control == "switch" else "set_value",
+            {"entity_id": "switch.charger"}
+            if control == "switch"
+            else {"entity_id": "number.charger_amps", "value": 0},
+        )
+    ]
+
+    power.last_updated = datetime.now(timezone.utc)
+    power.state = "0"
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, "entry-1", "generic_ev"))
+
+    assert state["current_amps"] == 0
+    assert state["target_amps"] == 0
+    assert state["charging_started"] is False
+    assert state.get("stop_outcome") is None
+    assert len(hass.services.calls) == 1
+
+
+def test_solar_surplus_yields_external_generic_session_without_command(monkeypatch):
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State(
+            "sensor.charger_power",
+            "3000",
+            {"unit_of_measurement": "W"},
+            last_updated=now,
+        ),
+        _State("switch.charger", "on"),
+    ])
+    _set_external_policy(hass, "generic_ev", "yield")
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_soc": 20,
+            "grid_power": 3000,
+            "battery_power": 0,
+            "solar_power": 0,
+            "load_power": 0,
+        }
+
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_dynamic_ev_full_soc_reason", AsyncMock(return_value=None))
+    monkeypatch.setattr(actions, "_get_current_ev_export_price", lambda *args: 8.0)
+    state = {
+        "active": True,
+        "current_amps": 0,
+        "target_amps": 0,
+        "charging_started": False,
+        "paused": False,
+        "params": {
+            "dynamic_mode": "solar_surplus",
+            "owner_mode": "solar_surplus",
+            "charger_type": "generic",
+            "charger_power_entity": "sensor.charger_power",
+            "charger_switch_entity": "switch.charger",
+            "min_battery_soc": 80,
+            "pause_below_soc": 70,
+            "voltage": 240,
+            "phases": 1,
+        },
+    }
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {"generic_ev": state}
+
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, "entry-1", "generic_ev"))
+
+    assert hass.services.calls == []
+    assert state["external_manual_override"] is True
+    assert "External manual charging active" in state["reason"]
+    from power_sync.automations.ev_ownership import get_ev_ownership
+
+    lease = get_ev_ownership(hass, entry, "generic_ev")[1]
+    assert lease["owner"] == "external"
+
+
+def test_solar_surplus_retries_failed_external_generic_stop(monkeypatch):
+    now = datetime.now(timezone.utc)
+    power = _State(
+        "sensor.charger_power",
+        "3000",
+        {"unit_of_measurement": "W"},
+        last_updated=now,
+    )
+    hass = _Hass([
+        power,
+        _State("switch.charger", "on"),
+    ])
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+    stop_results = iter([False, True])
+    stop_calls: list[int] = []
+
+    async def fake_live_status(*args, **kwargs):
+        return {
+            "battery_soc": 20,
+            "grid_power": 3000,
+            "battery_power": 0,
+            "solar_power": 0,
+            "load_power": 0,
+        }
+
+    async def fake_stop(*args):
+        stop_calls.append(args[3])
+        return next(stop_results)
+
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_dynamic_ev_full_soc_reason", AsyncMock(return_value=None))
+    monkeypatch.setattr(actions, "_get_current_ev_export_price", lambda *args: 8.0)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_stop)
+    state = {
+        "active": True,
+        "current_amps": 0,
+        "target_amps": 0,
+        "charging_started": False,
+        "paused": False,
+        "params": {
+            "dynamic_mode": "solar_surplus",
+            "owner_mode": "solar_surplus",
+            "charger_type": "generic",
+            "charger_power_entity": "sensor.charger_power",
+            "charger_switch_entity": "switch.charger",
+            "min_battery_soc": 80,
+            "pause_below_soc": 70,
+            "voltage": 240,
+            "phases": 1,
+        },
+    }
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {"generic_ev": state}
+
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, "entry-1", "generic_ev"))
+    assert stop_calls == [0]
+    assert state["stop_outcome"]["status"] == "failed"
+    assert state["current_amps"] == 12
+
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, "entry-1", "generic_ev"))
+    assert stop_calls == [0, 0]
+    assert state["stop_outcome"]["status"] == "unconfirmed"
+    assert state["current_amps"] == 12
+
+    power.state = "0"
+    power.last_updated = datetime.now(timezone.utc)
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, "entry-1", "generic_ev"))
+    assert state.get("stop_outcome") is None
+    assert state["charging_started"] is False
+
+
+def test_generic_stop_requires_a_configured_control_entity():
+    hass = _Hass([])
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+
+    result = asyncio.run(
+        actions._set_vehicle_amps(
+            hass,
+            entry,
+            "generic_ev",
+            0,
+            {"charger_type": "generic"},
+        )
+    )
+
+    assert result is False
+    assert hass.services.calls == []
+
+
 @pytest.mark.parametrize("outcome, expected", [(False, "failed"), (None, "unconfirmed"), (True, None)])
 def test_surplus_stop_outcome_replaces_expired_delay(monkeypatch, outcome, expected):
     """A stop request is not a completed stop or another grace period."""

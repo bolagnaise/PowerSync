@@ -7366,6 +7366,13 @@ async def _set_vehicle_amps_unchecked(
         applied_amps = amps
         manual_failure = params.get("_manual_command_failure")
 
+        if not switch_entity and not amps_entity:
+            _LOGGER.error(
+                "Generic charger control requires a switch or amps entity"
+            )
+            _record_manual_generic_failure(manual_failure, "control_validation")
+            return False
+
         try:
             if amps == 0:
                 # Stop/pause charging
@@ -9327,7 +9334,14 @@ async def _dynamic_ev_update_surplus(
         if _session_was_replaced("Sigenergy charger-power read"):
             return
     for vid, v_state in all_vehicles.items():
-        if not v_state.get("active") or v_state.get("paused"):
+        if not v_state.get("active"):
+            continue
+        if v_state.get("paused") and not (
+            vid == vehicle_id
+            and str((v_state.get("params") or {}).get("charger_type") or "").lower()
+            == "generic"
+            and v_state.get("stop_outcome")
+        ):
             continue
         v_params = v_state.get("params", {})
         v_amps = v_state.get("current_amps", 0)
@@ -9386,10 +9400,12 @@ async def _dynamic_ev_update_surplus(
     )
     from .ev_ownership import (
         EXTERNAL_CONTROL_POLICY_YIELD,
+        can_claim_ev_ownership,
         claim_ev_ownership,
         ensure_external_ev_ownership,
         get_external_control_policy,
         get_ev_ownership,
+        record_ev_command,
         release_ev_ownership,
         release_external_ev_ownership,
     )
@@ -9398,6 +9414,85 @@ async def _dynamic_ev_update_surplus(
         get_external_control_policy(hass, config_entry, vehicle_id)
         == EXTERNAL_CONTROL_POLICY_YIELD
     )
+
+    generic_stop_readback_confirmed = (
+        params.get("charger_type", "tesla") == "generic"
+        and bool(state.get("external_generic_session"))
+        and bool(state.get("stop_outcome"))
+        and current_vehicle_power_available
+        and observed_current_power_kw <= _ACTIVE_EV_POWER_EPSILON_KW
+    )
+    if generic_stop_readback_confirmed:
+        state.pop("stop_outcome", None)
+        state.pop("external_generic_session", None)
+        state.pop("last_stop_command_at", None)
+        state["current_amps"] = 0
+        state["target_amps"] = 0
+        state["charging_started"] = False
+        state["external_start_detection_armed"] = True
+        state["reason"] = "Generic Charger stop confirmed by fresh power readback"
+        current_amps = 0
+
+    async def _request_external_generic_stop(stop_reason: str) -> bool | None:
+        """Request a stop while retaining the physical session until readback."""
+        if not (
+            params.get("charger_switch_entity")
+            or params.get("charger_amps_entity")
+        ):
+            state["stop_outcome"] = {
+                "status": "failed",
+                "requested_at": datetime.now(dt_timezone.utc),
+                "reason": (
+                    "Generic Charger is still drawing power, but no configured "
+                    "stop entity is available"
+                ),
+            }
+            return False
+
+        state["stop_outcome"] = {
+            "status": "pending",
+            "requested_at": datetime.now(dt_timezone.utc),
+            "reason": "Stop requested; awaiting fresh zero-power readback",
+        }
+        success = await _set_vehicle_amps(
+            hass,
+            config_entry,
+            vehicle_id,
+            0,
+            params,
+        )
+        if _session_was_replaced("external Generic Charger stop"):
+            return None
+
+        record_ev_command(
+            hass,
+            config_entry,
+            vehicle_id,
+            command="stop",
+            success=bool(success),
+            reason=stop_reason,
+        )
+        if success:
+            state["target_amps"] = 0
+            state["last_stop_command_at"] = datetime.now().astimezone()
+            state["stop_outcome"].update(
+                status="unconfirmed",
+                reason=(
+                    "Stop command accepted; awaiting fresh zero-power readback; "
+                    "retry pending"
+                ),
+            )
+        else:
+            state["stop_outcome"].update(
+                status="unconfirmed" if success is None else "failed",
+                reason=(
+                    "Stop unconfirmed; retry pending"
+                    if success is None
+                    else "Stop unsuccessful; retry pending"
+                ),
+            )
+        return success
+
     if state.get("external_manual_override") and not yield_external_control:
         release_external_ev_ownership(
             hass,
@@ -9513,6 +9608,108 @@ async def _dynamic_ev_update_surplus(
     ):
         state["external_start_detection_armed"] = True
 
+    external_generic_charge_active = (
+        params.get("charger_type", "tesla") == "generic"
+        and current_amps <= 0
+        and current_vehicle_power_available
+        and observed_current_power_kw > _ACTIVE_EV_POWER_EPSILON_KW
+    )
+    if external_generic_charge_active:
+        if yield_external_control:
+            release_ev_ownership(
+                hass,
+                config_entry,
+                vehicle_id,
+                reason="Solar Surplus yielded to external Generic Charger",
+                command="external_handoff",
+                source="external",
+            )
+            if not ensure_external_ev_ownership(
+                hass,
+                config_entry,
+                vehicle_id,
+                reason="Generic Charger is charging outside PowerSync",
+            ):
+                state["reason"] = (
+                    "Generic Charger is charging; awaiting external ownership "
+                    "reconciliation"
+                )
+                return
+            state["external_manual_override"] = True
+            state["external_start_detection_armed"] = False
+            state["reason"] = (
+                "External manual charging active; Solar Surplus rate control suspended"
+            )
+            _LOGGER.info(
+                "Solar surplus EV: detected external Generic Charger start for %s at %.2fkW; "
+                "suspending automated rate control",
+                vehicle_id,
+                observed_current_power_kw,
+            )
+            return
+
+        if not (
+            params.get("charger_switch_entity")
+            or params.get("charger_amps_entity")
+        ):
+            state["paused"] = True
+            state["paused_reason"] = (
+                "Observed Generic Charger power, but no configured stop/control entity "
+                "is available"
+            )
+            state["reason"] = state["paused_reason"]
+            return
+
+        can_claim, _lease_id, _lease, block_reason = can_claim_ev_ownership(
+            hass,
+            config_entry,
+            vehicle_id,
+            owner_mode=str(params.get("owner_mode") or "solar_surplus"),
+        )
+        if not can_claim:
+            state["reason"] = (
+                block_reason
+                or "Generic Charger session is owned by another PowerSync mode"
+            )
+            return
+
+        observed_amps = max(
+            1,
+            int(round((observed_current_power_kw * 1000) / (voltage * phases))),
+        )
+        normalized_observed_amps = _normalize_generic_charger_amps(
+            hass,
+            params.get("charger_amps_entity"),
+            observed_amps,
+        )
+        if normalized_observed_amps is None:
+            state["paused"] = True
+            state["paused_reason"] = (
+                "Observed Generic Charger power, but its current range is invalid"
+            )
+            state["reason"] = state["paused_reason"]
+            return
+
+        state["current_amps"] = normalized_observed_amps
+        state["target_amps"] = normalized_observed_amps
+        state["charging_started"] = True
+        state["external_generic_session"] = True
+        state["external_start_detection_armed"] = False
+        state["ownership"] = claim_ev_ownership(
+            hass,
+            config_entry,
+            vehicle_id,
+            owner_mode=str(params.get("owner_mode") or "solar_surplus"),
+            reason="Adopted fresh power from an externally started Generic Charger",
+            extra={"observed": True},
+        )
+        current_amps = normalized_observed_amps
+        _LOGGER.info(
+            "Solar surplus EV: adopted external Generic Charger session for %s at %sA",
+            vehicle_id,
+            normalized_observed_amps,
+        )
+
     export_price_cents = _get_current_ev_export_price(hass, entry_id)
     deadline_override = bool(
         params.get("solar_export_price_deadline_override", False)
@@ -9535,6 +9732,9 @@ async def _dynamic_ev_update_surplus(
         state["paused_reason"] = paused_reason
         state["reason"] = paused_reason
         state["high_surplus_start"] = None
+        if state.get("external_generic_session") and current_amps > 0:
+            await _request_external_generic_stop(paused_reason)
+            return
         if current_amps > 0:
             success = await _set_vehicle_amps(
                 hass,
@@ -9617,7 +9817,12 @@ async def _dynamic_ev_update_surplus(
             return
 
     # Don't start charging until battery reaches min_soc (unless strict solar surplus is available)
-    if not state.get("charging_started"):
+    external_generic_floor_stop = (
+        bool(state.get("external_generic_session"))
+        and battery_soc < min_soc
+        and not parallel_charging_available
+    )
+    if not state.get("charging_started") or external_generic_floor_stop:
         if battery_soc < min_soc:
             if parallel_charging_available:
                 state["paused"] = False
@@ -9640,6 +9845,8 @@ async def _dynamic_ev_update_surplus(
                 else:
                     state["paused_reason"] = f"Waiting for battery to reach {min_soc}% (currently {battery_soc:.0f}%)"
                 _LOGGER.debug(f"Solar surplus EV: {state['paused_reason']}")
+                if external_generic_floor_stop:
+                    await _request_external_generic_stop(state["paused_reason"])
                 return
         else:
             state["paused"] = False
