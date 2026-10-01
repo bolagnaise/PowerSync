@@ -6531,6 +6531,22 @@ def test_generic_plug_detection_blocks_available_without_connector():
     assert asyncio.run(ev_planner.is_ev_plugged_in(hass, entry)) is False
 
 
+@pytest.mark.parametrize("status", ["not_plugged_in", "unplugged"])
+def test_generic_plug_detection_blocks_explicit_disconnected_status(status):
+    hass = _FakeHass()
+    hass.states = _FakeStates({"sensor.garage_ev_status": status})
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "generic_charger_status_entity": "sensor.garage_ev_status",
+        },
+    )
+
+    assert asyncio.run(ev_planner.is_ev_plugged_in(hass, entry)) is False
+
+
 def test_sigenergy_plug_detection_wins_before_ocpp_false(monkeypatch):
     hass = _FakeHass()
     hass.states = _FakeStates()

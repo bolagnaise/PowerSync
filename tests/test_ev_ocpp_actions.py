@@ -4452,6 +4452,47 @@ def test_generic_start_blocks_when_status_available_and_no_connector_present():
     assert hass.services.calls == []
 
 
+def test_generic_start_blocks_explicit_disconnected_status():
+    hass = _Hass([
+        _State("switch.garage_ev", "off"),
+        _State("sensor.garage_ev_status", "not_plugged_in"),
+    ])
+
+    result = asyncio.run(
+        actions._action_start_ev_charging(
+            hass,
+            _Entry(),
+            {
+                "charger_type": "generic",
+                "charger_switch_entity": "switch.garage_ev",
+                "charger_status_entity": "sensor.garage_ev_status",
+            },
+        )
+    )
+
+    assert result is False
+    assert hass.services.calls == []
+
+
+def test_generic_start_blocks_missing_switch_entity():
+    hass = _Hass([_State("sensor.garage_ev_status", "Preparing")])
+
+    result = asyncio.run(
+        actions._action_start_ev_charging(
+            hass,
+            _Entry(),
+            {
+                "charger_type": "generic",
+                "charger_switch_entity": "switch.garage_ev",
+                "charger_status_entity": "sensor.garage_ev_status",
+            },
+        )
+    )
+
+    assert result is False
+    assert hass.services.calls == []
+
+
 def test_generic_start_allows_available_status_when_connector_has_car():
     hass = _Hass([
         _State("switch.garage_ev", "off"),
@@ -4474,6 +4515,99 @@ def test_generic_start_allows_available_status_when_connector_has_car():
     assert result is True
     assert hass.services.calls == [
         ("switch", "turn_on", {"entity_id": "switch.garage_ev"})
+    ]
+
+
+def test_generic_dynamic_start_without_physical_readback_stays_unmanaged():
+    now = datetime.now(timezone.utc)
+    hass = _Hass([
+        _State("switch.garage_ev", "off", last_updated=now),
+        _State(
+            "sensor.garage_ev_status",
+            "Preparing",
+            last_updated=now,
+        ),
+        _State(
+            "sensor.garage_ev_power",
+            "0",
+            {"unit_of_measurement": "W"},
+            last_updated=now,
+        ),
+    ])
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "price_level_recovery",
+                "charger_type": "generic",
+                "charger_switch_entity": "switch.garage_ev",
+                "charger_status_entity": "sensor.garage_ev_status",
+                "charger_power_entity": "sensor.garage_ev_power",
+                "require_physical_start_confirmation": True,
+                "_generic_start_confirmation_timeout_seconds": 0,
+            },
+        )
+    )
+
+    assert result is False
+    assert actions._dynamic_ev_state == {}
+    assert hass.services.calls == [
+        ("switch", "turn_on", {"entity_id": "switch.garage_ev"}),
+        ("switch", "turn_off", {"entity_id": "switch.garage_ev"}),
+    ]
+    assert hass.data["power_sync"]["entry-1"].get("ev_ownership") in (None, {})
+
+
+def test_generic_dynamic_start_promotes_only_fresh_physical_readback():
+    now = datetime.now(timezone.utc)
+    status = _State("sensor.garage_ev_status", "Preparing", last_updated=now)
+    power = _State(
+        "sensor.garage_ev_power",
+        "0",
+        {"unit_of_measurement": "W"},
+        last_updated=now,
+    )
+    hass = _Hass([
+        _State("switch.garage_ev", "off", last_updated=now),
+        status,
+        power,
+    ])
+
+    async def turn_on_and_publish_readback(domain, service, data, blocking=True):
+        hass.services.calls.append((domain, service, data))
+        if service == "turn_on":
+            fresh = datetime.now(timezone.utc)
+            status.state = "Charging"
+            status.last_updated = fresh
+            power.state = "1800"
+            power.last_updated = fresh
+
+    hass.services.async_call = turn_on_and_publish_readback
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "dynamic_mode": "battery_target",
+                "owner_mode": "price_level_recovery",
+                "charger_type": "generic",
+                "charger_switch_entity": "switch.garage_ev",
+                "charger_status_entity": "sensor.garage_ev_status",
+                "charger_power_entity": "sensor.garage_ev_power",
+                "require_physical_start_confirmation": True,
+                "_generic_start_confirmation_timeout_seconds": 0,
+            },
+        )
+    )
+
+    assert result is True
+    assert actions._dynamic_ev_state["entry-1"]["_default"]["active"] is True
+    assert hass.services.calls == [
+        ("switch", "turn_on", {"entity_id": "switch.garage_ev"}),
     ]
 
 
@@ -5321,7 +5455,7 @@ def test_direct_ev_start_action_records_manual_ownership(monkeypatch):
         return True
 
     monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
-    hass = _Hass([])
+    hass = _Hass([_State("switch.garage_ev", "off")])
 
     result = asyncio.run(
         actions._execute_single_action(
@@ -5351,7 +5485,7 @@ def test_direct_manual_start_preempts_solar_surplus_ownership(monkeypatch):
         return True
 
     monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
-    hass = _Hass([])
+    hass = _Hass([_State("switch.garage_ev", "off")])
     cancelled = []
     actions._dynamic_ev_state.clear()
     actions._dynamic_ev_state["entry-1"] = {

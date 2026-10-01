@@ -425,6 +425,18 @@ async def _start_generic_charger_switch(
         return False
 
     switch_state = hass.states.get(entity_id)
+    if switch_state is None or str(switch_state.state).lower() in {
+        "unknown",
+        "unavailable",
+    }:
+        _LOGGER.error(
+            "Generic charger start: switch entity %s is missing or unavailable",
+            entity_id,
+        )
+        _record_manual_generic_failure(
+            manual_failure, "switch_unavailable", entity_id
+        )
+        return False
     connector_state = None
     if entity_id.endswith("_charge_control"):
         charger_id = entity_id.removeprefix("switch.").removesuffix("_charge_control")
@@ -465,6 +477,92 @@ async def _start_generic_charger_switch(
         _LOGGER.error("Generic charger start failed via %s: %s", entity_id, err)
         _record_manual_generic_failure(manual_failure, "switch_service", entity_id)
         return False
+
+
+_GENERIC_START_CONFIRMATION_TIMEOUT_SECONDS = 5
+_GENERIC_START_CONFIRMATION_POLL_SECONDS = 1
+_GENERIC_ACTIVE_POWER_EPSILON_KW = 0.05
+
+
+def _generic_start_confirmation_evidence(
+    hass: HomeAssistant,
+    params: Dict[str, Any],
+    command_started_at: datetime,
+) -> list[str]:
+    """Return fresh Generic charger state/power evidence after a start."""
+    evidence: list[str] = []
+    status_entity = str(params.get("charger_status_entity") or "").strip()
+    if status_entity:
+        status = hass.states.get(status_entity)
+        status_value = str(getattr(status, "state", "") or "").strip().lower()
+        status_updated_at = (
+            getattr(status, "last_reported", None)
+            or getattr(status, "last_updated", None)
+            or getattr(status, "last_changed", None)
+        )
+        if (
+            status_value == "charging"
+            and _datetime_is_after(status_updated_at, command_started_at)
+        ):
+            evidence.append(f"{status_entity}=charging")
+
+    power_entity = str(params.get("charger_power_entity") or "").strip()
+    if power_entity:
+        power_state = hass.states.get(power_entity)
+        power_kw, available = _power_state_kw_reading(power_state)
+        power_updated_at = (
+            getattr(power_state, "last_reported", None)
+            or getattr(power_state, "last_updated", None)
+            or getattr(power_state, "last_changed", None)
+        )
+        if (
+            available
+            and power_kw > _GENERIC_ACTIVE_POWER_EPSILON_KW
+            and _datetime_is_after(power_updated_at, command_started_at)
+        ):
+            evidence.append(f"{power_entity}={power_kw:.2f}kW")
+
+    return evidence
+
+
+async def _wait_for_generic_physical_start(
+    hass: HomeAssistant,
+    params: Dict[str, Any],
+    command_started_at: datetime,
+) -> tuple[bool, str]:
+    """Require fresh Generic charger status or measured power after start."""
+    if not (
+        str(params.get("charger_status_entity") or "").strip()
+        or str(params.get("charger_power_entity") or "").strip()
+    ):
+        return False, "no Generic charger status or power readback entity is configured"
+
+    timeout_seconds = params.get(
+        "_generic_start_confirmation_timeout_seconds",
+        _GENERIC_START_CONFIRMATION_TIMEOUT_SECONDS,
+    )
+    try:
+        timeout_seconds = max(0.0, float(timeout_seconds))
+    except (TypeError, ValueError):
+        timeout_seconds = _GENERIC_START_CONFIRMATION_TIMEOUT_SECONDS
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    while True:
+        evidence = _generic_start_confirmation_evidence(
+            hass,
+            params,
+            command_started_at,
+        )
+        if evidence:
+            return True, ", ".join(sorted(evidence))
+
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False, "no fresh charging state or positive power readback"
+        await asyncio.sleep(
+            min(_GENERIC_START_CONFIRMATION_POLL_SECONDS, remaining)
+        )
 
 
 def _tesla_entity_max_fallback_amps(
@@ -4756,7 +4854,12 @@ def _generic_charger_ready_for_start(
         return True, None
 
     status_lower = state.state.lower()
-    if status_lower not in ("available", "disconnected"):
+    if status_lower not in (
+        "available",
+        "disconnected",
+        "not_plugged_in",
+        "unplugged",
+    ):
         return True, None
 
     car_present_states = {
@@ -7365,6 +7468,11 @@ async def _set_vehicle_amps_unchecked(
         amps_entity = params.get("charger_amps_entity")
         applied_amps = amps
         manual_failure = params.get("_manual_command_failure")
+        confirmation_started_at = (
+            datetime.now(dt_timezone.utc)
+            if amps > 0 and params.get("require_physical_start_confirmation")
+            else None
+        )
 
         if not switch_entity and not amps_entity:
             _LOGGER.error(
@@ -7420,6 +7528,40 @@ async def _set_vehicle_amps_unchecked(
                     hass, switch_entity, manual_failure
                 ):
                     return False
+                if confirmation_started_at is not None:
+                    confirmed, evidence = await _wait_for_generic_physical_start(
+                        hass,
+                        params,
+                        confirmation_started_at,
+                    )
+                    if not confirmed:
+                        cleanup_params = dict(params)
+                        cleanup_params.pop("require_physical_start_confirmation", None)
+                        try:
+                            await _set_vehicle_amps_unchecked(
+                                hass,
+                                config_entry,
+                                vehicle_id,
+                                0,
+                                cleanup_params,
+                            )
+                        except Exception as cleanup_error:
+                            _LOGGER.warning(
+                                "Generic charger start cleanup failed for %s: %s",
+                                vehicle_id,
+                                cleanup_error,
+                            )
+                        _LOGGER.warning(
+                            "Generic charger start was not promoted to a session: %s",
+                            evidence,
+                        )
+                        _record_manual_generic_failure(
+                            manual_failure,
+                            "start_readback",
+                            params.get("charger_power_entity")
+                            or params.get("charger_status_entity"),
+                        )
+                        return False
             _LOGGER.info(
                 "Set generic charger to %sA via %s",
                 applied_amps,

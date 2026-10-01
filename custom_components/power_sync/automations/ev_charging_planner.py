@@ -1208,7 +1208,12 @@ async def is_ev_plugged_in(
                         )
                         # Charger-level entities can show "available" even when a car is
                         # connected — fall back to connector-level entities before declaring unplugged.
-                        if not plugged and status in ("available", "disconnected"):
+                        if not plugged and status in (
+                            "available",
+                            "disconnected",
+                            "not_plugged_in",
+                            "unplugged",
+                        ):
                             _OCPP_CAR_PRESENT = {"preparing", "charging", "suspendedev", "suspendedevse", "finishing"}
                             for s in hass.states.async_all():
                                 if (s.entity_id.startswith("sensor.") and s.entity_id.endswith("_status_connector")
@@ -9203,7 +9208,7 @@ async def _start_coordinated_charging(
     no_grid_import: bool = False,
     allow_ownership_takeover: bool = False,
     cooldown_state: Optional[Any] = None,
-    require_tesla_physical_start_confirmation: bool = False,
+    require_physical_start_confirmation: bool = False,
     log_prefix: str = "EV charging",
 ) -> bool:
     """Start charging through the configured dynamic charger action."""
@@ -9233,9 +9238,12 @@ async def _start_coordinated_charging(
     )
     charger_type = params.get("charger_type", _configured_charger_type(opts))
     confirm_tesla_start = (
-        require_tesla_physical_start_confirmation and charger_type == "tesla"
+        require_physical_start_confirmation and charger_type == "tesla"
     )
-    if confirm_tesla_start:
+    confirm_generic_start = (
+        require_physical_start_confirmation and charger_type == "generic"
+    )
+    if confirm_tesla_start or confirm_generic_start:
         params["require_physical_start_confirmation"] = True
     loadpoint_id = params.get("vehicle_id") or vehicle_vin
     try:
@@ -10371,7 +10379,7 @@ class PriceLevelChargingExecutor:
             no_grid_import=self._get_settings().get("no_grid_import", False),
             allow_ownership_takeover=True,
             cooldown_state=state,
-            require_tesla_physical_start_confirmation=True,
+            require_physical_start_confirmation=True,
             log_prefix="Price-level charging",
         )
         if not success:
