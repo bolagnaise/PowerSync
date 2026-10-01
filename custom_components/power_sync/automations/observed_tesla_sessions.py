@@ -187,7 +187,10 @@ class ObservedTeslaSessionTracker:
             vehicle.get("ev_power_kw", vehicle.get("current_power_kw")),
             0.0,
         )
-        is_charging = bool(vehicle.get("is_charging")) or power_kw > ACTIVE_POWER_THRESHOLD_KW
+        power_available = vehicle.get("power_available") is not False
+        is_charging = bool(vehicle.get("is_charging")) or (
+            power_available and power_kw > ACTIVE_POWER_THRESHOLD_KW
+        )
         if is_charging:
             if self._has_other_active_session(self._session_manager, vehicle_id):
                 return
@@ -235,9 +238,9 @@ class ObservedTeslaSessionTracker:
                 vehicle.get("ev_power_kw", vehicle.get("current_power_kw")),
                 0.0,
             )
-            is_charging = (
-                bool(vehicle.get("is_charging"))
-                or power_kw > ACTIVE_POWER_THRESHOLD_KW
+            power_available = vehicle.get("power_available") is not False
+            is_charging = bool(vehicle.get("is_charging")) or (
+                power_available and power_kw > ACTIVE_POWER_THRESHOLD_KW
             )
             soc = _optional_int(vehicle.get("ev_soc", vehicle.get("current_soc")))
 

@@ -288,6 +288,25 @@ def test_stale_timestamped_charging_does_not_start_observed_session():
     assert manager.updated == []
 
 
+def test_unavailable_positive_power_does_not_claim_observed_session():
+    """Expired watts cannot create an external Tesla ownership lease."""
+    manager = _SessionManager()
+    hass = _Hass()
+    vehicles = [{
+        "vehicle_id": VIN,
+        "ev_power_kw": 7.0,
+        "power_available": False,
+        "is_charging": False,
+        "is_connected": True,
+    }]
+
+    asyncio.run(_tracker(manager, vehicles, hass).poll())
+
+    assert manager.started == []
+    assert manager.updated == []
+    assert get_ev_ownership(hass, _Entry(), VIN) == (None, None)
+
+
 def test_external_tesla_ownership_is_vin_scoped():
     manager = _SessionManager()
     hass = _Hass()

@@ -126,6 +126,9 @@ def _install_import_stubs() -> None:
     optimization_coordinator.sigenergy_capped_optimizer_limit_w = (
         lambda *args, **kwargs: None
     )
+    optimization_coordinator.battery_specs_source_by_field = (
+        lambda *args, **kwargs: {}
+    )
     sys.modules["power_sync.optimization.coordinator"] = optimization_coordinator
 
     coordinator = types.ModuleType("power_sync.coordinator")
@@ -1209,6 +1212,69 @@ def test_ble_silent_state_entity_cannot_veto_a_live_power_value():
 
     assert vehicle["ev_power_kw"] == 7.0
     assert vehicle["power_available"] is True
+
+
+def test_ble_expired_power_does_not_assert_charging_activity(monkeypatch):
+    """Expired watts cannot claim an active EV or external ownership."""
+    power_sync = _power_sync_module()
+    now = datetime.now(timezone.utc)
+    prefix = "garage_ble"
+    hass = _Hass([
+        _State(f"binary_sensor.{prefix}_status", "on", last_updated=now),
+        _State(
+            f"sensor.{prefix}_charging_state",
+            "Stopped",
+            last_updated=now - timedelta(minutes=10),
+        ),
+        _State(
+            f"sensor.{prefix}_charge_power",
+            "7.0",
+            {"unit_of_measurement": "kW"},
+            last_updated=now - timedelta(minutes=5),
+        ),
+        _State(f"sensor.{prefix}_charge_level", "78", last_updated=now),
+    ])
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"tesla_ble_entity_prefix": prefix},
+    )
+
+    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+
+    assert vehicle["ev_power_kw"] == 0.0
+    assert vehicle["power_available"] is False
+    assert vehicle["is_charging"] is False
+    assert vehicle["_power_activity_unknown"] is True
+
+    async def no_sigenergy_state(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        power_sync,
+        "_read_sigenergy_charger_state_for_entry",
+        no_sigenergy_state,
+    )
+    observations = asyncio.run(
+        power_sync._get_ev_load_observations(hass, entry, [vehicle])
+    )
+    assert observations[0].power_kw is None
+    assert observations[0].active is True
+    ev_load = importlib.import_module("power_sync.ev_load")
+    snapshot = ev_load.aggregate_ev_load(
+        observations,
+        at=now,
+    )
+    assert snapshot.quality.value == "incomplete"
+    assert snapshot.unavailable_active_keys == ("vehicle:blegarageble",)
+    normalized = ev_load.normalize_home_load(
+        1.783,
+        ev_load.HomeLoadBasis.INCLUDES_EV,
+        snapshot,
+        at=now,
+    )
+    assert normalized.non_ev_home_load_kw is None
+    assert normalized.normalization_quality.value == "incomplete"
 
 
 def test_autodetected_ble_bridge_pairs_with_single_fleet_vehicle_and_commands():

@@ -2323,6 +2323,16 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         if stale_power_contradicted_by_state:
             power_kw = 0.0
             power_available = False
+        power_activity_unknown = (
+            not power_available
+            and ble_power_observed_at is not None
+            and power_kw > 0.05
+        )
+        if power_activity_unknown:
+            # Never expose an expired numeric value as current EV power. Keep
+            # the loadpoint active/unknown marker below so Home Load remains
+            # conservative until a fresh state or measurement arrives.
+            power_kw = 0.0
         if power_kw > 0:
             ev_power_kw = power_kw
             is_connected = True
@@ -2399,9 +2409,10 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 and (
                     str(getattr(charge_state, "state", "")).strip().lower()
                     == "charging"
-                    or ev_power_kw > 0.05
+                    or (power_available and ev_power_kw > 0.05)
                 )
             ),
+            "_power_activity_unknown": power_activity_unknown,
             "_observed_at": (
                 ble_power_observed_at
                 or ble_current_observed_at
@@ -2705,7 +2716,9 @@ async def _get_ev_load_observations(hass, entry, vehicles=None):
                     or _ev_observed_at(vehicle.get("_observed_at"))
                     or observed_at
                 ),
-                active=bool(vehicle.get("is_charging")),
+                active=bool(vehicle.get("is_charging")) or bool(
+                    vehicle.get("_power_activity_unknown")
+                ),
                 measurement_kind=kind,
             )
         )
