@@ -1156,11 +1156,11 @@ def test_disable_idle_keeps_charge_by_time_deadline_feasible(
     ) == pytest.approx(3.95, abs=0.01)
 
 
-def test_disable_idle_drops_already_satisfied_charge_by_time_constraint(
+def test_disable_idle_preserves_already_satisfied_charge_by_time_constraint(
     battery_optimizer_module,
     monkeypatch,
 ):
-    """A satisfied target must not conflict with natural self-consumption."""
+    """Disable Idle must not spend SOC reserved for an explicit deadline."""
     module = battery_optimizer_module
     _select_backend(module, monkeypatch, "highs")
     optimizer = _optimizer(
@@ -1188,10 +1188,11 @@ def test_disable_idle_drops_already_satisfied_charge_by_time_constraint(
     assert result.solver_used == "highs"
     assert result.feasible is True
     assert result.lp_stats["mode_converged"] is True
-    assert all(
-        action.action == "self_consumption"
-        for action in result.schedule.actions
-    )
+    assert [action.action for action in result.schedule.actions] == [
+        "idle",
+        "idle",
+        "self_consumption",
+    ]
     assert all(
         action.battery_charge_w == pytest.approx(0.0)
         for action in result.schedule.actions
@@ -1242,7 +1243,7 @@ def test_disable_idle_deadline_reachability_respects_grid_charge_soc_cap(
     battery_optimizer_module,
     monkeypatch,
 ):
-    """No Idle still self-consumes when the charge cap makes the target unreachable."""
+    """No Idle still protects the reachable portion of an unreachable target."""
     module = battery_optimizer_module
     _select_backend(module, monkeypatch, "highs")
     optimizer = _optimizer(
@@ -1272,17 +1273,17 @@ def test_disable_idle_deadline_reachability_respects_grid_charge_soc_cap(
     assert result.solver_used == "highs"
     assert result.feasible is True
     assert result.lp_stats["mode_converged"] is True
-    assert result.schedule.actions[0].action == "self_consumption"
-    assert result.schedule.actions[0].battery_discharge_w == pytest.approx(1000.0)
+    assert result.schedule.actions[0].action == "idle"
+    assert result.schedule.actions[0].battery_discharge_w == pytest.approx(0.0)
     assert result.schedule.actions[1].soc <= 0.5001
 
 
-def test_disable_idle_self_consumes_after_last_charge_despite_deadline(
+def test_disable_idle_preserves_deadline_after_last_charge(
     battery_optimizer_module,
     monkeypatch,
     caplog,
 ):
-    """A retained feasible plan must not log its discarded hold as final."""
+    """A deadline hold remains visible after the last permitted charge slot."""
     module = battery_optimizer_module
     _select_backend(module, monkeypatch, "highs")
     optimizer = _optimizer(
@@ -1309,15 +1310,13 @@ def test_disable_idle_self_consumes_after_last_charge_despite_deadline(
 
     assert result.solver_used == "highs"
     assert result.feasible is True
-    assert result.lp_stats["mode_converged"] is False
-    assert result.lp_stats["fallback_reason"] == (
-        "mode_projection_infeasible_projected_highs"
-    )
+    assert result.lp_stats["mode_converged"] is True
     assert result.schedule.actions[0].action == "charge"
-    assert result.schedule.actions[2].action == "self_consumption"
-    assert result.schedule.actions[2].battery_discharge_w == pytest.approx(1000.0)
-    assert result.schedule.actions[2].soc < 0.595
-    assert any(
+    assert result.schedule.actions[2].action == "idle"
+    assert result.schedule.actions[2].battery_discharge_w == pytest.approx(0.0)
+    assert result.schedule.actions[2].soc >= 0.595
+    assert result.grid_import_w[2] == pytest.approx(1000.0)
+    assert not any(
         "using the previous physically projected HiGHS plan" in message
         for message in caplog.messages
     )

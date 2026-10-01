@@ -4444,7 +4444,7 @@ class BatteryOptimizer:
         if pre_window_boundary is not None and pre_window_boundary > 0:
             if (
                 pre_window_effective_target is not None
-                and pre_window_effective_target > soc_0
+                and pre_window_effective_target > 0.0
             ):
                 A_ub[len(b_ub), energy_var(pre_window_boundary)] = -1.0
                 b_ub.append(-pre_window_effective_target * cap)
@@ -4459,9 +4459,10 @@ class BatteryOptimizer:
                 )
             else:
                 # Keep A_ub row count aligned with b_ub when the pre-window
-                # request is already satisfied by current SOC or has no
-                # positive effective deadline target. Natural self-consumption
-                # can then proceed without forcing a later grid top-up.
+                # request has no positive effective deadline target. A target
+                # below the starting SOC still needs the row above: later
+                # natural self-consumption must not spend the SOC reserved for
+                # the future deadline.
                 b_ub.append(0.0)
 
         solar_prefill_ceilings = self._pre_window_solar_prefill_ceilings(
@@ -7855,8 +7856,7 @@ class BatteryOptimizer:
                 # happens.
                 economic_hold = soc > self.backup_reserve
                 preserve_charge_by_time_hold = (
-                    not disable_idle
-                    and _charge_by_time_hold_required(t, soc)
+                    _charge_by_time_hold_required(t, soc)
                 )
                 preserve_recovery_hold = (
                     not disable_idle

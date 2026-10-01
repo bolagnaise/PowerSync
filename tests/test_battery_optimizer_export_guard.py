@@ -429,10 +429,10 @@ def test_grid_charge_soc_cap_caps_unreachable_deadline_without_solar(
     assert result.grid_import_w[3] == pytest.approx(3000.0)
 
 
-def test_highs_charge_by_time_deadline_is_inactive_when_starting_at_target(
+def test_highs_charge_by_time_deadline_protects_target_when_starting_at_target(
     battery_optimizer_module,
 ):
-    """Starting at the target must not force a later grid top-up."""
+    """Starting at target must protect the future deadline from later load."""
     if not battery_optimizer_module.HIGHS_AVAILABLE:
         pytest.skip("requires HiGHS LP solver")
 
@@ -465,13 +465,47 @@ def test_highs_charge_by_time_deadline_is_inactive_when_starting_at_target(
 
     assert result.feasible is True
     assert result.solver_used == "highs"
-    assert result.schedule.actions[0].action == "self_consumption"
-    assert result.schedule.actions[0].battery_discharge_w == pytest.approx(1000.0)
-    assert result.schedule.actions[1].soc == pytest.approx(0.90)
-    assert all(
-        action.battery_charge_w == pytest.approx(0.0)
-        for action in result.schedule.actions
+    assert result.schedule.actions[1].soc >= 0.995 - 1e-4
+    assert result.schedule.actions[0].battery_discharge_w == pytest.approx(0.0)
+
+
+def test_highs_charge_by_time_deadline_protects_near_full_high_load_variant(
+    battery_optimizer_module,
+):
+    """A 99.9% start must still honor a reachable 100% deadline target."""
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        grid_charge_soc_cap=1.0,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
     )
+    optimizer.pre_window_soc_target = 1.0
+    optimizer.pre_window_slot = 2
+
+    result = optimizer.optimize(
+        import_prices=[1.00, 0.05, 0.10],
+        export_prices=[0.0] * 3,
+        solar_forecast=[0.0] * 3,
+        load_forecast=[3.14, 0.0, 0.0],
+        current_soc=0.999,
+        allow_battery_export=[False] * 3,
+        block_battery_charge=[False] * 3,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * 3,
+    )
+
+    assert result.feasible is True
+    assert result.solver_used == "highs"
+    assert result.schedule.actions[1].soc >= 0.995 - 1e-4
 
 
 def test_greedy_charge_by_time_preserves_rolling_target_margin(
