@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -109,6 +110,18 @@ def _base_ns(monitoring_mode: bool, **overrides) -> dict:
     ns = dict(
         CONF_MONITORING_MODE=CONF_MONITORING_MODE,
         _LOGGER=_Logger(),
+        DEMAND_GRID_CHARGING_MAX_RESTORE_ATTEMPTS=3,
+        time=time,
+        tesla_grid_charging_enabled_from_site_info=lambda site_info: (
+            None
+            if "disallow_charge_from_grid_with_solar_installed"
+            not in site_info.get("components", {})
+            else not bool(
+                site_info["components"][
+                    "disallow_charge_from_grid_with_solar_installed"
+                ]
+            )
+        ),
         entry=SimpleNamespace(
             entry_id="entry-1",
             options={CONF_MONITORING_MODE: monitoring_mode},
@@ -250,6 +263,25 @@ class _TeslaCoordinator:
         return True
 
 
+class _FieldAbsentTeslaCoordinator:
+    def __init__(self, outcomes):
+        self.grid_charging_calls: list = []
+        self.outcomes = list(outcomes)
+        self.readbacks: list = []
+
+    async def set_grid_charging_enabled(self, enabled: bool) -> bool:
+        self.grid_charging_calls.append(enabled)
+        return False
+
+    async def set_grid_charging_enabled_outcome(self, enabled: bool):
+        self.grid_charging_calls.append(enabled)
+        status = self.outcomes.pop(0)
+        return SimpleNamespace(applied=False, status=status)
+
+    async def async_get_site_info(self, max_age=None):
+        return self.readbacks.pop(0) if self.readbacks else None
+
+
 def test_demand_charging_check_blocked_by_monitoring_mode():
     dc_coordinator = _DemandChargeCoordinator()
     ts_coordinator = _TeslaCoordinator()
@@ -301,6 +333,7 @@ def _demand_callback_namespace(
     currently_disabled=False,
     peak_start=None,
     peak_end=None,
+    tesla_coordinator=None,
 ):
     peak_start = peak_start or (now + timedelta(minutes=1))
     peak_end = peak_end or (now + timedelta(minutes=21))
@@ -308,7 +341,7 @@ def _demand_callback_namespace(
         peak_start=peak_start,
         peak_end=peak_end,
     )
-    ts_coordinator = _TeslaCoordinator()
+    ts_coordinator = tesla_coordinator or _TeslaCoordinator()
     entry_id = "entry-1"
     hass = SimpleNamespace(
         data={
@@ -380,6 +413,102 @@ def test_demand_charging_only_reenables_after_true_peak_end():
     _run_closure(_DEMAND_CHARGING_NODE, ns)
 
     assert ts_coordinator.grid_charging_calls == [True]
+
+
+def test_field_absent_restore_is_bounded_across_minute_and_tou_enforcement():
+    now = datetime(2026, 8, 9, 15, 15, tzinfo=timezone.utc)
+    ts_coordinator = _FieldAbsentTeslaCoordinator(
+        ["accepted_field_absent"] * 4
+    )
+    ns, _, _ = _demand_callback_namespace(
+        now,
+        currently_disabled=True,
+        peak_start=datetime(2026, 8, 9, 14, 55, tzinfo=timezone.utc),
+        peak_end=now,
+        tesla_coordinator=ts_coordinator,
+    )
+
+    # The minute callback and the TOU callback share the same enforcement
+    # state; repeated accepted-but-unobservable enables must stop at a bound.
+    _run_closure(_DEMAND_CHARGING_NODE, ns)
+    enforce = ns["_enforce_demand_grid_charging_protection"]
+    asyncio.run(enforce(ts_coordinator))
+    asyncio.run(enforce(ts_coordinator))
+    asyncio.run(enforce(ts_coordinator))
+
+    assert ts_coordinator.grid_charging_calls == [True, True, True]
+    assert ns["hass"].data["power_sync"]["entry-1"][
+        "grid_charging_disabled_for_demand"
+    ] is True
+    assert ns["hass"].data["power_sync"]["entry-1"][
+        "_demand_grid_charging_restore"
+    ]["exhausted"] is True
+
+
+def test_bounded_restore_accepts_later_explicit_read_only_confirmation():
+    now = datetime(2026, 8, 9, 15, 15, tzinfo=timezone.utc)
+    ts_coordinator = _FieldAbsentTeslaCoordinator(
+        ["accepted_field_absent"] * 3
+    )
+    ts_coordinator.readbacks.append(
+        {
+            "components": {
+                "disallow_charge_from_grid_with_solar_installed": False
+            }
+        }
+    )
+    ns, _, _ = _demand_callback_namespace(
+        now,
+        currently_disabled=True,
+        peak_start=datetime(2026, 8, 9, 14, 55, tzinfo=timezone.utc),
+        peak_end=now,
+        tesla_coordinator=ts_coordinator,
+    )
+
+    _run_closure(_DEMAND_CHARGING_NODE, ns)
+    enforce = ns["_enforce_demand_grid_charging_protection"]
+    asyncio.run(enforce(ts_coordinator))
+    asyncio.run(enforce(ts_coordinator))
+    asyncio.run(enforce(ts_coordinator))
+
+    assert ts_coordinator.grid_charging_calls == [True, True, True]
+    assert ts_coordinator.readbacks == []
+    assert ns["hass"].data["power_sync"]["entry-1"].get(
+        "_demand_grid_charging_restore"
+    ) is None
+    assert ns["hass"].data["power_sync"]["entry-1"][
+        "grid_charging_disabled_for_demand"
+    ] is False
+
+
+def test_bounded_restore_resets_for_the_next_peak_boundary():
+    now = datetime(2026, 8, 9, 15, 15, tzinfo=timezone.utc)
+    ts_coordinator = _FieldAbsentTeslaCoordinator(
+        ["accepted_field_absent"] * 5
+    )
+    ns, _, _ = _demand_callback_namespace(
+        now,
+        currently_disabled=True,
+        peak_start=datetime(2026, 8, 9, 14, 55, tzinfo=timezone.utc),
+        peak_end=now,
+        tesla_coordinator=ts_coordinator,
+    )
+
+    _run_closure(_DEMAND_CHARGING_NODE, ns)
+    enforce = ns["_enforce_demand_grid_charging_protection"]
+    asyncio.run(enforce(ts_coordinator))
+    asyncio.run(enforce(ts_coordinator))
+    asyncio.run(enforce(ts_coordinator))
+    assert ts_coordinator.grid_charging_calls == [True, True, True]
+
+    peak_start = datetime(2026, 8, 9, 14, 55, tzinfo=timezone.utc)
+    ns["dt_util"] = SimpleNamespace(now=lambda: peak_start)
+    asyncio.run(enforce(ts_coordinator))
+    assert ts_coordinator.grid_charging_calls == [True, True, True, False]
+
+    ns["dt_util"] = SimpleNamespace(now=lambda: now)
+    asyncio.run(enforce(ts_coordinator))
+    assert ts_coordinator.grid_charging_calls == [True, True, True, False, True]
 
 
 def test_demand_grid_charging_write_converges_when_boundary_changes_mid_call():

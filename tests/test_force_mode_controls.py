@@ -1086,18 +1086,27 @@ def test_tesla_grid_charging_force_helper_confirms_local_state_then_cloud_falls_
 def test_tesla_energy_coordinator_grid_charging_uses_confirmed_uncached_helper():
     source = COORDINATOR_PATH.read_text()
     tree = ast.parse(source)
-    method = _find_class_method(
+    outcome_method = _find_class_method(
+        tree,
+        "TeslaEnergyCoordinator",
+        "set_grid_charging_enabled_outcome",
+    )
+    outcome_source = ast.get_source_segment(source, outcome_method)
+    bool_method = _find_class_method(
         tree,
         "TeslaEnergyCoordinator",
         "set_grid_charging_enabled",
     )
-    method_source = ast.get_source_segment(source, method)
+    bool_source = ast.get_source_segment(source, bool_method)
 
-    assert method_source is not None
-    assert "async_set_tesla_grid_charging_confirmed(" in method_source
-    assert "async_get_site_info(" not in method_source
-    assert "if outcome.applied:" in method_source
-    assert "return False" in method_source
+    assert outcome_source is not None
+    assert bool_source is not None
+    assert "async_set_tesla_grid_charging_confirmed(" in outcome_source
+    assert "async_get_site_info(" not in outcome_source
+    assert "if outcome.applied:" in outcome_source
+    assert "return outcome" in outcome_source
+    assert "set_grid_charging_enabled_outcome(" in bool_source
+    assert ").applied" in bool_source
 
 
 def test_tesla_tou_upload_reports_accepted_before_readback_failure():

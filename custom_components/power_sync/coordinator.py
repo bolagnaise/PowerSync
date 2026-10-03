@@ -63,7 +63,11 @@ from .demand_charge_config import (
     normalize_demand_charge_billing_day,
     normalize_demand_charge_days,
 )
-from .tesla_grid_control import async_set_tesla_grid_charging_confirmed
+from .tesla_grid_control import (
+    TeslaGridWriteStatus,
+    TeslaGridWriteOutcome,
+    async_set_tesla_grid_charging_confirmed,
+)
 from .tesla_ble_mapping import (
     TeslaBleMappingError,
     parse_tesla_ble_vehicle_mapping,
@@ -3990,8 +3994,10 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self._site_info_fetch_failed = False
         _LOGGER.debug("Tesla site_info cache invalidated — next read will refetch")
 
-    async def set_grid_charging_enabled(self, enabled: bool) -> bool:
-        """Set grid charging and return only after direct readback confirms it."""
+    async def set_grid_charging_enabled_outcome(
+        self, enabled: bool
+    ) -> TeslaGridWriteOutcome:
+        """Set grid charging and return its structured direct-readback result."""
         _LOGGER.info(
             "Setting grid charging %s for site %s",
             "enabled" if enabled else "disabled",
@@ -4007,10 +4013,13 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             )
         except Exception as err:
             _LOGGER.error("Error setting grid charging: %s", err)
-            return False
+            return TeslaGridWriteOutcome(
+                TeslaGridWriteStatus.TRANSPORT_ERROR,
+                detail=str(err) or err.__class__.__name__,
+            )
         if outcome.applied:
             self.invalidate_site_info_cache()
-            return True
+            return outcome
 
         _LOGGER.error(
             "Grid charging %s did not verify for site %s (%s%s)",
@@ -4019,7 +4028,13 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             outcome.status.value,
             f": {outcome.detail}" if outcome.detail else "",
         )
-        return False
+        return outcome
+
+    async def set_grid_charging_enabled(self, enabled: bool) -> bool:
+        """Set grid charging and return only after direct readback confirms it."""
+        return (
+            await self.set_grid_charging_enabled_outcome(enabled)
+        ).applied
 
     # ------------------------------------------------------------------
     # Unified Tesla Energy Site API helper

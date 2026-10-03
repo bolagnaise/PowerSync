@@ -43,6 +43,7 @@ _discrepancy_alert_date: dict[str, str] = {}
 DISCREPANCY_ALERT_COOLDOWN = timedelta(minutes=30)
 DISCREPANCY_ALERT_DAILY_MAX = 4
 AEMO_SETTLED_SYNC_DELAY_SECONDS = 5.0
+DEMAND_GRID_CHARGING_MAX_RESTORE_ATTEMPTS = 3
 
 
 def _should_sync_sigenergy_static_tariff_on_startup(
@@ -21387,9 +21388,93 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 protection_active = latest_protection_active
                 if _aemo_dispatch_entry_data() is not current_entry_data:
                     return False, latest_protection_active
-                success = await ts_coordinator.set_grid_charging_enabled(
-                    not protection_active
+                site_id = str(getattr(ts_coordinator, "site_id", ""))
+                restore_state = current_entry_data.get(
+                    "_demand_grid_charging_restore"
                 )
+                if protection_active:
+                    # A new peak boundary must never inherit a stale restore
+                    # suppression from the previous outside-peak interval.
+                    current_entry_data.pop(
+                        "_demand_grid_charging_restore", None
+                    )
+                elif (
+                    isinstance(restore_state, dict)
+                    and restore_state.get("site_id") == site_id
+                    and restore_state.get("target_enabled") is True
+                    and restore_state.get("exhausted") is True
+                ):
+                    readback_reader = getattr(
+                        ts_coordinator,
+                        "async_get_site_info",
+                        None,
+                    )
+                    if not callable(readback_reader):
+                        return False, protection_active
+                    now_monotonic = time.monotonic()
+                    next_readback_at = float(
+                        restore_state.get("next_readback_at", 0.0)
+                    )
+                    if now_monotonic < next_readback_at:
+                        return False, protection_active
+                    restore_state["next_readback_at"] = now_monotonic + 300.0
+                    try:
+                        site_info = await readback_reader(max_age=0)
+                    except Exception as err:
+                        _LOGGER.debug(
+                            "Could not reconcile bounded Tesla grid-charging "
+                            "restore for site %s: %s",
+                            site_id,
+                            err,
+                        )
+                        return False, protection_active
+                    observed_enabled = (
+                        tesla_grid_charging_enabled_from_site_info(site_info)
+                        if isinstance(site_info, dict)
+                        else None
+                    )
+                    if observed_enabled is True:
+                        current_entry_data.pop(
+                            "_demand_grid_charging_restore", None
+                        )
+                        current_entry_data[
+                            "grid_charging_disabled_for_demand"
+                        ] = False
+                        _LOGGER.info(
+                            "Tesla grid charging enable was confirmed by a "
+                            "later read-only reconciliation for site %s",
+                            site_id,
+                        )
+                        return True, protection_active
+                    if observed_enabled is False:
+                        restore_state["last_observed_enabled"] = False
+                    return False, protection_active
+                elif not (
+                    isinstance(restore_state, dict)
+                    and restore_state.get("site_id") == site_id
+                    and restore_state.get("target_enabled") is True
+                ):
+                    current_entry_data["_demand_grid_charging_restore"] = {
+                        "site_id": site_id,
+                        "target_enabled": True,
+                        "attempts": 0,
+                    }
+
+                write_outcome = None
+                outcome_writer = getattr(
+                    ts_coordinator,
+                    "set_grid_charging_enabled_outcome",
+                    None,
+                )
+                if callable(outcome_writer):
+                    write_outcome = await outcome_writer(not protection_active)
+                    success = bool(getattr(write_outcome, "applied", False))
+                else:
+                    # Keep lightweight/test coordinators and downstream
+                    # integrations compatible with the original bool API.
+                    success = await ts_coordinator.set_grid_charging_enabled(
+                        not protection_active
+                    )
                 current_entry_data = _aemo_dispatch_entry_data()
                 if current_entry_data is None:
                     return False, latest_protection_active
@@ -21401,6 +21486,63 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         current_entry_data[
                             "grid_charging_disabled_for_demand"
                         ] = protection_active
+                        current_entry_data.pop(
+                            "_demand_grid_charging_restore", None
+                        )
+                    elif (
+                        not protection_active
+                        and write_outcome is not None
+                        and getattr(
+                            getattr(write_outcome, "status", None),
+                            "value",
+                            getattr(write_outcome, "status", None),
+                        )
+                        == "accepted_field_absent"
+                    ):
+                        restore_state = current_entry_data.setdefault(
+                            "_demand_grid_charging_restore",
+                            {
+                                "site_id": site_id,
+                                "target_enabled": True,
+                                "attempts": 0,
+                            },
+                        )
+                        if (
+                            restore_state.get("site_id") != site_id
+                            or restore_state.get("target_enabled") is not True
+                        ):
+                            restore_state.clear()
+                            restore_state.update(
+                                {
+                                    "site_id": site_id,
+                                    "target_enabled": True,
+                                    "attempts": 0,
+                                }
+                            )
+                        restore_state["attempts"] = int(
+                            restore_state.get("attempts", 0)
+                        ) + 1
+                        restore_state["last_status"] = (
+                            getattr(
+                                write_outcome.status,
+                                "value",
+                                write_outcome.status,
+                            )
+                        )
+                        if (
+                            restore_state["attempts"]
+                            >= DEMAND_GRID_CHARGING_MAX_RESTORE_ATTEMPTS
+                        ):
+                            restore_state["exhausted"] = True
+                            _LOGGER.warning(
+                                "Tesla grid charging enable was accepted but "
+                                "remained unconfirmed after %d bounded demand "
+                                "restore attempts for site %s; suppressing "
+                                "duplicate writes until the next demand "
+                                "boundary",
+                                DEMAND_GRID_CHARGING_MAX_RESTORE_ATTEMPTS,
+                                site_id,
+                            )
                     return success, protection_active
 
                 _LOGGER.info(
@@ -27568,6 +27710,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             dc_coordinator = entry_data.get("demand_charge_coordinator")
             if dc_coordinator and dc_coordinator.enabled and not entry_data.get("demand_allow_grid_charging", False):
+                restore_state = entry_data.get(
+                    "_demand_grid_charging_restore"
+                )
+                restore_exhausted = (
+                    isinstance(restore_state, dict)
+                    and restore_state.get("target_enabled") is True
+                    and restore_state.get("exhausted") is True
+                )
                 if (
                     _demand_grid_charging_protection_active(
                         entry_data=entry_data,
@@ -27588,10 +27738,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 else "enabled_outside_peak"
                             ),
                         )
-                    else:
+                    elif not restore_exhausted:
                         _LOGGER.warning(
                             "⚠️ Grid charging enforcement failed after TOU sync"
                         )
+                elif restore_exhausted:
+                    _LOGGER.debug(
+                        "Skipping duplicate Tesla grid-charging restore after "
+                        "bounded unconfirmed attempts"
+                    )
         else:
             _LOGGER.error("Failed to sync TOU schedule")
 
@@ -42342,6 +42497,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _demand_grid_charging_protection_active(current_time)
                 )
                 currently_disabled = entry_data.get("grid_charging_disabled_for_demand", False)
+                restore_state = entry_data.get(
+                    "_demand_grid_charging_restore"
+                )
+                restore_exhausted = (
+                    isinstance(restore_state, dict)
+                    and restore_state.get("target_enabled") is True
+                    and restore_state.get("exhausted") is True
+                )
 
                 if demand_grid_protection_active or currently_disabled:
                     # In or immediately before peak - force disable grid
@@ -42369,10 +42532,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             _LOGGER.info("✅ Grid charging DISABLED for demand period")
                         elif not applied_protection:
                             _LOGGER.info("Grid charging re-enabled after demand period")
-                    else:
+                    elif not restore_exhausted:
                         _LOGGER.error(
                             "Failed to enforce demand grid-charging protection"
                         )
+                elif restore_exhausted:
+                    _LOGGER.debug(
+                        "Skipping duplicate Tesla grid-charging restore after "
+                        "bounded unconfirmed attempts"
+                    )
 
             except Exception as err:
                 _LOGGER.error("Error in demand period grid charging check: %s", err)
