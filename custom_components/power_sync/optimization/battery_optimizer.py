@@ -241,6 +241,183 @@ def _fallback_ev_source_series(
             sources[vehicle_id]["grid"][slot] = remaining
     return sources
 
+
+def _reconcile_ev_sources_to_schedule(
+    ev_charge_by_vehicle_kw: dict[str, list[float]],
+    prior_sources_by_vehicle_kw: dict[str, dict[str, list[float]]],
+    schedule: OptimizationSchedule,
+    solar_kw: list[float],
+    house_load_kw: list[float],
+    grid_import_kw: list[float],
+) -> dict[str, dict[str, list[float]]] | None:
+    """Reattribute EV draw to sources available in the emitted schedule.
+
+    The LP source columns describe its incumbent before command projection and
+    Cost Neutral settlement can clip battery discharge.  They are therefore not
+    allowed to survive as a source ledger when the emitted action no longer
+    has that physical battery output.  Keep each vehicle's planned draw and
+    prefer the sources the LP selected, but cap every source by the final
+    schedule's house/solar/battery/grid balance.  Battery export is deliberately
+    removed before battery-to-EV capacity is computed.
+
+    ``None`` means the final action cannot physically supply the planned EV
+    draw with the source support retained by the LP; callers must not silently
+    trim delivery or invent a source in that case.
+    """
+    vehicle_ids = list(ev_charge_by_vehicle_kw)
+    n = max(
+        len(schedule.actions or []),
+        len(solar_kw),
+        len(house_load_kw),
+        len(grid_import_kw),
+        *(
+            len(series)
+            for series in ev_charge_by_vehicle_kw.values()
+        ),
+        0,
+    )
+    sources = {
+        vehicle_id: {
+            source: [0.0] * n for source in ("grid", "solar", "battery")
+        }
+        for vehicle_id in vehicle_ids
+    }
+    actions = schedule.actions or []
+    source_order = ("solar", "battery", "grid")
+
+    for slot in range(n):
+        target_by_vehicle = {
+            vehicle_id: max(
+                0.0,
+                float(
+                    (ev_charge_by_vehicle_kw.get(vehicle_id) or [0.0] * n)[slot]
+                    if slot < len(ev_charge_by_vehicle_kw.get(vehicle_id) or [])
+                    else 0.0
+                ),
+            )
+            for vehicle_id in vehicle_ids
+        }
+        total_ev_kw = sum(target_by_vehicle.values())
+        if total_ev_kw <= 1e-9:
+            continue
+
+        action = actions[slot] if slot < len(actions) else None
+        if action is None:
+            return None
+        solar = max(0.0, float(solar_kw[slot] if slot < len(solar_kw) else 0.0))
+        house = max(
+            0.0,
+            float(house_load_kw[slot] if slot < len(house_load_kw) else 0.0),
+        )
+        charge = max(0.0, float(action.battery_charge_w or 0.0)) / 1000.0
+        discharge = max(0.0, float(action.battery_discharge_w or 0.0)) / 1000.0
+        grid_import = max(
+            0.0,
+            float(grid_import_kw[slot] if slot < len(grid_import_kw) else 0.0),
+        )
+
+        solar_after_house = max(0.0, solar - house)
+        solar_to_battery = min(solar_after_house, charge)
+        solar_for_ev = max(0.0, solar_after_house - solar_to_battery)
+        house_deficit = max(0.0, house - solar)
+        battery_to_house = min(discharge, house_deficit)
+        # The final battery discharge can serve the EV or export.  Do not
+        # count the settled export tail as EV source capacity.
+        battery_export = max(
+            0.0,
+            discharge - max(0.0, house + total_ev_kw - solar),
+        )
+        battery_for_ev = max(
+            0.0,
+            discharge - battery_to_house - battery_export,
+        )
+        grid_to_house = max(0.0, house - min(solar, house) - battery_to_house)
+        grid_to_battery = max(0.0, charge - solar_to_battery)
+        grid_for_ev = max(0.0, grid_import - grid_to_house - grid_to_battery)
+        budgets = {
+            "grid": grid_for_ev,
+            "solar": solar_for_ev,
+            "battery": battery_for_ev,
+        }
+
+        remaining = dict(target_by_vehicle)
+        # First preserve the LP's selected source proportions, subject to the
+        # final physical budgets.  A later fill pass can move the clipped
+        # remainder to another source the LP had already selected.
+        for vehicle_id in vehicle_ids:
+            prior = prior_sources_by_vehicle_kw.get(vehicle_id, {}) or {}
+            ordered = sorted(
+                source_order,
+                key=lambda source: max(
+                    0.0,
+                    float(
+                        (prior.get(source) or [0.0] * n)[slot]
+                        if slot < len(prior.get(source) or [])
+                        else 0.0
+                    ),
+                ),
+                reverse=True,
+            )
+            for source in ordered:
+                if remaining[vehicle_id] <= 1e-9 or budgets[source] <= 1e-9:
+                    continue
+                requested = max(
+                    0.0,
+                    float(
+                        (prior.get(source) or [0.0] * n)[slot]
+                        if slot < len(prior.get(source) or [])
+                        else 0.0
+                    ),
+                )
+                allocated = min(remaining[vehicle_id], requested, budgets[source])
+                if allocated <= 0.0:
+                    continue
+                sources[vehicle_id][source][slot] += allocated
+                remaining[vehicle_id] -= allocated
+                budgets[source] -= allocated
+
+        # Fill only from source columns the LP actually used for that vehicle;
+        # this preserves source-policy decisions while correcting their final
+        # physical amount after settlement.
+        for vehicle_id in vehicle_ids:
+            if remaining[vehicle_id] <= 1e-9:
+                continue
+            prior = prior_sources_by_vehicle_kw.get(vehicle_id, {}) or {}
+            ordered = sorted(
+                source_order,
+                key=lambda source: max(
+                    0.0,
+                    float(
+                        (prior.get(source) or [0.0] * n)[slot]
+                        if slot < len(prior.get(source) or [])
+                        else 0.0
+                    ),
+                ),
+                reverse=True,
+            )
+            for source in ordered:
+                if remaining[vehicle_id] <= 1e-9 or budgets[source] <= 1e-9:
+                    continue
+                prior_value = max(
+                    0.0,
+                    float(
+                        (prior.get(source) or [0.0] * n)[slot]
+                        if slot < len(prior.get(source) or [])
+                        else 0.0
+                    ),
+                )
+                if prior_value <= 1e-9:
+                    continue
+                allocated = min(remaining[vehicle_id], budgets[source])
+                sources[vehicle_id][source][slot] += allocated
+                remaining[vehicle_id] -= allocated
+                budgets[source] -= allocated
+
+        if any(value > 1e-6 for value in remaining.values()):
+            return None
+
+    return sources
+
 # Try to import the HiGHS solver; fall back to greedy if unavailable.
 try:
     import highspy
@@ -1859,7 +2036,13 @@ class BatteryOptimizer:
         idx = 0
 
         while idx < n:
-            if idx < near_slots:
+            # Cost Neutral is settled against the executable action, not an
+            # averaged parent period.  Keep those slots at base resolution so
+            # native solar charging can fill the battery chronologically and
+            # a later cap/restore decision cannot be spread across children.
+            if cost_neutral_slots[idx]:
+                width = 1
+            elif idx < near_slots:
                 width = 1
             elif idx < mid_slots:
                 width = min(mid_width, mid_slots - idx)
@@ -3435,6 +3618,37 @@ class BatteryOptimizer:
         if ev_charge_active:
             next_offset += n_ev_vehicles * p_n
 
+        # Cost Neutral needs a physical mode witness because the public action
+        # builder naturally absorbs solar surplus whenever no explicit charge
+        # or export command survives. Keep this disjunction scoped to Cost
+        # Neutral; Profit Max and ordinary cost solves retain their existing
+        # model and aggregation.
+        cost_neutral_mode_periods = [
+            t
+            for t in range(p_n)
+            if p_cost_neutral[t]
+            and p_mode[t] in (None, "self_use", "export")
+        ]
+        cost_neutral_natural_periods = [
+            t
+            for t in cost_neutral_mode_periods
+            if p_mode[t] in (None, "self_use")
+        ]
+        cost_neutral_export_mode_offset = next_offset
+        if cost_neutral_active:
+            next_offset += p_n
+        cost_neutral_surplus_offset = next_offset
+        cost_neutral_surplus_sign_offset = next_offset
+        cost_neutral_min_surplus_offset = next_offset
+        cost_neutral_min_power_offset = next_offset
+        cost_neutral_min_capacity_offset = next_offset
+        if cost_neutral_active and ev_charge_active:
+            next_offset += p_n
+            next_offset += 4 * p_n
+        cost_neutral_saturation_offset = next_offset
+        if cost_neutral_active and not ev_charge_active:
+            next_offset += p_n
+
         energy_offset = next_offset
         num_vars = energy_offset + p_n + 1
 
@@ -3503,6 +3717,27 @@ class BatteryOptimizer:
 
         def ev_solar_exception_var(vehicle: int, t: int) -> int:
             return ev_solar_exception_binary_offset + vehicle * p_n + t
+
+        def cost_neutral_export_mode_var(t: int) -> int:
+            return cost_neutral_export_mode_offset + t
+
+        def cost_neutral_surplus_var(t: int) -> int:
+            return cost_neutral_surplus_offset + t
+
+        def cost_neutral_surplus_sign_var(t: int) -> int:
+            return cost_neutral_surplus_sign_offset + t
+
+        def cost_neutral_min_surplus_var(t: int) -> int:
+            return cost_neutral_min_surplus_offset + t
+
+        def cost_neutral_min_power_var(t: int) -> int:
+            return cost_neutral_min_power_offset + t
+
+        def cost_neutral_min_capacity_var(t: int) -> int:
+            return cost_neutral_min_capacity_offset + t
+
+        def cost_neutral_saturation_var(t: int) -> int:
+            return cost_neutral_saturation_offset + t
 
         def ev_stage_credit(stage_slot: int, t: int, efficiency: float) -> float:
             """Return period ``t``'s energy coefficient toward a stage.
@@ -3985,6 +4220,19 @@ class BatteryOptimizer:
             # charger/policy rows per vehicle-period (on, start, minimum
             # power, minimum start SOC, consume floor and preserve mode).
             A_ub_rows += 5 * p_n + 17 * n_ev_vehicles * p_n
+        if cost_neutral_active:
+            # Six rows witness a retained executable export/charge mode. The
+            # remaining rows make native solar absorption exact, including
+            # capacity saturation and total-EV surplus crossing zero.
+            A_ub_rows += 6 * len(cost_neutral_mode_periods)
+            if ev_charge_active:
+                A_ub_rows += 11 * len(cost_neutral_natural_periods)
+            else:
+                A_ub_rows += 4 * len(cost_neutral_natural_periods)
+                A_ub_rows += sum(
+                    max(0.0, p_solar[t] - p_load[t]) > 1e-9
+                    for t in cost_neutral_natural_periods
+                )
 
         A_ub = _LpMatrix((A_ub_rows, num_vars), dtype=float)
         b_ub: list[float] = []
@@ -4078,6 +4326,140 @@ class BatteryOptimizer:
                 A_ub[len(b_ub), grid_export_var(t)] = 1.0
                 A_ub[len(b_ub), grid_direction_var(t)] = slot_export_limit_kw
                 b_ub.append(slot_export_limit_kw)
+
+        if cost_neutral_active:
+            # The existing battery_to_grid variable is the settlement-facing
+            # physical intersection of battery discharge and grid export. The
+            # Cost Neutral selector only witnesses that an executable export
+            # action was retained; it does not add a solar-export action.
+            for t in cost_neutral_mode_periods:
+                export_mode = cost_neutral_export_mode_var(t)
+                export_cap = min(
+                    self.max_discharge_kw,
+                    self._grid_export_limit_kw_for_range(
+                        periods[t].start,
+                        periods[t].end,
+                        default_kw=100.0,
+                    ),
+                )
+                charge_cap = max(0.0, self.max_charge_kw)
+
+                A_ub[len(b_ub), battery_to_grid_var(t)] = -1.0
+                A_ub[len(b_ub), export_mode] = ACTION_THRESHOLD_W / 1000.0
+                b_ub.append(0.0)
+                A_ub[len(b_ub), battery_to_grid_var(t)] = 1.0
+                A_ub[len(b_ub), export_mode] = -export_cap
+                b_ub.append(0.0)
+                A_ub[len(b_ub), grid_export_var(t)] = -1.0
+                A_ub[len(b_ub), export_mode] = ACTION_THRESHOLD_W / 1000.0
+                b_ub.append(0.0)
+                A_ub[len(b_ub), discharge_var(t)] = -1.0
+                A_ub[len(b_ub), export_mode] = ACTION_THRESHOLD_W / 1000.0
+                b_ub.append(0.0)
+                A_ub[len(b_ub), charge_var(t)] = 1.0
+                A_ub[len(b_ub), export_mode] = charge_cap
+                b_ub.append(charge_cap)
+                A_ub[len(b_ub), grid_import_var(t)] = 1.0
+                A_ub[len(b_ub), export_mode] = max_grid_kw
+                b_ub.append(max_grid_kw)
+
+            for t in cost_neutral_natural_periods:
+                export_mode = cost_neutral_export_mode_var(t)
+                if ev_charge_active:
+                    base_surplus = p_solar[t] - p_load[t]
+                    max_ev_kw = sum(
+                        p_ev_max_by_vehicle[vehicle][t]
+                        for vehicle in range(n_ev_vehicles)
+                    )
+                    lower_surplus = base_surplus - max_ev_kw
+                    upper_surplus = max(0.0, base_surplus)
+                    surplus = cost_neutral_surplus_var(t)
+                    surplus_sign = cost_neutral_surplus_sign_var(t)
+                    min_surplus = cost_neutral_min_surplus_var(t)
+                    min_power = cost_neutral_min_power_var(t)
+                    min_capacity = cost_neutral_min_capacity_var(t)
+                    ev_total = [
+                        ev_charge_var(vehicle, t)
+                        for vehicle in range(n_ev_vehicles)
+                    ]
+
+                    # S = max(0, solar - house - total EV load), using the
+                    # existing charger capability bounds.
+                    A_ub[len(b_ub), surplus] = -1.0
+                    for variable in ev_total:
+                        A_ub[len(b_ub), variable] = -1.0
+                    b_ub.append(-base_surplus)
+                    A_ub[len(b_ub), surplus] = 1.0
+                    A_ub[len(b_ub), surplus_sign] = -upper_surplus
+                    b_ub.append(0.0)
+                    A_ub[len(b_ub), surplus] = 1.0
+                    for variable in ev_total:
+                        A_ub[len(b_ub), variable] = 1.0
+                    A_ub[len(b_ub), surplus_sign] = -lower_surplus
+                    b_ub.append(base_surplus - lower_surplus)
+
+                    # Natural charge is exactly min(S, native power,
+                    # available stored-energy headroom). Export mode relaxes
+                    # these rows, while the mode rows above require a real
+                    # executable export witness.
+                    A_ub[len(b_ub), charge_var(t)] = 1.0
+                    A_ub[len(b_ub), surplus] = -1.0
+                    A_ub[len(b_ub), export_mode] = -self.max_charge_kw
+                    b_ub.append(0.0)
+                    A_ub[len(b_ub), charge_var(t)] = 1.0
+                    A_ub[len(b_ub), export_mode] = -self.max_charge_kw
+                    b_ub.append(self.max_charge_kw)
+                    A_ub[len(b_ub), min_surplus] = 1.0
+                    A_ub[len(b_ub), min_power] = 1.0
+                    A_ub[len(b_ub), min_capacity] = 1.0
+                    A_ub[len(b_ub), export_mode] = 1.0
+                    b_ub.append(1.0)
+                    A_ub[len(b_ub), min_surplus] = -1.0
+                    A_ub[len(b_ub), min_power] = -1.0
+                    A_ub[len(b_ub), min_capacity] = -1.0
+                    A_ub[len(b_ub), export_mode] = -1.0
+                    b_ub.append(-1.0)
+                    A_ub[len(b_ub), charge_var(t)] = -1.0
+                    A_ub[len(b_ub), surplus] = 1.0
+                    A_ub[len(b_ub), min_surplus] = upper_surplus
+                    A_ub[len(b_ub), export_mode] = -upper_surplus
+                    b_ub.append(upper_surplus)
+                    A_ub[len(b_ub), charge_var(t)] = -1.0
+                    A_ub[len(b_ub), min_power] = self.max_charge_kw
+                    A_ub[len(b_ub), export_mode] = -self.max_charge_kw
+                    b_ub.append(0.0)
+                    A_ub[len(b_ub), energy_var(t + 1)] = -1.0
+                    A_ub[len(b_ub), min_capacity] = cap
+                    b_ub.append(0.0)
+                    A_ub[len(b_ub), discharge_var(t)] = 1.0
+                    A_ub[len(b_ub), surplus] = -1.0
+                    for variable in ev_total:
+                        A_ub[len(b_ub), variable] = -1.0
+                    A_ub[len(b_ub), export_mode] = -self.max_discharge_kw
+                    b_ub.append(-base_surplus)
+                else:
+                    q = min(
+                        self.max_charge_kw,
+                        max(0.0, p_solar[t] - p_load[t]),
+                    )
+                    saturation = cost_neutral_saturation_var(t)
+                    A_ub[len(b_ub), charge_var(t)] = 1.0
+                    A_ub[len(b_ub), export_mode] = -self.max_charge_kw
+                    b_ub.append(q)
+                    A_ub[len(b_ub), charge_var(t)] = -1.0
+                    A_ub[len(b_ub), export_mode] = -q
+                    A_ub[len(b_ub), saturation] = -q
+                    b_ub.append(-q)
+                    A_ub[len(b_ub), saturation] = 1.0
+                    A_ub[len(b_ub), export_mode] = 1.0
+                    b_ub.append(1.0)
+                    A_ub[len(b_ub), energy_var(t + 1)] = -1.0
+                    A_ub[len(b_ub), saturation] = cap
+                    b_ub.append(0.0)
+                    if q > 1e-9:
+                        A_ub[len(b_ub), discharge_var(t)] = 1.0
+                        A_ub[len(b_ub), export_mode] = -self.max_discharge_kw
+                        b_ub.append(0.0)
 
         if ev_charge_active:
             for t in range(p_n):
@@ -4579,6 +4961,20 @@ class BatteryOptimizer:
         # grid-import -> grid-export or battery -> grid arbitrage.
         for t in range(p_n):
             max_grid_export_kw = period_grid_export_limits_kw[t]
+            if (
+                p_mode[t] == "self_use"
+                and p_cost_neutral[t]
+                and p_allow_export[t]
+            ):
+                export_limit_kw = max_grid_export_kw
+                if self.max_battery_export_kw is not None:
+                    solar_surplus_kw = max(0.0, p_solar[t] - p_load[t])
+                    export_limit_kw = min(
+                        export_limit_kw,
+                        solar_surplus_kw + self.max_battery_export_kw,
+                    )
+                bounds.append((0, export_limit_kw))
+                continue
             if p_mode[t] is not None and p_mode[t] != "export":
                 solar_surplus_kw = max(0.0, p_solar[t] - p_load[t])
                 bounds.append((0, min(max_grid_export_kw, solar_surplus_kw)))
@@ -4669,10 +5065,20 @@ class BatteryOptimizer:
                     if ev_charge_active
                     else 0.0
                 )
-                upper = min(
-                    self.max_discharge_kw,
-                    net_load_kw + ev_battery_capability,
-                )
+                if p_cost_neutral[t] and p_allow_export[t]:
+                    upper = self.max_discharge_kw
+                    if self.max_battery_export_kw is not None:
+                        upper = min(
+                            upper,
+                            net_load_kw
+                            + ev_battery_capability
+                            + self.max_battery_export_kw,
+                        )
+                else:
+                    upper = min(
+                        self.max_discharge_kw,
+                        net_load_kw + ev_battery_capability,
+                    )
                 lower = min(
                     upper,
                     max(0.0, p_required_self_use[t]),
@@ -4846,6 +5252,41 @@ class BatteryOptimizer:
                         else (0.0, 0.0)
                     )
 
+        if cost_neutral_active:
+            for t in range(p_n):
+                if not p_cost_neutral[t] or p_mode[t] in (
+                    "charge",
+                    "idle",
+                ):
+                    bounds.append((0.0, 0.0))
+                elif p_mode[t] == "export":
+                    bounds.append((1.0, 1.0))
+                else:
+                    bounds.append((0.0, 1.0))
+
+            if ev_charge_active:
+                for t in range(p_n):
+                    upper_surplus = max(0.0, p_solar[t] - p_load[t])
+                    bounds.append(
+                        (0.0, upper_surplus)
+                        if p_cost_neutral[t]
+                        else (0.0, 0.0)
+                    )
+                for _ in range(4):
+                    for t in range(p_n):
+                        bounds.append(
+                            (0.0, 1.0)
+                            if t in cost_neutral_natural_periods
+                            else (0.0, 0.0)
+                        )
+            else:
+                for t in range(p_n):
+                    bounds.append(
+                        (0.0, 1.0)
+                        if t in cost_neutral_natural_periods
+                        else (0.0, 0.0)
+                    )
+
         bounds.append((soc_0 * cap, soc_0 * cap))
         for t in range(1, p_n + 1):
             upper_soc = solar_prefill_ceilings[t]
@@ -4900,6 +5341,33 @@ class BatteryOptimizer:
                     future_reservation_binary_offset + p_n,
                 )
             )
+        if cost_neutral_active:
+            integer_indices.extend(
+                range(
+                    cost_neutral_export_mode_offset,
+                    cost_neutral_export_mode_offset + p_n,
+                )
+            )
+            if ev_charge_active:
+                integer_indices.extend(
+                    range(
+                        cost_neutral_surplus_sign_offset,
+                        cost_neutral_surplus_sign_offset + p_n,
+                    )
+                )
+                for offset in (
+                    cost_neutral_min_surplus_offset,
+                    cost_neutral_min_power_offset,
+                    cost_neutral_min_capacity_offset,
+                ):
+                    integer_indices.extend(range(offset, offset + p_n))
+            else:
+                integer_indices.extend(
+                    range(
+                        cost_neutral_saturation_offset,
+                        cost_neutral_saturation_offset + p_n,
+                    )
+                )
         if ev_charge_active:
             integer_indices.extend(
                 range(
@@ -5191,6 +5659,21 @@ class BatteryOptimizer:
         grid_import, grid_export = self._grid_flows_from_schedule(
             schedule, n, solar, load
         )
+        if ev_charge_active and cost_neutral_active:
+            reconciled_sources = _reconcile_ev_sources_to_schedule(
+                ev_charge_kw_by_vehicle,
+                ev_source_kw_by_vehicle,
+                schedule,
+                solar,
+                load,
+                grid_import,
+            )
+            if reconciled_sources is None:
+                raise ValueError(
+                    "final schedule cannot physically source the planned EV draw"
+                )
+            ev_source_kw_by_vehicle = reconciled_sources
+            lp_stats["ev_sources_reconciled_to_schedule"] = True
         bonus_export = self._allocate_capped_bonus(
             grid_export,
             export_bonus_prices,
@@ -8521,6 +9004,10 @@ class BatteryOptimizer:
             )
         else:
             cost_neutral_plan = cost_neutral_plan.normalized(len(import_prices))
+        cost_neutral_settlement_active = bool(
+            cost_neutral_plan is not None
+            and any(day is not None for day in cost_neutral_plan.day_ids)
+        )
         provisional_grid_import, _ = self._grid_flows_from_schedule(
             schedule,
             len(import_prices),
@@ -8884,82 +9371,77 @@ class BatteryOptimizer:
                     idx
                 ] = target_w
         result.ev_charge_by_vehicle_w = reconciled_by_vehicle_w
-        # Reconciliation may rescale a slot's EV draw after schedule spreading,
-        # but it must not reclassify the electricity source. The solver and
-        # fallbacks have already applied each vehicle's allow-grid/solar/
-        # battery policy; inferring sources again from aggregate site flow can
-        # invent a source that vehicle explicitly disallowed.
-        prior_sources_by_vehicle = dict(result.ev_source_by_vehicle_w or {})
-        reconciled_sources_by_vehicle_w = {
-            vehicle_id: {
-                source: [0.0] * n for source in ("grid", "solar", "battery")
-            }
-            for vehicle_id in reconciled_by_vehicle_w
-        }
-        unresolved_by_vehicle_w: dict[str, list[float]] = {}
-        for vehicle_id, target_series in reconciled_by_vehicle_w.items():
-            prior_sources = prior_sources_by_vehicle.get(vehicle_id, {}) or {}
-            for idx, target_w in enumerate(target_series):
-                target_w = max(0.0, float(target_w or 0.0))
-                if target_w <= 1e-9:
-                    continue
-                prior_total_w = sum(
-                    max(
-                        0.0,
-                        float(
-                            (prior_sources.get(source, []) or [])[idx]
-                            if idx < len(prior_sources.get(source, []) or [])
-                            else 0.0
-                        ),
-                    )
-                    for source in ("grid", "solar", "battery")
-                )
-                if prior_total_w <= 1e-9:
-                    unresolved_by_vehicle_w.setdefault(
-                        vehicle_id, [0.0] * n
-                    )[idx] = target_w
-                    continue
-                for source in ("grid", "solar", "battery"):
-                    prior_series = prior_sources.get(source, []) or []
-                    prior_w = (
-                        max(0.0, float(prior_series[idx] or 0.0))
-                        if idx < len(prior_series)
-                        else 0.0
-                    )
-                    reconciled_sources_by_vehicle_w[vehicle_id][source][idx] = (
-                        target_w * prior_w / prior_total_w
-                    )
-
-        if unresolved_by_vehicle_w:
-            unresolved_sources_kw = _fallback_ev_source_series(
+        if cost_neutral_settlement_active:
+            prior_sources_by_vehicle_w = dict(result.ev_source_by_vehicle_w or {})
+            reconciled_sources = _reconcile_ev_sources_to_schedule(
                 {
                     vehicle_id: [value / 1000.0 for value in series]
-                    for vehicle_id, series in unresolved_by_vehicle_w.items()
+                    for vehicle_id, series in reconciled_by_vehicle_w.items()
                 },
+                {
+                    vehicle_id: {
+                        source: [value / 1000.0 for value in series]
+                        for source, series in sources.items()
+                    }
+                    for vehicle_id, sources in prior_sources_by_vehicle_w.items()
+                },
+                schedule,
                 list(solar[:n]),
                 list(load[:n]),
-                [
-                    max(0.0, float(action.battery_charge_w or 0.0)) / 1000.0
-                    for action in schedule.actions[:n]
-                ],
-                [
-                    max(0.0, float(action.battery_discharge_w or 0.0)) / 1000.0
-                    for action in schedule.actions[:n]
-                ],
+                list(grid_import[:n]),
             )
-            for vehicle_id, sources in unresolved_sources_kw.items():
-                target = reconciled_sources_by_vehicle_w.setdefault(
-                    vehicle_id,
-                    {
-                        source: [0.0] * n
-                        for source in ("grid", "solar", "battery")
-                    },
+            if reconciled_sources is None:
+                _LOGGER.warning(
+                    "Final schedule cannot physically reconcile EV source ledger; "
+                    "retaining the solver source columns and marking the result"
                 )
-                for source, series in sources.items():
-                    for idx, value_kw in enumerate(series[:n]):
-                        if value_kw > 0:
-                            target[source][idx] = value_kw * 1000.0
-        result.ev_source_by_vehicle_w = reconciled_sources_by_vehicle_w
+                result.lp_stats["ev_sources_reconciled_to_schedule"] = False
+            else:
+                result.ev_source_by_vehicle_w = {
+                    vehicle_id: {
+                        source: [value * 1000 for value in series]
+                        for source, series in sources.items()
+                    }
+                    for vehicle_id, sources in reconciled_sources.items()
+                }
+                result.lp_stats["ev_sources_reconciled_to_schedule"] = True
+        else:
+            # Non-Cost-Neutral EV attribution remains the solver/fallback
+            # policy ledger; this reconciliation is only for the confirmed
+            # settlement path whose final battery export is clipped.
+            prior_sources_by_vehicle_w = dict(result.ev_source_by_vehicle_w or {})
+            result.ev_source_by_vehicle_w = {
+                vehicle_id: {
+                    source: [0.0] * n for source in ("grid", "solar", "battery")
+                }
+                for vehicle_id in reconciled_by_vehicle_w
+            }
+            for vehicle_id, target_series in reconciled_by_vehicle_w.items():
+                prior_sources = prior_sources_by_vehicle_w.get(vehicle_id, {}) or {}
+                for idx, target_w in enumerate(target_series):
+                    prior_total_w = sum(
+                        max(
+                            0.0,
+                            float(
+                                (prior_sources.get(source, []) or [])[idx]
+                                if idx < len(prior_sources.get(source, []) or [])
+                                else 0.0
+                            ),
+                        )
+                        for source in ("grid", "solar", "battery")
+                    )
+                    if prior_total_w <= 1e-9:
+                        continue
+                    for source in ("grid", "solar", "battery"):
+                        prior_series = prior_sources.get(source, []) or []
+                        prior_w = (
+                            max(0.0, float(prior_series[idx] or 0.0))
+                            if idx < len(prior_series)
+                            else 0.0
+                        )
+                        result.ev_source_by_vehicle_w[vehicle_id][source][idx] = (
+                            target_w * prior_w / prior_total_w
+                        )
         result.battery_to_grid_w = [
             max(
                 0.0,

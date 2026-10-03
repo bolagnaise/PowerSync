@@ -80,6 +80,85 @@ def _timestamps(n: int) -> list[datetime]:
     return [start + timedelta(hours=idx) for idx in range(n)]
 
 
+def test_cost_neutral_values_executable_morning_solar_charge(
+    optimizer_module, monkeypatch,
+):
+    """A near-empty sunrise solve must not sell PV the inverter will store."""
+    optimizer = optimizer_module.BatteryOptimizer(
+        capacity_wh=10_000, max_charge_w=5_000, max_discharge_w=5_000,
+        efficiency=0.92, backup_reserve=0.05, hardware_reserve=0.05,
+        interval_minutes=60, horizon_hours=8,
+    )
+    solar = [0.0, 2.0, 5.0, 8.0, 10.0, 12.0, 12.0, 10.0]
+    builds = []
+    original = optimizer._build_schedule
+
+    def capture(*args, **kwargs):
+        schedule = original(*args, **kwargs)
+        builds.append((list(args[3]), list(args[4]), schedule))
+        return schedule
+
+    monkeypatch.setattr(optimizer, "_build_schedule", capture)
+    result = optimizer.optimize(
+        import_prices=[0.17] * 5 + [0.03, 0.02, 0.02],
+        export_prices=[0.07, 0.04, 0.03, 0.03, 0.03, 0.0, -0.01, -0.01],
+        solar_forecast=solar, load_forecast=[1.0] * 8, current_soc=0.05,
+        allow_grid_charge=False, allow_battery_export=[True] * 8,
+        schedule_timestamps=_timestamps(8), cost_neutral_earnings_cap=1.87,
+        cost_neutral_slots=[True] * 8,
+    )
+    assert result.solver_used == "highs"
+    assert result.lp_stats["mode_converged"]
+    raw_charge, raw_discharge, schedule = builds[-1]
+    for idx, action in enumerate(schedule.actions):
+        assert min(raw_charge[idx], raw_discharge[idx]) < 1e-6
+        assert raw_charge[idx] == pytest.approx(
+            action.battery_charge_w / 1000.0, abs=2e-5,
+        )
+        assert action.action != "solar_export"
+        assert action.soc >= 0.05 - 1e-6
+    assert sum(result.schedule.battery_export_w[:5]) > 100
+    assert not any(result.schedule.battery_export_w[5:])
+    assert 0 < result.lp_stats["cost_neutral_planned_earnings"] <= 2.04
+
+
+def test_cost_neutral_ev_sources_match_settled_battery_export(
+    optimizer_module,
+):
+    """EV source metadata must follow the final export-capped dispatch."""
+    optimizer = optimizer_module.BatteryOptimizer(
+        capacity_wh=10_000, max_charge_w=5_000, max_discharge_w=5_000,
+        efficiency=1.0, backup_reserve=0.05, hardware_reserve=0.05,
+        max_grid_import_w=10_000, interval_minutes=60, horizon_hours=2,
+        terminal_weight=0.0,
+    )
+    ev = optimizer_module.EVChargePlan(
+        vehicle_id="car", max_power_kw=(5.0, 0.0), energy_needed_kwh=5.0,
+        charge_efficiency=1.0, min_power_kw=1.0,
+        allow_grid=(True, True), allow_solar=(True, True),
+        allow_battery=(True, True), initially_charging=True,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.2, 0.2], export_prices=[1.0, 0.0],
+        solar_forecast=[5.0, 0.0], load_forecast=[1.0, 0.0], current_soc=1.0,
+        allow_battery_export=[True, True], allow_grid_charge=False,
+        schedule_timestamps=_timestamps(2), ev_plan=ev,
+        cost_neutral_earnings_cap=0.2, cost_neutral_slots=[True, True],
+    )
+
+    action = result.schedule.actions[0]
+    sources = result.ev_source_by_vehicle_w["car"]
+    assert action.battery_discharge_w == pytest.approx(1_200.0)
+    assert result.grid_export_w[0] == pytest.approx(200.0)
+    assert sources["grid"][0] == pytest.approx(0.0)
+    assert sources["solar"][0] == pytest.approx(4_000.0)
+    assert sources["battery"][0] == pytest.approx(1_000.0)
+    assert sum(sources[source][0] for source in sources) == pytest.approx(
+        action.ev_charge_w,
+    )
+    assert result.lp_stats["ev_sources_reconciled_to_schedule"] is True
+
+
 def test_cost_neutral_caps_discretionary_battery_export_at_exact_earnings(
     optimizer_module,
 ):
