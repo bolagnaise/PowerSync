@@ -1026,6 +1026,60 @@ def test_default_blocks_battery_export_when_fit_beats_import(battery_optimizer_m
     assert max(action.battery_discharge_w for action in result.schedule.actions) <= 500.1
 
 
+@pytest.mark.parametrize("fallback_mode", ["unavailable", "lp_exception"])
+def test_known_zero_acquisition_allows_lower_fit_export_in_fallback(
+    battery_optimizer_module, monkeypatch, fallback_mode
+):
+    """Known-free inventory remains exportable when the LP falls back."""
+    monkeypatch.setattr(
+        battery_optimizer_module,
+        "HIGHS_AVAILABLE",
+        fallback_mode == "lp_exception",
+    )
+
+    def _run(known_zero):
+        optimizer = battery_optimizer_module.BatteryOptimizer(
+            capacity_wh=41930,
+            max_charge_w=10000,
+            max_discharge_w=10000,
+            max_grid_export_w=5000,
+            backup_reserve=0.20,
+            hardware_reserve=0.0,
+            efficiency=0.92,
+            interval_minutes=5,
+            horizon_hours=1,
+            terminal_weight=0.0,
+        )
+        if fallback_mode == "lp_exception":
+            monkeypatch.setattr(
+                optimizer,
+                "_solve_lp",
+                lambda *args, **kwargs: (_ for _ in ()).throw(
+                    RuntimeError("forced focused fallback")
+                ),
+            )
+        return optimizer.optimize(
+            import_prices=[0.4069, 0.0555],
+            export_prices=[0.18, 0.0],
+            solar_forecast=[0.0, 6.0],
+            load_forecast=[1.0, 1.0],
+            current_soc=0.69,
+            acquisition_cost_kwh=0.0,
+            acquisition_cost_known_zero=known_zero,
+            allow_battery_export=True,
+            allow_grid_charge=True,
+        )
+
+    unknown_result = _run(False)
+    known_result = _run(True)
+
+    assert unknown_result.solver_used == "greedy"
+    assert known_result.solver_used == "greedy"
+    assert max(unknown_result.grid_export_w) <= 1e-6
+    assert max(known_result.grid_export_w) == pytest.approx(5000.0)
+    assert known_result.schedule.actions[0].action == "export"
+
+
 def test_explicit_battery_export_true_allows_export_when_profitable(
     battery_optimizer_module,
 ):

@@ -3905,6 +3905,8 @@ def test_solar_only_charge_does_not_use_median_import_as_acquisition_cost(
     )
 
     assert acquisition_cost == 0.0
+    assert coordinator._last_acquisition_cost_known_zero is True
+    assert coordinator._last_acquisition_cost_diagnostics["known_zero_cost"] is True
 
 
 def test_solar_top_up_blends_unknown_carry_over_with_free_solar(opt_module):
@@ -4000,6 +4002,8 @@ def test_unknown_charge_provenance_keeps_median_import_acquisition_cost(
     )
 
     assert acquisition_cost == pytest.approx(0.43)
+    assert coordinator._last_acquisition_cost_known_zero is False
+    assert coordinator._last_acquisition_cost_diagnostics["known_zero_cost"] is False
 
 
 def test_dynamic_price_padding_does_not_reprice_unknown_inventory(opt_module):
@@ -4028,6 +4032,7 @@ def test_dynamic_price_padding_does_not_reprice_unknown_inventory(opt_module):
     assert coordinator._last_acquisition_cost_diagnostics == {
         "cost_kwh": 0.10,
         "source": "median_reference_fallback",
+        "known_zero_cost": False,
         "reference_price_slots": 226,
         "reference_price_median_kwh": 0.10,
         "tracking_known": False,

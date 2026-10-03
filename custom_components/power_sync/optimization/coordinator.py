@@ -5876,9 +5876,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             source: str,
             **components: float,
         ) -> float:
+            unknown_carry_over_kwh = float(
+                components.get("unknown_carry_over_kwh", 0.0) or 0.0
+            )
+            proven_solar_kwh = float(
+                components.get("proven_solar_kwh", 0.0) or 0.0
+            )
+            measured_grid_kwh = float(
+                components.get("measured_grid_kwh", 0.0) or 0.0
+            )
+            self._last_acquisition_cost_known_zero = bool(
+                float(cost) <= 1e-9
+                and unknown_carry_over_kwh <= 1e-6
+                and (
+                    proven_solar_kwh > 1e-6
+                    or (
+                        measured_grid_kwh > 1e-6
+                        and measured_grid_unit_cost is not None
+                        and measured_grid_unit_cost <= 1e-9
+                    )
+                )
+            )
             self._last_acquisition_cost_diagnostics = {
                 "cost_kwh": round(float(cost), 8),
                 "source": source,
+                "known_zero_cost": self._last_acquisition_cost_known_zero,
                 "reference_price_slots": len(import_prices),
                 "reference_price_median_kwh": round(
                     float(median_import_cost), 8
@@ -7095,6 +7117,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         manual_control_payload,
                         ev_charge_plan,
                         self._last_optimizer_price_valid_slots,
+                        bool(
+                            getattr(
+                                self,
+                                "_last_acquisition_cost_known_zero",
+                                False,
+                            )
+                        ),
                     )
                 finally:
                     if reserve_floor is not None:

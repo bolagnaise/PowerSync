@@ -803,6 +803,7 @@ class BatteryOptimizer:
         manual_control: dict[str, Any] | None = None,
         ev_plan: EVChargePlan | None = None,
         price_valid_slots: list[bool] | None = None,
+        acquisition_cost_known_zero: bool = False,
     ) -> OptimizerResult:
         """
         Run the LP optimization.
@@ -858,11 +859,17 @@ class BatteryOptimizer:
             price_valid_slots: Optional per-step mask identifying slots whose
                 prices came from the provider rather than LP padding. When
                 omitted, every supplied price is treated as valid.
+            acquisition_cost_known_zero: The stored inventory's zero cost is
+                proven by solar or measured free-grid provenance. A default
+                zero remains unknown and keeps the conservative fallback guard.
 
         Returns:
             OptimizerResult with schedule and metadata
         """
         start_time = time.monotonic()
+        self._acquisition_cost_known_zero = bool(
+            acquisition_cost_known_zero and acquisition_cost_kwh <= 0
+        )
 
         # Align all arrays to the same length
         n_steps = self._align_forecasts(
@@ -1754,8 +1761,8 @@ class BatteryOptimizer:
 
         return costs
 
-    @staticmethod
     def _is_export_profitable(
+        self,
         export_price: float,
         import_price: float,
         acquisition_cost_kwh: float,
@@ -1776,7 +1783,13 @@ class BatteryOptimizer:
         # but it should not completely block exporting energy that was acquired
         # below the export rate.
         return (
-            acquisition_cost_kwh > 0
+            (
+                acquisition_cost_kwh > 0
+                or (
+                    acquisition_cost_kwh <= 0
+                    and getattr(self, "_acquisition_cost_known_zero", False)
+                )
+            )
             and export_price >= effective_acquisition_cost_kwh
         )
 
