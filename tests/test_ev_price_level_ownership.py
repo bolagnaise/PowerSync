@@ -5351,6 +5351,11 @@ def test_auto_schedule_grid_start_prefers_tesla_site_meter_limit(monkeypatch, fa
     fake_actions._resolve_max_grid_import_kw.assert_awaited_once_with(
         hass,
         executor.config_entry,
+        {
+            "max_inverter_kw": 10.0,
+            "max_battery_charge_rate_kw": 14.7,
+            "target_battery_charge_kw": 14.7,
+        },
     )
     _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
     assert params["max_grid_import_kw"] == 16.1
@@ -6044,7 +6049,7 @@ def test_auto_schedule_deadline_uses_vehicle_max_amps(monkeypatch, fake_actions)
     _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
     assert params["max_charge_amps"] == 24
     assert params["start_amps"] == 24
-    assert params["fixed_charge_amps"] == 24
+    assert "fixed_charge_amps" not in params
     assert params["allow_stale_entity_max_override"] is False
 
 
@@ -6097,7 +6102,7 @@ def test_auto_schedule_deadline_preserves_lower_active_tesla_limit(
     params = fake_actions._action_start_ev_charging_dynamic.await_args.args[2]
     assert params["max_charge_amps"] == 15
     assert params["start_amps"] == 15
-    assert params["fixed_charge_amps"] == 15
+    assert "fixed_charge_amps" not in params
     assert "configured for 32A" in caplog.text
     assert "reports a 15A limit" in caplog.text
 
@@ -6153,7 +6158,7 @@ def test_auto_schedule_deadline_preserves_exact_wall_connector_override(
     assert params["configured_max_charge_amps"] == 32
     assert params["max_charge_amps"] == 32
     assert params["start_amps"] == 32
-    assert params["fixed_charge_amps"] == 32
+    assert "fixed_charge_amps" not in params
     assert params["allow_stale_entity_max_override"] is True
     assert params["prefer_vin_scoped_current_control"] is True
 
