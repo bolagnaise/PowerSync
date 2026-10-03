@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.12.1344] - 2026-10-03
+
+### Fixed
+
+- Removed duplicate Home Assistant core dependencies from the integration manifest so Hassfest validation accepts the package.
+
 ## [2.12.1343] - 2026-10-03
 
 ### Fixed
