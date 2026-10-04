@@ -2907,13 +2907,22 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         # Determine API base URL based on provider
         if api_provider == TESLA_PROVIDER_POWERSYNC:
             self.api_base_url = POWERSYNC_API_BASE_URL
-            _LOGGER.info(f"TeslaEnergyCoordinator initialized with PowerSync.cc proxy for site {site_id}")
+            _LOGGER.info(
+                f"TeslaEnergyCoordinator initialized with PowerSync.cc proxy for site "
+                f"{SensitiveDataFilter.obfuscate(str(site_id))}"
+            )
         elif api_provider == TESLA_PROVIDER_FLEET_API:
             self.api_base_url = fleet_base_url or FLEET_API_BASE_URL
-            _LOGGER.info(f"TeslaEnergyCoordinator initialized with Fleet API for site {site_id} (base: {self.api_base_url})")
+            _LOGGER.info(
+                f"TeslaEnergyCoordinator initialized with Fleet API for site "
+                f"{SensitiveDataFilter.obfuscate(str(site_id))} (base: {self.api_base_url})"
+            )
         else:
             self.api_base_url = TESLEMETRY_API_BASE_URL
-            _LOGGER.info(f"TeslaEnergyCoordinator initialized with Teslemetry for site {site_id}")
+            _LOGGER.info(
+                f"TeslaEnergyCoordinator initialized with Teslemetry for site "
+                f"{SensitiveDataFilter.obfuscate(str(site_id))}"
+            )
 
         super().__init__(
             hass,
@@ -4160,7 +4169,10 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
           - 5xx / network error: unknown (assume supported; probe again later)
         Results are cached in self.tesla_capabilities and persist until restart.
         """
-        _LOGGER.info("Probing Tesla Energy Site capabilities for site %s", self.site_id)
+        _LOGGER.info(
+            "Probing Tesla Energy Site capabilities for site %s",
+            SensitiveDataFilter.obfuscate(str(self.site_id)),
+        )
 
         async def _probe(name: str, path: str) -> bool:
             status, _body = await self._tesla_api_call("GET", path, max_retries=1, timeout_seconds=15)

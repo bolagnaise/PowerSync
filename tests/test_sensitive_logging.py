@@ -8,9 +8,12 @@ import importlib.util
 import io
 import logging
 from pathlib import Path
+import re
 import sys
 import textwrap
 import types
+from functools import lru_cache
+from typing import Any
 
 
 _MODULE_PATH = (
@@ -34,6 +37,151 @@ MASKED_VIN = "LRWY*********1374"
 
 def _mask(value: str) -> str:
     return f"{value[:4]}{'*' * (len(value) - 8)}{value[-4:]}"
+
+
+@lru_cache(maxsize=None)
+def _load_sensitive_filter_class(source_path_string: str):
+    source_path = Path(source_path_string)
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    class_node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SensitiveDataFilter"
+    )
+    namespace = {
+        "Any": Any,
+        "logging": logging,
+        "obfuscate_log_arg": obfuscate_log_arg,
+        "obfuscate_vin_tokens": obfuscate_vin_tokens,
+        "re": re,
+    }
+    exec(
+        compile(
+            ast.Module(body=[class_node], type_ignores=[]),
+            str(source_path),
+            "exec",
+        ),
+        namespace,
+    )
+    return namespace["SensitiveDataFilter"]
+
+
+def _load_sensitive_filter(source_path: Path):
+    return _load_sensitive_filter_class(str(source_path))()
+
+
+def _render_filtered_log(filter_instance, message: str, *args: Any) -> str:
+    record = logging.LogRecord(
+        name="power_sync.test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg=message,
+        args=args,
+        exc_info=None,
+    )
+    assert filter_instance.filter(record)
+    return record.getMessage()
+
+
+@lru_cache(maxsize=None)
+def _log_statement_for(source_path_string: str, phrase: str) -> ast.Expr:
+    source_path = Path(source_path_string)
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    node = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "info"
+        and phrase
+        in " ".join(
+            constant.value
+            for constant in ast.walk(node.value)
+            if isinstance(constant, ast.Constant)
+            and isinstance(constant.value, str)
+        )
+    )
+    return node
+
+
+def _execute_log_statement(
+    source_path: Path,
+    phrase: str,
+    filter_instance,
+    site_id: str | int,
+) -> str:
+    node = _log_statement_for(str(source_path), phrase)
+    logger = logging.getLogger(f"power_sync.test.{phrase}")
+    logger.handlers = []
+    logger.filters = []
+    logger.addFilter(filter_instance)
+    logger.setLevel(logging.INFO)
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    logger.addHandler(handler)
+    namespace = {
+        "_LOGGER": logger,
+        "CONF_TESLA_ENERGY_SITE_ID": "site_id",
+        "SensitiveDataFilter": type(filter_instance),
+        "entry": types.SimpleNamespace(data={"site_id": site_id}),
+        "self": types.SimpleNamespace(
+            api_base_url="https://example.test",
+            site_id=site_id,
+        ),
+        "site_id": site_id,
+    }
+    exec(
+        compile(ast.Module(body=[node], type_ignores=[]), str(source_path), "exec"),
+        namespace,
+    )
+    return stream.getvalue().strip()
+
+
+def test_tesla_site_id_logs_mask_all_known_emissions() -> None:
+    """Every known Tesla site-ID INFO emission masks short and deferred IDs."""
+    repo_root = Path(__file__).resolve().parents[1]
+    coordinator_path = repo_root / "custom_components" / "power_sync" / "coordinator.py"
+    init_path = repo_root / "custom_components" / "power_sync" / "__init__.py"
+    emissions = (
+        (coordinator_path, "PowerSync.cc proxy for site", "TeslaEnergyCoordinator initialized with PowerSync.cc proxy for site"),
+        (coordinator_path, "Fleet API for site", "TeslaEnergyCoordinator initialized with Fleet API for site"),
+        (coordinator_path, "Teslemetry for site", "TeslaEnergyCoordinator initialized with Teslemetry for site"),
+        (coordinator_path, "Probing Tesla Energy Site capabilities", "Probing Tesla Energy Site capabilities for site"),
+        (init_path, "Detected Tesla Fleet integration", "Detected Tesla Fleet integration - using Fleet API tokens for site"),
+        (init_path, "Using PowerSync.cc cloud proxy", "Using PowerSync.cc cloud proxy for site"),
+        (init_path, "Using Teslemetry API", "Using Teslemetry API for site"),
+    )
+    site_cases = (
+        (12345678, "********"),
+        ("1234567890123", "1234*****0123"),
+        ("123456789012345", "1234*******2345"),
+    )
+
+    for source_path, phrase, expected_prefix in emissions:
+        for site_id, expected_mask in site_cases:
+            result = _execute_log_statement(
+                source_path,
+                phrase,
+                _load_sensitive_filter(source_path),
+                site_id,
+            )
+            assert result.startswith(expected_prefix)
+            assert expected_mask in result
+            assert str(site_id) not in result
+
+
+def test_sensitive_filter_preserves_unrelated_numeric_formatting() -> None:
+    """Site-ID redaction must not change unrelated typed log arguments."""
+    repo_root = Path(__file__).resolve().parents[1]
+    source_path = repo_root / "custom_components" / "power_sync" / "coordinator.py"
+    filter_instance = _load_sensitive_filter(source_path)
+
+    assert _render_filtered_log(filter_instance, "count=%d ratio=%.3f", 42, 1.23456) == (
+        "count=42 ratio=1.235"
+    )
 
 
 def test_obfuscate_vin_tokens_masks_bare_vin_contexts() -> None:

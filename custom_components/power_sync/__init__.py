@@ -22730,12 +22730,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if tesla_api_provider == TESLA_PROVIDER_FLEET_API:
             _LOGGER.info(
                 "Detected Tesla Fleet integration - using Fleet API tokens for site %s",
-                entry.data[CONF_TESLA_ENERGY_SITE_ID]
+                SensitiveDataFilter.obfuscate(
+                    str(entry.data[CONF_TESLA_ENERGY_SITE_ID])
+                ),
             )
         elif tesla_api_provider == TESLA_PROVIDER_POWERSYNC:
-            _LOGGER.info("Using PowerSync.cc cloud proxy for site %s", entry.data[CONF_TESLA_ENERGY_SITE_ID])
+            _LOGGER.info(
+                "Using PowerSync.cc cloud proxy for site %s",
+                SensitiveDataFilter.obfuscate(
+                    str(entry.data[CONF_TESLA_ENERGY_SITE_ID])
+                ),
+            )
         else:
-            _LOGGER.info("Using Teslemetry API for site %s", entry.data[CONF_TESLA_ENERGY_SITE_ID])
+            _LOGGER.info(
+                "Using Teslemetry API for site %s",
+                SensitiveDataFilter.obfuscate(
+                    str(entry.data[CONF_TESLA_ENERGY_SITE_ID])
+                ),
+            )
 
         # Create token getter that always fetches fresh token (handles token refresh)
         # This is called before each API request to ensure we use the latest token
