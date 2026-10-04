@@ -241,6 +241,7 @@ def test_boost_runs_through_the_dynamic_controller_for_the_whole_window():
     assert "'fixed_charge_amps': 32" in source
     assert "'phase_requested_amps': 32" in source
     assert "'phase_load_management_required': True" in source
+    assert "'_user_initiated': True" in source
     # The old raw path bypassed both the controller and the phase clamp.
     assert "'action_type': 'start_ev_charging'" not in source
     assert "'skip_ownership': True" not in source

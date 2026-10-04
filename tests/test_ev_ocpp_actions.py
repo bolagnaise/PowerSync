@@ -196,6 +196,32 @@ def test_phase_management_clamps_owned_initial_target_to_worst_phase(monkeypatch
     assert status["allocated_amps"] == 10
 
 
+def test_phase_management_does_not_persist_explicit_command_marker(monkeypatch):
+    hass, now = _phase_managed_hass(currents=(20, 18, 17))
+    monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
+
+    async def accept_command(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps_unchecked", accept_command)
+    params = {
+        "owner_mode": "boost",
+        "charger_type": "generic",
+        "phases": 3,
+        "min_charge_amps": 6,
+        "max_charge_amps": 32,
+        "_user_initiated": True,
+    }
+
+    assert asyncio.run(
+        actions._set_vehicle_amps(hass, _Entry(), "boost-car", 16, params)
+    ) is True
+    cached_params = actions._phase_load_management_targets["entry-1"]["boost-car"][
+        "params"
+    ]
+    assert "_user_initiated" not in cached_params
+
+
 def test_phase_management_stale_data_stops_active_owned_charging(monkeypatch):
     hass, now = _phase_managed_hass(age_seconds=120)
     monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
@@ -11075,6 +11101,59 @@ def test_sigenergy_evdc_solar_surplus_uses_dynamic_rate_when_entity_detected(mon
     assert state["params"]["solar_control_strategy"] == "dynamic_rate"
 
 
+@pytest.mark.parametrize("stop_result", [True, False, None])
+def test_dynamic_stop_notification_requires_physical_confirmation(
+    monkeypatch, stop_result
+):
+    """Controller teardown must not announce a stop before its actuator result."""
+    vehicle_id = "5YJTEST00000000A1"
+    events: list[object] = []
+
+    async def physical_stop(*_args, **_kwargs):
+        events.append("physical_stop")
+        return stop_result
+
+    async def push(_hass, _title, message):
+        events.append(("push", message))
+
+    monkeypatch.setattr(actions, "_action_stop_ev_charging", physical_stop)
+    monkeypatch.setattr(actions, "_send_expo_push", push)
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_id: {
+            "active": True,
+            "cancel_timer": lambda: events.append("cancel_timer"),
+            "params": {
+                "owner_mode": "manual",
+                "dynamic_mode": "battery_target",
+                "charger_type": "tesla",
+                "vehicle_vin": vehicle_id,
+                "vehicle_name": "donkey",
+                "notify_on_complete": True,
+            },
+        }
+    }
+
+    result = asyncio.run(
+        actions._action_stop_ev_charging_dynamic(
+            _Hass([]),
+            _Entry(),
+            {
+                "vehicle_id": vehicle_id,
+                "stop_charging": True,
+                "stop_reason": "stopped",
+            },
+        )
+    )
+
+    assert result is (True if stop_result else False)
+    assert events.index("physical_stop") > events.index("cancel_timer")
+    pushes = [event for event in events if isinstance(event, tuple)]
+    assert bool(pushes) is bool(stop_result)
+    if pushes:
+        assert events.index(pushes[0]) > events.index("physical_stop")
+
+
 def _install_away_location_module(monkeypatch, location: str = "work") -> None:
     planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
@@ -12912,6 +12991,127 @@ def test_ble_start_still_requires_an_explicit_wake_acknowledgement(monkeypatch):
     assert result is False
     assert attempts == ["car"]  # not short-circuited by charging evidence
     assert hass.services.calls == []
+
+
+@pytest.mark.parametrize(
+    "params_extra, expected_allow_backoff",
+    [
+        ({"_user_initiated": True}, False),
+        ({}, True),
+    ],
+)
+def test_start_action_scopes_ble_backoff_bypass_to_explicit_commands(
+    monkeypatch, params_extra, expected_allow_backoff
+):
+    recorded: list[bool] = []
+
+    async def fake_start(_hass, _prefix, *, allow_backoff=True):
+        recorded.append(allow_backoff)
+        return False
+
+    monkeypatch.setattr(
+        actions,
+        "_get_ev_config",
+        lambda _entry: {"ev_provider": actions.EV_PROVIDER_TESLA_BLE},
+    )
+    monkeypatch.setattr(
+        actions, "_resolve_ble_prefix_for_vehicle", lambda *_args: "donkey"
+    )
+    monkeypatch.setattr(actions, "_is_ble_available", lambda *_args: True)
+    monkeypatch.setattr(actions, "_start_ev_charging_ble", fake_start)
+
+    result = asyncio.run(
+        actions._action_start_ev_charging(
+            _Hass([_State("switch.donkey_charger", "off")]),
+            _tesla_entry(),
+            {"vehicle_vin": "5YJTEST00000000A1", **params_extra},
+        )
+    )
+
+    assert result is False
+    assert recorded == [expected_allow_backoff]
+
+
+@pytest.mark.parametrize("kind", ["amps", "limit"])
+def test_explicit_ble_boost_prerequisite_writes_bypass_backoff(monkeypatch, kind):
+    recorded: list[bool] = []
+
+    async def fake_write(*args, allow_backoff=True, **kwargs):
+        recorded.append(allow_backoff)
+        return True
+
+    monkeypatch.setattr(
+        actions,
+        "_get_ev_config",
+        lambda _entry: {"ev_provider": actions.EV_PROVIDER_TESLA_BLE},
+    )
+    monkeypatch.setattr(
+        actions, "_resolve_ble_prefix_for_vehicle", lambda *_args: "donkey"
+    )
+    monkeypatch.setattr(actions, "_is_ble_available", lambda *_args: True)
+    helper = (
+        "_set_ev_charging_amps_ble"
+        if kind == "amps"
+        else "_set_ev_charge_limit_ble"
+    )
+    monkeypatch.setattr(actions, helper, fake_write)
+
+    if kind == "amps":
+        result = asyncio.run(
+            actions._action_set_ev_charging_amps(
+                _Hass([]),
+                _tesla_entry(),
+                {
+                    "vehicle_vin": "5YJTEST00000000A1",
+                    "amps": 29,
+                    "_user_initiated": True,
+                },
+            )
+        )
+    else:
+        result = asyncio.run(
+            actions._action_set_ev_charge_limit(
+                _Hass([]),
+                _tesla_entry(),
+                {
+                    "vehicle_vin": "5YJTEST00000000A1",
+                    "percent": 80,
+                    "_user_initiated": True,
+                },
+            )
+        )
+
+    assert result is True
+    assert recorded == [False]
+
+
+def test_ble_backoff_is_vehicle_prefix_scoped_for_explicit_boost():
+    hass = _Hass([
+        _State("button.donkey_wake_up", "unknown"),
+        _State("binary_sensor.donkey_asleep", "on"),
+        _State("button.electric_bullet_wake_up", "unknown"),
+        _State("binary_sensor.electric_bullet_asleep", "on"),
+    ])
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        hass.data["power_sync"]["_ev_ble_wake_retry_after"] = {
+            "electric_bullet": loop.time() + 60,
+        }
+        return await actions._wake_tesla_ble(
+            hass,
+            "donkey",
+            wait_timeout=0,
+            allow_backoff=False,
+        )
+
+    assert asyncio.run(run()) is False
+    assert (
+        "button",
+        "press",
+        {"entity_id": "button.donkey_wake_up"},
+    ) in hass.services.calls
+    assert all("electric_bullet" not in str(call) for call in hass.services.calls)
 
 
 @pytest.mark.parametrize(

@@ -18411,6 +18411,10 @@ class ChargingBoostView(HomeAssistantView):
             action_vehicle_vin = None if boost_vehicle_id == "_default" else boost_vehicle_id
             action_params = {
                 "vehicle_vin": action_vehicle_vin,
+                # This marker is intentionally transient. It lets the initial
+                # explicit Boost command bypass automatic BLE wake backoff;
+                # dynamic session state does not persist it to later ticks.
+                "_user_initiated": True,
             }
             warnings: list[str] = []
 

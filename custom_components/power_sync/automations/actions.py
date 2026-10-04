@@ -2498,7 +2498,12 @@ def _ble_command_has_fresh_charging_evidence(
     return False
 
 
-async def _start_ev_charging_ble(hass: HomeAssistant, ble_prefix: str) -> Optional[bool]:
+async def _start_ev_charging_ble(
+    hass: HomeAssistant,
+    ble_prefix: str,
+    *,
+    allow_backoff: bool = True,
+) -> Optional[bool]:
     """Return True if confirmed, False before dispatch, None if unconfirmed."""
     charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
 
@@ -2508,7 +2513,9 @@ async def _start_ev_charging_ble(hass: HomeAssistant, ble_prefix: str) -> Option
 
     command_dispatched = False
     try:
-        if not await _wake_tesla_ble(hass, ble_prefix):
+        if not await _wake_tesla_ble(
+            hass, ble_prefix, allow_backoff=allow_backoff
+        ):
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         hass.data.setdefault(DOMAIN, {}).setdefault("_ev_ble_start_dispatched_at", {})[ble_prefix] = command_started_at
@@ -2606,7 +2613,11 @@ async def _stop_ev_charging_ble(
 
 
 async def _set_ev_charge_limit_ble(
-    hass: HomeAssistant, ble_prefix: str, percent: int
+    hass: HomeAssistant,
+    ble_prefix: str,
+    percent: int,
+    *,
+    allow_backoff: bool = True,
 ) -> Optional[bool]:
     """Set EV charge limit via Tesla BLE."""
     limit_entity = TESLA_BLE_NUMBER_CHARGING_LIMIT.format(prefix=ble_prefix)
@@ -2617,7 +2628,9 @@ async def _set_ev_charge_limit_ble(
 
     command_dispatched = False
     try:
-        if not await _wake_tesla_ble(hass, ble_prefix):
+        if not await _wake_tesla_ble(
+            hass, ble_prefix, allow_backoff=allow_backoff
+        ):
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
@@ -2646,6 +2659,7 @@ async def _set_ev_charging_amps_ble(
     allow_stale_entity_max_override: bool = False,
     configured_max_amps: Optional[int] = None,
     params: Optional[dict] = None,
+    allow_backoff: bool = True,
 ) -> Optional[bool]:
     """Set EV charging amps via Tesla BLE."""
     amps_entity = TESLA_BLE_NUMBER_CHARGING_AMPS.format(prefix=ble_prefix)
@@ -2683,7 +2697,9 @@ async def _set_ev_charging_amps_ble(
     try:
         if not _ble_command_has_fresh_charging_evidence(
             hass, ble_prefix
-        ) and not await _wake_tesla_ble(hass, ble_prefix):
+        ) and not await _wake_tesla_ble(
+            hass, ble_prefix, allow_backoff=allow_backoff
+        ):
             return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
@@ -5216,7 +5232,11 @@ async def _action_start_ev_charging(
         if _is_ble_available(hass, ble_prefix):
             hass.data.setdefault(DOMAIN, {}).setdefault("_ev_ble_start_dispatched_at", {}).pop(ble_prefix, None)
             command_started_at = datetime.now(dt_timezone.utc)
-            result = await _start_ev_charging_ble(hass, ble_prefix)
+            result = await _start_ev_charging_ble(
+                hass,
+                ble_prefix,
+                allow_backoff=not bool(params.get("_user_initiated")),
+            )
             if result is None:
                 # A sent BLE command can start charging after its local
                 # readback times out. Settle it through the existing VIN-scoped
@@ -5628,7 +5648,12 @@ async def _action_set_ev_charge_limit(
     # Try ESPHome BLE if configured
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
-            result = await _set_ev_charge_limit_ble(hass, ble_prefix, percent)
+            result = await _set_ev_charge_limit_ble(
+                hass,
+                ble_prefix,
+                percent,
+                allow_backoff=not bool(params.get("_user_initiated")),
+            )
             if result is None:
                 return False
             if result or ev_provider == EV_PROVIDER_TESLA_BLE:
@@ -5766,6 +5791,7 @@ async def _action_set_ev_charging_amps(
                 allow_stale_entity_max_override=allow_stale_entity_max_override,
                 configured_max_amps=configured_max_amps,
                 params=params,
+                allow_backoff=not bool(params.get("_user_initiated")),
             )
             if result is None:
                 return False
@@ -7303,9 +7329,11 @@ async def _set_vehicle_amps(
         if success:
             entry_targets = _phase_load_management_targets.setdefault(entry_id, {})
             if applied_amps > 0:
+                target_params = dict(params)
+                target_params.pop("_user_initiated", None)
                 entry_targets[vehicle_id] = {
                     "amps": applied_amps,
-                    "params": dict(params),
+                    "params": target_params,
                 }
             else:
                 entry_targets.pop(vehicle_id, None)
@@ -13115,6 +13143,7 @@ async def _action_start_ev_charging_dynamic_locked(
         {
             "vehicle_id": vehicle_id,
             "_physical_stop_report": teardown_report,
+            "_user_initiated": bool(params.get("_user_initiated")),
         },
     )
     self_stopped_during_teardown = bool(
@@ -13739,6 +13768,7 @@ async def _action_stop_ev_charging_dynamic(
     released_vehicle_ids: set[str] = set()
     passive_vehicle_ids: set[str] = set()
     replaced_vehicle_ids: set[str] = set()
+    notify_after_physical_stop: Dict[str, dict] = {}
 
     from .ev_ownership import owner_family
 
@@ -13811,24 +13841,10 @@ async def _action_stop_ev_charging_dynamic(
             except Exception as e:
                 _LOGGER.warning(f"Dynamic EV: Failed to end session for {vid}: {e}")
 
-            # Send stop notification if enabled
-            notify_on_complete = state.get("params", {}).get("notify_on_complete", True)
-            if notify_on_complete:
-                try:
-                    # Look up vehicle name from VIN, fallback to param or truncated VIN
-                    vehicle_name = state.get("params", {}).get("vehicle_name")
-                    if not vehicle_name and vid:
-                        vehicle_name = _get_vehicle_name_from_vin(hass, vid)
-                    if not vehicle_name:
-                        vehicle_name = vid[:8] if len(vid) > 8 else vid
-                    reason = params.get("stop_reason", "stopped")
-                    await _send_expo_push(
-                        hass,
-                        "EV Charging",
-                        f"{vehicle_name} {reason}"
-                    )
-                except Exception as e:
-                    _LOGGER.debug(f"Could not send stop notification: {e}")
+            # A dynamic session is controller state, not physical stop
+            # confirmation. Delay the user-facing stopped notification until
+            # the downstream charger command has returned success.
+            notify_after_physical_stop[vid] = state.get("params", {})
 
             if vehicles.get(vid) is not state:
                 replaced_vehicle_ids.add(vid)
@@ -13910,6 +13926,37 @@ async def _action_stop_ev_charging_dynamic(
                 ).add(vid_to_stop)
             if not stop_success:
                 physical_stop_failed = True
+                _LOGGER.warning(
+                    "Dynamic EV charging stop for %s was not confirmed; "
+                    "no stopped notification was sent",
+                    vid_to_stop,
+                )
+            elif (
+                notify_after_physical_stop.get(vid_to_stop, {}).get(
+                    "notify_on_complete", True
+                )
+            ):
+                try:
+                    # Look up vehicle name from VIN, fallback to param or truncated VIN
+                    vehicle_name = notify_after_physical_stop[vid_to_stop].get(
+                        "vehicle_name"
+                    )
+                    if not vehicle_name and vid_to_stop:
+                        vehicle_name = _get_vehicle_name_from_vin(hass, vid_to_stop)
+                    if not vehicle_name:
+                        vehicle_name = (
+                            vid_to_stop[:8]
+                            if len(vid_to_stop) > 8
+                            else vid_to_stop
+                        )
+                    reason = params.get("stop_reason", "stopped")
+                    await _send_expo_push(
+                        hass,
+                        "EV Charging",
+                        f"{vehicle_name} {reason}",
+                    )
+                except Exception as e:
+                    _LOGGER.debug(f"Could not send stop notification: {e}")
             from .ev_ownership import record_ev_command
             record_ev_command(
                 hass,
