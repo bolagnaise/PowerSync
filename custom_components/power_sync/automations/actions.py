@@ -479,7 +479,9 @@ async def _start_generic_charger_switch(
         return False
 
 
-_GENERIC_START_CONFIRMATION_TIMEOUT_SECONDS = 5
+# Cloud-backed HA entities can lag an accepted start by tens of seconds.
+# Keep the request pending without replaying it or publishing a managed session.
+_GENERIC_START_CONFIRMATION_TIMEOUT_SECONDS = 60
 _GENERIC_START_CONFIRMATION_POLL_SECONDS = 1
 _GENERIC_ACTIVE_POWER_EPSILON_KW = 0.05
 
@@ -549,6 +551,8 @@ async def _wait_for_generic_physical_start(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
     while True:
+        if (params.get("_generic_pending_start") or {}).get("cancelled"):
+            return False, "Generic charger start was cancelled by a stop request"
         evidence = _generic_start_confirmation_evidence(
             hass,
             params,
@@ -7536,6 +7540,8 @@ async def _set_vehicle_amps_unchecked(
                         manual_failure, "pre_charge_wake", params.get("pre_charge_wake_entity")
                     )
                     return False
+                if confirmation_started_at is not None and not switch_entity:
+                    confirmation_started_at = datetime.now(dt_timezone.utc)
                 if amps_entity:
                     normalized_amps = _normalize_generic_charger_amps(
                         hass,
@@ -7552,33 +7558,43 @@ async def _set_vehicle_amps_unchecked(
                         manual_failure,
                     ):
                         return False
+                if confirmation_started_at is not None and switch_entity:
+                    # Setup/wake/current writes can take time. Their telemetry
+                    # must not confirm the later switch start.
+                    confirmation_started_at = datetime.now(dt_timezone.utc)
                 if switch_entity and not await _start_generic_charger_switch(
                     hass, switch_entity, manual_failure
                 ):
                     return False
                 if confirmation_started_at is not None:
-                    confirmed, evidence = await _wait_for_generic_physical_start(
-                        hass,
-                        params,
-                        confirmation_started_at,
-                    )
+                    confirmed = False
+                    try:
+                        confirmed, evidence = await _wait_for_generic_physical_start(
+                            hass,
+                            params,
+                            confirmation_started_at,
+                        )
+                    finally:
+                        # Cancellation during cloud settlement must compensate
+                        # the accepted start before propagating to the caller.
+                        if not confirmed:
+                            cleanup_params = dict(params)
+                            cleanup_params.pop("require_physical_start_confirmation", None)
+                            try:
+                                await _set_vehicle_amps_unchecked(
+                                    hass,
+                                    config_entry,
+                                    vehicle_id,
+                                    0,
+                                    cleanup_params,
+                                )
+                            except Exception as cleanup_error:
+                                _LOGGER.warning(
+                                    "Generic charger start cleanup failed for %s: %s",
+                                    vehicle_id,
+                                    cleanup_error,
+                                )
                     if not confirmed:
-                        cleanup_params = dict(params)
-                        cleanup_params.pop("require_physical_start_confirmation", None)
-                        try:
-                            await _set_vehicle_amps_unchecked(
-                                hass,
-                                config_entry,
-                                vehicle_id,
-                                0,
-                                cleanup_params,
-                            )
-                        except Exception as cleanup_error:
-                            _LOGGER.warning(
-                                "Generic charger start cleanup failed for %s: %s",
-                                vehicle_id,
-                                cleanup_error,
-                            )
                         _LOGGER.warning(
                             "Generic charger start was not promoted to a session: %s",
                             evidence,
@@ -13270,9 +13286,20 @@ async def _action_start_ev_charging_dynamic_locked(
             start_params = dict(params)
             if charger_type == "sigenergy":
                 start_params["_sigenergy_start_after_rate_limit"] = True
-            start_success = await _set_vehicle_amps(
-                hass, config_entry, vehicle_id, start_amps, start_params
-            )
+            pending_starts = None
+            if charger_type == "generic" and start_params.get("require_physical_start_confirmation"):
+                pending_starts = hass.data.setdefault(DOMAIN, {}).setdefault(
+                    entry_id, {}
+                ).setdefault("_pending_generic_ev_starts", {})
+                start_params["_generic_pending_start"] = {"cancelled": False}
+                pending_starts[vehicle_id] = start_params["_generic_pending_start"]
+            try:
+                start_success = await _set_vehicle_amps(
+                    hass, config_entry, vehicle_id, start_amps, start_params
+                )
+            finally:
+                if pending_starts is not None:
+                    pending_starts.pop(vehicle_id, None)
             if start_success:
                 start_amps = _phase_applied_amps(start_params, start_amps)
             if not start_success:
@@ -13452,6 +13479,21 @@ async def _action_start_ev_charging_dynamic_locked(
                         reason=reason,
                     )
                     return False
+
+    if charger_type == "generic":
+        still_allowed, _lease_id, _lease, block_reason = can_claim_ev_ownership(
+            hass, config_entry, vehicle_id,
+            owner_mode=owner_mode, allow_takeover=allow_takeover,
+        )
+        if not still_allowed:
+            # A different controller owns the loadpoint now. Do not overwrite
+            # its lease or stop its charging after our readback wait.
+            record_ev_command(
+                hass, config_entry, vehicle_id,
+                command=f"start_{owner_mode}", success=False,
+                reason=block_reason or "ownership changed during Generic start confirmation",
+            )
+            return False
 
     # Create the periodic update callback for this vehicle
     async def periodic_update(now) -> None:
@@ -13728,6 +13770,14 @@ async def _action_stop_ev_charging_dynamic(
                 "vehicle_vin": canonical_vehicle_id,
             }
             vehicle_id = canonical_vehicle_id
+
+    if params.get("_expected_state") is None:
+        pending_starts = hass.data.get(DOMAIN, {}).get(entry_id, {}).get(
+            "_pending_generic_ev_starts", {}
+        )
+        for pending_id, pending in pending_starts.items():
+            if not vehicle_id or vehicle_id == DEFAULT_VEHICLE_ID or pending_id == vehicle_id:
+                pending["cancelled"] = True
 
     vehicles = _dynamic_ev_state.get(entry_id, {})
 

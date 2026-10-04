@@ -4637,6 +4637,131 @@ def test_generic_dynamic_start_promotes_only_fresh_physical_readback():
     ]
 
 
+@pytest.mark.parametrize("readback", [
+    "status", "power", "stale", "none", "cancel", "stop", "stop_all",
+    "stop_other", "ownership",
+])
+def test_generic_cloud_start_settles_delayed_readback_safely(monkeypatch, readback):
+    """Cloud feedback at 45s must settle before session/ownership promotion."""
+    now = datetime.now(timezone.utc) - timedelta(minutes=1)
+    status = _State("sensor.garage_ev_status", "Preparing", last_updated=now)
+    power = _State("sensor.garage_ev_power", "0",
+                   {"unit_of_measurement": "W"}, last_updated=now)
+    hass = _Hass([_State("switch.garage_ev", "off"), status, power])
+    params = {
+        "dynamic_mode": "battery_target",
+        "owner_mode": "price_level_recovery",
+        "charger_type": "generic",
+        "charger_switch_entity": "switch.garage_ev",
+        "charger_status_entity": status.entity_id,
+        "charger_power_entity": power.entity_id,
+        "require_physical_start_confirmation": True,
+    }
+    elapsed = 0.0
+
+    async def advance_cloud_poll(seconds):
+        nonlocal elapsed
+        assert actions._dynamic_ev_state == {}
+        if readback != "ownership" or elapsed < 10:
+            assert hass.data["power_sync"]["entry-1"].get("ev_ownership") in (None, {})
+        assert hass.services.calls == [
+            ("switch", "turn_on", {"entity_id": "switch.garage_ev"})
+        ]
+        elapsed += seconds
+        if readback == "cancel":
+            raise asyncio.CancelledError
+        if elapsed == 10 and readback.startswith("stop"):
+            stop_params = (
+                {} if readback == "stop_all" else {
+                    "vehicle_id": "other" if readback == "stop_other" else "_default"
+                }
+            )
+            await actions._action_stop_ev_charging_dynamic(hass, _Entry(), stop_params)
+        if elapsed == 10 and readback == "ownership":
+            from power_sync.automations.ev_ownership import claim_ev_ownership
+            claim_ev_ownership(hass, _Entry(), "_default", owner_mode="manual")
+        if elapsed >= 45:
+            if readback in ("status", "stale", "stop_other", "ownership"):
+                status.state = "Charging"
+                if readback != "stale":
+                    status.last_reported = datetime.now(timezone.utc)
+            elif readback == "power":
+                power.state = "1800"
+                power.last_reported = datetime.now(timezone.utc)
+
+    async def run_start():
+        with monkeypatch.context() as patch:
+            patch.setattr(actions.asyncio, "get_running_loop",
+                          lambda: SimpleNamespace(time=lambda: elapsed))
+            patch.setattr(actions.asyncio, "sleep", advance_cloud_poll)
+            return await actions._action_start_ev_charging_dynamic(hass, _Entry(), params)
+
+    if readback == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(run_start())
+    else:
+        result = asyncio.run(run_start())
+        assert result is (readback in ("status", "power", "stop_other"))
+
+    assert hass.data["power_sync"]["entry-1"].get("_pending_generic_ev_starts") == {}
+    if readback == "ownership":
+        from power_sync.automations.ev_ownership import get_ev_ownership
+        assert actions._dynamic_ev_state == {}
+        assert get_ev_ownership(hass, _Entry(), "_default")[1]["owner_mode"] == "manual"
+        assert len(hass.services.calls) == 1
+    elif readback in ("status", "power", "stop_other"):
+        assert elapsed == 45
+        assert actions._dynamic_ev_state["entry-1"]["_default"]["active"] is True
+        assert len(hass.services.calls) == 1
+    else:
+        if readback in ("stop", "stop_all"):
+            assert elapsed == 10
+        elif readback != "cancel":
+            assert elapsed == 60
+        assert actions._dynamic_ev_state == {}
+        assert hass.data["power_sync"]["entry-1"].get("ev_ownership") in (None, {})
+        assert hass.services.calls == [
+            ("switch", "turn_on", {"entity_id": "switch.garage_ev"}),
+            ("switch", "turn_off", {"entity_id": "switch.garage_ev"}),
+        ]
+
+
+def test_generic_setup_telemetry_cannot_confirm_later_switch_start():
+    now = datetime.now(timezone.utc) - timedelta(minutes=1)
+    power = _State("sensor.garage_ev_power", "0",
+                   {"unit_of_measurement": "W"}, last_updated=now)
+    hass = _Hass([
+        _State("switch.garage_ev", "off"),
+        _State("sensor.garage_ev_status", "Preparing", last_updated=now),
+        _State("number.garage_ev_current", "5", {"min": 0, "max": 32}),
+        power,
+    ])
+
+    async def setup_only_readback(domain, service, data, blocking=True):
+        hass.services.calls.append((domain, service, data))
+        if service == "set_value":
+            power.state = "1800"
+            power.last_reported = datetime.now(timezone.utc)
+
+    hass.services.async_call = setup_only_readback
+    result = asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass, _Entry(), {
+            "dynamic_mode": "battery_target",
+            "owner_mode": "price_level_recovery",
+            "charger_type": "generic",
+            "charger_switch_entity": "switch.garage_ev",
+            "charger_amps_entity": "number.garage_ev_current",
+            "charger_status_entity": "sensor.garage_ev_status",
+            "charger_power_entity": power.entity_id,
+            "require_physical_start_confirmation": True,
+            "_generic_start_confirmation_timeout_seconds": 0,
+        },
+    ))
+    assert result is False
+    assert actions._dynamic_ev_state == {}
+    assert [call[1] for call in hass.services.calls] == ["set_value", "turn_on", "turn_off"]
+
+
 def test_generic_manual_switch_failure_keeps_safe_service_boundary():
     hass = _Hass([_State("switch.garage_ev", "off")])
     manual_failure = {}
