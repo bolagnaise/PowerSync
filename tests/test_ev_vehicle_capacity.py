@@ -10,6 +10,7 @@ import types
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Optional
 
 import pytest
 
@@ -515,6 +516,54 @@ def test_schedule_view_preview_uses_live_vehicle_charger_capability(monkeypatch)
         ("sync", "5YJTEST0000000001", 32),
         ("capability", "5YJTEST0000000001", 32),
     ]
+
+
+def test_schedule_view_preview_uses_saved_grid_price_ceiling(monkeypatch):
+    """The display plan must receive the same saved price policy as execution."""
+    tree = ast.parse(INIT_PATH.read_text())
+    method = next(
+        item
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ChargingScheduleView"
+        for item in node.body
+        if (
+            isinstance(item, ast.FunctionDef)
+            and item.name == "_get_effective_max_grid_price"
+        )
+    )
+    namespace = {
+        "__package__": "power_sync",
+        "Optional": Optional,
+        "datetime": datetime,
+    }
+    exec(
+        compile(ast.Module(body=[method], type_ignores=[]), str(INIT_PATH), "exec"),
+        namespace,
+    )
+
+    hass = SimpleNamespace()
+    calls = []
+
+    class _Settings:
+        def get_effective_max_grid_price(self, weekday):
+            calls.append(weekday)
+            return 25.0
+
+    executor = SimpleNamespace(
+        hass=hass,
+        get_settings=lambda vehicle_id: _Settings(),
+    )
+    monkeypatch.setattr(ev_planner, "_auto_schedule_executor", executor)
+
+    view = SimpleNamespace(_hass=hass)
+    ceiling = namespace["_get_effective_max_grid_price"](
+        view,
+        "5YJTEST0000000001",
+        datetime(2026, 10, 5, 7, 30),  # Monday departure policy
+    )
+
+    assert ceiling == 25.0
+    assert calls == [0]
 
 
 def test_schedule_view_preview_keeps_configured_power_without_live_capability(

@@ -17964,6 +17964,35 @@ class ChargingScheduleView(HomeAssistantView):
 
         return configured_power_kw
 
+    def _get_effective_max_grid_price(
+        self,
+        vehicle_id: str,
+        target_time: Optional[datetime],
+    ) -> Optional[float]:
+        """Return the saved Smart Schedule price ceiling for a preview."""
+        from .automations.ev_charging_planner import (
+            _as_ha_local_naive,
+            _ha_local_now_naive,
+            get_auto_schedule_executor,
+        )
+
+        executor = get_auto_schedule_executor()
+        if executor is None or getattr(executor, "hass", None) is not self._hass:
+            return None
+
+        try:
+            settings = executor.get_settings(vehicle_id)
+            policy_time = (
+                _as_ha_local_naive(target_time)
+                if target_time is not None
+                else _ha_local_now_naive()
+            )
+            return settings.get_effective_max_grid_price(policy_time.weekday())
+        except (AttributeError, TypeError, ValueError):
+            # A display-only preview must remain available for legacy or
+            # partially initialized loadpoints without an executor profile.
+            return None
+
     async def _get_vehicle_soc(self, vehicle_id: str) -> int:
         """Get current SoC for a vehicle from Home Assistant entities.
 
@@ -18145,6 +18174,11 @@ class ChargingScheduleView(HomeAssistantView):
                 except ValueError:
                     pass
 
+            max_grid_price_cents = self._get_effective_max_grid_price(
+                vehicle_id,
+                target_time,
+            )
+
             # Parse priority
             from .automations.ev_charging_planner import ChargingPriority
             try:
@@ -18223,6 +18257,7 @@ class ChargingScheduleView(HomeAssistantView):
                 target_time=target_time,
                 priority=priority,
                 charger_power_kw=charger_power_kw,
+                max_grid_price_cents=max_grid_price_cents,
                 resolved_capacity=resolved_capacity,
             )
 

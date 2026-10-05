@@ -205,6 +205,81 @@ def test_missing_import_price_owned_stop_status_and_retry(
         assert guarded_stop.await_count == 2
 
 
+def test_auto_schedule_runtime_uses_plan_departure_policy_across_midnight(
+    monkeypatch,
+):
+    """A Monday deadline keeps its strategy and price policy on Sunday night."""
+    now = datetime(2026, 10, 4, 23, 46, tzinfo=timezone.utc)  # Sunday
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+
+    captured = {}
+
+    class _Planner:
+        def _is_grid_charging_blocked_at(self, _now):
+            return False
+
+        async def should_charge_now(self, **kwargs):
+            captured.update(kwargs)
+            return True, "planned deadline window", "grid_peak"
+
+    hass = _FakeHass()
+    executor = ev_planner.AutoScheduleExecutor(
+        hass,
+        _FakeConfigEntry(),
+        planner=_Planner(),
+    )
+    executor._get_vehicle_soc = AsyncMock(return_value=50)
+    executor._resolve_effective_charger_capability = AsyncMock(return_value=None)
+    executor._start_charging = AsyncMock(return_value=False)
+
+    settings = ev_planner.AutoScheduleSettings(
+        enabled=True,
+        vehicle_id=VIN,
+        target_soc=80,
+        priority=ev_planner.ChargingPriority.SOLAR_PREFERRED,
+        departure_priorities={0: ev_planner.ChargingPriority.TIME_CRITICAL.value},
+        max_grid_price_cents=25.0,
+    )
+    state = executor.get_state(VIN)
+    state.current_plan = ev_planner.ChargingPlan(
+        vehicle_id=VIN,
+        current_soc=50,
+        target_soc=80,
+        target_time="2026-10-05T02:30:00",
+        energy_needed_kwh=20.0,
+        priority=ev_planner.ChargingPriority.TIME_CRITICAL.value,
+        max_grid_price_cents=25.0,
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time="2026-10-04T23:00:00",
+                end_time="2026-10-05T03:00:00",
+                source="grid_peak",
+                estimated_power_kw=7.0,
+                estimated_energy_kwh=20.0,
+                price_cents_kwh=31.0,
+                reason="target_deadline",
+            )
+        ],
+    )
+    state.last_plan_update = now.replace(tzinfo=None)
+
+    asyncio.run(
+        executor._evaluate_vehicle(
+            VIN,
+            settings,
+            {"battery_soc": 100, "solar_power": 0, "load_power": 1000, "grid_power": 1000},
+            current_price_cents=31.0,
+        )
+    )
+
+    assert captured["priority"] == ev_planner.ChargingPriority.TIME_CRITICAL
+    assert executor._start_charging.await_args.args[3] == "grid_peak"
+    assert executor._start_charging.await_args.kwargs["force_max_rate"] is True
+    assert "Grid price" not in state.last_decision_reason
+
+
 def test_price_log_value_formats_unknown_without_cents_suffix():
     assert ev_planner._format_price_log_value(None) == "unknown"
     assert ev_planner._format_price_log_value(12) == "12.0c"

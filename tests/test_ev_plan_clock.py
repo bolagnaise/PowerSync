@@ -31,6 +31,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
 
@@ -119,6 +121,25 @@ if not hasattr(sys.modules.get("power_sync.const"), "TESLA_INTEGRATIONS"):
     sys.modules.pop("power_sync.const", None)
 
 ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+
+
+@pytest.mark.parametrize(
+    ("target_time", "fallback_weekday", "expected_weekday"),
+    (
+        ("2026-10-05T02:30:00", 6, 0),  # Sunday night evaluates Monday's plan
+        ("2026-10-04T23:30:00", 0, 6),  # Monday morning evaluates Sunday's plan
+        (None, 6, 6),  # no deadline keeps the current-day fallback
+    ),
+)
+def test_runtime_policy_uses_current_plan_departure_weekday(
+    target_time,
+    fallback_weekday,
+    expected_weekday,
+):
+    """A plan's strategy and price gates follow its departure day across midnight."""
+    plan = SimpleNamespace(target_time=target_time)
+
+    assert ev_planner._plan_policy_weekday(plan, fallback_weekday) == expected_weekday
 
 
 VIN = "5YJTEST0000000001"

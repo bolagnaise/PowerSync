@@ -249,6 +249,20 @@ def _as_ha_local_naive(value: datetime) -> datetime:
     return value.replace(tzinfo=None)
 
 
+def _plan_policy_weekday(plan: Any, fallback_weekday: int) -> int:
+    """Return the HA-local weekday whose departure policy built a plan."""
+    target_time = getattr(plan, "target_time", None)
+    if not target_time:
+        return fallback_weekday
+    try:
+        parsed_target = datetime.fromisoformat(
+            str(target_time).replace("Z", "+00:00")
+        )
+        return _as_ha_local_naive(parsed_target).weekday()
+    except (TypeError, ValueError):
+        return fallback_weekday
+
+
 def _schedule_window_for_comparison(
     start_value: str,
     end_value: str,
@@ -6266,10 +6280,18 @@ class AutoScheduleExecutor:
         # Note: min_battery_soc affects surplus calculation (prevents discharge),
         # but does NOT block EV charging from solar or grid.
         # The Powerwall's own backup reserve handles discharge protection.
-        # HA tz; container UTC would mis-classify weekday near midnight.
-        effective_priority = settings.get_effective_priority(weekday)
+        # Use the departure-day policy that built the current plan. Falling
+        # back to the current HA-local day preserves behavior when there is
+        # no deadline or when an older plan has no target timestamp.
+        policy_weekday = _plan_policy_weekday(state.current_plan, weekday)
+        effective_priority = settings.get_effective_priority(policy_weekday)
         effective_limit_grid = settings.get_effective_limit_grid_import(weekday)
-        effective_max_price = settings.get_effective_max_grid_price(weekday)
+        plan_max_price = getattr(state.current_plan, "max_grid_price_cents", None)
+        effective_max_price = (
+            plan_max_price
+            if plan_max_price is not None
+            else settings.get_effective_max_grid_price(policy_weekday)
+        )
         effective_home_min = settings.get_effective_min_battery_to_start(weekday)
         effective_consume_level = settings.get_effective_consume_battery_level(weekday)
         effective_stop_at_floor = settings.get_effective_stop_at_battery_floor(weekday)
