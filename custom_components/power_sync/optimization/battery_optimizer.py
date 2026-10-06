@@ -2829,6 +2829,14 @@ class BatteryOptimizer:
             return allow_battery_export
 
         round_trip_eff = self.economic_round_trip_efficiency
+        effective_acquisition_costs = self._effective_export_acquisition_costs(
+            len(allow_battery_export),
+            import_prices,
+            block_battery_charge,
+            allow_grid_charge,
+            acquisition_cost_kwh,
+            grid_charge_allowed,
+        )
         future_recovery_prices = [0.0] * len(allow_battery_export)
         best_future_export = 0.0
         for idx in range(len(allow_battery_export) - 1, -1, -1):
@@ -2845,7 +2853,7 @@ class BatteryOptimizer:
                     effective_export_price,
                     import_prices[idx],
                     acquisition_cost_kwh,
-                    acquisition_cost_kwh,
+                    effective_acquisition_costs[idx],
                 )
             )
             priority_export = (
@@ -2874,7 +2882,7 @@ class BatteryOptimizer:
                     effective_export_price,
                     import_prices[idx],
                     acquisition_cost_kwh,
-                    acquisition_cost_kwh,
+                    effective_acquisition_costs[idx],
                 )
             )
             priority_export = (
