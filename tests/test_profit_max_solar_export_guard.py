@@ -341,3 +341,102 @@ def test_high_feed_in_hold_survives_the_guard_and_still_pays(
 
     unheld = _solve(optimizer_module, prices, solar, load, soc, [False] * SLOTS)
     assert _net_cost(held, prices) < _net_cost(unheld, prices)
+
+
+def test_pre_deadline_hold_preserves_reachable_charge_by_time_target(
+    optimizer_module, coordinator_methods
+):
+    """Profit Max must not lower a reachable explicit SOC deadline."""
+    imports = [0.20, 0.20]
+    exports = [0.08, 0.067]
+    solar = [5.0, 5.0]
+    load = [1.0, 1.0]
+    soc = 0.196
+    target_soc = 0.70
+    coordinator = _fake_coordinator()
+    coordinator.charge_by_time_enabled = True
+    coordinator._config.max_charge_w = 5000
+    coordinator._config.battery_capacity_wh = 1000
+    coordinator._config.max_grid_import_w = 10000
+    coordinator._optimizer = SimpleNamespace(
+        efficiency=EFFICIENCY,
+        pre_window_slot=2,
+        pre_window_soc_target=target_soc,
+    )
+
+    held_mask = coordinator_methods["_profit_max_solar_export_slots"](
+        coordinator,
+        imports,
+        exports,
+        solar,
+        load,
+        soc,
+        [False, False],
+        [True, True],
+    )
+    assert held_mask == [False, False]
+
+    optimizer = optimizer_module.BatteryOptimizer(
+        capacity_wh=1000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        max_grid_import_w=10000,
+        max_grid_export_w=10000,
+        efficiency=EFFICIENCY,
+        backup_reserve=0.15,
+        hardware_reserve=0.05,
+        terminal_weight=0.3,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+    optimizer.pre_window_slot = 2
+    optimizer.pre_window_soc_target = target_soc
+    result = optimizer.optimize(
+        import_prices=imports,
+        export_prices=exports,
+        solar_forecast=solar,
+        load_forecast=load,
+        current_soc=soc,
+        acquisition_cost_kwh=0.0,
+        acquisition_cost_known_zero=True,
+        allow_battery_export=True,
+        allow_grid_charge=True,
+        block_battery_charge=held_mask,
+        profit_max_solar_export_slots=held_mask,
+        price_valid_slots=[True, True],
+        schedule_timestamps=[
+            datetime(2026, 10, 5, 10, tzinfo=timezone(timedelta(hours=10)))
+            + timedelta(minutes=5 * index)
+            for index in range(2)
+        ],
+    )
+    assert result.feasible
+    assert result.schedule.actions[-1].soc >= target_soc - 1e-6
+
+
+def test_pre_deadline_hold_remains_allowed_when_target_is_unreachable(
+    optimizer_module, coordinator_methods
+):
+    """Do not suppress a hold when hard limits make the target unreachable."""
+    coordinator = _fake_coordinator()
+    coordinator.charge_by_time_enabled = True
+    coordinator._config.max_charge_w = 5000
+    coordinator._config.battery_capacity_wh = 1000
+    coordinator._config.max_grid_import_w = 10000
+    coordinator._optimizer = SimpleNamespace(
+        efficiency=EFFICIENCY,
+        pre_window_slot=2,
+        pre_window_soc_target=1.0,
+    )
+
+    held_mask = coordinator_methods["_profit_max_solar_export_slots"](
+        coordinator,
+        [0.20, 0.20],
+        [0.08, 0.067],
+        [5.0, 5.0],
+        [1.0, 1.0],
+        0.196,
+        [False, False],
+        [True, True],
+    )
+    assert held_mask == [True, False]

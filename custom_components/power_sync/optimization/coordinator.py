@@ -13232,6 +13232,34 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         remaining_headroom_kwh = capacity_kwh * max(
             0.0, 1.0 - max(0.0, min(1.0, current_soc))
         )
+        # A discretionary solar-export hold must not consume charge capacity
+        # needed for an otherwise reachable Charge By Time target. The LP
+        # treats a Profit Max hold as a hard charge block, so selecting a hold
+        # before the deadline can silently lower the target it enforces. Keep
+        # the provider/hardware/manual blocks in the reachability calculation;
+        # only protect capacity when those constraints still leave the target
+        # reachable without Profit Max holds.
+        deadline_target_kwh: float | None = None
+        deadline_capacity_remaining_kwh: float | None = None
+        deadline_slot_capacity_kwh: list[float] = []
+        if deadline_slot is not None:
+            target_soc = max(
+                0.0,
+                min(
+                    1.0,
+                    float(
+                        getattr(optimizer, "pre_window_soc_target", 0.0) or 0.0
+                    ),
+                ),
+            )
+            required_kwh = max(0.0, (target_soc - current_soc) * capacity_kwh)
+            deadline_slot_capacity_kwh = list(
+                future_capacity_kwh[:deadline_slot]
+            )
+            reachable_kwh = sum(deadline_slot_capacity_kwh)
+            if required_kwh > 1e-9 and reachable_kwh + 1e-9 >= required_kwh:
+                deadline_target_kwh = required_kwh
+                deadline_capacity_remaining_kwh = reachable_kwh
         margin = 0.001  # Internal 0.1c/kWh anti-churn margin; not user config.
         current_slot_status: dict[str, Any] | None = None
         rejection_counts: dict[str, int] = {}
@@ -13330,6 +13358,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     **funding_details,
                 )
                 continue
+            if (
+                deadline_target_kwh is not None
+                and deadline_capacity_remaining_kwh is not None
+                and idx < deadline_slot
+            ):
+                blocked_capacity_kwh = deadline_slot_capacity_kwh[idx]
+                if (
+                    deadline_capacity_remaining_kwh - blocked_capacity_kwh
+                    < deadline_target_kwh - 1e-9
+                ):
+                    _record_slot(
+                        idx,
+                        "charge_by_time_target_protection",
+                        **funding_details,
+                        deadline_target_kwh=round(
+                            deadline_target_kwh, 6
+                        ),
+                        deadline_capacity_remaining_kwh=round(
+                            deadline_capacity_remaining_kwh, 6
+                        ),
+                    )
+                    continue
             remaining = deferred_kwh
             for future_idx in candidates:
                 used = min(remaining, future_capacity_kwh[future_idx])
@@ -13339,6 +13389,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     break
             selected[idx] = True
             _record_slot(idx, "selected", **funding_details)
+            if (
+                deadline_target_kwh is not None
+                and deadline_capacity_remaining_kwh is not None
+                and idx < deadline_slot
+            ):
+                deadline_capacity_remaining_kwh -= deadline_slot_capacity_kwh[idx]
             remaining_headroom_kwh -= deferred_kwh
 
         self._solar_export_capability_status = {
