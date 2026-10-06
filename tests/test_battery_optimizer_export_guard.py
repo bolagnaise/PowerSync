@@ -351,6 +351,52 @@ def test_profit_max_reason_threads_through_lp_and_recharges_later(
     assert result.schedule.actions[1].battery_charge_w > 100
 
 
+def test_known_free_inventory_keeps_solar_refill_for_later_priority_export(
+    battery_optimizer_module,
+):
+    """Lower-FIT known-free export must not suppress a solar refill."""
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=1000,
+        max_charge_w=1000,
+        max_discharge_w=1000,
+        backup_reserve=0.0,
+        hardware_reserve=0.05,
+        efficiency=0.92,
+        terminal_weight=0.3,
+        interval_minutes=5,
+        horizon_hours=3,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.2163] * 36,
+        export_prices=[0.03] * 12 + [0.28] * 12 + [0.03] * 12,
+        solar_forecast=[1.0] * 12 + [0.0] * 24,
+        load_forecast=[0.1] * 36,
+        current_soc=0.05,
+        acquisition_cost_kwh=0.0,
+        acquisition_cost_known_zero=True,
+        allow_battery_export=True,
+        allow_grid_charge=True,
+        priority_export_enabled=True,
+        priority_export_slots=[False] * 12 + [True] * 12 + [False] * 12,
+    )
+
+    assert result.feasible is True
+    assert (
+        sum(action.battery_charge_w for action in result.schedule.actions) / 12000
+        > 0.8
+    )
+    assert sum(result.grid_export_w[12:24]) / 12000 > 0.1
+    # The refill is solar-only; known-free inventory must not authorize
+    # grid-import-to-export passthrough in the lower-FIT slots.
+    assert max(result.grid_import_w[:12]) == pytest.approx(0.0, abs=0.1)
+    assert max(
+        action.battery_charge_w for action in result.schedule.actions[:12]
+    ) == pytest.approx(900.0, abs=0.1)
+
+
 def test_grid_import_limit_still_allows_solar_assisted_full_charge(
     battery_optimizer_module,
 ):

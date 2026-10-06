@@ -3194,6 +3194,25 @@ class BatteryOptimizer:
                 )
             )
 
+        def _solar_only_export_refill_slot(t: int) -> bool:
+            """Return whether a low-FIT slot may refill from solar only.
+
+            Known-free stored energy can make a lower-FIT export slot
+            profitable without making grid-import-to-export passthrough safe.
+            Preserve that distinction while allowing forecast solar to refill
+            the battery for a later premium export window.
+            """
+            return (
+                p_mode[t] in (None, "self_use")
+                and not p_block_charge[t]
+                and not _priority_export_slot(t)
+                and getattr(self, "_acquisition_cost_known_zero", False)
+                and _profitable_export_slot(t)
+                and p_price_valid_slots[t]
+                and not future_self_consumption_values[t]
+                and p_solar[t] > p_load[t] + 1e-9
+            )
+
         def _cost_neutral_export_slot(t: int) -> bool:
             """Return whether today's positive-FIT slot may cover daily costs."""
             day = p_cost_neutral_days[t]
@@ -3242,9 +3261,9 @@ class BatteryOptimizer:
 
         # Periods where the LP pins battery_charge to zero (see charge bounds
         # below): explicitly blocked windows, or export-profitable slots with
-        # no future self-consumption value. No charge — solar or grid — can
-        # enter the battery here, so these periods contribute nothing to the
-        # reachable SOC used for feasibility caps and prefill ceilings.
+        # no future self-consumption value and no solar surplus. Solar-only
+        # refill remains feasible in a lower-FIT slot so a later premium
+        # export can use forecast solar, while grid passthrough stays blocked.
         charge_pinned_periods = []
         for t in range(p_n):
             export_profitable_slot = _profitable_export_slot(t)
@@ -3256,6 +3275,7 @@ class BatteryOptimizer:
                     export_profitable_slot
                     and p_price_valid_slots[t]
                     and not future_self_consumption_values[t]
+                    and not _solar_only_export_refill_slot(t)
                 )
             )
 
@@ -3280,6 +3300,7 @@ class BatteryOptimizer:
                     (
                         False
                         if p_mode[t] == "self_use"
+                        or _solar_only_export_refill_slot(t)
                         else manual_grid_charge
                         or (allow_grid_charge and p_grid_charge_allowed[t])
                     ),
@@ -4157,13 +4178,20 @@ class BatteryOptimizer:
                     if (
                         p_block_charge[t]
                         or _priority_export_slot(t)
-                        or (
-                            export_profitable_slot
-                            and p_price_valid_slots[t]
-                            and not future_self_consumption_values[t]
-                        )
                     ):
                         return 0.0
+                    if (
+                        export_profitable_slot
+                        and p_price_valid_slots[t]
+                        and not future_self_consumption_values[t]
+                    ):
+                        return (
+                            self._charge_limit_kw(
+                                p_load[t], p_solar[t], False
+                            )
+                            if _solar_only_export_refill_slot(t)
+                            else 0.0
+                        )
                     return self._charge_limit_kw(
                         p_load[t],
                         p_solar[t],
@@ -5028,19 +5056,28 @@ class BatteryOptimizer:
             export_profitable_slot = _profitable_export_slot(t)
             priority_export_slot = _priority_export_slot(t)
             future_self_consumption_value = future_self_consumption_values[t]
-            if p_block_charge[t] or priority_export_slot or (
+            solar_only_export_refill = _solar_only_export_refill_slot(t)
+            if p_block_charge[t] or priority_export_slot:
+                # Explicit export/charge blocks retain their existing hard
+                # zero-charge behavior, including during solar surplus.
+                bounds.append((0, 0.0))
+            elif (
                 export_profitable_slot
                 and p_price_valid_slots[t]
                 and not future_self_consumption_value
             ):
-                # Do not charge during explicitly blocked export windows
-                # (for example fixed Flow Power Happy Hour export windows).
-                # A generic positive FiT is not enough to block charging:
-                # Octopus IOG can have 6.9p import and 12p export across the
-                # whole off-peak window. Permit charging there only when it has
-                # later self-consumption value, not for grid-import->export
-                # passthrough.
-                bounds.append((0, 0.0))
+                # A generic positive FiT is not enough to permit
+                # grid-import-to-export passthrough. If forecast solar is
+                # available, admit only its surplus so it can be stored for a
+                # later premium window.
+                bounds.append((
+                    0,
+                    self._charge_limit_kw(
+                        p_load[t], p_solar[t], False
+                    )
+                    if solar_only_export_refill
+                    else 0.0,
+                ))
             elif not allow_grid_charge:
                 bounds.append((
                     0,
