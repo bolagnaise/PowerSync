@@ -7301,6 +7301,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     soc,
                     solar_forecast=solar_forecast,
                     load_forecast=load_forecast,
+                    manual_control_projection=manual_control_projection,
                 )
             reference_export_windows = self._reference_export_bridge_windows(
                 schedule,
@@ -7318,11 +7319,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     battery_export_allowed,
                     export_reserve_floor=post_solve_export_floor,
                     export_prices=spread_export_prices,
+                    manual_control_projection=manual_control_projection,
                 )
             schedule = self._bridge_short_export_gaps(
                 schedule,
                 cost_neutral_export_prices,
                 authoritative_reserve_floor=post_solve_export_floor,
+                manual_control_projection=manual_control_projection,
             )
             self._last_update_time = dt_util.now()
 
@@ -7422,6 +7425,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         soc,
                         solar_forecast=solar_forecast,
                         load_forecast=load_forecast,
+                        manual_control_projection=manual_control_projection,
                     )
                 if self._should_spread_export_schedule():
                     schedule = self._spread_export_schedule(
@@ -7429,11 +7433,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         battery_export_allowed,
                         export_reserve_floor=post_solve_export_floor,
                         export_prices=spread_export_prices,
+                        manual_control_projection=manual_control_projection,
                     )
                 schedule = self._bridge_short_export_gaps(
                     schedule,
                     cost_neutral_export_prices,
                     authoritative_reserve_floor=post_solve_export_floor,
+                    manual_control_projection=manual_control_projection,
                 )
                 if self._should_apply_offgrid_overlay():
                     schedule = self._apply_offgrid_overlay(
@@ -8874,6 +8880,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         export_reserve_floor: float | list[float] | None = None,
         *,
         authoritative_reserve_floor: float | list[float] | None = None,
+        manual_control_projection: ManualControlProjection | None = None,
     ) -> OptimizationSchedule:
         """Keep export mode through one-slot self-use islands between exports."""
         if (
@@ -8893,6 +8900,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         interval = max(1, int(getattr(self._config, "interval_minutes", 5) or 5))
         max_gap_slots = 1
         bridged = 0
+        fixed_manual_positions = self._manual_control_slot_indices(
+            actions,
+            manual_control_projection,
+        )
         idx = 1
         while idx < len(actions) - 1:
             action_name = getattr(actions[idx], "action", None)
@@ -8905,6 +8916,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 idx += 1
             gap_end = idx
             gap_slots = gap_end - gap_start
+
+            if any(pos in fixed_manual_positions for pos in range(gap_start, gap_end)):
+                continue
 
             previous_action = actions[gap_start - 1]
             next_action = actions[gap_end] if gap_end < len(actions) else None
@@ -9498,6 +9512,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             action.control_source = "manual"
             action.control_action = projection.control_type
         return schedule
+
+    @staticmethod
+    def _manual_control_slot_indices(
+        actions: list[Any],
+        projection: ManualControlProjection | None,
+    ) -> set[int]:
+        """Return slots whose modeled action is fixed by a user control."""
+        fixed = {
+            idx
+            for idx, action in enumerate(actions)
+            if getattr(action, "control_source", None) == "manual"
+        }
+        if projection is not None:
+            fixed.update(
+                idx
+                for idx, active in enumerate(projection.active_slots)
+                if active and idx < len(actions)
+            )
+        return fixed
 
     def get_active_force_state(self) -> dict[str, Any]:
         """Return the active force state, including optimizer-owned hardware force."""
@@ -12343,6 +12376,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         free_only: bool = False,
         solar_forecast: list[float] | None = None,
         load_forecast: list[float] | None = None,
+        manual_control_projection: ManualControlProjection | None = None,
     ) -> OptimizationSchedule:
         """Spread planned grid-charge energy across same-price import windows."""
         actions = list(schedule.actions or [])
@@ -12370,6 +12404,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         cap_by_slot = max_grid_import_w is not None
         new_actions: list[ScheduleAction] = list(actions)
+        fixed_manual_positions = self._manual_control_slot_indices(
+            actions,
+            manual_control_projection,
+        )
         soc_cursor = max(0.0, min(1.0, float(initial_soc or 0.0)))
 
         def _forecast_kw(values: list[float] | None, pos: int) -> float:
@@ -12426,7 +12464,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         idx = 0
         while idx < n:
-            if blocked[idx] or getattr(actions[idx], "action", None) in ("discharge", "export"):
+            if (
+                blocked[idx]
+                or idx in fixed_manual_positions
+                or getattr(actions[idx], "action", None) in ("discharge", "export")
+            ):
                 soc_cursor = _advance_soc(soc_cursor, new_actions[idx])
                 idx += 1
                 continue
@@ -12436,6 +12478,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             while (
                 idx < n
                 and not blocked[idx]
+                and idx not in fixed_manual_positions
                 and getattr(actions[idx], "action", None) not in ("discharge", "export")
                 and abs(prices[idx] - price) <= 1e-6
             ):
@@ -12452,6 +12495,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             preserved_natural_positions = {
                 pos
                 for pos in range(start, end)
+                if pos not in fixed_manual_positions
                 if getattr(actions[pos], "action", None) != "charge"
                 and max(
                     0.0,
@@ -12465,15 +12509,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             spread_positions = [
                 pos
                 for pos in range(start, end)
+                if pos not in fixed_manual_positions
                 if pos not in preserved_natural_positions
             ]
             charge_wh = sum(
                 max(0.0, float(getattr(action, "battery_charge_w", 0.0) or 0.0))
                 * interval_hours
-                for action in actions[start:end]
+                for pos, action in enumerate(actions[start:end], start)
+                if pos in spread_positions
                 if getattr(action, "action", None) == "charge"
             )
-            if charge_wh <= 0 or max_charge_w <= 0:
+            if charge_wh <= 0 or max_charge_w <= 0 or not spread_positions:
                 for pos in range(start, end):
                     soc_cursor = _advance_soc(soc_cursor, new_actions[pos])
                 continue
@@ -12488,7 +12534,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         ),
                     )
                     * interval_hours
-                    for pos in preserved_natural_positions
+                    for pos in range(start, end)
+                    if pos not in spread_positions
                 )
                 available_wh = max(
                     0.0,
@@ -12524,6 +12571,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             spread_targets = dict(zip(spread_positions, target_by_pos))
             for pos in range(start, end):
                 original = actions[pos]
+                if pos in fixed_manual_positions:
+                    soc_cursor = _advance_soc(soc_cursor, original)
+                    continue
                 if pos in preserved_natural_positions:
                     soc_cursor = _advance_soc(soc_cursor, original)
                     new_actions[pos] = ScheduleAction(
@@ -12574,6 +12624,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         export_reserve_floor: float | list[float] | None = None,
         *,
         export_prices: list[float] | None = None,
+        manual_control_projection: ManualControlProjection | None = None,
     ) -> OptimizationSchedule:
         """Spread planned export energy across each same-price allowed window."""
         actions = list(schedule.actions or [])
@@ -12614,6 +12665,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if min_export_floor is None and scoped_export_floors is None:
             min_export_floor = self._force_discharge_reserve_floor()
         new_actions: list[ScheduleAction] = list(actions)
+        fixed_manual_positions = self._manual_control_slot_indices(
+            actions,
+            manual_control_projection,
+        )
         idx = 0
 
         def _action_soc(pos: int) -> float | None:
@@ -12712,7 +12767,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             export_wh = sum(
                 max(0.0, float(getattr(action, export_power_field, 0.0) or 0.0))
                 * interval_hours
-                for action in window_actions
+                for pos, action in enumerate(window_actions, start)
+                if pos not in fixed_manual_positions
                 if getattr(action, "action", None) in ("export", "discharge")
             )
             if export_wh <= 0:
@@ -12721,6 +12777,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             spread_positions = [
                 pos
                 for pos in range(start, end)
+                if pos not in fixed_manual_positions
                 if getattr(actions[pos], "action", None) != "charge"
                 and not (
                     float(getattr(actions[pos], "battery_charge_w", 0.0) or 0.0) > 0
@@ -12728,10 +12785,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ]
             floor = self._reserve_ratio(window_floor, None)
             first_export_pos = next(
-                pos
-                for pos in spread_positions
-                if getattr(actions[pos], "action", None) in ("export", "discharge")
+                (
+                    pos
+                    for pos in spread_positions
+                    if getattr(actions[pos], "action", None)
+                    in ("export", "discharge")
+                ),
+                None,
             )
+            if first_export_pos is None:
+                continue
             if floor is not None:
                 # SOC labels after the first raw export describe the concentrated
                 # LP plan that this pass is about to replace. Using those depleted

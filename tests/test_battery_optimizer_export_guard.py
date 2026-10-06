@@ -164,6 +164,64 @@ def test_grid_import_limit_caps_grid_sourced_charge(battery_optimizer_module):
     )
 
 
+@pytest.mark.parametrize("use_highs", [True, False])
+def test_manual_discharge_projection_stays_fixed_in_both_solver_paths(
+    battery_optimizer_module,
+    monkeypatch,
+    use_highs,
+):
+    """Manual discharge is fixed before any coordinator post-processing."""
+    if use_highs and not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", use_highs)
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=48_000,
+        max_charge_w=22_000,
+        max_discharge_w=22_000,
+        backup_reserve=0.80,
+        hardware_reserve=0.05,
+        efficiency=0.92,
+        interval_minutes=5,
+        horizon_hours=4,
+        terminal_weight=0.3,
+    )
+    n = 48
+    manual_slots = ["export"] * 6 + [None] * (n - 6)
+    required_discharge_kw = [22.0] * 6 + [0.0] * (n - 6)
+    result = optimizer.optimize(
+        import_prices=[0.2163] * n,
+        export_prices=[0.28] * n,
+        solar_forecast=[5.0] * 6 + [2.0] * 10 + [0.0] * (n - 16),
+        load_forecast=[1.0] * n,
+        current_soc=1.0,
+        allow_battery_export=[True] * n,
+        block_battery_charge=[False] * n,
+        allow_grid_charge=True,
+        grid_charge_allowed=[True] * n,
+        export_reserve_floor=0.80,
+        schedule_timestamps=[
+            datetime(2026, 10, 6, 6, 10, tzinfo=timezone.utc)
+            + timedelta(minutes=5 * idx)
+            for idx in range(n)
+        ],
+        manual_control={
+            "mode_slots": manual_slots,
+            "required_charge_kw": [0.0] * n,
+            "required_discharge_kw": required_discharge_kw,
+        },
+    )
+
+    assert result.feasible is True
+    assert result.solver_used == ("highs" if use_highs else "greedy")
+    assert [action.action for action in result.schedule.actions[:6]] == [
+        "export"
+    ] * 6
+    assert [action.battery_discharge_w for action in result.schedule.actions[:6]] == (
+        pytest.approx([22_000.0] * 6, abs=0.1)
+    )
+
+
 def test_highs_result_retains_solved_solar_curtailment_in_watts(
     battery_optimizer_module,
 ):

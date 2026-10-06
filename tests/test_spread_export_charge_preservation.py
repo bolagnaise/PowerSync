@@ -472,3 +472,140 @@ def test_spread_export_schedule_normal_run_without_charge_slot_still_spreads(opt
     original_wh = sum(a.power_w for a in actions) * (5 / 60)
     spread_wh = sum(a.power_w for a in spread.actions) * (5 / 60)
     assert spread_wh == pytest.approx(original_wh, abs=0.1)
+
+
+def test_spread_export_preserves_fixed_manual_discharge_and_solar_charge_island(
+    opt_module,
+):
+    """A user-owned discharge is not discretionary spread-export energy."""
+    coordinator = _coordinator(opt_module, "agl")
+    coordinator.battery_system = "foxess"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.max_discharge_w = 22_000
+    coordinator._config.battery_capacity_wh = 48_000
+
+    start = datetime(2026, 10, 6, 6, 10, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start,
+            action="export",
+            power_w=22_000,
+            soc=0.9792,
+            battery_discharge_w=22_000,
+        ),
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=5),
+            action="export",
+            power_w=22_000,
+            soc=0.9584,
+            battery_discharge_w=22_000,
+        ),
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=10),
+            action="export",
+            power_w=22_000,
+            soc=0.9376,
+            battery_discharge_w=22_000,
+        ),
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=15),
+            action="charge",
+            power_w=5_000,
+            soc=0.9472,
+            battery_charge_w=5_000,
+        ),
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=20),
+            action="export",
+            power_w=6_000,
+            soc=0.9360,
+            battery_discharge_w=6_000,
+        ),
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(minutes=25),
+            action="self_consumption",
+            power_w=0.0,
+            soc=0.9349,
+            battery_discharge_w=1_000,
+        ),
+    ]
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+    projection = SimpleNamespace(
+        control_type="discharge",
+        active_slots=[True, True, True, False, False, False],
+    )
+    coordinator._annotate_manual_control_schedule(schedule, projection)
+
+    spread = coordinator._spread_export_schedule(
+        schedule,
+        [True] * len(actions),
+        export_reserve_floor=0.80,
+        export_prices=[0.28] * len(actions),
+        manual_control_projection=projection,
+    )
+
+    for idx in range(3):
+        assert spread.actions[idx].action == "export"
+        assert spread.actions[idx].power_w == pytest.approx(22_000)
+        assert spread.actions[idx].battery_discharge_w == pytest.approx(22_000)
+        assert spread.actions[idx].soc == pytest.approx(actions[idx].soc)
+        assert spread.actions[idx].control_source == "manual"
+    assert spread.actions[3].action == "charge"
+    assert spread.actions[3].battery_charge_w == pytest.approx(5_000)
+
+
+def test_bridge_does_not_replace_fixed_manual_self_consumption_slot(opt_module):
+    """The one-slot export bridge cannot take over an active user control."""
+    coordinator = _coordinator(opt_module, "agl")
+    coordinator.battery_system = "foxess"
+    coordinator._config.max_discharge_w = 5_000
+    start = datetime(2026, 10, 6, 6, 10, tzinfo=timezone.utc)
+    schedule = opt_module.OptimizationSchedule(
+        actions=[
+            opt_module.ScheduleAction(
+                timestamp=start,
+                action="export",
+                power_w=5_000,
+                soc=0.80,
+                battery_discharge_w=5_000,
+            ),
+            opt_module.ScheduleAction(
+                timestamp=start + timedelta(minutes=5),
+                action="self_consumption",
+                power_w=0.0,
+                soc=0.79,
+                battery_discharge_w=0.0,
+            ),
+            opt_module.ScheduleAction(
+                timestamp=start + timedelta(minutes=10),
+                action="export",
+                power_w=5_000,
+                soc=0.78,
+                battery_discharge_w=5_000,
+            ),
+        ],
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+    projection = SimpleNamespace(
+        control_type="self_consumption",
+        active_slots=[False, True, False],
+    )
+    coordinator._annotate_manual_control_schedule(schedule, projection)
+
+    bridged = coordinator._bridge_short_export_gaps(
+        schedule,
+        export_prices=[0.28, 0.28, 0.28],
+        authoritative_reserve_floor=0.05,
+        manual_control_projection=projection,
+    )
+
+    assert bridged.actions[1].action == "self_consumption"
+    assert bridged.actions[1].control_source == "manual"
+    assert bridged.actions[1].battery_discharge_w == pytest.approx(0.0)
