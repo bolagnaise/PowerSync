@@ -21357,7 +21357,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     def _effective_solar_curtailment_enabled() -> bool:
         """Return whether this entry has a permitted automatic curtailment route."""
-        return any(get_effective_solar_curtailment_configuration(entry))
+        battery_export_enabled, direct_dc_enabled = (
+            get_effective_solar_curtailment_configuration(entry)
+        )
+        ac_inverter_enabled = entry.options.get(
+            CONF_AC_INVERTER_CURTAILMENT_ENABLED,
+            entry.data.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
+        )
+        return bool(
+            battery_export_enabled or direct_dc_enabled or ac_inverter_enabled
+        )
+
+    def _ac_only_solar_curtailment_enabled() -> bool:
+        """Return whether automatic curtailment has only an AC-inverter route.
+
+        AC inverter control is independent from the battery and native-DC
+        routes.  Keep the latter permissions out of the AC-only dispatch path
+        so enabling a separate AC inverter cannot authorize a battery write.
+        """
+        battery_export_enabled, direct_dc_enabled = (
+            get_effective_solar_curtailment_configuration(entry)
+        )
+        ac_inverter_enabled = entry.options.get(
+            CONF_AC_INVERTER_CURTAILMENT_ENABLED,
+            entry.data.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
+        )
+        return bool(
+            ac_inverter_enabled
+            and not (battery_export_enabled or direct_dc_enabled)
+        )
 
     def _direct_dc_curtailment_write_allowed() -> bool:
         """Fail closed before a native DC curtailment register write.
@@ -29204,6 +29232,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info("☀️ Solar curtailment skipped - EV charging using solar surplus")
             return
 
+        # A separately configured AC inverter is its own control surface.  If
+        # battery export and native-DC curtailment are both disabled, route
+        # directly to the AC helper instead of entering a battery/brand path
+        # merely because AC control made the shared eligibility gate true.
+        if _ac_only_solar_curtailment_enabled():
+            await handle_ac_inverter_curtailment_only(refresh_prices=True)
+            return
+
         # FoxESS uses Modbus-based curtailment, not Tesla API
         if is_foxess:
             await handle_foxess_curtailment()
@@ -29580,6 +29616,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         if entry_data.get("ev_curtailment_override"):
             _LOGGER.info("☀️ Solar curtailment skipped - EV charging using solar surplus")
+            return
+
+        # Keep an AC-only configuration on its independent control path.  Do
+        # not let AC opt-in authorize a battery or native-DC command.
+        if _ac_only_solar_curtailment_enabled():
+            feedin_price = websocket_data.get('feedIn', {}).get('perKwh') if websocket_data else None
+            import_price = websocket_data.get('general', {}).get('perKwh') if websocket_data else None
+            await handle_ac_inverter_curtailment_only(
+                feedin_price=feedin_price,
+                import_price=import_price,
+                price_source="websocket",
+            )
             return
 
         # FoxESS uses Modbus-based curtailment, not Tesla API

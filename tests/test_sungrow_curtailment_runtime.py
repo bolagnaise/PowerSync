@@ -1119,6 +1119,7 @@ def test_solar_curtailment_monitoring_mode_blocks_automatic_command_routes(
         "DEFAULT_CURTAILMENT_CONTROL_IN_MONITORING_MODE": False,
         "CONF_BATTERY_CURTAILMENT_ENABLED": "battery_curtailment_enabled",
         "_effective_solar_curtailment_enabled": lambda: True,
+        "_ac_only_solar_curtailment_enabled": lambda: False,
         "_LOGGER": SimpleNamespace(info=lambda message: messages.append(message)),
     }
     exec(
@@ -1172,6 +1173,7 @@ def test_solar_curtailment_monitoring_mode_explicit_permission_routes_control(
         "DEFAULT_CURTAILMENT_CONTROL_IN_MONITORING_MODE": False,
         "CONF_BATTERY_CURTAILMENT_ENABLED": "battery_curtailment_enabled",
         "_effective_solar_curtailment_enabled": lambda: True,
+        "_ac_only_solar_curtailment_enabled": lambda: False,
         "_LOGGER": SimpleNamespace(
             info=lambda *args, **kwargs: None,
             debug=lambda *args, **kwargs: None,

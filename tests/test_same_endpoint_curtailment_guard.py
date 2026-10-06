@@ -24,6 +24,12 @@ CONFIG_FLOW_PATH = ROOT / "custom_components" / "power_sync" / "config_flow.py"
 # Mirrors the hard-coded-namespace pattern in test_sungrow_curtailment_runtime.py
 # so the extracted function can run without importing the HA-dependent package.
 _CONST_NAMESPACE = {
+    "Any": object,
+    "ConfigEntry": object,
+    "HomeAssistant": object,
+    "BATTERY_SYSTEM_SUNGROW": "sungrow",
+    "BATTERY_SYSTEM_SOLAREDGE": "solaredge",
+    "CONF_BATTERY_SYSTEM": "battery_system",
     "CONF_INVERTER_BRAND": "inverter_brand",
     "CONF_INVERTER_MODEL": "inverter_model",
     "CONF_INVERTER_HOST": "inverter_host",
@@ -36,6 +42,11 @@ _CONST_NAMESPACE = {
     "CONF_SUNGROW_SLAVE_ID": "sungrow_slave_id",
     "DEFAULT_SUNGROW_PORT": 502,
     "DEFAULT_SUNGROW_SLAVE_ID": 1,
+    "CONF_SOLAREDGE_HOST": "solaredge_host",
+    "CONF_SOLAREDGE_PORT": "solaredge_port",
+    "CONF_SOLAREDGE_SLAVE_ID": "solaredge_slave_id",
+    "DEFAULT_SOLAREDGE_PORT": 502,
+    "DEFAULT_SOLAREDGE_SLAVE_ID": 1,
 }
 
 _CONFIG_FLOW_CONST_NAMESPACE = {
@@ -92,6 +103,20 @@ def _build_guard(entry, source_path: Path = INIT_PATH):
     namespace["is_sungrow"] = True
     exec(
         textwrap.dedent(
+            _nested_function_source(source_path, "_active_battery_system")
+        ),
+        namespace,
+    )
+    exec(
+        textwrap.dedent(
+            _nested_function_source(
+                source_path, "_solaredge_ac_inverter_matches_battery"
+            )
+        ),
+        namespace,
+    )
+    exec(
+        textwrap.dedent(
             _nested_function_source(source_path, "ac_inverter_is_same_hybrid")
         ),
         namespace,
@@ -104,6 +129,7 @@ def _entry(*, brand="sungrow", model, host, port, slave):
     return SimpleNamespace(
         options={},
         data={
+            "battery_system": "sungrow",
             "inverter_brand": brand,
             "inverter_model": model,
             "inverter_host": host,
