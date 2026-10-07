@@ -124,7 +124,7 @@ def test_optimizer_routes_total_discharge_for_adapter_contracts_that_need_it():
 
 
 def test_sigenergy_optimizer_uses_solved_pcc_ceiling_not_battery_export_value():
-    method = _load_coordinator_method("_sigenergy_grid_export_limit_w")
+    method = _load_coordinator_method("_solved_grid_export_power_w")
     action = SimpleNamespace(timestamp="slot-0", power_w=2478.8)
     coordinator = SimpleNamespace(
         _last_optimizer_result=SimpleNamespace(
@@ -134,6 +134,42 @@ def test_sigenergy_optimizer_uses_solved_pcc_ceiling_not_battery_export_value():
     )
 
     assert method(coordinator, action) == 9999.98
+
+
+def test_foxess_optimizer_export_uses_solved_whole_site_grid_target():
+    """FoxESS grid-mode force discharge must include the solar surplus."""
+    method = _load_coordinator_method("_export_command_power_w")
+    solved_grid_method = _load_coordinator_method("_solved_grid_export_power_w")
+    action = SimpleNamespace(
+        timestamp="slot-0",
+        power_w=615.3,
+        battery_discharge_w=615.3,
+    )
+
+    for solved_grid_export_w, expected_command_w in (
+        (1792.042, 1792.042),  # sunny site: battery target + solar surplus
+        (615.3, 615.3),       # no solar: grid target equals battery export
+    ):
+        coordinator = SimpleNamespace(
+            battery_system="foxess",
+            _config=SimpleNamespace(
+                max_discharge_w=24_000,
+                max_grid_export_w=30_000,
+            ),
+            _supports_target_export_power=lambda: True,
+            _last_optimizer_result=SimpleNamespace(
+                schedule=SimpleNamespace(actions=[action]),
+                grid_export_w=[solved_grid_export_w],
+            ),
+        )
+        coordinator._solved_grid_export_power_w = (
+            lambda candidate, _coordinator=coordinator: solved_grid_method(
+                _coordinator,
+                candidate,
+            )
+        )
+
+        assert method(coordinator, action) == expected_command_w
 
 
 def test_sigenergy_pv_only_export_requests_hardware_refresh_for_battery_target():

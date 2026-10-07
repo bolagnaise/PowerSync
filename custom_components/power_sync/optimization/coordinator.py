@@ -9540,10 +9540,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return the hardware export command power for an optimizer action."""
         command_w = float(self._config.max_discharge_w)
         if self._supports_target_export_power():
-            try:
-                requested_w = float(getattr(action, "power_w", 0.0) or 0.0)
-            except (TypeError, ValueError):
-                requested_w = 0.0
+            if self.battery_system == "foxess":
+                # FoxESS remote-discharge mode targets the site grid meter, not
+                # the battery output. Include the solved solar/load contribution
+                # so PV does not displace the planned battery export.
+                requested_w = self._solved_grid_export_power_w(action)
+            else:
+                try:
+                    requested_w = float(getattr(action, "power_w", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    requested_w = 0.0
             if requested_w <= 0 and self.battery_system == "goodwe":
                 try:
                     requested_w = float(
@@ -9557,14 +9563,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 command_w = min(command_w, float(self._config.max_grid_export_w))
         return command_w
 
-    def _sigenergy_grid_export_limit_w(self, action: Any) -> float:
-        """Return the solved PCC ceiling for a Sigenergy optimizer export.
-
-        ``ScheduleAction.power_w`` is intentionally battery-to-grid power after
-        reconciliation.  Sigenergy register 40038 is instead a whole-site PCC
-        ceiling, so recover the matching solved grid flow rather than passing
-        the battery contribution as though it were a site limit.
-        """
+    def _solved_grid_export_power_w(self, action: Any) -> float:
+        """Return the final whole-site grid export for an action slot."""
         fallback_w = max(0.0, float(getattr(action, "power_w", 0.0) or 0.0))
         result = getattr(self, "_last_optimizer_result", None)
         schedule = getattr(result, "schedule", None)
@@ -9580,6 +9580,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         break
                 break
         return fallback_w
+
+    def _sigenergy_grid_export_limit_w(self, action: Any) -> float:
+        """Return the solved PCC ceiling for a Sigenergy optimizer export.
+
+        ``ScheduleAction.power_w`` is intentionally battery-to-grid power after
+        reconciliation.  Sigenergy register 40038 is instead a whole-site PCC
+        ceiling, so recover the matching solved grid flow rather than passing
+        the battery contribution as though it were a site limit.
+        """
+        return self._solved_grid_export_power_w(action)
 
     def _network_export_guard(self) -> Any | None:
         """Return the entry-scoped network guard when configured."""

@@ -338,6 +338,10 @@ provider-specific bonus windows.
 On supported batteries, Smart Optimization spreads planned battery export across
 the eligible export window instead of using maximum discharge power immediately.
 
+For FoxESS grid-meter force-discharge control, the command target includes the
+final planned whole-site grid export. Forecast solar and household load therefore
+do not displace the planned battery-to-grid contribution.
+
 ### Spread import across window
 
 On supported batteries, Smart Optimization spreads planned grid charging across
