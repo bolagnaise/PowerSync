@@ -237,23 +237,41 @@ class FroniusReservaBatteryController:
 
         registry = er.async_get(self.hass)
         entries = er.async_entries_for_config_entry(registry, self._fronius_entry_id)
-        entity_ids = [entry.entity_id for entry in entries if entry.entity_id]
-        known = set(entity_ids)
-        entity_ids.extend(
-            state.entity_id
-            for state in self.hass.states.async_all()
-            if state.entity_id.startswith(("sensor.", "number.", "select."))
-            and state.entity_id not in known
-        )
+        registry_get = getattr(registry, "async_get", None)
+        selected_entity_ids = [entry.entity_id for entry in entries if entry.entity_id]
+        selected_entity_ids_set = set(selected_entity_ids)
+        legacy_entity_ids: list[str] = []
+        for state in self.hass.states.async_all():
+            entity_id = state.entity_id
+            if not entity_id.startswith(("sensor.", "number.", "select.")):
+                continue
+            if entity_id in selected_entity_ids_set:
+                continue
+
+            registry_entry = (
+                registry_get(entity_id) if callable(registry_get) else None
+            )
+            config_entry_id = getattr(registry_entry, "config_entry_id", None)
+            if config_entry_id == self._fronius_entry_id:
+                selected_entity_ids.append(entity_id)
+                selected_entity_ids_set.add(entity_id)
+            elif config_entry_id is None:
+                # Keep compatibility with old/unregistered entity IDs, but do
+                # not let a different config entry's entity cross the bridge.
+                legacy_entity_ids.append(entity_id)
 
         for key, suffixes in _READ_ENTITIES.items():
-            entity_id = self._resolve_entity_id(entity_ids, "sensor", suffixes)
+            entity_id = self._resolve_entity_id(
+                selected_entity_ids, "sensor", suffixes
+            ) or self._resolve_entity_id(legacy_entity_ids, "sensor", suffixes)
             if entity_id:
                 self._entity_map[key] = entity_id
 
         for key, suffixes in _WRITE_ENTITIES.items():
             domain = "select" if key in ("battery_api_mode", "storage_control_mode") else "number"
-            entity_id = self._resolve_entity_id(entity_ids, domain, suffixes)
+            entity_id = self._resolve_entity_id(
+                selected_entity_ids, domain, suffixes
+            ) or self._resolve_entity_id(legacy_entity_ids, domain, suffixes)
             if entity_id:
                 self._entity_map[key] = entity_id
 
@@ -266,7 +284,7 @@ class FroniusReservaBatteryController:
         domain_prefix = f"{domain}."
         for suffix in suffixes:
             exact = f"{domain}.{suffix}"
-            if self.hass.states.get(exact) is not None:
+            if exact in entity_ids and self.hass.states.get(exact) is not None:
                 return exact
 
             tail = f"_{suffix}"

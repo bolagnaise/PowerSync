@@ -91,6 +91,15 @@ class _FakeRegistry:
             for entity_id in self._entries.get(entry_id, [])
         ]
 
+    def async_get(self, entity_id: str):
+        for config_entry_id, entity_ids in self._entries.items():
+            if entity_id in entity_ids:
+                return SimpleNamespace(
+                    entity_id=entity_id,
+                    config_entry_id=config_entry_id,
+                )
+        return None
+
 
 class _FakeHass:
     def __init__(self, states: list[_FakeState]):
@@ -335,6 +344,68 @@ def test_connect_discovers_generic_byd_state_of_charge_suffix():
 
     status = controller.get_status()
     assert status["battery_level"] == 74.2
+
+
+def test_entity_discovery_ignores_foreign_config_entry_aliases():
+    owned_states = _callifo_byd_states()
+    foreign_states = [
+        _FakeState("sensor.load", "5200"),
+        _FakeState("sensor.meter_200_power", "0"),
+        _FakeState("select.storage_control_mode", "Block Discharging"),
+    ]
+    hass = _FakeHass(owned_states + foreign_states)
+    hass.entity_registry = _FakeRegistry(
+        {
+            "fronius-entry": [state.entity_id for state in owned_states],
+            "other-entry": [state.entity_id for state in foreign_states],
+        }
+    )
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.connect())
+    assert controller._entity_map["load_power"] == "sensor.fronius_inverter_load"
+    assert controller._entity_map["grid_power"] == "sensor.fronius_meter_200_power"
+    assert (
+        controller._entity_map["storage_control_mode"]
+        == "select.fronius_battery_storage_storage_control_mode"
+    )
+
+
+def test_entity_discovery_does_not_use_foreign_required_control_entity():
+    owned_states = [
+        state
+        for state in _reserva_states()
+        if state.entity_id != "select.reserva_storage_control_mode_2"
+    ]
+    foreign_state = _FakeState("select.storage_control_mode", "Auto")
+    hass = _FakeHass(owned_states + [foreign_state])
+    hass.entity_registry = _FakeRegistry(
+        {
+            "fronius-entry": [state.entity_id for state in owned_states],
+            "other-entry": [foreign_state.entity_id],
+        }
+    )
+    controller = _controller(hass)
+
+    with pytest.raises(ValueError, match="fronius_reserva_missing_entities"):
+        asyncio.run(controller.connect())
+
+
+def test_entity_discovery_keeps_unregistered_legacy_fallback():
+    selected_states = [
+        state
+        for state in _callifo_byd_states()
+        if state.entity_id != "sensor.fronius_inverter_load"
+    ]
+    legacy_load = _FakeState("sensor.load", "3200")
+    hass = _FakeHass(selected_states + [legacy_load])
+    hass.entity_registry = _FakeRegistry(
+        {"fronius-entry": [state.entity_id for state in selected_states]}
+    )
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.connect())
+    assert controller._entity_map["load_power"] == "sensor.load"
 
 
 def test_status_uses_configured_power_fallback_when_callifo_limits_missing():
