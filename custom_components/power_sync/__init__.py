@@ -1167,6 +1167,27 @@ def _kw_from_wall_connector_power(value: Any) -> float:
     return _kw_from_ev_power(value)
 
 
+def _load_following_site_load_w(
+    live_status: Mapping[str, Any] | None,
+) -> int | None:
+    """Return the gross site load for an inverter load-following target."""
+    if not live_status or live_status.get("load_power") is None:
+        return None
+
+    site_load_w = live_status.get("site_load_power")
+    if site_load_w is None:
+        # Older/raw API status only exposes load_power, which is already the
+        # gross site load for those sources.
+        site_load_w = live_status.get("load_power")
+    try:
+        site_load_w = float(site_load_w)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(site_load_w) or site_load_w < 0:
+        return None
+    return int(site_load_w)
+
+
 def _vehicle_identity_key(value: Any) -> str:
     """Normalize a vehicle identifier/name for best-effort matching."""
     if value is None:
@@ -25200,8 +25221,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     curtail_live_status = live_status
                     if _aemo_dispatch_entry_data() is not entry_data:
                         return False
-                    if live_status and live_status.get("load_power") is not None:
-                        home_load_w = int(live_status.get("load_power", 0))
+                    if live_status:
+                        home_load_w = _load_following_site_load_w(live_status)
+                    if home_load_w is not None:
                         # Add battery charge rate if battery is charging
                         # battery_power < 0 means charging (negative = consuming power from solar)
                         # battery_power > 0 means discharging (positive = providing power)
@@ -25210,10 +25232,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         battery_charge_w = max(0, -int(battery_power))
                         if battery_charge_w > 50:  # At least 50W charging
                             total_load_w = home_load_w + battery_charge_w
-                            _LOGGER.info(f"🔌 LOAD-FOLLOWING: Home={home_load_w}W + Battery charging={battery_charge_w}W = {total_load_w}W")
+                            _LOGGER.info(f"🔌 LOAD-FOLLOWING: Site={home_load_w}W + Battery charging={battery_charge_w}W = {total_load_w}W")
                             home_load_w = total_load_w
                         else:
-                            _LOGGER.info(f"🔌 LOAD-FOLLOWING: Home load is {home_load_w}W (battery not charging or <50W)")
+                            _LOGGER.info(f"🔌 LOAD-FOLLOWING: Site load is {home_load_w}W (battery not charging or <50W)")
 
                 if (
                     inverter_brand == "fronius"
@@ -42478,7 +42500,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "blocked by monitoring mode"
                 )
                 return
-            if not live_status or live_status.get("load_power") is None:
+            if not live_status:
                 if inverter_brand == "fronius":
                     # The existing device limit may still be in effect, but
                     # without a current site sample its physical result is
@@ -42487,7 +42509,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     entry_data.pop("inverter_curtailment_residual_export_w", None)
                 return
 
-            home_load_w = int(live_status.get("load_power", 0))
+            home_load_w = _load_following_site_load_w(live_status)
+            if home_load_w is None:
+                if inverter_brand == "fronius":
+                    entry_data.pop("inverter_curtailment_physical_converged", None)
+                    entry_data.pop("inverter_curtailment_residual_export_w", None)
+                return
 
             # Add battery charge rate if charging
             battery_power = live_status.get("battery_power", 0) or 0

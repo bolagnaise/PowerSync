@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import ast
 import importlib.util
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import textwrap
 from types import SimpleNamespace
+from collections.abc import Mapping
 
 import pytest
 
@@ -152,7 +154,15 @@ def test_ac_inverter_restore_keeps_heartbeat_but_skips_sungrow_verify_readback()
     assert controller_index < restore_index < verify_false_index
 
 
-def _stale_ac_curtailment_case(kind: str, replace_during: str | None = None):
+def _stale_ac_curtailment_case(
+    kind: str,
+    replace_during: str | None = None,
+    *,
+    live_status_override: dict | None = None,
+    should_curtail_result: bool | None = None,
+    capture_limit: bool = False,
+    brand: str = "sungrow",
+):
     """Execute AC curtailment with a setup generation that is no longer live."""
     entry_id = "entry-id"
     old_generation = object()
@@ -167,6 +177,10 @@ def _stale_ac_curtailment_case(kind: str, replace_during: str | None = None):
         live_entry_data = {
             "aemo_dispatch_generation": old_generation,
             "aemo_dispatch_stopping": True,
+        }
+    elif kind == "live":
+        live_entry_data = {
+            "aemo_dispatch_generation": old_generation,
         }
     else:  # pragma: no cover - parameterized values are fixed below
         raise AssertionError(kind)
@@ -186,7 +200,7 @@ def _stale_ac_curtailment_case(kind: str, replace_during: str | None = None):
         options={},
         data={
             "ac_inverter_curtailment_enabled": True,
-            "inverter_brand": "sungrow",
+            "inverter_brand": brand,
             "inverter_host": "192.0.2.10",
         },
     )
@@ -199,8 +213,10 @@ def _stale_ac_curtailment_case(kind: str, replace_during: str | None = None):
     def _get_inverter_controller(**_kwargs):
         calls["construct"] += 1
 
-        async def _curtail(**_kwargs):
+        async def _curtail(*, home_load_w=None, **_kwargs):
             calls["commands"].append("curtail")
+            if capture_limit:
+                calls["limit_w"] = home_load_w
             if replace_during == "command_exception":
                 hass.data["power_sync"][entry_id] = replacement_entry_data
                 raise RuntimeError("stale controller failed after reload")
@@ -216,12 +232,16 @@ def _stale_ac_curtailment_case(kind: str, replace_during: str | None = None):
         await asyncio.sleep(0)
         if replace_during == "decision":
             hass.data["power_sync"][entry_id] = replacement_entry_data
+        if should_curtail_result is not None:
+            return should_curtail_result
         return replace_during in ("live_status", "command_exception")
 
     async def _get_live_status():
         await asyncio.sleep(0)
         if replace_during == "live_status":
             hass.data["power_sync"][entry_id] = replacement_entry_data
+        if live_status_override is not None:
+            return live_status_override
         return {"load_power": 100, "battery_power": 0}
 
     async def _fallback(curtail, reason):
@@ -278,6 +298,9 @@ def _stale_ac_curtailment_case(kind: str, replace_during: str | None = None):
     ):
         namespace[constant] = constant.removeprefix("CONF_").lower()
 
+    namespace["Mapping"] = Mapping
+    namespace["math"] = math
+    exec(_top_level_function_source("_load_following_site_load_w"), namespace)
     exec(_function_source("_aemo_dispatch_entry_data"), namespace)
     exec(
         textwrap.dedent(
@@ -397,7 +420,9 @@ def _run_fast_load_following_case(
     *,
     brand: str = "sungrow",
     current_limit: int | None = None,
-    load_power: int = 100,
+    load_power: int | None = 100,
+    site_load_power: int | None = None,
+    battery_power: int = 0,
     grid_power: float | None = None,
     applied_device_limit_w: int | None = None,
     monitoring_mode: bool = False,
@@ -456,11 +481,14 @@ def _run_fast_load_following_case(
         await asyncio.sleep(0)
         if kind == "replacement":
             domain_data[entry_id] = replacement_entry_data
-        return {
+        status = {
             "load_power": load_power,
-            "battery_power": 0,
+            "battery_power": battery_power,
             "grid_power": grid_power,
         }
+        if site_load_power is not None:
+            status["site_load_power"] = site_load_power
+        return status
 
     def _record_state(*args, **kwargs):
         state_calls.append(args)
@@ -502,6 +530,9 @@ def _run_fast_load_following_case(
     ):
         namespace[constant] = constant.removeprefix("CONF_").lower()
 
+    namespace["Mapping"] = Mapping
+    namespace["math"] = math
+    exec(_top_level_function_source("_load_following_site_load_w"), namespace)
     exec(_function_source("_aemo_dispatch_entry_data"), namespace)
     exec(
         textwrap.dedent(
@@ -513,6 +544,63 @@ def _run_fast_load_following_case(
     exec(_function_source("fast_load_following_update"), namespace)
     result = asyncio.run(namespace["fast_load_following_update"](SimpleNamespace(second=0)))
     return result, status_calls, controller_calls, state_calls, replacement_entry_data
+
+
+def test_load_following_uses_gross_site_load_for_initial_and_refresh():
+    """Ticket #90: an EV-excluded home load must not cap the AC inverter."""
+    result, calls, _domain_data, _initial_domain_data, _replacement = (
+        _stale_ac_curtailment_case(
+            "live",
+            live_status_override={
+                "load_power": 557,
+                "site_load_power": 2_857,
+                "battery_power": 2_320,
+            },
+            should_curtail_result=True,
+            capture_limit=True,
+        )
+    )
+
+    assert result is True
+    assert calls["commands"] == ["curtail"]
+    assert calls["limit_w"] == 2_857
+
+    _result, _status_calls, controller_calls, _state_calls, _replacement = (
+        _run_fast_load_following_case(
+            "live",
+            brand="fronius",
+            load_power=557,
+            site_load_power=2_857,
+            battery_power=2_320,
+        )
+    )
+
+    assert controller_calls == [2_857]
+
+
+def test_load_following_preserves_legacy_load_and_battery_charge_addition():
+    _result, _status_calls, controller_calls, _state_calls, _replacement = (
+        _run_fast_load_following_case(
+            "live",
+            load_power=557,
+            battery_power=-1_000,
+        )
+    )
+
+    assert controller_calls == [1_557]
+
+
+def test_load_following_fails_closed_for_incomplete_home_load():
+    _result, status_calls, controller_calls, _state_calls, _replacement = (
+        _run_fast_load_following_case(
+            "live",
+            load_power=None,
+            site_load_power=2_857,
+        )
+    )
+
+    assert status_calls == [True]
+    assert controller_calls == []
 
 
 @pytest.mark.parametrize("kind", ("stopping", "replacement", "live"))
@@ -661,7 +749,7 @@ def test_fronius_load_following_rejects_failed_not_ready_or_stale_snapshot():
 def test_fronius_initial_load_following_requires_a_fresh_load_target():
     source = _function_source("apply_inverter_curtailment")
 
-    assert 'live_status.get("load_power") is not None' in source
+    assert "_load_following_site_load_w(live_status)" in source
     assert 'and fronius_load_following' in source
     assert 'and home_load_w is None' in source
     assert "Skipping Fronius load-following limit because fresh" in source
@@ -670,7 +758,7 @@ def test_fronius_initial_load_following_requires_a_fresh_load_target():
 def test_fronius_missing_live_sample_marks_physical_effect_unknown():
     source = _function_source("fast_load_following_update")
 
-    assert 'not live_status or live_status.get("load_power") is None' in source
+    assert "_load_following_site_load_w(live_status)" in source
     assert 'entry_data.pop("inverter_curtailment_physical_converged", None)' in source
     assert 'entry_data.pop("inverter_curtailment_residual_export_w", None)' in source
 

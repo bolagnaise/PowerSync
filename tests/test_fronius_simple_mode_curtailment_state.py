@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import math
 from pathlib import Path
 import sys
 import types
+from collections.abc import Mapping
 from types import SimpleNamespace
 
 import pytest
@@ -150,6 +152,17 @@ def _function_source(name: str) -> str:
     raise AssertionError(f"{name} not found")
 
 
+def _top_level_function_source(name: str) -> str:
+    source = INIT_PATH.read_text()
+    module = ast.parse(source)
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            segment = ast.get_source_segment(source, node)
+            assert segment is not None
+            return segment
+    raise AssertionError(f"{name} not found")
+
+
 class _Logger:
     def __getattr__(self, _name):
         def _log(*_args, **_kwargs):
@@ -269,6 +282,9 @@ def _run_fronius_curtailment(
     ):
         namespace[constant] = constant.removeprefix("CONF_").lower()
 
+    namespace["Mapping"] = Mapping
+    namespace["math"] = math
+    exec(_top_level_function_source("_load_following_site_load_w"), namespace)
     exec(_function_source("_aemo_dispatch_entry_data"), namespace)
     exec(_function_source("apply_inverter_curtailment"), namespace)
     result = asyncio.run(namespace["apply_inverter_curtailment"](True, 10.67, 0.14))
