@@ -30815,6 +30815,109 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return False
 
+        def _schedule_persisted_force_cleanup_retry(
+            state: dict[str, Any],
+            service_data: dict[str, Any],
+            *,
+            mode: str,
+            source: str,
+            retry_count: int = 0,
+        ) -> bool:
+            """Retry a failed expired FoxESS cleanup without losing ownership."""
+            if retry_count >= 3 or not state.get("active"):
+                _LOGGER.error(
+                    "Expired FoxESS force %s cleanup remains pending after %d "
+                    "retries; leaving ownership active for manual restore",
+                    mode,
+                    retry_count,
+                )
+                return False
+            if entry.entry_id not in hass.data.get(DOMAIN, {}):
+                return False
+
+            retry_generation = _command_generation[0]
+            next_retry = retry_count + 1
+            retry_delay = min(60 * (2**retry_count), 300)
+            retry_at = dt_util.utcnow() + timedelta(seconds=retry_delay)
+
+            async def _retry_expired_force_cleanup(_now):
+                if entry.entry_id not in hass.data.get(DOMAIN, {}):
+                    return
+                if _command_generation[0] != retry_generation:
+                    _LOGGER.info(
+                        "Expired FoxESS force %s cleanup retry superseded by a "
+                        "newer command",
+                        mode,
+                    )
+                    return
+                if not state.get("active"):
+                    return
+
+                state["cancel_expiry_timer"] = None
+                _LOGGER.warning(
+                    "Retrying expired FoxESS force %s cleanup (attempt %d)",
+                    mode,
+                    next_retry,
+                )
+                try:
+                    await hass.services.async_call(
+                        DOMAIN,
+                        SERVICE_RESTORE_NORMAL,
+                        {
+                            **service_data,
+                            "_restore_retry": next_retry,
+                        },
+                        blocking=True,
+                    )
+                except Exception as err:
+                    _LOGGER.warning(
+                        "Expired FoxESS force %s cleanup retry failed: %s",
+                        mode,
+                        err,
+                    )
+                    _schedule_persisted_force_cleanup_retry(
+                        state,
+                        service_data,
+                        mode=mode,
+                        source=source,
+                        retry_count=next_retry,
+                    )
+                    return
+
+                # handle_restore_normal clears the state only after FoxESS
+                # confirms the restore. A newer command may have superseded
+                # this callback while the service call was in flight.
+                if (
+                    _command_generation[0] != retry_generation + 1
+                    or state.get("active")
+                ):
+                    _LOGGER.info(
+                        "Expired FoxESS force %s cleanup retry superseded; "
+                        "preserving newer ownership",
+                        mode,
+                    )
+                    return
+                if source == "optimizer":
+                    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+                    if isinstance(entry_data, dict):
+                        entry_data["optimizer_force_restart_restore_pending"] = False
+
+            if state.get("cancel_expiry_timer"):
+                state["cancel_expiry_timer"]()
+            state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                hass,
+                _retry_expired_force_cleanup,
+                retry_at,
+            )
+            _LOGGER.warning(
+                "Expired FoxESS force %s cleanup failed; retry %d scheduled in "
+                "%d seconds",
+                mode,
+                next_retry,
+                retry_delay,
+            )
+            return True
+
         mode = persisted_force_state.get("mode")
         expires_at_str = persisted_force_state.get("expires_at")
 
@@ -31094,6 +31197,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         }
                     )
                 if not restore_completed:
+                    if is_foxess:
+                        _schedule_persisted_force_cleanup_retry(
+                            state,
+                            {
+                                "source": persisted_source,
+                                "_force_restore": True,
+                                "_allow_monitoring_restore": True,
+                            },
+                            mode=mode,
+                            source=persisted_source,
+                        )
                     _LOGGER.warning(
                         "Persisted force %s cleanup remains pending for retry",
                         mode,
@@ -31137,6 +31251,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     {"source": "optimizer"}
                 )
                 if not restore_completed:
+                    if is_foxess:
+                        _schedule_persisted_force_cleanup_retry(
+                            state,
+                            {"source": "optimizer"},
+                            mode=mode,
+                            source=persisted_source,
+                        )
                     _LOGGER.warning(
                         "Persisted optimizer force %s cleanup remains pending "
                         "for retry",
@@ -31198,6 +31319,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "for retry",
                         mode,
                     )
+                    if is_foxess:
+                        _schedule_persisted_force_cleanup_retry(
+                            state,
+                            {
+                                "source": "force_timer",
+                                "_allow_monitoring_restore": True,
+                            },
+                            mode=mode,
+                            source=persisted_source,
+                        )
             else:
                 # Force mode is still active - restore state and re-setup timer
                 remaining_seconds = (expires_at - now).total_seconds()

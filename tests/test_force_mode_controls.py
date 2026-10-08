@@ -2823,6 +2823,139 @@ def test_expired_persisted_force_state_clears_only_after_confirmed_restore():
     confirmed_index = expired_branch.index("if restore_completed:")
     pending_index = expired_branch.index("cleanup remains stored")
     assert confirmed_index < clear_index < pending_index
+    assert "if is_foxess:" in expired_branch
+    assert "_schedule_persisted_force_cleanup_retry(" in expired_branch
+
+
+def test_expired_foxess_cleanup_retries_and_releases_optimizer_ownership():
+    """A transient startup restore failure must not strand expired ownership."""
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    helper = _find_function(tree, "_schedule_persisted_force_cleanup_retry")
+    helper_source = ast.get_source_segment(source, helper)
+    assert helper_source is not None
+
+    now = datetime(2026, 10, 8, 6, 30, tzinfo=timezone.utc)
+    command_generation = [0]
+    timers: list[tuple[Callable, datetime, bool]] = []
+    calls: list[dict] = []
+    state = {"active": True, "cancel_expiry_timer": None}
+    entry_data = {"optimizer_force_restart_restore_pending": True}
+
+    def _track(_hass, callback, when):
+        cancelled = [False]
+
+        def _cancel():
+            cancelled[0] = True
+
+        timers.append((callback, when, cancelled[0]))
+        return _cancel
+
+    class _Services:
+        async def async_call(self, _domain, _service, data, *, blocking):
+            assert blocking is True
+            calls.append(dict(data))
+            command_generation[0] += 1
+            if len(calls) == 1:
+                raise RuntimeError("transient FoxESS restore failure")
+            state["active"] = False
+
+    namespace = {
+        "Any": object,
+        "DOMAIN": "power_sync",
+        "SERVICE_RESTORE_NORMAL": "restore_normal",
+        "_LOGGER": SimpleNamespace(
+            error=lambda *_args, **_kwargs: None,
+            info=lambda *_args, **_kwargs: None,
+            warning=lambda *_args, **_kwargs: None,
+        ),
+        "_command_generation": command_generation,
+        "dt_util": SimpleNamespace(utcnow=lambda: now),
+        "timedelta": timedelta,
+        "async_track_point_in_utc_time": _track,
+        "entry": SimpleNamespace(entry_id="entry-1"),
+        "hass": SimpleNamespace(
+            data={"power_sync": {"entry-1": entry_data}},
+            services=_Services(),
+        ),
+    }
+    exec(textwrap.dedent(helper_source), namespace)
+
+    schedule = namespace["_schedule_persisted_force_cleanup_retry"]
+    assert schedule(
+        state,
+        {"source": "optimizer"},
+        mode="discharge",
+        source="optimizer",
+    ) is True
+    assert timers[0][1] == now + timedelta(seconds=60)
+
+    asyncio.run(timers[0][0](None))
+    assert calls == [{"source": "optimizer", "_restore_retry": 1}]
+    assert len(timers) == 2
+    assert state["active"] is True
+
+    asyncio.run(timers[1][0](None))
+    assert calls == [
+        {"source": "optimizer", "_restore_retry": 1},
+        {"source": "optimizer", "_restore_retry": 2},
+    ]
+    assert state["active"] is False
+    assert entry_data["optimizer_force_restart_restore_pending"] is False
+
+
+def test_expired_foxess_cleanup_retry_is_superseded_by_new_command():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    helper = _find_function(tree, "_schedule_persisted_force_cleanup_retry")
+    helper_source = ast.get_source_segment(source, helper)
+    assert helper_source is not None
+
+    command_generation = [0]
+    callbacks: list[Callable] = []
+    calls = []
+
+    def _track(_hass, callback, _when):
+        callbacks.append(callback)
+        return lambda: None
+
+    class _Services:
+        async def async_call(self, *_args, **_kwargs):
+            calls.append(True)
+
+    namespace = {
+        "Any": object,
+        "DOMAIN": "power_sync",
+        "SERVICE_RESTORE_NORMAL": "restore_normal",
+        "_LOGGER": SimpleNamespace(
+            error=lambda *_args, **_kwargs: None,
+            info=lambda *_args, **_kwargs: None,
+            warning=lambda *_args, **_kwargs: None,
+        ),
+        "_command_generation": command_generation,
+        "dt_util": SimpleNamespace(
+            utcnow=lambda: datetime(2026, 10, 8, 6, 30, tzinfo=timezone.utc)
+        ),
+        "timedelta": timedelta,
+        "async_track_point_in_utc_time": _track,
+        "entry": SimpleNamespace(entry_id="entry-1"),
+        "hass": SimpleNamespace(
+            data={"power_sync": {"entry-1": {}}},
+            services=_Services(),
+        ),
+    }
+    exec(textwrap.dedent(helper_source), namespace)
+    state = {"active": True, "cancel_expiry_timer": None}
+    namespace["_schedule_persisted_force_cleanup_retry"](
+        state,
+        {"source": "force_timer"},
+        mode="discharge",
+        source="user",
+    )
+    command_generation[0] += 1
+
+    asyncio.run(callbacks[0](None))
+    assert calls == []
 
 
 def test_optimizer_restart_restore_is_hidden_from_force_getter():
