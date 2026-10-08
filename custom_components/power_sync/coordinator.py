@@ -1312,8 +1312,6 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                 if (
                     not math.isfinite(buy_dollars)
                     or not math.isfinite(sell_dollars)
-                    or buy_dollars < 0
-                    or sell_dollars < 0
                 ):
                     return None
                 return (buy_dollars, sell_dollars)
@@ -1325,8 +1323,6 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
             if (
                 not math.isfinite(buy_cents)
                 or not math.isfinite(sell_cents)
-                or buy_cents < 0
-                or sell_cents < 0
             ):
                 return None
             return (buy_cents / 100.0, sell_cents / 100.0)
@@ -1439,7 +1435,7 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                             )
                         else:
                             pea = 0.0
-                        buy_cents_fp = max(0.0, fp_base_rate + pea)
+                        buy_cents_fp = fp_base_rate + pea
                         # Export: Flow Power pays a flat happy hour rate, not the AEMO spot price.
                         # The AEMO feedIn channel reflects the wholesale price, which is unrelated
                         # to the fixed 45c/kWh happy hour credit Flow Power actually pays.
@@ -1464,7 +1460,7 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                     else:
                         # Generic AEMO (non-Flow-Power): wholesale price is the retail price
                         buy_dollar = wholesale_cents / 100.0
-                        sell_dollar = max(0.0, -(sell_cents_raw or 0)) / 100.0
+                        sell_dollar = -(sell_cents_raw or 0) / 100.0
                         return (buy_dollar, sell_dollar)
 
         # Fall back to tariff schedule (TOU rates).

@@ -391,6 +391,33 @@ def test_flow_power_current_import_price_prefers_tariff_schedule():
     assert attrs["price_spike"] is None
 
 
+def test_flow_power_price_sensors_keep_signed_tariff_and_contract_rates():
+    sensor = _sensor_module()
+    sensor.get_current_price_from_tariff_schedule = lambda tariff: (-5.0, -2.0, "NEGATIVE")
+    hass = _hass("AUD")
+    hass.data = {
+        sensor.DOMAIN: {
+            "entry-1": {"tariff_schedule": {"currency": "AUD", "buy_prices": {"NEGATIVE": -0.05}}}
+        }
+    }
+    coordinator = SimpleNamespace(data={"current": []})
+    import_entity = sensor.FlowPowerPriceSensor(
+        coordinator, _entry("flow_power"), "current_import_price",
+    )
+    export_entity = sensor.FlowPowerPriceSensor(
+        coordinator, _entry("flow_power"), "current_export_price",
+    )
+    import_entity.hass = export_entity.hass = hass
+    assert import_entity.native_value == -0.05
+    assert export_entity.native_value == -0.02
+
+    import_entity._flow_power_provider_contract = lambda: {
+        "plan": {"plan_id": "four_free_2026"},
+        "prices": {"marginal": {"import": -0.04, "export": -0.02}},
+    }
+    assert import_entity.native_value == -0.04
+
+
 def test_covau_price_and_quota_sensors_use_live_provider_contract():
     sensor = _sensor_module()
     entry = _entry("covau")

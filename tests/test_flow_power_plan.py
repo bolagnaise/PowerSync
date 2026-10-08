@@ -189,6 +189,15 @@ def test_plan_hash_changes_with_contract_or_timezone():
     assert len({sydney.plan_hash, brisbane.plan_hash, vic.plan_hash}) == 3
 
 
+def test_negative_import_rate_remains_signed_without_negative_quota_bonus():
+    snapshot = _snapshot("four_free_2026", region="SEQ")
+    at = datetime(2026, 10, 8, 12, tzinfo=timezone.utc)
+    series = flow_power_price_series(snapshot, [at], [-0.04])
+    assert series.settlement_import == (-0.04,)
+    assert series.import_bonus == (0.0,)
+    assert series.marginal_import == (-0.04,)
+
+
 def test_active_official_plan_hash_ignores_inactive_legacy_fields():
     """A legacy UI edit must not discard the active official-plan ledger."""
     first = _snapshot(

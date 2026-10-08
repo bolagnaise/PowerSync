@@ -1367,7 +1367,6 @@ def _build_rolling_24h_tariff(
                 if current_actual_interval.get("general"):
                     actual_price_cents = current_actual_interval["general"].get("perKwh", 0)
                     buy_price = _round_price(actual_price_cents / 100)
-                    buy_price = max(0, buy_price)  # Tesla restriction: no negatives
                     general_prices[period_key] = buy_price
                     _LOGGER.info(
                         "%s (CURRENT): Using ActualInterval buy price: $%.4f/kWh",
@@ -1390,7 +1389,6 @@ def _build_rolling_24h_tariff(
                     actual_feedin_cents = current_actual_interval["feedIn"].get("perKwh", 0)
                     # Amber convention: feedIn is negative, Tesla convention: positive
                     sell_price = _round_price(-actual_feedin_cents / 100)
-                    sell_price = max(0, sell_price)  # No negatives
 
                     # Note: sell > buy is now allowed by Tesla API (restriction removed)
 
@@ -1446,8 +1444,6 @@ def _build_rolling_24h_tariff(
             if found_in_lookup:
                 prices = general_lookup[lookup_key]
                 buy_price = _round_price(sum(prices) / len(prices))
-                # Tesla restriction: No negative prices
-                buy_price = max(0, buy_price)
                 general_prices[period_key] = buy_price
                 last_valid_buy_price = buy_price  # Track for fallback
             else:
@@ -1490,9 +1486,6 @@ def _build_rolling_24h_tariff(
             if found_feedin:
                 prices = feedin_lookup[feedin_lookup_key]
                 sell_price = _round_price(sum(prices) / len(prices))
-
-                # Tesla restriction: No negative prices
-                sell_price = max(0, sell_price)
 
                 # Note: sell > buy is now allowed by Tesla API (restriction removed)
 
@@ -2050,9 +2043,6 @@ def _apply_network_tariff_library(
                 # Convert c/kWh back to $/kWh
                 new_price = round(retail_cents / 100, 4)
 
-                # Tesla restriction: no negative prices
-                new_price = max(0, new_price)
-
                 if rates[period] != new_price:
                     modified_count += 1
                     _LOGGER.debug(
@@ -2188,9 +2178,6 @@ def _apply_network_tariff_manual(
             total_cents = wholesale_cents + total_charge_cents
             new_price = round(total_cents / 100, 4)
 
-            # Tesla restriction: no negative prices
-            new_price = max(0, new_price)
-
             if rates[period] != new_price:
                 modified_count += 1
                 _LOGGER.debug(
@@ -2315,9 +2302,8 @@ def apply_flow_power_pea(
             # Final rate = base_rate + PEA (in c/kWh)
             final_cents = base_rate + pea
 
-            # Convert to $/kWh and clamp to 0 (Tesla restriction: no negatives)
-            final_dollars = max(0, final_cents / 100)
-            final_dollars = round(final_dollars, 4)
+            # Keep signed retail rates so Tesla receives negative import prices.
+            final_dollars = round(final_cents / 100, 4)
 
             final_prices.append(final_cents)
 

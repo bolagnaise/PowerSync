@@ -6340,7 +6340,7 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
             if self._sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE
             else sell_price_cents
         )
-        return max(0.0, price_cents / 100), tariff_data
+        return price_cents / 100, tariff_data
 
     def _flow_power_provider_contract(self) -> dict[str, Any] | None:
         """Return the quota-aware contract published by the optimizer."""
@@ -6399,8 +6399,7 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
             # No PEA - just use base rate
             final_cents = base_rate
 
-        # Convert to $/kWh and clamp to 0 (no negative prices)
-        return max(0, final_cents / 100)
+        return final_cents / 100
 
     def _calculate_pea_auto(self, wholesale_cents: float) -> float:
         """Calculate PEA automatically using v2 or legacy formula."""
@@ -6444,7 +6443,7 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
             marginal = ((contract.get("prices") or {}).get("marginal") or {})
             key = "import" if self._is_import_sensor else "export"
             try:
-                return round(max(0.0, float(marginal[key])), 4)
+                return round(float(marginal[key]), 4)
             except (KeyError, TypeError, ValueError):
                 pass
         tariff_price = self._get_current_tariff_price()

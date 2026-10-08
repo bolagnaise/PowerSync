@@ -104,6 +104,71 @@ def _day_intervals(day: datetime) -> list[dict]:
     return prices
 
 
+def test_tesla_tariff_keeps_negative_live_and_forecast_rates(
+    tariff_converter_module, monkeypatch,
+):
+    brisbane = ZoneInfo("Australia/Brisbane")
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 8, 12, 10, tzinfo=brisbane).astimezone(tz)
+
+    monkeypatch.setattr(tariff_converter_module, "datetime", FixedDatetime)
+    forecast = _day_intervals(datetime(2026, 10, 8, tzinfo=brisbane))
+    for point in forecast:
+        slot_start = datetime.fromisoformat(point["nemTime"]) - timedelta(minutes=30)
+        if (slot_start.hour, slot_start.minute) == (12, 30):
+            rate = -7.0 if point["channelType"] == "general" else 3.0
+            point["perKwh"] = rate
+            point["advancedPrice"] = {"predicted": rate}
+
+    tariff = tariff_converter_module.convert_amber_to_tesla_tariff(
+        forecast,
+        tesla_energy_site_id="test-site",
+        forecast_type="predicted",
+        powerwall_timezone="Australia/Brisbane",
+        current_actual_interval={
+            "general": {"perKwh": -5.0},
+            "feedIn": {"perKwh": 2.0},
+        },
+        electricity_provider="amber",
+    )
+
+    buy = tariff["energy_charges"]["Summer"]["rates"]
+    sell = tariff["sell_tariff"]["energy_charges"]["Summer"]["rates"]
+    assert (buy["PERIOD_12_00"], sell["PERIOD_12_00"]) == (-0.05, -0.02)
+    assert (buy["PERIOD_12_30"], sell["PERIOD_12_30"]) == (-0.07, -0.03)
+
+
+def test_tesla_network_and_flow_power_adjustments_keep_negative_rates(
+    tariff_converter_module, monkeypatch,
+):
+    monkeypatch.setattr(
+        tariff_converter_module.dt_util, "now", lambda: datetime(2026, 10, 8, 12),
+        raising=False,
+    )
+    tariff = {"energy_charges": {"Summer": {"rates": {"PERIOD_12_00": -0.10}}}}
+    tariff_converter_module._apply_network_tariff_manual(
+        tariff, flat_rate=2, other_fees=0, include_gst=False,
+    )
+    assert tariff["energy_charges"]["Summer"]["rates"]["PERIOD_12_00"] == -0.08
+
+    monkeypatch.setattr(
+        tariff_converter_module, "spot_to_tariff", lambda **kwargs: -4.0,
+        raising=False,
+    )
+    tariff_converter_module._apply_network_tariff_library(
+        tariff, distributor="energex", tariff_code="test",
+    )
+    assert tariff["energy_charges"]["Summer"]["rates"]["PERIOD_12_00"] == -0.04
+
+    tariff_converter_module.apply_flow_power_pea(
+        tariff, {"PERIOD_12_00": -0.10}, base_rate=1, custom_pea=-5,
+    )
+    assert tariff["energy_charges"]["Summer"]["rates"]["PERIOD_12_00"] == -0.04
+
+
 def test_sigenergy_converter_prefers_next_24h_date_for_past_clock_slots(
     sigenergy_api_module,
     monkeypatch,

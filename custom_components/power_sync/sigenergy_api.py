@@ -1077,7 +1077,7 @@ def convert_amber_prices_to_sigenergy(
 
         # For sell prices (feedIn channel), Amber uses negative values (you receive money)
         # We negate to convert to Sigenergy's convention (positive = you receive)
-        # Note: Unlike Tesla, Sigenergy can handle negative prices - no clamping to zero
+        # Keep signed prices for both Sigenergy and Tesla tariff uploads.
         # During extreme negative wholesale prices, sell price can become negative (you pay to export)
         if price_type == "sell":
             per_kwh_cents = -per_kwh_cents
@@ -1124,7 +1124,7 @@ def convert_amber_prices_to_sigenergy(
                 if interval_data:
                     actual_price = interval_data.get("perKwh", 0)
                     # For sell prices, negate (Amber feedIn is negative = you receive)
-                    # No clamping - Sigenergy handles negative prices unlike Tesla
+                    # Keep negative prices so the cloud tariff reflects the retail rate.
                     if price_type == "sell":
                         actual_price = -actual_price
                     _LOGGER.info(

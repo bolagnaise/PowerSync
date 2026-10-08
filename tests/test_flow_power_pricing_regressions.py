@@ -62,12 +62,6 @@ def test_cost_tracking_uses_live_provider_contract_without_tariff_schedule():
     }
     invalid_contracts = (
         {"prices": {"import": {"c_per_kwh": 35.0}}},
-        {
-            "prices": {
-                "import": {"c_per_kwh": -1.0},
-                "export": {"c_per_kwh": 15.0},
-            }
-        },
     )
     for invalid_contract in invalid_contracts:
         hass.data["power_sync"]["covau-entry"] = {
@@ -82,6 +76,18 @@ def test_cost_tracking_uses_live_provider_contract_without_tariff_schedule():
             0.22,
             0.08,
         )
+
+    hass.data["power_sync"]["covau-entry"] = {
+        "covau_quota_runtime": SimpleNamespace(
+            contract=lambda: {
+                "prices": {
+                    "import": {"c_per_kwh": -1.0},
+                    "export": {"c_per_kwh": -2.0},
+                }
+            }
+        )
+    }
+    assert namespace["_get_current_prices"](hass, "covau-entry") == (-0.01, -0.02)
 
 
 def test_cost_tracking_uses_all_amber_compatible_dynamic_coordinators():
@@ -170,6 +176,9 @@ def test_cost_tracking_uses_flow_marginal_contract_prices():
     )
 
     assert namespace["_get_current_prices"](hass, "flow-entry") == (0.21, 0.30)
+
+    contract["prices"]["marginal"] = {"import": -0.04, "export": -0.02}
+    assert namespace["_get_current_prices"](hass, "flow-entry") == (-0.04, -0.02)
 
 
 def test_flow_nem_region_labels_do_not_claim_a_plan_rate():

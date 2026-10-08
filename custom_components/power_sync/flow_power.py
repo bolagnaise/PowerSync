@@ -127,7 +127,7 @@ class FlowPowerPriceSeries:
 
     @property
     def marginal_import(self) -> tuple[float, ...]:
-        return tuple(max(0.0, base - bonus) for base, bonus in zip(
+        return tuple(base - bonus for base, bonus in zip(
             self.settlement_import, self.import_bonus, strict=True
         ))
 
@@ -335,7 +335,7 @@ def flow_power_price_series(
             snapshot, plan_id, local, rules
         )
         import_rule_id = _matching_import_rule(plan_id, local)
-        base_import = max(0.0, float(import_price))
+        base_import = float(import_price)
         i_bonus = 0.0
         i_group = None
         e_group = None
@@ -347,7 +347,7 @@ def flow_power_price_series(
             )
             import_caps[i_group] = cap
             if available:
-                i_bonus = base_import
+                i_bonus = max(0.0, base_import)
         if export_rule_id is not None:
             e_group = f"{local.date().isoformat()}:{export_rule_id}"
             cap, available = _group_cap(

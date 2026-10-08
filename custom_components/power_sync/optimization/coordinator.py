@@ -17946,7 +17946,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if runtime is not None:
                 snapshot, ledger = runtime
                 base_import_prices = self._last_settlement_import_prices or self._last_import_prices
-                base_import_price = max(0.0, float(base_import_prices[0] or 0.0))
+                base_import_price = float(base_import_prices[0] or 0.0)
                 from ..flow_power import flow_power_price_series
 
                 series = flow_power_price_series(
