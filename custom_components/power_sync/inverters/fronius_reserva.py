@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from datetime import datetime
 from typing import Any
 
 from homeassistant.helpers import entity_registry as er
@@ -357,6 +358,7 @@ class FroniusReservaBatteryController:
         return {
             "telemetry_ready": self.telemetry_ready(),
             "upstream_integration": self.upstream_integration_status(),
+            "telemetry_observed_at": self._telemetry_observed_at(),
             "battery_level": self._read_float("battery_level"),
             "battery_power": battery_kw,
             "grid_power": grid_kw,
@@ -386,6 +388,56 @@ class FroniusReservaBatteryController:
                 export_limit_w / 1000.0 if export_limit_w is not None else None
             ),
         }
+
+    def _read_observed_at(self, key: str) -> datetime | None:
+        """Return when the selected HA entity last reported its value.
+
+        ``last_reported`` advances when an upstream integration republishes a
+        state, including an unchanged value, and is therefore the best
+        available compatibility signal for a current source observation.  On
+        older Home Assistant versions that do not expose it, fall back to
+        ``last_updated``; modern states with an unavailable report timestamp
+        remain unknown instead of being restamped by the PowerSync refresh.
+        """
+        entity_id = self._entity_map.get(key)
+        if not entity_id:
+            return None
+        state = self.hass.states.get(entity_id)
+        if not state:
+            return None
+
+        reported_at = getattr(state, "last_reported", None)
+        if isinstance(reported_at, datetime):
+            return reported_at
+        if hasattr(state, "last_reported"):
+            return None
+
+        updated_at = getattr(state, "last_updated", None)
+        return updated_at if isinstance(updated_at, datetime) else None
+
+    def _telemetry_observed_at(self) -> dict[str, datetime | None]:
+        """Preserve source observation times for live-control power fields."""
+        source_keys = {
+            "load_power": ("load_power",),
+            "grid_power": ("grid_power",),
+            "solar_power": ("solar_power",),
+            "battery_power": (
+                "battery_charge_power",
+                "battery_discharge_power",
+            ),
+        }
+        observed_at: dict[str, datetime | None] = {}
+        for output_key, keys in source_keys.items():
+            selected_keys = [key for key in keys if key in self._entity_map]
+            if not selected_keys:
+                continue
+            timestamps = [self._read_observed_at(key) for key in selected_keys]
+            observed_at[output_key] = (
+                min(timestamps)
+                if all(timestamp is not None for timestamp in timestamps)
+                else None
+            )
+        return observed_at
 
     def telemetry_ready(self) -> bool:
         """Return whether the upstream Fronius telemetry is usable for control."""

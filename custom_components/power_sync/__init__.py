@@ -24195,13 +24195,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             last_update = getattr(coordinator, "last_update_success_time", None)
             update_interval = getattr(coordinator, "update_interval", None)
-            if last_update is None:
-                # DataUpdateCoordinator does not expose a success timestamp in
-                # every supported Home Assistant runtime.  A successful,
-                # telemetry-ready snapshot is still safe to use here; the
-                # matching normalized live-status guard follows this contract.
-                return True
-
             try:
                 stale_after = max(
                     update_interval * 4
@@ -24216,11 +24209,47 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ):
                     now = now.replace(tzinfo=last_update.tzinfo)
                 elif (
-                    getattr(now, "tzinfo", None) is not None
+                    last_update is not None
+                    and getattr(now, "tzinfo", None) is not None
                     and getattr(last_update, "tzinfo", None) is None
                 ):
                     last_update = last_update.replace(tzinfo=now.tzinfo)
-                return (now - last_update) <= stale_after
+                if last_update is not None and (now - last_update) > stale_after:
+                    return False
+
+                # New Fronius bridge snapshots retain the source entity
+                # observation times. A successful PowerSync refresh must not
+                # renew an unchanged upstream value, and all power fields
+                # used for a target or physical convergence verdict must be
+                # current together. Snapshots from older bridge versions do
+                # not have this field and retain coordinator-only compatibility
+                # behavior until the next bridge refresh.
+                observed_at = data.get("telemetry_observed_at")
+                if observed_at is None:
+                    return True
+                if not isinstance(observed_at, dict):
+                    return False
+
+                for key in ("load_power", "grid_power", "battery_power"):
+                    source_at = observed_at.get(key)
+                    if source_at is None:
+                        return False
+                    source_now = now
+                    if (
+                        getattr(source_now, "tzinfo", None) is None
+                        and getattr(source_at, "tzinfo", None) is not None
+                    ):
+                        source_now = source_now.replace(tzinfo=source_at.tzinfo)
+                    elif (
+                        getattr(source_now, "tzinfo", None) is not None
+                        and getattr(source_at, "tzinfo", None) is None
+                    ):
+                        source_at = source_at.replace(tzinfo=source_now.tzinfo)
+                    source_age = source_now - source_at
+                    if source_age > stale_after or source_age < -timedelta(seconds=5):
+                        return False
+
+                return True
             except Exception:
                 return False
 

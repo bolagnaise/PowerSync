@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -180,6 +181,27 @@ def test_connect_discovers_reserva_entities_and_reads_status():
     assert status["solar_power_valid"] is True
     assert status["backup_reserve"] == 20.0
     assert status["battery_max_charge_power_w"] == 5000.0
+
+
+def test_status_preserves_selected_source_observation_times():
+    now = datetime.now(timezone.utc)
+    states = _callifo_byd_states()
+    for state in states:
+        state.last_reported = now
+        state.last_updated = now - timedelta(hours=1)
+    load_state = next(
+        state for state in states if state.entity_id == "sensor.fronius_inverter_load"
+    )
+    load_state.last_reported = now.replace(microsecond=0)
+    hass = _FakeHass(states)
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["telemetry_observed_at"]["load_power"] == load_state.last_reported
+    assert status["telemetry_observed_at"]["grid_power"] == now
+    assert status["telemetry_observed_at"]["battery_power"] == now
 
 
 def test_upstream_config_entry_state_is_reported_when_available():

@@ -10962,6 +10962,7 @@ class FroniusReservaEnergyCoordinator(
 
         return {
             "telemetry_ready": telemetry_ready,
+            "telemetry_observed_at": status.get("telemetry_observed_at", {}),
             "solar_power": solar_kw,
             "solar_power_valid": status.get("solar_power_valid", True),
             "grid_power": grid_kw,
