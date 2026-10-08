@@ -12415,6 +12415,177 @@ def test_target_export_force_refreshes_when_optimizer_power_changes(opt_module):
     assert coordinator._optimizer_force_state["power_w"] == 8000
 
 
+def _sigenergy_active_export_refresh_fixture(
+    opt_module,
+    monkeypatch,
+    *,
+    previous_grid_export_w=2680.0,
+    current_grid_export_w=2326.0,
+    force_discharge_result=None,
+):
+    now = datetime(2026, 10, 8, 6, 25, tzinfo=timezone.utc)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda *args, **kwargs: now)
+    monkeypatch.setattr(
+        opt_module.dt_util,
+        "utcnow",
+        lambda *args, **kwargs: now,
+    )
+    battery = _FakeBattery(force_discharge_result=force_discharge_result)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.812)
+    coordinator.battery_system = "sigenergy"
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={"battery_power": 1.7183, "grid_power": -2.67}
+    )
+    action = SimpleNamespace(
+        action="export",
+        power_w=1718.3,
+        timestamp=now,
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+    coordinator._last_optimizer_result = SimpleNamespace(
+        schedule=SimpleNamespace(actions=[action]),
+        grid_export_w=[current_grid_export_w],
+    )
+    coordinator._optimizer_force_state = {
+        "active": True,
+        "type": "discharge",
+        "expires_at": now + timedelta(hours=1),
+        "hardware_expires_at": now + timedelta(hours=1),
+        "power_w": 1718.3,
+        "grid_export_limit_w": previous_grid_export_w,
+        "started_at": now - timedelta(minutes=5),
+        "source": "optimizer",
+        "scope": "optimizer",
+    }
+    return coordinator, battery
+
+
+def test_sigenergy_refreshes_when_only_pcc_ceiling_decreases(opt_module, monkeypatch):
+    coordinator, battery = _sigenergy_active_export_refresh_fixture(
+        opt_module, monkeypatch
+    )
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            coordinator._current_schedule.actions[0]
+        )
+    )
+
+    assert battery.force_discharge_calls == [(5, 2326.0, True, None)]
+    assert coordinator._optimizer_force_state["power_w"] == 1718.3
+    assert coordinator._optimizer_force_state["grid_export_limit_w"] == 2326.0
+
+
+def test_sigenergy_refreshes_when_only_pcc_ceiling_increases(opt_module, monkeypatch):
+    coordinator, battery = _sigenergy_active_export_refresh_fixture(
+        opt_module,
+        monkeypatch,
+        previous_grid_export_w=2326.0,
+        current_grid_export_w=2680.0,
+    )
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            coordinator._current_schedule.actions[0]
+        )
+    )
+
+    assert battery.force_discharge_calls == [(5, 2680.0, True, None)]
+    assert coordinator._optimizer_force_state["power_w"] == 1718.3
+    assert coordinator._optimizer_force_state["grid_export_limit_w"] == 2680.0
+
+
+def test_sigenergy_refresh_records_network_clamped_pcc_ceiling(
+    opt_module,
+    monkeypatch,
+):
+    coordinator, battery = _sigenergy_active_export_refresh_fixture(
+        opt_module, monkeypatch
+    )
+
+    class _Guard:
+        async def async_guard_write(self, requested_w, writer):
+            assert requested_w == 2326.0
+            return await writer(2000.0)
+
+    coordinator._network_export_guard = lambda: _Guard()
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            coordinator._current_schedule.actions[0]
+        )
+    )
+
+    assert battery.force_discharge_calls == [(5, 2000.0, True, None)]
+    assert coordinator._optimizer_force_state["grid_export_limit_w"] == 2000.0
+
+
+def test_sigenergy_does_not_refresh_when_battery_and_pcc_targets_are_unchanged(
+    opt_module,
+    monkeypatch,
+):
+    coordinator, battery = _sigenergy_active_export_refresh_fixture(
+        opt_module,
+        monkeypatch,
+        previous_grid_export_w=2326.0,
+        current_grid_export_w=2326.0,
+    )
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            coordinator._current_schedule.actions[0]
+        )
+    )
+
+    assert battery.force_discharge_calls == []
+
+
+def test_sigenergy_failed_pcc_refresh_keeps_prior_applied_ceiling(
+    opt_module,
+    monkeypatch,
+):
+    coordinator, battery = _sigenergy_active_export_refresh_fixture(
+        opt_module,
+        monkeypatch,
+        force_discharge_result=False,
+    )
+    prior_state = dict(coordinator._optimizer_force_state)
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            coordinator._current_schedule.actions[0]
+        )
+    )
+
+    assert battery.force_discharge_calls == [(5, 2326.0, True, None)]
+    assert coordinator._optimizer_force_state["active"] is True
+    assert coordinator._optimizer_force_state["grid_export_limit_w"] == (
+        prior_state["grid_export_limit_w"]
+    )
+    assert coordinator._optimizer_force_state["hardware_expires_at"] == (
+        prior_state["hardware_expires_at"]
+    )
+
+
+def test_sigenergy_legacy_active_state_without_pcc_ceiling_refreshes_once(
+    opt_module,
+    monkeypatch,
+):
+    coordinator, battery = _sigenergy_active_export_refresh_fixture(
+        opt_module, monkeypatch
+    )
+    coordinator._optimizer_force_state.pop("grid_export_limit_w")
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            coordinator._current_schedule.actions[0]
+        )
+    )
+
+    assert battery.force_discharge_calls == [(5, 2326.0, True, None)]
+    assert coordinator._optimizer_force_state["grid_export_limit_w"] == 2326.0
+
+
 def test_spread_export_force_refresh_applies_higher_target_within_grid_cap(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)

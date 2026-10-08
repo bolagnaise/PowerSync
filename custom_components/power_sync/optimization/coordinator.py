@@ -9216,7 +9216,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Clear private optimizer-owned force state."""
         state = getattr(self, "_optimizer_force_state", None)
         if not isinstance(state, dict):
-            self._optimizer_force_state = {"active": False}
+            self._optimizer_force_state = {
+                "active": False,
+                "grid_export_limit_w": None,
+            }
             return
         state.update(
             {
@@ -9225,6 +9228,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "expires_at": None,
                 "hardware_expires_at": None,
                 "power_w": 0,
+                "grid_export_limit_w": None,
                 "started_at": None,
                 "source": "optimizer",
                 "scope": "optimizer",
@@ -9236,6 +9240,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         force_type: str,
         duration_minutes: int,
         power_w: float,
+        grid_export_limit_w: float | None = None,
     ) -> None:
         """Record an optimizer-owned hardware force command."""
         now = dt_util.utcnow()
@@ -9254,6 +9259,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "expires_at": expires_at,
             "hardware_expires_at": expires_at,
             "power_w": power_w,
+            "grid_export_limit_w": grid_export_limit_w,
             "started_at": started_at or now,
             "source": "optimizer",
             "scope": "optimizer",
@@ -10783,6 +10789,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             force_power_w,
                         )
                     )
+                    pcc_ceiling_changed = (
+                        force_type == "discharge"
+                        and self.battery_system == "sigenergy"
+                        and (
+                            _ext_state.get("grid_export_limit_w") is None
+                            or self._force_command_power_changed(
+                                _ext_state.get("grid_export_limit_w"),
+                                grid_export_limit_w,
+                            )
+                        )
+                    )
                     now = dt_util.utcnow()
                     refresh_window = timedelta(
                         minutes=max(
@@ -10796,6 +10813,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             hardware_expiry is None
                             or hardware_expiry <= now + refresh_window
                             or hardware_power_changed
+                            or pcc_ceiling_changed
                         )
                     else:
                         _ext_state["expires_at"] = new_expiry
@@ -10858,6 +10876,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
                     ):
                         try:
+                            export_guard_present = (
+                                self._network_export_guard() is not None
+                            )
                             # For Modbus-backed systems, _extend_hardware
                             # re-issues the inverter countdown. For Tesla, the
                             # service falls through to the full tariff uploader
@@ -10899,6 +10920,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     )
                                 )
                                 if not allowed:
+                                    if (
+                                        force_scope == "optimizer"
+                                        and self.battery_system == "sigenergy"
+                                        and not export_guard_present
+                                    ):
+                                        _LOGGER.warning(
+                                            "Optimizer: Sigenergy force-discharge "
+                                            "refresh was not confirmed; retaining "
+                                            "the prior PCC ceiling for retry"
+                                        )
+                                        return
                                     if self.battery_system == "solaredge":
                                         _LOGGER.warning(
                                             "Optimizer: SolarEdge force-discharge "
@@ -10928,6 +10960,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     force_type,
                                     extend_mins,
                                     force_power_w,
+                                    grid_export_limit_w=(
+                                        applied_power_w
+                                        if (
+                                            force_type == "discharge"
+                                            and self.battery_system == "sigenergy"
+                                        )
+                                        else None
+                                    ),
                                 )
                             else:
                                 _ext_state["power_w"] = force_power_w
@@ -11720,6 +11760,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 self._export_command_power_w(action)
                                 if self.battery_system == "sigenergy"
                                 else discharge_power
+                            ),
+                            grid_export_limit_w=(
+                                discharge_power
+                                if self.battery_system == "sigenergy"
+                                else None
                             ),
                         )
                     if not force_result:
