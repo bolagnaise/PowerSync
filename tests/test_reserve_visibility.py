@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,13 @@ from types import SimpleNamespace
 import pytest
 
 from test_battery_export_allowed_slots import _coordinator, opt_module as _opt_module_fixture
+from test_reserve_source_of_truth import (
+    _bc_module,
+    _execute_coordinator,
+    _FakeBatteryNoTrust,
+    _FakeBatteryWithTrust,
+    _self_consumption_action,
+)
 
 
 opt_module = _opt_module_fixture
@@ -26,6 +34,7 @@ def coordinator(opt_module):
     coordinator._manual_backup_reserve = 0.20
     coordinator._auto_apply_reserve_enabled = True
     coordinator._startup_backup_reserve = 15
+    coordinator._startup_backup_reserve_source = "persisted user backup reserve"
     coordinator._last_update_time = NOW
     return coordinator
 
@@ -47,6 +56,7 @@ def test_manual_active_and_hardware_reserves_remain_distinct(coordinator):
         "active_software_floor_percent": 45.0,
         "hardware_baseline_percent": 15.0,
         "hardware_value_quality": "saved_baseline",
+        "hardware_value_source": "persisted user backup reserve",
         "auto_apply_enabled": True,
         "forecast_updated_at": NOW.isoformat(),
         "forecast_quality": "current",
@@ -247,4 +257,236 @@ def test_api_and_current_action_share_block_without_changing_legacy_fields(
 
 def test_current_action_handles_older_payload_without_reserve_block():
     assert _current_action_attributes({"current_action": "idle"})["reserve_visibility"] == {}
+    assert _current_action_attributes({"current_action": "idle"})["export_reserve_decision"] is None
     assert _current_action_attributes(None) == {}
+
+
+def test_current_action_forwards_current_export_reserve_decision():
+    decision = {"status": "blocked", "reason": "projected_below_floor", "software_floor_percent": 45.0}
+
+    attrs = _current_action_attributes({"current_action": "export", "export_reserve_decision": decision})
+
+    assert attrs["export_reserve_decision"] is decision
+
+
+def _startup_coordinator(opt_module, battery, **options):
+    """Use real startup configuration resolution with the lightweight HA shell."""
+    coordinator = _coordinator(opt_module, "amber", **options)
+    coordinator._enabled = True
+    coordinator._executor = SimpleNamespace(battery_controller=battery)
+    coordinator._startup_backup_reserve = None
+    coordinator._startup_backup_reserve_source = None
+    coordinator._manual_backup_reserve = 0.20
+    coordinator._auto_apply_reserve_enabled = False
+    coordinator._last_update_time = NOW
+    coordinator._should_apply_offgrid_overlay = lambda: False
+
+    class _ConfigEntries:
+        def async_update_entry(self, entry, **kwargs):
+            if "data" in kwargs:
+                entry.data = kwargs["data"]
+            if "options" in kwargs:
+                entry.options = kwargs["options"]
+
+    coordinator.hass.config_entries = _ConfigEntries()
+    return coordinator
+
+
+@pytest.mark.parametrize(
+    "options, source",
+    [
+        ({"optimization_backup_reserve": 0.40}, "optimizer floor config"),
+        ({}, "optimizer floor"),
+    ],
+)
+def test_actual_optimizer_only_startup_has_no_hardware_baseline(
+    opt_module, options, source
+):
+    coordinator = _startup_coordinator(opt_module, object(), **options)
+    coordinator._config.backup_reserve = 0.40
+
+    asyncio.run(coordinator._deferred_enable_restore())
+    visibility = _visibility(coordinator)
+
+    assert coordinator._startup_backup_reserve == 40
+    assert visibility["active_software_floor_percent"] == 40.0
+    assert visibility["hardware_baseline_percent"] is None
+    assert visibility["hardware_value_quality"] == "unknown"
+    assert visibility["hardware_value_source"] == source
+
+
+@pytest.mark.parametrize(
+    "options, source",
+    [
+        ({"_user_backup_reserve": 15}, "persisted user backup reserve"),
+        ({"hardware_backup_reserve": 0.15}, "hardware backup reserve config"),
+        ({"hardware_backup_reserve": 0}, "hardware backup reserve config"),
+    ],
+)
+def test_saved_and_hardware_config_startup_have_baseline(opt_module, options, source):
+    coordinator = _startup_coordinator(opt_module, object(), **options)
+
+    asyncio.run(coordinator._deferred_enable_restore())
+    visibility = _visibility(coordinator)
+
+    expected = 0.0 if options.get("hardware_backup_reserve") == 0 else 15.0
+    assert coordinator._startup_backup_reserve == expected
+    assert visibility["hardware_baseline_percent"] == expected
+    assert visibility["hardware_value_quality"] == "saved_baseline"
+    assert visibility["hardware_value_source"] == source
+
+
+@pytest.mark.parametrize("trust_name", ["LIVE", "CLOUD_FRESH"])
+def test_trusted_startup_capture_has_baseline(opt_module, trust_name):
+    trust = getattr(_bc_module().ReserveTrust, trust_name)
+    coordinator = _startup_coordinator(opt_module, _FakeBatteryWithTrust(30, trust))
+    coordinator._config.backup_reserve = None
+
+    asyncio.run(coordinator._deferred_enable_restore())
+    visibility = _visibility(coordinator)
+
+    assert coordinator._startup_backup_reserve == 30
+    assert visibility["hardware_baseline_percent"] == 30.0
+    assert visibility["hardware_value_quality"] == "saved_baseline"
+    assert visibility["hardware_value_source"] == "trusted battery backup reserve"
+
+
+@pytest.mark.parametrize("trust_name", ["CLOUD_STALE", "ENTITY", "NONE"])
+def test_untrusted_startup_read_is_not_saved(opt_module, trust_name):
+    trust = getattr(_bc_module().ReserveTrust, trust_name)
+    coordinator = _startup_coordinator(opt_module, _FakeBatteryWithTrust(30, trust))
+    coordinator._config.backup_reserve = None
+
+    asyncio.run(coordinator._deferred_enable_restore())
+    visibility = _visibility(coordinator)
+
+    assert coordinator._startup_backup_reserve is None
+    assert visibility["hardware_baseline_percent"] is None
+    assert visibility["hardware_value_quality"] == "unknown"
+
+
+def test_raw_startup_capture_preserves_control_value_but_stays_unverified(opt_module):
+    coordinator = _startup_coordinator(opt_module, _FakeBatteryNoTrust(30))
+    coordinator._config.backup_reserve = None
+
+    asyncio.run(coordinator._deferred_enable_restore())
+    visibility = _visibility(coordinator)
+
+    assert coordinator._startup_backup_reserve == 30
+    assert visibility["hardware_baseline_percent"] is None
+    assert visibility["hardware_value_quality"] == "unknown"
+    assert visibility["hardware_value_source"] == "unverified battery backup reserve"
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+def test_resolved_startup_tracks_trusted_and_raw_self_heal(opt_module, trusted):
+    battery = (
+        _FakeBatteryWithTrust(30, _bc_module().ReserveTrust.LIVE)
+        if trusted else _FakeBatteryNoTrust(30)
+    )
+    coordinator = _startup_coordinator(opt_module, battery, _user_backup_reserve=52)
+
+    asyncio.run(coordinator._deferred_enable_restore())
+    visibility = _visibility(coordinator)
+
+    assert coordinator._startup_backup_reserve == 30
+    assert coordinator._entry.options["_user_backup_reserve"] == 30
+    assert visibility["hardware_baseline_percent"] == (30.0 if trusted else None)
+    assert visibility["hardware_value_quality"] == ("saved_baseline" if trusted else "unknown")
+    assert visibility["hardware_value_source"] == (
+        "trusted battery backup reserve" if trusted else "unverified battery backup reserve"
+    )
+
+
+@pytest.mark.parametrize("trust_name", ["LIVE", "CLOUD_FRESH", "CLOUD_STALE", "ENTITY", None])
+def test_runtime_reserve_adoption_tracks_read_trust(opt_module, trust_name):
+    battery = (
+        _FakeBatteryWithTrust(30, getattr(_bc_module().ReserveTrust, trust_name))
+        if trust_name else _FakeBatteryNoTrust(30)
+    )
+    coordinator = _execute_coordinator(opt_module, battery)
+    coordinator._startup_backup_reserve = 20
+    coordinator._startup_backup_reserve_source = "hardware backup reserve config"
+    coordinator._manual_backup_reserve = 0.20
+    coordinator._auto_apply_reserve_enabled = False
+    coordinator._last_update_time = NOW
+
+    asyncio.run(coordinator._execute_optimizer_action(_self_consumption_action()))
+    visibility = _visibility(coordinator)
+
+    if trust_name in {"LIVE", "CLOUD_FRESH"}:
+        assert coordinator._startup_backup_reserve == 30
+        assert visibility["hardware_baseline_percent"] == 30.0
+        assert visibility["hardware_value_source"] == "trusted battery backup reserve"
+    elif trust_name is None:
+        assert coordinator._startup_backup_reserve == 30
+        assert visibility["hardware_baseline_percent"] is None
+        assert visibility["hardware_value_quality"] == "unknown"
+        assert visibility["hardware_value_source"] == "unverified battery backup reserve"
+    else:
+        assert coordinator._startup_backup_reserve == 20
+        assert visibility["hardware_baseline_percent"] == 20.0
+        assert visibility["hardware_value_source"] == "hardware backup reserve config"
+
+
+def test_hardware_setting_establishes_saved_configuration_provenance(opt_module):
+    coordinator = _startup_coordinator(opt_module, object())
+
+    result = asyncio.run(coordinator.set_settings({"hardware_backup_reserve": 10}))
+    visibility = _visibility(coordinator)
+
+    assert result["success"] is True
+    assert coordinator._startup_backup_reserve == 10
+    assert coordinator._entry.data["hardware_backup_reserve"] == 0.10
+    assert visibility["hardware_baseline_percent"] == 10.0
+    assert visibility["hardware_value_quality"] == "saved_baseline"
+    assert visibility["hardware_value_source"] == "hardware backup reserve setting"
+
+
+def test_runtime_read_without_trust_keeps_legacy_adoption_unverified(opt_module):
+    coordinator = _execute_coordinator(opt_module, _FakeBatteryWithTrust(30, None))
+    coordinator._startup_backup_reserve = 20
+    coordinator._startup_backup_reserve_source = "hardware backup reserve config"
+    coordinator._manual_backup_reserve = 0.20
+    coordinator._auto_apply_reserve_enabled = False
+    coordinator._last_update_time = NOW
+
+    asyncio.run(coordinator._execute_optimizer_action(_self_consumption_action()))
+    visibility = _visibility(coordinator)
+
+    assert coordinator._startup_backup_reserve == 30
+    assert visibility["hardware_baseline_percent"] is None
+    assert visibility["hardware_value_quality"] == "unknown"
+    assert visibility["hardware_value_source"] == "unverified battery backup reserve"
+
+
+@pytest.mark.parametrize(
+    "source", [None, "optimizer floor", "optimizer floor config", "unverified battery backup reserve", "unexpected source"]
+)
+def test_finite_value_without_proven_hardware_source_stays_unknown(coordinator, source):
+    coordinator._startup_backup_reserve_source = source
+
+    visibility = _visibility(coordinator)
+
+    assert visibility["hardware_baseline_percent"] is None
+    assert visibility["hardware_value_quality"] == "unknown"
+    assert visibility["hardware_value_source"] == source
+
+
+def test_older_cached_value_without_source_is_not_a_proven_baseline(coordinator):
+    del coordinator._startup_backup_reserve_source
+
+    assert _visibility(coordinator)["hardware_baseline_percent"] is None
+    assert _visibility(coordinator)["hardware_value_quality"] == "unknown"
+    assert _visibility(coordinator)["hardware_value_source"] is None
+
+
+@pytest.mark.parametrize("source", [True, 10, [], {}])
+def test_invalid_source_metadata_stays_unknown(coordinator, source):
+    coordinator._startup_backup_reserve_source = source
+
+    visibility = _visibility(coordinator)
+
+    assert visibility["hardware_baseline_percent"] is None
+    assert visibility["hardware_value_quality"] == "unknown"
+    assert visibility["hardware_value_source"] is None

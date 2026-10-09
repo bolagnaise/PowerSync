@@ -2002,6 +2002,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       compact,
       priceMeta,
       reserveForecastQuality: this._reserveDetails().forecastQuality,
+      exportReserveDecision: this._currentExportReserveDecision(),
       forceCharge: this._entityStateSignature(this._config?.forceChargeEntity, ['windows']),
       forceDischarge: this._entityStateSignature(this._config?.forceDischargeEntity, ['windows']),
     });
@@ -2109,6 +2110,24 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           color: var(--warning-color, #ff9800);
           background: rgba(255, 152, 0, 0.10);
           border-color: rgba(255, 152, 0, 0.30);
+        }
+        .reserve-decision strong {
+          display: block;
+          margin-bottom: 5px;
+          color: var(--primary-text-color);
+          font-size: 13px;
+        }
+        .reserve-decision p {
+          margin: 5px 0;
+          max-width: 72ch;
+        }
+        .reserve-decision .decision-time {
+          color: var(--secondary-text-color);
+          font-size: 11px;
+        }
+        .window-row .reserve-decision {
+          grid-column: 1 / -1;
+          margin: 0;
         }
         .reserve-detail {
           margin: 0 0 14px;
@@ -2704,6 +2723,81 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     return '';
   }
 
+  _currentExportReserveDecision(data = this._data) {
+    const decision = data?.export_reserve_decision;
+    if (!decision || typeof decision !== 'object' || Array.isArray(decision) ||
+        data.enabled === false || data.monitoring_mode === true || data.is_stale === true || this._error) return null;
+    if (!['blocked', 'limited', 'unknown'].includes(decision.status) ||
+        !['at_floor', 'projected_below_floor', 'insufficient_safe_duration', 'safe_duration_unverified'].includes(decision.reason) ||
+        !['self_consumption_accepted', 'export_accepted', 'restore_unconfirmed', 'command_unconfirmed', 'not_requested'].includes(decision.control_outcome)) return null;
+    const parseTime = value => typeof value === 'string' ? Date.parse(value) : NaN;
+    const evaluated = parseTime(decision.evaluated_at);
+    const start = parseTime(decision.slot_start);
+    const end = parseTime(decision.slot_end);
+    const now = Date.now();
+    const interval = Math.max(1, Number(data?.config?.interval_minutes) || 5);
+    if (![evaluated, start, end].every(Number.isFinite) || start >= end ||
+        now < start || now >= end || evaluated > now + 30000 || now - evaluated > 3 * interval * 60000) return null;
+    const generated = parseTime(decision.plan_generated_at);
+    const currentPlan = parseTime(data.last_optimization);
+    if (Number.isFinite(generated) && Number.isFinite(currentPlan) && generated !== currentPlan) return null;
+    if (decision.status === 'limited' &&
+        !(Number.isFinite(decision.requested_minutes) && Number.isFinite(decision.allowed_minutes) &&
+          decision.allowed_minutes > 0 && decision.allowed_minutes < decision.requested_minutes)) return null;
+    return decision;
+  }
+
+  _renderExportReserveDecision(decision = this._currentExportReserveDecision()) {
+    if (!decision) return '';
+    const percent = value => {
+      const n = this._optionalReservePercent(value);
+      return Number.isFinite(n) ? `${Number(n.toFixed(2))}%` : 'Unknown';
+    };
+    const soc = percent(decision.current_soc_percent);
+    const projected = percent(decision.projected_soc_percent);
+    const floor = percent(decision.software_floor_percent);
+    const planned = this._data?.planned_current_action === 'discharge' ? 'discharge' : 'export';
+    let title;
+    let explanation;
+    if (decision.status === 'unknown') {
+      title = 'Reserve-safe export could not be verified';
+      explanation = 'The inputs needed to check a safe discharge duration were unavailable. This does not establish that the reserve was reached.';
+    } else if (decision.status === 'limited') {
+      title = 'Export duration limited by reserve';
+      explanation = `Requested ${decision.requested_minutes} min; allowed ${decision.allowed_minutes} min above the ${floor} software export floor.`;
+    } else {
+      title = `Planned ${planned} held by reserve`;
+      if (decision.reason === 'at_floor') {
+        explanation = `Charge was ${soc}, at or below the ${floor} software export floor when checked.`;
+      } else if (decision.reason === 'projected_below_floor') {
+        const basis = decision.projection_basis === 'full_power_duration' ? 'Full-power estimate' : 'Forecast end-of-slot charge';
+        explanation = `${basis}: ${projected}, below the ${floor} software export floor. Charge was ${soc} when checked.`;
+      } else {
+        explanation = `The full-power command could not run for a complete interval above the ${floor} software export floor. Charge was ${soc} when checked; full-power estimate: ${projected}.`;
+      }
+    }
+    let outcome;
+    if (decision.control_outcome === 'restore_unconfirmed') {
+      if (decision.status !== 'unknown') title = 'Reserve stop not confirmed';
+      outcome = 'Returning to self-consumption was not confirmed. Export may still be active.';
+    } else if (decision.control_outcome === 'command_unconfirmed') {
+      if (decision.status === 'limited') title = 'Reserve-limited export not confirmed';
+      outcome = 'The export command was not confirmed.';
+    } else if (decision.control_outcome === 'self_consumption_accepted') {
+      outcome = 'Self-consumption accepted. Household use can continue below the software floor, subject to hardware protection.';
+    } else if (decision.control_outcome === 'export_accepted') {
+      outcome = 'The shorter export command was accepted.';
+    } else {
+      outcome = 'The control outcome has not been confirmed.';
+    }
+    return `<div class="notice warn reserve-decision" role="status">
+      <strong>${this._escHtml(title)}</strong>
+      <p>${this._escHtml(explanation)}</p>
+      <p>${this._escHtml(outcome)}</p>
+      <div class="decision-time">Checked ${this._escHtml(this._formatTime(decision.evaluated_at))} · ${this._escHtml(this._timeRange(decision.slot_start, decision.slot_end))} · current slot only</div>
+    </div>`;
+  }
+
   _renderPowerChart(model, compact) {
     const { W, H, pad, chartW, chartH, powerMax } = this._powerChartMetrics(model, compact);
     const x = (i) => pad.left + (i / Math.max(1, model.points.length - 1)) * chartW;
@@ -2957,11 +3051,33 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     </div>`;
   }
 
+  _exportReserveDecisionForWindow(window, decision = this._currentExportReserveDecision()) {
+    if (!decision || !['export', 'discharge'].includes(window?.action)) return null;
+    const now = Date.now();
+    const slotStart = Date.parse(decision.slot_start);
+    const slotEnd = Date.parse(decision.slot_end);
+    const segments = Array.isArray(window.segments) ? window.segments : [window];
+    // Merged windows can span gaps. Only an active segment can own the current
+    // decision; later segments retain their planned status.
+    return segments.some(segment => {
+      const start = Date.parse(segment.timestamp);
+      const end = Date.parse(segment.end_time);
+      return Number.isFinite(start) && Number.isFinite(end) &&
+        now >= start && now < end && start < slotEnd && end > slotStart;
+    }) ? decision : null;
+  }
+
   _renderBatteryWindows(windows, priceMeta) {
+    const visibleWindows = windows.slice(0, 8);
+    const decision = this._currentExportReserveDecision();
+    const decisionWindow = visibleWindows.find(window => this._exportReserveDecisionForWindow(window, decision));
+    // Keep current evidence available beside this section if its planned row is
+    // missing, rather than attributing it to an unrelated future window.
+    const fallbackNotice = decisionWindow ? '' : this._renderExportReserveDecision(decision);
     if (!windows.length) {
-      return '<div class="empty">No planned charge, discharge, or export windows in the next 24 hours.</div>';
+      return `${fallbackNotice}<div class="empty">No planned charge, discharge, or export windows in the next 24 hours.</div>`;
     }
-    return `<div class="battery-windows">${windows.slice(0, 8).map(window => {
+    return `${fallbackNotice}<div class="battery-windows">${visibleWindows.map(window => {
       const info = this._actionInfo(window.action);
       const durationLabel = window.spanDurationMinutes > window.durationMinutes
         ? `${this._formatDuration(window.durationMinutes)} active / ${this._formatDuration(window.spanDurationMinutes)} span`
@@ -2980,6 +3096,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
             ${this._renderWindowImpact(window.energyValue, window.action, priceMeta)}
           </div>
           ${this._renderActionPriceStats(window.priceStats, window.action, priceMeta)}
+          ${window === decisionWindow ? this._renderExportReserveDecision(decision) : ''}
         </div>
       `;
     }).join('')}${windows.length > 8 ? `<div class="empty">+${windows.length - 8} more battery window${windows.length - 8 === 1 ? '' : 's'}</div>` : ''}</div>`;

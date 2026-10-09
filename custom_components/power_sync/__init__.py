@@ -39597,6 +39597,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not optimizer_write:
                 if opt_coord:
                     opt_coord._startup_backup_reserve = percent
+                    opt_coord._startup_backup_reserve_source = "hardware backup reserve setting"
                     if hasattr(opt_coord, "_sync_brand_restore_targets"):
                         opt_coord._sync_brand_restore_targets(percent)
                     optimizer_model = getattr(opt_coord, "_optimizer", None)
@@ -43876,6 +43877,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             if hw_reserve_int is not None:
                 optimization_coordinator._startup_backup_reserve = hw_reserve_int
+                optimization_coordinator._startup_backup_reserve_source = hw_reserve_source
                 if optimization_coordinator._optimizer:
                     optimization_coordinator._optimizer.update_hardware_reserve(hw_reserve_int / 100)
                 _LOGGER.info(
@@ -45789,6 +45791,7 @@ class OptimizationSettingsView(HomeAssistantView):
                 opt_coord = self._hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {}).get("optimization_coordinator")
                 if opt_coord:
                     opt_coord._startup_backup_reserve = int(hw_reserve * 100)
+                    opt_coord._startup_backup_reserve_source = "hardware backup reserve setting"
                     opt_coord._sync_brand_restore_targets(int(hw_reserve * 100))
                     _LOGGER.info("Updated startup backup reserve to %d%%", int(hw_reserve * 100))
 
