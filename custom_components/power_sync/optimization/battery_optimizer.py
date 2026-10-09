@@ -3197,17 +3197,33 @@ class BatteryOptimizer:
         def _solar_only_export_refill_slot(t: int) -> bool:
             """Return whether a low-FIT slot may refill from solar only.
 
-            Known-free stored energy can make a lower-FIT export slot
-            profitable without making grid-import-to-export passthrough safe.
-            Preserve that distinction while allowing forecast solar to refill
-            the battery for a later premium export window.
+            Known-free or already-profitable stored energy can make a
+            lower-FIT export slot profitable without making
+            grid-import-to-export passthrough safe. Preserve that distinction
+            while allowing forecast solar to refill the battery for a later
+            premium export window.
             """
             return (
                 p_mode[t] in (None, "self_use")
                 and not p_block_charge[t]
                 and not _priority_export_slot(t)
-                and getattr(self, "_acquisition_cost_known_zero", False)
+                and (
+                    getattr(self, "_acquisition_cost_known_zero", False)
+                    or (
+                        acquisition_cost_kwh > 0
+                        and any(
+                            p_allow_export[future]
+                            and (
+                                _priority_export_slot(future)
+                                or p_export[future] + p_export_bonus[future]
+                                > p_import[future] + 1e-9
+                            )
+                            for future in range(t + 1, p_n)
+                        )
+                    )
+                )
                 and _profitable_export_slot(t)
+                and p_export[t] + p_export_bonus[t] < p_import[t] - 1e-9
                 and p_price_valid_slots[t]
                 and not future_self_consumption_values[t]
                 and p_solar[t] > p_load[t] + 1e-9

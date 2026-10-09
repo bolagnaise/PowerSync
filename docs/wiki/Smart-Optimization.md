@@ -331,6 +331,12 @@ eligible on its own. Export eligibility still comes from positive export prices,
 Flow Power Profit Max Happy Hour behavior, export boost, saving sessions, or
 provider-specific bonus windows.
 
+When a lower-FIT slot is still profitable for stored energy and a later
+premium export opportunity is reachable, forecast solar surplus in that slot
+may refill the battery ahead of the deadline. This exception is solar-only:
+grid-import-to-export passthrough remains blocked, and explicit charge or
+export blocks still take precedence.
+
 ## Spread controls
 
 ### Spread export across window

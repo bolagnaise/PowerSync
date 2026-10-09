@@ -397,6 +397,47 @@ def test_known_free_inventory_keeps_solar_refill_for_later_priority_export(
     ) == pytest.approx(900.0, abs=0.1)
 
 
+def test_positive_acquisition_cost_keeps_solar_refill_before_deadline_export(
+    battery_optimizer_module,
+):
+    """A profitable low-FIT slot must still admit solar-only refill."""
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10_000,
+        max_charge_w=10_000,
+        max_discharge_w=10_000,
+        backup_reserve=0.05,
+        hardware_reserve=0.0,
+        efficiency=1.0,
+        interval_minutes=60,
+        horizon_hours=3,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_slot = 2
+    optimizer.pre_window_soc_target = 1.0
+
+    result = optimizer.optimize(
+        import_prices=[0.2163] * 3,
+        export_prices=[0.28, 0.03, 0.28],
+        solar_forecast=[0.0, 10.9, 0.0],
+        load_forecast=[0.0] * 3,
+        current_soc=1.0,
+        acquisition_cost_kwh=0.01498081,
+        allow_battery_export=[True] * 3,
+        allow_grid_charge=True,
+        priority_export_slots=[True, False, True],
+        priority_export_enabled=True,
+        prevent_simultaneous_grid_flow=True,
+    )
+
+    assert result.feasible is True
+    assert result.schedule.actions[1].battery_charge_w > 9_000
+    assert result.grid_import_w[1] == pytest.approx(0.0, abs=0.1)
+    assert result.grid_export_w[0] > 1_000
+
+
 def test_grid_import_limit_still_allows_solar_assisted_full_charge(
     battery_optimizer_module,
 ):
