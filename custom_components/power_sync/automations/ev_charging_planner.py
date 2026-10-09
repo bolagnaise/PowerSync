@@ -9713,16 +9713,34 @@ class PriceLevelChargingExecutor:
     async def _get_home_battery_soc(self) -> Optional[float]:
         """Get home battery (Powerwall/Sigenergy/Sungrow) state of charge.
 
-        Returns the battery percentage from the Tesla coordinator or other sources.
+        Returns the battery percentage from the active battery coordinator or
+        other sources.
         """
-        # Try to get from Tesla coordinator
         entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
-        tesla_coordinator = entry_data.get("tesla_coordinator")
 
-        if tesla_coordinator and tesla_coordinator.data:
-            battery_level = tesla_coordinator.data.get("battery_level")
+        def _valid_soc(value: Any) -> Optional[float]:
+            if isinstance(value, bool):
+                return None
+            try:
+                soc = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(soc) or not 0 <= soc <= 100:
+                return None
+            return soc
+
+        # The active coordinator is the source already selected by setup for
+        # the configured battery topology (including native Sigenergy Modbus).
+        # Keep Tesla as the legacy fallback for entries created before that
+        # active-coordinator key was stored.
+        for coordinator_key in ("battery_energy_coordinator", "tesla_coordinator"):
+            coordinator = entry_data.get(coordinator_key)
+            data = getattr(coordinator, "data", None) if coordinator else None
+            if not isinstance(data, Mapping):
+                continue
+            battery_level = _valid_soc(data.get("battery_level"))
             if battery_level is not None:
-                return float(battery_level)
+                return battery_level
 
         # Fallback: Try to find battery level from common entity patterns
         entity_patterns = [
@@ -9738,10 +9756,9 @@ class PriceLevelChargingExecutor:
                 if pattern.replace("*", "") in entity_id.lower() or entity_id == pattern:
                     state = self.hass.states.get(entity_id)
                     if state and state.state not in ("unknown", "unavailable"):
-                        try:
-                            return float(state.state)
-                        except (ValueError, TypeError):
-                            continue
+                        battery_level = _valid_soc(state.state)
+                        if battery_level is not None:
+                            return battery_level
 
         return None
 

@@ -6850,6 +6850,125 @@ def test_enabled_price_level_leaves_away_vehicle_charging_alone(
     assert state.last_decision_reason == "Vehicle not at home (location: work)"
 
 
+@pytest.mark.parametrize(
+    ("vehicle_specific", "price"),
+    [
+        (False, 5),
+        (False, 25),
+        (True, 5),
+        (True, 25),
+    ],
+)
+def test_price_level_enforces_native_home_battery_minimum(
+    monkeypatch, vehicle_specific, price
+):
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "_get_ev_soc",
+        AsyncMock(return_value=50),
+    )
+
+    hass = _FakeHass(
+        price_settings={
+            "recovery_soc": 40,
+            "recovery_price_cents": 30,
+            "opportunity_price_cents": 10,
+            "home_battery_minimum": 20,
+        }
+    )
+    hass.data["power_sync"]["entry-1"]["battery_energy_coordinator"] = (
+        SimpleNamespace(data={"battery_level": 10})
+    )
+    executor = ev_planner.PriceLevelChargingExecutor(hass, _FakeConfigEntry())
+
+    if vehicle_specific:
+        decision = asyncio.run(
+            executor.get_charging_decision_for_vehicle(VIN, price)
+        )
+    else:
+        decision = asyncio.run(executor.get_charging_decision(price))
+
+    assert decision == (
+        False,
+        "Home battery 10% < 20% minimum",
+        "",
+    )
+
+
+def test_price_level_native_home_battery_blocks_sigenergy_charger_start(monkeypatch):
+    monkeypatch.setattr(
+        ev_planner,
+        "discover_all_tesla_vehicles",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "_get_ev_soc",
+        AsyncMock(return_value=50),
+    )
+
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"sigenergy_charger_enabled": True},
+    )
+    hass = _FakeHass(
+        price_settings={
+            "recovery_soc": 40,
+            "recovery_price_cents": 30,
+            "opportunity_price_cents": 10,
+            "home_battery_minimum": 20,
+        }
+    )
+    hass.data["power_sync"]["entry-1"]["battery_energy_coordinator"] = (
+        SimpleNamespace(data={"battery_level": 10})
+    )
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor._start_charging = AsyncMock()
+
+    results = asyncio.run(executor.evaluate_all_vehicles(5))
+
+    assert results["sigenergy_charger"] == (
+        False,
+        "Home battery 10% < 20% minimum",
+        "",
+    )
+    executor._start_charging.assert_not_awaited()
+
+
+def test_price_level_prefers_active_native_battery_over_legacy_sources():
+    hass = _FakeHass(states={"sensor.sigenergy_battery_soc": "90"})
+    hass.data["power_sync"]["entry-1"].update(
+        {
+            "battery_energy_coordinator": SimpleNamespace(
+                data={"battery_level": 10}
+            ),
+            "tesla_coordinator": SimpleNamespace(data={"battery_level": 80}),
+        }
+    )
+    executor = ev_planner.PriceLevelChargingExecutor(hass, _FakeConfigEntry())
+
+    assert asyncio.run(executor._get_home_battery_soc()) == 10
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, True, "unknown", "unavailable", "nan", float("inf"), -1, 101],
+)
+def test_price_level_ignores_invalid_home_battery_soc(value):
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["battery_energy_coordinator"] = (
+        SimpleNamespace(data={"battery_level": value})
+    )
+    executor = ev_planner.PriceLevelChargingExecutor(hass, _FakeConfigEntry())
+
+    assert asyncio.run(executor._get_home_battery_soc()) is None
+
+
 def test_unknown_soc_uses_recovery_price_fallback(monkeypatch):
     async def at_home(*args, **kwargs):
         return "home"
