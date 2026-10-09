@@ -245,6 +245,14 @@ def build_globird_entities(
     return entities
 
 
+def globird_entity_unique_id(entity: SensorEntity) -> str | None:
+    """Return an entity's stable ID for deferred recovery registration."""
+    unique_id = getattr(entity, "unique_id", None)
+    if unique_id is None:
+        unique_id = getattr(entity, "_attr_unique_id", None)
+    return str(unique_id) if unique_id else None
+
+
 def _globird_object_id(*parts: Any) -> str:
     """Return a stable suggested object ID for GloBird provider sensors."""
     safe_parts = [

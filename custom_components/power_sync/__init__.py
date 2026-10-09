@@ -23492,6 +23492,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # readiness sensors. This is additive to the existing GloBird tariff/AEMO
     # spike behavior and does not become an optimizer price source.
     globird_coordinator = None
+    globird_initial_refresh_failed = False
     if electricity_provider == "globird":
         globird_email = entry.options.get(
             CONF_GLOBIRD_EMAIL, entry.data.get(CONF_GLOBIRD_EMAIL)
@@ -23507,12 +23508,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await globird_coordinator.async_config_entry_first_refresh()
                 _LOGGER.info("GloBird portal coordinator initialized")
             except Exception as exc:
-                _LOGGER.warning("GloBird portal coordinator unavailable: %s", exc)
-                try:
-                    await globird_coordinator.async_shutdown()
-                except Exception:
-                    pass
-                globird_coordinator = None
+                globird_initial_refresh_failed = True
+                _LOGGER.warning(
+                    "GloBird portal coordinator first refresh failed; keeping "
+                    "coordinator active so it can retry: %s",
+                    exc,
+                )
 
     # Initialize Solcast Solar Forecast Coordinator if enabled
     # Skip if the Solcast Solar integration is already installed (avoid double-polling API)
@@ -23889,6 +23890,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "_mode_stick_failures": [],  # list of timestamps for calibration detection
         "_calibration_check_unsub": None,
     }
+
+    if globird_coordinator and globird_initial_refresh_failed:
+        globird_coordinator.async_start_initial_retry()
 
     if electricity_provider == "covau":
         from .const import (
@@ -46112,6 +46116,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if fp_mid_cancel := entry_data.get("fp_midnight_cancel"):
         fp_mid_cancel()
         _LOGGER.debug("Cancelled Flow Power midnight tariff recalc timer")
+
+    if globird_sensor_unsub := entry_data.pop("globird_sensor_unsub", None):
+        globird_sensor_unsub()
 
     if globird_coordinator := entry_data.get("globird_coordinator"):
         try:

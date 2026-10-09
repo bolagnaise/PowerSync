@@ -1,6 +1,7 @@
 """Data update coordinator for GloBird HA."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import timedelta
@@ -32,6 +33,9 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+_GLOBIRD_INITIAL_RETRY_DELAY_SECONDS = 30
+_GLOBIRD_MAX_INITIAL_RETRY_DELAY_SECONDS = 300
+
 
 class GloBirdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator for fetching GloBird portal data."""
@@ -62,10 +66,48 @@ class GloBirdCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._cache: dict[str, Any] | None = None
         self._initialized = False
+        self._initial_retry_task: asyncio.Task[None] | None = None
 
     async def async_shutdown(self) -> None:
         """Close resources."""
+        if self._initial_retry_task is not None:
+            self._initial_retry_task.cancel()
+            try:
+                await self._initial_retry_task
+            except asyncio.CancelledError:
+                pass
+            self._initial_retry_task = None
         await self.client.close()
+
+    def async_start_initial_retry(self) -> None:
+        """Retry a failed uncached first refresh until the portal recovers."""
+        if self._initial_retry_task is not None and not self._initial_retry_task.done():
+            return
+        self._initial_retry_task = self.hass.async_create_task(
+            self._async_retry_initial_refresh(),
+            name=f"{DOMAIN}_globird_initial_retry",
+        )
+
+    async def _async_retry_initial_refresh(self) -> None:
+        """Keep a failed cold-start portal coordinator recoverable."""
+        delay = _GLOBIRD_INITIAL_RETRY_DELAY_SECONDS
+        while True:
+            try:
+                await asyncio.sleep(delay)
+                await self.async_refresh()
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - retry the provider path.
+                _LOGGER.warning(
+                    "GloBird initial portal refresh retry failed; retrying in %ss: %s",
+                    delay,
+                    err,
+                )
+            else:
+                if self.last_update_success:
+                    _LOGGER.info("GloBird portal coordinator recovered after startup failure")
+                    return
+            delay = min(delay * 2, _GLOBIRD_MAX_INITIAL_RETRY_DELAY_SECONDS)
 
     async def _async_initialize(self) -> None:
         """Load cached data and any persisted cookies."""

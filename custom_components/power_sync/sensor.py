@@ -2517,10 +2517,44 @@ async def async_setup_entry(
     # Add GloBird portal/account sensors if the provider account is connected.
     globird_coordinator = domain_data.get("globird_coordinator")
     if electricity_provider == "globird" and globird_coordinator:
-        from .globird_sensors import build_globird_entities
+        from .globird_sensors import build_globird_entities, globird_entity_unique_id
 
         globird_entities = build_globird_entities(globird_coordinator, entry)
         entities.extend(globird_entities)
+        added_globird_ids = {
+            unique_id
+            for entity in globird_entities
+            if (unique_id := globird_entity_unique_id(entity)) is not None
+        }
+        domain_data["globird_sensor_unique_ids"] = added_globird_ids
+
+        if not (globird_coordinator.data or {}).get("services"):
+
+            def _add_globird_entities_after_recovery() -> None:
+                current_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+                if (
+                    current_data is not domain_data
+                    or current_data.get("globird_coordinator") is not globird_coordinator
+                ):
+                    return
+                recovered_entities = build_globird_entities(globird_coordinator, entry)
+                new_entities = []
+                for entity in recovered_entities:
+                    unique_id = globird_entity_unique_id(entity)
+                    if unique_id is None or unique_id in added_globird_ids:
+                        continue
+                    added_globird_ids.add(unique_id)
+                    new_entities.append(entity)
+                if new_entities:
+                    async_add_entities(new_entities)
+                if (globird_coordinator.data or {}).get("services"):
+                    unsubscribe = domain_data.pop("globird_sensor_unsub", None)
+                    if unsubscribe:
+                        unsubscribe()
+
+            domain_data["globird_sensor_unsub"] = globird_coordinator.async_add_listener(
+                _add_globird_entities_after_recovery
+            )
         _LOGGER.info("GloBird portal sensors added (%d sensors)", len(globird_entities))
 
     # Always add battery health sensor
