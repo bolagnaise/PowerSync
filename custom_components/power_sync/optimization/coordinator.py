@@ -167,6 +167,8 @@ CUSTOM_LOAD_POWER_ENTITY = "custom_load_power_entity"
 
 COST_STORE_VERSION = 1
 COST_STORE_SAVE_DELAY = 300  # Coalesce writes — flush at most every 5 minutes
+BATTERY_PROVENANCE_STORE_VERSION = 1
+BATTERY_PROVENANCE_STORE_SAVE_DELAY = 300
 SOLAR_FORECAST_LEARNING_STORE_VERSION = 1
 SOLAR_FORECAST_LEARNING_STORE_SAVE_DELAY = 300
 BATTERY_EFFICIENCY_LEARNING_STORE_VERSION = 1
@@ -199,6 +201,19 @@ def _positive_finite_number(value: Any) -> float | None:
     except (TypeError, ValueError, OverflowError):
         return None
     if not math.isfinite(numeric_value) or numeric_value <= 0:
+        return None
+    return numeric_value
+
+
+def _nonnegative_finite_number(value: Any) -> float | None:
+    """Return a finite non-negative numeric persisted value."""
+    if isinstance(value, bool):
+        return None
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(numeric_value) or numeric_value < 0:
         return None
     return numeric_value
 
@@ -797,6 +812,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             COST_STORE_VERSION,
             f"power_sync.costs.{entry_id}",
         )
+        # This inventory deliberately does not share the daily-cost Store:
+        # energy acquired before midnight remains in the battery afterwards.
+        self._battery_provenance_store = Store(
+            hass,
+            BATTERY_PROVENANCE_STORE_VERSION,
+            f"power_sync.battery_provenance.{entry_id}",
+        )
+        self._battery_provenance_solar_kwh = 0.0
+        self._battery_provenance_grid_kwh = 0.0
+        self._battery_provenance_grid_cost = 0.0
+        self._battery_provenance_unknown_kwh = 0.0
+        # False means that no durable measurement history is available yet;
+        # acquisition costing must retain its established fallback in that
+        # case.  A valid restored ledger is usable before the first new poll.
+        self._battery_provenance_available = False
+        self._battery_provenance_last_soc: float | None = None
+        self._battery_provenance_last_capacity_wh: float | None = None
+        self._battery_provenance_last_observed_at: str | None = None
+        self._battery_provenance_reconciliation = "uninitialized"
         self._solar_forecast_learning_store = Store(
             hass,
             SOLAR_FORECAST_LEARNING_STORE_VERSION,
@@ -4882,6 +4916,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Restore persisted daily cost data (survives HA restarts)
         await self._restore_cost_data()
+        await self._restore_battery_provenance()
+        startup_soc, startup_capacity = await self._get_battery_state()
+        self._reconcile_battery_provenance(
+            startup_soc,
+            startup_capacity,
+            reason="startup_restore",
+        )
 
         _LOGGER.info(
             "Optimization coordinator setup complete (built-in LP). "
@@ -5759,6 +5800,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Flush cost data to disk before shutdown
         await self._cost_store.async_save(self._cost_data_to_save())
+        provenance_store = getattr(self, "_battery_provenance_store", None)
+        if provenance_store is not None:
+            await provenance_store.async_save(self._battery_provenance_data_to_save())
 
         _LOGGER.info("Optimization disabled")
 
@@ -5834,6 +5878,219 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return list(reference_prices)
         return list(lp_import_prices)
 
+    def _battery_provenance_total_kwh(self) -> float:
+        """Return the validated total durable battery inventory."""
+        values = (
+            getattr(self, "_battery_provenance_solar_kwh", 0.0),
+            getattr(self, "_battery_provenance_grid_kwh", 0.0),
+            getattr(self, "_battery_provenance_unknown_kwh", 0.0),
+        )
+        parsed = [_nonnegative_finite_number(value) for value in values]
+        if any(value is None for value in parsed):
+            return 0.0
+        return sum(value for value in parsed if value is not None)
+
+    def _battery_provenance_is_usable(self) -> bool:
+        """Return whether durable provenance can safely replace daily totals."""
+        if not bool(getattr(self, "_battery_provenance_available", False)):
+            return False
+        solar = _nonnegative_finite_number(
+            getattr(self, "_battery_provenance_solar_kwh", None)
+        )
+        grid = _nonnegative_finite_number(
+            getattr(self, "_battery_provenance_grid_kwh", None)
+        )
+        grid_cost = _nonnegative_finite_number(
+            getattr(self, "_battery_provenance_grid_cost", None)
+        )
+        unknown = _nonnegative_finite_number(
+            getattr(self, "_battery_provenance_unknown_kwh", None)
+        )
+        return None not in (solar, grid, grid_cost, unknown)
+
+    def _battery_provenance_data_to_save(self) -> dict[str, Any]:
+        """Serialize durable inventory without rounding its retained cost."""
+        def _stored_value(attribute: str) -> float:
+            value = _nonnegative_finite_number(getattr(self, attribute, 0.0))
+            return value if value is not None else 0.0
+
+        return {
+            "solar_kwh": _stored_value("_battery_provenance_solar_kwh"),
+            "grid_kwh": _stored_value("_battery_provenance_grid_kwh"),
+            "grid_cost": _stored_value("_battery_provenance_grid_cost"),
+            "unknown_kwh": _stored_value("_battery_provenance_unknown_kwh"),
+            "last_soc": getattr(self, "_battery_provenance_last_soc", None),
+            "last_capacity_wh": getattr(
+                self, "_battery_provenance_last_capacity_wh", None
+            ),
+            "last_observed_at": getattr(
+                self, "_battery_provenance_last_observed_at", None
+            ),
+        }
+
+    def _schedule_battery_provenance_save(self) -> None:
+        """Coalesce durable provenance writes independently of daily costs."""
+        store = getattr(self, "_battery_provenance_store", None)
+        if store is not None:
+            store.async_delay_save(
+                self._battery_provenance_data_to_save,
+                BATTERY_PROVENANCE_STORE_SAVE_DELAY,
+            )
+
+    async def _restore_battery_provenance(self) -> None:
+        """Restore the cross-day inventory, rejecting malformed provenance."""
+        store = getattr(self, "_battery_provenance_store", None)
+        if store is None:
+            return
+        try:
+            data = await store.async_load()
+        except Exception as exc:
+            _LOGGER.warning("Failed to load battery provenance: %s", exc)
+            self._battery_provenance_reconciliation = "load_error"
+            return
+        if not isinstance(data, dict):
+            self._battery_provenance_reconciliation = "legacy_or_missing"
+            return
+
+        solar = _nonnegative_finite_number(data.get("solar_kwh"))
+        grid = _nonnegative_finite_number(data.get("grid_kwh"))
+        grid_cost = _nonnegative_finite_number(data.get("grid_cost"))
+        unknown = _nonnegative_finite_number(data.get("unknown_kwh"))
+        # A retained cost without grid energy cannot be apportioned safely.
+        if (
+            None in (solar, grid, grid_cost, unknown)
+            or (
+                grid is not None
+                and grid <= 1e-9
+                and grid_cost is not None
+                and grid_cost > 1e-9
+            )
+        ):
+            _LOGGER.warning(
+                "Ignoring invalid battery provenance; treating live inventory as unknown"
+            )
+            self._battery_provenance_reconciliation = "malformed_persistence"
+            return
+
+        self._battery_provenance_solar_kwh = solar or 0.0
+        self._battery_provenance_grid_kwh = grid or 0.0
+        self._battery_provenance_grid_cost = grid_cost or 0.0
+        self._battery_provenance_unknown_kwh = unknown or 0.0
+        self._battery_provenance_available = True
+        last_soc = _nonnegative_finite_number(data.get("last_soc"))
+        self._battery_provenance_last_soc = (
+            min(1.0, last_soc) if last_soc is not None else None
+        )
+        last_capacity = _positive_finite_number(data.get("last_capacity_wh"))
+        self._battery_provenance_last_capacity_wh = last_capacity
+        observed_at = data.get("last_observed_at")
+        self._battery_provenance_last_observed_at = (
+            observed_at if isinstance(observed_at, str) else None
+        )
+        self._battery_provenance_reconciliation = "restored"
+
+    def _reconcile_battery_provenance(
+        self,
+        current_soc: float,
+        capacity_wh: float,
+        *,
+        reason: str,
+    ) -> None:
+        """Make inventory match authoritative SOC without inventing origin."""
+        soc = _nonnegative_finite_number(current_soc)
+        capacity = _positive_finite_number(capacity_wh)
+        if soc is None or capacity is None:
+            self._battery_provenance_reconciliation = "invalid_soc_or_capacity"
+            return
+        target_kwh = min(1.0, soc) * capacity / 1000.0
+        if not self._battery_provenance_is_usable():
+            # No historical provenance: retaining this as unknown preserves the
+            # established median-reference fallback until a trustworthy interval
+            # establishes a new ledger baseline.
+            self._battery_provenance_solar_kwh = 0.0
+            self._battery_provenance_grid_kwh = 0.0
+            self._battery_provenance_grid_cost = 0.0
+            self._battery_provenance_unknown_kwh = target_kwh
+            self._battery_provenance_last_soc = min(1.0, soc)
+            self._battery_provenance_last_capacity_wh = capacity
+            self._battery_provenance_last_observed_at = dt_util.now().isoformat()
+            self._battery_provenance_reconciliation = f"unknown_baseline:{reason}"
+            self._schedule_battery_provenance_save()
+            return
+
+        total = self._battery_provenance_total_kwh()
+        difference = target_kwh - total
+        if difference > 1e-6:
+            # SOC increased beyond measured intervals (including a reload or
+            # telemetry gap), so its origin is deliberately unknown.
+            self._battery_provenance_unknown_kwh += difference
+            reconciliation = f"unknown_added:{reason}"
+        elif difference < -1e-6 and total > 1e-9:
+            # SOC/capacity decreases are authoritative. Trim all energy and
+            # retained grid cost in the same ratio, never below zero.
+            ratio = max(0.0, min(1.0, target_kwh / total))
+            self._battery_provenance_solar_kwh *= ratio
+            self._battery_provenance_grid_kwh *= ratio
+            self._battery_provenance_unknown_kwh *= ratio
+            self._battery_provenance_grid_cost *= ratio
+            reconciliation = f"proportional_trim:{reason}"
+        else:
+            reconciliation = f"matched:{reason}"
+        self._battery_provenance_last_soc = min(1.0, soc)
+        self._battery_provenance_last_capacity_wh = capacity
+        self._battery_provenance_last_observed_at = dt_util.now().isoformat()
+        self._battery_provenance_reconciliation = reconciliation
+        self._schedule_battery_provenance_save()
+
+    def _record_battery_provenance_interval(
+        self,
+        *,
+        solar_charge_kwh: float,
+        grid_charge_kwh: float,
+        grid_charge_cost: float,
+        discharge_kwh: float,
+        current_soc: float,
+        capacity_wh: float,
+        telemetry_gap: bool,
+    ) -> None:
+        """Add one measured interval and apportion discharge across origins."""
+        if not self._battery_provenance_is_usable():
+            self._reconcile_battery_provenance(
+                current_soc, capacity_wh, reason="initial_measurement"
+            )
+            # There is no trustworthy opening SOC for this interval. Preserve
+            # it as unknown rather than assigning its already-present energy a
+            # false solar or grid origin; following intervals are measured.
+            self._battery_provenance_available = True
+            self._schedule_battery_provenance_save()
+            return
+        if telemetry_gap:
+            self._reconcile_battery_provenance(
+                current_soc, capacity_wh, reason="telemetry_gap"
+            )
+            self._schedule_battery_provenance_save()
+            return
+
+        solar_charge = _nonnegative_finite_number(solar_charge_kwh) or 0.0
+        grid_charge = _nonnegative_finite_number(grid_charge_kwh) or 0.0
+        grid_cost = _nonnegative_finite_number(grid_charge_cost) or 0.0
+        discharge = _nonnegative_finite_number(discharge_kwh) or 0.0
+        self._battery_provenance_solar_kwh += solar_charge
+        self._battery_provenance_grid_kwh += grid_charge
+        self._battery_provenance_grid_cost += grid_cost
+
+        total = self._battery_provenance_total_kwh()
+        if discharge > 1e-9 and total > 1e-9:
+            ratio = max(0.0, min(1.0, (total - discharge) / total))
+            self._battery_provenance_solar_kwh *= ratio
+            self._battery_provenance_grid_kwh *= ratio
+            self._battery_provenance_unknown_kwh *= ratio
+            self._battery_provenance_grid_cost *= ratio
+        self._reconcile_battery_provenance(
+            current_soc, capacity_wh, reason="measured_interval"
+        )
+        self._schedule_battery_provenance_save()
+
     def _acquisition_cost_for_run(
         self,
         *,
@@ -5868,6 +6125,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             * max(0.0, float(capacity_wh))
             / 1000.0
         )
+
         proven_solar_candidates: list[float] = []
         summary_totals: tuple[float, float, float] | None = None
 
@@ -5897,6 +6155,44 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                 )
             )
+            provenance_diagnostics = {}
+            if hasattr(self, "_battery_provenance_available"):
+                provenance_diagnostics = {
+                    "persistent_inventory_available": bool(
+                        getattr(self, "_battery_provenance_available", False)
+                    ),
+                    "persistent_solar_kwh": round(
+                        float(
+                            getattr(self, "_battery_provenance_solar_kwh", 0.0)
+                            or 0.0
+                        ),
+                        6,
+                    ),
+                    "persistent_grid_kwh": round(
+                        float(
+                            getattr(self, "_battery_provenance_grid_kwh", 0.0)
+                            or 0.0
+                        ),
+                        6,
+                    ),
+                    "persistent_grid_cost": round(
+                        float(
+                            getattr(self, "_battery_provenance_grid_cost", 0.0)
+                            or 0.0
+                        ),
+                        8,
+                    ),
+                    "persistent_unknown_kwh": round(
+                        float(
+                            getattr(self, "_battery_provenance_unknown_kwh", 0.0)
+                            or 0.0
+                        ),
+                        6,
+                    ),
+                    "persistent_reconciliation": getattr(
+                        self, "_battery_provenance_reconciliation", None
+                    ),
+                }
             self._last_acquisition_cost_diagnostics = {
                 "cost_kwh": round(float(cost), 8),
                 "source": source,
@@ -5942,8 +6238,41 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     key: round(float(value), 6)
                     for key, value in components.items()
                 },
+                **provenance_diagnostics,
             }
             return cost
+
+        if self._battery_provenance_is_usable():
+            solar_kwh = max(
+                0.0,
+                float(getattr(self, "_battery_provenance_solar_kwh", 0.0) or 0.0),
+            )
+            persistent_grid_kwh = max(
+                0.0,
+                float(getattr(self, "_battery_provenance_grid_kwh", 0.0) or 0.0),
+            )
+            persistent_grid_cost = max(
+                0.0,
+                float(getattr(self, "_battery_provenance_grid_cost", 0.0) or 0.0),
+            )
+            unknown_kwh = max(
+                0.0,
+                float(getattr(self, "_battery_provenance_unknown_kwh", 0.0) or 0.0),
+            )
+            persistent_total_kwh = solar_kwh + persistent_grid_kwh + unknown_kwh
+            if persistent_total_kwh > 1e-6:
+                return _finish(
+                    (
+                        persistent_grid_cost + unknown_kwh * median_import_cost
+                    )
+                    / persistent_total_kwh,
+                    "persistent_provenance",
+                    persistent_solar_kwh=solar_kwh,
+                    persistent_grid_kwh=persistent_grid_kwh,
+                    persistent_grid_cost=persistent_grid_cost,
+                    persistent_unknown_kwh=unknown_kwh,
+                    persistent_total_kwh=persistent_total_kwh,
+                )
 
         if tracking_known:
             # Known private counters are an independently authoritative lower
@@ -6499,6 +6828,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # native-home import, never EV charging or battery charging.
             native_home_load_w = list(load or [])
             soc, capacity = await self._get_battery_state()
+            self._reconcile_battery_provenance(
+                soc,
+                capacity,
+                reason="optimizer_run",
+            )
             self._observe_battery_efficiency(
                 timestamp=solve_timestamp,
                 soc=soc,
@@ -18139,6 +18473,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         grid_charge_kwh = grid_charge_kw * dt_hours
         self._actual_grid_charge_kwh_today += grid_charge_kwh
         self._actual_grid_charge_cost_today += grid_charge_kwh * import_price
+
+        # Keep provenance independent from the daily counters above.  The
+        # first interval after missing/legacy state only establishes an unknown
+        # baseline; subsequent continuous intervals retain their measured
+        # solar/grid source and actual grid acquisition cost.
+        battery_level = _nonnegative_finite_number(data.get("battery_level"))
+        if battery_level is not None:
+            self._record_battery_provenance_interval(
+                solar_charge_kwh=max(
+                    0.0,
+                    battery_charge_kw * dt_hours - grid_charge_kwh,
+                ),
+                grid_charge_kwh=grid_charge_kwh,
+                grid_charge_cost=grid_charge_kwh * import_price,
+                discharge_kwh=battery_discharge_kw * dt_hours,
+                current_soc=min(1.0, battery_level / 100.0),
+                capacity_wh=self._config.battery_capacity_wh,
+                telemetry_gap=elapsed_seconds > 10.0 * 60.0,
+            )
+        else:
+            self._battery_provenance_reconciliation = "missing_soc_telemetry"
 
         # Baseline cost: what would happen without a battery
         # Power balance: load = solar + grid + battery (Tesla sign convention)

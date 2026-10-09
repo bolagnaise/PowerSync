@@ -4287,6 +4287,146 @@ def test_all_grid_charge_keeps_measured_acquisition_cost(opt_module):
     assert acquisition_cost == pytest.approx(0.40)
 
 
+class _ProvenanceStore:
+    def __init__(self, data=None):
+        self.data = data
+        self.delayed_callback = None
+
+    async def async_load(self):
+        return self.data
+
+    async def async_save(self, data):
+        self.data = data
+
+    def async_delay_save(self, callback, _delay):
+        self.delayed_callback = callback
+
+
+def _provenance_coordinator(opt_module, store=None):
+    coordinator = _coordinator(opt_module, "flow_power")
+    coordinator._battery_provenance_store = store or _ProvenanceStore()
+    coordinator._actual_grid_charge_kwh_today = 0.0
+    coordinator._actual_grid_charge_cost_today = 0.0
+    coordinator._grid_charge_tracking_known = False
+    coordinator._battery_provenance_solar_kwh = 0.0
+    coordinator._battery_provenance_grid_kwh = 0.0
+    coordinator._battery_provenance_grid_cost = 0.0
+    coordinator._battery_provenance_unknown_kwh = 0.0
+    coordinator._battery_provenance_available = False
+    coordinator._battery_provenance_last_soc = None
+    coordinator._battery_provenance_last_capacity_wh = None
+    coordinator._battery_provenance_last_observed_at = None
+    coordinator._battery_provenance_reconciliation = "uninitialized"
+    return coordinator
+
+
+def test_persistent_provenance_restores_after_midnight_and_blends_cost(opt_module):
+    """Carry-over source and purchase cost must not depend on daily totals."""
+    store = _ProvenanceStore(
+        {
+            "solar_kwh": 3.0,
+            "grid_kwh": 2.0,
+            "grid_cost": 0.80,
+            "unknown_kwh": 3.0,
+            "last_soc": 0.8,
+            "last_capacity_wh": 10_000,
+            "last_observed_at": "2026-05-02T23:55:00+00:00",
+        }
+    )
+    coordinator = _provenance_coordinator(opt_module, store)
+
+    asyncio.run(coordinator._restore_battery_provenance())
+    coordinator._reconcile_battery_provenance(0.8, 10_000, reason="startup")
+
+    assert coordinator._actual_grid_charge_kwh_today == 0.0
+    assert coordinator._battery_provenance_total_kwh() == pytest.approx(8.0)
+    coordinator._schedule_battery_provenance_save()
+    assert store.delayed_callback()["grid_cost"] == pytest.approx(0.80)
+    assert coordinator._acquisition_cost_for_run(
+        import_prices=[0.50], current_soc=0.8, capacity_wh=10_000
+    ) == pytest.approx((0.80 + 3.0 * 0.50) / 8.0)
+    assert coordinator._last_acquisition_cost_diagnostics["source"] == (
+        "persistent_provenance"
+    )
+
+
+def test_persistent_provenance_discharge_reduces_energy_and_grid_cost_proportionally(
+    opt_module,
+):
+    coordinator = _provenance_coordinator(opt_module)
+    coordinator._battery_provenance_available = True
+    coordinator._battery_provenance_solar_kwh = 4.0
+    coordinator._battery_provenance_grid_kwh = 4.0
+    coordinator._battery_provenance_grid_cost = 2.0
+    coordinator._battery_provenance_unknown_kwh = 2.0
+
+    coordinator._record_battery_provenance_interval(
+        solar_charge_kwh=0.0,
+        grid_charge_kwh=0.0,
+        grid_charge_cost=0.0,
+        discharge_kwh=2.0,
+        current_soc=0.8,
+        capacity_wh=10_000,
+        telemetry_gap=False,
+    )
+
+    assert coordinator._battery_provenance_solar_kwh == pytest.approx(3.2)
+    assert coordinator._battery_provenance_grid_kwh == pytest.approx(3.2)
+    assert coordinator._battery_provenance_unknown_kwh == pytest.approx(1.6)
+    assert coordinator._battery_provenance_grid_cost == pytest.approx(1.6)
+    assert coordinator._acquisition_cost_for_run(
+        import_prices=[0.50], current_soc=0.8, capacity_wh=10_000
+    ) == pytest.approx(0.30)
+
+
+def test_persistent_provenance_reconciles_soc_capacity_and_gaps_as_unknown(
+    opt_module,
+):
+    coordinator = _provenance_coordinator(opt_module)
+    coordinator._battery_provenance_available = True
+    coordinator._battery_provenance_solar_kwh = 4.0
+    coordinator._battery_provenance_grid_kwh = 4.0
+    coordinator._battery_provenance_grid_cost = 2.0
+    coordinator._battery_provenance_unknown_kwh = 2.0
+
+    coordinator._reconcile_battery_provenance(0.6, 20_000, reason="reload")
+    assert coordinator._battery_provenance_unknown_kwh == pytest.approx(4.0)
+    assert coordinator._battery_provenance_reconciliation == "unknown_added:reload"
+
+    coordinator._record_battery_provenance_interval(
+        solar_charge_kwh=0.0,
+        grid_charge_kwh=0.0,
+        grid_charge_cost=0.0,
+        discharge_kwh=0.0,
+        current_soc=0.5,
+        capacity_wh=20_000,
+        telemetry_gap=True,
+    )
+    assert coordinator._battery_provenance_total_kwh() == pytest.approx(10.0)
+    assert coordinator._battery_provenance_reconciliation == (
+        "proportional_trim:telemetry_gap"
+    )
+    assert coordinator._battery_provenance_grid_cost == pytest.approx(
+        10.0 / 12.0 * 2.0
+    )
+
+
+@pytest.mark.parametrize(
+    "stored", [None, {}, {"solar_kwh": "bad", "grid_kwh": 1.0}]
+)
+def test_missing_or_malformed_persistent_provenance_keeps_median_fallback(
+    opt_module, stored
+):
+    coordinator = _provenance_coordinator(opt_module, _ProvenanceStore(stored))
+
+    asyncio.run(coordinator._restore_battery_provenance())
+
+    assert coordinator._battery_provenance_available is False
+    assert coordinator._acquisition_cost_for_run(
+        import_prices=[0.43, 0.53], current_soc=0.8, capacity_wh=10_000
+    ) == pytest.approx(0.53)
+
+
 @pytest.mark.parametrize(
     ("grid_fields", "expected_known"),
     [({}, False), ({"grid_charge_kwh": 0.0, "grid_charge_cost": 0.0}, True)],
