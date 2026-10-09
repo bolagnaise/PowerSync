@@ -19296,6 +19296,66 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return data
 
+    def _reserve_visibility(
+        self,
+        reserve_recommendation: dict[str, Any],
+        *,
+        schedule_age_s: float | None,
+        stale_after_s: float,
+    ) -> dict[str, Any]:
+        """Describe cached reserve values without changing optimizer or hardware state."""
+        def _percent(value: Any, *, ratio: bool = False) -> float | None:
+            if value is None or isinstance(value, bool):
+                return None
+            try:
+                percent = float(value) * (100.0 if ratio else 1.0)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if not math.isfinite(percent) or not 0.0 <= percent <= 100.0:
+                return None
+            return percent
+
+        auto_apply_enabled = self.auto_apply_reserve_enabled
+        manual_reserve = self.manual_backup_reserve
+        if manual_reserve is None and not auto_apply_enabled:
+            manual_reserve = getattr(self._config, "backup_reserve", None)
+        recommended_percent = _percent(
+            reserve_recommendation.get("suggested_optimizer_reserve_percent")
+        )
+        hardware_baseline_percent = _percent(
+            getattr(self, "_startup_backup_reserve", None)
+        )
+        forecast_updated_at = getattr(self, "_last_update_time", None)
+        forecast_quality = "unavailable"
+        if (
+            recommended_percent is not None
+            and isinstance(forecast_updated_at, datetime)
+            and schedule_age_s is not None
+            and math.isfinite(schedule_age_s)
+        ):
+            forecast_quality = (
+                "stale" if schedule_age_s > stale_after_s else "current"
+            )
+
+        return {
+            "manual_minimum_percent": _percent(manual_reserve, ratio=True),
+            "recommended_percent": recommended_percent,
+            "active_software_floor_percent": _percent(
+                getattr(self._config, "backup_reserve", None), ratio=True
+            ),
+            "hardware_baseline_percent": hardware_baseline_percent,
+            "hardware_value_quality": (
+                "saved_baseline" if hardware_baseline_percent is not None else "unknown"
+            ),
+            "auto_apply_enabled": auto_apply_enabled,
+            "forecast_updated_at": (
+                forecast_updated_at.isoformat()
+                if isinstance(forecast_updated_at, datetime)
+                else None
+            ),
+            "forecast_quality": forecast_quality,
+        }
+
     def get_api_data(self) -> dict[str, Any]:
         """Get data for HTTP API and mobile app."""
         optimizer_available = self._optimizer is not None
@@ -19579,6 +19639,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "predicted_savings": self._get_daily_savings(),
             "lp_stats": lp_stats,
             "reserve_recommendation": reserve_recommendation,
+            "reserve_visibility": self._reserve_visibility(
+                reserve_recommendation,
+                schedule_age_s=schedule_age_s,
+                stale_after_s=stale_after_s,
+            ),
             "battery_export_price_policy": self._battery_export_price_status(ca),
             "profit_max_solar_export": {
                 "capability": dict(

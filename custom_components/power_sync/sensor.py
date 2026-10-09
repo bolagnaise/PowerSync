@@ -1461,6 +1461,7 @@ OPTIMIZER_ACTION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             "battery_export_price_policy": data.get("battery_export_price_policy", {}),
             "lp_stats": data.get("lp_stats", {}),
             "reserve_recommendation": data.get("reserve_recommendation", {}),
+            "reserve_visibility": data.get("reserve_visibility", {}),
             "idle_hold_active": data.get("idle_hold_active", False),
             "idle_hold_reserve": data.get("idle_hold_reserve"),
             "idle_hold_reserve_percent": data.get("idle_hold_reserve_percent"),
