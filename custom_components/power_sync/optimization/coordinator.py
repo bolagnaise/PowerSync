@@ -9459,6 +9459,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 external_state.setdefault("scope", "external")
                 return external_state
 
+            # A Tesla force command accepted without complete readback may
+            # still have an armed cleanup lifecycle, but it must not inherit
+            # the optimizer-only commitment lease from an earlier command.
+            if (
+                self.battery_system == "tesla"
+                and shared_force_state.get("active")
+                and shared_force_state.get("source") == "optimizer"
+                and shared_force_state.get("commitment_eligible") is not True
+            ):
+                external_state = dict(shared_force_state)
+                external_state["scope"] = "external"
+                return external_state
+
         state = getattr(self, "_optimizer_force_state", None)
         optimizer_state_matches = (
             isinstance(state, dict)
@@ -9471,7 +9484,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not optimizer_state_matches:
             if shared_force_state.get("active"):
                 external_state = dict(shared_force_state)
-                external_state.setdefault("scope", "external")
+                external_state["scope"] = "external"
                 return external_state
             return {"active": False}
 
@@ -10956,19 +10969,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 force_type, extend_mins, force_power_w,
                             )
                             if force_scope == "optimizer":
-                                self._set_optimizer_force_state(
-                                    force_type,
-                                    extend_mins,
-                                    force_power_w,
-                                    grid_export_limit_w=(
-                                        applied_power_w
-                                        if (
-                                            force_type == "discharge"
-                                            and self.battery_system == "sigenergy"
-                                        )
-                                        else None
-                                    ),
-                                )
+                                if (
+                                    self.battery_system == "tesla"
+                                    and self._force_state_getter
+                                    and (
+                                        self._force_state_getter() or {}
+                                    ).get("commitment_eligible")
+                                    is not True
+                                ):
+                                    # The Tesla service accepted a degraded
+                                    # refresh; keep its cleanup lifecycle armed
+                                    # but drop the optimizer-only lease.
+                                    self._clear_optimizer_force_state()
+                                else:
+                                    self._set_optimizer_force_state(
+                                        force_type,
+                                        extend_mins,
+                                        force_power_w,
+                                        grid_export_limit_w=(
+                                            applied_power_w
+                                            if (
+                                                force_type == "discharge"
+                                                and self.battery_system == "sigenergy"
+                                            )
+                                            else None
+                                        ),
+                                    )
                             else:
                                 _ext_state["power_w"] = force_power_w
                         except Exception as ext_err:
@@ -11752,21 +11778,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             _tariff_duration=tariff_duration,
                         )
                     )
-                    if force_result and self.battery_system != "tesla":
-                        self._set_optimizer_force_state(
-                            "discharge",
-                            discharge_duration,
-                            (
-                                self._export_command_power_w(action)
-                                if self.battery_system == "sigenergy"
-                                else discharge_power
-                            ),
-                            grid_export_limit_w=(
-                                discharge_power
-                                if self.battery_system == "sigenergy"
-                                else None
-                            ),
+                    if force_result:
+                        tesla_commitment_confirmed = (
+                            self.battery_system != "tesla"
+                            or (
+                                self._force_state_getter
+                                and (
+                                    self._force_state_getter() or {}
+                                ).get("commitment_eligible")
+                                is True
+                            )
                         )
+                        if tesla_commitment_confirmed:
+                            self._set_optimizer_force_state(
+                                "discharge",
+                                discharge_duration,
+                                (
+                                    self._export_command_power_w(action)
+                                    if self.battery_system == "sigenergy"
+                                    else discharge_power
+                                ),
+                                grid_export_limit_w=(
+                                    discharge_power
+                                    if self.battery_system == "sigenergy"
+                                    else None
+                                ),
+                            )
                     if not force_result:
                         if self.battery_system == "solaredge":
                             _LOGGER.warning(

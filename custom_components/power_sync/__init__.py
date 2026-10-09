@@ -30095,6 +30095,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Storage for saved tariff and operation mode during force discharge
     force_discharge_state = {
         "active": False,
+        "source": "user",
+        # Optimizer-owned Tesla force discharge uses these fields to carry the
+        # conditional commitment across the shared service boundary.  The
+        # commitment is enabled only after all Tesla writes/readbacks verify.
+        "scope": "external",
+        "started_at": None,
+        "commitment_eligible": False,
         "saved_tariff": None,
         "saved_operation_mode": None,
         "saved_backup_reserve": None,
@@ -30663,6 +30670,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state.get("battery_discharge_w", 0)
                 ),
                 "source": force_discharge_state.get("source", "user"),
+                "scope": force_discharge_state.get("scope", "external"),
+                "started_at": (
+                    force_discharge_state["started_at"].isoformat()
+                    if isinstance(force_discharge_state.get("started_at"), datetime)
+                    else force_discharge_state.get("started_at")
+                ),
+                "commitment_eligible": bool(
+                    force_discharge_state.get("commitment_eligible")
+                ),
                 "saved_tariff": _select_restorable_tesla_tariff(force_discharge_state["saved_tariff"]),
                 "saved_operation_mode": force_discharge_state["saved_operation_mode"],
                 "saved_backup_reserve": force_discharge_state["saved_backup_reserve"],
@@ -31474,6 +31490,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         persisted_battery_discharge_w
                     )
                     force_discharge_state["source"] = persisted_force_state.get("source", "user")
+                    persisted_started_at = persisted_force_state.get("started_at")
+                    if persisted_started_at:
+                        try:
+                            persisted_started_at = datetime.fromisoformat(
+                                str(persisted_started_at).replace("Z", "+00:00")
+                            )
+                            if persisted_started_at.tzinfo is None:
+                                persisted_started_at = persisted_started_at.replace(
+                                    tzinfo=dt_util.UTC
+                                )
+                        except (TypeError, ValueError):
+                            persisted_started_at = None
+                    force_discharge_state["started_at"] = persisted_started_at
+                    force_discharge_state["scope"] = persisted_force_state.get(
+                        "scope", "external"
+                    )
+                    force_discharge_state["commitment_eligible"] = bool(
+                        persisted_force_state.get("commitment_eligible")
+                    )
                     force_discharge_state["saved_tariff"] = _select_restorable_tesla_tariff(
                         persisted_force_state.get("saved_tariff"),
                         _cached_restorable_tesla_tariff(),
@@ -31515,7 +31550,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             1,
                             math.ceil(replay_remaining_seconds / 60),
                         )
-                        service_data = {"duration": remaining_min}
+                        service_data = {
+                            "duration": remaining_min,
+                            "source": persisted_source,
+                        }
                         if persisted_power_w > 0:
                             service_data["power_w"] = persisted_power_w
                         await hass.services.async_call(
@@ -33004,6 +33042,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ),
             )
 
+        # Preserve the beginning of an optimizer force-discharge episode across
+        # five-minute hardware refreshes.  A refresh must not restart the
+        # conditional commitment clock, and a user-owned command must never
+        # inherit optimizer ownership.
+        prior_optimizer_started_at = None
+        if (
+            source == "optimizer"
+            and force_discharge_state.get("active")
+            and force_discharge_state.get("source") == "optimizer"
+            and force_discharge_state.get("scope") == "optimizer"
+        ):
+            prior_optimizer_started_at = force_discharge_state.get("started_at")
+
         # Cancel any pending expiry timers and advance the generation counter
         # synchronously — before any await — so that a queued restore callback
         # from a previous command cannot fire during this command's I/O window.
@@ -33055,6 +33106,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         force_discharge_state["active"] = True
         force_discharge_state["source"] = source
+        force_discharge_state["scope"] = (
+            "optimizer" if source == "optimizer" else "external"
+        )
+        force_discharge_state["started_at"] = (
+            prior_optimizer_started_at or dt_util.utcnow()
+            if source == "optimizer"
+            else None
+        )
+        # A new or refreshed command is not commitment-eligible until the
+        # Tesla operation mode, tariff, and reserve writes all verify.
+        force_discharge_state["commitment_eligible"] = False
         force_discharge_state["duration"] = duration
         force_discharge_state["power_w"] = command_power_w
         force_discharge_state["battery_discharge_w"] = (
@@ -33857,6 +33919,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 retry_expiry = dt_util.utcnow() + timedelta(minutes=15)
                 force_discharge_state["active"] = True
                 force_discharge_state["source"] = source
+                force_discharge_state["scope"] = "external"
+                force_discharge_state["commitment_eligible"] = False
                 force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(
                     minutes=2
                 )
@@ -34213,6 +34277,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 force_discharge_state["active"] = True
                 force_discharge_state["source"] = source
+                commitment_eligible = bool(
+                    source == "optimizer"
+                    and all_success
+                    and mode_success
+                    and reserve_success
+                    and not unconfirmed_sites
+                )
+                force_discharge_state["scope"] = (
+                    "optimizer" if commitment_eligible else "external"
+                )
+                force_discharge_state["commitment_eligible"] = commitment_eligible
                 # Use the requested duration for the countdown timer, not the
                 # period-aligned tariff expiry. The TOU tariff window extends to
                 # the period boundary (Tesla API requirement) but the timer fires
@@ -36315,6 +36390,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         restore_was_force_discharging = bool(force_discharge_state.get("active"))
         restore_was_force_charging = bool(force_charge_state.get("active"))
         restore_was_hold_soc = bool(hold_soc_state.get("active"))
+        if restore_was_force_discharging:
+            # A restore/cleanup path owns the hardware lifecycle.  It must
+            # not be delayed by the optimizer's conditional hold, including
+            # when a prior Tesla write was accepted without readback.
+            force_discharge_state["scope"] = "external"
+            force_discharge_state["commitment_eligible"] = False
         is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
         is_tesla = bool(
             hass.data.get(DOMAIN, {})
@@ -37999,6 +38080,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             force_discharge_state["saved_grid_charging_enabled"] = None
             force_discharge_state["saved_states"] = {}
             force_discharge_state["expires_at"] = None
+            force_discharge_state["scope"] = "external"
+            force_discharge_state["started_at"] = None
+            force_discharge_state["commitment_eligible"] = False
+            force_discharge_state["source"] = "user"
             force_discharge_state["_skip_backup_reserve_restore"] = False
 
             # Clear charge state
@@ -43486,6 +43571,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "duration": force_discharge_state.get("duration"),
                         "power_w": force_discharge_state.get("power_w", 0),
                         "source": force_discharge_state.get("source", "user"),
+                        "scope": force_discharge_state.get("scope", "external"),
+                        "started_at": force_discharge_state.get("started_at"),
+                        "commitment_eligible": bool(
+                            force_discharge_state.get("commitment_eligible")
+                        ),
                     }
                 if hold_soc_state.get("active"):
                     return {
@@ -43518,6 +43608,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_charge_state["expires_at"] = None
                 force_discharge_state["active"] = False
                 force_discharge_state["expires_at"] = None
+                force_discharge_state["scope"] = "external"
+                force_discharge_state["started_at"] = None
+                force_discharge_state["commitment_eligible"] = False
+                force_discharge_state["source"] = "user"
                 self_consumption_state["active"] = False
                 self_consumption_state["expires_at"] = None
                 self_consumption_state["duration"] = 0

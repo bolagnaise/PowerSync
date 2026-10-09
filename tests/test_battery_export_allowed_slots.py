@@ -203,6 +203,11 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_OPTIMIZATION_GRID_CHARGE_BLACKOUT_WINDOWS = "optimization_grid_charge_blackout_windows"
     const_module.CONF_CURTAILMENT_EXPORT_THRESHOLD_CENTS = "curtailment_export_threshold_cents"
     const_module.DEFAULT_CURTAILMENT_EXPORT_THRESHOLD_CENTS = 1.0
+    const_module.CONF_BATTERY_CURTAILMENT_ENABLED = "battery_curtailment_enabled"
+    const_module.CONF_BATTERY_SYSTEM = "battery_system"
+    const_module.CONF_ALPHAESS_DC_CURTAILMENT_ENABLED = "alphaess_dc_curtailment_enabled"
+    const_module.CONF_SIGENERGY_DC_CURTAILMENT_ENABLED = "sigenergy_dc_curtailment_enabled"
+    const_module.CONF_SOLAREDGE_DC_CURTAILMENT_ENABLED = "solaredge_dc_curtailment_enabled"
     const_module.CONF_SIGENERGY_EXPORT_LIMIT_KW = "sigenergy_export_limit_kw"
     const_module.CONF_ALPHAESS_EXPORT_LIMIT_KW = "alphaess_export_limit_kw"
     const_module.CONF_CHARGE_BY_TIME_ENABLED = "charge_by_time_enabled"
@@ -218,6 +223,19 @@ def _install_power_sync_stubs() -> None:
     const_module.DEFAULT_PROFIT_MAX_TARGET_TIME = "17:15"
     const_module.DEFAULT_PROFIT_MAX_TARGET_SOC = 1.0
     const_module.DEFAULT_OPTIMIZATION_INTERVAL = 5
+    const_module.BATTERY_SYSTEM_ALPHAESS = "alphaess"
+    const_module.BATTERY_SYSTEM_SIGENERGY = "sigenergy"
+    const_module.BATTERY_SYSTEM_SUNGROW = "sungrow"
+    const_module.BATTERY_SYSTEM_FOXESS = "foxess"
+    const_module.BATTERY_SYSTEM_GOODWE = "goodwe"
+    const_module.BATTERY_SYSTEM_ESY_SUNHOME = "esy_sunhome"
+    const_module.BATTERY_SYSTEM_SOLAX = "solax"
+    const_module.BATTERY_SYSTEM_SAJ_H2 = "saj_h2"
+    const_module.BATTERY_SYSTEM_FRONIUS_RESERVA = "fronius_reserva"
+    const_module.BATTERY_SYSTEM_NEOVOLT = "neovolt"
+    const_module.BATTERY_SYSTEM_SOLAREDGE = "solaredge"
+    const_module.BATTERY_SYSTEM_ANKER_SOLIX = "anker_solix"
+    const_module.BATTERY_SYSTEM_CUSTOM = "custom"
     const_module.BATTERY_CAPACITY_DEFAULTS = {"tesla": 13500}
     const_module.BATTERY_POWER_DEFAULTS = {"tesla": 5000}
     const_module.FLOW_POWER_BENCHMARK = 1.7
@@ -4834,6 +4852,115 @@ def _execution_coordinator(opt_module, battery: _FakeBattery, soc: float):
 
     coordinator._get_battery_state = _battery_state
     return coordinator
+
+
+def test_tesla_optimizer_force_discharge_holds_confirmed_shared_commitment(
+    opt_module,
+):
+    """A confirmed Tesla force command survives a sliding self-use slot."""
+    shared_state = {
+        "active": False,
+        "type": "discharge",
+        "source": "optimizer",
+        "scope": "external",
+        "commitment_eligible": False,
+    }
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+
+    class TeslaSharedStateBattery(_FakeBattery):
+        async def force_discharge(self, *args, **kwargs):
+            result = await super().force_discharge(*args, **kwargs)
+            shared_state.update(
+                {
+                    "active": True,
+                    "type": "discharge",
+                    "source": "optimizer",
+                    "scope": "optimizer",
+                    "started_at": start,
+                    "commitment_eligible": True,
+                    "expires_at": start + timedelta(minutes=20),
+                    "hardware_expires_at": start + timedelta(minutes=20),
+                }
+            )
+            return True if result is None else result
+
+    battery = TeslaSharedStateBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.58)
+    coordinator._force_state_getter = lambda: shared_state
+    coordinator._force_state_clearer = lambda: shared_state.update(active=False)
+    coordinator._config.battery_capacity_wh = 13_500
+    actions = [
+        SimpleNamespace(
+            action="export",
+            power_w=5_000,
+            timestamp=start,
+        ),
+        SimpleNamespace(
+            action="export",
+            power_w=5_000,
+            timestamp=start + timedelta(minutes=5),
+        ),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    coordinator._last_price_timestamps = [action.timestamp for action in actions]
+    coordinator._last_export_prices = [0.20] * len(actions)
+    coordinator._last_battery_export_allowed_slots = [True] * len(actions)
+    coordinator._last_priority_export_slots = [True] * len(actions)
+
+    original_now = opt_module.dt_util.now
+    original_utcnow = opt_module.dt_util.utcnow
+    try:
+        opt_module.dt_util.now = lambda *args, **kwargs: start
+        opt_module.dt_util.utcnow = lambda *args, **kwargs: start
+        asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+        opt_module.dt_util.now = lambda *args, **kwargs: start + timedelta(minutes=5)
+        opt_module.dt_util.utcnow = lambda *args, **kwargs: start + timedelta(minutes=5)
+        dropped_action = SimpleNamespace(
+            action="self_consumption",
+            power_w=0,
+            timestamp=start + timedelta(minutes=5),
+        )
+        coordinator._current_schedule = SimpleNamespace(actions=[dropped_action])
+        asyncio.run(coordinator._execute_optimizer_action(dropped_action))
+    finally:
+        opt_module.dt_util.now = original_now
+        opt_module.dt_util.utcnow = original_utcnow
+
+    assert battery.force_discharge_calls == [(10, 5_000, False, None)]
+    assert coordinator._optimizer_force_state["active"] is True
+    assert coordinator._optimizer_force_state["started_at"] == start
+    assert battery.restore_normal_calls == 0
+    assert battery.self_consumption_calls == 0
+
+
+def test_tesla_unconfirmed_force_discharge_does_not_hold_private_commitment(
+    opt_module,
+):
+    """A degraded Tesla cleanup state cannot retain an old optimizer hold."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.58)
+    coordinator._optimizer_force_state.update(
+        {
+            "active": True,
+            "type": "discharge",
+            "started_at": datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc),
+            "expires_at": datetime(2026, 5, 3, 8, 50, tzinfo=timezone.utc),
+        }
+    )
+    shared_state = {
+        "active": True,
+        "type": "discharge",
+        "source": "optimizer",
+        "scope": "external",
+        "commitment_eligible": False,
+    }
+    coordinator._force_state_getter = lambda: shared_state
+
+    active_state = coordinator._get_active_force_state()
+
+    assert active_state["scope"] == "external"
+    assert active_state["source"] == "optimizer"
 
 
 class _FakeSolarExportHold:
