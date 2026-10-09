@@ -28662,6 +28662,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return False
 
     async def handle_goodwe_curtailment(feedin_price=None, import_price=None) -> None:
+        """Serialize automatic GoodWe commands and their lifecycle updates."""
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        control_lock = entry_data.get("_goodwe_curtailment_lock")
+        if control_lock is None:
+            control_lock = asyncio.Lock()
+            entry_data["_goodwe_curtailment_lock"] = control_lock
+        # Price callbacks and the periodic check can overlap while a device
+        # write is awaiting I/O. Read the lifecycle and retry budget only after
+        # the previous command and its persistence have completed.
+        async with control_lock:
+            try:
+                await _handle_goodwe_curtailment_locked(feedin_price, import_price)
+            except asyncio.CancelledError:
+                async_dispatcher_send(
+                    hass, f"power_sync_curtailment_updated_{entry.entry_id}"
+                )
+                raise
+
+    async def _handle_goodwe_curtailment_locked(
+        feedin_price=None, import_price=None
+    ) -> None:
         """Handle GoodWe DC curtailment via export limit register.
 
         Sets export limit to 0W when export earnings are negative by default;
@@ -28878,6 +28899,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     entry_data["_last_goodwe_curtailment_effect_retry"] = _now
                     if _needs_effect_retry:
                         entry_data["_goodwe_curtailment_effect_retry_used"] = True
+                    entry_data["goodwe_curtailment_state"] = "pending"
                     success = await controller.curtail()
                     await _persist_restore_snapshot()
                     if success:
@@ -28907,6 +28929,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             export_earnings,
                         )
                         entry_data["_last_goodwe_curtailment_restore_attempt"] = _now
+                        entry_data["goodwe_curtailment_state"] = "pending"
                         success = await controller.restore()
                         await _persist_restore_snapshot()
                         if success:

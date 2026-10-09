@@ -109,7 +109,7 @@ class _Store:
         self.data = dict(data)
 
 
-def _run_goodwe_curtailment(
+def _build_goodwe_curtailment_handler(
     controller: Any,
     *,
     feedin_price: float,
@@ -119,10 +119,9 @@ def _run_goodwe_curtailment(
     last_update_success: bool = False,
     last_reapply: float | None = None,
     last_effect_retry: float | None = None,
-    repeat: int = 1,
     monotonic_values: tuple[float, ...] | None = None,
 ):
-    """Run the real handler against a fake coordinator and return its state."""
+    """Build the real handler against a fake coordinator."""
     entry_data: dict[str, Any] = {"goodwe_curtailment_state": initial_state}
     if store is not None:
         entry_data["store"] = store
@@ -165,8 +164,9 @@ def _run_goodwe_curtailment(
         "timezone": timezone,
         "timedelta": timedelta,
         "math": math,
+        "asyncio": asyncio,
     }
-    handler_source = _nested_function_source("handle_goodwe_curtailment")
+    handler_source = _nested_function_source("_handle_goodwe_curtailment_locked")
     if monotonic_values is not None:
         ticks = iter(monotonic_values)
         namespace["_test_time"] = SimpleNamespace(monotonic=lambda: next(ticks))
@@ -174,13 +174,119 @@ def _run_goodwe_curtailment(
             "import time as _time_mod", "_time_mod = _test_time"
         )
     exec(handler_source, namespace)
+    exec(_nested_function_source("handle_goodwe_curtailment"), namespace)
+    return namespace["handle_goodwe_curtailment"], entry_data, logger, dispatches
+
+
+def _run_goodwe_curtailment(controller: Any, *, feedin_price: float, repeat=1, **kwargs):
+    handler, entry_data, logger, dispatches = _build_goodwe_curtailment_handler(
+        controller, feedin_price=feedin_price, **kwargs
+    )
     for _ in range(repeat):
-        asyncio.run(
-            namespace["handle_goodwe_curtailment"](
-                feedin_price=feedin_price, import_price=17.22
-            )
-        )
+        asyncio.run(handler(feedin_price=feedin_price, import_price=17.22))
     return entry_data, logger, dispatches
+
+
+class _BlockingController(_Controller):
+    """Keep the first write in flight while a second callback arrives."""
+
+    def __init__(self):
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.inflight = 0
+        self.max_inflight = 0
+
+    async def _write(self, action):
+        self.calls.append(action)
+        self.inflight += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        try:
+            if len(self.calls) == 1:
+                self.started.set()
+                await self.release.wait()
+            return True
+        finally:
+            self.inflight -= 1
+
+    async def curtail(self):
+        return await self._write("curtail")
+
+    async def restore(self, **_kwargs):
+        return await self._write("restore")
+
+
+def _run_overlapping_callbacks(initial_state, first_price, second_price):
+    async def run():
+        controller = _BlockingController()
+        handler, state, _logger, _dispatches = _build_goodwe_curtailment_handler(
+            controller, feedin_price=first_price, initial_state=initial_state
+        )
+        first = asyncio.create_task(handler(first_price, 17.22))
+        await controller.started.wait()
+        second = asyncio.create_task(handler(second_price, 17.22))
+        await asyncio.sleep(0)
+        controller.release.set()
+        await asyncio.gather(first, second)
+        return controller, state
+
+    return asyncio.run(run())
+
+
+def test_overlapping_initial_callbacks_send_one_curtail_command():
+    controller, state = _run_overlapping_callbacks("normal", 6.0, 6.0)
+    assert controller.calls == ["curtail"]
+    assert controller.max_inflight == 1
+    assert state["goodwe_curtailment_state"] == "curtailed"
+
+
+def test_overlapping_restore_callbacks_send_one_restore_command():
+    controller, state = _run_overlapping_callbacks("curtailed", -6.0, -6.0)
+    assert controller.calls == ["restore"]
+    assert controller.max_inflight == 1
+    assert state["goodwe_curtailment_state"] == "normal"
+
+
+def test_new_uneconomic_price_waits_for_restore_then_curtails():
+    controller, state = _run_overlapping_callbacks("curtailed", -6.0, 6.0)
+    assert controller.calls == ["restore", "curtail"]
+    assert controller.max_inflight == 1
+    assert state["goodwe_curtailment_state"] == "curtailed"
+
+
+def test_new_economic_price_restores_after_inflight_curtail():
+    controller, state = _run_overlapping_callbacks("normal", 6.0, -6.0)
+    assert controller.calls == ["curtail", "restore"]
+    assert controller.max_inflight == 1
+    assert state["goodwe_curtailment_state"] == "normal"
+
+
+def test_cancelled_write_remains_pending_and_keeps_retry_backoff():
+    async def run(initial_state, price, timestamp_key, action):
+        controller = _BlockingController()
+        handler, state, _logger, dispatches = _build_goodwe_curtailment_handler(
+            controller, feedin_price=price, initial_state=initial_state
+        )
+        task = asyncio.create_task(handler(price, 17.22))
+        await controller.started.wait()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert state["goodwe_curtailment_state"] == "pending"
+        assert state[timestamp_key] > 0
+        assert not state["_goodwe_curtailment_lock"].locked()
+        assert [call[1] for call in dispatches] == [
+            "power_sync_curtailment_updated_entry"
+        ]
+        await handler(price, 17.22)
+        assert controller.calls == [action]
+
+    asyncio.run(run("normal", 6.0, "_last_goodwe_curtailment_reapply", "curtail"))
+    asyncio.run(
+        run("curtailed", -6.0, "_last_goodwe_curtailment_restore_attempt", "restore")
+    )
 
 
 def test_entity_only_profile_records_unsupported_and_warns():
@@ -216,7 +322,9 @@ def test_repeated_polls_do_not_repeat_the_unsupported_warning():
         ),
         "_goodwe_force_export_active": lambda _entry_data: False,
         "async_dispatcher_send": lambda *_args, **_kwargs: None,
+        "asyncio": asyncio,
     }
+    exec(_nested_function_source("_handle_goodwe_curtailment_locked"), namespace)
     exec(_nested_function_source("handle_goodwe_curtailment"), namespace)
     asyncio.run(
         namespace["handle_goodwe_curtailment"](feedin_price=6.0, import_price=17.22)

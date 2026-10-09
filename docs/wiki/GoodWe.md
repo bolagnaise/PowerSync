@@ -89,6 +89,24 @@ Hold SoC requires the EMS entity path; PowerSync does not issue an unverified di
 
 ## Troubleshooting
 
+### DC curtailment remains Pending
+
+For direct GoodWe control, PowerSync verifies the export-limit setting and
+requires fresh site telemetry below the 250 W export tolerance before reporting
+Active. An accepted zero-watt setting can still remain Pending if the inverter
+continues exporting. Entity-only battery profiles without an export-limit
+actuator also remain Pending.
+
+Automatic price and timer checks run one GoodWe curtailment or restore transition
+at a time. A newer price callback waits for the current transition and then
+evaluates the updated state. An interrupted write remains Pending and keeps its
+retry backoff.
+
+For an ESA still exporting after a verified limit, check the native meter/CT
+selection and grid-connected power-limit configuration with the installer.
+PowerSync does not expose GoodWe Off-grid mode as an automatic curtailment
+fallback.
+
 ### Force charge/discharge does not work on LAN / Kit-20
 
 - Confirm PowerSync is using TCP port 502.
