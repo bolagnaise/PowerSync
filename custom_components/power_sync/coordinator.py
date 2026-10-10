@@ -9655,6 +9655,8 @@ class GoodWeEnergyCoordinator(
                     solar_kw,
                     load_kw,
                     read_power_entity_kw(self.hass, self._solar_override_entity),
+                    grid_kw,
+                    battery_kw,
                 )
 
             # Accumulate daily energy from power readings (with cost tracking)

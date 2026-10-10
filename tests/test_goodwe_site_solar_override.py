@@ -18,6 +18,7 @@ import math
 import sys
 import textwrap
 import types
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -133,29 +134,42 @@ def test_read_power_entity_kw_missing_entity_is_none(override, entity_id):
 def test_override_adds_ac_coupled_surplus_to_solar_and_load(override):
     # GoodWe sees 2.5 kW of its own panels; Enphase adds 6.1 kW; GoodWe's load
     # figure (1.9 kW) is missing exactly that 6.1 kW of AC-coupled production.
-    solar, load, valid = override.apply_site_solar_override(2.5, 1.9, 8.6)
+    # Site balance: 8.6 solar - 0.6 export + 0 battery = 8.0 kW of load.
+    solar, load, valid = override.apply_site_solar_override(2.5, 1.9, 8.6, -0.6, 0.0)
     assert solar == pytest.approx(8.6)
     assert load == pytest.approx(8.0)
     assert valid is True
 
 
 def test_unreadable_override_returns_inverter_figures_and_marks_invalid(override):
-    solar, load, valid = override.apply_site_solar_override(2.5, 1.9, None)
+    solar, load, valid = override.apply_site_solar_override(2.5, 1.9, None, -0.6, 0.0)
     assert (solar, load) == (2.5, 1.9)
     assert valid is False
 
 
 def test_override_never_reports_less_solar_than_the_inverter_itself(override):
     # A lagging site sensor must not push solar below what the GoodWe measures.
-    solar, load, valid = override.apply_site_solar_override(2.5, 1.9, 2.0)
+    solar, load, valid = override.apply_site_solar_override(2.5, 1.9, 2.0, -0.6, 0.0)
     assert solar == pytest.approx(2.5)
     assert load == pytest.approx(1.9)
     assert valid is True
 
 
 def test_override_at_night_changes_nothing(override):
-    solar, load, valid = override.apply_site_solar_override(0.0, 0.6, 0.0)
+    solar, load, valid = override.apply_site_solar_override(0.0, 0.6, 0.0, 0.6, 0.0)
     assert (solar, load, valid) == (0.0, 0.6, True)
+
+
+def test_override_load_follows_the_site_power_balance_with_battery(override):
+    # 4 kW solar, battery charging 1 kW (-1), importing 0.5 kW: load = 4 + 0.5 - 1.
+    solar, load, valid = override.apply_site_solar_override(1.0, 0.0, 4.0, 0.5, -1.0)
+    assert load == pytest.approx(3.5)
+    assert valid is True
+
+
+def test_override_load_is_never_negative(override):
+    _solar, load, _valid = override.apply_site_solar_override(1.0, 0.0, 1.0, -3.0, 0.0)
+    assert load == 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -200,8 +214,19 @@ class _FakeEnergyAcc:
         return None
 
 
-def _run_update(*, override_entity: str, states: dict, runtime: dict | None = None):
-    """Run the real, patched ``_async_update_data`` and return (result, accumulator calls)."""
+def _run_update(
+    *,
+    override_entity: str,
+    states: dict,
+    runtime: dict | None = None,
+    controller=None,
+    entity_telemetry: bool = True,
+):
+    """Run the real, patched ``_async_update_data`` and return (result, accumulator calls).
+
+    By default a stand-in controller returns ``runtime``.  Pass ``controller`` (and
+    ``entity_telemetry``) to drive a real GoodWe adapter instead.
+    """
     module, restore = _load_override_module()
     try:
         source = COORDINATOR_PATH.read_text(encoding="utf-8")
@@ -235,7 +260,7 @@ def _run_update(*, override_entity: str, states: dict, runtime: dict | None = No
         runtime_data = {
             "telemetry_ready": True,
             "solar_power": 2.5,   # GoodWe's own PV strings only
-            "grid_power": -0.4,
+            "grid_power": -0.6,
             "battery_power": 0.0,
             "load_power": 1.9,    # GoodWe house_consumption: misses the AC-coupled array
             "battery_level": 80.0,
@@ -245,15 +270,16 @@ def _run_update(*, override_entity: str, states: dict, runtime: dict | None = No
         if runtime:
             runtime_data.update(runtime)
 
-        controller = _FakeController(runtime_data)
+        if controller is None:
+            controller = _FakeController(runtime_data)
         fake_self = SimpleNamespace(
             hass=_Hass(states),
             _entry_id="entry1",
             _energy_acc=_FakeEnergyAcc(),
-            _using_entity_telemetry=True,
+            _using_entity_telemetry=entity_telemetry,
             _telemetry_validated=True,
-            _telemetry_controller=controller,
-            _controller=None,
+            _telemetry_controller=controller if entity_telemetry else None,
+            _controller=None if entity_telemetry else controller,
             _connected=True,
             _solar_override_entity=override_entity,
             _native_integration_enabled=lambda: True,
@@ -328,6 +354,142 @@ def test_site_solar_below_goodwe_pv_is_clamped_to_goodwe_pv():
 
     assert result["solar_power"] == pytest.approx(2.5)
     assert result["load_power"] == pytest.approx(1.9)
+
+
+# --------------------------------------------------------------------------- #
+# Negative GoodWe load through both real telemetry adapters
+#
+# Both controllers clamp the load they report to zero, so a signed-negative
+# ``house_consumption`` reaches the coordinator as 0.  The override must not
+# depend on that figure: it rebuilds load from the site power balance.
+#
+#   inverter PV 1 kW, whole-site solar 4 kW, grid export 2 kW, battery 0 kW,
+#   GoodWe house consumption -1 kW  ->  real household load is 4 - 2 = 2 kW.
+# --------------------------------------------------------------------------- #
+
+@contextmanager
+def _inverter_module(name: str):
+    names = ("power_sync", "power_sync.inverters", f"power_sync.inverters.{name}")
+    saved = {n: sys.modules.get(n) for n in names}
+    power_sync = types.ModuleType("power_sync")
+    power_sync.__path__ = [str(COMPONENT)]
+    sys.modules["power_sync"] = power_sync
+    inverters = types.ModuleType("power_sync.inverters")
+    inverters.__path__ = [str(COMPONENT / "inverters")]
+    sys.modules["power_sync.inverters"] = inverters
+    sys.modules.pop(f"power_sync.inverters.{name}", None)
+    try:
+        yield importlib.import_module(f"power_sync.inverters.{name}")
+    finally:
+        for n, previous in saved.items():
+            if previous is None:
+                sys.modules.pop(n, None)
+            else:
+                sys.modules[n] = previous
+
+
+class _EntityHass(_Hass):
+    """``_Hass`` plus the entity listing the GoodWe entity adapter uses."""
+
+    def __init__(self, states: dict) -> None:
+        super().__init__(states)
+        self.states.async_entity_ids = lambda domain=None: sorted(
+            e for e in states if domain is None or e.startswith(f"{domain}.")
+        )
+
+
+class _FakeGoodWeInverter:
+    model_name = "GW10K-ET"
+    serial_number = "TEST"
+    rated_power = 10000
+
+    def __init__(self, runtime: dict) -> None:
+        self._runtime = runtime
+
+    async def read_runtime_data(self) -> dict:
+        return dict(self._runtime)
+
+
+_NEGATIVE_LOAD_STATES = {SITE_SOLAR: _State("4000", "W")}
+
+
+def test_negative_goodwe_load_through_the_entity_telemetry_path():
+    gw_states = {
+        "sensor.goodwe_battery_soc": _State(50),
+        "sensor.goodwe_battery_power": _State(0, "W"),
+        "sensor.goodwe_active_power": _State(2000, "W"),  # +ve = exporting
+        "sensor.goodwe_ppv": _State(1000, "W"),
+        "sensor.goodwe_house_consumption": _State(-1000, "W"),
+        "sensor.goodwe_rated_power": _State(10000, "W"),
+    }
+    with _inverter_module("goodwe_entity") as module:
+        controller = module.GoodWeEntityTelemetryController(
+            _EntityHass(gw_states), entity_prefix="goodwe"
+        )
+        assert asyncio.run(controller.connect())
+        result, calls = _run_update(
+            override_entity=SITE_SOLAR,
+            states=_NEGATIVE_LOAD_STATES,
+            controller=controller,
+            entity_telemetry=True,
+        )
+
+    assert result["solar_power"] == pytest.approx(4.0)
+    assert result["grid_power"] == pytest.approx(-2.0)
+    assert result["load_power"] == pytest.approx(2.0)
+    assert result["solar_power_valid"] is True
+    assert len(calls) == 1
+    assert calls[0][6] == pytest.approx(2.0)  # accumulator load_kw
+
+
+def test_negative_goodwe_load_through_the_direct_battery_controller_path():
+    runtime = {
+        "active_power": 2000,   # GoodWe: positive = export
+        "pbattery1": 0,
+        "ppv": 1000,
+        "house_consumption": -1000,
+        "battery_soc": 50,
+    }
+    with _inverter_module("goodwe_battery") as module:
+        controller = module.GoodWeBatteryController("192.0.2.10")
+        controller._inverter = _FakeGoodWeInverter(runtime)
+        result, calls = _run_update(
+            override_entity=SITE_SOLAR,
+            states=_NEGATIVE_LOAD_STATES,
+            controller=controller,
+            entity_telemetry=False,
+        )
+
+    assert result["solar_power"] == pytest.approx(4.0)
+    assert result["grid_power"] == pytest.approx(-2.0)
+    assert result["load_power"] == pytest.approx(2.0)
+    assert result["solar_power_valid"] is True
+    assert len(calls) == 1
+    assert calls[0][6] == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize("house_consumption_w", [3000, 0])
+def test_positive_and_zero_goodwe_load_agree_with_the_site_balance(house_consumption_w):
+    # Same site (1 kW inverter PV, 4 kW whole-site, 2 kW export) must give the
+    # same 2 kW load whatever the inverter's own load channel claims.
+    runtime = {
+        "active_power": 2000,
+        "pbattery1": 0,
+        "ppv": 1000,
+        "house_consumption": house_consumption_w,
+        "battery_soc": 50,
+    }
+    with _inverter_module("goodwe_battery") as module:
+        controller = module.GoodWeBatteryController("192.0.2.10")
+        controller._inverter = _FakeGoodWeInverter(runtime)
+        result, _calls = _run_update(
+            override_entity=SITE_SOLAR,
+            states=_NEGATIVE_LOAD_STATES,
+            controller=controller,
+            entity_telemetry=False,
+        )
+
+    assert result["load_power"] == pytest.approx(2.0)
 
 
 # --------------------------------------------------------------------------- #

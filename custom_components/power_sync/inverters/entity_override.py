@@ -50,22 +50,27 @@ def apply_site_solar_override(
     inverter_solar_kw: float,
     inverter_load_kw: float,
     override_solar_kw: float | None,
+    grid_kw: float,
+    battery_kw: float,
 ) -> tuple[float, float, bool]:
     """Correct inverter solar and load using a whole-site solar reading.
 
-    Returns ``(solar_kw, load_kw, solar_valid)``.
+    Returns ``(solar_kw, load_kw, solar_valid)``.  ``grid_kw`` is positive for
+    import and ``battery_kw`` positive for discharge (PowerSync conventions).
 
     * ``override_solar_kw is None`` (sensor unavailable): the inverter-only
       figures are returned unchanged and ``solar_valid`` is ``False`` so the
       optimiser ignores the sample instead of treating a half-blind reading as
       real production.
     * Otherwise the site figure is used for solar, but never below what the
-      inverter itself measures.  The surplus over the inverter's own PV is the
-      AC-coupled production the inverter cannot see; the inverter's load figure
-      excludes it too, so it is added back to load.
+      inverter itself measures.  Household load is rebuilt from the site power
+      balance (``solar + grid + battery``) rather than by adding the AC-coupled
+      surplus to the inverter's own load figure.  The controllers clamp that
+      figure to zero, so a signed negative reading (an inverter that reports
+      export through the load channel) would otherwise lose information and
+      over-state load; the balance does not depend on it.
     """
     if override_solar_kw is None:
         return inverter_solar_kw, inverter_load_kw, False
     solar_kw = max(override_solar_kw, inverter_solar_kw)
-    ac_coupled_kw = solar_kw - inverter_solar_kw
-    return solar_kw, inverter_load_kw + ac_coupled_kw, True
+    return solar_kw, max(0.0, solar_kw + grid_kw + battery_kw), True
