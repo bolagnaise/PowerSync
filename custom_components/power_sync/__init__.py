@@ -22472,6 +22472,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry_id=entry.entry_id,
                 ems_entity_prefix=goodwe_ems_prefix,
                 entity_telemetry_prefix=goodwe_entity_telemetry_prefix,
+                solar_override_entity=entry.options.get(
+                    CONF_CUSTOM_SOLAR_POWER_ENTITY,
+                    entry.data.get(CONF_CUSTOM_SOLAR_POWER_ENTITY, ""),
+                ),
             )
     elif is_alphaess:
         _LOGGER.info("Running in AlphaESS mode - Tesla credentials not required")

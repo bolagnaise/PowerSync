@@ -781,6 +781,7 @@ BATTERY_SYSTEM_CONNECTION_KEYS: dict[str, tuple[str, ...]] = {
         CONF_GOODWE_PROTOCOL,
         CONF_GOODWE_EMS_ENTITY_PREFIX,
         CONF_GOODWE_EMS_CONTROL_MODE,
+        CONF_CUSTOM_SOLAR_POWER_ENTITY,
     ),
     BATTERY_SYSTEM_ALPHAESS: (
         CONF_ALPHAESS_MODBUS_HOST,
@@ -1975,6 +1976,22 @@ def goodwe_ems_control_options() -> list[SelectOptionDict]:
     ]
 
 
+def goodwe_site_solar_schema(current: Any = None) -> dict[Any, Any]:
+    """Return the optional whole-site solar sensor field for GoodWe forms.
+
+    An EntitySelector rejects ``""``/``None``, and voluptuous validates an
+    Optional default even when the frontend omits the field, so a default is
+    only attached once a real entity id is stored.
+    """
+    stored = str(current or "").strip()
+    key = (
+        vol.Optional(CONF_CUSTOM_SOLAR_POWER_ENTITY, default=stored)
+        if stored
+        else vol.Optional(CONF_CUSTOM_SOLAR_POWER_ENTITY)
+    )
+    return {key: EntitySelector(EntitySelectorConfig(domain="sensor"))}
+
+
 def resolve_goodwe_port(protocol: str, port: int | None) -> int:
     """Resolve GoodWe port defaults when the user switches protocol."""
     if protocol == "tcp" and (port is None or port == DEFAULT_GOODWE_PORT_UDP):
@@ -2915,6 +2932,14 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     }.get(battery_system)
                     if route_key:
                         self._battery_profile_data[route_key] = profile.route_value
+                if battery_system == BATTERY_SYSTEM_GOODWE:
+                    site_solar = str(
+                        user_input.get(CONF_CUSTOM_SOLAR_POWER_ENTITY) or ""
+                    ).strip()
+                    if site_solar:
+                        self._battery_profile_data[
+                            CONF_CUSTOM_SOLAR_POWER_ENTITY
+                        ] = site_solar
                 if profile.profile_id == "goodwe_ha":
                     self._battery_profile_data[CONF_GOODWE_EMS_CONTROL_MODE] = (
                         GOODWE_EMS_CONTROL_ENTITY
@@ -2976,6 +3001,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             schema_fields[
                 vol.Optional(CONF_BATTERY_INTEGRATION_ANCHOR_ENTITY)
             ] = EntitySelector(EntitySelectorConfig(domain="sensor"))
+        if battery_system == BATTERY_SYSTEM_GOODWE:
+            schema_fields.update(goodwe_site_solar_schema())
         return self.async_show_form(
             step_id="battery_connection_profile_setup",
             data_schema=vol.Schema(schema_fields),
@@ -6179,6 +6206,13 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 CONF_GOODWE_PROTOCOL: protocol,
                                 CONF_GOODWE_EMS_CONTROL_MODE: ems_control_mode,
                             }
+                            site_solar = str(
+                                user_input.get(CONF_CUSTOM_SOLAR_POWER_ENTITY) or ""
+                            ).strip()
+                            if site_solar:
+                                self._goodwe_data[
+                                    CONF_CUSTOM_SOLAR_POWER_ENTITY
+                                ] = site_solar
                             if ems_control_mode == GOODWE_EMS_CONTROL_ENTITY:
                                 self._goodwe_data[
                                     CONF_GOODWE_EMS_ENTITY_PREFIX
@@ -6252,6 +6286,11 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             "suggested_value": current_ems_prefix or "goodwe"
                         },
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    **goodwe_site_solar_schema(
+                        user_input.get(CONF_CUSTOM_SOLAR_POWER_ENTITY)
+                        if user_input
+                        else None
+                    ),
                 }
             ),
             errors=errors,
@@ -9086,6 +9125,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     }.get(battery_system)
                     if route_key:
                         updates[route_key] = profile.route_value
+                if battery_system == BATTERY_SYSTEM_GOODWE:
+                    updates[CONF_CUSTOM_SOLAR_POWER_ENTITY] = str(
+                        user_input.get(CONF_CUSTOM_SOLAR_POWER_ENTITY) or ""
+                    ).strip()
                 if profile.profile_id == "goodwe_ha":
                     updates[CONF_GOODWE_EMS_CONTROL_MODE] = GOODWE_EMS_CONTROL_ENTITY
                     updates[CONF_GOODWE_EMS_ENTITY_PREFIX] = user_input.get(
@@ -9187,6 +9230,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             )
             schema_fields[anchor_key] = EntitySelector(
                 EntitySelectorConfig(domain="sensor")
+            )
+        if battery_system == BATTERY_SYSTEM_GOODWE:
+            schema_fields.update(
+                goodwe_site_solar_schema(
+                    self._get_option(CONF_CUSTOM_SOLAR_POWER_ENTITY, "")
+                )
             )
 
         return self.async_show_form(
@@ -10970,6 +11019,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     }
                     new_data.update(goodwe_values)
                     new_options.update(goodwe_values)
+                    site_solar = str(
+                        user_input.get(CONF_CUSTOM_SOLAR_POWER_ENTITY) or ""
+                    ).strip()
+                    for target in (new_data, new_options):
+                        if site_solar:
+                            target[CONF_CUSTOM_SOLAR_POWER_ENTITY] = site_solar
+                        else:
+                            target.pop(CONF_CUSTOM_SOLAR_POWER_ENTITY, None)
                     if ems_control_mode == GOODWE_EMS_CONTROL_ENTITY:
                         new_data[CONF_GOODWE_EMS_ENTITY_PREFIX] = resolved_ems_prefix
                         new_options[CONF_GOODWE_EMS_ENTITY_PREFIX] = resolved_ems_prefix
@@ -11040,6 +11097,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                             "suggested_value": current_ems_prefix or "goodwe"
                         },
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    **goodwe_site_solar_schema(
+                        self._get_option(CONF_CUSTOM_SOLAR_POWER_ENTITY, "")
+                    ),
                 }
             ),
             errors=errors,

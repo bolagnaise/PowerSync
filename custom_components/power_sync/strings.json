@@ -684,14 +684,16 @@
           "goodwe_port": "Port",
           "goodwe_protocol": "Protocol",
           "goodwe_ems_control_mode": "EMS control method",
-          "goodwe_ems_entity_prefix": "GoodWe entity mode prefix"
+          "goodwe_ems_entity_prefix": "GoodWe entity mode prefix",
+          "custom_solar_power_entity": "Whole-site solar power sensor (all PV)"
         },
         "data_description": {
           "goodwe_host": "Local IP address of your GoodWe inverter.",
           "goodwe_protocol": "UDP uses direct GoodWe control on port 8899. TCP uses Modbus on port 502 for LAN/Kit-20 setups.",
           "goodwe_port": "Default: 8899 for UDP, 502 for TCP.",
           "goodwe_ems_control_mode": "Choose how PowerSync sends GoodWe EMS commands. Direct IP requires UDP 8899 control. For TCP / LAN Kit-20 setups, PowerSync auto-uses detected GoodWe Experimental EMS entities because direct operation-mode writes do not reliably control the inverter. TCP / LAN Kit-20 telemetry can also use detected GoodWe HA sensors to avoid a second direct TCP/502 polling client.",
-          "goodwe_ems_entity_prefix": "Required only when EMS control method is Home Assistant entity control. PowerSync will auto-detect a matching EMS entity pair when possible. You can also enter only the prefix for the GoodWe Experimental EMS controls. Example: goodwe uses select.goodwe_ems_mode and number.goodwe_ems_power_limit."
+          "goodwe_ems_entity_prefix": "Required only when EMS control method is Home Assistant entity control. PowerSync will auto-detect a matching EMS entity pair when possible. You can also enter only the prefix for the GoodWe Experimental EMS controls. Example: goodwe uses select.goodwe_ems_mode and number.goodwe_ems_power_limit.",
+          "custom_solar_power_entity": "Optional. A sensor reporting TOTAL solar production for the whole property: the GoodWe inverter's own PV plus any AC-coupled array such as Enphase microinverters. Leave empty if the GoodWe PV strings are all your solar. If this sensor becomes unavailable, PowerSync ignores solar samples instead of using a partial reading."
         },
         "submit": "Connect"
       },
@@ -1353,13 +1355,15 @@
           "battery_connection_profile": "Connection method",
           "battery_integration_config_entry_id": "Home Assistant integration",
           "battery_integration_anchor_entity": "Sungrow anchor sensor",
-          "battery_sensor_display_mode": "Additional sensors"
+          "battery_sensor_display_mode": "Additional sensors",
+          "custom_solar_power_entity": "Whole-site solar power sensor (all PV)"
         },
         "data_description": {
           "battery_connection_profile": "Only validated bundles are offered. Existing installations keep their current method until changed here.",
           "battery_integration_config_entry_id": "Select the exact upstream integration entry for this physical installation.",
           "battery_integration_anchor_entity": "For YAML-based Sungrow setups without a config entry, select a sensor belonging to the intended inverter. PowerSync will restrict discovery to its stable namespace.",
-          "battery_sensor_display_mode": "Recommended shows high-value battery, solar, grid, energy and status entities. All supported includes every sensor in the selected source scope."
+          "battery_sensor_display_mode": "Recommended shows high-value battery, solar, grid, energy and status entities. All supported includes every sensor in the selected source scope.",
+          "custom_solar_power_entity": "Optional. A sensor reporting TOTAL solar production for the whole property: the GoodWe inverter's own PV plus any AC-coupled array such as Enphase microinverters. Leave empty if the GoodWe PV strings are all your solar. If this sensor becomes unavailable, PowerSync ignores solar samples instead of using a partial reading."
         },
         "submit": "Save"
       },
@@ -1370,13 +1374,15 @@
           "battery_connection_profile": "Connection method",
           "battery_integration_config_entry_id": "Home Assistant integration",
           "battery_integration_anchor_entity": "Sungrow anchor sensor",
-          "battery_sensor_display_mode": "Additional sensors"
+          "battery_sensor_display_mode": "Additional sensors",
+          "custom_solar_power_entity": "Whole-site solar power sensor (all PV)"
         },
         "data_description": {
           "battery_connection_profile": "Only connection bundles validated for the selected battery are offered.",
           "battery_integration_config_entry_id": "Select the exact upstream integration entry for this physical installation.",
           "battery_integration_anchor_entity": "For YAML-based Sungrow setups, select a sensor belonging to the intended inverter.",
-          "battery_sensor_display_mode": "Recommended shows useful battery, solar, grid, energy and status values without duplicating recorder entities."
+          "battery_sensor_display_mode": "Recommended shows useful battery, solar, grid, energy and status values without duplicating recorder entities.",
+          "custom_solar_power_entity": "Optional. A sensor reporting TOTAL solar production for the whole property: the GoodWe inverter's own PV plus any AC-coupled array such as Enphase microinverters. Leave empty if the GoodWe PV strings are all your solar. If this sensor becomes unavailable, PowerSync ignores solar samples instead of using a partial reading."
         },
         "submit": "Next"
       },
@@ -1634,14 +1640,16 @@
           "goodwe_protocol": "Protocol",
           "goodwe_port": "Port",
           "goodwe_ems_control_mode": "EMS control method",
-          "goodwe_ems_entity_prefix": "GoodWe entity mode prefix"
+          "goodwe_ems_entity_prefix": "GoodWe entity mode prefix",
+          "custom_solar_power_entity": "Whole-site solar power sensor (all PV)"
         },
         "data_description": {
           "goodwe_host": "Local IP address of your GoodWe inverter.",
           "goodwe_protocol": "UDP uses direct GoodWe control on port 8899. TCP uses Modbus on port 502 for LAN/Kit-20 setups.",
           "goodwe_port": "Default: 8899 for UDP, 502 for TCP.",
           "goodwe_ems_control_mode": "Choose how PowerSync sends GoodWe EMS commands. Direct IP requires UDP 8899 control. For TCP / LAN Kit-20 setups, PowerSync auto-uses detected GoodWe Experimental EMS entities because direct operation-mode writes do not reliably control the inverter. TCP / LAN Kit-20 telemetry can also use detected GoodWe HA sensors to avoid a second direct TCP/502 polling client.",
-          "goodwe_ems_entity_prefix": "Required only when EMS control method is Home Assistant entity control. PowerSync will auto-detect a matching EMS entity pair when possible. You can also enter only the prefix for the GoodWe Experimental EMS controls. Example: goodwe uses select.goodwe_ems_mode and number.goodwe_ems_power_limit."
+          "goodwe_ems_entity_prefix": "Required only when EMS control method is Home Assistant entity control. PowerSync will auto-detect a matching EMS entity pair when possible. You can also enter only the prefix for the GoodWe Experimental EMS controls. Example: goodwe uses select.goodwe_ems_mode and number.goodwe_ems_power_limit.",
+          "custom_solar_power_entity": "Optional. A sensor reporting TOTAL solar production for the whole property: the GoodWe inverter's own PV plus any AC-coupled array such as Enphase microinverters. Leave empty if the GoodWe PV strings are all your solar. If this sensor becomes unavailable, PowerSync ignores solar samples instead of using a partial reading."
         },
         "submit": "Save"
       },

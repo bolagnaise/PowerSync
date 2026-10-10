@@ -9528,11 +9528,16 @@ class GoodWeEnergyCoordinator(
         entry_id: str = "",
         ems_entity_prefix: str | None = None,
         entity_telemetry_prefix: str | None = None,
+        solar_override_entity: str | None = None,
     ) -> None:
         """Initialize the coordinator."""
         self.host = host
         self.port = port
         self._entry_id = entry_id
+        # Optional whole-site solar sensor.  The GoodWe only measures the panels
+        # wired to it, so an AC-coupled array (e.g. Enphase) is invisible and
+        # load is under-reported by the same amount.  See inverters/entity_override.py.
+        self._solar_override_entity = (solar_override_entity or "").strip()
         # When ems_entity_prefix is set (e.g. "goodwe"), control commands are
         # relayed through the community GoodWe HA integration's EMS entities
         # (select.<prefix>_ems_mode, number.<prefix>_ems_power_limit) instead of
@@ -9658,8 +9663,27 @@ class GoodWeEnergyCoordinator(
                 else True
             )
 
+            # Optional whole-site solar override.  Never fall back silently to the
+            # GoodWe-only figure: it would make the optimiser believe production
+            # is low (nowcast derate / forecast learner), so an unreadable
+            # override marks the sample invalid instead.
+            solar_power_valid = True
+            if self._solar_override_entity:
+                from .inverters.entity_override import (
+                    apply_site_solar_override,
+                    read_power_entity_kw,
+                )
+
+                solar_kw, load_kw, solar_power_valid = apply_site_solar_override(
+                    solar_kw,
+                    load_kw,
+                    read_power_entity_kw(self.hass, self._solar_override_entity),
+                    grid_kw,
+                    battery_kw,
+                )
+
             # Accumulate daily energy from power readings (with cost tracking)
-            if telemetry_ready:
+            if telemetry_ready and solar_power_valid:
                 buy, sell = _get_current_prices(self.hass, self._entry_id)
                 _update_energy_accumulator_with_ev_load(
                     self._energy_acc,
@@ -9704,6 +9728,10 @@ class GoodWeEnergyCoordinator(
             }
             if self._native_integration_enabled():
                 energy_data["telemetry_ready"] = telemetry_ready
+            if self._solar_override_entity:
+                # Same flag the Fronius coordinator uses; the optimiser skips
+                # its solar nowcast derate and forecast learner when False.
+                energy_data["solar_power_valid"] = solar_power_valid
             if data.get("work_mode") is not None:
                 energy_data["work_mode"] = data.get("work_mode")
                 energy_data["work_mode_name"] = data.get("work_mode_name")
