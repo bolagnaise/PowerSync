@@ -2001,6 +2001,8 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       error: this._error,
       compact,
       priceMeta,
+      reserveForecastQuality: this._reserveDetails().forecastQuality,
+      exportReserveDecision: this._currentExportReserveDecision(),
       forceCharge: this._entityStateSignature(this._config?.forceChargeEntity, ['windows']),
       forceDischarge: this._entityStateSignature(this._config?.forceDischargeEntity, ['windows']),
     });
@@ -2108,6 +2110,57 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           color: var(--warning-color, #ff9800);
           background: rgba(255, 152, 0, 0.10);
           border-color: rgba(255, 152, 0, 0.30);
+        }
+        .reserve-decision strong {
+          display: block;
+          margin-bottom: 5px;
+          color: var(--primary-text-color);
+          font-size: 13px;
+        }
+        .reserve-decision p {
+          margin: 5px 0;
+          max-width: 72ch;
+        }
+        .reserve-decision .decision-time {
+          color: var(--secondary-text-color);
+          font-size: 11px;
+        }
+        .window-row .reserve-decision {
+          grid-column: 1 / -1;
+          margin: 0;
+        }
+        .reserve-detail {
+          margin: 0 0 14px;
+          color: var(--primary-text-color);
+          font-size: 13px;
+          line-height: 1.4;
+        }
+        .reserve-detail summary {
+          padding: 8px 0;
+          cursor: pointer;
+          font-weight: 700;
+        }
+        .reserve-detail summary:focus-visible {
+          outline: 2px solid var(--primary-color);
+          outline-offset: 3px;
+        }
+        .reserve-values {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 8px 16px;
+          margin: 8px 0;
+        }
+        .reserve-values dt, .reserve-detail p {
+          color: var(--secondary-text-color);
+        }
+        .reserve-values dd {
+          margin: 0;
+          font-weight: 700;
+          font-variant-numeric: tabular-nums;
+        }
+        .reserve-detail p {
+          margin: 8px 0;
+          max-width: 72ch;
         }
         .section-title {
           margin: 16px 0 8px;
@@ -2441,6 +2494,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         </div>
         ${this._renderChips(model, priceMeta)}
         ${this._renderNotice(hasSchedule)}
+        ${this._renderReserveDetails()}
         <div class="section-title">Planned Battery Windows</div>
         ${this._renderBatteryWindows(batteryWindows, priceMeta)}
         ${model.priceLevelWindows.length ? `
@@ -2464,6 +2518,13 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     `;
 
     this.shadowRoot.querySelector('.refresh')?.addEventListener('click', () => this._maybeLoadData(true));
+    const reserveDetail = this.shadowRoot.querySelector('.reserve-detail');
+    if (reserveDetail) {
+      reserveDetail.open = this._reserveDetailsOpen === true;
+      reserveDetail.addEventListener('toggle', () => {
+        this._reserveDetailsOpen = reserveDetail.open;
+      });
+    }
     if (hasSchedule) {
       this._attachOptimizerChartTooltip('.soc-power-chart', this._powerTooltipConfig(model, compact));
       if (model.priceSeries.length) {
@@ -2622,11 +2683,8 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     if (data.last_optimization) {
       chips.push(['Optimized', this._formatTime(data.last_optimization)]);
     }
-    if (model.reserveCalculated && Number.isFinite(model.reservePercent)) {
-      chips.push(['Auto Reserve', `${Math.round(model.reservePercent)}%`]);
-    }
-    if (model.exportReserveCalculated && Number.isFinite(model.exportReservePercent)) {
-      chips.push(['Export Floor', `${Math.round(model.exportReservePercent)}%`]);
+    if (Number.isFinite(model.reservePercent)) {
+      chips.push(['Software export floor', `${Math.round(model.reservePercent)}%`]);
     }
     if (model.idleHoldActive && Number.isFinite(model.idleHoldReservePercent)) {
       chips.push(['IDLE Hold', `${Math.round(model.idleHoldReservePercent)}%`, true]);
@@ -2665,6 +2723,81 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     return '';
   }
 
+  _currentExportReserveDecision(data = this._data) {
+    const decision = data?.export_reserve_decision;
+    if (!decision || typeof decision !== 'object' || Array.isArray(decision) ||
+        data.enabled === false || data.monitoring_mode === true || data.is_stale === true || this._error) return null;
+    if (!['blocked', 'limited', 'unknown'].includes(decision.status) ||
+        !['at_floor', 'projected_below_floor', 'insufficient_safe_duration', 'safe_duration_unverified'].includes(decision.reason) ||
+        !['self_consumption_accepted', 'export_accepted', 'restore_unconfirmed', 'command_unconfirmed', 'not_requested'].includes(decision.control_outcome)) return null;
+    const parseTime = value => typeof value === 'string' ? Date.parse(value) : NaN;
+    const evaluated = parseTime(decision.evaluated_at);
+    const start = parseTime(decision.slot_start);
+    const end = parseTime(decision.slot_end);
+    const now = Date.now();
+    const interval = Math.max(1, Number(data?.config?.interval_minutes) || 5);
+    if (![evaluated, start, end].every(Number.isFinite) || start >= end ||
+        now < start || now >= end || evaluated > now + 30000 || now - evaluated > 3 * interval * 60000) return null;
+    const generated = parseTime(decision.plan_generated_at);
+    const currentPlan = parseTime(data.last_optimization);
+    if (Number.isFinite(generated) && Number.isFinite(currentPlan) && generated !== currentPlan) return null;
+    if (decision.status === 'limited' &&
+        !(Number.isFinite(decision.requested_minutes) && Number.isFinite(decision.allowed_minutes) &&
+          decision.allowed_minutes > 0 && decision.allowed_minutes < decision.requested_minutes)) return null;
+    return decision;
+  }
+
+  _renderExportReserveDecision(decision = this._currentExportReserveDecision()) {
+    if (!decision) return '';
+    const percent = value => {
+      const n = this._optionalReservePercent(value);
+      return Number.isFinite(n) ? `${Number(n.toFixed(2))}%` : 'Unknown';
+    };
+    const soc = percent(decision.current_soc_percent);
+    const projected = percent(decision.projected_soc_percent);
+    const floor = percent(decision.software_floor_percent);
+    const planned = this._data?.planned_current_action === 'discharge' ? 'discharge' : 'export';
+    let title;
+    let explanation;
+    if (decision.status === 'unknown') {
+      title = 'Reserve-safe export could not be verified';
+      explanation = 'The inputs needed to check a safe discharge duration were unavailable. This does not establish that the reserve was reached.';
+    } else if (decision.status === 'limited') {
+      title = 'Export duration limited by reserve';
+      explanation = `Requested ${decision.requested_minutes} min; allowed ${decision.allowed_minutes} min above the ${floor} software export floor.`;
+    } else {
+      title = `Planned ${planned} held by reserve`;
+      if (decision.reason === 'at_floor') {
+        explanation = `Charge was ${soc}, at or below the ${floor} software export floor when checked.`;
+      } else if (decision.reason === 'projected_below_floor') {
+        const basis = decision.projection_basis === 'full_power_duration' ? 'Full-power estimate' : 'Forecast end-of-slot charge';
+        explanation = `${basis}: ${projected}, below the ${floor} software export floor. Charge was ${soc} when checked.`;
+      } else {
+        explanation = `The full-power command could not run for a complete interval above the ${floor} software export floor. Charge was ${soc} when checked; full-power estimate: ${projected}.`;
+      }
+    }
+    let outcome;
+    if (decision.control_outcome === 'restore_unconfirmed') {
+      if (decision.status !== 'unknown') title = 'Reserve stop not confirmed';
+      outcome = 'Returning to self-consumption was not confirmed. Export may still be active.';
+    } else if (decision.control_outcome === 'command_unconfirmed') {
+      if (decision.status === 'limited') title = 'Reserve-limited export not confirmed';
+      outcome = 'The export command was not confirmed.';
+    } else if (decision.control_outcome === 'self_consumption_accepted') {
+      outcome = 'Self-consumption accepted. Household use can continue below the software floor, subject to hardware protection.';
+    } else if (decision.control_outcome === 'export_accepted') {
+      outcome = 'The shorter export command was accepted.';
+    } else {
+      outcome = 'The control outcome has not been confirmed.';
+    }
+    return `<div class="notice warn reserve-decision" role="status">
+      <strong>${this._escHtml(title)}</strong>
+      <p>${this._escHtml(explanation)}</p>
+      <p>${this._escHtml(outcome)}</p>
+      <div class="decision-time">Checked ${this._escHtml(this._formatTime(decision.evaluated_at))} · ${this._escHtml(this._timeRange(decision.slot_start, decision.slot_end))} · current slot only</div>
+    </div>`;
+  }
+
   _renderPowerChart(model, compact) {
     const { W, H, pad, chartW, chartH, powerMax } = this._powerChartMetrics(model, compact);
     const x = (i) => pad.left + (i / Math.max(1, model.points.length - 1)) * chartW;
@@ -2686,7 +2819,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
 
     if (Number.isFinite(model.reservePercent)) {
       const ry = ySoc(model.reservePercent);
-      const reserveLabel = model.reserveCalculated ? 'Calculated Reserve' : 'Reserve';
+      const reserveLabel = 'Software export floor';
       svg += `<rect x="${pad.left}" y="${ry}" width="${chartW}" height="${pad.top + chartH - ry}" fill="#F44336" opacity="0.06"/>`;
       svg += `<line x1="${pad.left}" y1="${ry}" x2="${W - pad.right}" y2="${ry}" stroke="#F44336" stroke-width="1" stroke-dasharray="5,3" opacity="0.75"/>`;
       svg += `<text x="${W - pad.right - 4}" y="${ry - 5}" text-anchor="end" font-size="${compact ? 9 : 10}" fill="#F44336">${this._escSvg(`${reserveLabel} ${Math.round(model.reservePercent)}%`)}</text>`;
@@ -2788,7 +2921,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         ];
         if (Number.isFinite(model.reservePercent)) {
           rows.push({
-            label: model.reserveCalculated ? 'Calculated Reserve' : 'Reserve',
+            label: 'Software export floor',
             color: '#F44336',
             value: `${Math.round(model.reservePercent)}%`,
           });
@@ -2918,11 +3051,33 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     </div>`;
   }
 
+  _exportReserveDecisionForWindow(window, decision = this._currentExportReserveDecision()) {
+    if (!decision || !['export', 'discharge'].includes(window?.action)) return null;
+    const now = Date.now();
+    const slotStart = Date.parse(decision.slot_start);
+    const slotEnd = Date.parse(decision.slot_end);
+    const segments = Array.isArray(window.segments) ? window.segments : [window];
+    // Merged windows can span gaps. Only an active segment can own the current
+    // decision; later segments retain their planned status.
+    return segments.some(segment => {
+      const start = Date.parse(segment.timestamp);
+      const end = Date.parse(segment.end_time);
+      return Number.isFinite(start) && Number.isFinite(end) &&
+        now >= start && now < end && start < slotEnd && end > slotStart;
+    }) ? decision : null;
+  }
+
   _renderBatteryWindows(windows, priceMeta) {
+    const visibleWindows = windows.slice(0, 8);
+    const decision = this._currentExportReserveDecision();
+    const decisionWindow = visibleWindows.find(window => this._exportReserveDecisionForWindow(window, decision));
+    // Keep current evidence available beside this section if its planned row is
+    // missing, rather than attributing it to an unrelated future window.
+    const fallbackNotice = decisionWindow ? '' : this._renderExportReserveDecision(decision);
     if (!windows.length) {
-      return '<div class="empty">No planned charge, discharge, or export windows in the next 24 hours.</div>';
+      return `${fallbackNotice}<div class="empty">No planned charge, discharge, or export windows in the next 24 hours.</div>`;
     }
-    return `<div class="battery-windows">${windows.slice(0, 8).map(window => {
+    return `${fallbackNotice}<div class="battery-windows">${visibleWindows.map(window => {
       const info = this._actionInfo(window.action);
       const durationLabel = window.spanDurationMinutes > window.durationMinutes
         ? `${this._formatDuration(window.durationMinutes)} active / ${this._formatDuration(window.spanDurationMinutes)} span`
@@ -2941,6 +3096,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
             ${this._renderWindowImpact(window.energyValue, window.action, priceMeta)}
           </div>
           ${this._renderActionPriceStats(window.priceStats, window.action, priceMeta)}
+          ${window === decisionWindow ? this._renderExportReserveDecision(decision) : ''}
         </div>
       `;
     }).join('')}${windows.length > 8 ? `<div class="empty">+${windows.length - 8} more battery window${windows.length - 8 === 1 ? '' : 's'}</div>` : ''}</div>`;
@@ -3325,34 +3481,92 @@ class PowerSyncOptimizationPlan extends HTMLElement {
   }
 
   _optimizerReserve(data) {
-    const recommendation = data?.reserve_recommendation || {};
-    const autoApplyEnabled = data?.auto_apply_reserve_enabled === true ||
-      data?.config?.auto_apply_reserve_enabled === true ||
-      recommendation?.auto_apply_enabled === true;
-    const appliedReserve = this._clampedPercent(recommendation?.applied_optimizer_reserve_percent);
-    const exportReserve = Math.max(
-      this._clampedPercent(recommendation?.applied_export_reserve_floor_percent),
-      this._clampedPercent(recommendation?.home_load_export_floor_percent),
-    );
-    const exportCalculated = autoApplyEnabled &&
-      Number.isFinite(exportReserve) &&
-      Number.isFinite(appliedReserve) &&
-      exportReserve > appliedReserve + 0.5;
-    if (autoApplyEnabled && Number.isFinite(appliedReserve)) {
-      return {
-        percent: appliedReserve,
-        calculated: true,
-        exportPercent: exportCalculated ? exportReserve : NaN,
-        exportCalculated,
-      };
-    }
-    const configuredReserve = this._reservePercent(data?.config?.backup_reserve);
+    const reserve = this._reserveDetails(data);
     return {
-      percent: Number.isFinite(configuredReserve) ? Math.max(0, Math.min(100, configuredReserve)) : NaN,
-      calculated: false,
+      percent: reserve.activePercent,
+      calculated: reserve.autoApplyEnabled === true,
       exportPercent: NaN,
       exportCalculated: false,
     };
+  }
+
+  _reserveDetails(data = this._data) {
+    const recommendation = data?.reserve_recommendation || {};
+    const normalized = data?.reserve_visibility;
+    const hasNormalized = data != null && Object.prototype.hasOwnProperty.call(data, 'reserve_visibility');
+    const autoApplyValue = hasNormalized ? normalized?.auto_apply_enabled : [
+      data?.auto_apply_reserve_enabled,
+      data?.config?.auto_apply_reserve_enabled,
+      recommendation.auto_apply_enabled,
+    ].find(value => typeof value === 'boolean');
+    const autoApplyEnabled = typeof autoApplyValue === 'boolean' ? autoApplyValue : null;
+    const activePercent = hasNormalized
+      ? this._optionalReservePercent(normalized?.active_software_floor_percent)
+      : this._optionalReservePercent(data?.config?.backup_reserve ?? data?.backup_reserve, true);
+    let manualPercent = hasNormalized
+      ? this._optionalReservePercent(normalized?.manual_minimum_percent)
+      : this._optionalReservePercent(data?.manual_backup_reserve ?? data?.config?.manual_backup_reserve, true);
+    if (!hasNormalized && !Number.isFinite(manualPercent)) {
+      manualPercent = this._optionalReservePercent(recommendation.manual_optimizer_reserve_percent);
+      if (!Number.isFinite(manualPercent) && autoApplyEnabled === false) manualPercent = activePercent;
+    }
+    const recommendedPercent = this._optionalReservePercent(hasNormalized
+      ? normalized?.recommended_percent : recommendation.suggested_optimizer_reserve_percent);
+    // Both legacy hardware fields can turn an unknown reserve into zero.
+    // Require the normalized baseline's quality before displaying a value.
+    const hardwarePercent = hasNormalized && normalized?.hardware_value_quality === 'saved_baseline'
+      ? this._optionalReservePercent(normalized?.hardware_baseline_percent) : NaN;
+    const updatedAt = hasNormalized ? normalized?.forecast_updated_at : data?.last_optimization;
+    const updatedMs = typeof updatedAt === 'string' ? Date.parse(updatedAt) : NaN;
+    let forecastQuality = hasNormalized ? normalized?.forecast_quality : 'current';
+    if (!Number.isFinite(recommendedPercent) || !Number.isFinite(updatedMs) ||
+        !['current', 'stale'].includes(forecastQuality)) {
+      forecastQuality = 'unavailable';
+    } else {
+      const interval = Math.max(1, Number(data?.config?.interval_minutes) || 5);
+      if (this._error || Date.now() - updatedMs > 3 * interval * 60000) forecastQuality = 'stale';
+    }
+    return {
+      activePercent, manualPercent, recommendedPercent, hardwarePercent,
+      autoApplyEnabled, forecastQuality, updatedAt: Number.isFinite(updatedMs) ? updatedAt : null,
+    };
+  }
+
+  _optionalReservePercent(value, ratio = false) {
+    if ((typeof value !== 'number' && typeof value !== 'string') || String(value).trim() === '') return NaN;
+    const percent = Number(value) * (ratio ? 100 : 1);
+    return Number.isFinite(percent) && percent >= 0 && percent <= 100 ? percent : NaN;
+  }
+
+  _renderReserveDetails() {
+    const reserve = this._reserveDetails();
+    const percent = value => Number.isFinite(value) ? `${Math.round(value)}%` : 'Unknown';
+    const autoApply = reserve.autoApplyEnabled === null
+      ? 'Auto-Apply status is unknown.' : `Auto-Apply is ${reserve.autoApplyEnabled ? 'on' : 'off'}.`;
+    let forecast = 'Forecast recommendation unavailable.';
+    if (reserve.updatedAt) {
+      const updated = new Date(reserve.updatedAt).toLocaleString(this._hass?.locale?.language, {
+        timeZone: this._hass?.config?.time_zone,
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
+      });
+      forecast = reserve.forecastQuality === 'stale'
+        ? `Forecast recommendation is stale. Last updated ${updated}.`
+        : reserve.forecastQuality === 'current'
+          ? `Forecast recommendation updated ${updated}.`
+          : `Forecast recommendation unavailable. Last plan update ${updated}.`;
+    }
+    return `<details class="reserve-detail">
+      <summary>Reserve details${reserve.forecastQuality === 'stale' ? ' — forecast stale' : ''}</summary>
+      <dl class="reserve-values">
+        <dt>Manual minimum</dt><dd>${percent(reserve.manualPercent)}</dd>
+        <dt>Forecast recommendation</dt><dd>${percent(reserve.recommendedPercent)}</dd>
+        <dt>Active software export floor</dt><dd>${percent(reserve.activePercent)}</dd>
+        <dt>Hardware reserve (saved baseline)</dt><dd>${percent(reserve.hardwarePercent)}</dd>
+      </dl>
+      <p>${autoApply} The software floor protects intentional battery export; household consumption can continue below it, subject to hardware protection.</p>
+      <p>The saved hardware baseline is not a verified current readback.</p>
+      <p>${this._escHtml(forecast)}</p>
+    </details>`;
   }
 
   _idleHoldReserve(data) {

@@ -921,6 +921,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # User's real backup reserve captured ONCE on startup, before any
         # IDLE modifies it. Used as the authoritative restore value.
         self._startup_backup_reserve: int | None = None
+        # Display provenance: the restore target can also come from the LP
+        # floor, which does not establish a saved hardware reserve.
+        self._startup_backup_reserve_source: str | None = None
+        self._export_reserve_decision: dict[str, Any] | None = None
         # Last reserve target successfully written by optimizer self-consumption
         # in this runtime. Used to distinguish our own SOC clamp from a manual
         # or stale hardware reserve on a later cycle.
@@ -2579,10 +2583,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         action: Any,
         soc_now: float | None,
         reserve: float,
+        *,
+        decision_metadata: dict[str, Any] | None = None,
     ) -> tuple[bool, float | None]:
         """Return whether a forced discharge/export command would hit reserve."""
         projected_soc = self._reserve_ratio(getattr(action, "soc", None))
+        if decision_metadata is not None:
+            try:
+                interval_minutes = max(1, int(self._config.interval_minutes or 5))
+            except (TypeError, ValueError, OverflowError):
+                interval_minutes = 5
+            try:
+                projection_known = math.isfinite(float(getattr(action, "soc", None)))
+            except (TypeError, ValueError, OverflowError):
+                projection_known = False
+            decision_metadata.update(
+                projection_basis="planned_slot" if projection_known else None,
+                requested_minutes=interval_minutes,
+                allowed_minutes=0,
+                projected_soc=projected_soc if projection_known else None,
+                reason="projected_below_floor",
+            )
         if soc_now is not None and soc_now <= reserve + 0.0001:
+            if decision_metadata is not None:
+                decision_metadata["reason"] = "at_floor"
             return True, projected_soc
         if not self._supports_target_export_power():
             interval_minutes = max(
@@ -2598,6 +2622,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             )
             if safe_minutes < interval_minutes:
+                if decision_metadata is not None:
+                    decision_metadata.update(
+                        projection_basis=(
+                            "full_power_duration" if hardware_projected_soc is not None else None
+                        ),
+                        allowed_minutes=safe_minutes,
+                        projected_soc=hardware_projected_soc,
+                        reason=(
+                            "insufficient_safe_duration"
+                            if hardware_projected_soc is not None
+                            else "safe_duration_unverified"
+                        ),
+                    )
                 return True, (
                     min(projected_soc, hardware_projected_soc)
                     if projected_soc is not None
@@ -2615,6 +2652,116 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if projected_soc is not None and projected_soc < reserve - 0.0001:
             return True, projected_soc
         return False, projected_soc
+
+    def _record_export_reserve_decision(
+        self,
+        action: Any,
+        soc: float | None,
+        floor: float | None,
+        metadata: dict[str, Any],
+        *,
+        limited: bool = False,
+    ) -> None:
+        """Cache the controller's evaluated guard for this plan and slot only."""
+        timestamp = getattr(action, "timestamp", None)
+        schedule = metadata.get("_schedule", getattr(self, "_current_schedule", None))
+        if not isinstance(timestamp, datetime) or schedule is None:
+            return
+
+        def _percent(value: Any) -> float | None:
+            try:
+                result = float(value) * 100
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return result if math.isfinite(result) else None
+
+        try:
+            interval_minutes = max(1, int(getattr(self._config, "interval_minutes", 5) or 5))
+        except (TypeError, ValueError, OverflowError):
+            interval_minutes = 5
+        try:
+            slot_end = timestamp + timedelta(minutes=interval_minutes)
+        except OverflowError:
+            return
+        for next_action in getattr(schedule, "actions", []) or []:
+            next_start = getattr(next_action, "timestamp", None)
+            if isinstance(next_start, datetime):
+                try:
+                    if timestamp < next_start < slot_end:
+                        slot_end = next_start
+                except TypeError:
+                    continue
+        generated_at = metadata.get("_generated_at", getattr(self, "_last_update_time", None))
+        self._export_reserve_decision = {
+            "schedule": schedule,
+            "action": action,
+            "generated_at": generated_at,
+            "slot_start": timestamp,
+            "slot_end": slot_end,
+            "payload": {
+                "status": (
+                    "unknown" if metadata.get("reason") == "safe_duration_unverified"
+                    else ("limited" if limited else "blocked")
+                ),
+                "reason": metadata["reason"],
+                "control_outcome": "not_requested",
+                "evaluated_at": dt_util.now().isoformat(),
+                "slot_start": timestamp.isoformat(),
+                "slot_end": slot_end.isoformat(),
+                "current_soc_percent": _percent(soc),
+                "projected_soc_percent": _percent(metadata.get("projected_soc")),
+                "projection_basis": metadata.get("projection_basis"),
+                "software_floor_percent": _percent(floor),
+                "requested_minutes": metadata.get("requested_minutes"),
+                "allowed_minutes": metadata.get("allowed_minutes"),
+                "plan_generated_at": (
+                    generated_at.isoformat() if isinstance(generated_at, datetime) else None
+                ),
+            },
+        }
+
+    def _set_export_reserve_control_outcome(self, outcome: str) -> None:
+        """Attach a command return value without claiming observed hardware state."""
+        decision = getattr(self, "_export_reserve_decision", None)
+        if decision is not None:
+            if (
+                decision["payload"]["status"] != "limited"
+                and decision["payload"]["control_outcome"] == "restore_unconfirmed"
+                and outcome in {"export_accepted", "command_unconfirmed"}
+            ):
+                # The legacy active-force exception path may continue export
+                # after a failed restore. Keep that failed restore visible;
+                # Current Action independently reports the accepted force.
+                return
+            decision["payload"]["control_outcome"] = outcome
+
+    def _current_export_reserve_decision(
+        self,
+        action: Any | None,
+        *,
+        is_stale: bool,
+        monitoring_mode: bool,
+        force_state: dict[str, Any],
+        plan_snapshot_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Project a current decision without refreshing telemetry or changing state."""
+        decision = getattr(self, "_export_reserve_decision", None)
+        if (
+            decision is None
+            or action is None
+            or not getattr(self, "_enabled", True)
+            or is_stale
+            or monitoring_mode
+            or (force_state.get("active") and force_state.get("source") != "optimizer")
+            or decision["schedule"] is not getattr(self, "_current_schedule", None)
+            or decision["action"] is not action
+            or decision["generated_at"] != getattr(self, "_last_update_time", None)
+        ):
+            return None
+        now = dt_util.now()
+        if not decision["slot_start"] <= now < decision["slot_end"]:
+            return None
+        return {**decision["payload"], "plan_snapshot_id": plan_snapshot_id}
 
     def _apply_auto_reserve_recommendation(
         self,
@@ -3028,6 +3175,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         battery: Any,
         startup_reserve: int | None,
         reserve_source: str,
+        *,
+        source_metadata: dict[str, str] | None = None,
     ) -> tuple[int | None, str]:
         """Self-heal stale legacy Tesla user reserves using the lower live reserve."""
         if (
@@ -3041,12 +3190,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ):
             return startup_reserve, reserve_source
 
+        live_source = "unverified battery backup reserve"
         try:
             if hasattr(battery, "read_backup_reserve"):
                 reading = await battery.read_backup_reserve()
                 if reading.trust not in TRUSTED_FOR_PERSIST:
                     return startup_reserve, reserve_source
                 live_reserve = self._reserve_percent(reading.percent)
+                live_source = "trusted battery backup reserve"
             else:
                 live_reserve = self._reserve_percent(await battery.get_backup_reserve())
         except Exception as exc:
@@ -3088,6 +3239,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as exc:
                 _LOGGER.debug("Could not update persisted backup reserve: %s", exc)
 
+        if source_metadata is not None:
+            source_metadata["source"] = live_source
         return live_reserve, "live Tesla backup reserve"
 
     async def resolve_restore_target(self) -> int | None:
@@ -5507,13 +5660,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # reserve to hold SOC; after an HA restart or update that live value
             # can still be elevated and must not become the restore target.
             startup_reserve, reserve_source = self._configured_startup_backup_reserve()
+            source_metadata = {"source": reserve_source}
             startup_reserve, reserve_source = await self._resolve_startup_backup_reserve(
                 battery,
                 startup_reserve,
                 reserve_source,
+                source_metadata=source_metadata,
             )
             if startup_reserve is not None:
                 self._startup_backup_reserve = startup_reserve
+                self._startup_backup_reserve_source = source_metadata["source"]
                 self._sync_brand_restore_targets(startup_reserve)
                 if self._optimizer:
                     self._optimizer.update_hardware_reserve(startup_reserve / 100)
@@ -5532,6 +5688,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         ):
                             startup_reserve = reading.percent
                             self._startup_backup_reserve = startup_reserve
+                            self._startup_backup_reserve_source = "trusted battery backup reserve"
                             self._sync_brand_restore_targets(startup_reserve)
                             _LOGGER.info(
                                 "Optimizer startup: captured live backup reserve: %d%%",
@@ -5543,6 +5700,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         startup_reserve = await battery.get_backup_reserve()
                         if startup_reserve is not None:
                             self._startup_backup_reserve = startup_reserve
+                            self._startup_backup_reserve_source = "unverified battery backup reserve"
                             self._sync_brand_restore_targets(startup_reserve)
                             _LOGGER.info(
                                 "Optimizer startup: captured live backup reserve: %d%%",
@@ -10706,6 +10864,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return
 
+        self._export_reserve_decision = None
+        execution_schedule = getattr(self, "_current_schedule", None)
+        execution_plan_time = getattr(self, "_last_update_time", None)
+
         runtime_action = self._effective_runtime_action(
             getattr(action, "action", None),
         )
@@ -10946,6 +11108,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 if not cap_cancelled_for_new_action and lp_matches_force:
                     if force_type == "discharge":
+                        reserve_decision_metadata = {
+                            "_schedule": execution_schedule,
+                            "_generated_at": execution_plan_time,
+                        }
                         try:
                             force_discharge_soc_now, _ = (
                                 await self._get_battery_state()
@@ -10958,9 +11124,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     action,
                                     force_discharge_soc_now,
                                     force_discharge_reserve,
+                                    decision_metadata=reserve_decision_metadata,
                                 )
                             )
                             if reaches_reserve:
+                                self._record_export_reserve_decision(
+                                    action,
+                                    force_discharge_soc_now,
+                                    force_discharge_reserve,
+                                    reserve_decision_metadata,
+                                )
+                                self._set_export_reserve_control_outcome("restore_unconfirmed")
                                 soc_text = (
                                     f"{force_discharge_soc_now * 100:.1f}%"
                                     if force_discharge_soc_now is not None
@@ -10984,6 +11158,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     restore_success = await battery.restore_normal()
                                 elif hasattr(battery, "set_self_consumption_mode"):
                                     restore_success = await battery.set_self_consumption_mode()
+                                self._set_export_reserve_control_outcome(
+                                    "self_consumption_accepted" if restore_success is True
+                                    and (hasattr(battery, "restore_normal") or hasattr(battery, "set_self_consumption_mode"))
+                                    else "restore_unconfirmed"
+                                )
                                 if restore_success is False:
                                     _LOGGER.warning(
                                         "Optimizer: Force-discharge reserve restore failed; "
@@ -11055,7 +11234,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         force_type == "discharge"
                         and not self._supports_target_export_power()
                     ):
-                        safe_mins, _ = self._targetless_export_safe_duration(
+                        safe_mins, hardware_projected_soc = self._targetless_export_safe_duration(
                             force_window_action,
                             force_discharge_soc_now,
                             (
@@ -11065,7 +11244,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             ),
                             extend_mins,
                         )
+                        if safe_mins < extend_mins:
+                            reserve_decision_metadata.update(
+                                reason=("insufficient_safe_duration" if hardware_projected_soc is not None else "safe_duration_unverified"),
+                                projection_basis=("full_power_duration" if hardware_projected_soc is not None else None),
+                                projected_soc=hardware_projected_soc,
+                                requested_minutes=extend_mins,
+                                allowed_minutes=safe_mins,
+                            )
+                            self._record_export_reserve_decision(
+                                action, force_discharge_soc_now, force_discharge_reserve,
+                                reserve_decision_metadata, limited=safe_mins > 0,
+                            )
                         if safe_mins <= 0:
+                            self._set_export_reserve_control_outcome("restore_unconfirmed")
                             _LOGGER.warning(
                                 "Optimizer: Canceling active targetless force "
                                 "discharge — reserve-safe duration is unavailable"
@@ -11077,6 +11269,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 restore_success = (
                                     await battery.set_self_consumption_mode()
                                 )
+                            self._set_export_reserve_control_outcome(
+                                "self_consumption_accepted" if restore_success is True
+                                and (hasattr(battery, "restore_normal") or hasattr(battery, "set_self_consumption_mode"))
+                                else "restore_unconfirmed"
+                            )
                             if restore_success is False:
                                 _LOGGER.warning(
                                     "Optimizer: Targetless force-discharge restore "
@@ -11266,6 +11463,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                         _tariff_duration=tariff_mins,
                                     )
                                 )
+                                self._set_export_reserve_control_outcome(
+                                    "export_accepted" if allowed else "command_unconfirmed"
+                                )
                                 if not allowed:
                                     if (
                                         force_scope == "optimizer"
@@ -11332,6 +11532,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             else:
                                 _ext_state["power_w"] = force_power_w
                         except Exception as ext_err:
+                            self._set_export_reserve_control_outcome("command_unconfirmed")
                             _LOGGER.warning("Optimizer: failed to re-issue %s for extension: %s", force_type, ext_err)
                             if self.battery_system == "solaredge":
                                 return
@@ -11716,6 +11917,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # eventually stop the battery.
             export_soc_now: float | None = None
             export_reserve: float | None = None
+            reserve_decision_metadata = {
+                "_schedule": execution_schedule,
+                "_generated_at": execution_plan_time,
+            }
             if effective_action in ("discharge", "export"):
                 try:
                     export_soc_now, _ = await self._get_battery_state()
@@ -11725,9 +11930,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             action,
                             export_soc_now,
                             export_reserve,
+                            decision_metadata=reserve_decision_metadata,
                         )
                     )
                     if reaches_reserve:
+                        self._record_export_reserve_decision(
+                            action, export_soc_now, export_reserve, reserve_decision_metadata,
+                        )
                         soc_text = (
                             f"{export_soc_now * 100:.1f}%"
                             if export_soc_now is not None
@@ -11749,6 +11958,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         effective_action = "self_consumption"
                 except Exception as reserve_err:
                     if not self._supports_target_export_power():
+                        reserve_decision_metadata.update(
+                            reason="safe_duration_unverified", projection_basis=None,
+                            projected_soc=None, allowed_minutes=None,
+                        )
+                        self._record_export_reserve_decision(
+                            action, export_soc_now, export_reserve, reserve_decision_metadata,
+                        )
                         _LOGGER.warning(
                             "Optimizer: Blocking targetless %s because its "
                             "reserve-safe duration could not be verified: %s",
@@ -12055,13 +12271,26 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         minimum_minutes=self._config.interval_minutes + 5,
                     )
                     if not self._supports_target_export_power():
-                        safe_mins, _ = self._targetless_export_safe_duration(
+                        safe_mins, hardware_projected_soc = self._targetless_export_safe_duration(
                             action,
                             export_soc_now,
                             export_reserve if export_reserve is not None else 1.0,
                             discharge_duration,
                         )
+                        if safe_mins < discharge_duration:
+                            reserve_decision_metadata.update(
+                                reason=("insufficient_safe_duration" if hardware_projected_soc is not None else "safe_duration_unverified"),
+                                projection_basis=("full_power_duration" if hardware_projected_soc is not None else None),
+                                projected_soc=hardware_projected_soc,
+                                requested_minutes=discharge_duration,
+                                allowed_minutes=safe_mins,
+                            )
+                            self._record_export_reserve_decision(
+                                action, export_soc_now, export_reserve,
+                                reserve_decision_metadata, limited=safe_mins > 0,
+                            )
                         if safe_mins <= 0:
+                            self._set_export_reserve_control_outcome("restore_unconfirmed")
                             _LOGGER.warning(
                                 "Optimizer: Blocking targetless %s because no "
                                 "reserve-safe force duration remains",
@@ -12074,6 +12303,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 )
                             elif hasattr(battery, "restore_normal"):
                                 mode_result = await battery.restore_normal()
+                            self._set_export_reserve_control_outcome(
+                                "self_consumption_accepted" if mode_result is True
+                                and (hasattr(battery, "set_self_consumption_mode") or hasattr(battery, "restore_normal"))
+                                else "restore_unconfirmed"
+                            )
                             if mode_result is False:
                                 _LOGGER.warning(
                                     "Optimizer: Failed to restore self-consumption "
@@ -12111,6 +12345,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             duration_minutes=discharge_duration,
                             _tariff_duration=tariff_duration,
                         )
+                    )
+                    self._set_export_reserve_control_outcome(
+                        "export_accepted" if force_result else "command_unconfirmed"
                     )
                     if force_result:
                         tesla_commitment_confirmed = (
@@ -12318,6 +12555,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 ):
                                     previous_reserve_pct = reserve_pct
                                     self._startup_backup_reserve = current_reserve
+                                    self._startup_backup_reserve_source = (
+                                        "trusted battery backup reserve"
+                                        if current_reserve_trust in TRUSTED_FOR_PERSIST
+                                        else "unverified battery backup reserve"
+                                    )
                                     if self._optimizer:
                                         self._optimizer.update_hardware_reserve(
                                             current_reserve / 100
@@ -12549,11 +12791,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             reserve_pct = max(reserve_pct, current_reserve)
                     mode_apply_failed = False
                     if apply_self_consumption or reapply_backup_reserve:
+                        self._set_export_reserve_control_outcome("restore_unconfirmed")
                         if (
                             tesla_stale_grid_charge
                             and hasattr(battery, "restore_normal")
                         ):
-                            if await battery.restore_normal(force_restore=True) is False:
+                            mode_result = await battery.restore_normal(force_restore=True)
+                            self._set_export_reserve_control_outcome(
+                                "self_consumption_accepted" if mode_result is True else "restore_unconfirmed"
+                            )
+                            if mode_result is False:
                                 mode_apply_failed = True
                             else:
                                 self._last_tesla_stale_grid_charge_restore_at = (
@@ -12561,11 +12808,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 )
                         elif hasattr(battery, "set_self_consumption_mode"):
                             if apply_self_consumption:
-                                if await battery.set_self_consumption_mode() is False:
+                                mode_result = await battery.set_self_consumption_mode()
+                                self._set_export_reserve_control_outcome(
+                                    "self_consumption_accepted" if mode_result is True else "restore_unconfirmed"
+                                )
+                                if mode_result is False:
                                     mode_apply_failed = True
                         elif hasattr(battery, "restore_normal"):
                             if apply_self_consumption:
-                                if await battery.restore_normal() is False:
+                                mode_result = await battery.restore_normal()
+                                self._set_export_reserve_control_outcome(
+                                    "self_consumption_accepted" if mode_result is True else "restore_unconfirmed"
+                                )
+                                if mode_result is False:
                                     mode_apply_failed = True
                         if sungrow_inferred_restore:
                             self._last_sungrow_inferred_restore_at = dt_util.utcnow()
@@ -12630,6 +12885,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_executed_action = effective_action
 
         except Exception as e:
+            decision = getattr(self, "_export_reserve_decision", None)
+            if decision is not None:
+                self._set_export_reserve_control_outcome(
+                    "command_unconfirmed" if decision["payload"]["status"] == "limited"
+                    else "restore_unconfirmed"
+                )
             _LOGGER.error("Failed to execute optimizer action: %s", e)
 
     def _battery_export_price_status(self, action: Any | None = None) -> dict[str, Any]:
@@ -19651,6 +19912,77 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return data
 
+    def _reserve_visibility(
+        self,
+        reserve_recommendation: dict[str, Any],
+        *,
+        schedule_age_s: float | None,
+        stale_after_s: float,
+    ) -> dict[str, Any]:
+        """Describe cached reserve values without changing optimizer or hardware state."""
+        def _percent(value: Any, *, ratio: bool = False) -> float | None:
+            if value is None or isinstance(value, bool):
+                return None
+            try:
+                percent = float(value) * (100.0 if ratio else 1.0)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if not math.isfinite(percent) or not 0.0 <= percent <= 100.0:
+                return None
+            return percent
+
+        auto_apply_enabled = self.auto_apply_reserve_enabled
+        manual_reserve = self.manual_backup_reserve
+        if manual_reserve is None and not auto_apply_enabled:
+            manual_reserve = getattr(self._config, "backup_reserve", None)
+        recommended_percent = _percent(
+            reserve_recommendation.get("suggested_optimizer_reserve_percent")
+        )
+        hardware_value_source = getattr(self, "_startup_backup_reserve_source", None)
+        if not isinstance(hardware_value_source, str):
+            hardware_value_source = None
+        hardware_baseline_percent = (
+            _percent(getattr(self, "_startup_backup_reserve", None))
+            if hardware_value_source in {
+                "persisted user backup reserve",
+                "hardware backup reserve config",
+                "hardware backup reserve setting",
+                "trusted battery backup reserve",
+            }
+            else None
+        )
+        forecast_updated_at = getattr(self, "_last_update_time", None)
+        forecast_quality = "unavailable"
+        if (
+            recommended_percent is not None
+            and isinstance(forecast_updated_at, datetime)
+            and schedule_age_s is not None
+            and math.isfinite(schedule_age_s)
+        ):
+            forecast_quality = (
+                "stale" if schedule_age_s > stale_after_s else "current"
+            )
+
+        return {
+            "manual_minimum_percent": _percent(manual_reserve, ratio=True),
+            "recommended_percent": recommended_percent,
+            "active_software_floor_percent": _percent(
+                getattr(self._config, "backup_reserve", None), ratio=True
+            ),
+            "hardware_baseline_percent": hardware_baseline_percent,
+            "hardware_value_quality": (
+                "saved_baseline" if hardware_baseline_percent is not None else "unknown"
+            ),
+            "hardware_value_source": hardware_value_source,
+            "auto_apply_enabled": auto_apply_enabled,
+            "forecast_updated_at": (
+                forecast_updated_at.isoformat()
+                if isinstance(forecast_updated_at, datetime)
+                else None
+            ),
+            "forecast_quality": forecast_quality,
+        }
+
     def get_api_data(self) -> dict[str, Any]:
         """Get data for HTTP API and mobile app."""
         optimizer_available = self._optimizer is not None
@@ -19934,6 +20266,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "predicted_savings": self._get_daily_savings(),
             "lp_stats": lp_stats,
             "reserve_recommendation": reserve_recommendation,
+            "reserve_visibility": self._reserve_visibility(
+                reserve_recommendation,
+                schedule_age_s=schedule_age_s,
+                stale_after_s=stale_after_s,
+            ),
             "battery_export_price_policy": self._battery_export_price_status(ca),
             "profit_max_solar_export": {
                 "capability": dict(
@@ -20459,6 +20796,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data["calibration_sources"] = list(
             _cal_entry_data.get("calibration_sources") or []
         )
+        data["export_reserve_decision"] = self._current_export_reserve_decision(
+            ca,
+            is_stale=is_stale,
+            monitoring_mode=bool(monitoring_mode),
+            force_state=active_force,
+            plan_snapshot_id=(data.get("schedule") or {}).get("plan_snapshot_id"),
+        )
 
         return data
 
@@ -20958,6 +21302,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 hw_reserve = hw_reserve / 100.0
             hw_int = int(hw_reserve * 100)
             self._startup_backup_reserve = hw_int
+            self._startup_backup_reserve_source = "hardware backup reserve setting"
             self._sync_brand_restore_targets(hw_int)
             if self._optimizer:
                 self._optimizer.update_hardware_reserve(hw_reserve)
