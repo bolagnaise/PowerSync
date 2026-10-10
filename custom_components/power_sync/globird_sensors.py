@@ -273,6 +273,15 @@ class GloBirdBaseSensor(CoordinatorEntity[GloBirdCoordinator], SensorEntity):
         super().__init__(coordinator)
         self._config_entry = config_entry
 
+    @property
+    def device_info(self) -> dict[str, Any]:
+        """Return provider metadata with the resolved PowerSync parent ID."""
+        return provider_pricing_device_info(
+            self._config_entry.entry_id,
+            SENSOR_FAMILY_GLOBIRD,
+            hass=getattr(self, "hass", None),
+        )
+
 
 class GloBirdGlobalSensor(GloBirdBaseSensor):
     """A config-entry level GloBird sensor."""
@@ -293,9 +302,6 @@ class GloBirdGlobalSensor(GloBirdBaseSensor):
         self._attr_device_class = description.device_class
         self._attr_state_class = description.state_class
         self._attr_icon = description.icon
-        self._attr_device_info = provider_pricing_device_info(
-            config_entry.entry_id, SENSOR_FAMILY_GLOBIRD
-        )
 
     @property
     def native_value(self) -> Any:
@@ -328,9 +334,6 @@ class GloBirdAccountSummarySensor(GloBirdBaseSensor):
         )
         self._attr_suggested_object_id = _globird_object_id(
             "account", self._account_id, "summary"
-        )
-        self._attr_device_info = provider_pricing_device_info(
-            config_entry.entry_id, SENSOR_FAMILY_GLOBIRD
         )
 
     def _account(self) -> dict[str, Any]:
@@ -382,9 +385,6 @@ class GloBirdServiceBaseSensor(GloBirdBaseSensor):
         self._attr_native_unit_of_measurement = self.native_unit_of_measurement
         self._attr_device_class = self.device_class
         self._attr_state_class = self.state_class
-        self._attr_device_info = provider_pricing_device_info(
-            config_entry.entry_id, SENSOR_FAMILY_GLOBIRD
-        )
 
     def _service_detail(self) -> dict[str, Any]:
         """Return the latest service detail."""

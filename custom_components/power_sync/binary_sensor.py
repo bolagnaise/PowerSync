@@ -230,7 +230,10 @@ class PowerwallCriticalAlertBinarySensor(_PowerwallLocalBinarySensorBase):
 
     @property
     def device_info(self):
-        return powerwall_device_info(self._entry.entry_id)
+        return powerwall_device_info(
+            self._entry.entry_id,
+            hass=getattr(self, "hass", None),
+        )
 
     @property
     def is_on(self) -> bool | None:
@@ -298,7 +301,10 @@ class GridServicesActiveBinarySensor(_TeslaBinarySensorBase):
 
     @property
     def device_info(self):
-        return powerwall_device_info(self._entry.entry_id)
+        return powerwall_device_info(
+            self._entry.entry_id,
+            hass=getattr(self, "hass", None),
+        )
 
     @property
     def is_on(self) -> bool | None:
@@ -329,7 +335,10 @@ class CalibrationActiveBinarySensor(_PowerwallLocalBinarySensorBase):
 
     @property
     def device_info(self):
-        return powerwall_device_info(self._entry.entry_id)
+        return powerwall_device_info(
+            self._entry.entry_id,
+            hass=getattr(self, "hass", None),
+        )
 
     async def async_added_to_hass(self) -> None:
         """Track both explicit local alerts and cloud mode-stick inference."""
@@ -375,7 +384,10 @@ class PermissionToOperateBinarySensor(_TeslaBinarySensorBase):
 
     @property
     def device_info(self):
-        return powerwall_device_info(self._entry.entry_id)
+        return powerwall_device_info(
+            self._entry.entry_id,
+            hass=getattr(self, "hass", None),
+        )
 
     @property
     def is_on(self) -> bool | None:

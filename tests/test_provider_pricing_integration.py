@@ -5,7 +5,9 @@ from __future__ import annotations
 import ast
 import asyncio
 from pathlib import Path
+import sys
 from types import SimpleNamespace
+import types
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -91,13 +93,113 @@ def test_provider_pricing_device_helper_links_to_entry_device():
     """Provider pricing devices should be linked under the PowerSync entry."""
     source = (COMPONENT_ROOT / "const.py").read_text()
 
-    assert "def provider_pricing_device_info(entry_id: str, provider: str) -> dict:" in source
+    assert "def provider_pricing_device_info(" in source
     assert '"name": name' in source
     assert '"model": "Electricity Pricing"' in source
-    assert '"via_device": (DOMAIN, entry_id)' in source
+    assert 'info["via_device_id"] = parent_id' in source
+    assert '"via_device": (DOMAIN, entry_id)' not in source
     assert 'f"{entry_id}_{provider_key}_pricing"' in source
     assert 'name = "GloBird Pricing"' in source
     assert 'name = "Flow Power Pricing"' in source
+
+
+def test_provider_pricing_registration_uses_resolved_parent_id():
+    """Provider registration must submit a resolved parent device ID."""
+    source = (COMPONENT_ROOT / "const.py").read_text()
+    tree = ast.parse(source)
+    helper = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "provider_pricing_device_info"
+    )
+    namespace = {
+        "DOMAIN": "power_sync",
+        "SENSOR_FAMILY_GLOBIRD": "globird",
+        "SENSOR_FAMILY_FLOW_POWER": "flow_power",
+        "Any": object,
+        "_entry_device_id": lambda _hass, _entry_id: "parent-id",
+    }
+    module = ast.Module(body=[helper], type_ignores=[])
+    ast.fix_missing_locations(module)
+    exec(compile(module, "const.py", "exec"), namespace)
+
+    info = namespace["provider_pricing_device_info"](
+        "entry-1",
+        "globird",
+        hass=object(),
+    )
+    assert info["via_device_id"] == "parent-id"
+    assert "via_device" not in info
+
+
+def test_provider_pricing_resolves_parent_without_deprecated_registry_lookup(monkeypatch):
+    """Parent lookup must use the scoped HA API before entity registration resumes."""
+    source = (COMPONENT_ROOT / "const.py").read_text()
+    tree = ast.parse(source)
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {
+            "_device_id_for_identifiers",
+            "_entry_device_id",
+            "powerwall_device_info",
+            "provider_pricing_device_info",
+        }
+    ]
+
+    class FakeRegistry:
+        def __init__(self):
+            self.created = None
+
+        def async_get_device_by_identifier(self, identifier, config_entry_id):
+            assert identifier == ("power_sync", "entry-1")
+            assert config_entry_id == "entry-1"
+            return None
+
+        def async_get_or_create(self, **kwargs):
+            self.created = kwargs
+            return SimpleNamespace(id="parent-id")
+
+    registry = FakeRegistry()
+    fake_dr = types.ModuleType("homeassistant.helpers.device_registry")
+    fake_dr.async_get = lambda _hass: registry
+    fake_helpers = types.ModuleType("homeassistant.helpers")
+    fake_helpers.device_registry = fake_dr
+    fake_homeassistant = types.ModuleType("homeassistant")
+    fake_homeassistant.helpers = fake_helpers
+    monkeypatch.setitem(sys.modules, "homeassistant", fake_homeassistant)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers", fake_helpers)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", fake_dr)
+
+    namespace = {
+        "DOMAIN": "power_sync",
+        "SENSOR_FAMILY_GLOBIRD": "globird",
+        "SENSOR_FAMILY_FLOW_POWER": "flow_power",
+        "Any": object,
+        "_LOGGER": SimpleNamespace(debug=lambda *_args, **_kwargs: None),
+    }
+    module = ast.Module(body=functions, type_ignores=[])
+    ast.fix_missing_locations(module)
+    exec(compile(module, "const.py", "exec"), namespace)
+
+    info = namespace["provider_pricing_device_info"](
+        "entry-1",
+        "globird",
+        hass=object(),
+    )
+    assert info["via_device_id"] == "parent-id"
+    assert registry.created == {
+        "config_entry_id": "entry-1",
+        "identifiers": {("power_sync", "entry-1")},
+    }
+
+    powerwall_info = namespace["powerwall_device_info"](
+        "entry-1",
+        hass=object(),
+    )
+    assert powerwall_info["via_device_id"] == "parent-id"
 
 
 def test_globird_setup_creates_coordinator_and_gated_sensors():
@@ -257,7 +359,8 @@ def test_flow_power_api_account_sensors_use_provider_device_and_object_ids():
     assert "CONF_FLOWPOWER_API_KEY" in source
     assert "if fp_api_key:" in source
     assert "FlowPowerAccountSensor(" in source
-    assert "return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)" in source
+    assert "return provider_pricing_device_info(" in source
+    assert "SENSOR_FAMILY_FLOW_POWER" in source
     assert 'self._attr_suggested_object_id = f"power_sync_{sensor_type}"' in source
     assert "network_tariff_raw" in source
 
