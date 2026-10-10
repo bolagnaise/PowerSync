@@ -3682,6 +3682,9 @@ class BatteryOptimizer:
         cost_neutral_export_mode_offset = next_offset
         if cost_neutral_active:
             next_offset += p_n
+        cost_neutral_charge_mode_offset = next_offset
+        if cost_neutral_active:
+            next_offset += p_n
         cost_neutral_surplus_offset = next_offset
         cost_neutral_surplus_sign_offset = next_offset
         cost_neutral_min_surplus_offset = next_offset
@@ -3765,6 +3768,9 @@ class BatteryOptimizer:
 
         def cost_neutral_export_mode_var(t: int) -> int:
             return cost_neutral_export_mode_offset + t
+
+        def cost_neutral_charge_mode_var(t: int) -> int:
+            return cost_neutral_charge_mode_offset + t
 
         def cost_neutral_surplus_var(t: int) -> int:
             return cost_neutral_surplus_offset + t
@@ -4273,10 +4279,12 @@ class BatteryOptimizer:
             # power, minimum start SOC, consume floor and preserve mode).
             A_ub_rows += 5 * p_n + 17 * n_ev_vehicles * p_n
         if cost_neutral_active:
-            # Six rows witness a retained executable export/charge mode. The
+            # Six rows witness a retained executable export mode. Two more
+            # rows make the initial grid-charge mode mutually exclusive with
+            # export and prevent it from discharging the battery. The
             # remaining rows make native solar absorption exact, including
             # capacity saturation and total-EV surplus crossing zero.
-            A_ub_rows += 6 * len(cost_neutral_mode_periods)
+            A_ub_rows += 8 * len(cost_neutral_mode_periods)
             if ev_charge_active:
                 A_ub_rows += 11 * len(cost_neutral_natural_periods)
             else:
@@ -4382,10 +4390,11 @@ class BatteryOptimizer:
         if cost_neutral_active:
             # The existing battery_to_grid variable is the settlement-facing
             # physical intersection of battery discharge and grid export. The
-            # Cost Neutral selector only witnesses that an executable export
-            # action was retained; it does not add a solar-export action.
+            # Cost Neutral selectors witness an executable export or forced
+            # charge action; they do not add a solar-export action.
             for t in cost_neutral_mode_periods:
                 export_mode = cost_neutral_export_mode_var(t)
+                charge_mode = cost_neutral_charge_mode_var(t)
                 export_cap = min(
                     self.max_discharge_kw,
                     self._grid_export_limit_kw_for_range(
@@ -4395,6 +4404,17 @@ class BatteryOptimizer:
                     ),
                 )
                 charge_cap = max(0.0, self.max_charge_kw)
+
+                # A charge mode may top up from the grid, but it must not
+                # overlap an export mode or discharge the battery. Solar can
+                # still serve the house and export its genuine surplus via
+                # the main power-balance/export-backing rows.
+                A_ub[len(b_ub), export_mode] = 1.0
+                A_ub[len(b_ub), charge_mode] = 1.0
+                b_ub.append(1.0)
+                A_ub[len(b_ub), discharge_var(t)] = 1.0
+                A_ub[len(b_ub), charge_mode] = self.max_discharge_kw
+                b_ub.append(self.max_discharge_kw)
 
                 A_ub[len(b_ub), battery_to_grid_var(t)] = -1.0
                 A_ub[len(b_ub), export_mode] = ACTION_THRESHOLD_W / 1000.0
@@ -4417,6 +4437,7 @@ class BatteryOptimizer:
 
             for t in cost_neutral_natural_periods:
                 export_mode = cost_neutral_export_mode_var(t)
+                charge_mode = cost_neutral_charge_mode_var(t)
                 if ev_charge_active:
                     base_surplus = p_solar[t] - p_load[t]
                     max_ev_kw = sum(
@@ -4457,6 +4478,7 @@ class BatteryOptimizer:
                     A_ub[len(b_ub), charge_var(t)] = 1.0
                     A_ub[len(b_ub), surplus] = -1.0
                     A_ub[len(b_ub), export_mode] = -self.max_charge_kw
+                    A_ub[len(b_ub), charge_mode] = -self.max_charge_kw
                     b_ub.append(0.0)
                     A_ub[len(b_ub), charge_var(t)] = 1.0
                     A_ub[len(b_ub), export_mode] = -self.max_charge_kw
@@ -4497,6 +4519,7 @@ class BatteryOptimizer:
                     saturation = cost_neutral_saturation_var(t)
                     A_ub[len(b_ub), charge_var(t)] = 1.0
                     A_ub[len(b_ub), export_mode] = -self.max_charge_kw
+                    A_ub[len(b_ub), charge_mode] = -self.max_charge_kw
                     b_ub.append(q)
                     A_ub[len(b_ub), charge_var(t)] = -1.0
                     A_ub[len(b_ub), export_mode] = -q
@@ -4923,6 +4946,50 @@ class BatteryOptimizer:
             charge_pinned=charge_pinned_periods,
         )
 
+        if cost_neutral_active and solar_prefill_ceilings is not None:
+            # Cost Neutral's native-mode witness requires the inverter's
+            # available solar surplus to enter the battery before settlement.
+            # A headroom ceiling calculated from that same future solar can be
+            # lower than the SOC immediately after an unavoidable native
+            # charge, making the LP infeasible before it can select either a
+            # native or forced-charge mode. Raise only the affected boundary
+            # to the native-solar trajectory; the ceiling still applies to
+            # discretionary grid top-up and hardware reserve floors remain
+            # unchanged.
+            native_soc = soc_0
+            for t in range(p_n):
+                net_load_kw = max(0.0, p_load[t] - p_solar[t])
+                discharge_kw = min(
+                    self.max_discharge_kw,
+                    net_load_kw,
+                    max(
+                        0.0,
+                        (native_soc - self_consumption_floor)
+                        * cap
+                        * eff
+                        / max(p_dt[t], 1e-9),
+                    ),
+                )
+                native_soc = max(
+                    self_consumption_floor,
+                    native_soc - discharge_kw * p_dt[t] / max(eff * cap, 1e-9),
+                )
+                if t in cost_neutral_natural_periods:
+                    solar_charge_kw = min(
+                        self.max_charge_kw,
+                        max(0.0, p_solar[t] - p_load[t]),
+                    )
+                    native_soc = min(
+                        1.0,
+                        native_soc
+                        + solar_charge_kw * eff * p_dt[t] / max(cap, 1e-9),
+                    )
+                    if solar_prefill_ceilings[t + 1] is not None:
+                        solar_prefill_ceilings[t + 1] = max(
+                            solar_prefill_ceilings[t + 1],
+                            native_soc,
+                        )
+
         # === Variable bounds ===
         # Cap grid at 100 kW by default (generous safety limit; prevents
         # unbounded LP if a price accidentally goes negative or zero). Sites
@@ -5325,6 +5392,12 @@ class BatteryOptimizer:
                 else:
                     bounds.append((0.0, 1.0))
 
+            for t in range(p_n):
+                if t in cost_neutral_natural_periods:
+                    bounds.append((0.0, 1.0))
+                else:
+                    bounds.append((0.0, 0.0))
+
             if ev_charge_active:
                 for t in range(p_n):
                     upper_surplus = max(0.0, p_solar[t] - p_load[t])
@@ -5407,6 +5480,12 @@ class BatteryOptimizer:
                 range(
                     cost_neutral_export_mode_offset,
                     cost_neutral_export_mode_offset + p_n,
+                )
+            )
+            integer_indices.extend(
+                range(
+                    cost_neutral_charge_mode_offset,
+                    cost_neutral_charge_mode_offset + p_n,
                 )
             )
             if ev_charge_active:

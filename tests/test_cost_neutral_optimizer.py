@@ -80,6 +80,131 @@ def _timestamps(n: int) -> list[datetime]:
     return [start + timedelta(hours=idx) for idx in range(n)]
 
 
+def _charge_by_time_cost_neutral_optimizer(module):
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=10_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        efficiency=1.0,
+        backup_reserve=0.0,
+        hardware_reserve=0.0,
+        interval_minutes=60,
+        horizon_hours=1,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_slot = 1
+    optimizer.pre_window_soc_target = 1.0
+    return optimizer
+
+
+def test_cost_neutral_deadline_can_select_initial_grid_charge(
+    optimizer_module,
+):
+    """Cost Neutral must not make a reachable deadline LP infeasible."""
+    if not optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    result = _charge_by_time_cost_neutral_optimizer(optimizer_module).optimize(
+        import_prices=[0.1291225],
+        export_prices=[0.0873771],
+        solar_forecast=[0.0],
+        load_forecast=[0.0],
+        current_soc=0.508,
+        allow_battery_export=[True],
+        allow_grid_charge=True,
+        cost_neutral_earnings_cap=3.7987,
+        cost_neutral_slots=[True],
+        schedule_timestamps=_timestamps(1),
+    )
+
+    assert result.solver_used == "highs"
+    assert result.feasible is True
+    assert result.schedule.actions[0].action == "charge"
+    assert result.schedule.charge_w[0] > 4_000
+    assert result.schedule.actions[0].soc >= 0.995
+
+
+def test_cost_neutral_five_minute_deadline_can_top_up_before_target(
+    optimizer_module,
+):
+    """The reported 14-slot geometry must retain its reachable target."""
+    if not optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    optimizer = optimizer_module.BatteryOptimizer(
+        capacity_wh=24_180,
+        max_charge_w=12_600,
+        max_discharge_w=14_400,
+        efficiency=0.92,
+        backup_reserve=0.05,
+        hardware_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=14 / 12,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_slot = 14
+    optimizer.pre_window_soc_target = 1.0
+
+    result = optimizer.optimize(
+        import_prices=[0.1291225] * 14,
+        export_prices=[0.0873771] * 14,
+        solar_forecast=[0.0] * 14,
+        load_forecast=[1.5] * 14,
+        current_soc=0.456,
+        allow_battery_export=[True] * 14,
+        allow_grid_charge=True,
+        cost_neutral_earnings_cap=3.7987,
+        cost_neutral_slots=[True] * 14,
+        schedule_timestamps=_timestamps(14),
+    )
+
+    assert result.solver_used == "highs"
+    assert result.feasible is True
+    assert sum(result.schedule.charge_w) > 10_000
+    assert result.schedule.actions[-1].soc >= 0.995
+
+
+def test_cost_neutral_deadline_preserves_native_solar_before_ceiling(
+    optimizer_module,
+):
+    """Solar headroom must not make unavoidable native charging infeasible."""
+    if not optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
+
+    optimizer = optimizer_module.BatteryOptimizer(
+        capacity_wh=10_000,
+        max_charge_w=5_000,
+        max_discharge_w=5_000,
+        efficiency=0.92,
+        backup_reserve=0.05,
+        hardware_reserve=0.05,
+        interval_minutes=60,
+        horizon_hours=2,
+        terminal_weight=0.0,
+    )
+    optimizer.pre_window_slot = 2
+    optimizer.pre_window_soc_target = 1.0
+
+    result = optimizer.optimize(
+        import_prices=[0.13, 0.13],
+        export_prices=[0.08, 0.08],
+        solar_forecast=[5.0, 5.0],
+        load_forecast=[0.0, 0.0],
+        current_soc=0.50,
+        allow_battery_export=[True, True],
+        allow_grid_charge=True,
+        cost_neutral_earnings_cap=3.8,
+        cost_neutral_slots=[True, True],
+        schedule_timestamps=_timestamps(2),
+    )
+
+    assert result.solver_used == "highs"
+    assert result.feasible is True
+    assert result.schedule.charge_w[0] == pytest.approx(5_000.0)
+    assert result.grid_import_w[0] == pytest.approx(0.0)
+    assert result.schedule.actions[0].soc == pytest.approx(0.96)
+
+
 def test_cost_neutral_values_executable_morning_solar_charge(
     optimizer_module, monkeypatch,
 ):
