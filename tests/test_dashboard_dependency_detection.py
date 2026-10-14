@@ -1258,16 +1258,31 @@ def test_optimizer_plan_shows_calculated_auto_reserve():
     """Auto-applied optimizer reserve should be visible on the schedule graph."""
     source = STRATEGY_PATH.read_text()
 
-    assert "_optimizerReserve(data)" in source
-    assert "applied_optimizer_reserve_percent" in source
-    assert "auto_apply_reserve_enabled" in source
-    assert "Calculated Reserve" in source
-    assert "Auto Reserve" in source
-    assert "home_load_export_floor_percent" in source
-    assert "applied_export_reserve_floor_percent" in source
-    assert "Export Floor" in source
-    assert "reserveCalculated" in source
-    assert "exportReserveCalculated" in source
+    reserve_source = source[
+        source.index("  _optimizerReserve(data) {"):
+        source.index("  _optionalReservePercent(value, ratio = false) {")
+    ]
+    assert "const reserve = this._reserveDetails(data);" in reserve_source
+    assert "percent: reserve.activePercent" in reserve_source
+    assert "calculated: reserve.autoApplyEnabled === true" in reserve_source
+    assert "const normalized = data?.reserve_visibility;" in reserve_source
+    assert "normalized?.auto_apply_enabled" in reserve_source
+    assert "this._optionalReservePercent(normalized?.active_software_floor_percent)" in reserve_source
+    assert "const reserve = this._optimizerReserve(data);" in source
+    assert "reservePercent: reserve.percent" in source
+
+    # The applied optimizer reserve is now the single active software export
+    # floor; inactive legacy recommendation fields must not add another line.
+    chart_source = source[
+        source.index("  _renderPowerChart(model, compact) {"):
+        source.index("  _powerTooltipConfig(model, compact) {")
+    ]
+    assert "if (Number.isFinite(model.reservePercent))" in chart_source
+    assert "const ry = ySoc(model.reservePercent);" in chart_source
+    assert "const reserveLabel = 'Software export floor';" in chart_source
+    assert '<line x1="${pad.left}" y1="${ry}"' in chart_source
+    assert 'stroke-dasharray="5,3"' in chart_source
+    assert "${reserveLabel} ${Math.round(model.reservePercent)}%" in chart_source
 
 
 def test_optimizer_plan_shows_temporary_idle_hold_separately():
