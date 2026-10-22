@@ -5302,6 +5302,44 @@ def test_solar_export_apply_failure_executes_normal_control_fallback(opt_module)
     assert coordinator._last_executed_action == "self_consumption"
 
 
+@pytest.mark.parametrize("restore_only", [False, True])
+def test_solar_export_failed_fallback_keeps_previous_action_and_retries(
+    opt_module, restore_only
+):
+    """A rejected hold and failed normal-mode restore cannot acknowledge success."""
+    battery = _FakeBattery(self_consumption_result=False, restore_normal_result=False)
+    execution_battery = (
+        SimpleNamespace(restore_normal=battery.restore_normal)
+        if restore_only else battery
+    )
+    coordinator = _execution_coordinator(opt_module, execution_battery, soc=0.50)
+    coordinator.battery_system = "sungrow"
+    coordinator._last_executed_action = "charge"
+    coordinator._last_executed_planned_action = "charge"
+    coordinator._solar_export_hold = _FakeSolarExportHold(apply_result=False)
+    action = SimpleNamespace(
+        action="solar_export", power_w=4000,
+        timestamp=datetime(2026, 10, 23, 6, 15, tzinfo=timezone.utc),
+    )
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert coordinator._last_executed_planned_action == "charge"
+    assert coordinator._last_executed_action == "charge"
+    assert battery.force_charge_calls == []
+    assert battery.force_discharge_calls == []
+    assert (battery.restore_normal_calls if restore_only else battery.self_consumption_calls) == 1
+
+    battery.restore_normal_result = True
+    battery.self_consumption_result = True
+    action.action = "self_consumption"
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert (battery.restore_normal_calls if restore_only else battery.self_consumption_calls) == 2
+    assert coordinator._last_executed_action == "self_consumption"
+    assert coordinator._last_executed_planned_action == "self_consumption"
+
+
 def test_transition_clears_solar_export_hold_before_next_action(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
