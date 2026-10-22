@@ -1715,6 +1715,111 @@ def test_amber_dynamic_export_current_settled_price_preserves_current_slot(opt_m
     assert coordinator._last_display_export_prices == pytest.approx(export_prices)
 
 
+@pytest.mark.parametrize("forecast_type", ["low", "predicted", "high"])
+@pytest.mark.parametrize(
+    "current_duration,cached_duration,minute,cached_offset,cache_utc_z",
+    [
+        (5, 5, 0, 0, False),
+        (5, 5, 10, 0, False),
+        (5, 30, 0, 0, False),
+        (5, 5, 0, 0, True),
+        (30, 5, 10, 10, False),
+    ],
+)
+def test_amber_fresh_current_overrides_only_overlapping_cached_prices(
+    opt_module, monkeypatch, forecast_type, current_duration, cached_duration,
+    minute, cached_offset, cache_utc_z,
+):
+    """Discord #120: cached snapshots must not replace fresh current prices."""
+    now = datetime(2026, 10, 22, 14, minute, tzinfo=timezone.utc)
+    current_start = now if current_duration == 5 else now.replace(minute=0)
+    cached_start = current_start + timedelta(minutes=cached_offset)
+    future_start = current_start + timedelta(minutes=30)
+
+    def entry(start, duration, channel, prices, kind, utc_z=False):
+        end = start + timedelta(minutes=duration)
+        timestamp = lambda value: (
+            value.isoformat().replace("+00:00", "Z")
+            if utc_z else value.isoformat()
+        )
+        return {
+            "startTime": timestamp(start),
+            "endTime": timestamp(end),
+            "nemTime": timestamp(end),
+            "duration": duration,
+            "channelType": channel,
+            "type": kind,
+            "perKwh": 99.0,
+            "advancedPrice": prices,
+        }
+
+    current_import = {"low": 10.0, "predicted": 20.0, "high": 40.0}
+    current_export = {"low": -1.0, "predicted": -5.0, "high": -12.0}
+    current = [
+        entry(current_start, current_duration, "general", current_import, "CurrentInterval"),
+        entry(current_start, current_duration, "feedIn", current_export, "CurrentInterval"),
+    ]
+    forecast = [
+        entry(cached_start, cached_duration, channel, prices, "CurrentInterval", cache_utc_z)
+        for channel, prices in (
+            ("general", dict.fromkeys(("low", "predicted", "high"), 90.0)),
+            ("feedIn", dict.fromkeys(("low", "predicted", "high"), -80.0)),
+        )
+    ] + [
+        entry(future_start, 30, channel, prices, "ForecastInterval")
+        for channel, prices in (
+            ("general", dict.fromkeys(("low", "predicted", "high"), 8.0)),
+            ("feedIn", dict.fromkeys(("low", "predicted", "high"), 2.0)),
+        )
+    ]
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module, "amber", forecast, current=current,
+        amber_forecast_type=forecast_type,
+    )
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: now)
+
+    imports, exports = asyncio.run(coordinator._get_price_forecast())
+
+    current_steps = int(
+        (current_start + timedelta(minutes=current_duration) - now).total_seconds() / 300
+    )
+    expected_import = [current_import[forecast_type] / 100] * current_steps
+    expected_export = [-current_export[forecast_type] / 100] * current_steps
+    assert imports[:current_steps] == pytest.approx(expected_import)
+    assert exports[:current_steps] == pytest.approx(expected_export)
+    assert coordinator._last_display_import_prices[:current_steps] == pytest.approx(expected_import)
+    assert coordinator._last_display_export_prices[:current_steps] == pytest.approx(expected_export)
+    assert coordinator._last_settlement_import_prices[:current_steps] == pytest.approx(expected_import)
+    assert coordinator._last_settlement_export_prices[:current_steps] == pytest.approx(expected_export)
+    future_slot = int((future_start - now).total_seconds() / 300)
+    assert imports[future_slot:future_slot + 6] == pytest.approx([0.08] * 6)
+    assert exports[future_slot:future_slot + 6] == pytest.approx([0.0] * 6)
+    assert coordinator._last_display_export_prices[future_slot:future_slot + 6] == pytest.approx([-0.02] * 6)
+
+
+def test_amber_unusable_fresh_current_retains_usable_cached_price(opt_module, monkeypatch):
+    start = datetime(2026, 10, 22, 14, tzinfo=timezone.utc)
+    current = [
+        _dynamic_price_entry(start, 0, channel, interval_type="CurrentInterval")
+        for channel in ("general", "feedIn")
+    ]
+    for entry in current:
+        entry["perKwh"] = None
+    forecast = [
+        _dynamic_price_entry(start, 0, "general", advanced_price={"predicted": 30.0}),
+        _dynamic_price_entry(start, 0, "feedIn", advanced_price={"predicted": -5.0}),
+    ]
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module, "amber", forecast, current=current,
+    )
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: start)
+
+    imports, exports = asyncio.run(coordinator._get_price_forecast())
+
+    assert imports[0] == pytest.approx(0.30)
+    assert exports[0] == pytest.approx(0.05)
+
+
 def test_non_amber_dynamic_import_forecast_still_uses_per_kwh(opt_module):
     start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
     forecast = []

@@ -16166,16 +16166,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Each entry has perKwh (cents), channelType ("general"/"feedIn")
             # forecast is 30-min resolution; expand to 5-min intervals for LP
             if "current" in data or "forecast" in data:
-                all_entries = list(data.get("current", []) or []) + list(data.get("forecast", []) or [])
+                current_entries = list(data.get("current", []) or [])
+                all_entries = current_entries + list(data.get("forecast", []) or [])
                 if all_entries:
                     # Separate by channel type
                     general = [e for e in all_entries if e.get("channelType") == "general"]
                     feed_in = [e for e in all_entries if e.get("channelType") == "feedIn"]
                     is_flow_power_provider = self._electricity_provider() == "flow_power"
 
-                    # Sort by start time (works for Octopus, Amber, and AEMO)
+                    # Amber refreshes current prices more often than its cached
+                    # forecasts. Apply fresh current coverage last so an older
+                    # overlapping snapshot cannot overwrite either price series.
+                    amber_current_ids = (
+                        {
+                            id(e) for e in current_entries
+                            if e.get("type") == "CurrentInterval"
+                        }
+                        if self._electricity_provider() == "amber"
+                        else set()
+                    )
                     for lst in (general, feed_in):
-                        lst.sort(key=lambda e: self._get_entry_start_time(e))
+                        lst.sort(key=lambda e: (
+                            id(e) in amber_current_ids,
+                            self._get_entry_start_time(e),
+                        ))
 
                     # Filter out fully-past entries — providers return
                     # historical entries, but the LP needs prices starting
