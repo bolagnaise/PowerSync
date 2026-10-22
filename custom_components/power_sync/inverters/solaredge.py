@@ -930,10 +930,10 @@ class SolarEdgeEnergyController:
                 keys.update(("battery_charge", "battery_discharge"))
             else:
                 keys.add("battery_power")
-        if any(self._power_kw(key) is not None for key in ("grid_import", "grid_export")):
-            keys.update(("grid_import", "grid_export"))
-        else:
+        if self._power_kw("grid_power") is not None:
             keys.add("grid_power")
+        else:
+            keys.update(("grid_import", "grid_export"))
 
         pv_keys = [
             f"pv{idx}_power" for idx in range(1, 5)
@@ -2565,17 +2565,15 @@ class SolarEdgeEnergyController:
         )
 
     def _grid_power_kw(self) -> float:
+        raw_kw = self._power_kw("grid_power")
+        if raw_kw is not None:
+            # Prefer the native meter over optional split/template helpers.
+            # SolarEdge is negative on import; PowerSync uses positive import.
+            return -raw_kw
+
         import_kw = self._power_kw("grid_import")
         export_kw = self._power_kw("grid_export")
-        if import_kw is not None or export_kw is not None:
-            return (import_kw or 0.0) - (export_kw or 0.0)
-
-        raw_kw = self._power_kw("grid_power")
-        if raw_kw is None:
-            return 0.0
-        # SolarEdge meter AC power is normally negative when importing and
-        # positive when exporting; PowerSync uses positive import.
-        return -raw_kw
+        return (import_kw or 0.0) - (export_kw or 0.0)
 
     def _solar_power_kw(self) -> float:
         has_battery_source = self._has_battery_power_source()

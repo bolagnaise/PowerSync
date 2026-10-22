@@ -55,6 +55,20 @@ class StorageReadbackResult:
     fields: tuple[str, ...] = ()
 
 
+def _device_belongs_to_entry(device: Any, entry_id: str) -> bool:
+    """Check current ownership, retaining compatibility with older HA devices."""
+    if device is None:
+        return False
+    # HA can restore an old shared device ID as a composite shim. Its public
+    # membership property retains all split owners and does not warn.
+    if getattr(device, "is_composite_device", False) is True:
+        return entry_id in set(getattr(device, "config_entries", ()))
+    try:
+        return device.config_entry_id == entry_id
+    except AttributeError:
+        return entry_id in set(getattr(device, "config_entries", ()))
+
+
 async def async_read_storage_result(
     hass: Any, command_entity_id: str
 ) -> StorageReadbackResult:
@@ -92,7 +106,7 @@ async def async_read_storage_result(
             return StorageReadbackResult(None, "identity_mismatch")
 
         device = dr.async_get(hass).async_get(device_id)
-        if device is None or entry_id not in set(getattr(device, "config_entries", ())):
+        if not _device_belongs_to_entry(device, entry_id):
             return StorageReadbackResult(None, "identity_mismatch")
         inverter_ids = {
             identifier[1]
@@ -226,9 +240,7 @@ async def async_read_storage_result(
         ) != (_DOMAIN, entry_id, device_id, unique_id):
             return StorageReadbackResult(None, "identity_mismatch")
         current_device = dr.async_get(hass).async_get(device_id)
-        if current_device is None or entry_id not in set(
-            getattr(current_device, "config_entries", ())
-        ):
+        if not _device_belongs_to_entry(current_device, entry_id):
             return StorageReadbackResult(None, "identity_mismatch")
         current_ids = {
             identifier[1]

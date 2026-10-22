@@ -211,6 +211,87 @@ def test_readback_rejects_stale_refresh(monkeypatch):
     assert coordinator.refreshes == 1
 
 
+class _SingleOwnerDevice:
+    """HA 2026.10 device contract; deprecated access must never be needed."""
+
+    def __init__(self, owner="entry-a"):
+        self.config_entry_id = owner
+        self.identifiers = {("solaredge_modbus_multi", "SE5000_SERIAL-A")}
+
+    @property
+    def config_entries(self):
+        raise AssertionError("deprecated DeviceEntry.config_entries accessed")
+
+
+class _CompositeDevice(_SingleOwnerDevice):
+    """Current HA shim for an old device ID split between config entries."""
+
+    is_composite_device = True
+
+    def __init__(self):
+        super().__init__("primary-entry")
+        self.owners = {"primary-entry", "entry-a"}
+
+    @property
+    def config_entries(self):
+        return self.owners
+
+
+@pytest.mark.parametrize("change", ["none", "before", "after"])
+def test_readback_preserves_composite_secondary_owner(monkeypatch, change):
+    device = _CompositeDevice()
+    coordinator = _Coordinator()
+    if change == "before":
+        device.owners.remove("entry-a")
+    if change == "after":
+        refresh = coordinator.async_request_refresh
+
+        async def remove_secondary():
+            await refresh()
+            device.owners.remove("entry-a")
+
+        coordinator.async_request_refresh = remove_secondary
+    result = _read(monkeypatch, coordinator, [_Inverter("SE5000_SERIAL-A")], device=device)
+    assert (result is not None) is (change == "none")
+    assert coordinator.refreshes == (0 if change == "before" else 1)
+    assert coordinator.listeners == []
+
+
+def test_readback_uses_current_device_owner_without_deprecated_access(monkeypatch):
+    coordinator = _Coordinator()
+    assert _read(monkeypatch, coordinator, [_Inverter("SE5000_SERIAL-A")], device=_SingleOwnerDevice()) is not None
+    assert coordinator.refreshes == 1
+    assert coordinator.listeners == []
+
+
+@pytest.mark.parametrize("owner", ["other-entry", None, ""])
+def test_readback_does_not_fallback_from_mismatched_current_owner(monkeypatch, owner):
+    device = _Device({"entry-a"}, {("solaredge_modbus_multi", "SE5000_SERIAL-A")})
+    device.config_entry_id = owner
+    coordinator = _Coordinator()
+    assert _read(monkeypatch, coordinator, [_Inverter("SE5000_SERIAL-A")], device=device) is None
+    assert coordinator.refreshes == 0
+
+
+@pytest.mark.parametrize("modern", [True, False])
+def test_readback_rechecks_device_owner_after_refresh(monkeypatch, modern):
+    coordinator = _Coordinator()
+    device = _SingleOwnerDevice() if modern else _Device({"entry-a"}, {("solaredge_modbus_multi", "SE5000_SERIAL-A")})
+    refresh = coordinator.async_request_refresh
+
+    async def move_owner():
+        await refresh()
+        if modern:
+            device.config_entry_id = "other-entry"
+        else:
+            device.config_entries = {"other-entry"}
+
+    coordinator.async_request_refresh = move_owner
+    assert _read(monkeypatch, coordinator, [_Inverter("SE5000_SERIAL-A")], device=device) is None
+    assert coordinator.refreshes == 1
+    assert coordinator.listeners == []
+
+
 def test_readback_rejects_failed_poll(monkeypatch):
     coordinator = _Coordinator(succeeds=False)
     assert _read(monkeypatch, coordinator, [_Inverter("SE5000_SERIAL-A")]) is None

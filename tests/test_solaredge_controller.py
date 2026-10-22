@@ -359,6 +359,58 @@ class _SEStates:
         ]
 
 
+@pytest.mark.parametrize("meter_w", [-437.6, 422.6])
+@pytest.mark.parametrize("helper_state", ["stale_zero", "unavailable", "fresh_conflict"])
+def test_solaredge_native_meter_precedes_optional_split_helpers(meter_w, helper_state):
+    """An unchanged generic export helper must not blank fresh native flows."""
+    hass = _SEHass(include_control=False)
+    now = datetime.now(timezone.utc)
+    meter = _SEState("sensor.solaredge_i1_m1_ac_power", str(meter_w), {"unit_of_measurement": "W"})
+    imported = _SEState("sensor.inverter_import_power", "437.6", {"unit_of_measurement": "W"})
+    exported = _SEState("sensor.inverter_export_power", "0", {"unit_of_measurement": "W"})
+    if helper_state == "stale_zero":
+        exported.last_reported = now - timedelta(minutes=14)
+    elif helper_state == "unavailable":
+        exported.state = "unavailable"
+    else:
+        exported.state = "1000"
+    hass.states._states.update({s.entity_id: s for s in (meter, imported, exported)})
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    assert asyncio.run(controller.connect())
+
+    status = controller.get_status()
+    assert status["telemetry_ready"] is True
+    assert status["grid_power"] == pytest.approx(-meter_w / 1000)
+    assert meter.entity_id in controller._telemetry_entity_ids()
+    assert imported.entity_id not in controller._telemetry_entity_ids()
+    assert exported.entity_id not in controller._telemetry_entity_ids()
+
+    # Native freshness still fails closed even if optional helpers are fresh.
+    imported.last_reported = exported.last_reported = datetime.now(timezone.utc)
+    meter.last_reported = now - timedelta(seconds=121)
+    assert controller.get_status()["telemetry_ready"] is False
+    meter.last_reported = datetime.now(timezone.utc)
+    assert controller.get_status()["telemetry_ready"] is True
+    assert hass.services.calls == []
+
+
+@pytest.mark.parametrize("export_state,ready", [("0", True), ("unavailable", False)])
+def test_solaredge_split_helpers_remain_guarded_fallback(export_state, ready):
+    hass = _SEHass(include_control=False)
+    meter = _SEState("sensor.solaredge_i1_m1_ac_power", "unavailable")
+    imported = _SEState("sensor.inverter_import_power", "437.6", {"unit_of_measurement": "W"})
+    exported = _SEState("sensor.inverter_export_power", export_state, {"unit_of_measurement": "W"})
+    hass.states._states.update({s.entity_id: s for s in (meter, imported, exported)})
+    controller = SolarEdgeEnergyController(hass, entity_prefix="solaredge")
+    assert asyncio.run(controller.connect())
+    assert controller.get_status()["telemetry_ready"] is ready
+    assert controller.get_status()["grid_power"] == pytest.approx(0.4376)
+    assert meter.entity_id not in controller._telemetry_entity_ids()
+    exported.last_reported = datetime.now(timezone.utc) - timedelta(seconds=121)
+    assert controller.get_status()["telemetry_ready"] is False
+    assert hass.services.calls == []
+
+
 def test_solaredge_energy_bridge_does_not_map_battery_dc_power_as_solar():
     class Hass:
         def __init__(self) -> None:
