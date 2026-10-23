@@ -452,6 +452,26 @@ powerwall_go_off_grid:
       selector:
         boolean:
 
+powerwall_set_on_grid_solar_curtailment:
+  name: Allow on-grid solar curtailment (Powerwall)
+  description: >-
+    Save the paired gateway's permission to reduce solar while grid-connected.
+    Use with a zero/limited-export policy. This does not switch off all PV or
+    control an independent AC-coupled inverter. Requires LAN access and confirms
+    gateway setting readback; it has no Fleet API fallback. The setting persists
+    until explicitly changed, including across Home Assistant restarts.
+  fields:
+    enabled:
+      name: Enabled
+      required: true
+      selector:
+        boolean:
+    entry_id:
+      name: PowerSync entry
+      description: Required when more than one PowerSync entry is configured.
+      selector:
+        text:
+
 powerwall_reconnect_grid:
   name: Reconnect to Grid (Local)
   description: >-

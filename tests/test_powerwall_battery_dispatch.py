@@ -320,7 +320,10 @@ def load_routing(monitored=False, paired=True, **options):
     now = SimpleNamespace(utcnow=lambda: datetime.now(timezone.utc))
     hs = importlib.util.spec_from_file_location('local_host_test', ROOT/'custom_components/power_sync/powerwall_host.py')
     hm = importlib.util.module_from_spec(hs); hs.loader.exec_module(hm)
+    duration_spec = importlib.util.spec_from_file_location('local_discharge_duration_test', ROOT/'custom_components/power_sync/force_discharge_duration.py')
+    durations = importlib.util.module_from_spec(duration_spec); duration_spec.loader.exec_module(durations)
     ns = dict(local_battery_dispatch_configured=hm.local_battery_dispatch_configured, asyncio=asyncio, Any=object, ServiceCall=object, HomeAssistantError=RuntimeError,
+              selected_discharge_duration=durations.selected_discharge_duration, validate_native_discharge_duration=durations.validate_native_discharge_duration,
               DOMAIN='power_sync', hass=hass, entry=entry, _local_powerwall_runtime=runtime, DispatchCommandFailed=module.DispatchCommandFailed, validate_dispatch_config=module.validate_dispatch_config, _LOGGER=logging.getLogger(__name__),
               force_charge_state=charge, force_discharge_state=discharge,
               hold_soc_state={'active':False}, self_consumption_state={'active':False},

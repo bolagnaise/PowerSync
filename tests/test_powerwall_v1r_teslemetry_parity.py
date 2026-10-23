@@ -7,6 +7,7 @@ import asyncio
 import base64
 import functools
 import importlib
+import json
 import sys
 import textwrap
 import types
@@ -713,6 +714,87 @@ async def test_client_grid_import_export_writes_both_settings_atomically():
             "site_info.disallow_charge_from_grid_with_solar_installed": False,
         },
     )
+
+
+@async_test
+@pytest.mark.parametrize("enabled, info, expected", [
+    (True, {"on_grid_solar_curtailment_enabled": True}, True),
+    (False, {}, True),
+    (False, {"on_grid_solar_curtailment_enabled": False}, True),
+    (True, {}, False),
+    (False, {"on_grid_solar_curtailment_enabled": True}, False),
+    (True, {"on_grid_solar_curtailment_enabled": 1}, False),
+    (False, None, False),
+])
+async def test_on_grid_solar_curtailment_requires_structured_native_readback(enabled, info, expected):
+    client = _bare_client()
+    client._transport = SimpleNamespace(
+        write_config=AsyncMock(return_value=True),
+        read_config=AsyncMock(return_value={"site_info": info}),
+    )
+    assert await client.set_on_grid_solar_curtailment(enabled) is expected
+    client._transport.write_config.assert_awaited_once_with(
+        "DIN--1", {"site_info.on_grid_solar_curtailment_enabled": enabled},
+    )
+
+
+@async_test
+async def test_on_grid_solar_curtailment_rejects_bad_input_and_failed_write():
+    client = _bare_client()
+    client._transport = SimpleNamespace(write_config=AsyncMock(return_value=False), read_config=AsyncMock())
+    with pytest.raises(ValueError, match="boolean"):
+        await client.set_on_grid_solar_curtailment("false")
+    client._transport.write_config.assert_not_awaited()
+    assert await client.set_on_grid_solar_curtailment(True) is False
+    client._transport.read_config.assert_not_awaited()
+    client._transport = None
+    assert await client.set_on_grid_solar_curtailment(True) is False
+
+
+@async_test
+@pytest.mark.parametrize("deny_at", ["config_read", "write_session"])
+async def test_native_config_guard_runs_after_reads_and_session_acquisition(deny_at):
+    transport = transport_mod.TEDAPIv1rTransport("192.168.1.10", _private_key_pem(), din="DIN--1")
+    allowed = True
+    sessions = 0
+    writes = []
+
+    class Response:
+        status = 200
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def read(self):
+            nonlocal allowed
+            if deny_at == "config_read": allowed = False
+            env = transport_pb2.MessageEnvelope()
+            env.filestore.read_file_response.file.blob = json.dumps({"site_info": {}}).encode()
+            env.filestore.read_file_response.hash = b"hash"
+            reply = energy_device.signed_message_pb2.RoutableMessage()
+            reply.protobuf_message_as_bytes = env.SerializeToString()
+            return reply.SerializeToString()
+
+    class Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def post(self, url, *, data, headers):
+            outer = energy_device.signed_message_pb2.RoutableMessage()
+            outer.ParseFromString(data)
+            env = transport_pb2.MessageEnvelope()
+            env.ParseFromString(outer.protobuf_message_as_bytes)
+            if env.filestore.HasField("update_file_request"): writes.append(data)
+            return Response()
+
+    async def acquire():
+        nonlocal sessions, allowed
+        sessions += 1
+        if sessions == 2 and deny_at == "write_session": allowed = False
+        return Session()
+    def guard():
+        if not allowed: raise RuntimeError("authority_changed")
+    transport._session = acquire
+    with pytest.raises(RuntimeError, match="authority_changed"):
+        await transport.write_config("DIN--1", {"site_info.on_grid_solar_curtailment_enabled": True}, before_write=guard)
+    assert writes == [], "Neither a delayed config read nor session acquisition may bypass the final authority check"
 
 
 @async_test

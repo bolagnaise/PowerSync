@@ -25,7 +25,7 @@ import struct
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import aiohttp
 from cryptography.hazmat.primitives import hashes, serialization
@@ -252,7 +252,7 @@ class TEDAPIv1rTransport:
             algorithm=hashes.SHA512(),
         )
 
-    async def post_v1r(self, envelope_bytes: bytes, din: str) -> TEDAPIResponse:
+    async def post_v1r(self, envelope_bytes: bytes, din: str, *, before_send: Callable[[], None] | None = None) -> TEDAPIResponse:
         """Wrap an envelope in a signed ``RoutableMessage`` and POST it."""
         routable = signed_message_pb2.RoutableMessage()
         routable.to_destination.domain = signed_message_pb2.DOMAIN_ENERGY_DEVICE
@@ -279,6 +279,8 @@ class TEDAPIv1rTransport:
         )
         try:
             async with await self._session() as sess:
+                if before_send is not None:
+                    before_send()
                 async with sess.post(url, data=payload, headers=headers) as resp:
                     http_status = resp.status
                     if http_status != 200:
@@ -421,7 +423,7 @@ class TEDAPIv1rTransport:
             _LOGGER.debug("read_config parse error: %s", err)
         return None
 
-    async def write_config(self, din: str, updates: dict[str, Any]) -> bool:
+    async def write_config(self, din: str, updates: dict[str, Any], *, before_write: Callable[[], None] | None = None) -> bool:
         """Read-modify-write ``config.json`` via FileStore updateFileRequest.
 
         ``updates`` keys use dotted paths, eg ``site_info.default_real_mode``.
@@ -470,7 +472,8 @@ class TEDAPIv1rTransport:
         update_req.file.blob = json.dumps(config).encode("utf-8")
         update_req.hash = config_hash
 
-        write_resp = await self.post_v1r(w_env.SerializeToString(), din)
+        write_resp = await self.post_v1r(w_env.SerializeToString(), din,
+            **({"before_send": before_write} if before_write is not None else {}))
         if not write_resp.ok or not write_resp.inner_bytes:
             return False
         try:

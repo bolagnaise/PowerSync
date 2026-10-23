@@ -18,7 +18,7 @@ import logging
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 from .exceptions import (
     PowerwallLocalError,
@@ -397,6 +397,35 @@ class PowerwallLocalClient:
         return await self._transport.dispatch_battery_power(
             self._din, power_watts, duration_seconds
         )
+
+    async def set_on_grid_solar_curtailment(self, enabled: bool, *, before_write: Callable[[], None] | None = None) -> bool:
+        """Allow gateway-managed solar reduction while connected to the grid.
+
+        This is a persistent permission, not a PV power setpoint. An export
+        restriction must also be configured to request zero/limited export.
+        Disabling normally removes the key from the gateway's config.
+        Only a fresh, structured config readback confirms the setting; this
+        says nothing about measured PV production or third-party inverters.
+        There is no Fleet API equivalent or fallback for this setting.
+        """
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
+        if not self._transport or not self._din:
+            return False
+        if before_write is not None:
+            before_write()
+        if not await self._transport.write_config(
+            self._din,
+            {"site_info.on_grid_solar_curtailment_enabled": enabled},
+            **({"before_write": before_write} if before_write is not None else {}),
+        ):
+            return False
+        config = await self._transport.read_config(self._din)
+        info = config.get("site_info") if isinstance(config, dict) else None
+        if not isinstance(info, dict):
+            return False
+        observed = info.get("on_grid_solar_curtailment_enabled", False)
+        return isinstance(observed, bool) and observed is enabled
 
     @property
     def dispatch_discharge_limit_w(self) -> float | None:
