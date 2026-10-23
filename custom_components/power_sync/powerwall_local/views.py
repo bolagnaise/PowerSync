@@ -45,8 +45,10 @@ from ..const import (
     DEFAULT_POWERWALL_OFFGRID_CURTAILMENT_MAX_SECONDS,
     DEFAULT_POWERWALL_OFFGRID_CURTAILMENT_MIN_SOC,
     DOMAIN,
+    TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS,
     POWERWALL_PAIRING_WINDOW_SECONDS,
 )
+from .battery_dispatch import manual_power_limits_kw
 from .client import PowerwallLocalClient, PowerwallVersion
 from .coordinator import PowerwallLocalCoordinator
 from .curtailment_fallback import get_fallback as _get_curtailment_fallback
@@ -139,7 +141,17 @@ def _local_access_status(
         else:
             mode = "local_unavailable"
 
+    limits = {"charge_input_max_kw": 0.0, "grid_export_max_kw": 0.0}
+    last_success = getattr(coordinator, "last_success_monotonic", None)
+    if local_available and last_success is not None and 0 <= time.monotonic() - last_success <= TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS:
+        try:
+            limits = manual_power_limits_kw(coordinator.data, {**entry.data, **entry.options},
+                getattr(getattr(coordinator, "client", None), "dispatch_discharge_limit_w", None))
+        except (TypeError, ValueError):
+            pass
+
     return {
+        **(limits if local_battery_dispatch_configured(entry.data) else {}),
         "cloud_paired": paired,
         "gateway_ip": gateway_ip or None,
         "local_access_configured": configured,

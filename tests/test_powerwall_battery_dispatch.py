@@ -15,7 +15,8 @@ spec.loader.exec_module(module)
 
 def snapshot(**kw):
     return SimpleNamespace(**dict(dict(soc=60, grid_status='SystemGridConnected', load_w=1000, solar_w=200,
-                                     battery_w=0, grid_w=800, backup_reserve_percent=20, grid_charging_enabled=True), **kw))
+                                     battery_w=0, grid_w=800, backup_reserve_percent=20, grid_charging_enabled=True,
+                                     raw={'config': {'site_info': {'max_site_meter_power_ac': 1e9, 'min_site_meter_power_ac': -1e9}}}), **kw))
 
 
 def config(**kw):
@@ -32,6 +33,153 @@ def test_export_target_accounts_for_home_and_solar():
 def test_charging_respects_rate_and_site_import_headroom():
     assert module.battery_watts('charge', 2000, snapshot(), config()) == -2000
     assert module.battery_watts('charge', 10000, snapshot(load_w=5500), config()) == -700
+
+
+def site_snapshot(import_kw=14.9, export_kw=-10.1, **kw):
+    return snapshot(raw={'config': {'site_info': {'max_site_meter_power_ac': import_kw,
+                                                 'min_site_meter_power_ac': export_kw}}}, **kw)
+
+
+def test_gateway_site_limits_use_kw_and_refresh_in_both_directions():
+    cfg = config(optimization_max_discharge_w=21000, optimization_max_charge_w=21000,
+                 optimization_max_grid_import_w=None)
+    assert module.site_grid_limits_w(site_snapshot()) == (14900, 10100)
+    assert module.battery_watts('discharge', 20000, site_snapshot(), cfg) == 10900
+    assert module.battery_watts('discharge', 20000, site_snapshot(export_kw=-12), cfg) == 12800
+    assert module.battery_watts('discharge', 20000, site_snapshot(export_kw=-2), cfg) == 2800
+    assert module.battery_watts('charge', 20000, site_snapshot(import_kw=4), cfg) == -3200
+    assert module.battery_watts('charge', 20000, site_snapshot(import_kw=2), cfg) == -1200
+    assert module.battery_watts('discharge', 20000, site_snapshot(export_kw=-1e9), cfg) == 20800
+    assert module.battery_watts('charge', 20000, site_snapshot(import_kw=1e9), cfg) == -20000
+    with pytest.raises(ValueError, match='blocks force discharge'):
+        module.battery_watts('discharge', 1000, site_snapshot(export_kw=0), cfg)
+    with pytest.raises(ValueError, match='headroom'):
+        module.battery_watts('charge', 1000, site_snapshot(import_kw=0), cfg)
+
+
+@pytest.mark.parametrize('raw', [ {'config': None}, {'config': {'site_info': None}},
+    {'config': {'site_info': {'min_site_meter_power_ac': 10}}},
+    {'config': {'site_info': {'max_site_meter_power_ac': float('nan')}}} ])
+def test_gateway_site_limit_errors_fail_closed(raw):
+    with pytest.raises(ValueError):
+        module.battery_watts('discharge', 1000, snapshot(raw=raw), config())
+
+
+def test_manual_slider_bounds_prefer_site_limits_then_learned_battery_limit():
+    cfg = config(optimization_max_charge_w=21000, optimization_max_discharge_w=21000,
+                 optimization_max_grid_import_w=None)
+    assert module.manual_power_limits_kw(site_snapshot(), cfg, 10000) == {
+        'charge_input_max_kw': 14.1, 'grid_export_max_kw': 10.1}
+    assert module.manual_power_limits_kw(site_snapshot(import_kw=4, export_kw=-2), cfg, 10000) == {
+        'charge_input_max_kw': 3.2, 'grid_export_max_kw': 2}
+    assert module.manual_power_limits_kw(site_snapshot(import_kw=16, export_kw=-12), cfg, 10000) == {
+        'charge_input_max_kw': 15.2, 'grid_export_max_kw': 12}
+    assert module.manual_power_limits_kw(site_snapshot(import_kw=1e9, export_kw=-1e9), cfg, 10000) == {
+        'charge_input_max_kw': 21, 'grid_export_max_kw': 9.2}
+    assert module.manual_power_limits_kw(site_snapshot(), {**cfg, 'optimization_max_discharge_w': 0})['grid_export_max_kw'] == 0
+
+
+def test_force_power_number_does_not_keep_an_old_selection_above_new_limits():
+    import ast
+    import math
+    import time
+    source = (ROOT / 'custom_components/power_sync/number.py').read_text()
+    tree = ast.parse(source)
+    wanted = {'_fresh_powerwall_local_snapshot', 'ForcePowerNumber'}
+    nodes = [n for n in tree.body if getattr(n, 'name', '') in wanted]
+    class StripImports(ast.NodeTransformer):
+        def visit_ImportFrom(self, node): return ast.copy_location(ast.Pass(), node)
+    scope = dict(NumberEntity=object, NumberMode=SimpleNamespace(SLIDER='slider'),
+                 UnitOfPower=SimpleNamespace(KILO_WATT='kW'), FORCE_POWER_STEP_KW=.05,
+                 FORCE_POWER_FALLBACK_MAX_KW=50, CONF_POWERWALL_LOCAL_PAIRED='powerwall_local_paired',
+                 DOMAIN='power_sync', TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS=90,
+                 manual_power_limits_kw=module.manual_power_limits_kw, math=math, time=time)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[StripImports().visit(n) for n in nodes], type_ignores=[])),
+                 str(ROOT / 'custom_components/power_sync/number.py'), 'exec', flags=__import__('__future__').annotations.compiler_flag), scope)
+    coord = SimpleNamespace(data=site_snapshot(), last_success_monotonic=time.monotonic())
+    client = SimpleNamespace(dispatch_discharge_limit_w=10000)
+    hass = SimpleNamespace(data={'power_sync': {'test': {'powerwall_local': {'coordinator': coord, 'client': client}}}})
+    entry = SimpleNamespace(entry_id='test', data={'powerwall_local_paired': True, **config(optimization_max_charge_w=21000,
+                            optimization_max_discharge_w=21000, optimization_max_grid_import_w=None)}, options={})
+    number = scope['ForcePowerNumber'](hass, entry)
+    number._attr_native_value = 20
+    assert number.native_max_value == 14.1
+    assert number.native_value == 14.1
+    coord.data = site_snapshot(import_kw=4, export_kw=-2)
+    assert number.native_max_value == 3.2
+    assert number.native_value == 3.2
+    coord.data = site_snapshot(import_kw=16, export_kw=-12)
+    assert number.native_max_value == 15.2
+    assert number.extra_state_attributes['grid_export_max_kw'] == 12
+    coord.last_success_monotonic -= 100
+    assert number.native_max_value == 0
+    assert number.native_value == 20
+    # Execute the actual switch routing with that stale entity value, then
+    # the real local-force boundary. An explicit target cannot become Max.
+    switch_tree = ast.parse((ROOT / 'custom_components/power_sync/switch.py').read_text())
+    helpers = [n for n in switch_tree.body if getattr(n, 'name', '') in ('_state_float', '_selected_force_power_w')]
+    switch = next(n for n in switch_tree.body if getattr(n, 'name', '') == 'ForceDischargeSwitch')
+    turn_on = next(n for n in switch.body if getattr(n, 'name', '') == 'async_turn_on')
+    registry = SimpleNamespace(async_get_entity_id=lambda *args: 'number.home_force_power')
+    hass.states = SimpleNamespace(get=lambda key: SimpleNamespace(state=str(number.native_value)))
+    import logging
+    switch_scope = dict(er=SimpleNamespace(async_get=lambda h: registry), DOMAIN='power_sync', _LOGGER=logging.getLogger(__name__),
+                        _selected_duration=lambda *args: 15, _coerce_duration=lambda value, fallback: value,
+                        CONF_FORCE_DISCHARGE_DURATION='force_discharge_duration')
+    exec(compile(ast.Module(body=[*helpers, turn_on], type_ignores=[]), '<actual-force-switch>', 'exec',
+                 flags=__import__('__future__').annotations.compiler_flag), switch_scope)
+    async def run():
+        ns, controller, client, saved = load_routing()
+        client.get_snapshot.side_effect = RuntimeError('offline')
+        async def service(domain, action, data, **kwargs):
+            assert data['power_w'] == 20000
+            await ns['_try_local_powerwall_force']('discharge', call(**data), 15, data['power_w'])
+        hass.services = SimpleNamespace(async_call=AsyncMock(side_effect=service))
+        with pytest.raises(RuntimeError, match='cannot enforce the selected kW'):
+            await switch_scope['async_turn_on'](SimpleNamespace(hass=hass, _entry=entry, _duration_minutes=15))
+        assert hass.services.async_call.await_count == 1
+        client.dispatch_battery_power.assert_not_called()
+        assert not controller.pending
+    asyncio.run(run())
+
+
+def test_mobile_local_status_reports_fresh_direction_limits_and_fails_closed():
+    import ast
+    import time
+    path = ROOT / 'custom_components/power_sync/powerwall_local/views.py'
+    fn = next(n for n in ast.parse(path.read_text()).body if getattr(n, 'name', '') == '_local_access_status')
+    scope = dict(CONF_POWERWALL_LOCAL_PAIRED='powerwall_local_paired', time=time,
+                 TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS=90, manual_power_limits_kw=module.manual_power_limits_kw,
+                 _normalized_gateway_host=lambda entry: '192.168.1.10', local_battery_dispatch_configured=lambda data: True)
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), str(path), 'exec', flags=__import__('__future__').annotations.compiler_flag), scope)
+    entry = SimpleNamespace(data={'powerwall_local_paired': True, **config()}, options={})
+    coord = SimpleNamespace(data=site_snapshot(import_kw=4, export_kw=-10.1), reachable=True,
+                            last_success_monotonic=time.monotonic(), client=SimpleNamespace(dispatch_discharge_limit_w=10000))
+    status = scope['_local_access_status'](entry, coord)
+    assert status['charge_input_max_kw'] == 3.2
+    assert status['grid_export_max_kw'] == 10.1
+    coord.data = snapshot(raw={'config': None})
+    assert scope['_local_access_status'](entry, coord)['grid_export_max_kw'] == 0
+    coord.data = site_snapshot()
+    coord.last_success_monotonic -= 100
+    assert scope['_local_access_status'](entry, coord)['charge_input_max_kw'] == 0
+    scope['local_battery_dispatch_configured'] = lambda data: False
+    assert 'charge_input_max_kw' not in scope['_local_access_status'](entry, coord)
+
+
+def test_live_renewal_cannot_erase_known_gateway_limits():
+    async def run():
+        c, client, _ = controller()
+        client.get_snapshot.return_value = site_snapshot()
+        await c.start('discharge', 1000, 120)
+        client.get_snapshot.return_value = snapshot(raw={'config': {'site_info': {}}})
+        with pytest.raises(ValueError, match='unavailable'):
+            await c._write()
+        assert client.dispatch_battery_power.await_count == 1
+        client.get_snapshot.return_value = site_snapshot(export_kw=-1e9)
+        await c._write()
+        await c.stop()
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize('mode,snap,cfg', [
@@ -367,14 +515,67 @@ def test_local_command_fallback_requires_resume_and_fresh_authorization():
     asyncio.run(run())
 
 
-def test_precommand_local_read_failure_falls_back_without_a_resume_command():
+def test_precommand_local_read_failure_cannot_erase_unknown_site_limits():
     async def run():
         ns,c,client,saved=load_routing()
         client.get_snapshot.side_effect=TimeoutError()
-        result=await ns['_try_local_powerwall_force']('charge',call(source='user'),15,500)
-        assert result['fallback']
+        with pytest.raises(ValueError, match='fallback blocked by gateway site limits'):
+            await ns['_try_local_powerwall_force']('charge',call(source='user'),15,500)
         client.dispatch_battery_power.assert_not_called()
         client.resume_battery_operation.assert_not_called()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('mode', ['charge', 'discharge'])
+def test_known_site_cap_and_lost_lan_cannot_enter_max_tariff_fallback(mode):
+    async def run():
+        ns, c, client, saved = load_routing()
+        client.get_snapshot.return_value = site_snapshot(import_kw=4, export_kw=-1)
+        await ns['_try_local_powerwall_force'](mode, call(source='user', power_w=500), 15, 500)
+        await ns['_stop_local_powerwall_dispatch']()
+        client.get_snapshot.side_effect = TimeoutError('LAN lost')
+        with pytest.raises(ValueError, match='fallback blocked by gateway site limits'):
+            await ns['_try_local_powerwall_force'](mode, call(source='user'), 15, 500)
+        client.get_snapshot.side_effect = None
+        # Even after a new controller/reload, an actual configured cap denies
+        # fallback. Only fresh explicit-unset evidence can permit Max tariff.
+        with pytest.raises(ValueError, match='fallback blocked by gateway site limits'):
+            await c.check_tariff_fallback(mode)
+        fresh, fresh_client, _ = controller()
+        fresh_client.get_snapshot.return_value = snapshot(raw={'config': {'site_info': {}}})
+        with pytest.raises(ValueError, match='unavailable limit evidence'):
+            await fresh.check_tariff_fallback(mode)
+        fresh_client.get_snapshot.return_value = snapshot()
+        await fresh.check_tariff_fallback(mode)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('path', ['optimizer', 'manual'])
+@pytest.mark.parametrize('change', ['stopping', 'generation', 'license'])
+def test_delayed_site_limit_read_rechecks_fallback_authorization(path, change):
+    async def run():
+        ns, c, client, saved = load_routing()
+        if path == 'optimizer':
+            ns['_local_powerwall_runtime']['powerwall_dispatch_fallback_pending'] = True
+        client.dispatch_battery_power.return_value = False
+        count = 0
+        async def read():
+            nonlocal count
+            count += 1
+            if count == (1 if path == 'optimizer' else 2):
+                if change == 'stopping':
+                    ns['_local_powerwall_runtime']['powerwall_local_dispatch_stopping'] = True
+                elif change == 'generation':
+                    ns['_command_generation'][0] += 1
+                else:
+                    ns['hass'].data['power_sync_license_manager'] = object()
+                    ns['service_allowed'] = lambda *args: False
+            return snapshot()
+        client.get_snapshot.side_effect = read
+        with pytest.raises(RuntimeError, match='changed during limit verification'):
+            await ns['_try_local_powerwall_force']('charge', call(source=path if path == 'optimizer' else 'user'), 15, 500)
+        assert client.dispatch_battery_power.await_count == (0 if path == 'optimizer' else 1)
+        assert not c.pending
     asyncio.run(run())
 
 

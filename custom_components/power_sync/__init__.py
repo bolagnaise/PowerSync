@@ -33443,6 +33443,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # A new targetless solve must bound the very first tariff fallback.
             # Keep that path for this setup generation rather than repeatedly
             # retrying local with a plan that assumed a different actuator.
+            fallback_generation = _command_generation[0]
+            controller = await _get_local_powerwall_dispatch()
+            await controller.check_tariff_fallback(mode)
+            if (not _local_powerwall_generation_current()
+                    or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
+                    or _command_generation[0] != fallback_generation
+                    or _monitoring_mode_should_block_control(call)):
+                raise HomeAssistantError("Tesla fallback authorization changed during limit verification")
+            if hass.data.get("power_sync_license_manager") is not None:
+                from .licensing.guard import service_allowed
+                if not service_allowed(hass, call.data, f"handle_force_{mode}"):
+                    raise HomeAssistantError("Tesla fallback optimiser access changed during limit verification")
             return None
         local_configured = local_battery_dispatch_configured(entry.data)
         if not local_configured:
@@ -33535,6 +33547,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             "Local Powerwall dispatch was not acknowledged; normal operation resumed. "
                             "Tariff fallback cannot enforce the selected kW target."
                         ) from err
+                    await controller.check_tariff_fallback(mode)
+                    validate_dispatch_config(mode, _local_powerwall_dispatch_config())
+                    if (not _local_powerwall_generation_current()
+                            or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
+                            or _command_generation[0] != local_generation
+                            or _monitoring_mode_should_block_control(call)):
+                        raise HomeAssistantError("Tesla fallback authorization changed during limit verification")
+                    if hass.data.get("power_sync_license_manager") is not None:
+                        from .licensing.guard import service_allowed
+                        if not service_allowed(hass, call.data, f"handle_force_{mode}"):
+                            raise HomeAssistantError("Tesla fallback optimiser access changed during limit verification")
                     _LOGGER.warning("Local Powerwall dispatch failed and released safely; using existing Tesla control: %s", err)
                     return {"fallback": True, "power_w": fallback_power}
                 raise HomeAssistantError(f"Local Powerwall dispatch failed: {err}") from err

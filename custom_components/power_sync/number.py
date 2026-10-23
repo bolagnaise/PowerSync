@@ -94,7 +94,7 @@ def _positive_float(value: Any) -> float | None:
         result = float(value)
     except (TypeError, ValueError):
         return None
-    return result if result > 0 else None
+    return result if math.isfinite(result) and result > 0 else None
 
 
 def _entry_value(entry: ConfigEntry, key: str) -> Any:
@@ -312,6 +312,9 @@ class ForcePowerNumber(NumberEntity):
     @property
     def native_max_value(self) -> float:
         """Scale the force-power slider to the site instead of a universal 50 kW."""
+        local = self._local_power_limits_kw()
+        if local is not None:
+            return min(FORCE_POWER_FALLBACK_MAX_KW, max(local.values()))
         candidates = [
             *self._configured_power_limits_kw(),
             *self._coordinator_power_limits_kw(),
@@ -325,6 +328,33 @@ class ForcePowerNumber(NumberEntity):
             FORCE_POWER_FALLBACK_MAX_KW,
             max(FORCE_POWER_STEP_KW, round(rounded_max, 2)),
         )
+
+    def _local_power_limits_kw(self) -> dict[str, float] | None:
+        """Separate battery charge input and grid export from fresh LAN data."""
+        snapshot = _fresh_powerwall_local_snapshot(self.hass, self._entry)
+        if snapshot is None:
+            return ({"charge_input_max_kw": 0.0, "grid_export_max_kw": 0.0}
+                    if self._entry.data.get(CONF_POWERWALL_LOCAL_PAIRED) else None)
+        from .powerwall_local.battery_dispatch import manual_power_limits_kw
+        try:
+            runtime = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+            client = runtime.get("powerwall_local", {}).get("client")
+            return manual_power_limits_kw(snapshot, {**self._entry.data, **self._entry.options},
+                                          getattr(client, "dispatch_discharge_limit_w", None))
+        except (TypeError, ValueError):
+            return {"charge_input_max_kw": 0.0, "grid_export_max_kw": 0.0}
+
+    @property
+    def native_value(self) -> float:
+        local = self._local_power_limits_kw()
+        maximum = max(local.values()) if local is not None else None
+        # Zero means Max to the force switches. Never erase a positive user
+        # target merely because telemetry or directional headroom is absent.
+        return min(self._attr_native_value, maximum) if maximum is not None and maximum > 0 else self._attr_native_value
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self._local_power_limits_kw() or {}
 
     def _configured_power_limits_kw(self) -> list[float]:
         entry = self._entry

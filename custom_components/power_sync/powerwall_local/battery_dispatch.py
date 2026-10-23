@@ -58,6 +58,54 @@ def validate_dispatch_config(mode: str, config: dict) -> None:
             raise ValueError("Grid export limit blocks battery dispatch")
 
 
+def site_grid_limits_w(snapshot: Any) -> tuple[float | None, float | None]:
+    """Read signed Tesla site-meter limits in kW from this fresh snapshot.
+
+    Missing fields and Tesla's 1e9 sentinel mean unset. A failed config read
+    cannot establish that limits are unset; stop rather than erase a cap.
+    """
+    raw = getattr(snapshot, "raw", {}) or {}
+    config = raw.get("config", {})
+    if not isinstance(config, dict):
+        raise ValueError("Gateway site limits unavailable")
+    info = config.get("site_info", {})
+    if not isinstance(info, dict):
+        raise ValueError("Gateway site limits unavailable")
+
+    def bound(key: str, sign: int) -> float | None:
+        value = info.get(key)
+        if value is None:
+            return None
+        watts = _number(value, "gateway site limit")
+        if watts * sign < 0:
+            raise ValueError("Invalid gateway site limit sign")
+        return None if abs(watts) >= 1e9 else abs(watts) * 1000
+
+    return bound("max_site_meter_power_ac", 1), bound("min_site_meter_power_ac", -1)
+
+
+
+def manual_power_limits_kw(snapshot: Any, config: dict, learned_discharge_w: float | None = None) -> dict[str, float]:
+    """UI bounds: configured site export first, learned battery bound otherwise."""
+    site_import, site_export = site_grid_limits_w(snapshot)
+    load, solar = _number(snapshot.load_w, "home power"), _number(snapshot.solar_w, "solar power")
+    charge = _number(config.get("optimization_max_charge_w", 5000), "charge limit")
+    discharge = _number(config.get("optimization_max_discharge_w", 5000), "discharge limit")
+    user_import = config.get("optimization_max_grid_import_w")
+    if user_import not in (None, 0):
+        site_import = min(site_import if site_import is not None else math.inf, _number(user_import, "import limit"))
+    if site_import is not None:
+        charge = min(charge, site_import - load + solar)
+    user_export = config.get("optimization_max_grid_export_w")
+    if user_export is not None:
+        site_export = min(site_export if site_export is not None else math.inf, _number(user_export, "export limit"))
+    if learned_discharge_w is not None:
+        discharge = min(discharge, _number(learned_discharge_w, "gateway discharge limit"))
+    export = (site_export if site_export is not None else discharge + solar - load) if discharge > 0 else 0
+    return {"charge_input_max_kw": math.floor(max(0, charge) + 1e-6) / 1000,
+            "grid_export_max_kw": math.floor(max(0, export) + 1e-6) / 1000}
+
+
 def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict) -> float:
     """Convert a grid-export target or charging rate into safe battery watts.
 
@@ -76,6 +124,7 @@ def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict) -> fl
         raise ValueError("Local dispatch requires a positive power target")
     load = _number(snapshot.load_w, "home power")
     solar = _number(snapshot.solar_w, "solar power")
+    site_import, site_export = site_grid_limits_w(snapshot)
     reserve = _percent(config.get("hardware_backup_reserve", 0), "backup reserve")
     if snapshot.backup_reserve_percent is not None:
         reserve = max(reserve, _number(snapshot.backup_reserve_percent, "gateway reserve"))
@@ -86,6 +135,8 @@ def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict) -> fl
         limit = config.get("optimization_max_grid_export_w")
         if limit is not None:
             target = min(target, _number(limit, "grid export limit"))
+        if site_export is not None:
+            target = min(target, site_export)
         if target <= 0:
             raise ValueError("Grid export limit blocks force discharge")
         maximum = _number(config.get("optimization_max_discharge_w", 5000), "discharge limit")
@@ -103,6 +154,8 @@ def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict) -> fl
     import_limit = config.get("optimization_max_grid_import_w")
     # Existing setup uses None/zero for an automatic (unset) site import cap.
     headroom = maximum if import_limit in (None, 0) else _number(import_limit, "grid import limit") - load + solar
+    if site_import is not None:
+        headroom = min(headroom, site_import - load + solar)
     power = min(target, maximum, headroom)
     if power <= 0:
         raise ValueError("No grid import headroom for battery charging")
@@ -133,6 +186,7 @@ class LocalBatteryDispatch:
         self._target = 0.0
         self.pending = False
         self._command_may_have_reached = False
+        self._site_limits = None
 
     def assume_pending(self):
         """Recover durable intent without replaying its power request."""
@@ -142,6 +196,24 @@ class LocalBatteryDispatch:
     def _device_discharge_limit(self) -> float:
         value = getattr(self.client, "dispatch_discharge_limit_w", None)
         return _number(value, "gateway dispatch limit") if value is not None else math.inf
+
+    async def check_tariff_fallback(self, mode: str) -> None:
+        """A full-rate tariff cannot enforce a native site-meter bound.
+
+        Require fresh, explicit unset evidence even after reload: an unknown
+        or failed read cannot erase a previously configured installer limit.
+        """
+        try:
+            snapshot = await self.client.get_snapshot()
+            limits = site_grid_limits_w(snapshot)
+            info = (getattr(snapshot, "raw", {}) or {}).get("config", {}).get("site_info", {})
+            key = "max_site_meter_power_ac" if mode == "charge" else "min_site_meter_power_ac"
+            if info.get(key) is None:
+                raise ValueError("Gateway site limits unavailable")
+            if limits[0 if mode == "charge" else 1] is not None:
+                raise ValueError("Tariff fallback cannot enforce the gateway site limit")
+        except Exception as err:
+            raise ValueError("Tariff fallback blocked by gateway site limits or unavailable limit evidence") from err
 
     async def start(self, mode: str, target_w: float, duration_seconds: int, *, allowed=None, guarded_write=None) -> dict:
         if type(duration_seconds) is not int or not 1 <= duration_seconds <= 86400:
@@ -186,6 +258,17 @@ class LocalBatteryDispatch:
         except Exception as err:
             raise DispatchCommandFailed("Local Powerwall telemetry is unavailable") from err
         observed_at = time.monotonic()
+        limits = site_grid_limits_w(snapshot)
+        if self._site_limits is not None and any(
+            old is not None and new is None for old, new in zip(self._site_limits, limits)
+        ):
+            # Explicit sentinel values can clear a configured bound; partial
+            # config responses cannot silently turn a known bound into unset.
+            info = (getattr(snapshot, "raw", {}) or {}).get("config", {}).get("site_info", {})
+            for old, new, key in zip(self._site_limits, limits, ("max_site_meter_power_ac", "min_site_meter_power_ac")):
+                if old is not None and new is None and info.get(key) is None:
+                    raise ValueError("Gateway site limits unavailable")
+        self._site_limits = limits
         config = self.config()
         if not self.allowed(self._mode):
             raise ValueError("Local dispatch blocked by control ownership or safety policy")
