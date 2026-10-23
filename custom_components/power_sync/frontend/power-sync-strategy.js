@@ -8599,10 +8599,18 @@ function _batteryControls(hass, forcePowerEntityId = null) {
   const forcePowerEntity = forcePowerEntityId || 'number.power_sync_force_power_kw';
   const hasForcePower = !!hass?.states[forcePowerEntity];
   const isPairedTesla = hass?.states['binary_sensor.power_sync_powerwall_local_paired']?.state === 'on';
+  const customDischargeDuration = 'number.power_sync_force_discharge_custom_duration';
 
   return {
     type: 'vertical-stack',
     cards: [
+      ...(hass?.states[customDischargeDuration]
+        ? [{ type: 'tile', entity: customDischargeDuration, name: 'Custom Discharge Duration (minutes)',
+             features: [{ type: 'numeric-input', mode: 'buttons' }] }]
+        : []),
+      ...(hass?.states['select.power_sync_hold_self_duration']
+        ? [{ type: 'tile', entity: 'select.power_sync_hold_self_duration', name: 'Hold / Self Consumption Duration' }]
+        : []),
       // Power slider — only shown when the ForcePowerNumber entity exists.
       // Tile card with numeric-input feature gives a clean inline slider.
       // 0 kW = auto (uses inverter rated/BMS max at dispatch).
@@ -8664,7 +8672,7 @@ function _batteryControls(hass, forcePowerEntityId = null) {
             show_name: true,
             show_icon: true,
             icon: 'mdi:timer-outline',
-            name: durationName('select.power_sync_force_discharge_duration', 'Discharge/Hold/Self'),
+            name: durationName('select.power_sync_force_discharge_duration', 'Discharge'),
             styles: sharedDischargeDurationChip,
             tap_action: { action: 'more-info' },
           },
@@ -8691,7 +8699,7 @@ function _batteryControls(hass, forcePowerEntityId = null) {
                 power_w: `[[[ const kw = parseFloat(states['${forcePowerEntity}']?.state) || 0; return kw > 0 ? Math.round(kw * 1000) : undefined; ]]]`,
               },
               confirmation: {
-                text: `[[[ const kw = parseFloat(states['${forcePowerEntity}']?.state) || 0; const dur = states['select.power_sync_force_discharge_duration']?.state ?? '30'; return 'Force discharge for ' + dur + ' min' + (kw > 0 ? ' at ' + kw.toFixed(1) + ' kW' : ' at max power') + '?'; ]]]`,
+                text: `[[[ const kw = parseFloat(states['${forcePowerEntity}']?.state) || 0; let dur = states['select.power_sync_force_discharge_duration']?.state ?? '30'; if (dur === 'Custom') dur = states['number.power_sync_force_discharge_custom_duration']?.state ?? '30'; return 'Force discharge for ' + dur + ' min' + (kw > 0 ? ' at ' + kw.toFixed(1) + ' kW' : ' at max power') + '?'; ]]]`,
               },
             },
           },
@@ -8701,7 +8709,7 @@ function _batteryControls(hass, forcePowerEntityId = null) {
         type: 'custom:button-card',
         entity: batteryModeEntity,
         triggers_update: [batteryModeEntity],
-        name: activeModeName('self_consumption', 'Self Consumption', 'select.power_sync_force_discharge_duration'),
+        name: activeModeName('self_consumption', 'Self Consumption', 'select.power_sync_hold_self_duration'),
         icon: 'mdi:home-battery',
         styles: {
           ...selfConsumptionChip,
@@ -8734,10 +8742,10 @@ function _batteryControls(hass, forcePowerEntityId = null) {
           action: 'call-service',
           service: 'power_sync.set_self_consumption',
           data: {
-            duration: "[[[ return (states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '30'); ]]]",
+            duration: "[[[ return (states['select.power_sync_hold_self_duration'] ? states['select.power_sync_hold_self_duration'].state : '30'); ]]]",
           },
           confirmation: {
-            text: "[[[ const dur = states['select.power_sync_force_discharge_duration']?.state ?? '30'; return 'Set battery to self-consumption mode for ' + dur + ' min?'; ]]]",
+            text: "[[[ const dur = states['select.power_sync_hold_self_duration']?.state ?? '30'; return 'Set battery to self-consumption mode for ' + dur + ' min?'; ]]]",
           },
         },
       },
@@ -8750,7 +8758,7 @@ function _batteryControls(hass, forcePowerEntityId = null) {
             type: 'custom:button-card',
             entity: batteryModeEntity,
             triggers_update: [batteryModeEntity],
-            name: activeModeName('hold_soc', 'Hold SoC', 'select.power_sync_force_discharge_duration'),
+            name: activeModeName('hold_soc', 'Hold SoC', 'select.power_sync_hold_self_duration'),
             icon: 'mdi:battery-lock',
             styles: {
               ...holdSocChip,
@@ -8782,10 +8790,10 @@ function _batteryControls(hass, forcePowerEntityId = null) {
               action: 'call-service',
               service: 'power_sync.hold_battery_soc',
               data: {
-                duration: "[[[ return (states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '30'); ]]]",
+                duration: "[[[ return (states['select.power_sync_hold_self_duration'] ? states['select.power_sync_hold_self_duration'].state : '30'); ]]]",
               },
               confirmation: {
-                text: "[[[ const dur = states['select.power_sync_force_discharge_duration']?.state ?? '30'; return 'Hold battery at current SoC for ' + dur + ' min?'; ]]]",
+                text: "[[[ const dur = states['select.power_sync_hold_self_duration']?.state ?? '30'; return 'Hold battery at current SoC for ' + dur + ' min?'; ]]]",
               },
             },
           },

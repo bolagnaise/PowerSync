@@ -67,12 +67,13 @@ force_discharge:
   fields:
     duration:
       name: Duration
-      description: Duration in minutes (15 minutes to 4 hours)
+      description: Whole minutes from 1 to 1440 (24 hours). Choose a preset through 6 hours or enter a custom value. Device/provider limits still apply; Amber overrides support up to 240 minutes.
       required: false
       default: 30
       example: 60
       selector:
         select:
+          custom_value: true
           options:
             - label: "15 minutes"
               value: "15"
@@ -106,6 +107,22 @@ force_discharge:
               value: "225"
             - label: "4 hours"
               value: "240"
+            - label: "4 hours 15 min"
+              value: "255"
+            - label: "4 hours 30 min"
+              value: "270"
+            - label: "4 hours 45 min"
+              value: "285"
+            - label: "5 hours"
+              value: "300"
+            - label: "5 hours 15 min"
+              value: "315"
+            - label: "5 hours 30 min"
+              value: "330"
+            - label: "5 hours 45 min"
+              value: "345"
+            - label: "6 hours"
+              value: "360"
     power_w:
       name: Power (W)
       description: Target power in watts. For paired Powerwalls this is grid export; battery output also accounts for home load and solar. 0 or omitted uses the configured maximum.

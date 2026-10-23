@@ -33576,6 +33576,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def handle_force_discharge(call: ServiceCall) -> dict[str, Any] | None:
         """Force discharge mode - switches to autonomous with high export tariff."""
+        # Validate manual input before relinquishing ownership or mutating timers.
+        if _control_call_source(call) != "optimizer":
+            from .force_discharge_duration import selected_discharge_duration, validate_native_discharge_duration
+            try:
+                manual_duration = selected_discharge_duration(
+                    call.data.get("duration", DEFAULT_DISCHARGE_DURATION), entry.options,
+                )
+                if manual_duration not in DISCHARGE_DURATIONS:
+                    validate_native_discharge_duration(
+                        hass, hass.data.get(DOMAIN, {}).get(entry.entry_id, {}), manual_duration,
+                    )
+            except ValueError as err:
+                raise HomeAssistantError(str(err)) from err
         if getattr(hass, "data", {}).get("power_sync_license_manager") is not None:
             from .licensing.guard import service_allowed
             if not service_allowed(hass, call.data, 'handle_force_discharge'):
@@ -33615,7 +33628,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Convert to int if string (from HA service selector or button-card)
         try:
-            duration = int(raw_duration)
+            duration = int(raw_duration) if source == "optimizer" else manual_duration
         except (ValueError, TypeError):
             _LOGGER.warning(f"Could not convert duration {raw_duration!r} to int, using default {DEFAULT_DISCHARGE_DURATION}")
             duration = DEFAULT_DISCHARGE_DURATION
@@ -33627,9 +33640,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     DEFAULT_DISCHARGE_DURATION,
                 )
                 duration = DEFAULT_DISCHARGE_DURATION
-        elif duration not in DISCHARGE_DURATIONS:
-            _LOGGER.warning(f"Duration {duration} not in allowed values {DISCHARGE_DURATIONS}, using default {DEFAULT_DISCHARGE_DURATION}")
-            duration = DEFAULT_DISCHARGE_DURATION
+        else:
+            duration = manual_duration
 
         tariff_duration = duration
         if source == "optimizer" and raw_tariff_duration is not None:
@@ -35500,15 +35512,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         discharge_start = current_period_index
         discharge_end = (current_period_index + total_periods) % 48
 
-        # Calculate actual expiry time aligned to tariff window end
-        # This ensures the timer doesn't fire before the tariff window ends
-        end_period_hour = (discharge_end // 2) % 24
-        end_period_minute = 30 if discharge_end % 2 else 0
-        actual_expiry = now.replace(hour=end_period_hour, minute=end_period_minute, second=0, microsecond=0)
-
-        # Handle midnight wrap-around
-        if actual_expiry <= now:
-            actual_expiry += timedelta(days=1)
+        # Keep the day offset: modulo-48 slot indices alone lose a full day.
+        actual_expiry = now.replace(second=0, microsecond=0) + timedelta(
+            minutes=remaining_in_current + additional_periods * 30
+        )
 
         actual_duration = int((actual_expiry - now).total_seconds() / 60)
         _LOGGER.info(f"Discharge window: periods {discharge_start} to {discharge_end} ({total_periods} periods), "
@@ -35522,7 +35529,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             # Check if this period is in the discharge window
             is_discharge_period = False
-            if discharge_start < discharge_end:
+            if total_periods >= 48:
+                is_discharge_period = True
+            elif discharge_start < discharge_end:
                 is_discharge_period = discharge_start <= i < discharge_end
             else:  # Wrap around midnight
                 is_discharge_period = i >= discharge_start or i < discharge_end

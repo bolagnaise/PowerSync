@@ -79,6 +79,28 @@ def test_tesla_discharge_tariff_uses_configured_rates_only_in_force_window():
     assert expiry.hour == 19 and expiry.minute == 0
 
 
+@pytest.mark.parametrize("minute", [0, 5, 29, 30, 59])
+def test_full_day_discharge_does_not_wrap_to_one_period(minute):
+    _, configured = _price_helpers()
+    path = ROOT / "__init__.py"
+    function = _function(path, "_create_discharge_tariff")
+    now = datetime(2026, 10, 24, 23, minute, tzinfo=timezone.utc)
+    namespace = {
+        "datetime": datetime, "timedelta": timedelta,
+        "entry": SimpleNamespace(data={}), "hass": object(),
+        "dt_util": SimpleNamespace(now=lambda: now),
+        "_LOGGER": SimpleNamespace(info=lambda *args, **kwargs: None),
+        "currency_for_entry": lambda *_: "AUD",
+        "configured_force_discharge_prices": configured,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), str(path), "exec"), namespace)
+    tariff, expiry = namespace["_create_discharge_tariff"](1440)
+    rates = tariff["sell_tariff"]["energy_charges"]["Summer"]["rates"]
+    assert len(rates) == 48
+    assert set(rates.values()) == {25.0}
+    assert now + timedelta(minutes=1440) <= expiry <= now + timedelta(minutes=1470)
+
+
 def test_tesla_config_flow_exposes_and_persists_both_rates():
     source = (ROOT / "config_flow.py").read_text()
     setup = ast.get_source_segment(source, _function(ROOT / "config_flow.py", "async_step_tesla_provider"))

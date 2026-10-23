@@ -11,12 +11,21 @@ def handlers(runtime):
     def mode_handler(mode):
         async def handle(call):
             source = str(call.data.get("source") or ("user" if getattr(call.context, "user_id", None) else "automation"))
+            duration = call.data.get("duration", 30)
+            if mode == "discharge" and source != "optimizer":
+                from ..force_discharge_duration import selected_discharge_duration
+                try:
+                    duration = selected_discharge_duration(duration, runtime.entry.options)
+                except ValueError as err:
+                    raise HomeAssistantError(str(err)) from err
+                if duration > 240:
+                    raise HomeAssistantError("Amber overrides support at most 240 minutes")
             if not service_allowed(runtime.hass, call.data, "handle_force_" + mode):
                 raise HomeAssistantError("HA optimiser access is required")
             manager = runtime.hass.data.get("power_sync_license_manager")
             if manager and source != "optimizer":
                 await manager.relinquish(runtime.entry_id)
-            result = await runtime.command(mode, call.data.get("duration", 30), source=source,
+            result = await runtime.command(mode, duration, source=source,
                                            power_w=call.data.get("power_w", 0), call_data=call.data)
             return {"success": result, "state": runtime.command_state}
         return handle
