@@ -18,7 +18,7 @@ EV, tariff, or hardware.
 
 The explanation opens with a short headline and four compact answers: **Right now**, **Next**, **Why this plan**, and **Expected outcome**. Every AI provider uses the same brevity limits. Cost comparisons use the supplied plan figures: a higher estimated cost is described as more than the baseline, rather than negative savings. Monitoring-only operation and important forecast limitations stay visible.
 
-Expand **Details** to see the optional timeline and forecast summaries. Windows with five-minute forecast data have a separate **Five-minute readings** disclosure, so opening the explanation does not dump every reading. Longer forecast windows show their supplied minimum, average and maximum values. These are forecast inputs for the saved plan, not proof of battery activity or the cause of a decision.
+Expand **Details** to see the optional timeline. **Forecast windows** stays collapsed separately; opening it shows only each window’s average solar and home-use power. Expand an individual window for its forecast range and, where available, **Five-minute readings**. These are forecast inputs for the saved plan, not proof of battery activity or the cause of a decision.
 
 If a provider returns a valid but overlong answer, PowerSync shows a short **Plan summary** built from the supplied plan facts without another AI request. Invalid or truncated answers retain the previous explanation or show an error. Generate or refresh an explanation after updating to use the new wording; an older cached explanation is still identified as an older plan.
 

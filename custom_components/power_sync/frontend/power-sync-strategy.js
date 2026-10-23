@@ -3987,6 +3987,7 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
     this._connected = false;
     this._expanded = true;
     this._detailsExpanded = false;
+    this._forecastWindowsExpanded = false;
     this._connectionRequested = false;
     this._connectionOpen = false;
     this._connectionTouched = false;
@@ -4881,7 +4882,7 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
     return [time, action, item.reason.trim()].filter(Boolean).join(' — ');
   }
 
-  _forecastSummaryText(window) {
+  _forecastWindowStats(window) {
     // Older summaries contain raw readings; longer windows already carry
     // deterministic aggregates. Show both shapes without dropping evidence.
     const stats = (key) => {
@@ -4895,16 +4896,19 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
     const solar = stats('solar_kw');
     const load = stats('load_kw');
     if (!solar || !load) return null;
-    const range = value => `${value.min.toFixed(1)}–${value.max.toFixed(1)} kW (average ${value.average.toFixed(1)} kW)`;
-    return `Forecast solar ${range(solar)}; home use ${range(load)}.`;
+    return { solar, load };
+  }
+
+  _forecastSummaryText(window) {
+    const stats = this._forecastWindowStats(window);
+    if (!stats) return null;
+    const average = value => Number(value.average.toFixed(1));
+    return `Solar ${average(stats.solar)} kW · Home ${average(stats.load)} kW`;
   }
 
   _appendForecastEvidence(parent, evidence) {
     if (!evidence || typeof evidence !== 'object') return;
     const block = document.createElement('section');
-    const heading = document.createElement('h4');
-    heading.textContent = 'Forecast inputs for this plan';
-    block.append(heading);
     if (evidence.status === 'unavailable') {
       const notice = document.createElement('p');
       notice.className = 'notice';
@@ -4919,6 +4923,12 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
       notice.textContent = 'Forecast data changed since the last explanation. These values belong to the displayed plan snapshot.';
       block.append(notice);
     }
+    const windows = document.createElement('details');
+    windows.className = 'forecast-windows';
+    windows.open = !!this._forecastWindowsExpanded;
+    windows.addEventListener('toggle', () => { this._forecastWindowsExpanded = windows.open; });
+    const heading = document.createElement('summary');
+    windows.append(heading);
     let rows = 0;
     for (const window of Array.isArray(evidence.windows) ? evidence.windows : []) {
       const values = Array.isArray(window?.values) ? window.values : [];
@@ -4926,9 +4936,17 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
       if (!overview) continue;
       const label = this._timelineText({ start: window.start, end: window.end, action: window.action || '', reason: '' })
         .split(' — ').filter(Boolean).slice(0, 2).join(' — ');
-      const row = document.createElement('p');
-      row.textContent = [label, overview].filter(Boolean).join(' — ');
-      block.append(row);
+      const row = document.createElement('details');
+      row.className = 'forecast-window';
+      const rowHeading = document.createElement('summary');
+      rowHeading.textContent = [label, overview].filter(Boolean).join(' — ');
+      row.append(rowHeading);
+      const stats = this._forecastWindowStats(window);
+      const range = value => `${value.min.toFixed(1)}–${value.max.toFixed(1)} kW`;
+      const ranges = document.createElement('p');
+      ranges.textContent = `Forecast ranges: solar ${range(stats.solar)}; home use ${range(stats.load)}.`;
+      row.append(ranges);
+      windows.append(row);
       rows++;
       if (!values.length) continue;
       const raw = document.createElement('details');
@@ -4950,9 +4968,12 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
         list.append(item);
       }
       raw.append(list);
-      block.append(raw);
+      row.append(raw);
     }
-    if (!rows) {
+    if (rows) {
+      heading.textContent = `Forecast windows (${rows}) · averages`;
+      block.append(windows);
+    } else {
       const notice = document.createElement('p');
       notice.className = 'notice';
       notice.textContent = 'Forecast evidence is unavailable for this plan snapshot.';
@@ -5056,6 +5077,8 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
         .headline { font-size:16px; font-weight:700; line-height:1.4; }
         .summary-row { margin:8px 0; line-height:1.5; }
         .explanation-details { margin-top:12px; }
+        .forecast-window { margin-inline-start:10px; }
+        .forecast-window > summary { font-weight:400; font-size:13px; }
         summary { cursor:pointer; padding:6px 0; font-weight:600; }
         .status { color:var(--secondary-text-color); }
         .generated { margin-top:13px; color:var(--secondary-text-color); font-size:12px; }
