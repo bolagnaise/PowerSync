@@ -137,6 +137,26 @@ def test_current_export_reserve_decision_renders_only_current_evidence():
       expect(html === '', 'decision remained visible at the exact slot end');
       html = render({ ...baseDecision, evaluated_at: '2025-12-31T23:44:00Z' });
       expect(html === '', 'stale same-client decision remained visible');
+
+      // A freshly evaluated guard cannot keep an aging cached plan current.
+      const freshDecisionForPlan = planTime => ({ ...baseDecision,
+        evaluated_at: '2025-12-31T23:59:58Z', plan_generated_at: planTime });
+      const stalePlanTime = '2025-12-31T23:44:59.999Z';
+      html = render(freshDecisionForPlan(stalePlanTime), {
+        last_optimization: stalePlanTime,
+      });
+      expect(html === '', 'fresh guard evidence outlived its stale cached plan');
+      const thresholdPlanTime = '2025-12-31T23:45:00Z';
+      html = render(freshDecisionForPlan(thresholdPlanTime), {
+        last_optimization: thresholdPlanTime,
+      });
+      expect(html !== '', 'plan expired at the inclusive freshness threshold');
+      html = render(freshDecisionForPlan(stalePlanTime), {
+        last_optimization: stalePlanTime, config: { interval_minutes: 10 },
+      });
+      expect(html !== '', 'plan freshness ignored the configured interval');
+      expect(render(baseDecision, { optimization_status: 'stale' }) === '',
+        'API-marked stale plan showed a current reserve decision');
       html = render({ ...baseDecision, plan_generated_at: '2025-12-31T23:59:00Z' });
       expect(html === '', 'decision from a superseded plan remained visible');
       html = render({ ...baseDecision, evaluated_at: 'not-a-time' });

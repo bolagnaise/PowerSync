@@ -2929,7 +2929,8 @@ class PowerSyncOptimizationPlan extends HTMLElement {
   _currentExportReserveDecision(data = this._data) {
     const decision = data?.export_reserve_decision;
     if (!decision || typeof decision !== 'object' || Array.isArray(decision) ||
-        data.enabled === false || data.monitoring_mode === true || data.is_stale === true || this._error) return null;
+        data.enabled === false || data.monitoring_mode === true || data.is_stale === true ||
+        data.optimization_status === 'stale' || this._error) return null;
     if (!['blocked', 'limited', 'unknown'].includes(decision.status) ||
         !['at_floor', 'projected_below_floor', 'insufficient_safe_duration', 'safe_duration_unverified'].includes(decision.reason) ||
         !['self_consumption_accepted', 'export_accepted', 'restore_unconfirmed', 'command_unconfirmed', 'not_requested'].includes(decision.control_outcome)) return null;
@@ -2939,10 +2940,12 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const end = parseTime(decision.slot_end);
     const now = Date.now();
     const interval = Math.max(1, Number(data?.config?.interval_minutes) || 5);
+    const staleAfterMs = 3 * interval * 60000;
     if (![evaluated, start, end].every(Number.isFinite) || start >= end ||
-        now < start || now >= end || evaluated > now + 30000 || now - evaluated > 3 * interval * 60000) return null;
+        now < start || now >= end || evaluated > now + 30000 || now - evaluated > staleAfterMs) return null;
     const generated = parseTime(decision.plan_generated_at);
     const currentPlan = parseTime(data.last_optimization);
+    if (Number.isFinite(currentPlan) && now - currentPlan > staleAfterMs) return null;
     if (Number.isFinite(generated) && Number.isFinite(currentPlan) && generated !== currentPlan) return null;
     if (decision.status === 'limited' &&
         !(Number.isFinite(decision.requested_minutes) && Number.isFinite(decision.allowed_minutes) &&
