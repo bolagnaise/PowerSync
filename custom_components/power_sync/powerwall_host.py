@@ -2,8 +2,25 @@
 
 from __future__ import annotations
 
-from ipaddress import IPv6Address
+from ipaddress import IPv6Address, ip_address
 from urllib.parse import urlsplit
+
+
+def local_battery_dispatch_configured(data: dict) -> bool:
+    """Whether a paired site has a usable gateway address for local commands."""
+    if data.get("powerwall_local_paired") is not True:
+        return False
+    try:
+        host = normalize_powerwall_gateway_host(data.get("powerwall_local_ip"))
+        hostname = urlsplit(f"//{host}").hostname
+        if not hostname or hostname.lower() == "localhost":
+            return False
+        try:
+            return not ip_address(hostname).is_loopback
+        except ValueError:
+            return True  # A LAN hostname is supported too.
+    except ValueError:
+        return False
 
 
 def normalize_powerwall_gateway_host(value: object) -> str:

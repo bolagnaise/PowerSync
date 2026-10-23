@@ -600,6 +600,51 @@ class TEDAPIv1rTransport:
             _LOGGER.warning("trigger_islanding: response parse error: %s", err)
         return False
 
+    async def dispatch_battery_power(
+        self, din: str, power_watts: float, duration_seconds: int
+    ) -> bool:
+        """Request battery watts (positive discharge, negative charge) over LAN.
+
+        Thanks to Scotty (cool.scotty) for identifying and testing this API.
+        The typed response acknowledges the request; it is not power readback.
+        """
+        if isinstance(power_watts, bool) or not math.isfinite(power_watts):
+            raise ValueError("power_watts must be finite")
+        if type(duration_seconds) is not int or not 1 <= duration_seconds <= 86400:
+            raise ValueError("duration_seconds must be an integer from 1 to 86400")
+        env = self._battery_dispatch_envelope(din)
+        command = env.teg.dispatch_battery_power_request.real_power
+        command.power_watts = power_watts
+        command.duration_seconds = duration_seconds
+        return await self._send_battery_dispatch(din, env)
+
+    async def resume_battery_operation(self, din: str) -> bool:
+        """Release direct dispatch and resume the gateway's configured mode."""
+        env = self._battery_dispatch_envelope(din)
+        env.teg.dispatch_battery_power_request.resume_device_mode.SetInParent()
+        return await self._send_battery_dispatch(din, env)
+
+    @staticmethod
+    def _battery_dispatch_envelope(din: str) -> Any:
+        env = transport_pb2.MessageEnvelope()
+        env.delivery_channel = transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        env.sender.authorized_client = 1
+        env.recipient.din = din
+        return env
+
+    async def _send_battery_dispatch(self, din: str, env: Any) -> bool:
+        resp = await self.post_v1r(env.SerializeToString(), din)
+        if not resp.ok or not resp.inner_bytes:
+            return False
+        try:
+            reply = transport_pb2.MessageEnvelope()
+            reply.ParseFromString(resp.inner_bytes)
+            return reply.HasField("teg") and reply.teg.HasField(
+                "dispatch_battery_power_response"
+            )
+        except Exception:
+            return False
+
     async def schedule_manual_backup(self, din: str, duration_s: int) -> bool:
         """Trigger Tesla's "Storm Watch Manual Backup" — holds SOC, stops export.
 

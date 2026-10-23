@@ -375,7 +375,9 @@ async def async_setup_entry(
         _add_disable_idle_switch
     )
 
-    if battery_system in TARGET_EXPORT_POWER_BATTERY_SYSTEMS:
+    from .powerwall_host import local_battery_dispatch_configured
+    local_power_targets = battery_system == "tesla" and local_battery_dispatch_configured(entry.data)
+    if battery_system in TARGET_EXPORT_POWER_BATTERY_SYSTEMS or local_power_targets:
         def _add_spread_export_switch(coordinator: Any) -> None:
             async_add_entities([
                 SpreadExportSwitch(hass=hass, entry=entry, coordinator=coordinator)
@@ -383,7 +385,7 @@ async def async_setup_entry(
 
         hass.data[DOMAIN][entry.entry_id]["switch_add_spread_export"] = _add_spread_export_switch
 
-    if battery_system in TARGET_CHARGE_POWER_BATTERY_SYSTEMS:
+    if battery_system in TARGET_CHARGE_POWER_BATTERY_SYSTEMS or local_power_targets:
         def _add_spread_import_switch(coordinator: Any) -> None:
             async_add_entities([
                 SpreadImportSwitch(hass=hass, entry=entry, coordinator=coordinator)

@@ -617,6 +617,7 @@ class ExportGuard:
         requested_w: float,
         *,
         current_controlled_export_w: float = 0.0,
+        stop_on_fault: bool = True,
     ) -> float:
         snapshot = self.manager.snapshot
         if snapshot.mode == "off":
@@ -634,7 +635,7 @@ class ExportGuard:
             or observed_at is None
             or (now - observed_at).total_seconds() > self.pcc_max_age_seconds
         ):
-            await self._fault_and_stop("PCC telemetry is stale or unavailable")
+            await self._fault_and_stop("PCC telemetry is stale or unavailable", stop_export=stop_on_fault)
             return 0.0
         active_limit = snapshot.limit_for_interval(now, now + timedelta(seconds=1))
         limit = max(0.0, float(active_limit or 0.0))
@@ -653,7 +654,7 @@ class ExportGuard:
         safe_limit = max(0.0, limit - margin)
         unmanaged = max(0.0, pcc_export_w - max(0.0, current_controlled_export_w))
         if pcc_export_w > safe_limit + 1e-6:
-            await self._fault_and_stop("PCC export exceeded the guarded network limit")
+            await self._fault_and_stop("PCC export exceeded the guarded network limit", stop_export=stop_on_fault)
             return 0.0
         return min(max(0.0, float(requested_w)), max(0.0, safe_limit - unmanaged))
 
@@ -663,17 +664,20 @@ class ExportGuard:
         writer: Callable[[float], Awaitable[bool]],
         *,
         current_controlled_export_w: float = 0.0,
+        stop_on_fault: bool = True,
     ) -> bool:
         first = self.manager.snapshot
         clamped = await self.clamp_requested_export_w(
             requested_w,
             current_controlled_export_w=current_controlled_export_w,
+            stop_on_fault=stop_on_fault,
         )
         second = self.manager.snapshot
         if second.snapshot_version != first.snapshot_version:
             clamped = await self.clamp_requested_export_w(
                 clamped,
                 current_controlled_export_w=current_controlled_export_w,
+                stop_on_fault=stop_on_fault,
             )
             second = self.manager.snapshot
         if second.mode != "off" and (
@@ -690,9 +694,9 @@ class ExportGuard:
             return False
         return bool(await writer(clamped))
 
-    async def _fault_and_stop(self, reason: str) -> None:
+    async def _fault_and_stop(self, reason: str, *, stop_export: bool = True) -> None:
         await self.manager.async_set_fault(reason)
-        if self.stop_export is not None:
+        if stop_export and self.stop_export is not None:
             try:
                 stopped = await self.stop_export()
             except Exception:

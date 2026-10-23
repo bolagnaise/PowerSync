@@ -63,11 +63,15 @@ def restore_probe():
     async def confirmed_mode(*args, **kwargs):
         return True
 
+    async def no_local_dispatch():
+        return False
+
     ns.update(
         entry=entry, hass=NS(data={"power_sync": {"test": {"tesla_coordinator": True}}}),
         force_charge_state={"active": False}, force_discharge_state={"active": False},
         hold_soc_state={"active": False}, self_consumption_state={"active": False},
         _command_generation=[0], _tesla_reserve_generation=[0],
+        _stop_local_powerwall_dispatch=no_local_dispatch,
         _control_call_source=lambda call: "user",
         _sigenergy_restore_native_control=lambda call: False,
         _monitoring_mode_should_block_control=lambda call: False,

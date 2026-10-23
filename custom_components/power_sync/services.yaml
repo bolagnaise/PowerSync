@@ -63,7 +63,7 @@ apply_history_relink:
 
 force_discharge:
   name: Force Discharge
-  description: Force battery discharge mode - switches to autonomous with high export tariff to maximise export
+  description: Force battery discharge for a timed window. Paired Powerwalls use local power control first, with existing Tesla controls as a fallback.
   fields:
     duration:
       name: Duration
@@ -108,7 +108,7 @@ force_discharge:
               value: "240"
     power_w:
       name: Power (W)
-      description: Target power in watts. 0 or omitted means use the inverter's rated/BMS max.
+      description: Target power in watts. For paired Powerwalls this is grid export; battery output also accounts for home load and solar. 0 or omitted uses the configured maximum.
       required: false
       default: 0
       example: 5000
@@ -121,7 +121,7 @@ force_discharge:
 
 force_charge:
   name: Force Charge
-  description: Force battery charge mode - switches to autonomous with free import tariff to maximise charging from grid
+  description: Force battery charging for a timed window. Paired Powerwalls use local power control first, with existing Tesla controls as a fallback.
   fields:
     duration:
       name: Duration

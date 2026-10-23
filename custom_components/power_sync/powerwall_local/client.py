@@ -390,6 +390,20 @@ class PowerwallLocalClient:
             raise ValueError("at least one grid import/export setting is required")
         return await self._transport.write_config(self._din, updates)
 
+    async def dispatch_battery_power(self, power_watts: float, duration_seconds: int) -> bool:
+        """Request bounded local battery power without changing stored settings."""
+        if not self._local_access_enabled or is_loopback_host(self._host):
+            raise PowerwallUnreachableError("Powerwall LAN access is disabled")
+        return await self._transport.dispatch_battery_power(
+            self._din, power_watts, duration_seconds
+        )
+
+    async def resume_battery_operation(self) -> bool:
+        """Release local dispatch; never substitute a cloud tariff write."""
+        if not self._local_access_enabled or is_loopback_host(self._host):
+            raise PowerwallUnreachableError("Powerwall LAN access is disabled")
+        return await self._transport.resume_battery_operation(self._din)
+
     async def schedule_max_backup(self, duration_seconds: int = 7200) -> bool:
         """Schedule a local manual max-backup event."""
         return await self._transport.schedule_manual_backup(

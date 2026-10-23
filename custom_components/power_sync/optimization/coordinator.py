@@ -1541,11 +1541,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return the saved manual optimizer reserve restore point."""
         return getattr(self, "_manual_backup_reserve", None)
 
+    def _supports_local_powerwall_target_power(self) -> bool:
+        """Only paired LAN Tesla sites can honor direct battery power targets."""
+        if self.battery_system != "tesla":
+            return False
+        entry = getattr(self, "_entry", None)
+        from ..powerwall_host import local_battery_dispatch_configured
+        if not local_battery_dispatch_configured(getattr(entry, "data", {})):
+            return False
+        runtime = getattr(getattr(self, "hass", None), "data", {}).get(DOMAIN, {}).get(getattr(self, "entry_id", None), {})
+        return not runtime.get("powerwall_dispatch_fallback_pending") and not any(state.get("active") and not state.get("powerwall_local_dispatch")
+                       for state in (runtime.get("force_charge_state", {}), runtime.get("force_discharge_state", {}),
+                                     runtime.get("hold_soc_state", {}), runtime.get("self_consumption_state", {})))
+
     def _supports_target_export_power(self) -> bool:
         """Return True when the selected battery can honor a target export power."""
         try:
             from ..const import TARGET_EXPORT_POWER_BATTERY_SYSTEMS
-            return self.battery_system in TARGET_EXPORT_POWER_BATTERY_SYSTEMS
+            return self.battery_system in TARGET_EXPORT_POWER_BATTERY_SYSTEMS or self._supports_local_powerwall_target_power()
         except Exception:
             return False
 
@@ -1553,7 +1566,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return True when the selected battery can honor a target charge power."""
         try:
             from ..const import TARGET_CHARGE_POWER_BATTERY_SYSTEMS
-            return self.battery_system in TARGET_CHARGE_POWER_BATTERY_SYSTEMS
+            return self.battery_system in TARGET_CHARGE_POWER_BATTERY_SYSTEMS or self._supports_local_powerwall_target_power()
         except Exception:
             return False
 
@@ -10253,6 +10266,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                 except (TypeError, ValueError):
                     requested_w = 0.0
+            if requested_w <= 0 and self._supports_local_powerwall_target_power():
+                return 0.0
             if requested_w > 0:
                 command_w = min(command_w, requested_w)
             if self._config.max_grid_export_w is not None:

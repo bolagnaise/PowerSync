@@ -870,3 +870,64 @@ def test_max_backup_refuses_unrestorable_reserve_fallback():
     assert "max_backup_saved_reserve" not in entry_data
     assert "max_backup_end_ts" not in entry_data
     assert "max_backup_local_event" not in entry_data
+
+
+@async_test
+async def test_timed_battery_dispatch_and_resume_use_distinct_typed_requests():
+    transport = _transport_without_key()
+    requests = []
+
+    async def post(payload, din):
+        request = transport_pb2.MessageEnvelope.FromString(payload)
+        requests.append(request)
+        assert din == "gateway"
+        assert request.recipient.din == din
+        assert request.delivery_channel == transport_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        assert request.sender.authorized_client == 1
+        reply = transport_pb2.MessageEnvelope()
+        reply.teg.dispatch_battery_power_response.SetInParent()
+        return transport_mod.TEDAPIResponse(True, reply.SerializeToString())
+
+    transport.post_v1r = post
+    assert await transport.dispatch_battery_power("gateway", -500, 30)
+    command = requests[-1].teg.dispatch_battery_power_request
+    assert command.HasField("real_power")
+    assert not command.HasField("resume_device_mode")
+    assert command.real_power.power_watts == -500
+    assert command.real_power.duration_seconds == 30
+    assert await transport.resume_battery_operation("gateway")
+    command = requests[-1].teg.dispatch_battery_power_request
+    assert command.HasField("resume_device_mode")
+    assert not command.HasField("real_power")
+
+
+@pytest.mark.parametrize("watts,seconds", [(float('nan'), 30), (float('inf'), 30), (True, 30), (500, 0), (500, -1), (500, 86401), (500, 1.5), (500, True)])
+@async_test
+async def test_invalid_battery_dispatch_never_reaches_gateway(watts, seconds):
+    transport = _transport_without_key()
+    transport.post_v1r = AsyncMock()
+    with pytest.raises(ValueError):
+        await transport.dispatch_battery_power("gateway", watts, seconds)
+    transport.post_v1r.assert_not_called()
+
+
+@pytest.mark.parametrize("payload,ok", [(b'', True), (b'bad protobuf', True), (b'\xaa\x01\x00', True), (b'', False)])
+@async_test
+async def test_battery_dispatch_rejects_missing_wrong_or_malformed_ack(payload, ok):
+    transport = _transport_without_key()
+    transport.post_v1r = AsyncMock(return_value=transport_mod.TEDAPIResponse(ok, payload))
+    assert not await transport.dispatch_battery_power("gateway", 500, 30)
+
+
+@async_test
+async def test_disabled_local_client_never_dispatches_or_resumes():
+    client = client_mod.PowerwallLocalClient.__new__(client_mod.PowerwallLocalClient)
+    client._local_access_enabled = False
+    client._host = 'gateway'
+    client._transport = SimpleNamespace(dispatch_battery_power=AsyncMock(), resume_battery_operation=AsyncMock())
+    with pytest.raises(Exception, match="LAN access is disabled"):
+        await client.dispatch_battery_power(500, 30)
+    with pytest.raises(Exception, match="LAN access is disabled"):
+        await client.resume_battery_operation()
+    client._transport.dispatch_battery_power.assert_not_called()
+    client._transport.resume_battery_operation.assert_not_called()

@@ -30747,6 +30747,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if persisted_force_state.get("source") == "optimizer":
         hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = True
 
+    hass.data[DOMAIN][entry.entry_id]["powerwall_local_recovery_pending"] = bool(persisted_force_state.get("powerwall_local_dispatch"))
+
     # A restore whose Tesla writes failed schedules an in-process retry. That
     # retry cannot run if the process is shutting down, and it self-skips once
     # force state has been cleared — so without a persisted marker a failed
@@ -31308,7 +31310,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Only save what's needed to restore after restart
         state_to_save = None
-        if force_charge_state["active"]:
+        if force_charge_state["active"] or force_charge_state.get("powerwall_local_dispatch"):
             state_to_save = {
                 "mode": "charge",
                 "expires_at": force_charge_state["expires_at"].isoformat() if force_charge_state["expires_at"] else None,
@@ -31324,7 +31326,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_charge_state.get("_skip_backup_reserve_restore")
                 ),
             }
-        elif force_discharge_state["active"]:
+        elif force_discharge_state["active"] or force_discharge_state.get("powerwall_local_dispatch"):
             state_to_save = {
                 "mode": "discharge",
                 "expires_at": force_discharge_state["expires_at"].isoformat() if force_discharge_state["expires_at"] else None,
@@ -31394,6 +31396,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if solax_restore_state:
                     state_to_save["solax_restore_state"] = solax_restore_state
 
+        if state_to_save and state_to_save.get("mode") in ("charge", "discharge"):
+            state = force_charge_state if state_to_save["mode"] == "charge" else force_discharge_state
+            if state.get("powerwall_local_dispatch"):
+                state_to_save["powerwall_local_dispatch"] = True
+                state_to_save["command_status"] = state.get("command_status")
+
         stored_data["force_mode_state"] = state_to_save
         stored_data["tesla_grid_charging_preferences"] = dict(
             tesla_grid_charging_preferences
@@ -31426,6 +31434,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "SolarEdge startup will not replay persisted force commands or timers; "
                 "controller recovery state remains available for supervised reconciliation"
             )
+            return
+
+        if persisted_force_state.get("powerwall_local_dispatch"):
+            state = force_charge_state if persisted_force_state.get("mode") == "charge" else force_discharge_state
+            state.update(active=True, powerwall_local_dispatch=True,
+                         source=persisted_force_state.get("source", "user"))
+            await _stop_local_powerwall_dispatch()
+            hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = False
+            hass.data[DOMAIN][entry.entry_id]["powerwall_local_recovery_pending"] = False
             return
 
         if not persisted_force_state:
@@ -33313,6 +33330,220 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             }
         return {"success": True}
 
+    # Local dispatch shares the existing force-mode projection/persistence,
+    # while renewable hardware leases are managed independently of tariffs.
+    _local_powerwall_runtime = hass.data[DOMAIN][entry.entry_id]
+    _local_powerwall_route_lock = asyncio.Lock()
+    _local_powerwall_runtime["powerwall_battery_dispatch_route_lock"] = _local_powerwall_route_lock
+    hass.data[DOMAIN][entry.entry_id]["powerwall_local_dispatch_stopping"] = False
+
+    def _local_powerwall_generation_current():
+        return hass.data.get(DOMAIN, {}).get(entry.entry_id) is _local_powerwall_runtime
+
+    async def _clear_local_powerwall_dispatch() -> None:
+        if not _local_powerwall_generation_current():
+            return
+        runtime = hass.data[DOMAIN][entry.entry_id]
+        runtime["powerwall_local_recovery_pending"] = False
+        runtime["optimizer_force_restart_restore_pending"] = False
+        for mode, state in (("charge", force_charge_state), ("discharge", force_discharge_state)):
+            if state.pop("powerwall_local_dispatch", False):
+                state.update(active=False, expires_at=None, hardware_expires_at=None,
+                             commitment_eligible=False, command_status=None)
+                async_dispatcher_send(hass, f"{DOMAIN}_force_{mode}_state", {"active": False})
+        await persist_force_mode_state()
+
+    def _local_powerwall_dispatch_config():
+        config = {**entry.data, **entry.options}
+        if "optimization_backup_reserve" in entry.data:
+            config["optimization_backup_reserve"] = entry.data["optimization_backup_reserve"]
+        effective = getattr(hass.data[DOMAIN][entry.entry_id].get("optimization_coordinator"), "_config", None)
+        for name in ("max_charge_w", "max_discharge_w", "max_grid_import_w", "max_grid_export_w", "grid_charge_soc_cap", "allow_grid_charge"):
+            if effective is not None and hasattr(effective, name):
+                config[f"optimization_{name}"] = getattr(effective, name)
+        return config
+
+    async def _local_powerwall_dispatch_acknowledged(watts, seconds):
+        if not _local_powerwall_generation_current():
+            raise ValueError("Powerwall dispatch setup generation was replaced")
+        for state in (force_charge_state, force_discharge_state):
+            if state.get("powerwall_local_dispatch"):
+                state["hardware_expires_at"] = dt_util.utcnow() + timedelta(seconds=seconds)
+                state["command_status"] = "accepted"
+        await persist_force_mode_state()
+
+    async def _local_powerwall_dispatch_failed():
+        if not _local_powerwall_generation_current():
+            return
+        for state in (force_charge_state, force_discharge_state):
+            if state.get("powerwall_local_dispatch"):
+                state["command_status"] = "restore_pending"
+                state["commitment_eligible"] = False
+                state["expires_at"] = state.get("hardware_expires_at") or dt_util.utcnow()
+        await persist_force_mode_state()
+
+    async def _get_local_powerwall_dispatch():
+        if not _local_powerwall_generation_current():
+            raise HomeAssistantError("Powerwall dispatch setup generation was replaced")
+        runtime = _local_powerwall_runtime
+        controller = runtime.get("powerwall_battery_dispatch")
+        if controller is not None:
+            return controller
+        from .powerwall_local.views import ensure_client
+        from .powerwall_local.battery_dispatch import LocalBatteryDispatch
+        client = await ensure_client(hass, entry)
+        if not _local_powerwall_generation_current():
+            raise HomeAssistantError("Powerwall dispatch setup generation was replaced")
+        if client is None or not client.local_access_enabled:
+            raise HomeAssistantError("Paired Powerwall LAN client is unavailable")
+        controller = LocalBatteryDispatch(
+            client, _local_powerwall_dispatch_config,
+            lambda _mode: False, persist_force_mode_state,
+            _clear_local_powerwall_dispatch,
+            acknowledged=_local_powerwall_dispatch_acknowledged, failed=_local_powerwall_dispatch_failed,
+        )
+        runtime["powerwall_battery_dispatch"] = controller
+        return controller
+
+    async def _stop_local_powerwall_dispatch() -> bool:
+        runtime = _local_powerwall_runtime
+        controller = runtime.get("powerwall_battery_dispatch")
+        pending = any(state.get("powerwall_local_dispatch") for state in (force_charge_state, force_discharge_state))
+        if not pending and not (controller and controller.pending):
+            return False
+        controller = controller or await _get_local_powerwall_dispatch()
+        controller.assume_pending()
+        try:
+            await controller.stop()
+        except Exception as err:
+            raise HomeAssistantError("Local Powerwall resume unconfirmed; cleanup remains pending") from err
+        return True
+
+    async def _try_local_powerwall_force(mode, call, duration, power_w):
+        from .powerwall_host import local_battery_dispatch_configured
+        if active_battery_system != BATTERY_SYSTEM_TESLA:
+            return None
+        if not _local_powerwall_generation_current():
+            raise HomeAssistantError("Powerwall dispatch setup generation was replaced")
+        if hass.data[DOMAIN][entry.entry_id].get("powerwall_local_dispatch_stopping"):
+            raise HomeAssistantError("Local Powerwall integration is stopping")
+        if hass.data[DOMAIN][entry.entry_id].get("powerwall_local_recovery_pending"):
+            raise HomeAssistantError("Local Powerwall restart cleanup is still pending")
+        # Finish an already-active tariff/hold lifecycle through its original
+        # path; never adopt its modified settings as a new local baseline.
+        if hold_soc_state.get("active") or self_consumption_state.get("active"):
+            return None
+        if any(state.get("active") and not state.get("powerwall_local_dispatch")
+               for state in (force_charge_state, force_discharge_state)):
+            return None
+        pending = any(state.get("powerwall_local_dispatch") for state in (force_charge_state, force_discharge_state))
+        if (_local_powerwall_runtime.get("powerwall_dispatch_fallback_pending")
+                and _control_call_source(call) == "optimizer" and not pending):
+            # A new targetless solve must bound the very first tariff fallback.
+            # Keep that path for this setup generation rather than repeatedly
+            # retrying local with a plan that assumed a different actuator.
+            return None
+        local_configured = local_battery_dispatch_configured(entry.data)
+        if not local_configured:
+            if pending:
+                raise HomeAssistantError("Local dispatch cleanup required before changing control paths")
+            return None
+        source = _control_call_source(call)
+        if source == "optimizer" and power_w <= 0:
+            raise HomeAssistantError("Optimizer local dispatch requires positive power")
+        config = {**entry.data, **entry.options}
+        target = power_w or config.get("optimization_max_grid_export_w" if mode == "discharge" else "optimization_max_charge_w", 5000)
+
+        def allowed(direction):
+            if not _local_powerwall_generation_current() or _monitoring_mode_should_block_control(call) or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping"):
+                return False
+            state = force_charge_state if direction == "charge" else force_discharge_state
+            if not state.get("active") or not state.get("powerwall_local_dispatch"):
+                return False
+            if direction == "charge" and _demand_grid_charging_protection_active():
+                return False
+            if hass.data.get("power_sync_license_manager") is not None:
+                from .licensing.guard import service_allowed
+                if not service_allowed(hass, call.data, f"handle_force_{direction}"):
+                    return False
+            return True
+
+        async def local_export_guard(write, controlled_export=0.0):
+            guard = hass.data[DOMAIN][entry.entry_id].get("network_export_guard")
+            if guard is None:
+                return await write(target)
+            return await guard.async_guard_write(target, write, current_controlled_export_w=controlled_export, stop_on_fault=False)
+
+        async with _local_powerwall_route_lock:
+            controller = await _get_local_powerwall_dispatch()
+            if not _local_powerwall_generation_current() or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping"):
+                raise HomeAssistantError("Powerwall dispatch setup generation was replaced or stopped")
+            state = force_charge_state if mode == "charge" else force_discharge_state
+            other = force_discharge_state if mode == "charge" else force_charge_state
+            _cancel_all_force_timers("local Powerwall dispatch")
+            _command_generation[0] += 1
+            local_generation = _command_generation[0]
+            _local_powerwall_runtime["powerwall_dispatch_fallback_pending"] = False
+            other.update(active=False, expires_at=None, hardware_expires_at=None)
+            other.pop("powerwall_local_dispatch", None)
+            expiry = dt_util.utcnow() + timedelta(minutes=duration)
+            state.update(active=True, source=source, duration=duration, power_w=power_w,
+                         expires_at=expiry, hardware_expires_at=None,
+                         powerwall_local_dispatch=True, command_status="pending",
+                         scope="optimizer" if source == "optimizer" else "external",
+                         started_at=dt_util.utcnow(), commitment_eligible=False)
+            try:
+                result = await controller.start(mode, target, duration * 60,
+                                                allowed=allowed, guarded_write=local_export_guard if mode == "discharge" else None)
+            except Exception as err:
+                from .powerwall_local.battery_dispatch import DispatchCommandFailed
+                if isinstance(err, DispatchCommandFailed) and not controller.pending:
+                    from .powerwall_local.battery_dispatch import validate_dispatch_config
+                    try:
+                        validate_dispatch_config(mode, _local_powerwall_dispatch_config())
+                    except ValueError as policy_err:
+                        raise HomeAssistantError("Tesla fallback blocked by configured safety limits") from policy_err
+                    fallback_power = target
+                    guard = _local_powerwall_runtime.get("network_export_guard")
+                    if mode == "discharge" and guard is not None:
+                        fallback_power = await guard.clamp_requested_export_w(target)
+                        if fallback_power <= 0:
+                            raise HomeAssistantError("Tesla fallback blocked by network export envelope") from err
+                    # Cleanup can take several awaits. A stale source must not
+                    # enter tariff control after policy or setup changed.
+                    if (not _local_powerwall_generation_current()
+                            or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
+                            or _command_generation[0] != local_generation
+                            or _monitoring_mode_should_block_control(call)
+                            or (mode == "charge" and _demand_grid_charging_protection_active())):
+                        raise HomeAssistantError("Tesla fallback authorization changed during local cleanup") from err
+                    if hass.data.get("power_sync_license_manager") is not None:
+                        from .licensing.guard import service_allowed
+                        if not service_allowed(hass, call.data, f"handle_force_{mode}"):
+                            raise HomeAssistantError("Tesla fallback optimiser access changed during cleanup") from err
+                    _local_powerwall_runtime["powerwall_dispatch_fallback_pending"] = True
+                    if source == "optimizer":
+                        optimization = _local_powerwall_runtime.get("optimization_coordinator")
+                        if optimization is not None:
+                            hass.async_create_task(optimization.async_request_refresh())
+                        raise HomeAssistantError(
+                            "Local Powerwall dispatch released; retrying with targetless safety checks before fallback"
+                        ) from err
+                    _LOGGER.warning("Local Powerwall dispatch failed and released safely; using existing Tesla control: %s", err)
+                    return {"fallback": True, "power_w": fallback_power}
+                raise HomeAssistantError(f"Local Powerwall dispatch failed: {err}") from err
+            state["command_status"] = "accepted"
+            await persist_force_mode_state()
+            for force_mode, force_state in (("charge", force_charge_state), ("discharge", force_discharge_state)):
+                async_dispatcher_send(hass, f"{DOMAIN}_force_{force_mode}_state", {
+                    "active": force_state["active"], "source": force_state.get("source"),
+                    "expires_at": force_state["expires_at"].isoformat() if force_state.get("expires_at") else None,
+                    "duration": force_state.get("duration"),
+                })
+            _LOGGER.info("Powerwall local %s dispatch accepted: battery %.0f W, requested %d min (source=%s)",
+                         mode, result["battery_power_w"], duration, source)
+            return result
+
     async def handle_force_discharge(call: ServiceCall) -> dict[str, Any] | None:
         """Force discharge mode - switches to autonomous with high export tariff."""
         if getattr(hass, "data", {}).get("power_sync_license_manager") is not None:
@@ -33410,7 +33641,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # optimizer zero remains a deny/no-export request.
         network_guard = _fd_entry_data.get("network_export_guard")
         use_device_max = source != "optimizer" and command_power_w <= 0
-        if network_guard is not None:
+        from .powerwall_host import local_battery_dispatch_configured
+        local_export_candidate = (
+            active_battery_system == BATTERY_SYSTEM_TESLA
+            and local_battery_dispatch_configured(entry.data)
+            and not (source == "optimizer" and _local_powerwall_runtime.get("powerwall_dispatch_fallback_pending"))
+            and not hold_soc_state.get("active") and not self_consumption_state.get("active")
+            and not any(state.get("active") and not state.get("powerwall_local_dispatch")
+                        for state in (force_charge_state, force_discharge_state))
+        )
+        if network_guard is not None and not local_export_candidate:
             if use_device_max:
                 snapshot = network_guard.manager.snapshot
                 if snapshot.mode != "off":
@@ -33440,6 +33680,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if network_guard is None:
                 return bool(await writer(command_power_w))
             return await network_guard.async_guard_write(command_power_w, writer)
+
+        local_result = await _try_local_powerwall_force(
+            "discharge", call, duration, command_power_w
+        )
+        if local_result is not None:
+            if local_result.get("fallback"):
+                command_power_w = local_result["power_w"]
+            else:
+                return local_result
 
         extend_hardware = call.data.get("_extend_hardware", False)
 
@@ -35402,6 +35651,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return
 
+        local_result = await _try_local_powerwall_force("charge", call, duration, command_power_w)
+        if local_result is not None:
+            if local_result.get("fallback"):
+                command_power_w = local_result["power_w"]
+            else:
+                return local_result
+
         extend_hardware = call.data.get("_extend_hardware", False)
 
         # Hardware-only path: fires for BOTH (a) optimizer-issued dispatch and
@@ -37233,6 +37489,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _command_generation[0],
             )
             return
+        if await _stop_local_powerwall_dispatch():
+            return
+
         solaredge_restore_coordinator = (
             hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("solaredge_coordinator")
         )
@@ -39188,6 +39447,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return
 
+        await _stop_local_powerwall_dispatch()
+
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
 
         # Pick the first available coordinator. All brands expose a
@@ -39530,6 +39791,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "set self consumption",
                 owns_operation_mode=True,
             )
+
+        await _stop_local_powerwall_dispatch()
 
         internal_hold_soc_transition = (
             source == "hold_soc"
@@ -40167,6 +40430,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return
 
+        await _stop_local_powerwall_dispatch()
+
         _autonomous_guard = (
             hass.data.get(DOMAIN, {})
             .get(entry.entry_id, {})
@@ -40676,6 +40941,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "set operation mode",
             owns_operation_mode=True,
         )
+
+        await _stop_local_powerwall_dispatch()
         _LOGGER.info(f"⚙️ Setting operation mode to {mode}")
 
         from .const import CONF_POWERWALL_LOCAL_DIN
@@ -47461,6 +47728,7 @@ class OptimizationAISummaryView(HomeAssistantView):
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
+    hass.data.get(DOMAIN, {}).get(entry.entry_id, {})["powerwall_local_dispatch_stopping"] = True
     if license_manager := hass.data.get("power_sync_license_manager"):
         license_manager.detach(entry.entry_id)
     _LOGGER.info("Unloading PowerSync integration")
@@ -47468,6 +47736,19 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Tear down TOU sync hooks (AEMO dispatch subscriber + dispatch-trigger
     # coordinator + cron fallback + optional Octopus cron)
     entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+
+    async def stop_local_dispatch_on_unload():
+        if local_dispatch := entry_data.get("powerwall_battery_dispatch"):
+            try:
+                await local_dispatch.stop()
+            except Exception:
+                _LOGGER.exception("Local Powerwall dispatch cleanup pending after unload; lease will expire")
+
+    if route_lock := entry_data.get("powerwall_battery_dispatch_route_lock"):
+        async with route_lock:
+            await stop_local_dispatch_on_unload()
+    else:
+        await stop_local_dispatch_on_unload()
 
     if amber_runtime := entry_data.get("amber_smartshift_coordinator"):
         await amber_runtime.shutdown()

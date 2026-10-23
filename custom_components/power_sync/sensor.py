@@ -7607,6 +7607,19 @@ class BatteryModeSensor(SensorEntity):
         else:
             attributes["description"] = "Battery operating in normal self-consumption mode"
 
+        local_state = force_charge_state if mode == BATTERY_MODE_STATE_FORCE_CHARGE else force_discharge_state if mode == BATTERY_MODE_STATE_FORCE_DISCHARGE else {}
+        if local_state.get("powerwall_local_dispatch"):
+            status = local_state.get("command_status", "pending")
+            attributes.update(control_path="powerwall_local_dispatch", command_status=status,
+                              physical_effect="unverified")
+            lease_expiry = local_state.get("hardware_expires_at")
+            attributes["hardware_expires_at"] = lease_expiry.isoformat() if hasattr(lease_expiry, "isoformat") else None
+            attributes["description"] = (
+                "Local Powerwall cleanup is pending; check battery power for measured behaviour"
+                if status == "restore_pending" else
+                "Local Powerwall power request is pending" if status == "pending" else
+                "Local Powerwall power request acknowledged; check battery power for measured behaviour"
+            )
         return attributes
 
 

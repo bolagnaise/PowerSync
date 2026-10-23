@@ -1465,7 +1465,11 @@ def test_tesla_hold_soc_tracks_failed_transition_and_preserves_supersession():
         def async_dispatcher_send(_hass, signal, payload):
             dispatches.append((signal, payload))
 
+        async def no_local_dispatch():
+            return False
+
         namespace = {
+            "_stop_local_powerwall_dispatch": no_local_dispatch,
             "ServiceCall": object,
             "HomeAssistantError": HomeAssistantError,
             "DEFAULT_DISCHARGE_DURATION": 60,
