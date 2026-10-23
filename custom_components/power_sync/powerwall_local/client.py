@@ -18,7 +18,7 @@ import logging
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from .exceptions import (
     PowerwallLocalError,
@@ -398,6 +398,49 @@ class PowerwallLocalClient:
             self._din, power_watts, duration_seconds
         )
 
+    async def get_battery_calibration_delay_status(self) -> dict[str, Any]:
+        """Read the gateway's deferral budget; never infer it from an alert."""
+        from .calibration_delay import calibration_envelope, parse_calibration_status
+        if not self._transport or not self._din:
+            return {"supported": False, "reason": "paired_gateway_unavailable"}
+        try:
+            response = await self._transport.post_v1r(calibration_envelope(self._din).SerializeToString(), self._din)
+        except (PowerwallLocalError, asyncio.TimeoutError):
+            return {"supported": False, "reason": "calibration_delay_status_unavailable"}
+        return {**parse_calibration_status(response.inner_bytes if response.ok else None), "read_at": time.time()}
+
+    async def delay_battery_calibration(self, delay_hours: int, *, before_write: Callable[[], None] | None = None,
+        before_command: Callable[[], Awaitable[None]] | None = None) -> dict[str, Any]:
+        """Request one deferral, with fresh allowance and typed acknowledgement.
+
+        Never replay after an uncertain write; a deferral may consume a limited
+        gateway allowance. This is not a cancellation or a calibration reset.
+        """
+        from .calibration_delay import calibration_envelope, calibration_delay_acknowledged, validate_delay_hours
+        validate_delay_hours(delay_hours)
+        if before_write is not None:
+            before_write()
+        status = await self.get_battery_calibration_delay_status()
+        if not status.get("supported"):
+            raise PowerwallLocalError("Calibration delay status is unavailable on this gateway")
+        if status["calibration_delays_left"] <= 0:
+            raise PowerwallLocalError("The gateway reports no calibration deferrals remaining")
+        if before_command is not None:
+            await before_command()
+        if before_write is not None:
+            before_write()
+        try:
+            response = await self._transport.post_v1r(
+                calibration_envelope(self._din, delay_hours).SerializeToString(), self._din,
+                **({"before_send": before_write} if before_write is not None else {}),
+            )
+            acknowledged = response.ok and calibration_delay_acknowledged(response.inner_bytes)
+        except (PowerwallLocalError, asyncio.TimeoutError):
+            acknowledged = False
+        observed = await self.get_battery_calibration_delay_status()
+        return {"command_acknowledged": acknowledged, "requested_delay_hours": delay_hours,
+            "status": observed, "retry_safe": False}
+
     async def set_on_grid_solar_curtailment(self, enabled: bool, *, before_write: Callable[[], None] | None = None) -> bool:
         """Allow gateway-managed solar reduction while connected to the grid.
 
@@ -420,12 +463,18 @@ class PowerwallLocalClient:
             **({"before_write": before_write} if before_write is not None else {}),
         ):
             return False
+        return await self.get_on_grid_solar_curtailment() is enabled
+
+    async def get_on_grid_solar_curtailment(self) -> bool | None:
+        """Read the persistent permission; unknown is not disabled."""
+        if not self._transport or not self._din or not self._local_access_enabled:
+            return None
         config = await self._transport.read_config(self._din)
         info = config.get("site_info") if isinstance(config, dict) else None
         if not isinstance(info, dict):
-            return False
+            return None
         observed = info.get("on_grid_solar_curtailment_enabled", False)
-        return isinstance(observed, bool) and observed is enabled
+        return observed if isinstance(observed, bool) else None
 
     @property
     def dispatch_discharge_limit_w(self) -> float | None:

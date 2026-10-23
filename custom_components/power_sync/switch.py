@@ -344,6 +344,7 @@ async def async_setup_entry(
         entities.extend([
             OffGridSwitch(hass=hass, entry=entry),
             OnGridSwitch(hass=hass, entry=entry),
+            OnGridSolarCurtailmentSwitch(hass=hass, entry=entry),
         ])
 
     # Away Mode and optimizer mode switches — added later via deferred callbacks once
@@ -2132,3 +2133,73 @@ class OnGridSwitch(_PowerwallGridModeSwitch):
             icon="mdi:transmission-tower",
             mode_is_off_grid=False,
         )
+
+
+class OnGridSolarCurtailmentSwitch(SwitchEntity):
+    """Expose the gateway permission, never infer physical PV curtailment."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_icon = "mdi:solar-power-variant-outline"
+    _attr_name = "Allow on-grid solar curtailment"
+    _attr_should_poll = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self.hass = hass
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_on_grid_solar_curtailment"
+        self._attr_suggested_object_id = "power_sync_allow_on_grid_solar_curtailment"
+        self._observed: bool | None = None
+        self._read_revision = 0
+
+    @property
+    def device_info(self):
+        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_BATTERY)
+
+    @property
+    def available(self) -> bool:
+        return self._observed is not None and bool(self._entry.data.get(CONF_POWERWALL_LOCAL_PAIRED))
+
+    @property
+    def is_on(self) -> bool | None:
+        return self._observed
+
+    async def async_update(self) -> None:
+        from .powerwall_local.views import ensure_client
+        self._read_revision += 1
+        revision = self._read_revision
+        self._observed = None
+        runtime = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+        identity = dict(self._entry.data)
+        if not isinstance(runtime, dict) or not identity.get(CONF_POWERWALL_LOCAL_PAIRED):
+            return
+        try:
+            client = await ensure_client(self.hass, self._entry)
+            if client is None or not client.local_access_enabled:
+                return
+            value = await client.get_on_grid_solar_curtailment()
+            if (revision == self._read_revision
+                    and self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id) is runtime
+                    and self._entry.data == identity):
+                self._observed = value if isinstance(value, bool) else None
+        except Exception:
+            _LOGGER.debug("Powerwall on-grid solar curtailment setting read unavailable", exc_info=True)
+
+    async def _set_permission(self, enabled: bool) -> None:
+        self._read_revision += 1
+        self._observed = None
+        self.async_write_ha_state()
+        try:
+            await self.hass.services.async_call(
+                DOMAIN, "powerwall_set_on_grid_solar_curtailment",
+                {"entry_id": self._entry.entry_id, "enabled": enabled},
+                blocking=True, context=self._context,
+            )
+        finally:
+            await self.async_update()
+            self.async_write_ha_state()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._set_permission(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._set_permission(False)

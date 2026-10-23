@@ -20,8 +20,8 @@ def fixture(*, monitoring=False, user=None, entries=1, explicit=None, confirmed=
         resolve_connection_profile=lambda *args: SimpleNamespace(monitoring_only=monitoring_only),
     )
     source = Path(__file__).resolve().parents[1] / "custom_components/power_sync/powerwall_local/services.py"
-    node = next(n for n in ast.parse(source.read_text()).body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_handle_on_grid_solar_curtailment")
-    exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), "exec"), namespace)
+    nodes = [n for n in ast.parse(source.read_text()).body if isinstance(n, ast.AsyncFunctionDef) and n.name in ("_paired_client_for_call", "_handle_on_grid_solar_curtailment")]
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), namespace)
     selected = []
     def get_entry(identity):
         selected.append(identity)

@@ -76,6 +76,12 @@ _ha_core.HomeAssistant = object
 _ha_core.callback = lambda func: func
 sys.modules["homeassistant.core"] = _ha_core
 
+_ha_helpers = sys.modules.setdefault("homeassistant.helpers", types.ModuleType("homeassistant.helpers"))
+_ha_registry = types.ModuleType("homeassistant.helpers.entity_registry")
+_ha_registry.async_get = lambda hass: types.SimpleNamespace(async_get_entity_id=lambda *args: None)
+_ha_helpers.entity_registry = _ha_registry
+sys.modules["homeassistant.helpers.entity_registry"] = _ha_registry
+
 _ha_dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
 _ha_dispatcher.async_dispatcher_connect = lambda *args, **kwargs: lambda: None
 sys.modules["homeassistant.helpers.dispatcher"] = _ha_dispatcher

@@ -24,7 +24,8 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Context, HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from ..const import (
@@ -49,6 +50,7 @@ from ..const import (
     POWERWALL_PAIRING_WINDOW_SECONDS,
 )
 from .battery_dispatch import manual_power_limits_kw
+from .calibration_delay import validate_delay_hours
 from .client import PowerwallLocalClient, PowerwallVersion
 from .coordinator import PowerwallLocalCoordinator
 from .curtailment_fallback import get_fallback as _get_curtailment_fallback
@@ -1422,9 +1424,53 @@ def register_views(hass: HomeAssistant) -> None:
     hass.http.register_view(PowerwallCurtailmentFallbackView(hass))
     hass.http.register_view(PowerwallDiscoverView(hass))
     hass.http.register_view(PowerwallGatewayInfoView(hass))
+    hass.http.register_view(PowerwallCalibrationDelayView(hass))
     hass.http.register_view(PowerwallDebugConfigView(hass))
     hass.http.register_view(PowerwallDebugProbeView(hass))
     hass.http.register_view(PowerwallCloudProbeView(hass))
+
+
+class PowerwallCalibrationDelayView(HomeAssistantView):
+    """Read support/budget, or request exactly one user-authorized deferral."""
+    url = "/api/power_sync/powerwall/calibration_delay"
+    name = "api:power_sync:powerwall:calibration_delay"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        data = {"entry_id": request.query["entry_id"]} if request.query.get("entry_id") else {}
+        try:
+            result = await self._hass.services.async_call(DOMAIN, "powerwall_get_battery_calibration_delay_status", data,
+                blocking=True, return_response=True)
+            return self.json(result)
+        except HomeAssistantError as error:
+            return self.json({"supported": False, "reason": str(error)}, status_code=409)
+
+    async def post(self, request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+            request_id = data.get("request_id") if isinstance(data, dict) else None
+            if not isinstance(request_id, str) or not 1 <= len(request_id) <= 80 or not all(c.isascii() and (c.isalnum() or c in "-_") for c in request_id):
+                raise ValueError("request_id is required")
+            validate_delay_hours(data.get("delay_hours"))
+            if "entry_id" in data and not isinstance(data["entry_id"], str):
+                raise ValueError("invalid entry_id")
+            data = {key: value for key, value in data.items() if key in ("delay_hours", "request_id", "entry_id")}
+        except (ValueError, TypeError):
+            return self.json({"error": "invalid_calibration_delay_request"}, status_code=400)
+        user = request.get("hass_user")
+        if user is None:
+            return self.json({"error": "authentication_required"}, status_code=401)
+        try:
+            result = await self._hass.services.async_call(DOMAIN, "powerwall_delay_battery_calibration", data,
+                blocking=True, return_response=True, context=Context(user_id=user.id))
+            if not isinstance(result, dict):
+                return self.json({"error": "calibration_delay_response_unavailable", "retry_safe": False}, status_code=503)
+            return self.json(result, status_code=200 if result.get("command_acknowledged") else 503)
+        except HomeAssistantError as error:
+            return self.json({"error": str(error), "retry_safe": False}, status_code=409)
 
 
 class PowerwallDebugConfigView(HomeAssistantView):

@@ -10075,6 +10075,7 @@ function _powerwallLocalControl(e, hasE, findEntity) {
   const pairedEntity = findEntity('binary_sensor', 'powerwall_local_paired');
   const islandedEntity = findEntity('binary_sensor', 'powerwall_local_islanded');
   const criticalAlertEntity = findEntity('binary_sensor', 'pw_critical_alert');
+  const solarPermission = findEntity('switch', 'on_grid_solar_curtailment');
   const calibrationEntity = findEntity('binary_sensor', 'calibration_active');
   const statusEntities = [
     {
@@ -10168,7 +10169,16 @@ function _powerwallLocalControl(e, hasE, findEntity) {
         ],
         card: {
           type: 'entities',
+          show_header_toggle: false,
           entities: [
+            ...(solarPermission ? [{
+              entity: solarPermission,
+              name: 'Allow on-grid solar curtailment',
+              icon: 'mdi:solar-power-variant-outline',
+            }, {
+              type: 'section',
+              label: 'Permission only; use with a zero/limited-export policy',
+            }] : []),
             {
               entity: findEntity('switch', 'on_grid') || 'switch.power_sync_on_grid',
               name: 'On-Grid Mode',

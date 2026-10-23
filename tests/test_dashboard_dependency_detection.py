@@ -142,6 +142,12 @@ def test_powerwall_local_card_uses_domain_aware_entity_resolution():
       if (!controls.includes('switch.power_sync_off_grid')) {
         throw new Error('off-grid switch is not wired');
       }
+      if (!controls.includes('switch.power_sync_on_grid_solar_curtailment')) {
+        throw new Error('paired Tesla solar permission switch is not wired');
+      }
+      const missing = _powerwallLocalControl(e, hasE, (domain, suffix) => suffix === 'on_grid_solar_curtailment' ? null : findEntity(domain, suffix));
+      if (missing.cards[1].card.entities.some(row => row.entity === null)) throw new Error('Missing permission entity was rendered');
+
     """
     subprocess.run(
         ["node", "-e", f"{helper_source}\n{runtime}"],

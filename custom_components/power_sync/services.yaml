@@ -452,6 +452,54 @@ powerwall_go_off_grid:
       selector:
         boolean:
 
+powerwall_get_battery_calibration_delay_status:
+  name: Powerwall calibration delay status
+  description: >-
+    Read the paired LAN gateway's remaining calibration delay and deferral
+    allowance. Unsupported firmware reports unavailable. This is read-only;
+    it does not reset PowerSync's calibration guard.
+  fields:
+    entry_id:
+      name: PowerSync entry
+      description: Required when more than one PowerSync entry is configured.
+      selector:
+        text:
+
+powerwall_delay_battery_calibration:
+  name: Delay Powerwall calibration
+  description: >-
+    Request one calibration deferral in whole hours on supporting paired LAN
+    gateways. Requires fresh status and an available deferral allowance. This
+    may consume a limited gateway allowance. No automatic retries, Fleet
+    fallback, cancellation or calibration-guard reset. Check the response and
+    gateway status after a request; acceptance is separate from status readback.
+  fields:
+    delay_hours:
+      name: Delay (hours)
+      description: Positive whole hours; available values depend on gateway firmware.
+      required: true
+      selector:
+        select:
+          custom_value: true
+          options:
+            - label: 1 hour
+              value: '1'
+            - label: 2 hours
+              value: '2'
+            - label: 3 hours
+              value: '3'
+            - label: 6 hours
+              value: '6'
+            - label: 12 hours
+              value: '12'
+            - label: 24 hours
+              value: '24'
+    entry_id:
+      name: PowerSync entry
+      description: Required when more than one PowerSync entry is configured.
+      selector:
+        text:
+
 powerwall_set_on_grid_solar_curtailment:
   name: Allow on-grid solar curtailment (Powerwall)
   description: >-
