@@ -2137,3 +2137,21 @@ def test_force_power_slider_and_buttons_follow_renamed_entity():
       }
     '''
     subprocess.run(['node','-e',script],check=True,capture_output=True,text=True)
+
+
+def test_solar_permission_uses_registry_for_ha_device_named_entities():
+    source = STRATEGY_PATH.read_text()
+    start = source.index("function _registeredPowerSyncControl(")
+    end = source.index("class PowerSyncStrategy", start)
+    script = source[start:end] + r'''
+      const hass = {states: {'switch.home_allow_on_grid_solar_curtailment': {state: 'on'}}};
+      const registry = [{platform: 'other', entity_id: 'switch.foreign', unique_id: 'foreign_on_grid_solar_curtailment'},
+        {platform: 'power_sync', entity_id: 'switch.home_allow_on_grid_solar_curtailment', unique_id: 'entry_on_grid_solar_curtailment'}];
+      if (_registeredPowerSyncControl(hass, registry, 'switch', 'on_grid_solar_curtailment') !== 'switch.home_allow_on_grid_solar_curtailment') throw new Error('HA device-prefixed entity was lost');
+      registry[1].disabled_by = 'user';
+      if (_registeredPowerSyncControl(hass, registry, 'switch', 'on_grid_solar_curtailment') !== null) throw new Error('Disabled switch exposed');
+      registry[1].disabled_by = null; registry[1].platform = 'other';
+      if (_registeredPowerSyncControl(hass, registry, 'switch', 'on_grid_solar_curtailment') !== null) throw new Error('Unrelated integration exposed');
+    '''
+    subprocess.run(["node", "-e", script], check=True)
+    assert "if (domain === 'switch' && suffix === 'on_grid_solar_curtailment' && solarPermissionEntityId) return solarPermissionEntityId;" in source

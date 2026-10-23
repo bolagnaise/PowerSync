@@ -7737,6 +7737,12 @@ if (!customElements.get('power-sync-layout')) {
 
 // ─── Dashboard Strategy ─────────────────────────────────────────
 
+function _registeredPowerSyncControl(hass, registry, domain, suffix) {
+  return registry.find(row => row.platform === 'power_sync' && !row.disabled_by
+    && row.entity_id?.startsWith(`${domain}.`) && row.unique_id?.endsWith(`_${suffix}`)
+    && hass.states[row.entity_id])?.entity_id || null;
+}
+
 class PowerSyncStrategy {
   static async generate(config, hass) {
     // Check for HACS custom elements — use synchronous check first (instant if loaded),
@@ -7756,8 +7762,12 @@ class PowerSyncStrategy {
     } catch (_) { /* YAML mode — skip */ }
 
     let forcePowerEntityId = null;
+    let solarPermissionEntityId = null;
     try {
       const registry = await hass.callWS({ type: 'config/entity_registry/list' });
+      solarPermissionEntityId = _registeredPowerSyncControl(
+        hass, registry, 'switch', 'on_grid_solar_curtailment'
+      );
       forcePowerEntityId = registry.find(row => row.platform === 'power_sync'
         && row.unique_id?.endsWith('_force_power_kw') && !row.disabled_by
         && hass.states[row.entity_id])?.entity_id || null;
@@ -7950,6 +7960,7 @@ class PowerSyncStrategy {
       return s && s.state !== 'unavailable' && s.state !== 'unknown';
     };
     const findEntity = (domain, suffix) => {
+      if (domain === 'switch' && suffix === 'on_grid_solar_curtailment' && solarPermissionEntityId) return solarPermissionEntityId;
       const direct = `${domain}.power_sync_${suffix}`;
       if (isAvailable(direct)) return direct;
       const prefix = `${domain}.`;
