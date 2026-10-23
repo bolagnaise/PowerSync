@@ -3986,6 +3986,7 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
     this._requestToken = 0;
     this._connected = false;
     this._expanded = true;
+    this._detailsExpanded = false;
     this._connectionRequested = false;
     this._connectionOpen = false;
     this._connectionTouched = false;
@@ -4837,10 +4838,11 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
 
   _appendTextBlock(parent, title, value) {
     if (typeof value !== 'string' || !value.trim()) return;
-    const block = document.createElement('section');
-    const heading = document.createElement('h4');
-    heading.textContent = title;
-    const text = document.createElement('p');
+    const block = document.createElement('p');
+    block.className = 'summary-row';
+    const heading = document.createElement('strong');
+    heading.textContent = `${title}: `;
+    const text = document.createElement('span');
     text.textContent = value;
     block.append(heading, text);
     parent.append(block);
@@ -4868,7 +4870,7 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
       const parsed = new Date(value);
       return Number.isNaN(parsed.getTime())
         ? ''
-        : parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        : parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: this._hass?.config?.time_zone });
     };
     const start = formatTime(item.start);
     const end = formatTime(item.end);
@@ -4879,11 +4881,29 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
     return [time, action, item.reason.trim()].filter(Boolean).join(' — ');
   }
 
+  _forecastSummaryText(window) {
+    // Older summaries contain raw readings; longer windows already carry
+    // deterministic aggregates. Show both shapes without dropping evidence.
+    const stats = (key) => {
+      const supplied = window?.summary?.[key];
+      if (supplied && [supplied.min, supplied.average, supplied.max].every(value => typeof value === 'number' && Number.isFinite(value))) return supplied;
+      const values = (Array.isArray(window?.values) ? window.values : [])
+        .map(slot => slot?.[key]).filter(value => typeof value === 'number' && Number.isFinite(value));
+      if (!values.length) return null;
+      return { min: Math.min(...values), average: values.reduce((sum, value) => sum + value, 0) / values.length, max: Math.max(...values) };
+    };
+    const solar = stats('solar_kw');
+    const load = stats('load_kw');
+    if (!solar || !load) return null;
+    const range = value => `${value.min.toFixed(1)}–${value.max.toFixed(1)} kW (average ${value.average.toFixed(1)} kW)`;
+    return `Forecast solar ${range(solar)}; home use ${range(load)}.`;
+  }
+
   _appendForecastEvidence(parent, evidence) {
     if (!evidence || typeof evidence !== 'object') return;
     const block = document.createElement('section');
     const heading = document.createElement('h4');
-    heading.textContent = 'Verified forecast evidence';
+    heading.textContent = 'Forecast inputs for this plan';
     block.append(heading);
     if (evidence.status === 'unavailable') {
       const notice = document.createElement('p');
@@ -4899,31 +4919,40 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
       notice.textContent = 'Forecast data changed since the last explanation. These values belong to the displayed plan snapshot.';
       block.append(notice);
     }
-    const rows = [];
+    let rows = 0;
     for (const window of Array.isArray(evidence.windows) ? evidence.windows : []) {
       const values = Array.isArray(window?.values) ? window.values : [];
-      if (!values.length) continue;
+      const overview = this._forecastSummaryText(window);
+      if (!overview) continue;
       const label = this._timelineText({ start: window.start, end: window.end, action: window.action || '', reason: '' })
         .split(' — ').filter(Boolean).slice(0, 2).join(' — ');
+      const row = document.createElement('p');
+      row.textContent = [label, overview].filter(Boolean).join(' — ');
+      block.append(row);
+      rows++;
+      if (!values.length) continue;
+      const raw = document.createElement('details');
+      const rawHeading = document.createElement('summary');
+      rawHeading.textContent = 'Five-minute readings';
+      raw.append(rawHeading);
       const slots = values.map((slot) => {
         const time = new Date(slot?.timestamp);
-        const renderedTime = Number.isNaN(time.getTime()) ? '' : time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        const solar = Number(slot?.solar_kw);
-        const load = Number(slot?.load_kw);
-        if (!Number.isFinite(solar) || !Number.isFinite(load)) return null;
+        const renderedTime = Number.isNaN(time.getTime()) ? '' : time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: this._hass?.config?.time_zone });
+        const solar = slot?.solar_kw;
+        const load = slot?.load_kw;
+        if (typeof solar !== 'number' || typeof load !== 'number' || !Number.isFinite(solar) || !Number.isFinite(load)) return null;
         return `${renderedTime ? `${renderedTime}: ` : ''}solar ${solar.toFixed(2)} kW, load ${load.toFixed(2)} kW`;
       }).filter(Boolean);
-      if (slots.length) rows.push([label, slots.join('; ')].filter(Boolean).join(' — '));
-    }
-    if (rows.length) {
       const list = document.createElement('ul');
-      for (const row of rows) {
+      for (const slot of slots) {
         const item = document.createElement('li');
-        item.textContent = row;
+        item.textContent = slot;
         list.append(item);
       }
-      block.append(list);
-    } else {
+      raw.append(list);
+      block.append(raw);
+    }
+    if (!rows) {
       const notice = document.createElement('p');
       notice.className = 'notice';
       notice.textContent = 'Forecast evidence is unavailable for this plan snapshot.';
@@ -4938,7 +4967,7 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
     badges.className = 'badges';
     const provider = typeof summary.provider === 'string' ? summary.provider : '';
     for (const label of [
-      provider ? provider.toUpperCase() : null,
+      summary.summary_source === 'plan' ? 'Plan summary' : provider ? provider.toUpperCase() : null,
       this._meta.cacheHit ? 'Cached' : null,
       this._meta.stale ? 'Older plan' : null,
     ].filter(Boolean)) {
@@ -4979,9 +5008,17 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
     const timeline = Array.isArray(summary.important_actions)
       ? summary.important_actions
       : summary.action_explanations;
-    this._appendList(body, 'Optional timeline', timeline, (item) => this._timelineText(item));
-    this._appendForecastEvidence(body, summary.forecast_evidence);
+    const details = document.createElement('details');
+    details.className = 'explanation-details';
+    details.open = !!this._detailsExpanded;
+    details.addEventListener('toggle', () => { this._detailsExpanded = details.open; });
+    const detailsHeading = document.createElement('summary');
+    detailsHeading.textContent = 'Details';
+    details.append(detailsHeading);
+    this._appendList(details, 'Optional timeline', timeline, (item) => this._timelineText(item));
+    this._appendForecastEvidence(details, summary.forecast_evidence);
     this._appendList(body, 'What may change', summary.caveats, (item) => typeof item === 'string' ? item : null);
+    if (details.childElementCount > 1) body.append(details);
     if (typeof summary.generated_at === 'string') {
       const generated = document.createElement('p');
       generated.className = 'generated';
@@ -5017,6 +5054,9 @@ class PowerSyncAIPlanExplanation extends HTMLElement {
         .badges span { padding:3px 8px; border-radius:999px; background:rgba(var(--rgb-cyan-color, 0,188,212),0.13); font-size:11px; font-weight:700; }
         .notice { padding:9px 10px; border-radius:9px; background:rgba(var(--rgb-orange-color,255,152,0),0.13); }
         .headline { font-size:16px; font-weight:700; line-height:1.4; }
+        .summary-row { margin:8px 0; line-height:1.5; }
+        .explanation-details { margin-top:12px; }
+        summary { cursor:pointer; padding:6px 0; font-weight:600; }
         .status { color:var(--secondary-text-color); }
         .generated { margin-top:13px; color:var(--secondary-text-color); font-size:12px; }
         .actions { display:flex; gap:9px; flex-wrap:wrap; margin-top:14px; }

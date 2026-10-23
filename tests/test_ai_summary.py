@@ -196,7 +196,7 @@ def test_context_is_compact_deterministic_and_excludes_private_fields():
         "predicted_savings_today": 2.3,
         "baseline_cost_today": 3.5,
     }
-    assert context["instruction_contract_version"] == "powersync.optimizer-explainer.v2"
+    assert context["instruction_contract_version"] == "powersync.optimizer-explainer.v3"
     assert context["units"] == {
         "power": "kW",
         "energy": "kWh",
@@ -337,11 +337,11 @@ def test_context_treats_configured_ev_without_active_plan_as_valid_empty_state()
     assert "ev_plan" not in context["missing_inputs"]
 
 
-def test_v2_prompt_is_provider_neutral_decision_first_and_descriptive_only():
+def test_v3_prompt_is_provider_neutral_decision_first_and_descriptive_only():
     module = _load_module()
 
-    assert module.PROMPT_VERSION == "2"
-    assert module.SCHEMA_VERSION == "2"
+    assert module.PROMPT_VERSION == "3"
+    assert module.SCHEMA_VERSION == "3"
     assert "PowerSync Optimizer Explainer contract" in module.SYSTEM_PROMPT
     assert "What is happening now" in module.SYSTEM_PROMPT
     assert "What happens next and when" in module.SYSTEM_PROMPT
@@ -459,7 +459,7 @@ def test_model_output_is_strict_and_server_owns_action_metadata():
     context = module.build_compact_context(_snapshot())
     output = module.validate_model_output(_model_output(), context["action_windows"])
 
-    assert output["contract_version"] == "powersync.optimizer-explainer.v2"
+    assert output["contract_version"] == "powersync.optimizer-explainer.v3"
     assert output["overview"] == " ".join(
         _model_output()[key] for key in ("headline", "now", "next")
     )
@@ -1618,3 +1618,112 @@ def test_local_auto_refresh_keeps_configured_timeout(monkeypatch):
         await service.async_shutdown()
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('savings,comparison', [(-1.04, 'more than'), (0, 'the same as'), (1.04, 'less than')])
+def test_concise_outcome_uses_honest_server_cost_comparison(savings, comparison):
+    module = _load_module()
+    snapshot = _snapshot()
+    snapshot.update(predicted_cost=15.90, predicted_savings=savings)
+    context = module.build_compact_context(snapshot)
+    output = module.prepare_model_output(_model_output(), context)
+    assert 'AUD 15.90' in output['expected_outcome']
+    assert comparison in output['expected_outcome']
+    assert '-1.04' not in output['expected_outcome']
+    assert output['strategy'].endswith(output['expected_outcome'])
+
+
+def test_concise_fallback_never_copies_verbose_or_unknown_window_claims():
+    module = _load_module()
+    context = module.build_compact_context(_snapshot())
+    verbose = _model_output()
+    verbose['why_it_matters'] = 'Unsupported causal assertion. ' * 15
+    output = module.prepare_model_output(verbose, context)
+    assert output['summary_source'] == 'plan'
+    assert 'Unsupported causal assertion' not in json.dumps(output)
+    assert len(' '.join(output[k] for k in ('headline', 'now', 'next', 'why_it_matters', 'expected_outcome')).split()) <= 140
+    assert 'plan' in output['now'].lower()
+    assert '01 Aug' in output['next']
+    assert '1:00 pm' in output['next']
+    verbose['action_explanations'] = [{'window_id': 'invented', 'reason': 'Unsafe'}]
+    with pytest.raises(module.AISummaryError) as caught:
+        module.prepare_model_output(verbose, context)
+    assert caught.value.code == 'invalid_provider_response'
+
+
+def test_concise_monitoring_and_missing_metrics_remain_explicit():
+    module = _load_module()
+    snapshot = _snapshot()
+    snapshot['monitoring_mode'] = True
+    snapshot.pop('currency')
+    snapshot.pop('predicted_cost')
+    snapshot.pop('predicted_savings')
+    context = module.build_compact_context(snapshot)
+    output = module.prepare_model_output(_model_output(), context)
+    assert 'Monitoring only' in output['now']
+    assert 'no commands' in output['now']
+    assert output['expected_outcome'] == 'A cost comparison is unavailable for this plan.'
+    assert '2.30' not in output['expected_outcome']
+
+
+@pytest.mark.parametrize('provider', ['gemini', 'grok', 'openrouter', 'openai', 'chatgpt', 'local_openai_compatible'])
+def test_every_provider_uses_shared_concise_policy_without_extra_generation(provider):
+    module = _load_module()
+    snapshot = _snapshot()
+    class Adapter:
+        calls = 0
+        async def generate(self, **kwargs):
+            self.calls += 1
+            result = _model_output()
+            result['now'] = 'The battery is currently performing self-consumption. ' * 6
+            return result
+    adapter = Adapter()
+    module.PROVIDER_ADAPTERS[provider] = adapter
+    service = module.AISummaryService(object(), lambda: snapshot)
+    service._chatgpt_connected = lambda: True
+    kwargs = dict(provider=provider, api_key='test', refresh=False,
+                  local_model='local-test', endpoint='http://127.0.0.1:3000/v1',
+                  openrouter_model='test/model')
+    result = asyncio.run(service.generate(**kwargs))
+    assert result['summary']['summary_source'] == 'plan'
+    assert len(result['summary']['now']) <= 180
+    assert adapter.calls == 1
+    assert asyncio.run(service.generate(**kwargs))['cache_hit'] is True
+    assert adapter.calls == 1
+
+
+def test_concise_budget_covers_combined_words_and_legacy_timeline_limits():
+    module = _load_module()
+    context = module.build_compact_context(_snapshot())
+    output = _model_output()
+    for key in ('now', 'next', 'why_it_matters'):
+        output[key] = 'A ' * 85
+    assert module.prepare_model_output(output, context)['summary_source'] == 'plan'
+    output = _model_output()
+    output['action_explanations'][0]['reason'] = 'A' * 141
+    assert module.prepare_model_output(output, context)['summary_source'] == 'plan'
+    output = _model_output()
+    output['caveats'] = ['One caveat.', 'Second caveat.', 'Third caveat.']
+    assert module.prepare_model_output(output, context)['summary_source'] == 'plan'
+    # Malformed or enormous content remains an error, never a summary source.
+    output['now'] = 'A' * 401
+    with pytest.raises(module.AISummaryError):
+        module.prepare_model_output(output, context)
+
+
+def test_concise_fallback_preserves_local_date_and_forecast_assumptions():
+    module = _load_module()
+    snapshot = _snapshot()
+    snapshot['monitoring_mode'] = True
+    snapshot['next_action_time'] = '2026-10-24T00:05:00+10:00'
+    snapshot['next_action'] = 'charge'
+    snapshot['forecast_summary'].update(away_mode=True, solar_next_24h_kwh=0)
+    context = module.build_compact_context(snapshot)
+    output = _model_output()
+    output['why_it_matters'] = 'Lengthy explanation. ' * 20
+    result = module.prepare_model_output(output, context)
+    assert '24 Oct 2026 at 12:05 am' in result['next']
+    assert 'Monitoring only' in result['now']
+    assert 'no commands' in result['now']
+    assert any('away mode and no solar generation' in text for text in result['caveats'])
+    assert module._concise_enough(result)

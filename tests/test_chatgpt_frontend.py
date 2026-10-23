@@ -983,3 +983,71 @@ def test_local_timeout_save_and_summary_watchdog_follow_server_budget():
       wait.resolve({ success: true, summary: { headline: 'Done' } }); await task;
       reader.disconnectedCallback();
     """)
+
+
+def test_ai_explanation_details_hide_raw_readings_and_keep_aggregate_windows():
+    """The default view stays short for both cached forecast representations."""
+    runtime_checks = r"""
+      const fs = require('fs');
+      const vm = require('vm');
+      const source = fs.readFileSync(process.argv[1], 'utf8');
+      const start = source.indexOf('class PowerSyncAIPlanExplanation');
+      const end = source.indexOf("if (!customElements.get('power-sync-ai-plan-explanation'))", start);
+      class Element {
+        constructor(tag = 'div') { this.tag = tag; this.children = []; this.listeners = {}; this.textContent = ''; }
+        append(...nodes) { this.children.push(...nodes); }
+        addEventListener(name, listener) { this.listeners[name] = listener; }
+        get childElementCount() { return this.children.length; }
+      }
+      class HTMLElement extends Element { attachShadow() { this.shadowRoot = new Element(); } }
+      const context = vm.createContext({ HTMLElement, document: { createElement: tag => new Element(tag) }, Date });
+      vm.runInContext(source.slice(start, end) + '\nthis.Card = PowerSyncAIPlanExplanation;', context);
+      const card = new context.Card();
+      card._hass = { config: { time_zone: 'Australia/Brisbane' }, callApi() { throw Error('Details requested provider usage'); } };
+      card._meta = { stale: true };
+      const rawWindow = {
+        start: '2026-10-24T18:00:00+10:00', end: '2026-10-24T20:00:00+10:00', action: 'export',
+        values: Array.from({ length: 24 }, (_, index) => ({
+          timestamp: new Date(Date.parse('2026-10-24T18:00:00+10:00') + index * 300000).toISOString(), solar_kw: 0, load_kw: 1 + index / 100,
+        })),
+      };
+      const aggregated = { ...rawWindow, values: undefined, summary: {
+        slot_count: 25, solar_kw: { min: 0, average: 1, max: 2 }, load_kw: { min: 1, average: 2, max: 3 },
+      }};
+      card._summary = { headline: 'A concise plan', now: 'Use stored energy.', next: 'Charge at 10 am.',
+        why_it_matters: 'Lower import prices.', expected_outcome: 'AUD 1.04 more than baseline.',
+        provider: 'gemini', important_actions: [{ ...rawWindow, reason: 'A material change.' }],
+        caveats: ['A material caveat.'], forecast_evidence: { status: 'available', windows: [rawWindow, aggregated] },
+      };
+      const flatten = node => [node, ...node.children.flatMap(flatten)];
+      const visible = node => node.textContent + ' ' + (node.tag === 'details' && !node.open
+        ? node.children.filter(child => child.tag === 'summary') : node.children).map(visible).join(' ');
+      const expect = (value, message) => { if (!value) throw Error(message); };
+      let body = new Element();
+      card._renderContent(body);
+      let details = flatten(body).find(node => node.className === 'explanation-details');
+      expect(details && !details.open, 'Details must start collapsed');
+      expect(/older plan/.test(visible(body)), 'stale notice was hidden');
+      expect(/material caveat/.test(visible(body)), 'material caveat was hidden');
+      expect(!/Forecast solar|A material change|solar 0.00/.test(visible(body)), 'default view dumped evidence');
+      details.open = true; details.listeners.toggle();
+      expect(/A material change/.test(visible(body)), 'timeline was lost');
+      expect(/Forecast solar 0.0–2.0/.test(visible(body)), '25-slot aggregate was omitted');
+      expect(/Forecast solar 0.0–0.0/.test(visible(body)), '24-slot raw window was not summarized');
+      expect(!/solar 0.00/.test(visible(body)), 'opening Details dumped raw readings');
+      const raw = flatten(details).find(node => node.tag === 'details' && node !== details);
+      raw.open = true;
+      expect(flatten(raw).filter(node => node.tag === 'li').length === 24, 'on-demand readings were lost');
+      expect(/solar 0.00/.test(visible(body)), 'explicit raw evidence could not be shown');
+      body = new Element(); card._renderContent(body);
+      expect(flatten(body).find(node => node.className === 'explanation-details').open, 'Details state was lost on render');
+      expect(card._forecastSummaryText({ values: [{ solar_kw: null, load_kw: null }] }) === null, 'null telemetry became zero');
+      card._summary.forecast_evidence = { status: 'unavailable', windows: [] };
+      body = new Element(); card._renderContent(body);
+      expect(/unavailable/.test(visible(body)), 'unavailable evidence notice was lost');
+    """
+    result = subprocess.run(
+        ["node", "-e", runtime_checks, str(STRATEGY_PATH)],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

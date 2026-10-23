@@ -44,11 +44,19 @@ AI_SUMMARY_MODELS = {
     "chatgpt": "gpt-6.1-sol",
     "local_openai_compatible": "",
 }
-EXPLAINER_CONTRACT_VERSION = "powersync.optimizer-explainer.v2"
-PROMPT_VERSION = "2"
-SCHEMA_VERSION = "2"
+EXPLAINER_CONTRACT_VERSION = "powersync.optimizer-explainer.v3"
+PROMPT_VERSION = "3"
+SCHEMA_VERSION = "3"
 MAX_CONTEXT_WINDOWS = 24
-MAX_ACTION_EXPLANATIONS = 6
+MAX_ACTION_EXPLANATIONS = 3
+MAX_NARRATIVE_WORDS = 140
+SUMMARY_TEXT_LIMITS = {
+    "headline": 80,
+    "now": 180,
+    "next": 180,
+    "why_it_matters": 240,
+    "expected_outcome": 180,
+}
 MAX_FORECAST_EVIDENCE_SLOTS = 24
 LOCAL_OPENAI_MAX_TOKENS = 2048
 DEFAULT_LOCAL_AI_TIMEOUT_SECONDS = 120
@@ -69,27 +77,27 @@ MODEL_OUTPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "headline": {
             "type": "string",
-            "maxLength": 180,
+            "maxLength": SUMMARY_TEXT_LIMITS["headline"],
             "description": "One concise homeowner-oriented headline for the supplied plan.",
         },
         "now": {
             "type": "string",
-            "maxLength": 400,
+            "maxLength": SUMMARY_TEXT_LIMITS["now"],
             "description": "What the supplied plan is doing now, using only verified context.",
         },
         "next": {
             "type": "string",
-            "maxLength": 400,
+            "maxLength": SUMMARY_TEXT_LIMITS["next"],
             "description": "The next material plan change and when it occurs.",
         },
         "why_it_matters": {
             "type": "string",
-            "maxLength": 600,
-            "description": "Why the plan is better than the relevant supplied alternative.",
+            "maxLength": SUMMARY_TEXT_LIMITS["why_it_matters"],
+            "description": "The strongest supported reason, without assuming this plan is cheaper or better.",
         },
         "expected_outcome": {
             "type": "string",
-            "maxLength": 400,
+            "maxLength": SUMMARY_TEXT_LIMITS["expected_outcome"],
             "description": "Expected supplied cost, saving, energy, or reserve outcome.",
         },
         "action_explanations": {
@@ -99,7 +107,7 @@ MODEL_OUTPUT_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "window_id": {"type": "string"},
-                    "reason": {"type": "string", "maxLength": 500},
+                    "reason": {"type": "string", "maxLength": 140},
                 },
                 "required": ["window_id", "reason"],
                 "additionalProperties": False,
@@ -107,8 +115,8 @@ MODEL_OUTPUT_SCHEMA: dict[str, Any] = {
         },
         "caveats": {
             "type": "array",
-            "maxItems": 4,
-            "items": {"type": "string", "maxLength": 300},
+            "maxItems": 2,
+            "items": {"type": "string", "maxLength": 160},
         },
     },
     "required": [
@@ -141,11 +149,26 @@ is available. Do not create a forecast-to-decision link from any other fact.
 Write in this priority order:
 1. What is happening now.
 2. What happens next and when.
-3. Why the supplied plan is better than the most relevant alternative supported by
-   the supplied prices, forecasts, constraints, or verified feedback.
+3. The strongest reason supported by supplied prices, forecasts, constraints, or
+   verified feedback. Do not assume the plan is better or cheaper.
 4. The expected supplied outcome.
 5. Caveats, unavailable inputs, and what verified inputs may change the plan.
-6. Only then, an optional short timeline using at most six supplied window IDs.
+6. Only then, an optional short timeline using at most three supplied window IDs.
+
+Target 80-120 words across the headline, now, next, why_it_matters,
+expected_outcome and caveats combined; never exceed 140 words. Use a headline of
+at most eight words, one short sentence each for now, next and expected_outcome,
+and at most two short sentences for why_it_matters. Do not repeat facts across
+fields. Return empty action_explanations and caveats arrays unless they add useful
+information. Include at most two material caveats; do not list disabled optional
+features. Never enumerate raw forecast intervals.
+
+Say "power the home from the battery" instead of "perform self-consumption", and
+"battery charge" instead of "State of Charge". Describe what the plan calls for;
+planned power is not a measured output and window peak power is not a constant
+rate. If monitoring_mode is true, say PowerSync sends no commands. Negative
+savings mean a higher cost than the baseline, not a saving. Use an explicit local
+date for the next action so a cached "tomorrow" cannot silently change meaning.
 
 Use plain homeowner-oriented wording. Use local times and the supplied currency and
 unit metadata. Round unnecessary precision naturally. Prefer comparative reasons
@@ -1277,7 +1300,9 @@ def validate_model_output(
             "invalid_provider_response",
             "The AI provider response is missing required explanation fields.",
         )
-    if len(explanations) > MAX_ACTION_EXPLANATIONS or len(caveats) > 4:
+    # Accept bounded legacy shapes for validation before deciding whether a
+    # provider ignored the concise contract. Unknown IDs still fail closed.
+    if len(explanations) > 6 or len(caveats) > 4:
         raise AISummaryError(
             "invalid_provider_response",
             "The AI provider returned too many explanation items.",
@@ -1340,6 +1365,131 @@ def validate_model_output(
         "overview": " ".join((headline, now, next_action)),
         "strategy": " ".join((why_it_matters, expected_outcome)),
     }
+
+
+def _concise_enough(summary: Mapping[str, Any]) -> bool:
+    texts = [summary[key] for key in SUMMARY_TEXT_LIMITS]
+    caveats = summary["caveats"]
+    actions = summary["important_actions"]
+    return (
+        all(len(summary[key]) <= limit for key, limit in SUMMARY_TEXT_LIMITS.items())
+        and len(summary["headline"].split()) <= 8
+        and sum(len(text.split()) for text in texts + caveats) <= MAX_NARRATIVE_WORDS
+        and len(caveats) <= 2
+        and all(len(text) <= 160 for text in caveats)
+        and len(actions) <= MAX_ACTION_EXPLANATIONS
+        and all(len(action["reason"]) <= 140 for action in actions)
+    )
+
+
+def _cost_outcome(context: Mapping[str, Any]) -> str:
+    """Format supplied daily estimates without relying on model arithmetic."""
+    metrics = context.get("summary", {})
+    currency = context.get("units", {}).get("currency")
+    cost = _finite_number(metrics.get("predicted_cost_today"), 2)
+    savings = _finite_number(metrics.get("predicted_savings_today"), 2)
+    baseline = _finite_number(metrics.get("baseline_cost_today"), 2)
+    if cost is None or not isinstance(currency, str) or not currency:
+        return "A cost comparison is unavailable for this plan."
+    estimate = f"Estimated cost today: {currency} {cost:.2f}"
+    if savings is None or baseline is None:
+        return f"{estimate}; a baseline comparison is unavailable."
+    if savings == 0:
+        return f"{estimate}, the same as the baseline."
+    direction = "less" if savings > 0 else "more"
+    return f"{estimate}; {currency} {abs(savings):.2f} {direction} than the {currency} {baseline:.2f} baseline."
+
+
+def _plan_summary(context: Mapping[str, Any]) -> dict[str, Any]:
+    """Build an honest short fallback solely from approved plan facts."""
+    labels = {
+        "charge": "charge the battery",
+        "export": "export energy to the grid",
+        "discharge": "discharge the battery",
+        "self_consumption": "power the home from the battery when needed",
+        "consume": "power the home from the battery when needed",
+        "idle": "hold stored battery energy",
+    }
+    current = context.get("current_status", {})
+    action = labels.get(current.get("planned_action"))
+    now = f"The plan is to {action}." if action else "The current planned action is unavailable."
+    soc = _finite_number(current.get("battery_soc_percent"), 0)
+    if soc is not None:
+        now += f" Battery charge at generation: {soc:.0f}%."
+    upcoming = context.get("next_material_action", {})
+    next_label = labels.get(upcoming.get("action"))
+    next_text = "No next action with a confirmed time is available."
+    if next_label and isinstance(upcoming.get("time"), str):
+        try:
+            timestamp = datetime.fromisoformat(upcoming["time"])
+            # Keep the supplied site-local offset; never use the server zone.
+            if timestamp.tzinfo is not None:
+                when = timestamp.strftime("%d %b %Y at %I:%M %p").replace(" at 0", " at ").replace("AM", "am").replace("PM", "pm")
+                next_text = f"Next, {next_label} on {when} (site time)."
+        except ValueError:
+            pass
+    caveats = []
+    if context.get("forecast_evidence", {}).get("status") != "available":
+        caveats.append("Forecast evidence is unavailable for this plan snapshot.")
+    forecast = context.get("forecast") or {}
+    assumptions = []
+    if forecast.get("away_mode") is True:
+        assumptions.append("away mode")
+    if _finite_number(forecast.get("solar_next_24h_kwh")) == 0:
+        assumptions.append("no solar generation")
+    if assumptions:
+        caveats.append("The forecast assumes " + " and ".join(assumptions) + ".")
+    why = "A detailed reason is unavailable in this short summary; the schedule and forecast inputs are in Details."
+    # A bounded fallback can repeat a verified comparison, but cannot invent
+    # an optimizer cause or a forecast-to-decision relationship.
+    next_window = next((window for window in context["action_windows"] if window.get("start") == upcoming.get("time")), None)
+    if next_window is None and not next_label and context["action_windows"]:
+        next_window = context["action_windows"][0]
+    currency = context.get("units", {}).get("currency")
+    if next_window and isinstance(currency, str) and currency:
+        price_kind = {"charge": "import", "export": "export"}.get(next_window.get("action"))
+        if price_kind:
+            average = _finite_number(next_window.get(f"{price_kind}_price", {}).get("average"), 3)
+            comparison_key = "max" if price_kind == "import" else "min"
+            comparison = _finite_number((context.get("price_summary", {}).get(price_kind) or {}).get(comparison_key), 3)
+            if average is not None and comparison is not None:
+                label = "Charging" if price_kind == "import" else "Export"
+                reference = "peak import" if price_kind == "import" else "lowest export"
+                why = f"{label} in that window averages {currency} {average:g}/kWh; the supplied {reference} price is {currency} {comparison:g}/kWh."
+    return {
+        "headline": "Your battery plan at a glance",
+        "now": now,
+        "next": next_text,
+        "why_it_matters": why,
+        "expected_outcome": _cost_outcome(context),
+        "action_explanations": [],
+        "caveats": caveats,
+    }
+
+
+def prepare_model_output(value: Any, context: Mapping[str, Any]) -> dict[str, Any]:
+    """Apply one presentation policy to every provider without paid retries."""
+    windows = list(context["action_windows"])
+    validated = validate_model_output(value, windows)
+    validated["expected_outcome"] = _cost_outcome(context)
+    if context.get("forecast_evidence", {}).get("status") != "available":
+        notice = "Forecast evidence is unavailable for this plan snapshot."
+        if notice not in validated["caveats"]:
+            validated["caveats"] = [notice, *validated["caveats"]]
+    if context.get("monitoring_mode"):
+        validated["now"] = "Monitoring only: PowerSync sends no commands. " + validated["now"]
+    source = "ai"
+    if not _concise_enough(validated):
+        validated = validate_model_output(_plan_summary(context), windows)
+        if context.get("monitoring_mode"):
+            validated["now"] = "Monitoring only: PowerSync sends no commands. " + validated["now"]
+        source = "plan"
+    if not _concise_enough(validated):
+        raise AISummaryError("invalid_provider_response", "A concise explanation could not be prepared safely.")
+    # Keep older clients on the same final wording as the decision-first UI.
+    validated["overview"] = " ".join(validated[key] for key in ("headline", "now", "next"))
+    validated["strategy"] = " ".join(validated[key] for key in ("why_it_matters", "expected_outcome"))
+    return {**validated, "summary_source": source}
 
 
 def _provider_error(status: int) -> AISummaryError:
@@ -2135,7 +2285,7 @@ class AISummaryService:
             else:
                 raw = await adapter.generate(session=self._session, api_key=api_key, model=model, context=context)
         self._require_generation(generation)
-        validated = validate_model_output(raw, list(context["action_windows"]))
+        validated = prepare_model_output(raw, context)
 
         current_context = build_compact_context(self._snapshot_getter())
         current_guard_fingerprint = plan_guard_fingerprint(
