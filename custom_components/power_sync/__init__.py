@@ -5749,6 +5749,23 @@ async def _confirm_tesla_tariff_uploaded(
     return False
 
 
+# Periodic price syncs run about every 5 minutes. A Retry-After longer than
+# this puts the retry at the next sync boundary, where it takes the rate-limit
+# slot from the fresher tariff and resends the previous interval's prices.
+TOU_PERIODIC_SYNC_MAX_RETRY_AFTER_SECONDS = 60.0
+
+
+def _tou_retry_after_too_long(
+    retry_after: float | None, max_retry_after: float | None
+) -> bool:
+    """Return True when a Retry-After wait is longer than the caller allows."""
+    return (
+        retry_after is not None
+        and max_retry_after is not None
+        and retry_after > max_retry_after
+    )
+
+
 async def send_tariff_to_tesla(
     hass: HomeAssistant,
     site_id: str,
@@ -5762,6 +5779,7 @@ async def send_tariff_to_tesla(
     accepted_status: dict[str, bool] | None = None,
     readback_status: dict[str, str] | None = None,
     is_current: Callable[[], bool] | None = None,
+    max_retry_after_seconds: float | None = None,
 ) -> bool:
     """Upload one site's tariff, sharing backpressure across all TOU callers.
 
@@ -5769,6 +5787,8 @@ async def send_tariff_to_tesla(
     lifecycle state before retrying. Keep the cooldown in hass.data so a final
     429 or a cancelled retry cannot let the next caller bypass Retry-After.
     Callers with a force lifecycle revoke stale payloads through is_current.
+    Periodic price syncs set max_retry_after_seconds so a long Retry-After
+    drops their retry instead of resending an older tariff at the next sync.
     """
     uploads = hass.data.setdefault(DOMAIN, {}).setdefault("_tesla_tou_uploads", {})
     key = (api_provider, get_tesla_api_base_url(api_provider, fleet_base_url), str(site_id))
@@ -5790,6 +5810,7 @@ async def send_tariff_to_tesla(
             readback_status=readback_status,
             rate_limit_state=state,
             is_current=is_current,
+            max_retry_after_seconds=max_retry_after_seconds,
         )
     finally:
         state["busy"] = False
@@ -5810,6 +5831,7 @@ async def _send_tariff_to_tesla(
     is_current: Callable[[], bool] | None = None,
     *,
     rate_limit_state: dict[str, Any],
+    max_retry_after_seconds: float | None = None,
 ) -> bool:
     """Send tariff data to Tesla via the configured provider with retry logic.
 
@@ -5827,6 +5849,8 @@ async def _send_tariff_to_tesla(
             after Tesla accepts the upload, even if readback confirmation fails.
         readback_status: Optional mutable status populated with the confirmed
             representation (``exact`` or ``tesla_zero_normalized``).
+        max_retry_after_seconds: Give up instead of retrying when a 429 or 5xx
+            Retry-After is longer than this. None (the default) always waits.
 
     Returns:
         True if successful, False otherwise
@@ -5973,6 +5997,15 @@ async def _send_tariff_to_tesla(
                         f"{retry_after_delay:.0f}s" if retry_after_delay else "not set",
                     )
                     last_error = f"Rate limited 429"
+                    if _tou_retry_after_too_long(retry_after_delay, max_retry_after_seconds):
+                        _LOGGER.warning(
+                            "Not retrying periodic TOU sync for site %s: retry-after %.0fs "
+                            "exceeds %.0fs; the next sync will send a fresher tariff",
+                            site_id,
+                            retry_after_delay,
+                            max_retry_after_seconds,
+                        )
+                        return False
                     continue  # Retry on 429
 
                 if response.status >= 500:
@@ -5988,6 +6021,18 @@ async def _send_tariff_to_tesla(
                         f", retry-after: {retry_after_delay:.0f}s" if retry_after_delay else "",
                     )
                     last_error = f"Server error {response.status}"
+                    if _tou_retry_after_too_long(retry_after_delay, max_retry_after_seconds):
+                        # Keep the shared cooldown so the next caller still
+                        # waits out this Retry-After after the slot is freed.
+                        rate_limit_state["retry_at"] = time.monotonic() + retry_after_delay
+                        _LOGGER.warning(
+                            "Not retrying periodic TOU sync for site %s: retry-after %.0fs "
+                            "exceeds %.0fs; the next sync will send a fresher tariff",
+                            site_id,
+                            retry_after_delay,
+                            max_retry_after_seconds,
+                        )
+                        return False
                     continue  # Retry on 5xx errors
 
                 # Other 4xx client errors — don't retry
@@ -25972,7 +26017,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             custom_tariff = entry.data.get("initial_custom_tariff")
         return custom_tariff if isinstance(custom_tariff, dict) else None
 
-    async def handle_sync_rest_api_check(check_name="manual") -> bool | None:
+    async def handle_sync_rest_api_check(
+        check_name="manual", periodic: bool = False
+    ) -> bool | None:
         """Run a single TOU sync against the live (settled) price.
 
         Used by:
@@ -25984,6 +26031,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         invoke `send_tariff_to_tesla` directly with their override tariff,
         and the in-progress force action also short-circuits this function
         via the guard inside `_handle_sync_tou_internal`.
+
+        Only periodic price syncs pass ``periodic=True``. Manual syncs and the
+        restore_normal tariff restore keep the full Retry-After wait.
         """
         # Skip if no price coordinator available (AEMO spike-only mode without pricing)
         if (
@@ -25997,7 +26047,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
 
         _LOGGER.info(f"⏰ TOU sync ({check_name})")
-        return await _handle_sync_tou_internal(None, sync_mode='settled_price')
+        return await _handle_sync_tou_internal(
+            None, sync_mode='settled_price', periodic=periodic
+        )
 
     async def handle_sync_tou(call: ServiceCall) -> None:
         """Service handler for `power_sync.sync_tou` — manual user-triggered sync."""
@@ -26810,7 +26862,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"Error in FoxESS schedule sync: {e}", exc_info=True)
 
-    async def _handle_sync_tou_internal(websocket_data, sync_mode='settled_price') -> bool | None:
+    async def _handle_sync_tou_internal(
+        websocket_data, sync_mode='settled_price', periodic: bool = False
+    ) -> bool | None:
         """Internal sync logic with price-aware de-dupe.
 
         Args:
@@ -26819,6 +26873,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             sync_mode: Always 'settled_price' in current callers. Kept as a
                 parameter so future provider-specific sync paths can pass a
                 different label without changing the signature.
+            periodic: True for scheduled price syncs. Their uploads drop a
+                retry with a long Retry-After, because the next sync sends a
+                fresher tariff. Manual syncs and restores wait it out.
         """
         # Snapshot before price acquisition, which can also yield to a newer
         # force/restore command. That command owns the tariff from then on.
@@ -27899,6 +27956,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 fleet_base_url=entry.data.get(CONF_FLEET_API_BASE_URL),
                 readback_status=site_readback_status,
                 is_current=lambda: _command_generation[0] == sync_command_generation,
+                max_retry_after_seconds=(
+                    TOU_PERIODIC_SYNC_MAX_RETRY_AFTER_SECONDS if periodic else None
+                ),
             )
             if _command_generation[0] != sync_command_generation:
                 _LOGGER.info("TOU sync superseded by a newer force/restore command")
@@ -38616,9 +38676,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.debug(f"Could not send notification: {notify_err}")
                 else:
                     _LOGGER.warning("No saved tariff to restore, triggering sync")
-                    await hass.services.async_call(DOMAIN, SERVICE_SYNC_TOU, {}, blocking=True)
+                    fallback_restored = await handle_sync_rest_api_check(
+                        check_name="restore normal fallback"
+                    )
                     if _restore_superseded("fallback TOU sync"):
                         return
+                    if fallback_restored is False:
+                        _mark_tesla_restore_failed("fallback TOU sync failed")
 
             # Restore operation mode on all gateways. Safe reserve targets are
             # collected and applied as the final dispatch-waking step after
@@ -43028,7 +43092,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
 
         _LOGGER.info("📡 AEMO dispatch received — syncing settled tariff")
-        await handle_sync_rest_api_check(check_name="aemo dispatch")
+        await handle_sync_rest_api_check(check_name="aemo dispatch", periodic=True)
 
     async def _handle_aemo_dispatch_event(_signal_data) -> None:
         """Run TOU sync once per AEMO dispatch (settled price publish event).
@@ -43231,7 +43295,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ):
                     _LOGGER.debug("Auto-sync disabled, skipping fallback periodic sync")
                     return
-                await handle_sync_rest_api_check(check_name="cron fallback")
+                await handle_sync_rest_api_check(check_name="cron fallback", periodic=True)
 
             cancel_dispatch_fallback_cron = async_track_utc_time_change(
                 hass,
@@ -43261,7 +43325,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ):
                 _LOGGER.debug("Auto-sync disabled, skipping Octopus periodic sync")
                 return
-            await handle_sync_rest_api_check(check_name="octopus :00/:30")
+            await handle_sync_rest_api_check(check_name="octopus :00/:30", periodic=True)
 
         cancel_octopus_cron = async_track_utc_time_change(
             hass,

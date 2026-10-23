@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def upload_harness(monkeypatch):
     source = (ROOT / "custom_components/power_sync/__init__.py").read_text()
     tree = ast.parse(source)
-    names = {"send_tariff_to_tesla", "_send_tariff_to_tesla"}
+    names = {"send_tariff_to_tesla", "_send_tariff_to_tesla", "_tou_retry_after_too_long"}
     nodes = [node for node in tree.body if getattr(node, "name", None) in names]
     clock = SimpleNamespace(now=0.0, sleeping=None, resume=None, confirmed=True)
 
@@ -338,3 +338,135 @@ def test_sync_and_restore_uploads_pass_their_own_generation(handler_name, genera
     assert is_current() is True
     generation[0] += 1
     assert is_current() is False
+
+
+def test_non_periodic_upload_waits_out_long_retry_after(upload_harness):
+    """Manual syncs and restore_normal keep the uncapped Retry-After wait."""
+    upload, hass, session, _clock = upload_harness
+
+    assert asyncio.run(upload(hass, "site-a", {"name": "restore"}, "token")) is True
+    assert [post[0] for post in session.posts] == [0.0, 282.0]
+
+
+def test_periodic_upload_drops_retry_after_longer_than_cap(upload_harness):
+    """A periodic sync must not resend its tariff at the next sync boundary."""
+    upload, hass, session, clock = upload_harness
+
+    async def run():
+        assert await upload(
+            hass, "site-a", {"name": "stale"}, "token", max_retry_after_seconds=60.0,
+        ) is False
+        assert [post[0] for post in session.posts] == [0.0]
+        # The dropped retry keeps the shared cooldown, so Retry-After holds.
+        clock.now = 281.9
+        assert await upload(hass, "site-a", {"name": "early"}, "token") is False
+        clock.now = 300.0
+        assert await upload(
+            hass, "site-a", {"name": "fresh"}, "token", max_retry_after_seconds=60.0,
+        ) is True
+        assert [post[2]["tou_settings"]["tariff_content_v2"]["name"]
+                for post in session.posts] == ["stale", "fresh"]
+
+    asyncio.run(run())
+
+
+def test_periodic_upload_still_retries_short_retry_after(upload_harness):
+    upload, hass, session, _clock = upload_harness
+    session.responses = [429, 200]
+    original_post = session.post
+
+    def post(url, **kwargs):
+        response = original_post(url, **kwargs)
+        if response.status == 429:
+            response.headers = {"Retry-After": "30"}
+        return response
+
+    session.post = post
+    assert asyncio.run(upload(
+        hass, "site-a", {}, "token", max_retry_after_seconds=60.0,
+    )) is True
+    assert [post[0] for post in session.posts] == [0.0, 30.0]
+
+
+def _sync_check_calls(tree):
+    return [node for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "handle_sync_rest_api_check"]
+
+
+def test_only_periodic_price_syncs_cap_retry_after():
+    tree = ast.parse((ROOT / "custom_components/power_sync/__init__.py").read_text())
+    periodic = {}
+    for call in _sync_check_calls(tree):
+        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+        name = keywords["check_name"].value
+        periodic[name] = "periodic" in keywords and keywords["periodic"].value is True
+    assert periodic == {
+        "service call": False,
+        "restore normal": False,
+        "restore normal fallback": False,
+        "aemo dispatch": True,
+        "cron fallback": True,
+        "octopus :00/:30": True,
+        "agl static startup": False,
+        "flow power startup": False,
+    }
+
+    sync = next(node for node in ast.walk(tree)
+                if isinstance(node, ast.AsyncFunctionDef)
+                and node.name == "_handle_sync_tou_internal")
+    upload = next(node for node in ast.walk(sync)
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                  and node.func.id == "send_tariff_to_tesla")
+    cap = next(keyword.value for keyword in upload.keywords
+               if keyword.arg == "max_retry_after_seconds")
+    for is_periodic, expected in ((True, 60.0), (False, None)):
+        assert eval(compile(ast.Expression(body=cap), "<cap>", "eval"), {
+            "periodic": is_periodic,
+            "TOU_PERIODIC_SYNC_MAX_RETRY_AFTER_SECONDS": 60.0,
+        }) == expected
+
+
+def test_restore_normal_marks_failed_sync_restores():
+    """A failed restore sync must keep restore_normal's pending cleanup state."""
+    source = (ROOT / "custom_components/power_sync/__init__.py").read_text()
+    restore = next(node for node in ast.walk(ast.parse(source))
+                   if isinstance(node, ast.AsyncFunctionDef)
+                   and node.name == "handle_restore_normal")
+    restore_source = ast.get_source_segment(source, restore)
+    assert "SERVICE_SYNC_TOU" not in restore_source
+    assert 'if tariff_restored is not True:\n                    _mark_tesla_restore_failed(' in restore_source
+    assert 'if fallback_restored is False:\n                        _mark_tesla_restore_failed(' in restore_source
+
+
+def test_periodic_upload_keeps_cooldown_after_dropping_long_5xx_retry(upload_harness):
+    """A dropped 503 retry must still hold every caller until Retry-After ends."""
+    upload, hass, session, clock = upload_harness
+    session.responses = [503, 200]
+    original_post = session.post
+
+    def post(url, **kwargs):
+        response = original_post(url, **kwargs)
+        if response.status == 503:
+            response.headers = {"Retry-After": "600"}
+        return response
+
+    session.post = post
+
+    async def run():
+        assert await upload(
+            hass, "site-a", {"name": "stale"}, "token", max_retry_after_seconds=60.0,
+        ) is False
+        clock.now = 300.0
+        assert await upload(
+            hass, "site-a", {"name": "early"}, "token", max_retry_after_seconds=60.0,
+        ) is False
+        assert len(session.posts) == 1
+        clock.now = 600.0
+        assert await upload(
+            hass, "site-a", {"name": "fresh"}, "token", max_retry_after_seconds=60.0,
+        ) is True
+        assert [(post[0], post[2]["tou_settings"]["tariff_content_v2"]["name"])
+                for post in session.posts] == [(0.0, "stale"), (600.0, "fresh")]
+
+    asyncio.run(run())

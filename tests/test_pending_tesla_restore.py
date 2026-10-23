@@ -314,8 +314,10 @@ def test_only_current_verified_completion_releases_restart_gate(superseded):
     assert data["optimizer_force_restart_restore_pending"] is superseded
 
 
+@pytest.mark.parametrize("periodic,expected_cap", [(True, 60.0), (False, None)])
 @pytest.mark.parametrize("site_results", [[True, True], [True, False], [False, False]])
-def test_sync_reports_all_site_upload_results_to_restore(site_results):
+def test_sync_reports_all_site_upload_results_to_restore(site_results, periodic, expected_cap):
+    """Periodic syncs cap Retry-After; restore and manual syncs do not."""
     tree = ast.parse(INIT_PATH.read_text())
     sync = _find_function(tree, "_handle_sync_tou_internal")
     begin = next(i for i, n in enumerate(sync.body) if isinstance(n, ast.Assign)
@@ -326,11 +328,13 @@ def test_sync_reports_all_site_upload_results_to_restore(site_results):
         body=sync.body[begin:sync.body.index(loop) + 1] + [sync.body[-1]], decorator_list=[])
     async def upload(hass, site, tariff, token, provider, **kwargs):
         assert kwargs["is_current"]()
+        assert kwargs["max_retry_after_seconds"] == expected_cap
         return site_results[int(site)]
     env = dict(site_configs=[("0", "fake", "teslemetry"), ("1", "fake", "teslemetry")],
                hass=None, tariff={}, entry=SimpleNamespace(data={}), CONF_FLEET_API_BASE_URL="base",
                send_tariff_to_tesla=upload, _command_generation=[1], sync_command_generation=1,
-               TESLA_TOU_READBACK_ZERO_NORMALIZED="normalized", _LOGGER=logging.getLogger(__name__))
+               TESLA_TOU_READBACK_ZERO_NORMALIZED="normalized", _LOGGER=logging.getLogger(__name__),
+               periodic=periodic, TOU_PERIODIC_SYNC_MAX_RETRY_AFTER_SECONDS=60.0)
     exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
                  "<sync-upload-result>", "exec"), env)
     assert asyncio.run(env["run"]()) is all(site_results)
