@@ -240,6 +240,9 @@ def test_duration_entities_preserve_saved_choices_and_custom_number_after_reload
     asyncio.run(number.async_set_native_value(421))
     reloaded = ns["ForceDischargeCustomDurationNumber"](hass, entry)
     assert reloaded.native_value == 421
+    hass.data["power_sync"]["battery"].pop("_skip_reload")
+    asyncio.run(reloaded.async_set_native_value(421))
+    assert "_skip_reload" not in hass.data["power_sync"]["battery"]
     with pytest.raises(ValueError):
         asyncio.run(number.async_set_native_value(float("nan")))
     assert reloaded.native_value == 421

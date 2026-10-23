@@ -205,6 +205,9 @@ class ForceDischargeCustomDurationNumber(NumberEntity):
         entry = self.hass.config_entries.async_get_entry(self._entry_id)
         if entry is None:
             return
+        if entry.options.get(CUSTOM_DISCHARGE_DURATION_KEY) == minutes:
+            self.async_write_ha_state()
+            return
         options = {**entry.options, CUSTOM_DISCHARGE_DURATION_KEY: minutes}
         self.hass.data.setdefault(DOMAIN, {}).setdefault(self._entry_id, {})["_skip_reload"] = True
         self.hass.config_entries.async_update_entry(entry, options=options)
