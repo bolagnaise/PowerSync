@@ -2944,7 +2944,7 @@ def test_configured_optimizer_builds_and_publishes_without_solar_runtime(
     )
     coordinator._set_active_export_reserve_floor_slots = lambda *args: None
     coordinator._record_solar_forecast_availability = lambda *args: None
-    coordinator._track_actual_cost = lambda: None
+    coordinator._track_actual_cost = lambda *, force=False: None
     coordinator._get_daily_cost = lambda: 0.0
     coordinator._get_daily_savings = lambda: 0.0
     coordinator._get_predicted_cost_to_midnight = lambda: (0.0, 0.0)

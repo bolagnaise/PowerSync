@@ -4324,6 +4324,219 @@ def _provenance_coordinator(opt_module, store=None):
     return coordinator
 
 
+class _AcquisitionCostCaptured(BaseException):
+    """Stop the real solve at its acquisition-cost input, before any commands."""
+
+
+def _charging_solve_coordinator(opt_module, monkeypatch, clock):
+    coordinator = _provenance_coordinator(opt_module)
+    coordinator._entry.entry_id = coordinator.entry_id
+    coordinator._config.battery_capacity_wh = 27_000
+    coordinator._battery_specs_source = "configured"
+    coordinator._enabled = True
+    coordinator._optimization_lock = asyncio.Lock()
+    coordinator._optimizer = SimpleNamespace(apply_resolved_parameters=lambda _: None)
+    coordinator._battery_efficiency_learner = SimpleNamespace(
+        ensure_topology=lambda _: False,
+        resolved_parameters=lambda **_: None,
+    )
+    coordinator._battery_efficiency_topology_fingerprint = lambda _: "two-pw2"
+    coordinator._observe_battery_efficiency = lambda **_: None
+    coordinator._energy_telemetry_ready = lambda: True
+    coordinator._capture_provider_quota_measurements_before_plan = lambda: None
+    coordinator._provider_priced_reference_prices = lambda: [0.2986]
+    coordinator._last_import_prices = [0.093]
+    coordinator._last_export_prices = [0.125]
+    coordinator._last_display_import_prices = [0.093]
+    coordinator._last_display_export_prices = [0.125]
+    coordinator._last_cost_date = None
+    coordinator._last_cost_tracking_time = None
+    coordinator._schedule_cost_save = lambda: None
+    coordinator._get_energy_data = lambda: clock["data"]
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: clock["now"])
+
+    async def no_restore():
+        return False
+
+    async def restored():
+        return True
+
+    async def no_forecast():
+        return []
+
+    async def prices():
+        return ([0.093], [0.125])
+
+    coordinator._wait_for_deferred_enable_restore = restored
+    coordinator._wait_for_restart_force_restore = no_restore
+    coordinator._refresh_ev_forecast_inputs = no_forecast
+    coordinator._get_price_forecast = prices
+    coordinator._get_solar_forecast = no_forecast
+    coordinator._get_load_forecast = no_forecast
+    acquisition_cost = coordinator._acquisition_cost_for_run
+
+    def capture_cost(**kwargs):
+        clock["acquisition_cost"] = acquisition_cost(**kwargs)
+        raise _AcquisitionCostCaptured
+
+    coordinator._acquisition_cost_for_run = capture_cost
+    return coordinator
+
+
+def _run_to_acquisition_cost(coordinator):
+    # Exercise the actual forecast/state/reconciliation ordering. Stop before
+    # the solver and hardware; all interval accounting methods remain real.
+    with pytest.raises(_AcquisitionCostCaptured):
+        asyncio.run(coordinator._run_optimization.__wrapped__(coordinator))
+
+
+@pytest.mark.parametrize(("seconds", "efficiency"), [(50, 1.0), (50, 0.93), (10, 0.93)])
+def test_charging_solves_preserve_measured_origin_before_pricing(
+    opt_module, monkeypatch, seconds, efficiency
+):
+    """Ticket #123: ordinary and short solves must not duplicate SOC rises."""
+    clock = {
+        "now": datetime(2026, 10, 23, 11, 9, tzinfo=timezone.utc),
+        "data": {"battery_level": 12.3, "battery_power": -10.0,
+                 "grid_power": 6.0, "solar_power": 4.0},
+    }
+    coordinator = _charging_solve_coordinator(opt_module, monkeypatch, clock)
+    _run_to_acquisition_cost(coordinator)
+    coordinator._track_actual_cost()  # end-of-solve initialization
+    opening_kwh = 0.123 * 27
+    # A restored ledger is usable from the first charging interval.
+    coordinator._battery_provenance_available = True
+    expected_solar, expected_grid, expected_cost = 0.0, 0.0, 0.0
+    expected_unknown = opening_kwh
+
+    for _ in range(60):
+        clock["now"] += timedelta(seconds=seconds)
+        input_kwh = 10.0 * seconds / 3600
+        stored_kwh = input_kwh * efficiency
+        clock["data"]["battery_level"] += stored_kwh / 27 * 100
+        expected_solar += input_kwh * 0.4
+        expected_grid += input_kwh * 0.6
+        expected_cost += input_kwh * 0.6 * 0.093
+        ratio = (clock["data"]["battery_level"] / 100 * 27) / (
+            expected_solar + expected_grid + expected_unknown
+        )
+        expected_solar *= ratio
+        expected_grid *= ratio
+        expected_cost *= ratio
+        expected_unknown *= ratio
+        _run_to_acquisition_cost(coordinator)
+        coordinator._track_actual_cost()  # existing post-solve/refresh path
+
+    assert coordinator._battery_provenance_unknown_kwh <= opening_kwh + 1e-6
+    assert coordinator._actual_charge_kwh_today == pytest.approx(10 * seconds / 60)
+    assert coordinator._actual_grid_charge_kwh_today == pytest.approx(6 * seconds / 60)
+    assert coordinator._actual_grid_charge_cost_today == pytest.approx(
+        6 * seconds / 60 * 0.093
+    )
+    assert coordinator._battery_provenance_grid_kwh == pytest.approx(expected_grid)
+    assert coordinator._battery_provenance_solar_kwh == pytest.approx(expected_solar)
+    assert coordinator._battery_provenance_grid_cost == pytest.approx(expected_cost)
+    assert coordinator._battery_provenance_unknown_kwh == pytest.approx(expected_unknown)
+    assert coordinator._battery_provenance_total_kwh() == pytest.approx(
+        clock["data"]["battery_level"] / 100 * 27
+    )
+    expected_cost = (
+        coordinator._battery_provenance_grid_cost
+        + coordinator._battery_provenance_unknown_kwh * 0.2986
+    ) / coordinator._battery_provenance_total_kwh()
+    assert clock["acquisition_cost"] == pytest.approx(expected_cost)
+    if seconds == 50:
+        # This inventory can clear the reported evening price under the
+        # existing acquisition-cost rule; no export policy changes are needed.
+        assert clock["acquisition_cost"] < 0.125
+
+
+def test_solve_settlement_preserves_refresh_guard_and_post_solve_interval(
+    opt_module, monkeypatch
+):
+    clock = {
+        "now": datetime(2026, 10, 23, 11, 9, tzinfo=timezone.utc),
+        "data": {"battery_level": 12.3, "battery_power": -10.0,
+                 "grid_power": 6.0, "solar_power": 4.0},
+    }
+    coordinator = _charging_solve_coordinator(opt_module, monkeypatch, clock)
+    _run_to_acquisition_cost(coordinator)
+    coordinator._track_actual_cost()
+    coordinator._battery_provenance_available = True
+
+    def advance(seconds):
+        clock["now"] += timedelta(seconds=seconds)
+        clock["data"]["battery_level"] += 10 * seconds / 3600 / 27 * 100
+
+    advance(10)
+    coordinator._track_actual_cost()  # regular refresh still coalesces <30s
+    assert coordinator._actual_charge_kwh_today == 0.0
+    _run_to_acquisition_cost(coordinator)
+    assert coordinator._actual_charge_kwh_today == pytest.approx(10 * 10 / 3600)
+    # A slow solve can accumulate another real interval before its existing
+    # closing tracker, and the next immediate solve must not count it again.
+    advance(40)
+    coordinator._track_actual_cost()
+    _run_to_acquisition_cost(coordinator)
+    coordinator._track_actual_cost()
+    assert coordinator._actual_charge_kwh_today == pytest.approx(10 * 50 / 3600)
+    assert coordinator._battery_provenance_unknown_kwh == pytest.approx(0.123 * 27)
+    assert coordinator._battery_provenance_grid_cost == pytest.approx(6 * 50 / 3600 * 0.093)
+
+
+@pytest.mark.parametrize("boundary", ["first_measurement", "missing_prices", "long_gap"])
+def test_solve_settlement_keeps_unobserved_energy_unknown(
+    opt_module, monkeypatch, boundary
+):
+    clock = {
+        "now": datetime(2026, 10, 23, 11, 9, tzinfo=timezone.utc),
+        "data": {"battery_level": 12.3, "battery_power": -10.0,
+                 "grid_power": 6.0, "solar_power": 4.0},
+    }
+    coordinator = _charging_solve_coordinator(opt_module, monkeypatch, clock)
+    _run_to_acquisition_cost(coordinator)
+    coordinator._track_actual_cost()
+    if boundary != "first_measurement":
+        coordinator._battery_provenance_available = True
+    if boundary == "missing_prices":
+        coordinator._last_import_prices = []
+    seconds = 650 if boundary == "long_gap" else 50
+    clock["now"] += timedelta(seconds=seconds)
+    clock["data"]["battery_level"] += 1 / 27 * 100
+    _run_to_acquisition_cost(coordinator)
+    assert coordinator._battery_provenance_unknown_kwh == pytest.approx(0.123 * 27 + 1)
+    assert coordinator._battery_provenance_grid_kwh == 0.0
+    assert coordinator._battery_provenance_solar_kwh == 0.0
+    assert coordinator._battery_provenance_grid_cost == 0.0
+    assert clock["acquisition_cost"] == pytest.approx(0.2986)
+
+
+def test_forced_settlement_missing_data_and_nonpositive_time_do_not_invent_origin(
+    opt_module, monkeypatch
+):
+    clock = {
+        "now": datetime(2026, 10, 23, 11, 9, tzinfo=timezone.utc),
+        "data": {"battery_level": 12.3, "battery_power": -10.0,
+                 "grid_power": 6.0, "solar_power": 4.0},
+    }
+    coordinator = _charging_solve_coordinator(opt_module, monkeypatch, clock)
+    _run_to_acquisition_cost(coordinator)
+    coordinator._battery_provenance_available = True
+    data = clock["data"]
+    clock["now"] += timedelta(seconds=50)
+    clock["data"] = None
+    coordinator._track_actual_cost(force=True)
+    assert coordinator._last_cost_tracking_time == clock["now"]
+    clock["data"] = data
+    data["battery_level"] += 1 / 27 * 100
+    _run_to_acquisition_cost(coordinator)
+    clock["now"] -= timedelta(seconds=1)
+    coordinator._track_actual_cost(force=True)
+    assert coordinator._actual_charge_kwh_today == 0.0
+    assert coordinator._battery_provenance_unknown_kwh == pytest.approx(0.123 * 27 + 1)
+    assert coordinator._battery_provenance_grid_cost == 0.0
+
+
 def test_persistent_provenance_restores_after_midnight_and_blends_cost(opt_module):
     """Carry-over source and purchase cost must not depend on daily totals."""
     store = _ProvenanceStore(

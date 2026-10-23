@@ -245,6 +245,16 @@ reserve controls are also advanced settings because they change solver limits or
 the final physical trajectory. They are grouped with the grid-charge price and SOC
 cap in the mobile app.
 
+## Stored battery energy cost
+
+PowerSync retains the measured solar and grid origin of stored battery energy
+across optimization runs, including closely spaced price updates. Measured
+charging is accounted for before the battery level is reconciled, so the same
+charge is not also treated as energy of unknown origin when valuing exports.
+Energy present before tracking begins or added during a telemetry gap remains
+unknown and is valued conservatively. Updating does not reconstruct the origin
+of energy already stored as unknown; that portion reduces as the battery discharges.
+
 ## Profit Max
 
 Profit Max makes the optimizer more willing to export stored energy for profit

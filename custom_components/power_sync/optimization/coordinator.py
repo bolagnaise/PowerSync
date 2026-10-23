@@ -6962,6 +6962,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # native-home import, never EV charging or battery charging.
             native_home_load_w = list(load or [])
             soc, capacity = await self._get_battery_state()
+            # Settle the measured interval before comparing inventory with SOC.
+            # Even a short price-triggered solve must account for its charge
+            # first, or the SOC rise is added as unknown and counted again when
+            # the regular refresh eventually records the same interval.
+            self._track_actual_cost(force=True)
             self._reconcile_battery_provenance(
                 soc,
                 capacity,
@@ -18629,14 +18634,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         schedule.actions = result
         return schedule
 
-    def _track_actual_cost(self) -> None:
+    def _track_actual_cost(self, *, force: bool = False) -> None:
         """Track actual electricity cost using real elapsed time.
 
         Accumulates actual grid import/export costs since midnight.
         Also tracks baseline cost (what cost would be without battery).
         Uses actual elapsed time between calls to prevent multi-counting
         when called from multiple triggers (DataUpdateCoordinator, polling
-        loop, price updates).
+        loop, price updates). A solve forces settlement of short positive
+        intervals before reconciling battery provenance against current SOC.
         Resets automatically at midnight.
         """
         now = dt_util.now()
@@ -18704,8 +18710,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             now,
         )
 
-        # Skip if called too frequently (< 30s) — eliminates multi-counting
-        if elapsed_seconds < 30:
+        # Regular refreshes coalesce short intervals. A solve must settle them
+        # before SOC reconciliation; advancing the timestamp below still keeps
+        # subsequent refresh/end-of-solve calls from counting the interval twice.
+        if elapsed_seconds <= 0 or (elapsed_seconds < 30 and not force):
             return
 
         self._last_cost_tracking_time = now
