@@ -120,6 +120,16 @@ cleanup for retry. After a restart, Smart Optimization waits for that cleanup
 to finish; a 30-second startup warning means that optimisation attempt was
 skipped while restoration remains pending. Tesla/Teslemetry cooldowns still apply.
 
+### Reserve details and current export guard
+
+The dashboard's **Reserve details** separates the manual minimum, forecast recommendation, active software export floor, and hardware reserve saved baseline. It also shows whether Auto-Apply is enabled and whether the forecast recommendation is current, stale, or unavailable. The hardware baseline is shown only when its provenance identifies a saved user reserve, an explicit hardware reserve setting, or a trusted battery reading. A software-floor fallback or unverified reading remains **Unknown**. The saved baseline does not establish the battery's current hardware reserve.
+
+When the controller evaluates a reserve guard for the current plan and slot, the dashboard explains the result: `blocked` means the reserve guard prevented the requested export or full interval; `limited` means it shortened export to a positive reserve-safe duration; `unknown` means the inputs could not establish a safe duration. An unknown result does not establish that the reserve was reached. The explanation shows evidence relevant to that result; duration limits show both requested and allowed time.
+
+Control outcomes describe command returns separately from the guard decision. An accepted self-consumption or shorter export command does not verify the battery's physical mode or power. If restoration is unconfirmed, export may still be active. The explanation uses existing controller evidence without extra hardware readbacks, applies only to the current plan and slot, and disappears when that evidence expires or is superseded. This transient explanation retains no history of reserve stops. An absent explanation establishes no reserve outcome.
+
+The Home Assistant **Current Action** sensor exposes two additive attributes: `reserve_visibility` contains these separate reserve percentages, hardware-baseline source and quality, Auto-Apply status, and forecast freshness; `export_reserve_decision` contains the current guard status, reason, evaluation and slot times, available SOC and duration evidence, and control outcome. `export_reserve_decision` is `null` when no matching current decision is available, including stale plans, disabled optimization, monitoring mode, or active external controls. These attributes do not change the sensor's current-action state.
+
 ### Timed manual controls in the Action Plan
 
 When an external PowerSync control is active — Force Charge, Force Discharge,
