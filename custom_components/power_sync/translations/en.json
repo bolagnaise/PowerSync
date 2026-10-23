@@ -526,7 +526,7 @@
           "optimization_backup_reserve": "The optimizer will not intentionally export battery energy below this percentage. Natural self-consumption may continue to the separate hardware backup reserve. Default 20% is a good starting point.",
           "hardware_backup_reserve": "The battery's own backup reserve for grid outages. PowerSync restores this level after temporary hold or force-control modes.",
           "optimization_battery_capacity_wh": "Total usable battery capacity in kWh. This should match the battery specs shown in the mobile app.",
-          "optimization_max_charge_w": "Maximum grid charge power in kW that the LP optimizer may request.",
+          "optimization_max_charge_w": "Maximum total battery charge power in kW. The plan counts solar and grid charging together against this limit.",
           "optimization_max_discharge_w": "Maximum battery/inverter discharge power in kW that the LP optimizer may request for loads and export.",
           "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Auto-detected only when your inverter reports its own export limit; otherwise Profit Max solar export stays off until you set this. Set 0 for zero-export sites. This does not limit battery power used by house loads.",
           "optimization_max_grid_import_w": "Maximum total site grid import in kW. Set 0 for no site import cap; solar can still add charging power above this limit.",
@@ -1771,7 +1771,7 @@
       },
       "optimization": {
         "title": "Smart Optimization settings",
-        "description": "Configure the optimiser from one screen. Related controls are grouped below without moving optimiser functions to other settings areas.",
+        "description": "Configure the optimiser from one screen. Related controls are grouped below without moving optimiser functions to other settings areas.\n\n**Live status:** {optimizer_runtime_status}",
         "sections": {
           "core_goals": {
             "name": "Core goals",
@@ -1830,7 +1830,7 @@
             },
             "data_description": {
               "optimization_battery_capacity_wh": "Total usable battery capacity in kWh. This should match the battery specs shown in the mobile app.",
-              "optimization_max_charge_w": "Maximum grid charge power in kW that the LP optimizer may request.",
+              "optimization_max_charge_w": "Maximum total battery charge power in kW. The plan counts solar and grid charging together against this limit.",
               "optimization_max_discharge_w": "Maximum battery/inverter discharge power in kW that the LP optimizer may request for loads and export.",
               "optimization_battery_efficiency_learning": "Learn effective AC round-trip efficiency from completed battery cycles and apply it to physical SOC planning. Economic export decisions remain capped at the conservative legacy efficiency.",
               "amber_forecast_confidence_enabled": "Reduce reliance on uncertain future Amber export spikes. Opt-in; may export earlier and miss a later higher price. This changes optimizer valuation only, not tariff prices or safety limits.",
@@ -1957,7 +1957,7 @@
           "optimization_backup_reserve": "The optimizer will not intentionally export battery energy below this percentage. Natural self-consumption may continue to the separate hardware backup reserve. Default 20% is a good starting point.",
           "hardware_backup_reserve": "The battery's own backup reserve for grid outages. PowerSync restores this level after temporary hold or force-control modes.",
           "optimization_battery_capacity_wh": "Total usable battery capacity in kWh. This should match the battery specs shown in the mobile app.",
-          "optimization_max_charge_w": "Maximum grid charge power in kW that the LP optimizer may request.",
+          "optimization_max_charge_w": "Maximum total battery charge power in kW. The plan counts solar and grid charging together against this limit.",
           "optimization_max_discharge_w": "Maximum battery/inverter discharge power in kW that the LP optimizer may request for loads and export.",
           "optimization_max_grid_export_w": "Site/DNSP export cap in kW. Auto-detected only when your inverter reports its own export limit; otherwise Profit Max solar export stays off until you set this. Set 0 for zero-export sites. This does not limit battery power used by house loads.",
           "optimization_max_grid_import_w": "Maximum total site grid import in kW. Set 0 for no site import cap; solar can still add charging power above this limit.",

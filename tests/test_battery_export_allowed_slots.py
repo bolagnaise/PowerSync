@@ -10763,6 +10763,61 @@ def test_export_command_power_respects_grid_export_cap(opt_module):
     assert battery.force_discharge_calls == [(15, 5000, False, None)]
 
 
+@pytest.mark.parametrize(
+    ("configured_cap_w", "expected_pcc_w"),
+    [(None, 9000), (5000, 5000), (0, 0)],
+)
+def test_sigenergy_solved_pcc_target_respects_configured_export_cap(
+    opt_module, configured_cap_w, expected_pcc_w,
+):
+    coordinator = _coordinator(opt_module, "octopus")
+    coordinator.battery_system = "sigenergy"
+    coordinator._config.max_grid_export_w = configured_cap_w
+    action = SimpleNamespace(
+        action="export",
+        power_w=2000,
+        battery_discharge_w=7000,
+        timestamp=datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc),
+    )
+    coordinator._last_optimizer_result = SimpleNamespace(
+        schedule=SimpleNamespace(actions=[action]),
+        grid_export_w=[9000],
+    )
+
+    assert coordinator._sigenergy_grid_export_limit_w(action) == expected_pcc_w
+
+
+def test_sigenergy_export_cap_keeps_separate_battery_target_for_home_load(
+    opt_module,
+):
+    class _SigenergyBattery(_FakeBattery):
+        async def force_discharge(self, **kwargs):
+            self.force_discharge_calls.append(kwargs)
+            return True
+
+    battery = _SigenergyBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "sigenergy"
+    coordinator._config.max_grid_export_w = 5000
+    action = SimpleNamespace(
+        action="export",
+        power_w=2000,
+        battery_discharge_w=7000,
+        timestamp=datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc),
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+    coordinator._last_optimizer_result = SimpleNamespace(
+        schedule=SimpleNamespace(actions=[action]),
+        grid_export_w=[9000],
+    )
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert len(battery.force_discharge_calls) == 1
+    assert battery.force_discharge_calls[0]["power_w"] == 5000
+    assert battery.force_discharge_calls[0]["battery_discharge_w"] == 7000
+
+
 def test_goodwe_export_command_uses_site_export_target_for_ems_limit(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)

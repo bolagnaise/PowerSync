@@ -34,6 +34,8 @@ The first paid optimiser mutation requires a durable recovery journal. Supported
 
 When access ends, new optimiser work stops. PowerSync attempts to restore only its own force modes, reserves and temporary holds, and stops only EV sessions it owns. Independent EV cleanup still runs when battery restoration fails. Failed recovery remains pending and is retried after restart; paid access returning does not automatically restart old schedules. Resume requires valid access and completed recovery, and clears the old plan. A newer manual/Boost owner takes precedence. If a restart removed EV ownership proof, PowerSync does not reclaim it from a journal; the user can stop the old session manually. A removed/unavailable charger stays pending until its state can be resolved.
 
+The Home Assistant 24-Hour Optimizer Plan card reports when HA optimiser access has expired, recovery is pending, or a fresh Resume is required. It separately identifies Smart Optimization disabled in settings. While control is stopped or the status cannot be refreshed, the card hides any retained forecast rather than presenting it as an active plan.
+
 Local source is available under the repository's existing licence. Client-side enforcement is not tamper-proof; this subscription pays for the supported verification and optimiser service, not a guarantee against modification of local Python.
 
 ## Billing and identities

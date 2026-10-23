@@ -76,6 +76,31 @@ def test_valid_access_with_resume_required_does_not_claim_ready():
     assert "close this window" not in result["next_step"]
 
 
+def test_settings_explain_saved_on_during_access_pause():
+    paused = presentation.optimizer_settings_description(
+        status(requires_resume=True, can_optimize=False),
+        enabled=True,
+        running=False,
+    )
+    assert "Saved setting is on" in paused
+    assert "paused" in paused
+    assert "Resume optimisation" in paused
+    assert "fresh schedule" in paused
+    assert presentation.optimizer_settings_description(
+        status(recovery_pending=True, requires_resume=True, can_optimize=False),
+        enabled=True,
+        running=False,
+    ).find("restored") >= 0
+    assert presentation.optimizer_settings_description(
+        status(), enabled=True, running=True
+    ) == "Smart Optimization is running."
+    assert presentation.optimizer_settings_description(
+        status(requires_resume=True, can_optimize=False),
+        enabled=False,
+        running=False,
+    ) == "Smart Optimization is off in saved settings."
+
+
 @pytest.mark.parametrize("access_state", ["expired", "subscription_required", "checking", "installation_revoked", "unknown_future_state"])
 def test_unavailable_access_is_not_presented_as_ready(access_state):
     result = presentation.optimizer_access_description(status(
@@ -149,6 +174,18 @@ def test_translations_render_the_actual_placeholders():
     assert "Resume required: False" not in rendered
     assert "Not started" not in rendered
     assert "No Resume action is needed" in rendered
+
+    settings = [json.loads((COMPONENT / name).read_text())["options"]["step"]["optimization"]
+                for name in ("strings.json", "translations/en.json")]
+    assert settings[0] == settings[1]
+    settings_description = settings[0]["description"].format(
+        optimizer_runtime_status=presentation.optimizer_settings_description(
+            status(requires_resume=True, can_optimize=False), enabled=True, running=False
+        )
+    )
+    assert "Saved setting is on, but optimisation is paused" in settings_description
+    charge_description = settings[0]["sections"]["battery_forecast_inputs"]["data_description"]["optimization_max_charge_w"]
+    assert "solar and grid charging together" in charge_description
 
 
 def setup_licensing(manager):

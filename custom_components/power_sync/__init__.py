@@ -45771,10 +45771,11 @@ class OptimizationView(HomeAssistantView):
                 optimization_entry_id = entry_id
                 break
 
+        config_entries = self._hass.config_entries.async_entries(DOMAIN)
         config_entry = next(
             (
                 entry
-                for entry in self._hass.config_entries.async_entries(DOMAIN)
+                for entry in config_entries
                 if optimization_entry_id is None or entry.entry_id == optimization_entry_id
             ),
             None,
@@ -45792,7 +45793,7 @@ class OptimizationView(HomeAssistantView):
         if not opt_coordinator:
             # Optimization not enabled - return disabled status
             _LOGGER.info("Optimization not configured")
-            return web.json_response({
+            unavailable_data = {
                 "success": True,
                 "enabled": False,
                 "optimizer_available": False,
@@ -45807,7 +45808,15 @@ class OptimizationView(HomeAssistantView):
                     "summary": None,
                     "last_error": None,
                 },
-            })
+            }
+            if len(config_entries) == 1 and config_entry and (
+                license_manager := self._hass.data.get("power_sync_license_manager")
+            ):
+                unavailable_data["licensing"] = license_manager.status(
+                    config_entry.entry_id
+                )
+                unavailable_data["features"]["licensing_v1"] = True
+            return web.json_response(unavailable_data)
 
         api_data = opt_coordinator.get_api_data()
         if license_manager := self._hass.data.get("power_sync_license_manager"):

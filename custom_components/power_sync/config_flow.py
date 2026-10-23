@@ -13420,11 +13420,36 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             marker.schema for marker in schema_fields
         }
 
+        from .licensing.presentation import optimizer_settings_description
+        from .licensing.runtime import DATA_KEY as _LICENSE_MANAGER_KEY
+
+        license_manager = self.hass.data.get(_LICENSE_MANAGER_KEY)
+        license_status = (
+            license_manager.status(self.config_entry.entry_id)
+            if license_manager else None
+        )
+        live_coordinator = (
+            license_manager.coordinators.get(self.config_entry.entry_id)
+            if license_manager else None
+        )
         return self.async_show_form(
             step_id=form_step_id,
             data_schema=vol.Schema(grouped_schema),
             errors=errors,
             description_placeholders={
+                "optimizer_runtime_status": optimizer_settings_description(
+                    license_status,
+                    enabled=bool(
+                        current_optimization_enabled
+                        and current_opt_provider == OPT_PROVIDER_POWERSYNC
+                    ),
+                    running=bool(
+                        live_coordinator
+                        and getattr(live_coordinator, "_enabled", False)
+                        and license_status
+                        and license_status.get("can_optimize")
+                    ),
+                ),
                 "ai_summary_key_status": (
                     "Configured" if current_ai_key_configured else "Not configured"
                 ),

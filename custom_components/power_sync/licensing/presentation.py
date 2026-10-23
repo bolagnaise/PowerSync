@@ -73,3 +73,34 @@ def optimizer_access_description(status: dict, pairing_code: str | None = None) 
         "pairing_status": "Paired with your PowerSync account." if paired else "Not paired with a PowerSync account.",
         "next_step": next_step,
     }
+
+
+def optimizer_settings_description(
+    status: dict | None, *, enabled: bool, running: bool
+) -> str:
+    """Distinguish the saved enable setting from live optimiser admission."""
+    if not enabled:
+        return "Smart Optimization is off in saved settings."
+    if status is None:
+        return "Saved setting is on. Check the Enable Smart Optimization switch for live operation."
+    if status.get("recovery_pending"):
+        return (
+            "Saved setting is on, but optimisation is paused while owned controls are "
+            "being restored. Open HA optimiser access to check recovery before resuming."
+        )
+    if status.get("requires_resume"):
+        return (
+            "Saved setting is on, but optimisation is paused after an access interruption. "
+            "Open HA optimiser access, choose Resume optimisation, and submit to start a fresh schedule."
+        )
+    if not status.get("can_optimize"):
+        return (
+            "Saved setting is on, but HA optimiser access is unavailable. "
+            "Open HA optimiser access to check pairing and access."
+        )
+    if running:
+        return "Smart Optimization is running."
+    return (
+        "Saved setting is on, but the optimiser is not running yet. "
+        "Check the Enable Smart Optimization switch and HA optimiser access."
+    )

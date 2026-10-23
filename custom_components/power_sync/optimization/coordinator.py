@@ -10122,7 +10122,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ceiling, so recover the matching solved grid flow rather than passing
         the battery contribution as though it were a site limit.
         """
-        return self._solved_grid_export_power_w(action)
+        command_w = self._solved_grid_export_power_w(action)
+        if self._config.max_grid_export_w is not None:
+            command_w = min(command_w, float(self._config.max_grid_export_w))
+        return command_w
 
     def _network_export_guard(self) -> Any | None:
         """Return the entry-scoped network guard when configured."""

@@ -2105,11 +2105,12 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     this._lastRenderSignature = this._renderSignature();
 
     const model = this._buildModel();
-    const hasSchedule = model.points.length > 0;
+    const availability = this._optimizerAvailability();
+    const hasSchedule = model.points.length > 0 && !availability?.blocking;
     const priceMeta = _priceMeta(this._hass, this._config.importPriceEntity);
     const box = this.getBoundingClientRect();
     const compact = (box.width || 640) < 560;
-    const actions = hasSchedule ? this._actionRangesFromApi() : this._fallbackActionRanges();
+    const actions = availability?.blocking ? [] : hasSchedule ? this._actionRangesFromApi() : this._fallbackActionRanges();
     const batteryWindows = this._batteryWindowsFromActions(actions, model);
 
     this.shadowRoot.innerHTML = `
@@ -2527,7 +2528,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         <div class="header">
           <div>
             <h2 class="title">24-Hour Optimizer Plan</h2>
-            <div class="subtitle">${this._escHtml(hasSchedule ? 'Now to next 24 hours from Smart Optimization' : 'Entity fallback while detailed schedule is unavailable')}</div>
+            <div class="subtitle">${this._escHtml(availability?.blocking ? (availability.label === 'Status unavailable' || availability.label === 'Checking status' ? 'Automatic optimisation status is unavailable' : 'Automatic optimisation is not running') : hasSchedule ? 'Now to next 24 hours from Smart Optimization' : 'Entity fallback while detailed schedule is unavailable')}</div>
           </div>
           <button class="refresh" type="button" title="Refresh optimizer plan" aria-label="Refresh optimizer plan">
             <ha-icon icon="mdi:refresh"></ha-icon>
@@ -2537,7 +2538,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         ${this._renderNotice(hasSchedule)}
         <div class="section-title">Planned Battery Windows</div>
         ${this._renderBatteryWindows(batteryWindows, priceMeta)}
-        ${model.priceLevelWindows.length ? `
+        ${!availability?.blocking && model.priceLevelWindows.length ? `
           <div class="section-title">Projected EV Price-Level Windows</div>
           <div class="projection-note">Based on forecast prices and current settings. Actual charging still requires live home, plug, SOC, ownership, charger, battery-safety, and price checks.</div>
           ${this._renderPriceLevelWindows(model.priceLevelWindows, priceMeta)}
@@ -2740,8 +2741,14 @@ class PowerSyncOptimizationPlan extends HTMLElement {
   _renderChips(model, priceMeta) {
     const data = model.raw || {};
     const chips = [];
-    const status = data.monitoring_mode ? 'Monitoring' : data.enabled === false ? 'Disabled' : data.status || 'Active';
-    chips.push(['Mode', this._title(status)]);
+    const availability = this._optimizerAvailability(data);
+    const status = availability?.label || (data.monitoring_mode ? 'Monitoring' : data.status || 'Active');
+    chips.push(['Mode', this._title(status), !!availability]);
+    if (availability?.blocking) {
+      return `<div class="chips">${chips.map(([name, value, warn]) => `
+        <div class="chip${warn ? ' warn' : ''}"><span>${this._escHtml(name)}:</span><span>${this._escHtml(value)}</span></div>
+      `).join('')}</div>`;
+    }
     chips.push(['Now', this._actionLabel(data.current_action_detail || data.current_action || 'idle')]);
     if (data.next_action && data.next_action_time) {
       chips.push(['Next', `${this._actionLabel(data.next_action_detail || data.next_action)} ${this._formatPlanTime(data.next_action_time)}`]);
@@ -2775,13 +2782,18 @@ class PowerSyncOptimizationPlan extends HTMLElement {
   }
 
   _renderNotice(hasSchedule) {
+    const availability = this._optimizerAvailability();
     const warnings = Array.isArray(this._data?.warnings) ? this._data.warnings : [];
+    const notices = [];
+    if (availability) {
+      notices.push(`<div class="notice warn">${this._escHtml(availability.message)}</div>`);
+    }
     if (warnings.length) {
       const text = warnings.map(w => w?.message || w?.title).filter(Boolean).join(' ');
-      return `<div class="notice warn">${this._escHtml(text)}</div>`;
+      notices.push(`<div class="notice warn">${this._escHtml(text)}</div>`);
     }
-    if (this._error) {
-      return `<div class="notice warn">${this._escHtml(this._error)}. Showing available entity data.</div>`;
+    if (notices.length) {
+      return notices.join('');
     }
     if (!hasSchedule && this._loading) {
       return '<div class="notice">Loading Smart Optimization schedule...</div>';
@@ -2790,6 +2802,70 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       return '<div class="notice">Detailed optimizer schedule is not available yet. Showing planned force windows from Home Assistant entities.</div>';
     }
     return '';
+  }
+
+  _optimizerAvailability(data = this._data) {
+    if (this._error) {
+      return {
+        label: 'Status unavailable',
+        message: `Unable to refresh optimiser status: ${this._error}. The previous plan may be stale.`,
+        blocking: true,
+      };
+    }
+    if (!data) {
+      return {
+        label: this._loading ? 'Checking status' : 'Status unavailable',
+        message: this._loading ? 'Checking Smart Optimization status...' : 'Smart Optimization status is unavailable. Refresh the plan to check again.',
+        blocking: true,
+      };
+    }
+    const license = data?.licensing;
+    if (license && typeof license === 'object') {
+      const denied = license.can_optimize === false;
+      if (denied && license.access_state === 'expired') {
+        return {
+          label: 'Licence expired',
+          message: 'HA optimiser access has expired. Open PowerSync integration options → HA optimiser access to restore access, then resume optimisation.',
+          blocking: true,
+        };
+      }
+      if (denied && license.access_state === 'installation_revoked') {
+        return {
+          label: 'Pairing revoked',
+          message: 'This HA server pairing was revoked. Open PowerSync integration options → HA optimiser access to pair it again.',
+          blocking: true,
+        };
+      }
+      if (license.recovery_pending) {
+        return {
+          label: 'Recovery pending',
+          message: 'Smart Optimization is paused while PowerSync restores its controls. Check HA optimiser access before resuming.',
+          blocking: true,
+        };
+      }
+      if (license.requires_resume && (license.would_allow || license.enforcement_mode === 'shadow')) {
+        return {
+          label: 'Resume required',
+          message: 'HA optimiser access is available, but Smart Optimization is paused after an interruption. Open PowerSync integration options → HA optimiser access and choose Resume optimisation.',
+          blocking: true,
+        };
+      }
+      if (denied) {
+        return {
+          label: license.access_state === 'checking' ? 'Checking access' : license.access_state === 'unpaired' ? 'Pairing required' : 'Access unavailable',
+          message: license.access_state === 'checking' ? 'Checking HA optimiser access. Refresh the plan or open HA optimiser access to check again.' : 'HA optimiser access is unavailable. Open PowerSync integration options → HA optimiser access to check pairing and access.',
+          blocking: true,
+        };
+      }
+    }
+    if (data?.enabled === false || data?.status === 'not_configured') {
+      return {
+        label: 'Disabled in settings',
+        message: 'Smart Optimization is disabled in PowerSync settings. Enable it to start a new plan.',
+        blocking: true,
+      };
+    }
+    return null;
   }
 
   _renderPowerChart(model, compact) {

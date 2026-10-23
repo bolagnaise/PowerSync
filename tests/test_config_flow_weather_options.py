@@ -3485,6 +3485,7 @@ def test_smart_optimization_sections_have_local_labels_and_descriptions():
             "optimization_ai_summary_clear_api_key",
             "optimization_ai_summary_local_endpoint",
             "optimization_ai_summary_local_model",
+            "optimization_ai_summary_local_timeout",
             "optimization_ai_summary_openrouter_model",
             "optimization_ai_summary_openai_model",
             "optimization_ai_summary_auto_refresh",

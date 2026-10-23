@@ -471,6 +471,39 @@ def test_grid_import_limit_still_allows_solar_assisted_full_charge(
     )
 
 
+@pytest.mark.parametrize("backend", ["highs", "greedy"])
+@pytest.mark.parametrize("solar_kw", [0.0, 1.8, 10.0])
+def test_grid_and_solar_share_7_9_kw_battery_charge_limit(
+    battery_optimizer_module, monkeypatch, backend, solar_kw,
+):
+    if backend == "greedy":
+        monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=20000,
+        max_charge_w=7900,
+        max_discharge_w=7900,
+        backup_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=1,
+    )
+    result = optimizer.optimize(
+        import_prices=[0.0] * 6 + [0.4] * 6,
+        export_prices=[0.0] * 12,
+        solar_forecast=[solar_kw] * 12,
+        load_forecast=[0.26] * 12,
+        current_soc=0.20,
+        allow_grid_charge=True,
+    )
+
+    assert result.feasible
+    assert result.solver_used == backend
+    previous_soc = 0.20
+    for action in result.schedule.actions:
+        assert action.battery_charge_w <= 7900.1
+        assert action.soc - previous_soc <= 7.9 * optimizer.efficiency / 12 / 20 + 0.0002
+        previous_soc = action.soc
+
+
 def test_grid_charge_soc_cap_chooses_cheapest_eligible_slot(battery_optimizer_module):
     optimizer = battery_optimizer_module.BatteryOptimizer(
         capacity_wh=10000,
