@@ -19,6 +19,7 @@ import ipaddress
 import json
 import logging
 import math
+import re
 import ssl
 import struct
 import time
@@ -633,16 +634,47 @@ class TEDAPIv1rTransport:
         return env
 
     async def _send_battery_dispatch(self, din: str, env: Any) -> bool:
+        request = env.teg.dispatch_battery_power_request
+        is_power = request.HasField("real_power")
+        operation = "power" if is_power else "resume"
+        watts = request.real_power.power_watts if is_power else None
+        seconds = request.real_power.duration_seconds if is_power else None
         resp = await self.post_v1r(env.SerializeToString(), din)
         if not resp.ok or not resp.inner_bytes:
+            _LOGGER.warning(
+                "Battery dispatch %s not acknowledged: watts=%s seconds=%s ok=%s http=%s fault=%s inner=%s",
+                operation, watts, seconds, resp.ok, resp.http_status,
+                resp.fault_name, bool(resp.inner_bytes),
+            )
             return False
         try:
             reply = transport_pb2.MessageEnvelope()
             reply.ParseFromString(resp.inner_bytes)
-            return reply.HasField("teg") and reply.teg.HasField(
+            accepted = reply.HasField("teg") and reply.teg.HasField(
                 "dispatch_battery_power_response"
             )
+            if not accepted:
+                # Only learn a LOWER device-specific ceiling from the exact
+                # typed out-of-range reply for this positive power request.
+                # A generic fault never authorizes retry or tariff fallback.
+                if is_power and watts > 0 and reply.HasField("common") and reply.common.HasField("error_response"):
+                    status = reply.common.error_response.status
+                    match = re.fullmatch(r"power ([+\-]?\d+(?:\.\d+)?) exceeds discharge limit (\d+(?:\.\d+)?)", status.message)
+                    if status.code == 11 and match:
+                        rejected, limit = map(float, match.groups())
+                        if math.isclose(rejected, watts, rel_tol=0, abs_tol=0.000001) and 0 < limit < watts:
+                            previous = getattr(self, "dispatch_discharge_limit_w", math.inf)
+                            self.dispatch_discharge_limit_w = min(previous, limit)
+                            _LOGGER.warning("Gateway reported battery dispatch discharge ceiling: %.0f W", limit)
+                _LOGGER.warning(
+                    "Battery dispatch %s unexpected reply: watts=%s seconds=%s envelope_fields=%s teg_fields=%s",
+                    operation, watts, seconds,
+                    [field.name for field, _value in reply.ListFields()],
+                    [field.name for field, _value in reply.teg.ListFields()],
+                )
+            return accepted
         except Exception:
+            _LOGGER.warning("Battery dispatch %s malformed reply: watts=%s seconds=%s", operation, watts, seconds)
             return False
 
     async def schedule_manual_backup(self, din: str, duration_s: int) -> bool:

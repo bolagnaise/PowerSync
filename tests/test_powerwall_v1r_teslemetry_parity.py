@@ -931,3 +931,34 @@ async def test_disabled_local_client_never_dispatches_or_resumes():
         await client.resume_battery_operation()
     client._transport.dispatch_battery_power.assert_not_called()
     client._transport.resume_battery_operation.assert_not_called()
+
+
+@async_test
+async def test_missing_dispatch_reply_logs_sent_power_and_reply_fields(caplog):
+    transport = _transport_without_key()
+    reply = transport_pb2.MessageEnvelope()
+    reply.teg.get_config_response.SetInParent()
+    transport.post_v1r = AsyncMock(return_value=transport_mod.TEDAPIResponse(True, reply.SerializeToString()))
+    assert not await transport.dispatch_battery_power('gateway', 10800, 60)
+    assert 'watts=10800.0 seconds=60' in caplog.text
+    assert 'get_config_response' in caplog.text
+    assert 'unexpected reply' in caplog.text
+
+
+@pytest.mark.parametrize('code,message,expected', [
+    (11,'power 10570.500000 exceeds discharge limit 10000',10000),
+    (7,'power 10570.500000 exceeds discharge limit 10000',None),
+    (11,'power 1 exceeds discharge limit 10000',None),
+    (11,'power 10570.500000 exceeds discharge limit 12000',None),
+    (11,'power 10570.500000 exceeds discharge limit 0',None),
+    (11,'unknown error',None),
+])
+@async_test
+async def test_only_typed_matching_lower_dispatch_limit_is_learned(code,message,expected):
+    transport=_transport_without_key()
+    reply=transport_pb2.MessageEnvelope()
+    reply.common.error_response.status.code=code
+    reply.common.error_response.status.message=message
+    transport.post_v1r=AsyncMock(return_value=transport_mod.TEDAPIResponse(True,reply.SerializeToString()))
+    assert not await transport.dispatch_battery_power('gateway',10570.5,12)
+    assert getattr(transport,'dispatch_discharge_limit_w',None)==expected

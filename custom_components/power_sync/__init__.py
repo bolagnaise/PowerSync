@@ -33370,6 +33370,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if state.get("powerwall_local_dispatch"):
                 state["hardware_expires_at"] = dt_util.utcnow() + timedelta(seconds=seconds)
                 state["command_status"] = "accepted"
+                state["battery_power_w"] = watts
         await persist_force_mode_state()
 
     async def _local_powerwall_dispatch_failed():
@@ -33529,10 +33530,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         raise HomeAssistantError(
                             "Local Powerwall dispatch released; retrying with targetless safety checks before fallback"
                         ) from err
+                    if call.data.get("power_w", 0) > 0:
+                        raise HomeAssistantError(
+                            "Local Powerwall dispatch was not acknowledged; normal operation resumed. "
+                            "Tariff fallback cannot enforce the selected kW target."
+                        ) from err
                     _LOGGER.warning("Local Powerwall dispatch failed and released safely; using existing Tesla control: %s", err)
                     return {"fallback": True, "power_w": fallback_power}
                 raise HomeAssistantError(f"Local Powerwall dispatch failed: {err}") from err
             state["command_status"] = "accepted"
+            state["gateway_discharge_limit_w"] = result.get("gateway_discharge_limit_w")
             await persist_force_mode_state()
             for force_mode, force_state in (("charge", force_charge_state), ("discharge", force_discharge_state)):
                 async_dispatcher_send(hass, f"{DOMAIN}_force_{force_mode}_state", {

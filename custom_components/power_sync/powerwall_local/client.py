@@ -398,6 +398,11 @@ class PowerwallLocalClient:
             self._din, power_watts, duration_seconds
         )
 
+    @property
+    def dispatch_discharge_limit_w(self) -> float | None:
+        """Device-specific ceiling observed in a typed dispatch rejection."""
+        return getattr(self._transport, "dispatch_discharge_limit_w", None)
+
     async def resume_battery_operation(self) -> bool:
         """Release local dispatch; never substitute a cloud tariff write."""
         if not self._local_access_enabled or is_loopback_host(self._host):

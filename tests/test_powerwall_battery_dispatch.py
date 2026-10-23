@@ -506,3 +506,65 @@ def test_known_policy_denial_never_falls_back_on_missing_telemetry(mode,changes)
         client.dispatch_battery_power.assert_not_called()
         client.resume_battery_operation.assert_not_called()
     asyncio.run(run())
+
+
+def test_manual_explicit_kw_failure_never_falls_back_to_uncontrolled_tariff():
+    async def run():
+        ns,c,client,saved=load_routing()
+        client.dispatch_battery_power.return_value=False
+        with pytest.raises(RuntimeError,match="cannot enforce the selected kW"):
+            await ns['_try_local_powerwall_force']('discharge',call(source='user',power_w=500),5,500)
+        client.resume_battery_operation.assert_awaited_once()
+        assert not c.pending
+        assert saved['force_mode_state'] is None
+    asyncio.run(run())
+
+
+def test_reported_lower_gateway_cap_retries_once_after_resume_with_fresh_policy():
+    async def run():
+        c,client,events=controller()
+        order=[]
+        async def dispatch(watts,seconds):
+            order.append(('power',watts,seconds))
+            if len([v for v in order if v[0]=='power'])==1:
+                client.dispatch_discharge_limit_w=1000
+                return False
+            assert order[-2][0]=='resume'
+            return True
+        async def resume(): order.append(('resume',));return True
+        client.dispatch_battery_power.side_effect=dispatch
+        client.resume_battery_operation.side_effect=resume
+        result=await c.start('discharge',2000,20)
+        assert result['battery_power_w']==1000
+        assert result['gateway_discharge_limit_w']==1000
+        assert client.get_snapshot.await_count==2
+        assert events==['intent','intent']  # Same durable owner throughout retry.
+        assert order[0][1]==2800 and order[2][1]==1000
+        assert order[2][2] <= order[0][2]
+        await c.stop()
+    asyncio.run(run())
+
+
+def test_reported_gateway_cap_does_not_bypass_policy_changed_during_resume():
+    async def run():
+        c,client,events=controller()
+        async def dispatch(watts,seconds):client.dispatch_discharge_limit_w=1000;return False
+        async def resume():c.allowed=lambda mode:False;return True
+        client.dispatch_battery_power.side_effect=dispatch
+        client.resume_battery_operation.side_effect=resume
+        with pytest.raises(ValueError,match='ownership or safety'):
+            await c.start('discharge',2000,20)
+        assert client.dispatch_battery_power.await_count==1
+        assert not c.pending and events[-1]=='stopped'
+    asyncio.run(run())
+
+
+def test_force_power_selection_resolves_renamed_entity_for_current_entry():
+    import ast
+    source=(ROOT/'custom_components/power_sync/switch.py').read_text()
+    nodes=[node for node in ast.parse(source).body if isinstance(node,ast.FunctionDef) and node.name in ('_state_float','_selected_force_power_w')]
+    registry=SimpleNamespace(async_get_entity_id=lambda domain,platform,uid: 'number.home_force_power' if uid=='one_force_power_kw' else None)
+    hass=SimpleNamespace(states=SimpleNamespace(get=lambda entity: SimpleNamespace(state={'number.home_force_power':'0.5','number.power_sync_force_power_kw':'8'}.get(entity,'unknown'))))
+    ns={'er':SimpleNamespace(async_get=lambda h:registry),'DOMAIN':'power_sync','HomeAssistant':object,'ConfigEntry':object}
+    exec(compile(ast.Module(body=nodes,type_ignores=[]),'<force-number-routing>','exec'),ns)
+    assert ns['_selected_force_power_w'](hass,SimpleNamespace(entry_id='one'))==500

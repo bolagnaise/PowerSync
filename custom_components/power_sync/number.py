@@ -156,6 +156,10 @@ async def async_setup_entry(
             CONF_NEOVOLT_CONFIG_ENTRY_IDS,
         )
     )
+    from .powerwall_host import local_battery_dispatch_configured
+    _supports_force_power = _supports_force_power or (
+        bool(tesla_site_id) and local_battery_dispatch_configured(entry.data)
+    )
     if _supports_force_power:
         async_add_entities([ForcePowerNumber(hass, entry)])
 

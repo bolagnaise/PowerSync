@@ -11,6 +11,7 @@ from homeassistant.components.switch import SwitchEntity, SwitchEntityDescriptio
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
@@ -145,8 +146,16 @@ def _state_float(hass: HomeAssistant, entity_id: str) -> float | None:
         return None
 
 
-def _selected_force_power_w(hass: HomeAssistant) -> int:
+def _selected_force_power_w(hass: HomeAssistant, entry: ConfigEntry | None = None) -> int:
     """Read the force-power selector and convert it to service power_w."""
+    if entry is not None:
+        registry = er.async_get(hass)
+        entity_id = registry.async_get_entity_id(
+            "number", DOMAIN, f"{entry.entry_id}_force_power_kw"
+        )
+        if entity_id:
+            kw = _state_float(hass, entity_id)
+            return int(round(kw * 1000)) if kw is not None and kw > 0 else 0
     watts = _state_float(hass, "number.power_sync_force_power_w")
     if watts is not None and watts > 0:
         return int(round(watts))
@@ -918,7 +927,7 @@ class ForceDischargeSwitch(SwitchEntity):
         # call explicitly so Monitoring Mode does not mistake it for an
         # optimizer/automation command when Home Assistant drops UI context.
         service_data = {"duration": duration, "source": "user"}
-        power_w = _selected_force_power_w(self.hass)
+        power_w = _selected_force_power_w(self.hass, self._entry)
         if power_w > 0:
             service_data["power_w"] = power_w
 
@@ -1082,7 +1091,7 @@ class ForceChargeSwitch(SwitchEntity):
         # call explicitly so Monitoring Mode does not mistake it for an
         # optimizer/automation command when Home Assistant drops UI context.
         service_data = {"duration": duration, "source": "user"}
-        power_w = _selected_force_power_w(self.hass)
+        power_w = _selected_force_power_w(self.hass, self._entry)
         if power_w > 0:
             service_data["power_w"] = power_w
 

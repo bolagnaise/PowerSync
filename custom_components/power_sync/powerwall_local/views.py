@@ -51,7 +51,7 @@ from .client import PowerwallLocalClient, PowerwallVersion
 from .coordinator import PowerwallLocalCoordinator
 from .curtailment_fallback import get_fallback as _get_curtailment_fallback
 from .exceptions import PowerwallLocalError, PowerwallPairingError
-from ..powerwall_host import normalize_powerwall_gateway_host
+from ..powerwall_host import local_battery_dispatch_configured, normalize_powerwall_gateway_host
 from .pairing import PowerwallPairingManager
 from .transport import get_insecure_ssl_context
 
@@ -144,6 +144,8 @@ def _local_access_status(
         "gateway_ip": gateway_ip or None,
         "local_access_configured": configured,
         "local_available": local_available,
+        "power_control_supported": local_battery_dispatch_configured(entry.data),
+        "dispatch_max_discharge_w": getattr(getattr(coordinator, "client", None), "dispatch_discharge_limit_w", None),
         "local_reachable": local_reachable,
         "needs_repair": needs_repair,
         "mode": mode,

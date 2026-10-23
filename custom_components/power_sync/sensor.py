@@ -7609,6 +7609,9 @@ class BatteryModeSensor(SensorEntity):
 
         local_state = force_charge_state if mode == BATTERY_MODE_STATE_FORCE_CHARGE else force_discharge_state if mode == BATTERY_MODE_STATE_FORCE_DISCHARGE else {}
         if local_state.get("powerwall_local_dispatch"):
+            attributes["requested_power_w"] = local_state.get("power_w")
+            attributes["battery_power_w"] = local_state.get("battery_power_w")
+            attributes["gateway_discharge_limit_w"] = local_state.get("gateway_discharge_limit_w")
             status = local_state.get("command_status", "pending")
             attributes.update(control_path="powerwall_local_dispatch", command_status=status,
                               physical_effect="unverified")

@@ -7755,6 +7755,14 @@ class PowerSyncStrategy {
       if (Array.isArray(lr)) lovelaceResources.push(...lr);
     } catch (_) { /* YAML mode — skip */ }
 
+    let forcePowerEntityId = null;
+    try {
+      const registry = await hass.callWS({ type: 'config/entity_registry/list' });
+      forcePowerEntityId = registry.find(row => row.platform === 'power_sync'
+        && row.unique_id?.endsWith('_force_power_kw') && !row.disabled_by
+        && hass.states[row.entity_id])?.entity_id || null;
+    } catch (_) { /* The canonical entity remains a compatible fallback. */ }
+
     const loaded = {};
     for (const c of requiredCards) {
       // Already registered as custom element
@@ -7995,7 +8003,7 @@ class PowerSyncStrategy {
     if (hass.states[e('amber_override')]) {
       left.push(_amberBatteryControls(e, findEntity, hass));
     } else if (hasButton && (hasE('battery_level') || hasE('battery_power'))) {
-      left.push(_batteryControls(hass));
+      left.push(_batteryControls(hass, forcePowerEntityId));
     }
 
     // --- Left Column: Tesla Energy Site Controls (v2.10.0+) ---
@@ -8515,7 +8523,7 @@ function _priceGauges(e, hass) {
   };
 }
 
-function _batteryControls(hass) {
+function _batteryControls(hass, forcePowerEntityId = null) {
   const batteryModeEntity = 'sensor.power_sync_battery_mode';
   const activeModeName = (mode, label, durationEntity = null, durationFallback = '30') => `[[[
     const modeState = states['${batteryModeEntity}'];
@@ -8588,7 +8596,9 @@ function _batteryControls(hass) {
   const chargeDurationChip = compactDurationChip(blueChip);
   const sharedDischargeDurationChip = compactDurationChip(orangeChip);
 
-  const hasForcePower = !!(hass && hass.states['number.power_sync_force_power_kw']);
+  const forcePowerEntity = forcePowerEntityId || 'number.power_sync_force_power_kw';
+  const hasForcePower = !!hass?.states[forcePowerEntity];
+  const isPairedTesla = hass?.states['binary_sensor.power_sync_powerwall_local_paired']?.state === 'on';
 
   return {
     type: 'vertical-stack',
@@ -8598,7 +8608,7 @@ function _batteryControls(hass) {
       // 0 kW = auto (uses inverter rated/BMS max at dispatch).
       ...(hasForcePower ? [{
         type: 'tile',
-        entity: 'number.power_sync_force_power_kw',
+        entity: forcePowerEntity,
         name: 'Force Power (0 = Max)',
         icon: 'mdi:lightning-bolt',
         features: [{ type: 'numeric-input', mode: 'slider' }],
@@ -8613,7 +8623,7 @@ function _batteryControls(hass) {
             }
           `,
         },
-      }] : []),
+      }, ...(isPairedTesla ? [{ type: 'markdown', content: 'Discharge kW targets grid export, up to the gateway battery limit. Battery output also supplies your home.' }] : [])] : []),
       {
         square: false,
         type: 'grid',
@@ -8641,10 +8651,10 @@ function _batteryControls(hass) {
               service: 'power_sync.force_charge',
               data: {
                 duration: "[[[ return (states['select.power_sync_force_charge_duration'] ? states['select.power_sync_force_charge_duration'].state : '30'); ]]]",
-                power_w: "[[[ const kw = parseFloat(states['number.power_sync_force_power_kw']?.state) || 0; return kw > 0 ? Math.round(kw * 1000) : undefined; ]]]",
+                power_w: `[[[ const kw = parseFloat(states['${forcePowerEntity}']?.state) || 0; return kw > 0 ? Math.round(kw * 1000) : undefined; ]]]`,
               },
               confirmation: {
-                text: "[[[ const kw = parseFloat(states['number.power_sync_force_power_kw']?.state) || 0; const dur = states['select.power_sync_force_charge_duration']?.state ?? '30'; return 'Force charge for ' + dur + ' min' + (kw > 0 ? ' at ' + kw.toFixed(1) + ' kW' : ' at max power') + '?'; ]]]",
+                text: `[[[ const kw = parseFloat(states['${forcePowerEntity}']?.state) || 0; const dur = states['select.power_sync_force_charge_duration']?.state ?? '30'; return 'Force charge for ' + dur + ' min' + (kw > 0 ? ' at ' + kw.toFixed(1) + ' kW' : ' at max power') + '?'; ]]]`,
               },
             },
           },
@@ -8678,10 +8688,10 @@ function _batteryControls(hass) {
               service: 'power_sync.force_discharge',
               data: {
                 duration: "[[[ return (states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '30'); ]]]",
-                power_w: "[[[ const kw = parseFloat(states['number.power_sync_force_power_kw']?.state) || 0; return kw > 0 ? Math.round(kw * 1000) : undefined; ]]]",
+                power_w: `[[[ const kw = parseFloat(states['${forcePowerEntity}']?.state) || 0; return kw > 0 ? Math.round(kw * 1000) : undefined; ]]]`,
               },
               confirmation: {
-                text: "[[[ const kw = parseFloat(states['number.power_sync_force_power_kw']?.state) || 0; const dur = states['select.power_sync_force_discharge_duration']?.state ?? '30'; return 'Force discharge for ' + dur + ' min' + (kw > 0 ? ' at ' + kw.toFixed(1) + ' kW' : ' at max power') + '?'; ]]]",
+                text: `[[[ const kw = parseFloat(states['${forcePowerEntity}']?.state) || 0; const dur = states['select.power_sync_force_discharge_duration']?.state ?? '30'; return 'Force discharge for ' + dur + ' min' + (kw > 0 ? ' at ' + kw.toFixed(1) + ' kW' : ' at max power') + '?'; ]]]`,
               },
             },
           },

@@ -20,8 +20,8 @@ class DispatchCommandFailed(Exception):
 
 
 _LOGGER = logging.getLogger(__name__)
-LEASE_SECONDS = 60
-RENEW_SECONDS = 15
+LEASE_SECONDS = 30
+RENEW_SECONDS = 10
 
 
 def _number(value: Any, label: str) -> float:
@@ -114,7 +114,7 @@ class LocalBatteryDispatch:
 
     persist() records intent BEFORE the first command. stop() clears it only
     after the specific resume acknowledgement. A lost process can leave at
-    most a sixty-second hardware lease; restart cleanup never replays power.
+    most a thirty-second hardware lease; restart cleanup never replays power.
     """
 
     def __init__(self, client, config, allowed, persist, stopped, guarded_write=None, acknowledged=None, failed=None):
@@ -139,6 +139,10 @@ class LocalBatteryDispatch:
         self.pending = True
         self._command_may_have_reached = True
 
+    def _device_discharge_limit(self) -> float:
+        value = getattr(self.client, "dispatch_discharge_limit_w", None)
+        return _number(value, "gateway dispatch limit") if value is not None else math.inf
+
     async def start(self, mode: str, target_w: float, duration_seconds: int, *, allowed=None, guarded_write=None) -> dict:
         if type(duration_seconds) is not int or not 1 <= duration_seconds <= 86400:
             raise ValueError("Invalid local dispatch duration")
@@ -150,16 +154,27 @@ class LocalBatteryDispatch:
             self._mode, self._target = mode, target_w
             self._deadline = time.monotonic() + duration_seconds
             self.pending = True
+            previous_limit = self._device_discharge_limit()
             try:
                 await self.persist()
-                watts = await self._write()
+                try:
+                    watts = await self._write()
+                except DispatchCommandFailed:
+                    current_limit = self._device_discharge_limit()
+                    if mode != "discharge" or not 0 < current_limit < previous_limit:
+                        raise
+                    # Keep durable ownership while releasing the rejected
+                    # attempt. Only a typed resume permits one bounded retry.
+                    await self._release(retain_intent=True)
+                    await self.persist()
+                    watts = await self._write()
             except BaseException:
-                # A timeout may have reached the gateway. Never fall through
-                # to tariff control while a local request may still own it.
                 await self._release()
                 raise
             self._task = asyncio.create_task(self._renew())
             return {"success": True, "command_status": "accepted", "battery_power_w": watts,
+                    "requested_power_w": target_w,
+                    "gateway_discharge_limit_w": self._device_discharge_limit() if mode == "discharge" and math.isfinite(self._device_discharge_limit()) else None,
                     "control_path": "powerwall_local_dispatch"}
 
     async def _write(self) -> float:
@@ -187,7 +202,13 @@ class LocalBatteryDispatch:
             remaining = min(LEASE_SECONDS, math.ceil(self._deadline - time.monotonic()))
             if remaining < 1:
                 raise ValueError("Local dispatch window expired before command")
-            watts = battery_watts(self._mode, target, snapshot, self.config())
+            current_config = dict(self.config())
+            if self._mode == "discharge":
+                current_config["optimization_max_discharge_w"] = min(
+                    _number(current_config.get("optimization_max_discharge_w", 5000), "discharge limit"),
+                    self._device_discharge_limit(),
+                )
+            watts = battery_watts(self._mode, target, snapshot, current_config)
             self._command_may_have_reached = True
             try:
                 accepted = await self.client.dispatch_battery_power(watts, remaining)
@@ -242,7 +263,7 @@ class LocalBatteryDispatch:
             with suppress(asyncio.CancelledError, Exception):
                 await task
 
-    async def _release(self):
+    async def _release(self, *, retain_intent=False):
         if not self.pending:
             return
         if not self._command_may_have_reached:
@@ -257,8 +278,10 @@ class LocalBatteryDispatch:
             if self.failed is not None:
                 await self.failed()
             raise
-        self.pending = False
         self._command_may_have_reached = False
+        if retain_intent:
+            return
+        self.pending = False
         await self.stopped()
 
     async def stop(self):

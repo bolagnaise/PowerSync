@@ -1315,8 +1315,8 @@ def test_dashboard_battery_controls_include_self_consumption_action():
     """Manual battery controls should expose the self-consumption service."""
     source = STRATEGY_PATH.read_text()
     battery_controls = source[
-        source.index("function _batteryControls(hass)"):
-        source.index("function _teslaEnergySiteControls", source.index("function _batteryControls(hass)"))
+        source.index("function _batteryControls("):
+        source.index("function _teslaEnergySiteControls", source.index("function _batteryControls("))
     ]
 
     assert (
@@ -1335,8 +1335,8 @@ def test_dashboard_manual_battery_controls_show_active_mode_countdown():
     """Manual battery controls should highlight active modes from Battery Mode."""
     source = STRATEGY_PATH.read_text()
     battery_controls = source[
-        source.index("function _batteryControls(hass)"):
-        source.index("function _teslaEnergySiteControls", source.index("function _batteryControls(hass)"))
+        source.index("function _batteryControls("):
+        source.index("function _teslaEnergySiteControls", source.index("function _batteryControls("))
     ]
 
     assert "const batteryModeEntity = 'sensor.power_sync_battery_mode'" in battery_controls
@@ -1375,8 +1375,8 @@ def test_dashboard_hold_and_self_consumption_share_discharge_duration_label():
     """Manual hold/self-consumption controls should visibly use the discharge timer."""
     source = STRATEGY_PATH.read_text()
     battery_controls = source[
-        source.index("function _batteryControls(hass)"):
-        source.index("function _teslaEnergySiteControls", source.index("function _batteryControls(hass)"))
+        source.index("function _batteryControls("):
+        source.index("function _teslaEnergySiteControls", source.index("function _batteryControls("))
     ]
 
     assert "const durationName = (entity, label, fallback = '30')" in battery_controls
@@ -2108,3 +2108,25 @@ def test_energy_day_prices_are_optional_signed_history_with_independent_axes():
       assert.equal(card._localMidnight(autumn+86400000, 'Australia/Sydney') - card._localMidnight(autumn, 'Australia/Sydney'), 25*3600000);
     """
     subprocess.run(['node', '-e', runtime], check=True)
+
+
+def test_force_power_slider_and_buttons_follow_renamed_entity():
+    source=STRATEGY_PATH.read_text()
+    start=source.index('function _batteryControls(')
+    end=source.index('\nfunction ',start+1)
+    script=source[start:end]+r'''
+      const id='number.home_force_power';
+      const states={
+        [id]:{state:'0.5'},
+        'binary_sensor.power_sync_powerwall_local_paired':{state:'on'},
+      };
+      const card=_batteryControls({states},id);
+      if(card.cards[0].entity!==id) throw new Error('Slider lost renamed number');
+      const buttons=card.cards.find(c=>c.type==='grid').cards;
+      for(const service of ['power_sync.force_charge','power_sync.force_discharge']) {
+        const button=buttons.find(c=>c.tap_action?.service===service);
+        const power=new Function('states',button.tap_action.data.power_w.slice(3,-3))(states);
+        if(power!==500) throw new Error('Selected kW was not forwarded');
+      }
+    '''
+    subprocess.run(['node','-e',script],check=True,capture_output=True,text=True)
