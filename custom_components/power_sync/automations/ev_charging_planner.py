@@ -9981,6 +9981,40 @@ def _get_optimizer_battery_params(
     return {}
 
 
+def _generic_charger_charge_state(
+    hass: "HomeAssistant", params: Mapping[str, Any],
+) -> bool | None:
+    """Read fresh charging/stopped evidence without treating missing data as stopped."""
+    from .ocpp_status import normalize_ocpp_status
+
+    stopped = False
+    for key in ("charger_status_entity", "charger_power_entity"):
+        entity_id = params.get(key)
+        entity = hass.states.get(entity_id) if entity_id else None
+        if entity is None or not is_current_ev_power_observation(
+            getattr(entity, "last_reported", None)
+            or getattr(entity, "last_updated", None)
+            or getattr(entity, "last_changed", None)
+        ):
+            continue
+        if key == "charger_status_entity":
+            status = normalize_ocpp_status(entity.state)
+            if status == "charging":
+                return True
+            if status in {
+                "connected", "complete", "completed", "finishing", "stopped",
+                "suspendedev", "suspendedevse", "available", "disconnected", "idle",
+            }:
+                stopped = True
+        else:
+            power_w = _state_power_w(entity)
+            if power_w is not None and math.isfinite(power_w) and power_w >= 0:
+                if power_w > 50:
+                    return True
+                stopped = True
+    return False if stopped else None
+
+
 def _has_current_non_tesla_charge(
     hass: "HomeAssistant",
     config_entry: "ConfigEntry",
@@ -10029,8 +10063,7 @@ def _has_current_non_tesla_charge(
         return mode == "charging" or (math.isfinite(power_w) and power_w > 50)
 
     if charger_type == "generic":
-        status_ids = [params.get("charger_status_entity")]
-        power_ids = [params.get("charger_power_entity")]
+        return _generic_charger_charge_state(hass, params) is True
     elif charger_type == "ocpp":
         prefix = params.get("ocpp_charger_id")
         if not prefix:
@@ -11193,7 +11226,22 @@ class PriceLevelChargingExecutor:
             else:
                 state.last_decision = "charging" if state.is_charging else "waiting"
                 state.last_decision_reason = reason
-        await self.apply_preserve_home_battery(state.is_charging, reason)
+        preserve_charging = state.is_charging
+        if preserve_charging and not state.start_pending and not state.stop_pending:
+            opts = {**self.config_entry.data, **self.config_entry.options}
+            params = _build_dynamic_stop_params(
+                self.hass, self._domain, self.config_entry, opts,
+                vehicle_vin=loadpoint_id,
+            )
+            if params.get("charger_type") == "generic":
+                # The dynamic session can remain armed after a user stop or
+                # vehicle completion. Release only the battery hold on fresh
+                # stopped telemetry; retain ownership and restart semantics.
+                # Unknown/stale telemetry must not release a possibly active hold.
+                preserve_charging = (
+                    _generic_charger_charge_state(self.hass, params) is not False
+                )
+        await self.apply_preserve_home_battery(preserve_charging, reason)
         return decision
 
     def _has_current_non_tesla_charge(self, loadpoint_id: str) -> bool:

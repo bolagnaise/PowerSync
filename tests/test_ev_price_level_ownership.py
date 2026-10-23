@@ -8954,3 +8954,120 @@ def test_price_level_preserves_unique_default_profile_hands_off_policy(
     executor._start_charging.assert_not_awaited()
     fake_actions._action_stop_ev_charging_dynamic.assert_not_awaited()
     assert executor._get_or_create_vehicle_state(loadpoint).last_decision == "external"
+
+
+@pytest.mark.parametrize("observation,expected_preserve", [
+    ("manual_stop", False), ("vehicle_full", False), ("zero_power", False),
+    ("charging", True), ("positive_power", True), ("stale", True),
+    ("missing", True), ("unknown", True), ("pending_start", True),
+    ("pending_stop", True),
+])
+def test_generic_price_level_preserve_follows_current_charge_readback(
+    monkeypatch, fake_actions, observation, expected_preserve,
+):
+    """Ticket #441: a retained price-level session must not strand the battery hold."""
+    hass = _FakeHass(price_settings={"preserve_home_battery": True})
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "generic_charger_enabled": True,
+        "generic_charger_status_entity": "sensor.garage_status",
+        "generic_charger_power_entity": "sensor.garage_power",
+    })
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
+    monkeypatch.setattr(ev_planner, "get_scheduled_charging_executor", lambda: None)
+    observed_at = datetime.now(timezone.utc) - timedelta(
+        minutes=10 if observation == "stale" else 0
+    )
+    if observation != "missing":
+        for entity_id, value in [
+            ("sensor.garage_status", "Charging" if observation == "charging" else
+             "Complete" if observation == "vehicle_full" else
+             "unknown" if observation in ("unknown", "zero_power") else "Connected"),
+            ("sensor.garage_power", "3.5" if observation == "positive_power" else
+             "unknown" if observation == "unknown" else "0"),
+        ]:
+            hass.states._states[entity_id] = SimpleNamespace(
+                entity_id=entity_id, state=value,
+                attributes={"unit_of_measurement": "kW"}, last_reported=observed_at,
+            )
+    if observation == "manual_stop":
+        from power_sync.automations.ev_ownership import record_manual_stop_hold
+        record_manual_stop_hold(hass, entry, "generic_ev")
+
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    state = executor._get_or_create_vehicle_state("generic_ev")
+    state.is_charging = True
+    state.charging_mode = "price_level_opportunity"
+    state.start_pending = observation == "pending_start"
+    state.stop_pending = observation == "pending_stop"
+    executor._set_preserve_home_battery_intent("charging")
+    executor.get_charging_decision = AsyncMock(
+        return_value=(True, "Cheap price", "price_level_opportunity")
+    )
+    executor._start_charging = AsyncMock()
+    executor._stop_charging = AsyncMock()
+
+    asyncio.run(executor.evaluate_all_vehicles(5))
+
+    preserve = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
+    assert preserve["active"] is expected_preserve
+    assert state.is_charging is True  # Retain logical session/paused-controller ownership.
+    assert state.charging_mode == "price_level_opportunity"
+    executor._start_charging.assert_not_awaited()
+    executor._stop_charging.assert_not_awaited()
+
+    # Cheap prices must not relatch the hold on the next periodic evaluation.
+    asyncio.run(executor.evaluate_all_vehicles(5))
+    assert preserve["active"] is expected_preserve
+    executor._start_charging.assert_not_awaited()
+    executor._stop_charging.assert_not_awaited()
+
+
+@pytest.mark.parametrize("source", ["price_level_charging", "scheduled_charging"])
+def test_generic_stopped_price_level_preserve_retains_scheduled_intent(
+    monkeypatch, fake_actions, source,
+):
+    hass = _FakeHass(price_settings={"preserve_home_battery": True})
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "generic_charger_enabled": True,
+        "generic_charger_status_entity": "sensor.garage_status",
+    })
+    hass.states._states["sensor.garage_status"] = SimpleNamespace(
+        entity_id="sensor.garage_status", state="Complete", attributes={},
+        last_reported=datetime.now(timezone.utc),
+    )
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
+    monkeypatch.setattr(ev_planner, "get_scheduled_charging_executor", lambda:
+                        SimpleNamespace(_preserve_home_battery_active=True))
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor._get_or_create_vehicle_state("generic_ev").is_charging = True
+    executor._set_preserve_home_battery_intent("charging")
+    hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]["source"] = source
+    executor.get_charging_decision = AsyncMock(
+        return_value=(True, "Cheap price", "price_level_opportunity")
+    )
+
+    asyncio.run(executor.evaluate_all_vehicles(5))
+
+    preserve = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
+    assert preserve["active"] is True
+    assert preserve["source"] == "scheduled_charging"
+
+
+@pytest.mark.parametrize("status,power,age,expected", [
+    ("Connected", "3.5", 0, True),  # Positive power overrides a stopped status.
+    ("Charging", "0", 0, True),    # Positive status overrides zero power.
+    ("Complete", "unknown", 0, False),
+    ("Connected", "0", -60, None),  # Future timestamps are not current evidence.
+    ("mystery", "NaN", 0, None),
+    ("unknown", "-1", 0, None),
+])
+def test_generic_price_level_readback_is_conservative(status, power, age, expected):
+    hass = _FakeHass()
+    for entity_id, value in [("sensor.status", status), ("sensor.power", power)]:
+        hass.states._states[entity_id] = SimpleNamespace(
+            entity_id=entity_id, state=value, attributes={"unit_of_measurement": "kW"},
+            last_reported=datetime.now(timezone.utc) - timedelta(seconds=age),
+        )
+    assert ev_planner._generic_charger_charge_state(hass, {
+        "charger_status_entity": "sensor.status", "charger_power_entity": "sensor.power",
+    }) is expected
