@@ -46498,6 +46498,21 @@ class OptimizationSettingsView(HomeAssistantView):
                 if isinstance(entry_data, dict):
                     opt_coordinator = entry_data.get("optimization_coordinator")
 
+            if settings.get("enabled") and config_entry:
+                license_manager = self._hass.data.get("power_sync_license_manager")
+                if license_manager and not license_manager.permits(entry_id):
+                    # Reject before saving or queueing a transition: a guarded
+                    # enable would otherwise fail after the client saw success.
+                    return web.json_response({
+                        "success": False,
+                        "code": "optimizer_access_required",
+                        "error": (
+                            "Open HA optimiser access in PowerSync integration "
+                            "options to check access and resume optimisation."
+                        ),
+                        "licensing": license_manager.status(entry_id),
+                    }, status=402)
+
             ai_setting_keys = {
                 "ai_summary_provider",
                 "ai_summary_api_key",
