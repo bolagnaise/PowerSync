@@ -50,7 +50,7 @@ def submitted_live_settings(
     }
 
 
-def optimizer_settings_schema() -> dict[str, Any]:
+def optimizer_settings_schema(*, local_power_control: bool = False) -> dict[str, Any]:
     """Return cross-client ownership metadata for PowerSync settings.
 
     ``category`` is retained for version-1 mobile clients. New clients should
@@ -225,14 +225,14 @@ def optimizer_settings_schema() -> dict[str, Any]:
                 "owner": "optimizer",
                 "section": "dispatch_behaviour",
                 "order": 80,
-                "visible_if": {"battery_system_not": "tesla"},
+                "visible_if": {} if local_power_control else {"battery_system_not": "tesla"},
             },
             "spread_export_enabled": {
                 "category": "advanced",
                 "owner": "optimizer",
                 "section": "dispatch_behaviour",
                 "order": 81,
-                "visible_if": {"battery_system_not": "tesla"},
+                "visible_if": {} if local_power_control else {"battery_system_not": "tesla"},
             },
             "disable_idle_enabled": {
                 "category": "advanced",

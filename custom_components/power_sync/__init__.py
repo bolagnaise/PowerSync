@@ -46193,6 +46193,9 @@ class OptimizationSettingsView(HomeAssistantView):
                 opt_coordinator = data["optimization_coordinator"]
                 break
 
+        from .powerwall_host import local_battery_dispatch_configured
+        local_power_control = bool(config_entry and local_battery_dispatch_configured(config_entry.data))
+
         def _entry_nonnegative_float_setting(key: str) -> float:
             if not config_entry:
                 return 0.0
@@ -46630,7 +46633,8 @@ class OptimizationSettingsView(HomeAssistantView):
                     ),
                 },
                 "settings_groups": _optimizer_settings_groups(),
-                "settings_schema": optimizer_settings_schema(),
+                "settings_schema": optimizer_settings_schema(local_power_control=local_power_control),
+                "local_power_control": local_power_control,
             })
 
         manual_backup_reserve = opt_coordinator.manual_backup_reserve
@@ -46668,7 +46672,8 @@ class OptimizationSettingsView(HomeAssistantView):
             ),
             "auto_apply_reserve_enabled": opt_coordinator.auto_apply_reserve_enabled,
             "settings_groups": _optimizer_settings_groups(),
-            "settings_schema": optimizer_settings_schema(),
+            "settings_schema": optimizer_settings_schema(local_power_control=local_power_control),
+            "local_power_control": local_power_control,
             "manual_backup_reserve": (
                 round(manual_backup_reserve * 100)
                 if manual_backup_reserve is not None

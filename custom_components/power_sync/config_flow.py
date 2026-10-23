@@ -12014,6 +12014,8 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
         """Menu handler: optimization provider and backup reserve settings."""
         battery_system = self._effective_battery_system()
         is_tesla = battery_system == BATTERY_SYSTEM_TESLA
+        from .powerwall_host import local_battery_dispatch_configured
+        supports_spread = not is_tesla or local_battery_dispatch_configured(self.config_entry.data)
         is_custom = battery_system == BATTERY_SYSTEM_CUSTOM
         is_sungrow_ihomemanager = (
             battery_system == BATTERY_SYSTEM_SUNGROW
@@ -12360,14 +12362,14 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 )
                 spread_export_enabled = (
                     False
-                    if is_tesla
+                    if not supports_spread
                     else bool(
                         user_input.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED, False)
                     )
                 )
                 spread_import_enabled = (
                     False
-                    if is_tesla
+                    if not supports_spread
                     else bool(
                         user_input.get(CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED, False)
                     )
@@ -13047,7 +13049,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
             current_form_values[CONF_OPTIMIZATION_MAX_GRID_EXPORT_W] = (
                 current_max_grid_export_kw
             )
-        if not is_tesla:
+        if supports_spread:
             current_form_values[CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED] = bool(
                 current_spread_export_enabled
             )
@@ -13282,7 +13284,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             }
         )
-        if not is_tesla:
+        if supports_spread:
             schema_fields.update({
                 vol.Required(
                     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,

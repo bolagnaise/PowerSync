@@ -222,3 +222,24 @@ def test_amber_confidence_is_optional_provider_scoped_and_owned_by_optimizer():
         'visible_if': {'electricity_provider': 'amber'},
     }
     assert 'amber_forecast_confidence_enabled' in module.optimizer_settings_groups()['advanced_optimizer']['fields']
+
+
+def test_paired_local_tesla_metadata_allows_spread_controls():
+    module=_load_module()
+    default=module.optimizer_settings_schema()
+    paired=module.optimizer_settings_schema(local_power_control=True)
+    for field in ('spread_export_enabled','spread_import_enabled'):
+        assert default['fields'][field]['visible_if']=={'battery_system_not':'tesla'}
+        assert paired['fields'][field]['visible_if']=={}
+
+
+def test_tesla_options_preserve_spread_input_only_with_local_dispatch_capability():
+    import ast
+    tree=ast.parse(CONFIG_FLOW_PATH.read_text())
+    method=next(node for node in ast.walk(tree) if isinstance(node,ast.AsyncFunctionDef) and node.name=='_async_step_optimization')
+    assignments=[node for node in ast.walk(method) if isinstance(node,ast.Assign) and any(isinstance(t,ast.Name) and t.id in ('spread_export_enabled','spread_import_enabled') for t in node.targets)]
+    for capability in (True,False):
+        ns={'supports_spread':capability,'user_input':{'spread_export_enabled':True,'spread_import_enabled':True},'CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED':'spread_export_enabled','CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED':'spread_import_enabled'}
+        for node in assignments:exec(compile(ast.Module(body=[node],type_ignores=[]),'<spread-input>','exec'),ns)
+        assert ns['spread_export_enabled'] is capability
+        assert ns['spread_import_enabled'] is capability
