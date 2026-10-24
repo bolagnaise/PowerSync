@@ -164,6 +164,8 @@ class PowerSyncChart extends HTMLElement {
       clockBucket,
       compact,
       title: config.title,
+      description: config.description,
+      recordedHistory: config.recordedHistory,
       height: config.height,
       width: config.width,
       yUnit: config.yUnit,
@@ -533,6 +535,9 @@ class PowerSyncChart extends HTMLElement {
       const nowX = xScale(Date.now());
       if (nowX >= pad.left && nowX <= W - pad.right) {
         svg += `<line x1="${nowX}" y1="${pad.top}" x2="${nowX}" y2="${pad.top + chartH}" stroke="var(--primary-color, #03a9f4)" stroke-width="1" stroke-dasharray="4,2" opacity="0.6"/>`;
+        if (config.recordedHistory) {
+          svg += `<text x="${nowX}" y="${pad.top - 4}" text-anchor="middle" font-size="10" fill="var(--primary-color, #03a9f4)">Now</text>`;
+        }
       }
     }
 
@@ -596,6 +601,13 @@ class PowerSyncChart extends HTMLElement {
           gap: 6px 10px;
           min-width: 120px;
           max-width: 58%;
+        }
+        .description {
+          color: var(--secondary-text-color, #888);
+          font-size: 12px;
+          line-height: 1.4;
+          margin-bottom: 8px;
+          position: relative;
         }
         .legend-item {
           display: inline-flex;
@@ -727,6 +739,7 @@ class PowerSyncChart extends HTMLElement {
           <div class="title">${this._escHtml(title)}</div>
           <div class="legend">${legend}</div>
         </div>
+        ${config.description ? `<div class="description">${this._escHtml(config.description)}</div>` : ''}
         ${empty
           ? `<div class="no-data">${this._escHtml(title)}<br>No data available</div>`
           : `<div class="chart-wrap">
@@ -791,7 +804,7 @@ class PowerSyncChart extends HTMLElement {
 
       const targetT = xMin + ((localX - pad.left) / chartW) * (xMax - xMin);
       const points = allSeries
-        .map((series) => ({ series, point: series.axis === 'price'
+        .map((series) => ({ series, point: config.recordedHistory || series.axis === 'price'
           ? (targetT >= series.data[0]?.[0] && targetT <= series.data[series.data.length - 1]?.[0] ? this._pointAt(series.data, targetT) : null)
           : nearestPoint(series.data, targetT) }))
         .filter((item) => item.point && Number.isFinite(item.point[1]));
@@ -1108,7 +1121,7 @@ class PowerSyncChart extends HTMLElement {
       const rawData = cached.length
         ? cached
         : this._statePoint(stateObj, now);
-      const data = s.axis === 'price'
+      const data = config.recordedHistory || s.axis === 'price'
         ? this._priceHistoryPoints(cached, stateObj, window)
         : this._projectHistoryToNow(rawData, stateObj, now, start, end);
       const filtered = this._filterSeriesData(data, s);
@@ -1119,14 +1132,15 @@ class PowerSyncChart extends HTMLElement {
   _priceHistoryPoints(cached, stateObj, window) {
     // Preserve signed observations; never fill earlier gaps or future hours.
     const { startMs, nowMs } = window;
-    const points = cached.filter(([t, v]) => Number.isFinite(t) && Number.isFinite(v) && t <= nowMs)
+    const points = cached.filter(([t, v]) => Number.isFinite(t) && Number.isFinite(v) && t >= startMs && t <= nowMs)
       .map(point => [...point]).sort((a, b) => a[0] - b[0]);
     const state = stateObj?.state;
     const value = state == null || String(state).trim() === '' ? NaN : Number(state);
     if (!Number.isFinite(value)) return points;
     const observed = Date.parse(stateObj?.last_updated || stateObj?.last_changed || '');
-    if (!points.length && Number.isFinite(observed) && observed <= nowMs) {
-      points.push([Math.max(startMs, observed), value]);
+    if (Number.isFinite(observed) && observed <= nowMs) {
+      const t = Math.max(startMs, observed);
+      if (!points.length || t > points[points.length - 1][0]) points.push([t, value]);
     }
     if (points.length && points[points.length - 1][0] < nowMs) points.push([nowMs, value]);
     return points;
@@ -8058,8 +8072,8 @@ class PowerSyncStrategy {
     // --- Center Column: EV Dashboard Panel ---
     center.push(_evPanel());
 
-    // --- Right Column: Price History (fallback when no tariff schedule exists) ---
-    if (hasE('current_import_price') && !hasE('tariff_schedule')) {
+    // --- Right Column: Actual Price History (independent of the TOU model) ---
+    if (hasE('current_import_price')) {
       right.push(_priceChart(e, hass));
     }
 
@@ -9551,8 +9565,10 @@ function _priceChart(e, hass) {
   const importMeta = _priceMeta(hass, e('current_import_price'));
   return {
     type: 'custom:power-sync-chart',
-    title: 'Current Price History - Today',
+    title: 'Actual Prices - Today',
+    description: 'Recorded import and export prices from midnight to now. Future hours are left blank.',
     mode: 'history',
+    recordedHistory: true,
     historyHours: 24,
     historyRange: 'today',
     height: 255,
@@ -9582,6 +9598,7 @@ function _touSchedule(e, hass) {
   return {
     type: 'custom:power-sync-chart',
     title: 'TOU Schedule',
+    description: 'Tariff model, not price history. Hours before now may use tomorrow’s model or repeated prices.',
     entity: e('tariff_schedule'),
     mode: 'tou',
     height: 235,

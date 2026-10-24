@@ -497,20 +497,102 @@ def test_lp_solar_chart_renders_only_evidence_backed_curtailment_bands():
     subprocess.run(["node", "-e", f"{prelude}\n{chart_source}\n{runtime}"], check=True)
 
 
-def test_dashboard_uses_tariff_schedule_instead_of_duplicate_price_history():
-    """Dynamic tariffs should not show a current-state history chart beside the schedule."""
+def test_dashboard_shows_actual_prices_alongside_tariff_model():
+    """Today's observed prices must remain available when tomorrow's TOU model exists."""
     source = STRATEGY_PATH.read_text()
     price_layout = source[
-        source.index("    // --- Right Column: Price History"):
+        source.index("    // --- Right Column: Actual Price History"):
         source.index("    // --- Center Column: LP Forecast Summary")
     ]
 
-    assert "if (hasE('current_import_price') && !hasE('tariff_schedule'))" in price_layout
+    assert "if (hasE('current_import_price'))" in price_layout
+    assert "&& !hasE('tariff_schedule')" not in price_layout
     assert "right.push(_priceChart(e, hass));" in price_layout
     assert "if (hasE('tariff_schedule'))" in price_layout
     assert "right.push(_touSchedule(e, hass));" in price_layout
-    assert "title: 'Current Price History - Today'" in source
+    assert "title: 'Actual Prices - Today'" in source
     assert "title: 'Electricity Prices - 24 Hours'" not in source
+
+
+def test_standalone_actual_prices_preserve_spikes_and_bound_history_tooltips():
+    """Today's history must not adopt tomorrow's model or fabricate missing prices."""
+    source = STRATEGY_PATH.read_text()
+    chart = source[source.index('const OPTIMIZER_POWER_AXIS_EXPONENT'):source.index("if (!customElements.get('power-sync-chart'))")]
+    builder = source[source.index('function _priceChart('):source.index('function _lpForecastSummary(')]
+    runtime = r"""
+      const assert = require('node:assert/strict');
+      const NativeDate = Date;
+      let now = NativeDate.parse('2026-10-13T03:40:00Z');
+      global.Date = class extends NativeDate {
+        constructor(...args) { super(...(args.length ? args : [now])); }
+        static now() { return now; }
+      };
+      global.HTMLElement = class {
+        attachShadow() { this.shadowRoot = {innerHTML: '', querySelectorAll() { return []; }, querySelector() { return null; }}; }
+        getBoundingClientRect() { return {width: this.testWidth || 640}; }
+      };
+      function _priceMeta() { return {minorPriceUnit: 'c/kWh'}; }
+    """ + chart + builder + r"""
+      const e = name => `sensor.${name}`;
+      const hass = {config: {time_zone: 'Australia/Brisbane'}, states: {
+        [e('current_import_price')]: {state: '0.36', last_updated: '2026-10-13T03:35:00Z'},
+        [e('current_export_price')]: {state: '-0.02', last_updated: '2026-10-13T03:35:00Z'},
+        [e('tariff_schedule')]: {attributes: {schedule: [{buy_price: 0.09, sell_price: 0.05}]}},
+      }};
+      const card = new PowerSyncChart();
+      card._config = _priceChart(e, hass);
+      card._hass = hass;
+      const window = card._historyWindow(card._config);
+      assert.equal(new Date(window.startMs).toISOString(), '2026-10-12T14:00:00.000Z');
+      const spike = Date.parse('2026-10-12T21:00:00Z');
+      const observed = Date.parse('2026-10-13T03:35:00Z');
+      card._historyCache.set(e('current_import_price'), [[window.startMs, 0.15], [spike, 1.25], [now+60000, 99]]);
+      const data = card._getHistoryData(card._config, hass);
+      assert.deepEqual(data[0].data, [[window.startMs, 0.15], [spike, 1.25], [observed, 0.36], [now, 0.36]]);
+      assert.deepEqual(data[1].data, [[observed, -0.02], [now, -0.02]]);
+      assert.deepEqual(card._priceHistoryPoints([], {state: '0.36'}, window), []);
+      for (const width of [320, 640]) {
+        card.testWidth = width;
+        card._render();
+        const html = card.shadowRoot.innerHTML;
+        assert.ok(html.includes('Actual Prices - Today'));
+        assert.ok(html.includes('>Now</text>'));
+        assert.ok(html.includes('-2.00c/kWh'));
+        assert.ok(!/NaN|Infinity/.test(html));
+      }
+      assert.ok(_touSchedule(e, hass).description.includes('not price history'));
+      // The displayed step price applies from its observation until the next change.
+      const handlers = {};
+      const tooltip = {style: {}, offsetWidth: 160};
+      const line = {style: {}};
+      const svg = {getBoundingClientRect() {return {left: 0, width: 640, height: 255};},
+        addEventListener(name, handler) {handlers[name] = handler;}};
+      card.shadowRoot.querySelector = selector => ({'.chart-wrap': {}, svg, '.tooltip-line': line, '.tooltip': tooltip})[selector];
+      const x = t => (t-window.startMs)/(window.endMs-window.startMs)*640;
+      card._attachTooltip({allSeries: data, chartW: 640, config: card._config, pad: {left: 0, right: 0, bottom: 30},
+        spanHours: 24, W: 640, xMin: window.startMs, xMax: window.endMs, yMultiplier: 100, rightYMultiplier: 1});
+      handlers.pointermove({clientX: x(spike + 60000)});
+      assert.ok(tooltip.innerHTML.includes('125.00c/kWh'));
+      assert.ok(!tooltip.innerHTML.includes('Export Price'));
+      handlers.pointermove({clientX: x(now + 60000)});
+      assert.equal(tooltip.style.opacity, '0');
+      // Query only today's recorder states and discard yesterday's cache on rollover.
+      let request;
+      hass.callApi = async (method, path) => {request = path; return [];};
+      card._scheduleRender = () => {};
+      (async () => {
+        await card._loadHistoryData(card._config, hass);
+        assert.ok(request.startsWith('history/period/2026-10-12T14:00:00.000Z?'));
+        const query = new URLSearchParams(request.split('?')[1]);
+        assert.equal(query.get('end_time'), new Date(now).toISOString());
+        assert.equal(query.get('filter_entity_id'), `${e('current_import_price')},${e('current_export_price')}`);
+        now = Date.parse('2026-10-13T14:05:00Z');
+        const next = card._historyWindow(card._config);
+        assert.deepEqual(card._priceHistoryPoints([[spike, 1.25]], {state: 'unknown'}, next), []);
+      })().catch(error => {console.error(error); process.exitCode = 1;});
+    """
+    result = subprocess.run(['node', '-e', runtime], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_daily_cost_card_distinguishes_amber_metered_cost_from_estimate():
