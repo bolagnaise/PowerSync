@@ -618,7 +618,9 @@ class TEDAPIv1rTransport:
         return False
 
     async def dispatch_battery_power(
-        self, din: str, power_watts: float, duration_seconds: int
+        self, din: str, power_watts: float, duration_seconds: int, *,
+        before_write: Callable[[], None] | None = None,
+        before_submit: Callable[[int], Awaitable[None]] | None = None,
     ) -> bool:
         """Request battery watts (positive discharge, negative charge) over LAN.
 
@@ -633,7 +635,9 @@ class TEDAPIv1rTransport:
         command = env.teg.dispatch_battery_power_request.real_power
         command.power_watts = power_watts
         command.duration_seconds = duration_seconds
-        return await self._send_battery_dispatch(din, env)
+        return await self._send_battery_dispatch(din, env,
+            **({"before_write": before_write} if before_write is not None else {}),
+            **({"before_submit": before_submit} if before_submit is not None else {}))
 
     async def resume_battery_operation(self, din: str, *, before_write: Callable[[], None] | None = None,
                                        before_submit: Callable[[int], Awaitable[None]] | None = None) -> bool:

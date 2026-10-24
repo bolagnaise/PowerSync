@@ -406,13 +406,16 @@ class PowerwallLocalClient:
             raise ValueError("at least one grid import/export setting is required")
         return await self._transport.write_config(self._din, updates)
 
-    async def dispatch_battery_power(self, power_watts: float, duration_seconds: int) -> bool:
+    async def dispatch_battery_power(self, power_watts: float, duration_seconds: int, *,
+            before_write: Callable[[], None] | None = None,
+            before_submit: Callable[[int], Awaitable[None]] | None = None) -> bool:
         """Request bounded local battery power without changing stored settings."""
         if not self._local_access_enabled or is_loopback_host(self._host):
             raise PowerwallUnreachableError("Powerwall LAN access is disabled")
         return await self._transport.dispatch_battery_power(
-            self._din, power_watts, duration_seconds
-        )
+            self._din, power_watts, duration_seconds,
+            **({"before_write": before_write} if before_write is not None else {}),
+            **({"before_submit": before_submit} if before_submit is not None else {}))
 
     async def get_battery_calibration_delay_status(self) -> dict[str, Any]:
         """Read the gateway's deferral budget; never infer it from an alert."""

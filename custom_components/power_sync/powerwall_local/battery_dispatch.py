@@ -22,6 +22,7 @@ class DispatchCommandFailed(Exception):
 _LOGGER = logging.getLogger(__name__)
 LEASE_SECONDS = 30
 RENEW_SECONDS = 10
+TIMED_DISPATCH_MAX_W = 10_000
 
 
 def _number(value: Any, label: str) -> float:
@@ -89,10 +90,10 @@ def manual_power_limits_kw(snapshot: Any, config: dict, learned_discharge_w: flo
     """UI bounds include both the site limit and available battery output."""
     site_import, site_export = site_grid_limits_w(snapshot)
     load, solar = _number(snapshot.load_w, "home power"), _number(snapshot.solar_w, "solar power")
-    charge = _number(config.get("optimization_max_charge_w", 5000), "charge limit")
+    charge = min(TIMED_DISPATCH_MAX_W, _number(config.get("optimization_max_charge_w", 5000), "charge limit"))
     if learned_charge_w is not None:
         charge = min(charge, _number(learned_charge_w, "gateway charge limit"))
-    discharge = _number(config.get("optimization_max_discharge_w", 5000), "discharge limit")
+    discharge = min(TIMED_DISPATCH_MAX_W, _number(config.get("optimization_max_discharge_w", 5000), "discharge limit"))
     user_import = config.get("optimization_max_grid_import_w")
     if user_import not in (None, 0):
         site_import = min(site_import if site_import is not None else math.inf, _number(user_import, "import limit"))
@@ -103,7 +104,7 @@ def manual_power_limits_kw(snapshot: Any, config: dict, learned_discharge_w: flo
         site_export = min(site_export if site_export is not None else math.inf, _number(user_export, "export limit"))
     if learned_discharge_w is not None:
         discharge = min(discharge, _number(learned_discharge_w, "gateway discharge limit"))
-    export = min(site_export if site_export is not None else math.inf,
+    export = min(TIMED_DISPATCH_MAX_W, site_export if site_export is not None else math.inf,
                  discharge + solar - load) if discharge > 0 else 0
     return {"charge_input_max_kw": math.floor(max(0, charge) + 1e-6) / 1000,
             "grid_export_max_kw": math.floor(max(0, export) + 1e-6) / 1000}
@@ -144,7 +145,7 @@ def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict, *, ta
             target = min(target, site_export)
         if target <= 0:
             raise ValueError("Grid export limit blocks force discharge")
-        maximum = _number(config.get("optimization_max_discharge_w", 5000), "discharge limit")
+        maximum = min(TIMED_DISPATCH_MAX_W, _number(config.get("optimization_max_discharge_w", 5000), "discharge limit"))
         if maximum <= 0:
             raise ValueError("Discharge limit must be positive")
         return max(0.0, min(maximum, target + load - solar))
@@ -155,7 +156,7 @@ def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict, *, ta
         raise ValueError("Battery is at its charge ceiling")
     if config.get("optimization_allow_grid_charge", True) is not True:
         raise ValueError("Grid charging is disabled")
-    maximum = _number(config.get("optimization_max_charge_w", 5000), "charge limit")
+    maximum = min(TIMED_DISPATCH_MAX_W, _number(config.get("optimization_max_charge_w", 5000), "charge limit"))
     import_limit = config.get("optimization_max_grid_import_w")
     # Existing setup uses None/zero for an automatic (unset) site import cap.
     headroom = maximum if import_limit in (None, 0) else _number(import_limit, "grid import limit") - load + solar

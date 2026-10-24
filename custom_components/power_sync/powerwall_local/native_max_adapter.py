@@ -11,7 +11,7 @@ from copy import deepcopy
 import math
 import time
 
-from .battery_dispatch import site_grid_limits_w, validate_dispatch_config
+from .battery_dispatch import battery_watts, site_grid_limits_w, validate_dispatch_config
 from .full_rate_charge import native_max_charge_eligibility
 from .native_max_charge import NativeMaxChargeError
 
@@ -29,7 +29,7 @@ class NativeMaxChargeAdapter:
     def __init__(self, *, client, identity, current_identity, policy, config,
                  read_tariff, upload, restorable, forcing_tariff,
                  budget, entry_id, site, tariff_matches=None, monotonic=time.monotonic,
-                 settle_interval=5):
+                 settle_interval=5, direction="charge", clock=time.time):
         self.client, self.identity = client, identity
         self.current_identity, self.policy, self.config = current_identity, policy, config
         self.read_tariff, self.upload, self.restorable = read_tariff, upload, restorable
@@ -41,6 +41,10 @@ class NativeMaxChargeAdapter:
         self._snapshot = None
         self._observed_at = None
         self.settle_interval = settle_interval
+        self.direction = direction
+        self.startup_kick = False
+        self.planning_request = False
+        self.clock = clock
 
     def _matches(self, expected, observed):
         # A same-priced foreign tariff is not this session's restore owner.
@@ -88,7 +92,7 @@ class NativeMaxChargeAdapter:
 
     def authority(self):
         try:
-            validate_dispatch_config("charge", dict(self.config()))
+            validate_dispatch_config(self.direction, dict(self.config()))
             return (self.identity == self.current_identity() and self.policy() is True
                     and bool(self.client.local_access_enabled))
         except (ValueError, TypeError):
@@ -105,10 +109,31 @@ class NativeMaxChargeAdapter:
             return False
         try:
             config = dict(self.config())
+            if self.planning_request:
+                capacity = config.get("powerwall_native_capacity_w")
+                maximum = config.get(f"optimization_max_{self.direction}_w", 5000)
+                if (type(capacity) not in (int, float) or not math.isfinite(capacity) or capacity <= 0
+                        or type(maximum) not in (int, float) or not math.isfinite(maximum) or maximum < capacity):
+                    return False
             raw = snapshot.raw.get("config") if native_config is None else native_config
             info = raw.get("site_info") if isinstance(raw, dict) else None
             imported, _ = site_grid_limits_w(type("NativeBounds", (), {"raw": {"config": raw}})())
             permission = info.get("disallow_charge_from_grid_with_solar_installed", False) if isinstance(info, dict) else None
+            if self.direction == "discharge":
+                if (not isinstance(info, dict) or "min_site_meter_power_ac" not in info
+                        or not 0 <= self.monotonic() - self._observed_at <= 5
+                        or not self.authority()):
+                    return False
+                _, exported = site_grid_limits_w(type("NativeBounds", (), {"raw": {"config": raw}})())
+                configured = config.get("optimization_max_grid_export_w")
+                if configured is not None and (type(configured) not in (int, float)
+                        or not math.isfinite(configured) or configured <= 0
+                        or exported is None or exported > configured):
+                    return False
+                if info.get("customer_preferred_export_rule") not in ("battery_ok", "pv_only", "never"):
+                    return False
+                battery_watts("discharge", 1, snapshot, config)
+                return True
             return native_max_charge_eligibility(
                 source="native_manual_max", requested_power_w=0, grid_import_target_w=None,
                 planning_charge_max_w=config.get("optimization_max_charge_w", 5000),
@@ -150,9 +175,21 @@ class NativeMaxChargeAdapter:
                 or not 0 <= reserve <= 100 or not self.restorable(tariff)
                 or not self._physical_sample(snapshot) or self.monotonic() - started > 5):
             raise NativeMaxChargeError("Exact native Max restoration baseline is unavailable")
-        return {"mode": mode, "reserve": reserve, "tariff": deepcopy(tariff),
-                "forcing_tariff": deepcopy(self.forcing_tariff),
-                "settle_charge_w": max(0, -snapshot.battery_w)}
+        baseline = {"mode": mode, "reserve": reserve, "tariff": deepcopy(tariff),
+                    "forcing_tariff": deepcopy(self.forcing_tariff),
+                    "settle_charge_w": max(0, -snapshot.battery_w), "direction": self.direction}
+        if self.direction == "discharge":
+            export = info.get("customer_preferred_export_rule")
+            if export not in ("battery_ok", "pv_only", "never"):
+                raise NativeMaxChargeError("Native discharge export baseline is unavailable")
+            config = dict(self.config())
+            def percent(value):
+                value = float(value)
+                return value * 100 if value <= 1 else value
+            baseline.update(export_rule=export, settle_discharge_w=max(0, snapshot.battery_w),
+                force_reserve=max(reserve, percent(config.get("optimization_backup_reserve", .2)),
+                                  percent(config.get("hardware_backup_reserve", 0))))
+        return baseline
 
     @staticmethod
     def _physical_sample(snapshot):
@@ -171,7 +208,8 @@ class NativeMaxChargeAdapter:
         Native TOU charging can persist after settings readback. Recovery starts
         these observations again; a previous process's sample is not reused.
         """
-        original = baseline.get("settle_charge_w", 0)
+        discharge = baseline.get("direction", "charge") == "discharge"
+        original = baseline.get("settle_discharge_w" if discharge else "settle_charge_w", 0)
         if type(original) not in (int, float) or not math.isfinite(original) or original < 0:
             return False
         for index in range(2):
@@ -182,7 +220,8 @@ class NativeMaxChargeAdapter:
             started = self.monotonic()
             snapshot = await self.client.get_snapshot()
             if (self.monotonic() - started > 5 or not self._physical_sample(snapshot)
-                    or -snapshot.battery_w > original + 250):
+                    or (snapshot.battery_w > max(original, snapshot.load_w - snapshot.solar_w) + 250
+                        if discharge else -snapshot.battery_w > original + 250)):
                 return False
         return True
 
@@ -195,6 +234,34 @@ class NativeMaxChargeAdapter:
         if result and self.token == token:
             self.token = None
         return result
+
+    async def kick(self, baseline, before_write, *, deadline, write_intent):
+        """Optional one-shot pulse, never a renewable local controller."""
+        if not self.startup_kick:
+            return
+        if await self.guard() is not True:
+            raise NativeMaxChargeError("Startup kick policy changed")
+        from .hybrid_policy import startup_watts
+        config = dict(self.config())
+        for direction in ("charge", "discharge"):
+            config[f"gateway_{direction}_limit_w"] = getattr(self.client, f"dispatch_{direction}_limit_w", None)
+        watts = startup_watts(self.direction, self._snapshot, config)
+        seconds = min(30, math.floor(deadline - self.clock()))
+        if watts is None or seconds < 1:
+            return
+        async def submitted(until):
+            await write_intent("kick", (until, seconds, watts))
+        fence = await before_write()
+        try:
+            confirmed = await self._mutate(self.client.dispatch_battery_power(watts, seconds,
+                before_write=fence, before_submit=submitted))
+        except Exception:
+            # An optional pulse failure may still have executed. Reconcile its
+            # acceptance window before the session attempts explicit resume.
+            await write_intent("wait_local")
+            return
+        if confirmed is True:
+            await write_intent("local_confirmed")
 
     async def resume(self, fence, *, write_intent):
         fence()
@@ -214,21 +281,27 @@ class NativeMaxChargeAdapter:
             info = config.get("site_info") if isinstance(config, dict) else None
             return (isinstance(info, dict) and config.get("default_real_mode") in
                     ("autonomous", "self_consumption", baseline["mode"])
-                    and info.get("backup_reserve_percent") in (100, baseline["reserve"])
+                    and info.get("backup_reserve_percent") in (reserve, baseline["reserve"])
+                    and (self.direction != "discharge" or info.get("customer_preferred_export_rule")
+                         in (baseline["export_rule"], "battery_ok"))
                     and self._forcing_permitted(config))
         def checked_fence():
             fence()
             if checked_config is None or not self._forcing_permitted(checked_config):
                 raise NativeMaxChargeError("Native Max policy changed before config submission")
+        updates = {"default_real_mode": mode, "site_info.backup_reserve_percent": reserve}
+        if self.direction == "discharge":
+            updates["site_info.customer_preferred_export_rule"] = "battery_ok"
         if not await self._mutate(self.client._transport.write_config(self.client._din,
-                {"default_real_mode": mode, "site_info.backup_reserve_percent": reserve},
+                updates,
                 before_write=checked_fence, validate_config=owned,
                 before_submit=lambda until: write_intent("local", until))):
             return False
         current = await self.client._transport.read_config(self.client._din)
         confirmed = (isinstance(current, dict) and current.get("default_real_mode") == mode
                 and isinstance(current.get("site_info"), dict)
-                and current["site_info"].get("backup_reserve_percent") == reserve)
+                and current["site_info"].get("backup_reserve_percent") == reserve
+                and (self.direction != "discharge" or current["site_info"].get("customer_preferred_export_rule") == "battery_ok"))
         if confirmed:
             await write_intent("local_confirmed")
         return confirmed
@@ -248,7 +321,8 @@ class NativeMaxChargeAdapter:
         before_write = self._owned_before(baseline, before_write)
         if not await self._upload(deepcopy(baseline["forcing_tariff"]), "forcing", before_write, write_intent):
             return False
-        return await self._write_config("autonomous", 100, before_write, baseline, write_intent)
+        return await self._write_config("autonomous", baseline.get("force_reserve", 100),
+                                        before_write, baseline, write_intent)
 
     async def restore(self, baseline, before_write, *, write_intent):
         """Release each owned field independently; retain uncertain cleanup.
@@ -327,7 +401,10 @@ class NativeMaxChargeAdapter:
         await cleanup_fence()
         # Remove the owned reserve even when tariff readback is unavailable.
         await release_field("reserve_released", "site_info.backup_reserve_percent",
-                            baseline["reserve"], 100)
+                            baseline["reserve"], baseline.get("force_reserve", 100))
+        if baseline.get("direction", "charge") == "discharge":
+            await release_field("export_released", "site_info.customer_preferred_export_rule",
+                                baseline["export_rule"], "battery_ok")
         try:
             tariff = await self.read_tariff()
         except Exception:
@@ -388,5 +465,7 @@ class NativeMaxChargeAdapter:
 
         if progress.get("mode_disarmed") and progress.get("tariff_released"):
             await release_field("mode_released", "default_real_mode", baseline["mode"], "self_consumption")
-        return not pending_tariff and all(progress.get(field) for field in
-                   ("mode_released", "reserve_released", "tariff_released"))
+        fields = ["mode_released", "reserve_released", "tariff_released"]
+        if baseline.get("direction", "charge") == "discharge":
+            fields.append("export_released")
+        return not pending_tariff and all(progress.get(field) for field in fields)

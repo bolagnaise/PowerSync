@@ -21,10 +21,12 @@ def setup(monkeypatch):
     session_module = importlib.import_module(package+'.powerwall_local.native_max_charge')
     state = SimpleNamespace(config={'default_real_mode':'self_consumption', 'site_info':{
         'backup_reserve_percent':5, 'max_site_meter_power_ac':14.9,
+        'min_site_meter_power_ac':-14.9,
         'customer_preferred_export_rule':'pv_only'}}, tariff={'name':'real tariff','code':'REAL'},
         identity='paired', policy=True, grid='SystemGridConnected', soc=50,
         events=[], at=1000., upload_ok=True, local_ok=True,
-        before_validate=None,before_send=None, battery_w=0, load_w=1000, solar_w=0)
+        before_validate=None,before_send=None, battery_w=0, load_w=1000, solar_w=0,
+        kick_ok=True, kick_error=None, resume_ok=True, after_kick=None)
     original = deepcopy(state.config), deepcopy(state.tariff)
     settings = {'optimization_max_charge_w':14700, 'optimization_max_grid_import_w':15000,
                 'optimization_grid_charge_soc_cap':1, 'optimization_allow_grid_charge':True}
@@ -53,10 +55,17 @@ def setup(monkeypatch):
         async def get_snapshot(self):
             return SimpleNamespace(raw={'config':deepcopy(state.config)},soc=state.soc,grid_status=state.grid,
                 battery_w=state.battery_w, load_w=state.load_w, solar_w=state.solar_w,
-                grid_w=state.load_w-state.solar_w-state.battery_w)
+                grid_w=state.load_w-state.solar_w-state.battery_w,
+                backup_reserve_percent=state.config['site_info']['backup_reserve_percent'])
         async def resume_battery_operation(self,*,before_write,before_submit):
             await before_submit(state.at-2)
-            before_write(); state.events.append(('resume',None)); return True
+            before_write(); state.events.append(('resume',None)); return state.resume_ok
+        async def dispatch_battery_power(self,watts,seconds,*,before_write,before_submit):
+            await before_submit(state.at-2)
+            before_write(); state.events.append(('kick',(watts,seconds)))
+            if state.after_kick: state.after_kick()
+            if state.kick_error: raise state.kick_error
+            return state.kick_ok
     async def read_tariff(): return deepcopy(state.tariff)
     async def upload(tariff,before_write):
         fence=await before_write(); fence(); state.events.append(('tariff',deepcopy(tariff)))
@@ -67,7 +76,7 @@ def setup(monkeypatch):
         current_identity=lambda:state.identity,policy=lambda:state.policy,config=lambda:settings,
         read_tariff=read_tariff,upload=upload,restorable=lambda t:t.get('code')=='REAL',
         forcing_tariff={'name':'Force Charge','code':'UNIQUE_FORCE'},budget=budget,
-        entry_id='battery',site='site',monotonic=lambda:state.at,settle_interval=0)
+        entry_id='battery',site='site',monotonic=lambda:state.at,settle_interval=0,clock=lambda:state.at)
     store=Store()
     session=session_module.NativeMaxChargeSession(adapter,store,
         clock=lambda:state.at,monotonic=lambda:state.at)
@@ -359,3 +368,113 @@ async def test_one_safe_sample_followed_by_renewed_draw_cannot_release_ev_capaci
     assert s.budget.native_max_claim('site')
     s.adapter.client.get_snapshot=original;s.state.battery_w=0
     assert await s.session.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('direction,watts',[('charge',-10000),('discharge',10000)])
+async def test_large_site_one_shot_kick_releases_before_native_tariff_and_restores(setup,direction,watts):
+    s=setup
+    s.adapter.direction=direction;s.adapter.startup_kick=True
+    s.settings.update(optimization_max_discharge_w=20000,optimization_max_grid_export_w=15000,
+                      optimization_backup_reserve=.2)
+    assert (await s.session.start(120))['active']
+    events=[e[0] for e in s.state.events]
+    assert events[:3]==['kick','resume','tariff']
+    assert [e[1] for e in s.state.events if e[0]=='kick']==[(watts,30)]
+    assert s.store.data['expires_at']==1120
+    assert not s.store.data.get('kick_pending')
+    assert s.store.data['baseline']['direction']==direction
+    if direction=='discharge':
+        assert s.state.config['site_info']['backup_reserve_percent']==20
+        assert s.state.config['site_info']['customer_preferred_export_rule']=='battery_ok'
+    assert await s.session.stop()
+    assert (s.state.config,s.state.tariff)==s.original
+    assert not s.session.pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('busy', ['battery','solar','home'])
+async def test_busy_large_inverter_skips_kick_and_uses_tariff(setup,busy):
+    s=setup;s.adapter.startup_kick=True
+    if busy=='battery':s.state.battery_w=12000
+    if busy=='solar':s.state.solar_w=12000
+    if busy=='home':s.state.load_w=12000
+    await s.session.start(120)
+    assert not any(e[0]=='kick' for e in s.state.events)
+    assert any(e[0]=='tariff' for e in s.state.events)
+    assert await s.session.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('response',['rejected','timeout'])
+async def test_uncertain_kick_is_released_before_tariff_without_a_second_pulse(setup,response):
+    s=setup;s.adapter.startup_kick=True
+    if response=='rejected':s.state.kick_ok=False
+    else:s.state.kick_error=TimeoutError('uncertain submission')
+    await s.session.start(120)
+    assert [e[0] for e in s.state.events][:3]==['kick','resume','tariff']
+    assert sum(e[0]=='kick' for e in s.state.events)==1
+    assert await s.session.stop()
+
+
+@pytest.mark.asyncio
+async def test_revocation_after_kick_only_resumes_and_never_uploads_forcing_tariff(setup):
+    s=setup;s.adapter.startup_kick=True
+    s.state.after_kick=lambda:setattr(s.state,'policy',False)
+    with pytest.raises(s.m.NativeMaxChargeError):await s.session.start(120)
+    assert [e[0] for e in s.state.events]==['kick','resume']
+    assert (s.state.config,s.state.tariff)==s.original
+    assert not s.session.pending
+
+
+@pytest.mark.asyncio
+async def test_failed_kick_release_keeps_owner_until_cleanup_succeeds(setup):
+    s=setup;s.adapter.startup_kick=True;s.state.resume_ok=False
+    with pytest.raises(s.m.NativeMaxChargeError):await s.session.start(120)
+    assert s.store.data['kick_pending'] and s.session.pending
+    assert not any(e[0]=='tariff' for e in s.state.events)
+    s.state.resume_ok=True
+    assert await s.session.stop()
+    assert not s.session.pending
+
+
+@pytest.mark.asyncio
+async def test_discharge_recovery_retains_owner_until_export_settles(setup):
+    s=setup;s.adapter.direction='discharge'
+    s.settings.update(optimization_max_discharge_w=20000,optimization_max_grid_export_w=15000)
+    await s.session.start(120)
+    s.state.battery_w=5000
+    with pytest.raises(s.m.NativeMaxChargeError,match='settling'):await s.session.stop()
+    assert s.store.data['phase']=='settling'
+    assert (s.state.config,s.state.tariff)==s.original
+    count=len(s.state.events);s.state.battery_w=900
+    assert await s.session.stop()
+    assert len(s.state.events)==count
+
+
+@pytest.mark.asyncio
+async def test_restart_releases_uncertain_startup_kick_without_replaying_it(setup):
+    s=setup;s.adapter.startup_kick=True;s.state.resume_ok=False
+    with pytest.raises(s.m.NativeMaxChargeError):await s.session.start(120)
+    await s.session._cancel_watch()
+    assert s.store.data['kick_pending']
+    s.store.data['local_acceptance_until']=s.state.at+1
+    s.state.resume_ok=True
+    recovered=type(s.session)(s.adapter,s.store,clock=lambda:s.state.at,monotonic=lambda:s.state.at)
+    count=len(s.state.events)
+    task=asyncio.create_task(recovered.recover());await asyncio.sleep(.02)
+    assert not task.done() and len(s.state.events)==count
+    s.state.at+=2
+    assert await task
+    assert sum(e[0]=='kick' for e in s.state.events)==1
+    assert not any(e[0]=='tariff' for e in s.state.events)
+    assert s.store.data is None and not s.budget.native_max_claim('site')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('direction',['charge','discharge'])
+async def test_optimizer_native_force_cannot_ignore_a_lower_configured_power_bound(setup,direction):
+    s=setup;s.adapter.direction=direction;s.adapter.planning_request=True
+    s.settings.update(powerwall_native_capacity_w=20000,optimization_max_discharge_w=15000)
+    with pytest.raises(s.m.NativeMaxChargeError,match='policy denied'):await s.session.start(120)
+    assert not s.state.events and not s.session.pending

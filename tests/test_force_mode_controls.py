@@ -5019,3 +5019,23 @@ def test_unclampable_tesla_export_paths_are_denied_by_network_envelope():
     for function_source in (spike_entry, session_entry):
         assert 'entry_runtime.get("network_export_guard")' in function_source
         assert "cannot be clamped to a watt-level headroom" in function_source
+
+
+@pytest.mark.parametrize('mode', ['force_charge', 'force_discharge'])
+@pytest.mark.parametrize('status', ['pending', 'accepted', 'restore_pending'])
+def test_native_powerwall_mode_reports_acknowledgement_separately_from_physical_power(mode,status):
+    source=SENSOR_PATH.read_text()
+    method=_find_class_method(ast.parse(source),'BatteryModeSensor','extra_state_attributes')
+    namespace={'DOMAIN':'power_sync','BATTERY_MODE_STATE_FORCE_CHARGE':'force_charge',
+        'BATTERY_MODE_STATE_FORCE_DISCHARGE':'force_discharge','BATTERY_MODE_STATE_HOLD_SOC':'hold_soc',
+        'BATTERY_MODE_STATE_SELF_CONSUMPTION':'self_consumption'}
+    exec(textwrap.dedent(ast.get_source_segment(source,method)),namespace)
+    force={'active':True,'native_tariff_force':True,'command_status':status,
+           'startup_kick_w':-10000 if mode=='force_charge' else 10000,'handoff_phase':'tariff'}
+    subject=SimpleNamespace(hass=SimpleNamespace(data={'power_sync':{'site':{mode+'_state':force}}}),
+        _entry=SimpleNamespace(entry_id='site'),_get_current_mode=lambda:mode)
+    attrs=namespace['extra_state_attributes'](subject)
+    assert attrs['control_path']=='powerwall_native_tariff'
+    assert attrs['physical_effect']=='unverified' and attrs['command_status']==status
+    assert attrs['startup_kick_w']==force['startup_kick_w']
+    assert 'being force' not in attrs['description']

@@ -1,6 +1,7 @@
 """Durable lifetime for an explicit Tesla-managed Max charging request.
 
-Numeric watts and optimiser requests do not use this actuator. Adapters own
+Explicit Max and targetless larger-site optimiser requests use this actuator.
+The charge storage/class names remain compatible with existing journals. Adapters own
 provider I/O and must obtain/use a new write fence at every mutation boundary,
 including retries. A five-second policy monitor is corrective, not a physical
 power or instantaneous SOC limiter. Recovery restores; it never replays charge.
@@ -59,7 +60,10 @@ class NativeMaxChargeSession:
         return {"active": r["phase"] == "active", "restore_pending": r["phase"] in
                 ("applying", "restoring", "settling", "restored"), "phase": r["phase"],
                 "expires_at": r["expires_at"], "id": r["id"],
-                "last_error": r.get("last_error")}
+                "last_error": r.get("last_error"),
+                "direction": r["baseline"].get("direction", "charge"),
+                "startup_kick_w": r.get("startup_kick_w"),
+                "handoff_phase": r.get("handoff_phase")}
 
     async def load(self):
         async with self._lock:
@@ -78,13 +82,16 @@ class NativeMaxChargeSession:
                     raise NativeMaxChargeError("Native Max restore journal is invalid")
                 cleanup = data.get("cleanup", {})
                 if (not isinstance(cleanup, dict) or any(key not in
-                        {"mode_released", "reserve_released", "tariff_released", "mode_disarmed"}
+                        {"mode_released", "reserve_released", "tariff_released", "mode_disarmed", "export_released"}
                         or type(value) is not bool for key, value in cleanup.items())):
                     raise NativeMaxChargeError("Native Max cleanup journal is invalid")
                 until = data.get("local_acceptance_until", 0)
                 if (type(until) not in (int, float) or not math.isfinite(until) or until < 0
                         or data.get("tariff_intent") not in (None, "forcing", "baseline")):
                     raise NativeMaxChargeError("Native Max mutation journal is invalid")
+                if (data["baseline"].get("direction", "charge") not in ("charge", "discharge")
+                        or type(data.get("kick_pending", False)) is not bool):
+                    raise NativeMaxChargeError("Native force direction or kick journal is invalid")
                 self.record = deepcopy(data)
             self.loaded = True
 
@@ -146,6 +153,18 @@ class NativeMaxChargeSession:
             if type(value) not in (int, float) or not math.isfinite(value):
                 raise NativeMaxChargeError("Native Max acceptance deadline is invalid")
             self.record["local_acceptance_until"] = max(value, self.record.get("local_acceptance_until", 0))
+        elif kind == "kick":
+            until, seconds, watts = value
+            if (type(until) not in (int, float) or not math.isfinite(until)
+                    or type(seconds) is not int or not 1 <= seconds <= 30
+                    or type(watts) not in (int, float) or not math.isfinite(watts) or abs(watts) > 10000):
+                raise NativeMaxChargeError("Native force kick intent is invalid")
+            self.record.update(kick_pending=True, startup_kick_w=watts,
+                               kick_lease_until=until + seconds, handoff_phase="starting")
+            self.record["local_acceptance_until"] = max(until, self.record.get("local_acceptance_until", 0))
+        elif kind == "kick_released":
+            self.record.pop("kick_pending", None)
+            self.record["handoff_phase"] = "tariff"
         elif kind == "local_confirmed":
             self.record.pop("local_acceptance_until", None)
         elif kind == "tariff":
@@ -197,8 +216,17 @@ class NativeMaxChargeSession:
                 self._watch_task = asyncio.create_task(self._watch(token, generation))
                 async def apply():
                     fence()  # storage/admission awaits must not extend a grant
-                    if await self.adapter.resume(fence, write_intent=self._write_intent) is not True:
+                    kick = getattr(self.adapter, "kick", None)
+                    if kick is not None:
+                        await kick(deepcopy(baseline), lambda: self._authorize(token, generation),
+                                   deadline=deadline, write_intent=self._write_intent)
+                    # A timed command is explicitly released before native
+                    # tariff writes. No renewable local controller is started.
+                    await self._write_intent("wait_local")
+                    resume_fence = await self._authorize(token, generation)
+                    if await self.adapter.resume(resume_fence, write_intent=self._write_intent) is not True:
                         raise NativeMaxChargeError("Local battery resume was not confirmed")
+                    await self._write_intent("kick_released")
                     await self._authorize(token, generation)
                     if await self.adapter.apply(deepcopy(baseline),
                             lambda: self._authorize(token, generation), write_intent=self._write_intent) is not True:
@@ -253,6 +281,10 @@ class NativeMaxChargeSession:
             self.record["phase"] = "restoring"
             await self._save()
             await self._write_intent("wait_local")
+            if self.record.get("kick_pending"):
+                if await self.adapter.resume(restore_fence, write_intent=self._write_intent) is not True:
+                    raise NativeMaxChargeError("Startup kick cleanup resume was not confirmed")
+                await self._write_intent("kick_released")
             baseline = deepcopy(self.record["baseline"])
             baseline["_cleanup"] = deepcopy(self.record.get("cleanup", {}))
             baseline["_tariff_intent"] = self.record.get("tariff_intent")
@@ -283,10 +315,13 @@ class NativeMaxChargeSession:
         finally:
             self._clearing = False
 
-    async def stop(self):
-        # Invalidate in-flight grants synchronously, before waiting for I/O.
+    def revoke(self):
+        """Revoke before a caller waits for the shared site route lock."""
         self._generation += 1
         self._abort_application()
+
+    async def stop(self):
+        self.revoke()
         await self.load()
         async with self._lock:
             await self._cancel_watch()

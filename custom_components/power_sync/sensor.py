@@ -7634,6 +7634,18 @@ class BatteryModeSensor(SensorEntity):
                 "Local Powerwall power request is pending" if status == "pending" else
                 "Local Powerwall power request acknowledged; check battery power for measured behaviour"
             )
+        if local_state.get("native_tariff_force"):
+            status = local_state.get("command_status", "pending")
+            attributes.update(control_path="powerwall_native_tariff", command_status=status,
+                power_target_basis="native_tariff", physical_effect="unverified",
+                startup_kick_w=local_state.get("startup_kick_w"),
+                handoff_phase=local_state.get("handoff_phase"))
+            attributes["description"] = (
+                "Powerwall cleanup is pending; check Battery Power and Grid Power"
+                if status == "restore_pending" else
+                "Powerwall force request is pending" if status == "pending" else
+                "Powerwall force request acknowledged; check Battery Power and Grid Power"
+            )
         return attributes
 
 

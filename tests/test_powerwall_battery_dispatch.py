@@ -8,6 +8,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+_hybrid_spec = importlib.util.spec_from_file_location('hybrid_policy_probe', ROOT / 'custom_components/power_sync/powerwall_local/hybrid_policy.py')
+_hybrid = importlib.util.module_from_spec(_hybrid_spec)
+_hybrid_spec.loader.exec_module(_hybrid)
+prefers_native_tariff = _hybrid.prefers_native_tariff
+routing_site_info = _hybrid.routing_site_info
+native_capacity_w = _hybrid.native_capacity_w
 spec = importlib.util.spec_from_file_location('pw_dispatch_under_test', ROOT / 'custom_components/power_sync/powerwall_local/battery_dispatch.py')
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -68,13 +74,13 @@ def test_gateway_site_limits_use_kw_and_refresh_in_both_directions():
     cfg = config(optimization_max_discharge_w=21000, optimization_max_charge_w=21000,
                  optimization_max_grid_import_w=None)
     assert module.site_grid_limits_w(site_snapshot()) == (14900, 10100)
-    assert module.battery_watts('discharge', 20000, site_snapshot(), cfg) == 10900
-    assert module.battery_watts('discharge', 20000, site_snapshot(export_kw=-12), cfg) == 12800
+    assert module.battery_watts('discharge', 20000, site_snapshot(), cfg) == 10000
+    assert module.battery_watts('discharge', 20000, site_snapshot(export_kw=-12), cfg) == 10000
     assert module.battery_watts('discharge', 20000, site_snapshot(export_kw=-2), cfg) == 2800
     assert module.battery_watts('charge', 20000, site_snapshot(import_kw=4), cfg) == -3200
     assert module.battery_watts('charge', 20000, site_snapshot(import_kw=2), cfg) == -1200
-    assert module.battery_watts('discharge', 20000, site_snapshot(export_kw=-1e9), cfg) == 20800
-    assert module.battery_watts('charge', 20000, site_snapshot(import_kw=1e9), cfg) == -20000
+    assert module.battery_watts('discharge', 20000, site_snapshot(export_kw=-1e9), cfg) == 10000
+    assert module.battery_watts('charge', 20000, site_snapshot(import_kw=1e9), cfg) == -10000
     with pytest.raises(ValueError, match='blocks force discharge'):
         module.battery_watts('discharge', 1000, site_snapshot(export_kw=0), cfg)
     with pytest.raises(ValueError, match='headroom'):
@@ -93,13 +99,13 @@ def test_manual_slider_bounds_respect_site_and_available_battery_headroom():
     cfg = config(optimization_max_charge_w=21000, optimization_max_discharge_w=21000,
                  optimization_max_grid_import_w=None)
     assert module.manual_power_limits_kw(site_snapshot(), cfg, 10000) == {
-        'charge_input_max_kw': 14.1, 'grid_export_max_kw': 9.2}
+        'charge_input_max_kw': 10, 'grid_export_max_kw': 9.2}
     assert module.manual_power_limits_kw(site_snapshot(import_kw=4, export_kw=-2), cfg, 10000) == {
         'charge_input_max_kw': 3.2, 'grid_export_max_kw': 2}
     assert module.manual_power_limits_kw(site_snapshot(import_kw=16, export_kw=-12), cfg, 10000) == {
-        'charge_input_max_kw': 15.2, 'grid_export_max_kw': 9.2}
+        'charge_input_max_kw': 10, 'grid_export_max_kw': 9.2}
     assert module.manual_power_limits_kw(site_snapshot(import_kw=1e9, export_kw=-1e9), cfg, 10000) == {
-        'charge_input_max_kw': 21, 'grid_export_max_kw': 9.2}
+        'charge_input_max_kw': 10, 'grid_export_max_kw': 9.2}
     assert module.manual_power_limits_kw(site_snapshot(), {**cfg, 'optimization_max_discharge_w': 0})['grid_export_max_kw'] == 0
 
 
@@ -137,13 +143,13 @@ def test_force_power_number_does_not_keep_an_old_selection_above_new_limits():
                             optimization_max_discharge_w=21000, optimization_max_grid_import_w=None)}, options={})
     number = scope['ForcePowerNumber'](hass, entry)
     number._attr_native_value = 20
-    assert number.native_max_value == 14.1
-    assert number.native_value == 14.1
+    assert number.native_max_value == 10
+    assert number.native_value == 10
     coord.data = site_snapshot(import_kw=4, export_kw=-2)
     assert number.native_max_value == 3.2
     assert number.native_value == 3.2
     coord.data = site_snapshot(import_kw=16, export_kw=-12)
-    assert number.native_max_value == 15.2
+    assert number.native_max_value == 10
     assert number.extra_state_attributes['grid_export_max_kw'] == 9.2
     coord.last_success_monotonic -= 100
     assert number.native_max_value == 0
@@ -382,7 +388,7 @@ def load_routing(monitored=False, paired=True, **options):
     names = {'_clear_local_powerwall_dispatch', '_stop_local_powerwall_dispatch', '_try_local_powerwall_force',
              '_try_local_powerwall_force_locked',
              '_stop_local_powerwall_dispatch_locked', '_stop_native_max_charge_locked',
-             '_stop_native_max_charge', '_try_native_max_charge',
+             '_stop_native_max_charge', '_try_native_max_charge', '_try_native_powerwall_force', '_powerwall_prefers_native_tariff',
              'handle_force_charge', 'handle_force_discharge', 'persist_force_mode_state', 'restore_force_mode_from_persistence',
              '_local_powerwall_dispatch_config', '_local_powerwall_dispatch_acknowledged', '_local_powerwall_dispatch_failed', '_local_powerwall_generation_current'}
     nodes = [n for n in setup.body if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name in names]
@@ -408,7 +414,7 @@ def load_routing(monitored=False, paired=True, **options):
     lock_module = importlib.util.module_from_spec(lock_spec); lock_spec.loader.exec_module(lock_module)
     duration_spec = importlib.util.spec_from_file_location('local_discharge_duration_test', ROOT/'custom_components/power_sync/force_discharge_duration.py')
     durations = importlib.util.module_from_spec(duration_spec); duration_spec.loader.exec_module(durations)
-    ns = dict(math=__import__('math'), time=__import__('time'), uuid4=__import__('uuid').uuid4,
+    ns = dict(prefers_native_tariff=prefers_native_tariff, routing_site_info=routing_site_info, native_capacity_w=native_capacity_w, math=__import__('math'), time=__import__('time'), uuid4=__import__('uuid').uuid4,
               _get_tesla_site_configs=lambda *_: [],
               local_battery_dispatch_configured=hm.local_battery_dispatch_configured, asyncio=asyncio, Any=object, ServiceCall=object, HomeAssistantError=RuntimeError,
               selected_discharge_duration=durations.selected_discharge_duration, validate_native_discharge_duration=durations.validate_native_discharge_duration,
@@ -728,7 +734,8 @@ def test_local_target_capability_honors_lp_and_static_limits_without_changing_cl
     hs=importlib.util.spec_from_file_location('target_host_test',ROOT/'custom_components/power_sync/powerwall_host.py')
     hm=importlib.util.module_from_spec(hs);hs.loader.exec_module(hm)
     ns={'Any':object,'DOMAIN':'power_sync','local_battery_dispatch_configured':hm.local_battery_dispatch_configured,
-        'TARGET_EXPORT_POWER_BATTERY_SYSTEMS':set(),'TARGET_CHARGE_POWER_BATTERY_SYSTEMS':set()}
+        'TARGET_EXPORT_POWER_BATTERY_SYSTEMS':set(),'TARGET_CHARGE_POWER_BATTERY_SYSTEMS':set(),
+        'prefers_native_tariff':prefers_native_tariff,'routing_site_info':routing_site_info}
     exec(compile(ast.fix_missing_locations(ast.Module(body=[cls],type_ignores=[])), 'capability_probe','exec'),ns)
     c=ns['Probe']();c.battery_system='tesla';c.entry_id='entry';c.hass=SimpleNamespace(data={'power_sync':{'entry':{}}})
     c._config=SimpleNamespace(max_discharge_w=5000,max_grid_export_w=1500)
@@ -737,6 +744,11 @@ def test_local_target_capability_honors_lp_and_static_limits_without_changing_cl
     assert c._export_command_power_w(SimpleNamespace(power_w=1000))==1000
     assert c._export_command_power_w(SimpleNamespace(power_w=5000))==1500
     assert c._export_command_power_w(SimpleNamespace(power_w=0))==0
+    c.energy_coordinator=SimpleNamespace(_site_info_cache={'nameplate_power':20000},_site_info_last_fetch=__import__('time').monotonic())
+    assert not c._supports_target_export_power() and not c._supports_target_charge_power()
+    assert c._export_command_power_w(SimpleNamespace(power_w=1000))==5000
+    c.energy_coordinator._site_info_cache['nameplate_power']=10000
+    assert c._supports_target_charge_power()
     c._entry.data['powerwall_local_paired']=False
     assert not c._supports_target_export_power()
     assert c._export_command_power_w(SimpleNamespace(power_w=1000))==5000
@@ -871,18 +883,18 @@ def test_reported_charge_ceiling_retries_below_limit_without_extending_deadline(
         async def dispatch(watts, seconds):
             order.append(('power', watts, seconds))
             if len([x for x in order if x[0] == 'power']) == 1:
-                client.dispatch_charge_limit_w = 10000
+                client.dispatch_charge_limit_w = 8000
                 return False
             return True
         async def resume(): order.append(('resume',)); return True
         client.dispatch_battery_power.side_effect = dispatch
         client.resume_battery_operation.side_effect = resume
         result = await c.start('charge', 12000, 20)
-        assert result['battery_power_w'] == -10000
+        assert result['battery_power_w'] == -8000
         assert result['requested_power_w'] == 12000
-        assert result['gateway_charge_limit_w'] == 10000
+        assert result['gateway_charge_limit_w'] == 8000
         assert cfg['optimization_max_charge_w'] == 20000
-        assert order[0][1] == -12000 and order[1] == ('resume',) and order[2][1] == -10000
+        assert order[0][1] == -10000 and order[1] == ('resume',) and order[2][1] == -8000
         assert order[2][2] <= order[0][2]
         assert events == ['intent', 'intent'] and client.get_snapshot.await_count == 2
         await c.stop()
@@ -898,14 +910,14 @@ def test_renewal_charge_ceiling_recovery_preserves_current_lease_owner():
         async def dispatch(watts, seconds):
             sent.append(watts)
             if len(sent) == 2:
-                client.dispatch_charge_limit_w = 10000
+                client.dispatch_charge_limit_w = 8000
                 return False
             return True
         client.dispatch_battery_power.side_effect = dispatch
         await c.start('charge', 12000, 120)
         deadline = c._deadline
         await c._write_with_limit_retry()
-        assert sent == [-9000, -12000, -10000]
+        assert sent == [-9000, -10000, -8000]
         assert c.pending and c._deadline == deadline
         assert events == ['intent', 'intent']
         client.resume_battery_operation.assert_awaited_once()
@@ -976,7 +988,7 @@ def test_learned_native_cap_blocks_targetless_tariff_fallback(mode):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('load,solar,expected', [(3500,0,-9000),(10860,0,-1640),(3500,2000,-11000),(13000,0,0)])
+@pytest.mark.parametrize('load,solar,expected', [(3500,0,-9000),(10860,0,-1640),(3500,2000,-10000),(13000,0,0)])
 def test_grid_import_target_shares_actual_home_ev_and_solar(load,solar,expected):
     cfg=config(optimization_max_charge_w=20000, optimization_max_grid_import_w=14900)
     actual=module.battery_watts('charge',12500,snapshot(load_w=load,solar_w=solar),cfg,target_basis='grid_import')
@@ -1068,7 +1080,8 @@ def test_local_gateway_limits_constrain_plan_without_changing_config():
     nodes=[n for n in cls.body if getattr(n,'name','') in names]
     class StripImports(ast.NodeTransformer):
         def visit_ImportFrom(self,node):return ast.copy_location(ast.Pass(),node)
-    ns=dict(math=math,time=time,DOMAIN='power_sync',site_grid_limits_w=module.site_grid_limits_w)
+    ns=dict(math=math,time=time,DOMAIN='power_sync',site_grid_limits_w=module.site_grid_limits_w,
+        prefers_native_tariff=prefers_native_tariff,routing_site_info=routing_site_info)
     exec(compile(ast.fix_missing_locations(ast.Module(body=[StripImports().visit(n) for n in nodes],type_ignores=[])),str(path),'exec',flags=__import__('__future__').annotations.compiler_flag),ns)
     client=SimpleNamespace(dispatch_charge_limit_w=10000,dispatch_discharge_limit_w=9000)
     coord=SimpleNamespace(data=site_snapshot(import_kw=14.9),last_success_monotonic=time.monotonic())
@@ -1079,6 +1092,9 @@ def test_local_gateway_limits_constrain_plan_without_changing_config():
     assert ns['_effective_charge_and_import_limits'](subject)==(10000,14900)
     assert subject._config.max_charge_w==20000
     assert subject._config.max_grid_import_w==15000
+    subject.energy_coordinator=SimpleNamespace(_site_info_cache={'nameplate_power':20000},_site_info_last_fetch=__import__('time').monotonic())
+    assert ns['_effective_charge_and_import_limits'](subject)==(20000,14900)
+    assert 'max_discharge_w' not in subject._local_powerwall_plan_limits()
 
 
 def test_zero_forecast_battery_plan_still_fills_missing_ev_draw():
@@ -1319,3 +1335,97 @@ async def test_native_max_tariff_discharge_keeps_real_and_configured_backup_rese
         body=candidates[0]+[ast.Return(value=ast.Name(id='reserve_result',ctx=ast.Load()))],decorator_list=[])
     exec(compile(ast.fix_missing_locations(ast.Module(body=[fn],type_ignores=[])),'native-reserve-test','exec'),ns)
     assert await ns['evaluate']()==expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('direction',['charge','discharge'])
+@pytest.mark.parametrize('source',['user','automation','optimizer'])
+async def test_large_site_tariff_route_never_starts_renewable_local_dispatch(direction,source):
+    ns,c,client,_=load_routing(optimization_max_charge_w=20000,optimization_max_discharge_w=20000)
+    runtime=ns['_local_powerwall_runtime']
+    requested_at=__import__('time').time()-30
+    runtime['battery_route_requested_at']=requested_at
+    runtime['tesla_coordinator']=SimpleNamespace(_site_info_cache={'nameplate_power':20000},
+                                               _site_info_last_fetch=__import__('time').monotonic())
+    native=SimpleNamespace(pending=False,record=None,adapter=SimpleNamespace(guard=AsyncMock(return_value=True)),
+                           start=AsyncMock(return_value={'expires_at':2000}))
+    ns.update(_native_max_context={'call':None},_get_native_max_charge=AsyncMock(return_value=native),
+        _get_tesla_site_configs=lambda *_:[('site','token','provider')],
+        _create_charge_tariff=lambda minutes:({'code':'charge'},None),
+        _create_discharge_tariff=lambda minutes:({'code':'discharge'},None))
+    result=await ns['_try_local_powerwall_force'](direction,call(source=source,power_w=0),15,20000)
+    assert result['control_path']=='powerwall_native_tariff'
+    assert native.adapter.direction==direction and native.adapter.startup_kick
+    native.start.assert_awaited_once()
+    assert native.start.await_args.kwargs['deadline']==requested_at+900
+    client.dispatch_battery_power.assert_not_called()
+    assert not c.pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('direction',['charge','discharge'])
+async def test_exact_optimizer_watts_do_not_become_tariff_on_a_large_site(direction):
+    ns,c,client,_=load_routing()
+    ns['_local_powerwall_runtime']['tesla_coordinator']=SimpleNamespace(
+        _site_info_cache={'nameplate_power':20000},_site_info_last_fetch=__import__('time').monotonic())
+    ns['_get_tesla_site_configs']=lambda *_:[('site','token','provider')]
+    result=await ns['_try_local_powerwall_force'](direction,call(source='optimizer',power_w=2000),15,2000)
+    assert result['control_path']=='powerwall_local_dispatch'
+    assert abs(result['battery_power_w'])<=10000
+    await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('phase',['prepared','applying','active'])
+async def test_duplicate_optimizer_native_action_retains_owner_and_original_deadline(phase):
+    ns,c,client,_=load_routing()
+    runtime=ns['_local_powerwall_runtime']
+    runtime['tesla_coordinator']=SimpleNamespace(_site_info_cache={'nameplate_power':20000},
+        _site_info_last_fetch=__import__('time').monotonic())
+    expiry=__import__('time').time()+120
+    native=SimpleNamespace(pending=True,record={'phase':phase,'expires_at':expiry},
+        adapter=SimpleNamespace(direction='charge',guard=AsyncMock(return_value=True)),
+        start=AsyncMock(),stop=AsyncMock())
+    runtime['powerwall_native_max_charge']=native
+    ns.update(_native_max_context={'call':call(source='optimizer'),'targetless':True},
+              _get_tesla_site_configs=lambda *_:[('site','token','provider')])
+    if phase=='active':
+        result=await ns['_try_local_powerwall_force']('charge',call(source='optimizer',power_w=0),15,20000)
+        assert result['expires_at']==expiry
+    else:
+        with pytest.raises(RuntimeError,match='in progress'):
+            await ns['_try_local_powerwall_force']('charge',call(source='optimizer',power_w=0),15,20000)
+    native.start.assert_not_called();native.stop.assert_not_called()
+    client.dispatch_battery_power.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_native_discharge_projection_cannot_create_a_second_restore_journal():
+    ns,c,client,saved=load_routing()
+    ns['force_discharge_state'].update(active=True,native_tariff_force=True)
+    await ns['persist_force_mode_state']()
+    assert saved['force_mode_state'] is None
+
+
+def test_stale_or_missing_capacity_does_not_authorize_full_rate_takeover():
+    now=__import__('time').monotonic()
+    for info,at in [(None,now),({'nameplate_power':20000},now-21601),({'nameplate_power':20000},None)]:
+        energy=SimpleNamespace(_site_info_cache=info,_site_info_last_fetch=at)
+        assert not prefers_native_tariff(routing_site_info(energy))
+    assert prefers_native_tariff(routing_site_info(SimpleNamespace(
+        _site_info_cache={'nameplate_power':10001},_site_info_last_fetch=now)))
+    assert not prefers_native_tariff({'nameplate_power':True})
+
+
+@pytest.mark.asyncio
+async def test_stop_revokes_native_application_before_waiting_for_site_route_lock():
+    ns,c,client,_=load_routing()
+    events=[]
+    native=SimpleNamespace(pending=True,revoke=lambda:events.append('revoke'),stop=AsyncMock())
+    ns['_local_powerwall_runtime']['powerwall_native_max_charge']=native
+    async with ns['_local_powerwall_route_lock']:
+        task=asyncio.create_task(ns['_stop_local_powerwall_dispatch']())
+        await asyncio.sleep(0)
+        assert events==['revoke'] and not task.done()
+    assert await task
+    native.stop.assert_awaited_once()

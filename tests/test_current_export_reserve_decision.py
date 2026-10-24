@@ -444,3 +444,28 @@ def test_api_includes_filtered_decision_and_preserves_accepted_current_action(op
     coordinator._entry.options["monitoring_mode"] = False
     coordinator._last_update_time = NOW - timedelta(minutes=16)
     assert coordinator.get_api_data()["export_reserve_decision"] is None
+
+
+@pytest.mark.parametrize('direction',['charge','export'])
+def test_larger_powerwall_plan_keeps_full_rate_safety_math_and_sends_tariff_sentinel(opt_module,clock,direction):
+    coordinator,battery,actions,_=_controller(opt_module,soc=.5,targetless=True)
+    coordinator.energy_coordinator=SimpleNamespace(_site_info_cache={'nameplate_power':20000},
+        _site_info_last_fetch=__import__('time').monotonic())
+    coordinator._config.max_charge_w=20000;coordinator._config.max_discharge_w=20000
+    coordinator._powerwall_plan_native_tariff=True
+    action=_api_action(NOW,direction,5000,.5)
+    coordinator._current_schedule.actions=[action]
+    coordinator._last_executed_action='self_consumption'
+    _run(coordinator,action)
+    calls=battery.force_charge_calls if direction=='charge' else battery.force_discharge_calls
+    assert calls and calls[0][0]>0 and calls[0][1]==0
+
+
+def test_capacity_change_between_solve_and_execution_requests_a_fresh_plan(opt_module,clock):
+    coordinator,battery,actions,_=_controller(opt_module,soc=.8,targetless=True)
+    coordinator.energy_coordinator=SimpleNamespace(_site_info_cache={'nameplate_power':20000},
+        _site_info_last_fetch=__import__('time').monotonic())
+    coordinator._powerwall_plan_native_tariff=False
+    replans=[];coordinator._schedule_settings_reoptimization=lambda:replans.append(True)
+    _run(coordinator,actions[0])
+    assert replans==[True] and not battery.force_discharge_calls
