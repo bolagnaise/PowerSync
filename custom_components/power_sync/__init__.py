@@ -39984,6 +39984,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         - Does NOT restore TOU tariff
         - Does NOT send push notifications
         """
+        manager = None
         if getattr(hass, "data", {}).get("power_sync_license_manager") is not None:
             from .licensing.entry_routing import entry_service_data
         else:
@@ -39994,8 +39995,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raise HomeAssistantError("HA optimiser access is required; queued work was discarded")
             from .licensing.runtime import DATA_KEY as _LICENSE_MANAGER_KEY
             manager = hass.data.get(_LICENSE_MANAGER_KEY)
-            if manager and _control_call_source(call) != "optimizer":
-                await manager.relinquish(entry.entry_id)
 
         source = _control_call_source(call)
         raw_duration = call.data.get("duration", DEFAULT_DISCHARGE_DURATION)
@@ -40043,6 +40042,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 owns_operation_mode=True,
             )
 
+        if manager and _control_call_source(call) != "optimizer":
+            await manager.relinquish(entry.entry_id)
         await _stop_local_powerwall_dispatch()
 
         internal_hold_soc_transition = (
@@ -40775,14 +40776,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         Supports both Tesla Powerwall and SigEnergy systems.
         """
+        manager = None
         if getattr(hass, "data", {}).get("power_sync_license_manager") is not None:
             from .licensing.guard import service_allowed
             if not service_allowed(hass, call.data, 'handle_set_backup_reserve'):
                 raise HomeAssistantError("HA optimiser access is required; queued work was discarded")
             from .licensing.runtime import DATA_KEY as _LICENSE_MANAGER_KEY
             manager = hass.data.get(_LICENSE_MANAGER_KEY)
-            if manager and _control_call_source(call) != "optimizer":
-                await manager.relinquish(entry.entry_id)
         response: dict[str, Any] | None = None
         percent = call.data.get("percent")
         if percent is None:
@@ -40806,7 +40806,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return {"success": False, "error": "blocked by monitoring mode"}
 
         reserve_source = call.data.get("source")
-        await _stop_native_max_charge()
         if (
             reserve_source == "optimizer"
             and hold_soc_state.get("active")
@@ -40822,6 +40821,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "set backup reserve"
         )
         backup_reserve_command_generation = _command_generation[0]
+        if manager and _control_call_source(call) != "optimizer":
+            await manager.relinquish(entry.entry_id)
+        await _stop_native_max_charge()
         _LOGGER.info(f"🔋 Setting backup reserve to {percent}%")
 
         # Check if this is a SigEnergy system

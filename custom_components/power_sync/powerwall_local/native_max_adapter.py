@@ -194,9 +194,13 @@ class NativeMaxChargeAdapter:
             self.token = None
         return result
 
-    async def resume(self, fence):
+    async def resume(self, fence, *, write_intent):
         fence()
-        return await self._mutate(self.client.resume_battery_operation(before_write=fence))
+        confirmed = await self._mutate(self.client.resume_battery_operation(before_write=fence,
+            before_submit=lambda until: write_intent("local", until)))
+        if confirmed is True:
+            await write_intent("local_confirmed")
+        return confirmed
 
     async def _write_config(self, mode, reserve, before_write, baseline, write_intent):
         fence = await before_write()

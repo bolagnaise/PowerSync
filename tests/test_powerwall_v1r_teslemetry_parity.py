@@ -1038,6 +1038,23 @@ async def test_native_max_resume_preserves_fence_until_actual_transport_submissi
 
 
 @async_test
+async def test_native_max_resume_carries_durable_expiry_callback_through_client_and_transport():
+    client=_bare_client();transport=_transport_without_key();events=[]
+    client._transport=transport
+    async def post(payload,din,*,before_send,before_submit):
+        request=transport_pb2.MessageEnvelope.FromString(payload)
+        assert request.teg.dispatch_battery_power_request.HasField('resume_device_mode')
+        await before_submit(12345);before_send();events.append('post')
+        reply=transport_pb2.MessageEnvelope();reply.teg.dispatch_battery_power_response.SetInParent()
+        return transport_mod.TEDAPIResponse(True,reply.SerializeToString())
+    async def durable(until):events.append(('persist',until))
+    def fence():events.append('fence')
+    transport.post_v1r=post
+    assert await client.resume_battery_operation(before_write=fence,before_submit=durable)
+    assert events==[('persist',12345),'fence','post']
+
+
+@async_test
 async def test_config_restore_rejects_external_owner_in_exact_read_modify_write_snapshot():
     transport=_transport_without_key();writes=[]
     async def post(payload,din,**kwargs):

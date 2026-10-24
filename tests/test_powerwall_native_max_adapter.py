@@ -54,7 +54,8 @@ def setup(monkeypatch):
             return SimpleNamespace(raw={'config':deepcopy(state.config)},soc=state.soc,grid_status=state.grid,
                 battery_w=state.battery_w, load_w=state.load_w, solar_w=state.solar_w,
                 grid_w=state.load_w-state.solar_w-state.battery_w)
-        async def resume_battery_operation(self,*,before_write):
+        async def resume_battery_operation(self,*,before_write,before_submit):
+            await before_submit(state.at-2)
             before_write(); state.events.append(('resume',None)); return True
     async def read_tariff(): return deepcopy(state.tariff)
     async def upload(tariff,before_write):
@@ -270,6 +271,26 @@ async def test_http_timeout_does_not_expire_signed_config_before_late_applicatio
     with pytest.raises(s.m.NativeMaxChargeError,match='provider timed out'):await start
     assert late and (s.state.config,s.state.tariff)==s.original
     assert s.store.data is None and not s.budget.native_max_claim('site')
+
+
+@pytest.mark.asyncio
+async def test_resume_timeout_retains_barrier_until_old_release_command_cannot_cancel_new_dispatch(setup):
+    s=setup;submitted=asyncio.Event();late=[]
+    async def delayed_resume(*,before_write,before_submit):
+        await before_submit(s.state.at+.05);before_write();submitted.set()
+        async def accepted_late():
+            await asyncio.sleep(.02)
+            assert s.budget.native_max_claim('site') and s.store.data
+            late.append('old resume accepted before release to new control')
+            s.state.at+=2
+        asyncio.create_task(accepted_late())
+        raise TimeoutError('resume HTTP timeout')
+    s.adapter.client.resume_battery_operation=delayed_resume
+    start=asyncio.create_task(s.session.start(120));await submitted.wait();await asyncio.sleep(0)
+    assert s.session.pending and not any(k=='tariff' for k,_ in s.state.events)
+    with pytest.raises(s.m.NativeMaxChargeError,match='provider timed out'):await start
+    assert late and s.store.data is None and not s.budget.native_max_claim('site')
+    assert (s.state.config,s.state.tariff)==s.original
 
 
 @pytest.mark.asyncio

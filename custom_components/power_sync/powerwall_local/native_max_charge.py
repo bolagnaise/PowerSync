@@ -197,7 +197,7 @@ class NativeMaxChargeSession:
                 self._watch_task = asyncio.create_task(self._watch(token, generation))
                 async def apply():
                     fence()  # storage/admission awaits must not extend a grant
-                    if await self.adapter.resume(fence) is not True:
+                    if await self.adapter.resume(fence, write_intent=self._write_intent) is not True:
                         raise NativeMaxChargeError("Local battery resume was not confirmed")
                     await self._authorize(token, generation)
                     if await self.adapter.apply(deepcopy(baseline),

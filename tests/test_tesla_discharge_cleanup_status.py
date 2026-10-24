@@ -61,11 +61,22 @@ def test_failed_tariff_cleanup_reports_pending_restore(restore_raises, monkeypat
             raise RuntimeError("provider unavailable")
         # restore_normal can return without raising while scheduling its retry.
 
-    namespace = dict(force_discharge_state=state, source="optimizer", call=NS(),
+    class ServiceCall:
+        def __init__(self, _domain, _service, data, context=None):
+            self.data = data
+            self.context = context
+
+    async def handle_restore_normal(call):
+        calls.append((("power_sync", "restore_normal", call.data), {}))
+        if restore_raises:
+            raise RuntimeError("provider unavailable")
+
+    namespace = dict(force_discharge_state=state, source="optimizer", call=NS(context=None),
                      hass=NS(data={}, services=NS(async_call=restore)),
                      entry=NS(entry_id="entry"), DOMAIN="power_sync",
                      SERVICE_RESTORE_NORMAL="restore_normal", dt_util=NS(utcnow=lambda: now),
                      timedelta=timedelta, persist_force_mode_state=persist,
+                     ServiceCall=ServiceCall, handle_restore_normal=handle_restore_normal,
                      _tesla_force_retry_expiry=lambda _state, expiry, **_kw: expiry,
                      async_dispatcher_send=lambda *args: events.append(args),
                      _LOGGER=logging.getLogger(__name__))

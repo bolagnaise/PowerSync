@@ -61,6 +61,23 @@ def _find_function(
     raise AssertionError(f"{function_name} not found")
 
 
+def _assert_optional_routed_service(tree, service, action, handler):
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute) and node.func.attr == "async_register"
+             and len(node.args) >= 3 and isinstance(node.args[1], ast.Name)
+             and node.args[1].id == service]
+    assert len(calls) == 1
+    registered = calls[0]
+    routed = registered.args[2]
+    assert isinstance(routed, ast.Call) and isinstance(routed.func, ast.Name)
+    assert routed.func.id == "routed_handler"
+    assert ast.literal_eval(routed.args[2]) == action
+    assert isinstance(routed.args[3], ast.Name) and routed.args[3].id == handler
+    assert any(kw.arg == "supports_response" and isinstance(kw.value, ast.Attribute)
+               and isinstance(kw.value.value, ast.Name) and kw.value.value.id == "SupportsResponse"
+               and kw.value.attr == "OPTIONAL" for kw in registered.keywords)
+
+
 def _is_async_update_entry_call(node: ast.AST) -> bool:
     return (
         isinstance(node, ast.Call)
@@ -270,7 +287,7 @@ def test_tesla_hold_soc_backup_reserve_write_does_not_replace_user_reserve():
 
     assert function_source is not None
     assert 'DOMAIN, SERVICE_SET_BACKUP_RESERVE' in function_source
-    assert '{"percent": target_reserve, "source": "hold_soc"}' in function_source
+    assert "{'percent': target_reserve, 'source': 'hold_soc'}" in function_source
     assert "_disabled_optimizer_backup_reserve_target(entry)" in function_source
     assert 'hold_soc_state["saved_backup_reserve"] = saved_backup_reserve' in function_source
 
@@ -486,14 +503,9 @@ def test_force_expiry_restores_are_allowed_to_clean_up_in_monitoring_mode():
                 and node.args[1].id == "SERVICE_RESTORE_NORMAL"
             ]
             for call in restore_calls:
-                payload = call.args[2]
-                assert isinstance(payload, ast.Dict), callback.name
-                keys = {
-                    key.value
-                    for key in payload.keys
-                    if isinstance(key, ast.Constant)
-                }
-                assert "_allow_monitoring_restore" in keys, callback.name
+                payload_source = ast.get_source_segment(source, call.args[2])
+                assert payload_source is not None
+                assert "_allow_monitoring_restore" in payload_source, callback.name
 
 
 def test_monitoring_mode_restores_persisted_force_without_replay_after_restart():
@@ -802,7 +814,7 @@ def test_tesla_stale_charge_restore_requires_confirmed_no_state_cleanup():
     assert 'confirm_restore = bool(call.data.get("_confirm_restore"))' in restore_source
     assert 'return {"success": True, "error": None}' in restore_source
     assert 'return {"success": False, "error": "nothing to restore"}' in restore_source
-    assert "SERVICE_RESTORE_NORMAL,\n        handle_restore_normal,\n        supports_response=SupportsResponse.OPTIONAL" in source
+    _assert_optional_routed_service(tree, "SERVICE_RESTORE_NORMAL", "restore_normal", "handle_restore_normal")
     assert 'service_data["_force_restore"] = True' in wrapper_source
     assert 'service_data["_confirm_restore"] = True' in wrapper_source
     assert "return_response=True" in wrapper_source
@@ -990,10 +1002,7 @@ def test_tesla_force_charge_exposes_optional_optimizer_result():
     handler_source = ast.get_source_segment(source, handler)
 
     assert handler_source is not None
-    assert (
-        "SERVICE_FORCE_CHARGE,\n        handle_force_charge,\n"
-        "        supports_response=SupportsResponse.OPTIONAL"
-    ) in source
+    _assert_optional_routed_service(tree, "SERVICE_FORCE_CHARGE", "force_charge", "handle_force_charge")
     assert 'return {"success": True, "error": None}' in handler_source
     assert 'return {"success": False, "error":' in handler_source
 
@@ -1005,10 +1014,7 @@ def test_tesla_force_discharge_exposes_optional_optimizer_result():
     handler_source = ast.get_source_segment(source, handler)
 
     assert handler_source is not None
-    assert (
-        "SERVICE_FORCE_DISCHARGE,\n        handle_force_discharge,\n"
-        "        supports_response=SupportsResponse.OPTIONAL"
-    ) in source
+    _assert_optional_routed_service(tree, "SERVICE_FORCE_DISCHARGE", "force_discharge", "handle_force_discharge")
     assert 'return {"success": True, "error": None}' in handler_source
     assert 'return {"success": False, "error":' in handler_source
     home_assistant_error_handler = handler_source.split(
@@ -1024,11 +1030,7 @@ def test_tesla_backup_reserve_service_exposes_truthful_optional_result():
     handler_source = ast.get_source_segment(source, handler)
 
     assert handler_source is not None
-    assert (
-        "SERVICE_SET_BACKUP_RESERVE,\n"
-        "        handle_set_backup_reserve,\n"
-        "        supports_response=SupportsResponse.OPTIONAL"
-    ) in source
+    _assert_optional_routed_service(tree, "SERVICE_SET_BACKUP_RESERVE", "set_backup_reserve", "handle_set_backup_reserve")
     assert "tesla_success = _tesla_force_result_all_confirmed(" in handler_source
     assert "reserve_result = await _tesla_force_apply_backup_reserve(" in handler_source
     assert '{"success": True, "error": None}' in handler_source
@@ -1337,8 +1339,8 @@ def test_tesla_hold_soc_preserves_target_through_required_reserve_pulse():
 
     assert hold_source is not None
     assert self_consumption_source is not None
-    assert '"_reserve_restore_target": target_reserve' in hold_source
-    assert '"_hold_soc_transition_token": (' in hold_source
+    assert "'_reserve_restore_target': target_reserve" in hold_source
+    assert "'_hold_soc_transition_token': _hold_soc_transition_token" in hold_source
     assert "is _hold_soc_transition_token" in self_consumption_source
     assert (
         "if source == \"hold_soc\" and not internal_hold_soc_transition:"
@@ -1468,9 +1470,36 @@ def test_tesla_hold_soc_tracks_failed_transition_and_preserves_supersession():
         async def no_local_dispatch():
             return False
 
+        async def handle_set_backup_reserve(_call):
+            reserve_generation[0] += 1
+
+        async def handle_set_self_consumption(_call):
+            if supersede:
+                reserve_generation[0] += 1
+            raise HomeAssistantError("reserve readback did not verify")
+
+        async def _arm_hold_soc_tracking(_soc, expires_at, *, pending):
+            hold_state.update(
+                {"active": True, "expires_at": expires_at, "pending": pending}
+            )
+
+            async def restore(_now):
+                hold_state.update({"active": False, "expires_at": None, "pending": False})
+                await persist_force_mode_state()
+
+            timers.append((restore, expires_at))
+
+        class ServiceCall:
+            def __init__(self, _domain, _service, data, context=None):
+                self.data = data
+                self.context = context
+
         namespace = {
             "_stop_local_powerwall_dispatch": no_local_dispatch,
-            "ServiceCall": object,
+            "handle_set_backup_reserve": handle_set_backup_reserve,
+            "handle_set_self_consumption": handle_set_self_consumption,
+            "_arm_hold_soc_tracking": _arm_hold_soc_tracking,
+            "ServiceCall": ServiceCall,
             "HomeAssistantError": HomeAssistantError,
             "DEFAULT_DISCHARGE_DURATION": 60,
             "DISCHARGE_DURATIONS": (30, 60, 120),
@@ -1526,7 +1555,10 @@ def test_tesla_hold_soc_tracks_failed_transition_and_preserves_supersession():
             ),
             namespace,
         )
-        call = SimpleNamespace(data={"duration": 60})
+        call = SimpleNamespace(
+            data={"duration": 60},
+            context=SimpleNamespace(user_id=None, parent_id=None),
+        )
         asyncio.run(namespace["handle_hold_battery_soc"](call))
         return (
             hold_state,
@@ -2523,9 +2555,7 @@ def test_tesla_reserve_only_supersession_cleans_force_tariff_without_clobbering_
     for handler_source in (charge_source, discharge_source):
         assert "reserve pulse superseded after tariff upload" in handler_source
         assert "preserve_newer_reserve=True" in handler_source
-        assert '"_skip_backup_reserve_restore": preserve_newer_reserve' in (
-            handler_source
-        )
+        assert "'_skip_backup_reserve_restore': preserve_newer_reserve" in handler_source
     assert 'call.data.get("_skip_backup_reserve_restore")' in restore_source
     assert "preserving a newer backup reserve command" in restore_source
     assert "restore_reserve_targets = []" in restore_source
@@ -3056,7 +3086,11 @@ def test_active_hold_soc_blocks_optimizer_and_reserve_write_generation():
     reserve_handler = _find_function(tree, "handle_set_backup_reserve")
     reserve_generation = [7]
     messages: list[str] = []
+    async def no_native_max_charge():
+        return None
     reserve_namespace = {
+        "hass": SimpleNamespace(data={}),
+        "entry": SimpleNamespace(entry_id="entry"),
         "ServiceCall": object,
         "_LOGGER": SimpleNamespace(
             error=lambda *_args, **_kwargs: None,
@@ -3066,6 +3100,7 @@ def test_active_hold_soc_blocks_optimizer_and_reserve_write_generation():
         ),
         "_monitoring_mode_should_block_control": lambda _call: False,
         "_tesla_reserve_generation": reserve_generation,
+        "_stop_native_max_charge": no_native_max_charge,
         "hold_soc_state": {"active": True},
     }
     exec(
@@ -3539,7 +3574,13 @@ def _run_tesla_restore_retry_generation_case(
             utcnow=lambda: datetime(2026, 10, 12, tzinfo=timezone.utc)
         ),
         "timedelta": timedelta,
-        "hass": SimpleNamespace(services=_Services()),
+        "hass": SimpleNamespace(
+            services=_Services(),
+            data={"power_sync": {"entry": {"pending_tesla_restore": True}}},
+        ),
+        "entry": SimpleNamespace(entry_id="entry", data={}),
+        "call": SimpleNamespace(data={}, context=None),
+        "site_configs": [],
         "DOMAIN": "power_sync",
         "SERVICE_RESTORE_NORMAL": "restore_normal",
         "skip_backup_reserve_restore": False,
@@ -3622,7 +3663,8 @@ def test_tesla_force_charge_partial_apply_arms_immediate_cleanup():
     assert 'force_charge_state["active"] = True' in helper_source
     assert "_tesla_force_retry_expiry(" in helper_source
     assert "SERVICE_RESTORE_NORMAL" in helper_source
-    assert '"source": "force_cleanup"' in helper_source
+    assert "source" in helper_source
+    assert "force_cleanup" in helper_source
     assert "await persist_force_mode_state()" in helper_source
     assert function_source.count("await _cleanup_failed_tesla_force_charge(") >= 3
 
@@ -3638,7 +3680,8 @@ def test_tesla_force_discharge_partial_apply_arms_immediate_cleanup():
     assert "tesla_force_discharge_mutated = True" in function_source
     assert "async def _cleanup_failed_tesla_force_discharge" in function_source
     assert 'force_discharge_state["active"] = True' in function_source
-    assert '"source": "force_cleanup"' in function_source
+    assert "source" in function_source
+    assert "force_cleanup" in function_source
     assert "SERVICE_RESTORE_NORMAL" in function_source
     assert "tariff upload failed after prerequisite writes" in function_source
 

@@ -38,7 +38,7 @@ class Adapter:
         self.events.append('claim')
         if self.admission_ok:self.barrier=token
         return self.admission_ok
-    async def resume(self,fence):
+    async def resume(self,fence,*,write_intent):
         fence();assert self.store.data['phase']=='applying';self.events.append('resume')
         return self.resume_ok
     async def apply(self,baseline,before_write,*,write_intent):
