@@ -134,6 +134,8 @@ async def async_setup_entry(
             TeslaGridExportRuleSelect(hass=hass, entry=entry),
         ])
 
+    if tesla_site_id and {**entry.data, **entry.options}.get("battery_system", "tesla") == "tesla":
+        select_entities.append(TeslaControlMethodSelect(entry))
     async_add_entities(select_entities)
 
 
@@ -356,3 +358,54 @@ class TeslaGridExportRuleSelect(_TeslaSiteSelectBase):
             {"rule": option, "source": "user"},
             blocking=False,
         )
+
+
+class TeslaControlMethodSelect(SelectEntity):
+    """PowerSync actuator preference, separate from Tesla operating mode."""
+    _attr_has_entity_name = True
+    _attr_name = "Preferred battery control"
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_suggested_object_id = "power_sync_tesla_control_method"
+    _attr_icon = "mdi:battery-sync"
+
+    def __init__(self, entry: ConfigEntry) -> None:
+        from .powerwall_local.control_method import LABELS
+        self._entry_id = entry.entry_id
+        self._attr_unique_id = f"{entry.entry_id}_tesla_control_method"
+        self._attr_options = list(LABELS.values())
+
+    async def async_added_to_hass(self):
+        from homeassistant.helpers.dispatcher import async_dispatcher_connect
+        await super().async_added_to_hass()
+        self.async_on_remove(async_dispatcher_connect(self.hass,
+            f"{DOMAIN}_tesla_control_method_{self._entry_id}", self.async_write_ha_state))
+
+    @property
+    def device_info(self):
+        return family_device_info(self._entry_id, SENSOR_FAMILY_BATTERY)
+
+    @property
+    def current_option(self):
+        from .powerwall_local.control_method import LABELS, control_method
+        entry = self.hass.config_entries.async_get_entry(self._entry_id)
+        return LABELS[control_method({**entry.data, **entry.options})] if entry else None
+
+    @property
+    def extra_state_attributes(self):
+        from .powerwall_local.control_method import runtime_route
+        entry = self.hass.config_entries.async_get_entry(self._entry_id)
+        if entry is None:
+            return {}
+        runtime = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
+        config = {**entry.data, **entry.options}
+        return {"charge_method": runtime_route(runtime, config, "charge"),
+                "discharge_method": runtime_route(runtime, config, "discharge"), "local_ceiling_w": 10000}
+
+    async def async_select_option(self, option):
+        from .powerwall_local.control_method import LABELS, set_control_method
+        entry = self.hass.config_entries.async_get_entry(self._entry_id)
+        if entry is None or option not in LABELS.values():
+            raise ValueError("Unknown Tesla control method")
+        method = next(key for key, label in LABELS.items() if label == option)
+        await set_control_method(self.hass, entry, method)
+        self.async_write_ha_state()

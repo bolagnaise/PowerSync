@@ -1,6 +1,18 @@
 # Paired Powerwall charge and export targets
 
-Paired Powerwalls with a reachable LAN gateway use timed local battery control for numeric charge/discharge targets. Sites whose fresh Tesla site information reports more than 10 kW use tariff control for sustained Max and targetless optimiser actions. Charge kW targets battery input. Discharge kW targets grid export, adjusting battery output for current home load and solar. Fresh telemetry, reserves, charging permission, configured power limits and gateway site limits still apply.
+Paired Powerwalls with a reachable LAN gateway use timed local battery control for numeric charge/discharge targets. The Tesla-only Preferred battery control selector chooses the method for Max and optimiser actions, with Tariff as the default for existing and new sites. Charge kW targets battery input. Discharge kW targets grid export, adjusting battery output for current home load and solar. Fresh telemetry, reserves, charging permission, configured power limits and gateway site limits still apply.
+
+## Preferred battery control
+
+The Tesla-only **Preferred battery control** selector is saved per Home Assistant entry and shared with the mobile app. It is available independently of an optimiser subscription; actual controls retain their existing admission checks.
+
+- **Tariff** (default): use Tesla tariff control for sustained Max and optimiser charge/export, with one optional safe startup kick on a paired gateway.
+- **Local V1R**: use timed gateway commands capped at 10 kW or a lower learned charge/discharge ceiling. This requires pairing and fails explicitly if local control is unavailable; it does not silently upload a tariff.
+- **Automatic**: choose charge and discharge independently using fresh home load, solar, connection limits and available battery power. A multi-Powerwall site can therefore use Local V1R for a modest export and Tariff for charging. Missing or unsafe telemetry selects Tariff, whose own safety checks must still pass. A running native tariff action retains its route until restored.
+
+Explicit positive kW requests retain local wattage control regardless of this preference. They cannot become unrestricted tariff actions. Local inverter output includes home consumption as well as export, so the same grid-export target may fit the local ceiling at one load and exceed it at another.
+
+Changing the preference stops the current force action and confirms restoration before saving. Pending or failed cleanup keeps the previous preference. The optimiser requests a fresh plan; a stopped manual action is not replayed. Mobile reads the saved backend preference and hides the selector when an older backend does not advertise support.
 
 ## Gateway command limits
 
@@ -8,15 +20,15 @@ The gateway can report a timed-command limit below the combined Powerwall rating
 
 A four-Powerwall 2 site on firmware 26.34.0 reported a 10 kW timed charging ceiling despite its configured 20 kW combined rating. The reporter demonstrated 10 kW charging and 10 kW grid export. This is evidence for that system, not a universal Powerwall 2 limit or a guarantee for other firmware. Check measured battery and grid power; acknowledgement alone does not prove output.
 
-## Startup kick and tariff control above 10 kW
+## Startup kick and tariff control
 
-For a site reporting more than 10 kW of inverter capacity, Max charge/discharge and targetless optimiser actions use the existing tariff method for sustained power. When safe, one local startup command requests at most 10 kW for at most 30 seconds. PowerSync immediately releases that command and requires acknowledgement before applying the tariff. It does not renew the startup command or restart the action's finish time. A brief transition in measured power is possible; this does not promise seamless takeover.
+When Tariff is selected, or Automatic selects the tariff route, Max charge/discharge and optimiser actions use the existing tariff method for sustained power. When safe, one local startup command requests at most 10 kW for at most 30 seconds. PowerSync immediately releases that command and requires acknowledgement before applying the tariff. It does not renew the startup command or restart the action's finish time. A brief transition in measured power is possible; this does not promise seamless takeover.
 
 The startup command is skipped if current battery flow, solar output or net home demand makes it restrictive, or the requested direction is already underway. Numeric targets remain bounded local commands. Unknown or expired site-capacity data cannot authorize a larger native planning envelope; paired local commands remain bounded by 10 kW, lower reported ceilings and current safety limits.
 
-Larger-site optimiser plans use tariff capabilities rather than inheriting the local 10 kW ceiling. Exact numeric requests never silently become unrestricted tariff control. Optimiser charge/discharge settings are planning rates, not exact native power ceilings. A rounded planning rating below the reported site rating does not block targetless tariff control. Reserve and charge-cap duration checks use the higher reported/configured rating, so a planned window may be shortened to avoid crossing the software SOC floor.
+Tariff-routed optimiser plans use tariff capabilities rather than inheriting the local 10 kW ceiling. Exact numeric requests never silently become unrestricted tariff control. Optimiser charge/discharge settings are planning rates, not exact native power ceilings. A rounded planning rating below the reported site rating does not block targetless tariff control. Reserve and charge-cap duration checks use the higher reported/configured rating, so a planned window may be shortened to avoid crossing the software SOC floor.
 
-From v2.12.1486, native discharge temporarily tightens a looser gateway export limit to the configured PowerSync export limit and verifies readback before uploading a forcing tariff. For example, a 10.1 kW gateway limit becomes 10.0 kW during a 10.0 kW software-limited action. A stricter existing gateway limit is retained. PowerSync keeps the temporary limit through physical settling, then restores the captured value only if it still owns that field; external edits are preserved. Failed readback blocks forcing. Grid import limits and conflicting EV ownership can still block native takeover. Large-site Max reports a failed takeover instead of silently starting a capped local command.
+From v2.12.1486, native discharge temporarily tightens a looser gateway export limit to the configured PowerSync export limit and verifies readback before uploading a forcing tariff. For example, a 10.1 kW gateway limit becomes 10.0 kW during a 10.0 kW software-limited action. A stricter existing gateway limit is retained. PowerSync keeps the temporary limit through physical settling, then restores the captured value only if it still owns that field; external edits are preserved. Failed readback blocks forcing. Grid import limits and conflicting EV ownership can still block native takeover. Tariff-routed Max reports a failed takeover instead of silently starting a capped local command.
 
 A gateway's explicit unset export-limit value can also be tightened to the configured PowerSync cap before native discharge. Missing, invalid or zero export limits still block the action. The original unset value is restored only after the same ownership and physical-settling checks.
 
@@ -26,7 +38,7 @@ The kick and tariff share one restoration owner and saved settings. Stop, expiry
 
 ## Native Max charging (from v2.12.1482)
 
-From v2.12.1482, Home Assistant distinguishes **Max** from a numeric battery-input target. For a manual or automation `force_charge` action, zero or omitted `power_w` requests Tesla-managed maximum charging. An eligible paired system resumes local dispatch, temporarily uses a charging tariff and Time-Based Control, and restores its original tariff, mode and reserve afterwards. No extra enable switch is needed. Max can exceed the optimiser's configured charge planning rate; numeric targets keep local wattage control. Larger-site optimiser actions use the targetless tariff route described below; smaller-site optimiser requests retain local targets.
+From v2.12.1482, Home Assistant distinguishes **Max** from a numeric battery-input target. For a manual or automation `force_charge` action, zero or omitted `power_w` requests Tesla-managed maximum charging. An eligible paired system resumes local dispatch, temporarily uses a charging tariff and Time-Based Control, and restores its original tariff, mode and reserve afterwards. No extra enable switch is needed. Max can exceed the optimiser's configured charge planning rate; numeric targets keep local wattage control. The preferred control method now determines the optimiser route; tariff-routed requests retain their energy and reserve checks.
 
 Grid-charging permission, SOC protection, demand protection, Monitoring Mode and other controller ownership still apply. A finite PowerSync import limit permits native Max only when a fresh gateway import limit is no higher. Active or unsettled EV control keeps charging on the local path, where prospective EV demand can be reserved. Max therefore does not bypass a lower software import limit or an EV reservation.
 
@@ -84,4 +96,4 @@ solar contribution can increase available export.
 
 ### Full-rate Max discharge
 
-An explicit manual or automation **Max** discharge uses the existing native tariff method after releasing any timed local dispatch. Its output is independent of the gateway’s learned timed-command ceiling. Numeric targets retain local wattage control and their live home/solar compensation. Max is not a promise to hold an exact grid-export target; installer site limits and reserves remain effective. On larger sites, a stricter software export limit is temporarily applied and verified at the gateway. If native takeover cannot be confirmed, Max fails explicitly; numeric targets retain local control. The tariff, mode, reserve and export settings return through the existing restore lifecycle.
+An explicit manual or automation **Max** discharge uses the existing native tariff method after releasing any timed local dispatch. Its output is independent of the gateway’s learned timed-command ceiling. Numeric targets retain local wattage control and their live home/solar compensation. Max is not a promise to hold an exact grid-export target; installer site limits and reserves remain effective. On the tariff route, a stricter software export limit is temporarily applied and verified at the gateway. If native takeover cannot be confirmed, Max fails explicitly; numeric targets retain local control. The tariff, mode, reserve and export settings return through the existing restore lifecycle.

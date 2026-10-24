@@ -8918,6 +8918,10 @@ function _teslaEnergySiteControls(findEntity, findVppSwitches) {
 
   // ── Select row: operation mode + grid export rule (side-by-side) ──
   const selects = [];
+  const controlMethod = findEntity('select', 'tesla_control_method');
+  if (controlMethod) {
+    selects.push({ type: 'tile', entity: controlMethod, name: 'Preferred battery control', icon: 'mdi:battery-sync', vertical: false });
+  }
   if (operationMode) {
     selects.push({
       type: 'tile',

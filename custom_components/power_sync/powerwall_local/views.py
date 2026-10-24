@@ -1425,6 +1425,7 @@ def register_views(hass: HomeAssistant) -> None:
     hass.http.register_view(PowerwallSetGatewayIpView(hass))
     hass.http.register_view(PowerwallOffGridView(hass))
     hass.http.register_view(PowerwallLocalStatusView(hass))
+    hass.http.register_view(PowerwallControlMethodView(hass))
     hass.http.register_view(PowerwallSafetyConfigView(hass))
     hass.http.register_view(PowerwallCurtailmentFallbackView(hass))
     hass.http.register_view(PowerwallDiscoverView(hass))
@@ -1502,3 +1503,59 @@ class PowerwallDebugConfigView(HomeAssistantView):
         if config is None:
             return web.json_response({"error": "read_config returned None"}, status=502)
         return web.json_response({"success": True, "config": config})
+
+
+class PowerwallControlMethodView(HomeAssistantView):
+    """Read/save the backend-owned Tesla actuator preference."""
+    url = "/api/power_sync/powerwall/control_method"
+    name = "api:power_sync:powerwall:control_method"
+    requires_auth = True
+
+    def __init__(self, hass):
+        self._hass = hass
+
+    def _entry(self, entry_id=None):
+        entries = self._hass.config_entries.async_entries(DOMAIN)
+        entries = [entry for entry in entries if
+            {**entry.data, **entry.options}.get("battery_system", "tesla") == "tesla"]
+        if entry_id:
+            return next((entry for entry in entries if entry.entry_id == entry_id), None)
+        return entries[0] if len(entries) == 1 else None
+
+    def _status(self, entry):
+        from .control_method import METHODS, control_method, runtime_route
+        config = {**entry.data, **entry.options}
+        runtime = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        paired = local_battery_dispatch_configured(config)
+        active = next((runtime.get(key, {}) for key in ("force_charge_state", "force_discharge_state")
+                       if runtime.get(key, {}).get("active")), {})
+        return {"success": True, "method": control_method(config),
+            "effective_method": ("local" if active.get("powerwall_local_dispatch") else "tariff") if active else None,
+            "available_methods": list(METHODS) if paired else ["tariff", "auto"],
+            "charge_method": runtime_route(runtime, config, "charge"),
+            "discharge_method": runtime_route(runtime, config, "discharge"),
+            "local_ceiling_w": 10000, "changing": bool(runtime.get("tesla_control_method_changing"))}
+
+    async def get(self, request):
+        entry = self._entry(request.query.get("entry_id"))
+        if entry is None:
+            return self.json({"success": False, "error": "Select a configured Tesla site"}, status_code=404)
+        return self.json(self._status(entry))
+
+    async def post(self, request):
+        from .control_method import set_control_method, validate_method
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("Expected a control method")
+            method = validate_method(body.get("method"))
+        except (ValueError, TypeError):
+            return self.json({"success": False, "error": "Choose tariff, local or auto"}, status_code=400)
+        entry = self._entry(body.get("entry_id"))
+        if entry is None:
+            return self.json({"success": False, "error": "Select a configured Tesla site"}, status_code=404)
+        try:
+            await set_control_method(self._hass, entry, method)
+        except (HomeAssistantError, ValueError) as error:
+            return self.json({"success": False, "error": str(error)}, status_code=409)
+        return self.json(self._status(entry))

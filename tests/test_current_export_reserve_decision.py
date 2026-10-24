@@ -453,6 +453,7 @@ def test_larger_powerwall_plan_keeps_full_rate_safety_math_and_sends_tariff_sent
         _site_info_last_fetch=__import__('time').monotonic())
     coordinator._config.max_charge_w=20000;coordinator._config.max_discharge_w=20000
     coordinator._powerwall_plan_native_tariff=True
+    coordinator._entry=SimpleNamespace(data={'powerwall_local_paired':True,'powerwall_local_ip':'gateway.local'},options={})
     action=_api_action(NOW,direction,5000,.5)
     coordinator._current_schedule.actions=[action]
     coordinator._last_executed_action='self_consumption'
@@ -466,6 +467,8 @@ def test_capacity_change_between_solve_and_execution_requests_a_fresh_plan(opt_m
     coordinator.energy_coordinator=SimpleNamespace(_site_info_cache={'nameplate_power':20000},
         _site_info_last_fetch=__import__('time').monotonic())
     coordinator._powerwall_plan_native_tariff=False
+    coordinator._powerwall_plan_routes={'charge':'local','discharge':'local'}
+    coordinator._powerwall_plan_method='local'
     replans=[];coordinator._schedule_settings_reoptimization=lambda:replans.append(True)
     _run(coordinator,actions[0])
     assert replans==[True] and not battery.force_discharge_calls
@@ -475,6 +478,7 @@ def test_capacity_change_between_solve_and_execution_requests_a_fresh_plan(opt_m
 def test_native_tariff_safety_uses_reported_rating_above_planning_rate(opt_module,clock,direction):
     coordinator,battery,actions,_=_controller(opt_module,soc=.717,targetless=True)
     coordinator._powerwall_plan_native_tariff=True
+    coordinator._entry=SimpleNamespace(data={'powerwall_local_paired':True,'powerwall_local_ip':'gateway.local'},options={})
     coordinator.energy_coordinator=SimpleNamespace(_site_info_cache={'nameplate_power':21040},
         _site_info_last_fetch=__import__('time').monotonic())
     coordinator._config.max_discharge_w=21000;coordinator._config.max_charge_w=14700

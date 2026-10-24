@@ -1542,13 +1542,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return the saved manual optimizer reserve restore point."""
         return getattr(self, "_manual_backup_reserve", None)
 
-    def _supports_local_powerwall_target_power(self) -> bool:
+    def _supports_local_powerwall_target_power(self, direction="discharge") -> bool:
         """Only paired LAN Tesla sites can honor direct battery power targets."""
         if self.battery_system != "tesla":
             return False
-        from ..powerwall_local.hybrid_policy import prefers_native_tariff, routing_site_info
-        energy = getattr(self, "energy_coordinator", None)
-        if prefers_native_tariff(routing_site_info(energy)):
+        if self._powerwall_route(direction) == "tariff":
             return False
         entry = getattr(self, "_entry", None)
         from ..powerwall_host import local_battery_dispatch_configured
@@ -1571,7 +1569,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return True when the selected battery can honor a target charge power."""
         try:
             from ..const import TARGET_CHARGE_POWER_BATTERY_SYSTEMS
-            return self.battery_system in TARGET_CHARGE_POWER_BATTERY_SYSTEMS or self._supports_local_powerwall_target_power()
+            return self.battery_system in TARGET_CHARGE_POWER_BATTERY_SYSTEMS or self._supports_local_powerwall_target_power("charge")
         except Exception:
             return False
 
@@ -2613,7 +2611,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             command_w = float(
                 getattr(self._config, "max_charge_w", 0.0) or 0.0
             )
-            command_w = self._native_powerwall_safety_power_w(command_w)
+            command_w = self._native_powerwall_safety_power_w(command_w, "charge")
             requested_w = max(
                 0.0,
                 float(getattr(action, "power_w", 0.0) or 0.0),
@@ -3194,6 +3192,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return None
 
+    def _powerwall_route(self, direction):
+        from ..powerwall_local.control_method import runtime_route
+        entry = getattr(self, "_entry", None)
+        config = {**getattr(entry, "data", {}), **getattr(entry, "options", {})}
+        config.update(optimization_max_charge_w=getattr(self._config, "max_charge_w", 5000),
+            optimization_max_discharge_w=getattr(self._config, "max_discharge_w", 5000),
+            optimization_max_grid_import_w=getattr(self._config, "max_grid_import_w", None),
+            optimization_max_grid_export_w=getattr(self._config, "max_grid_export_w", None))
+        runtime = getattr(getattr(self, "hass", None), "data", {}).get(DOMAIN, {}).get(getattr(self, "entry_id", None), {})
+        return runtime_route(runtime, config, direction)
+
+    def _powerwall_service_power(self, direction, requested_w):
+        from ..powerwall_host import local_battery_dispatch_configured
+        entry = getattr(self, "_entry", None)
+        paired = local_battery_dispatch_configured({**getattr(entry, "data", {}), **getattr(entry, "options", {})})
+        return 0 if self.battery_system == "tesla" and paired and self._powerwall_plan_uses_tariff(direction) else requested_w
+
+    def _powerwall_plan_uses_tariff(self, direction):
+        routes = getattr(self, "_powerwall_plan_routes", None)
+        if routes is not None:
+            return routes.get(direction) == "tariff"
+        return bool(getattr(self, "_powerwall_plan_native_tariff", False))
+
     def _local_powerwall_plan_limits(self) -> dict[str, float]:
         """Actuator feedback limits the solve without rewriting user settings."""
         if getattr(self, "battery_system", None) != "tesla":
@@ -3202,12 +3223,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         local = runtime.get("powerwall_local", {})
         client = local.get("client") or getattr(runtime.get("powerwall_battery_dispatch"), "client", None)
         limits = {}
-        from ..powerwall_local.hybrid_policy import prefers_native_tariff, routing_site_info
-        native = prefers_native_tariff(routing_site_info(getattr(self, "energy_coordinator", None)))
         from ..powerwall_host import local_battery_dispatch_configured
         local_ready = client is not None or local_battery_dispatch_configured(
             getattr(getattr(self, "_entry", None), "data", {}))
-        for direction in (() if native or not local_ready else ("charge", "discharge")):
+        for direction in (() if not local_ready else ("charge", "discharge")):
+            if self._powerwall_route(direction) == "tariff":
+                continue
             value = getattr(client, f"dispatch_{direction}_limit_w", None)
             limits[f"max_{direction}_w"] = 10000
             if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
@@ -3241,9 +3262,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Capability may change after site_info refresh or a route transition.
         self._optimizer.target_charge_power_supported = self._supports_target_charge_power()
         if self.battery_system == "tesla":
-            from ..powerwall_local.hybrid_policy import prefers_native_tariff, routing_site_info
-            self._powerwall_plan_native_tariff = prefers_native_tariff(
-                routing_site_info(getattr(self, "energy_coordinator", None)))
+            from ..powerwall_local.control_method import control_method
+            entry = getattr(self, "_entry", None)
+            self._powerwall_plan_method = control_method({**getattr(entry, "data", {}), **getattr(entry, "options", {})})
+            self._powerwall_plan_routes = {direction: self._powerwall_route(direction) for direction in ("charge", "discharge")}
+            self._powerwall_plan_native_tariff = self._powerwall_plan_routes["discharge"] == "tariff"
         physical_discharge_w = self._config.max_discharge_w
         export_command_cap_w: int | None = None
 
@@ -10302,9 +10325,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return the active force state, including optimizer-owned hardware force."""
         return self._get_active_force_state()
 
-    def _native_powerwall_safety_power_w(self, configured_w: float) -> float:
+    def _native_powerwall_safety_power_w(self, configured_w: float, direction="discharge") -> float:
         """A planning rate is not an enforceable native tariff power ceiling."""
-        if self.battery_system == "tesla" and getattr(self, "_powerwall_plan_native_tariff", False):
+        if self.battery_system == "tesla" and self._powerwall_plan_uses_tariff(direction):
             from ..powerwall_local.hybrid_policy import native_capacity_w, routing_site_info
             reported = native_capacity_w(routing_site_info(getattr(self, "energy_coordinator", None)))
             if reported is not None:
@@ -10456,8 +10479,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     float(total_battery_discharge_w),
                 )
             result = await fenced_call(self, lambda: battery.force_discharge(
-                power_w=(0 if self.battery_system == "tesla" and getattr(self, "_powerwall_plan_native_tariff", False)
-                         else applied_w), **writer_kwargs), 'force_discharge')
+                power_w=self._powerwall_service_power("discharge", applied_w), **writer_kwargs), 'force_discharge')
             return result is not False
 
         if guard is None:
@@ -11159,13 +11181,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # method to behave as if the optimizer is running.
         if not getattr(self, "_enabled", True):
             return
-        if getattr(self, "battery_system", None) == "tesla" and hasattr(self, "_powerwall_plan_native_tariff"):
-            from ..powerwall_local.hybrid_policy import prefers_native_tariff, routing_site_info
-            native_now = prefers_native_tariff(
-                routing_site_info(getattr(self, "energy_coordinator", None)))
-            if native_now != self._powerwall_plan_native_tariff:
+        if getattr(self, "battery_system", None) == "tesla" and hasattr(self, "_powerwall_plan_routes"):
+            from ..powerwall_local.control_method import control_method
+            entry = getattr(self, "_entry", None)
+            method = control_method({**getattr(entry, "data", {}), **getattr(entry, "options", {})})
+            routes = {direction: self._powerwall_route(direction) for direction in ("charge", "discharge")}
+            if routes != self._powerwall_plan_routes or method != self._powerwall_plan_method:
                 self._schedule_settings_reoptimization()
-                _LOGGER.info("Powerwall actuator capability changed; waiting for a fresh plan")
+                _LOGGER.info("Powerwall control preference/capability changed; waiting for a fresh plan")
                 return
 
         if not self._executor or not self._executor.battery_controller:
@@ -12556,8 +12579,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
                         force_result = await fenced_call(self, lambda: battery.force_charge(
                             duration_minutes=charge_duration,
-                            power_w=(0 if self.battery_system == "tesla" and getattr(self, "_powerwall_plan_native_tariff", False)
-                                     else charge_power_w),
+                            power_w=self._powerwall_service_power("charge", charge_power_w),
                             **self._charge_grid_target_kwargs(action),
                         ), 'force_charge')
                         if force_result is False:
@@ -12580,8 +12602,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     else:
                         force_result = await fenced_call(self, lambda: battery.force_charge(
                             duration_minutes=charge_duration,
-                            power_w=(0 if self.battery_system == "tesla" and getattr(self, "_powerwall_plan_native_tariff", False)
-                                     else charge_power_w),
+                            power_w=self._powerwall_service_power("charge", charge_power_w),
                             **self._charge_grid_target_kwargs(action),
                         ), 'force_charge')
                         if force_result is False:

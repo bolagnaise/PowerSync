@@ -33539,6 +33539,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if (call is None or (_control_call_source(call) == "optimizer" and not _native_max_context.get("targetless"))
                     or not _local_powerwall_generation_current()
                     or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
+                    or _local_powerwall_runtime.get("tesla_control_method_changing")
                     or _local_powerwall_runtime.get("powerwall_local_recovery_pending")
                     or _local_powerwall_runtime.get("optimizer_force_restart_restore_pending")
                     or _local_powerwall_runtime.get("pending_tesla_restore")
@@ -33626,10 +33627,54 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _local_powerwall_runtime["powerwall_native_max_charge"] = current
         return current
 
-    def _powerwall_prefers_native_tariff():
-        from .powerwall_local.hybrid_policy import prefers_native_tariff, routing_site_info
-        energy = _local_powerwall_runtime.get("tesla_coordinator")
-        return prefers_native_tariff(routing_site_info(energy))
+    def _powerwall_prefers_native_tariff(direction="discharge"):
+        from .powerwall_local.control_method import runtime_route
+        return runtime_route(_local_powerwall_runtime, _local_powerwall_dispatch_config(), direction) == "tariff"
+
+    async def _set_tesla_control_method(method):
+        from .powerwall_local.control_method import CONF_CONTROL_METHOD, control_method, validate_method
+        from .powerwall_host import local_battery_dispatch_configured
+        method = validate_method(method)
+        if active_battery_system != BATTERY_SYSTEM_TESLA:
+            raise HomeAssistantError("Battery control preference is Tesla-only")
+        current_entry = hass.config_entries.async_get_entry(entry.entry_id)
+        if current_entry is None:
+            raise HomeAssistantError("Tesla site is unavailable")
+        if method == "local" and not local_battery_dispatch_configured({**current_entry.data, **current_entry.options}):
+            raise HomeAssistantError("Local V1R requires a paired Powerwall gateway")
+        if control_method({**current_entry.data, **current_entry.options}) == method:
+            return
+        native = _local_powerwall_runtime.get("powerwall_native_max_charge")
+        if native and native.pending:
+            native.revoke()
+        async with _local_powerwall_route_lock:
+            _local_powerwall_runtime["tesla_control_method_changing"] = True
+            try:
+                _cancel_all_force_timers("Tesla control preference changed")
+                _command_generation[0] += 1
+                await _stop_local_powerwall_dispatch()
+                if any(state.get("active") for state in (force_charge_state, force_discharge_state, hold_soc_state, self_consumption_state)):
+                    await handle_restore_normal(ServiceCall(DOMAIN, "restore_normal", {"source": "user"}))
+                native = _local_powerwall_runtime.get("powerwall_native_max_charge")
+                local = _local_powerwall_runtime.get("powerwall_battery_dispatch")
+                if ((native and native.pending) or (local and local.pending)
+                        or any(state.get("active") for state in (force_charge_state, force_discharge_state, hold_soc_state, self_consumption_state))):
+                    raise HomeAssistantError("Previous battery control cleanup remains pending")
+                current_entry = hass.config_entries.async_get_entry(entry.entry_id)
+                if current_entry is None:
+                    raise HomeAssistantError("Tesla site was unloaded")
+                _local_powerwall_runtime["_skip_reload"] = True
+                hass.config_entries.async_update_entry(current_entry,
+                    options={**current_entry.options, CONF_CONTROL_METHOD: method})
+                _local_powerwall_runtime.pop("powerwall_dispatch_fallback_pending", None)
+            finally:
+                _local_powerwall_runtime.pop("tesla_control_method_changing", None)
+        optimization = _local_powerwall_runtime.get("optimization_coordinator")
+        if optimization is not None:
+            optimization._schedule_settings_reoptimization()
+        async_dispatcher_send(hass, f"{DOMAIN}_tesla_control_method_{entry.entry_id}")
+
+    _local_powerwall_runtime["set_tesla_control_method"] = _set_tesla_control_method
 
     async def _try_native_max_charge(call, duration, deadline):
         return await _try_native_powerwall_force("charge", call, duration, deadline)
@@ -33638,15 +33683,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         from .powerwall_host import local_battery_dispatch_configured
         raw_power = call.data.get("power_w", 0)
         source = _control_call_source(call)
-        large_site = _powerwall_prefers_native_tariff()
+        native_route = _powerwall_prefers_native_tariff(direction)
+        large_site = native_route
         # Optimizer requests are targetless only when the pre-solve capability
         # selected tariff control. Explicit positive user targets stay local.
         targetless = (source == "optimizer" and large_site
                       and type(raw_power) in (int, float) and raw_power == 0)
-        if ((source == "optimizer" and not targetless)
+        if (not native_route or (source == "optimizer" and not targetless)
                 or (not targetless and (type(raw_power) not in (int, float) or raw_power != 0))
                 or call.data.get("grid_import_target_w") is not None
-                or (direction == "discharge" and not large_site)
                 or not local_battery_dispatch_configured(entry.data)):
             return None
         if not _get_tesla_site_configs(hass, entry):
@@ -33704,7 +33749,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _command_generation[0] += 1
             state = force_charge_state if direction == "charge" else force_discharge_state
             state["duration"] = duration
-            status = await controller.start(duration * 60, deadline=deadline)
+            from .powerwall_local.native_max_charge import NativeMaxChargeError
+            try:
+                status = await controller.start(duration * 60, deadline=deadline)
+            except NativeMaxChargeError as error:
+                raise HomeAssistantError(str(error)) from error
             return {"success": True, "native_max_charge": direction == "charge",
                     "control_path": "powerwall_native_tariff", "command_status": "accepted",
                     "expires_at": status["expires_at"], "physical_effect_confirmed": False}
@@ -33730,6 +33779,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if grid_target is not None:
                 raise HomeAssistantError("Grid-import targeting requires paired local Powerwall control")
             return None
+        from .powerwall_local.control_method import control_method
+        if (control_method({**entry.data, **entry.options}) == "local"
+                and not local_battery_dispatch_configured(entry.data)):
+            raise HomeAssistantError("Local V1R requires a paired Powerwall gateway")
         requested_at = _local_powerwall_runtime.get("battery_route_requested_at") or dt_util.utcnow().timestamp()
         native = await _try_native_powerwall_force(mode, call, duration, requested_at + duration * 60)
         if native is not None:
@@ -33748,13 +33801,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise HomeAssistantError("Local Powerwall integration is stopping")
         if hass.data[DOMAIN][entry.entry_id].get("powerwall_local_recovery_pending"):
             raise HomeAssistantError("Local Powerwall restart cleanup is still pending")
-        # Finish an already-active tariff/hold lifecycle through its original
-        # path; never adopt its modified settings as a new local baseline.
-        if hold_soc_state.get("active") or self_consumption_state.get("active"):
-            return None
-        if any(state.get("active") and not state.get("powerwall_local_dispatch")
-               for state in (force_charge_state, force_discharge_state)):
-            return None
+        # Complete the previous owner's restoration before acquiring local
+        # watts; never convert a precise request into another tariff action.
+        legacy_active = (hold_soc_state.get("active") or self_consumption_state.get("active")
+            or any(state.get("active") and not state.get("powerwall_local_dispatch")
+                   for state in (force_charge_state, force_discharge_state)))
+        if legacy_active:
+            await handle_restore_normal(call)
+            if any(state.get("active") for state in (force_charge_state, force_discharge_state, hold_soc_state, self_consumption_state)):
+                raise HomeAssistantError("Previous battery control cleanup remains pending")
         pending = any(state.get("powerwall_local_dispatch") for state in (force_charge_state, force_discharge_state))
         if (_local_powerwall_runtime.get("powerwall_dispatch_fallback_pending")
                 and _control_call_source(call) == "optimizer" and not pending):
@@ -33782,35 +33837,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         source = _control_call_source(call)
         if source == "optimizer" and power_w <= 0 and grid_target is None:
             raise HomeAssistantError("Optimizer local dispatch requires positive power")
-        # Max is a deliberate full-rate request, not a precise watt target.
-        # Do not quietly turn it into the gateway's clipped local lease.
-        # The caller retains the established tariff baseline/timer/restore
-        # lifecycle, after any earlier local command is positively released.
-        if mode == "discharge" and source != "optimizer" and power_w == 0 and call.data.get("power_w", 0) == 0:
-            controller = await _get_local_powerwall_dispatch()
-            if await controller.native_max_discharge_available():
-                await _stop_local_powerwall_dispatch_locked()
-                if (not _local_powerwall_generation_current()
-                        or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
-                        or _monitoring_mode_should_block_control(call)):
-                    raise HomeAssistantError("Tesla Max discharge authorization changed during cleanup")
-                if not await controller.native_max_discharge_available():
-                    raise HomeAssistantError("Tesla Max discharge limits changed during cleanup")
-                if (not _local_powerwall_generation_current()
-                        or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
-                        or _monitoring_mode_should_block_control(call)):
-                    raise HomeAssistantError("Tesla Max discharge authorization changed during limit verification")
-                if hass.data.get("power_sync_license_manager") is not None:
-                    from .licensing.guard import service_allowed
-                    if not service_allowed(hass, call.data, "handle_force_discharge"):
-                        raise HomeAssistantError("Tesla Max discharge access changed during cleanup")
-                _LOGGER.info("Explicit Powerwall Max discharge uses native tariff control")
-                return {"fallback": True, "power_w": 0, "native_max_discharge": True}
         config = {**entry.data, **entry.options}
         target = grid_target if grid_target is not None else power_w or config.get("optimization_max_grid_export_w" if mode == "discharge" else "optimization_max_charge_w", 5000)
 
         def allowed(direction):
-            if not _local_powerwall_generation_current() or _monitoring_mode_should_block_control(call) or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping"):
+            if (not _local_powerwall_generation_current() or _monitoring_mode_should_block_control(call)
+                    or _local_powerwall_runtime.get("tesla_control_method_changing") or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")):
                 return False
             state = force_charge_state if direction == "charge" else force_discharge_state
             if not state.get("active") or not state.get("powerwall_local_dispatch"):
@@ -33861,6 +33893,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if grid_target is not None:
                     raise HomeAssistantError("Grid-import dispatch failed; tariff fallback cannot hold the target") from err
                 if isinstance(err, DispatchCommandFailed) and not controller.pending:
+                    from .powerwall_local.control_method import control_method
+                    if control_method({**entry.data, **entry.options}) == "local":
+                        raise HomeAssistantError("Local V1R failed; tariff fallback is disabled by your preference") from err
                     from .powerwall_local.battery_dispatch import validate_dispatch_config
                     try:
                         validate_dispatch_config(mode, _local_powerwall_dispatch_config())
