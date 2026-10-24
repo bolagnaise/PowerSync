@@ -6,6 +6,7 @@ import asyncio
 import ast
 import importlib
 import inspect
+import logging
 import math
 import sys
 import types
@@ -1818,6 +1819,152 @@ def test_amber_unusable_fresh_current_retains_usable_cached_price(opt_module, mo
 
     assert imports[0] == pytest.approx(0.30)
     assert exports[0] == pytest.approx(0.05)
+
+
+def _read_octopus_public_prices(opt_module, states, now):
+    """Run the real entity bridge without importing unrelated HA coordinators."""
+    source = ast.parse((COMPONENT_ROOT / "coordinator.py").read_text())
+    coordinator_class = next(
+        node for node in source.body
+        if isinstance(node, ast.ClassDef) and node.name == "OctopusPriceCoordinator"
+    )
+    methods = {
+        "_parse_octopus_datetime", "_octopus_rate_to_pence", "_octopus_state_entries",
+        "_build_octopus_amber_entry", "_read_from_octopus_energy_entities",
+    }
+    coordinator_class.bases = []
+    coordinator_class.body = [
+        node for node in coordinator_class.body
+        if isinstance(node, ast.FunctionDef) and node.name in methods
+    ]
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+
+    namespace = {
+        "datetime": FixedDatetime, "math": math, "dt_util": opt_module.dt_util,
+        "_LOGGER": logging.getLogger(__name__),
+    }
+    module = ast.Module(body=[coordinator_class], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), "octopus_entity_bridge", "exec"), namespace)
+    bridge = namespace["OctopusPriceCoordinator"]()
+    bridge.product_code = "AGILE-24-10-01"
+    bridge.tariff_code = "E-1R-AGILE-24-10-01-A"
+    bridge.gsp_region = "A"
+    bridge.hass = SimpleNamespace(states=SimpleNamespace(
+        async_all=lambda domain: [s for s in states if s.entity_id.startswith(domain + ".")],
+    ))
+    return bridge._read_from_octopus_energy_entities()
+
+
+@pytest.mark.parametrize("live_pence,cached_pence", [(22.75, -6.28), (-6.28, 22.75), (0.0, 22.75)])
+@pytest.mark.parametrize("cached_minutes,minute,cached_offset", [(30, 0, 0), (60, 10, -30)])
+@pytest.mark.parametrize("live_export_pence", [13.43, -1.5])
+def test_octopus_live_entities_override_cached_overlap_in_plan_and_display(
+    opt_module, monkeypatch, live_pence, cached_pence, cached_minutes, minute, cached_offset,
+    live_export_pence,
+):
+    """The live rate wins only in its interval, including wider cached blocks."""
+    start = datetime(2026, 10, 24, 16, 30, tzinfo=timezone.utc)
+    now = start + timedelta(minutes=minute)
+    live_end = start + timedelta(minutes=30)
+    cached_end = start + timedelta(minutes=cached_minutes)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: now)
+    states = []
+    for suffix, live, cached in (
+        ("", live_pence, cached_pence),
+        ("_export", live_export_pence, 8.0),
+    ):
+        is_export = bool(suffix)
+        entity = f"octopus_energy_electricity_ABC_123{suffix}"
+        states.extend([
+            SimpleNamespace(
+                entity_id=f"sensor.{entity}_current_rate", state=str(live / 100),
+                attributes={"start": start.isoformat(), "end": live_end.isoformat(),
+                            "is_export": is_export},
+            ),
+            SimpleNamespace(
+                entity_id=f"event.{entity}_current_day_rates", state="ready",
+                attributes={"is_export": is_export, "rates": [
+                    {"start": (start + timedelta(minutes=cached_offset)).isoformat(),
+                     "end": cached_end.isoformat(), "value_inc_vat": cached / 100},
+                    {"start": cached_end.isoformat(),
+                     "end": (cached_end + timedelta(minutes=30)).isoformat(),
+                     "value_inc_vat": 0.08},
+                ]},
+            ),
+        ])
+    data = _read_octopus_public_prices(opt_module, states, now)
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module, "octopus", data["forecast"], current=data["current"],
+    )
+    imports, exports = asyncio.run(coordinator._get_price_forecast())
+
+    expected_imports = []
+    expected_exports = []
+    for idx in range(12):
+        timestamp = now + timedelta(minutes=5 * idx)
+        expected_imports.append((
+            live_pence if timestamp < live_end else
+            cached_pence if timestamp < cached_end else 8.0
+        ) / 100)
+        expected_exports.append((live_export_pence if timestamp < live_end else 8.0) / 100)
+    assert imports == pytest.approx(expected_imports)
+    assert coordinator._last_display_import_prices == pytest.approx(expected_imports)
+    assert coordinator._last_settlement_import_prices == pytest.approx(expected_imports)
+    assert coordinator._last_display_export_prices == pytest.approx(expected_exports)
+    assert coordinator._last_settlement_export_prices == pytest.approx(expected_exports)
+    assert exports == pytest.approx([max(0.0, price) for price in expected_exports])
+    assert [e["perKwh"] for e in data["current"] if e["channelType"] == "general"] == [live_pence]
+    # Preserve historical rates and both sides of a wider cached block.
+    history = [e for e in data["forecast"] if e["type"] == "ActualInterval" and e["channelType"] == "general"]
+    if cached_offset < 0:
+        assert history and history[0]["perKwh"] == pytest.approx(cached_pence)
+
+    if live_pence == 22.75:
+        optimizer = opt_module.BatteryOptimizer(
+            capacity_wh=10000, max_charge_w=4000, max_discharge_w=4000,
+            backup_reserve=0.05, interval_minutes=5, horizon_hours=1, terminal_weight=0.0,
+        )
+        result = optimizer.optimize(
+            import_prices=imports, export_prices=[0.0] * 12,
+            solar_forecast=[0.0] * 12, load_forecast=[0.0] * 12,
+            current_soc=0.5, allow_grid_charge=True,
+        )
+        assert result.feasible
+        current_steps = int((live_end - now).total_seconds() / 300)
+        assert max(result.grid_import_w[:current_steps]) < 1.0
+
+
+@pytest.mark.parametrize("state,expired", [("unavailable", False), ("unknown", False), ("nan", False), ("inf", False), ("-0.0628", True)])
+def test_octopus_unusable_live_entity_retains_cached_rate(opt_module, monkeypatch, state, expired):
+    now = datetime(2026, 10, 24, 16, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: now)
+    live_start = now - timedelta(minutes=30) if expired else now
+    live_end = live_start + timedelta(minutes=30)
+    entity = "octopus_energy_electricity_ABC_123"
+    states = [
+        SimpleNamespace(
+            entity_id=f"sensor.{entity}_current_rate", state=state,
+            attributes={"start": live_start.isoformat(), "end": live_end.isoformat()},
+        ),
+        SimpleNamespace(
+            entity_id=f"event.{entity}_current_day_rates", state="ready",
+            attributes={"rates": [{"start": now.isoformat(),
+                                   "end": (now + timedelta(hours=1)).isoformat(),
+                                   "value_inc_vat": 0.2275}]},
+        ),
+    ]
+    data = _read_octopus_public_prices(opt_module, states, now)
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module, "octopus", data["forecast"], current=data["current"],
+    )
+    imports, _ = asyncio.run(coordinator._get_price_forecast())
+    assert all(math.isfinite(e["perKwh"]) for e in data["current"])
+    assert imports == pytest.approx([0.2275] * 12)
+    assert coordinator._last_display_import_prices == pytest.approx([0.2275] * 12)
 
 
 def test_non_amber_dynamic_import_forecast_still_uses_per_kwh(opt_module):

@@ -13207,6 +13207,8 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
             rate = float(value)
         except (TypeError, ValueError):
             return None
+        if not math.isfinite(rate):
+            return None
         # Public current_rate entities are GBP/kWh (e.g. 0.245), while internal
         # coordinator/API rates are p/kWh (e.g. 24.5).
         return round(rate * 100 if abs(rate) <= 2 else rate, 6)
@@ -13297,6 +13299,8 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
                 import_forecast.append(entry)
                 import_tariff = attrs.get("tariff") or import_tariff
 
+        sensor_current_prices = list(current_prices)
+
         for state in self._octopus_state_entries("event"):
             entity_id = getattr(state, "entity_id", "")
             if (
@@ -13334,6 +13338,43 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
                 else:
                     import_forecast.append(entry)
                     import_tariff = attrs.get("tariff_code") or import_tariff
+
+        # Public current_rate sensors can be newer than the cached daily rate
+        # events. Remove only the overlapping portion of each cached interval
+        # so every consumer sees the live rate, without losing history or the
+        # remainder of a wider Go/Tracker tariff block.
+        for live in sensor_current_prices:
+            rates = export_forecast if live["channelType"] == "feedIn" else import_forecast
+            live_start = datetime.fromisoformat(live["valid_from"])
+            live_end = datetime.fromisoformat(live["valid_to"])
+            merged = []
+            for rate in rates:
+                start = datetime.fromisoformat(rate["valid_from"])
+                end = datetime.fromisoformat(rate["valid_to"])
+                if end <= live_start or start >= live_end:
+                    merged.append(rate)
+                    continue
+                for piece_start, piece_end in (
+                    (start, min(end, live_start)),
+                    (max(start, live_end), end),
+                ):
+                    if piece_start >= piece_end:
+                        continue
+                    piece = dict(rate)
+                    piece.update({
+                        "valid_from": piece_start.isoformat(),
+                        "valid_to": piece_end.isoformat(),
+                        "nemTime": piece_end.isoformat(),
+                        "duration": max(1, int((piece_end - piece_start).total_seconds() // 60)),
+                        "type": "ActualInterval" if piece_end <= now else "ForecastInterval",
+                    })
+                    merged.append(piece)
+            rates[:] = merged + [live]
+
+        current_prices = [
+            rate for rate in import_forecast + export_forecast
+            if rate["type"] == "CurrentInterval"
+        ]
 
         if not import_forecast and not any(
             price.get("channelType") == "general" for price in current_prices
