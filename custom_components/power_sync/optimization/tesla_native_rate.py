@@ -17,6 +17,7 @@ from uuid import uuid4
 OWNER_MODE = "native_schedule_rate"
 COMMAND_INTERVAL = 60
 MAX_RESTORE_ATTEMPTS = 3
+SETTLEMENT_MAX_GAP = 90  # Individually fresh reports at the normal 30 s tick.
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,7 @@ class RateObservation:
     borrowable_battery_w: float = 0.0
     measured_ev_w: float = 0.0
     measured_ev_at: float = 0.0
+    confirmed_stopped: bool = False
 
 
 def decide_rate(observed: RateObservation, baseline_amps: int, now: float) -> tuple[int | None, str]:
@@ -224,14 +226,14 @@ class NativeRateController:
         settled = (math.isfinite(physical) and math.isfinite(target_w)
                    and ((observed.charging and target_w > 0
                          and abs(physical-target_w) <= max(250, target_w*0.05))
-                        or (not observed.charging and physical <= 250)))
+                        or (observed.confirmed_stopped and physical <= 250)))
         if not fresh or not settled:
             if session.pop("restore_sample", None) is not None:
                 await self.save()
             return
         first = session.get("restore_sample")
         if (not isinstance(first, list) or len(first) != 3
-                or now-min(first) > 15):
+                or now-min(first) > SETTLEMENT_MAX_GAP):
             session["restore_sample"] = list(stamps)
             await self.save()
             return

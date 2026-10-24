@@ -98,6 +98,38 @@ async def settle(c, ports):
         await c.tick()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('known_stopped', [False, True])
+async def test_restoration_zero_draw_releases_only_explicit_confirmed_stop(known_stopped):
+    c, store, ports = controller()
+    await c.tick()
+    await c.stop()
+    assert c.sessions[VIN]['restore_settling']
+    for delta in (30, 60):
+        now = NOW+delta
+        c.clock = lambda: now
+        ports.observed = replace(ports.observed, charging=False,
+            confirmed_stopped=known_stopped, measured_ev_w=0,
+            vehicle_at=now, meter_at=now, measured_ev_at=now)
+        await c.tick()
+    assert bool(c.sessions) is not known_stopped
+    assert ports.writes == [10,32]
+
+
+@pytest.mark.asyncio
+async def test_restoration_stale_physical_reports_cannot_release_reservation():
+    c, store, ports = controller()
+    await c.tick()
+    await c.stop()
+    for delta in (30, 60):
+        now = NOW+delta
+        c.clock = lambda: now
+        ports.observed = replace(ports.observed, measured_ev_w=7360,
+            vehicle_at=now, meter_at=now, measured_ev_at=NOW)
+        await c.tick()
+    assert c.sessions and ports.writes == [10,32]
+
+
 def test_rate_accounts_for_home_battery_and_remaining_deadline():
     assert m.decide_rate(observation(), 32, NOW) == (10, 'ready')
     assert m.decide_rate(observation(remaining_grid_wh=10000, import_limit_w=10000), 32, NOW) == (21, 'limited')

@@ -18,7 +18,8 @@ NOW = 1800000000.0
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('already_at_baseline', [False, True])
-async def test_restored_setpoint_keeps_battery_headroom_through_ramp_and_restart(already_at_baseline):
+@pytest.mark.parametrize('settlement_times', [(1, 4), (30, 60)])
+async def test_restored_setpoint_keeps_battery_headroom_through_ramp_and_restart(already_at_baseline, settlement_times):
     root = path.parent
     spec = importlib.util.spec_from_file_location('settlement_controller', root/'optimization/tesla_native_rate.py')
     rate = importlib.util.module_from_spec(spec)
@@ -87,13 +88,13 @@ async def test_restored_setpoint_keeps_battery_headroom_through_ramp_and_restart
     assert renewal() == -1640
     assert controller.sessions and ports.writes == expected_writes
 
-    for delta in (1, 4):
+    for index, delta in enumerate(settlement_times):
         clock[0] = NOW+delta
         ports.observed = replace(ports.observed, vehicle_at=clock[0],
             measured_ev_at=clock[0], meter_at=clock[0], measured_ev_w=7360)
         budget.observe('VIN', watts=7360, at=clock[0], meter_at=clock[0])
         await controller.tick()
-        assert bool(controller.sessions) == (delta == 1)
+        assert bool(controller.sessions) == (index == 0)
     assert budget.unobserved_w('site') == 0
     assert ports.writes == expected_writes
 

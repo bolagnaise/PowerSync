@@ -112,6 +112,30 @@ async def test_exact_current_only_write_requires_fresh_report(adapter):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('state,stopped', [('Starting',False), ('Unknown',False),
+    (None,False), ('Stopped',True), ('Complete',True), ('Disconnected',True)])
+async def test_cleanup_distinguishes_confirmed_stop_from_unknown_vehicle_state(live_adapter, state, stopped):
+    a = live_adapter
+    a.ports.controller.sessions[VIN] = {'recovering': True}
+    a.data['charge_state']['charging_state'] = state
+    a.data['charge_state']['charger_actual_current'] = 0
+    observed = await a.ports.read(VIN)
+    assert observed is not None
+    assert observed.confirmed_stopped is stopped
+    assert observed.charging is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('actual', [None, 'unknown', float('nan'), True, -1])
+async def test_cleanup_missing_physical_current_cannot_be_interpreted_as_zero(live_adapter, actual):
+    a = live_adapter
+    a.ports.controller.sessions[VIN] = {'recovering': True}
+    a.data['charge_state']['charging_state'] = 'Stopped'
+    a.data['charge_state']['charger_actual_current'] = actual
+    assert await a.ports.read(VIN) is None
+
+
+@pytest.mark.asyncio
 async def test_actual_cleanup_read_reconstructs_whole_site_budget(live_adapter):
     a = live_adapter
     a.state.state = '10'
