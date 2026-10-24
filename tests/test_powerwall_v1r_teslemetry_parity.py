@@ -1074,3 +1074,37 @@ async def test_dispatch_gateway_error_message_is_bounded(caplog):
     assert not await transport.dispatch_battery_power('gateway', -500, 30)
     assert 'x' * 350 in caplog.text
     assert 'OMITTED_DETAIL' not in caplog.text
+
+
+@pytest.mark.parametrize('watts,code,message,expected', [
+    (-12000, 11, 'power -12000.000000 exceeds charge limit -10000', 10000),
+    (-12000, 7, 'power -12000.000000 exceeds charge limit -10000', None),
+    (-12000, 11, 'power -12001.000000 exceeds charge limit -10000', None),
+    (-12000, 11, 'power -12000.000000 exceeds charge limit 10000', None),
+    (-12000, 11, 'power -12000.000000 exceeds charge limit -13000', None),
+    (-12000, 11, 'power -12000.000000 exceeds charge limit 0', None),
+    (-12000, 11, 'power -12000.000000 exceeds discharge limit -10000', None),
+    (12000, 11, 'power 12000.000000 exceeds charge limit -10000', None),
+])
+@async_test
+async def test_only_matching_signed_lower_charge_ceiling_is_learned(watts, code, message, expected):
+    transport = _transport_without_key()
+    reply = transport_pb2.MessageEnvelope()
+    reply.common.error_response.status.code = code
+    reply.common.error_response.status.message = message
+    transport.post_v1r = AsyncMock(return_value=transport_mod.TEDAPIResponse(True, reply.SerializeToString()))
+    assert not await transport.dispatch_battery_power('gateway', watts, 30)
+    assert getattr(transport, 'dispatch_charge_limit_w', None) == expected
+    assert getattr(transport, 'dispatch_discharge_limit_w', None) is None
+
+
+@async_test
+async def test_gateway_charge_ceiling_never_increases_from_later_rejections():
+    transport = _transport_without_key()
+    transport.dispatch_charge_limit_w = 9000
+    reply = transport_pb2.MessageEnvelope()
+    reply.common.error_response.status.code = 11
+    reply.common.error_response.status.message = 'power -12000.000000 exceeds charge limit -10000'
+    transport.post_v1r = AsyncMock(return_value=transport_mod.TEDAPIResponse(True, reply.SerializeToString()))
+    assert not await transport.dispatch_battery_power('gateway', -12000, 30)
+    assert transport.dispatch_charge_limit_w == 9000

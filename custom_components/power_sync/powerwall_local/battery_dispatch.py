@@ -85,11 +85,13 @@ def site_grid_limits_w(snapshot: Any) -> tuple[float | None, float | None]:
 
 
 
-def manual_power_limits_kw(snapshot: Any, config: dict, learned_discharge_w: float | None = None) -> dict[str, float]:
+def manual_power_limits_kw(snapshot: Any, config: dict, learned_discharge_w: float | None = None, learned_charge_w: float | None = None) -> dict[str, float]:
     """UI bounds: configured site export first, learned battery bound otherwise."""
     site_import, site_export = site_grid_limits_w(snapshot)
     load, solar = _number(snapshot.load_w, "home power"), _number(snapshot.solar_w, "solar power")
     charge = _number(config.get("optimization_max_charge_w", 5000), "charge limit")
+    if learned_charge_w is not None:
+        charge = min(charge, _number(learned_charge_w, "gateway charge limit"))
     discharge = _number(config.get("optimization_max_discharge_w", 5000), "discharge limit")
     user_import = config.get("optimization_max_grid_import_w")
     if user_import not in (None, 0):
@@ -194,7 +196,10 @@ class LocalBatteryDispatch:
         self._command_may_have_reached = True
 
     def _device_discharge_limit(self) -> float:
-        value = getattr(self.client, "dispatch_discharge_limit_w", None)
+        return self._device_limit("discharge")
+
+    def _device_limit(self, mode: str) -> float:
+        value = getattr(self.client, f"dispatch_{mode}_limit_w", None)
         return _number(value, "gateway dispatch limit") if value is not None else math.inf
 
     async def check_tariff_fallback(self, mode: str) -> None:
@@ -203,6 +208,10 @@ class LocalBatteryDispatch:
         Require fresh, explicit unset evidence even after reload: an unknown
         or failed read cannot erase a previously configured installer limit.
         """
+        # Tariff forcing has no wattage control. A learned native ceiling
+        # cannot be guaranteed by the configured optimiser power setting.
+        if math.isfinite(self._device_limit(mode)):
+            raise ValueError("Tariff fallback cannot enforce the learned gateway dispatch limit")
         try:
             snapshot = await self.client.get_snapshot()
             limits = site_grid_limits_w(snapshot)
@@ -226,28 +235,32 @@ class LocalBatteryDispatch:
             self._mode, self._target = mode, target_w
             self._deadline = time.monotonic() + duration_seconds
             self.pending = True
-            previous_limit = self._device_discharge_limit()
             try:
                 await self.persist()
-                try:
-                    watts = await self._write()
-                except DispatchCommandFailed:
-                    current_limit = self._device_discharge_limit()
-                    if mode != "discharge" or not 0 < current_limit < previous_limit:
-                        raise
-                    # Keep durable ownership while releasing the rejected
-                    # attempt. Only a typed resume permits one bounded retry.
-                    await self._release(retain_intent=True)
-                    await self.persist()
-                    watts = await self._write()
+                watts = await self._write_with_limit_retry()
             except BaseException:
                 await self._release()
                 raise
             self._task = asyncio.create_task(self._renew())
             return {"success": True, "command_status": "accepted", "battery_power_w": watts,
                     "requested_power_w": target_w,
+                    "gateway_charge_limit_w": self._device_limit("charge") if mode == "charge" and math.isfinite(self._device_limit("charge")) else None,
                     "gateway_discharge_limit_w": self._device_discharge_limit() if mode == "discharge" and math.isfinite(self._device_discharge_limit()) else None,
                     "control_path": "powerwall_local_dispatch"}
+
+    async def _write_with_limit_retry(self) -> float:
+        previous_limit = self._device_limit(self._mode)
+        try:
+            return await self._write()
+        except DispatchCommandFailed:
+            current_limit = self._device_limit(self._mode)
+            if not 0 < current_limit < previous_limit:
+                raise
+            # Keep ownership and the original deadline. Only a typed resume
+            # permits one retry with fresh telemetry and current safety gates.
+            await self._release(retain_intent=True)
+            await self.persist()
+            return await self._write()
 
     async def _write(self) -> float:
         validate_dispatch_config(self._mode, self.config())
@@ -286,11 +299,11 @@ class LocalBatteryDispatch:
             if remaining < 1:
                 raise ValueError("Local dispatch window expired before command")
             current_config = dict(self.config())
-            if self._mode == "discharge":
-                current_config["optimization_max_discharge_w"] = min(
-                    _number(current_config.get("optimization_max_discharge_w", 5000), "discharge limit"),
-                    self._device_discharge_limit(),
-                )
+            limit_key = f"optimization_max_{self._mode}_w"
+            current_config[limit_key] = min(
+                _number(current_config.get(limit_key, 5000), f"{self._mode} limit"),
+                self._device_limit(self._mode),
+            )
             watts = battery_watts(self._mode, target, snapshot, current_config)
             self._command_may_have_reached = True
             try:
@@ -322,7 +335,7 @@ class LocalBatteryDispatch:
                     if time.monotonic() >= self._deadline:
                         await self._release()
                         return
-                    await self._write()
+                    await self._write_with_limit_retry()
         except asyncio.CancelledError:
             raise
         except Exception:

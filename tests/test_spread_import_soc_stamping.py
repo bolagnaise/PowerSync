@@ -484,3 +484,31 @@ def test_spread_export_schedule_floor_check_uses_true_soc_not_stale_label(opt_mo
     )
     assert stale_spread.actions[1].action == "export"
     assert stale_spread.actions[1].battery_discharge_w > 0.0
+
+
+@pytest.mark.parametrize('native_kw,managed_w', [(0.0, 7000), (7.0, 0), (3.0, 4000)])
+def test_spread_import_retains_both_ev_sources_in_site_headroom(opt_module, native_kw, managed_w):
+    """Native forecasts are fixed load; managed charging is a separate LP field."""
+    coordinator = _coordinator(opt_module, 'octopus')
+    coordinator._config.interval_minutes = 60
+    coordinator._config.battery_capacity_wh = 100000
+    coordinator._config.max_charge_w = 14700
+    coordinator._config.max_grid_import_w = 16100
+    start = datetime(2026, 5, 3, 2, 0, tzinfo=timezone.utc)
+    # Original LP plan is feasible: battery takes more power in the slot
+    # without a car. Spreading must retain that varying EV headroom.
+    actions = [opt_module.ScheduleAction(
+        timestamp=start + timedelta(hours=i), action='charge',
+        power_w=8600 if i == 0 else 14700, soc=.1,
+        battery_charge_w=8600 if i == 0 else 14700,
+        ev_charge_w=managed_w if i == 0 else 0,
+    ) for i in range(2)]
+    schedule = opt_module.OptimizationSchedule(actions, 0, 0, start)
+    loads = [.5 + native_kw, .5]
+    result = coordinator._spread_import_schedule(schedule, [.10, .10], [False, False], .1,
+        solar_forecast=[0, 0], load_forecast=loads)
+    assert result.actions[0].battery_charge_w <= 8600
+    assert result.actions[0].ev_charge_w == managed_w
+    for i, action in enumerate(result.actions):
+        assert action.battery_charge_w + action.ev_charge_w + loads[i] * 1000 <= 16100 + .1
+    assert sum(a.battery_charge_w for a in result.actions) == pytest.approx(23300, abs=.1)

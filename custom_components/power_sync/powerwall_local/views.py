@@ -148,7 +148,8 @@ def _local_access_status(
     if local_available and last_success is not None and 0 <= time.monotonic() - last_success <= TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS:
         try:
             limits = manual_power_limits_kw(coordinator.data, {**entry.data, **entry.options},
-                getattr(getattr(coordinator, "client", None), "dispatch_discharge_limit_w", None))
+                getattr(getattr(coordinator, "client", None), "dispatch_discharge_limit_w", None),
+                getattr(getattr(coordinator, "client", None), "dispatch_charge_limit_w", None))
         except (TypeError, ValueError):
             pass
 
@@ -160,6 +161,7 @@ def _local_access_status(
         "local_available": local_available,
         "power_control_supported": local_battery_dispatch_configured(entry.data),
         "dispatch_max_discharge_w": getattr(getattr(coordinator, "client", None), "dispatch_discharge_limit_w", None),
+        "dispatch_max_charge_w": getattr(getattr(coordinator, "client", None), "dispatch_charge_limit_w", None),
         "local_reachable": local_reachable,
         "needs_repair": needs_repair,
         "mode": mode,

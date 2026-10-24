@@ -664,17 +664,19 @@ class TEDAPIv1rTransport:
                         operation, watts, seconds, status.code, status.message[:350],
                     )
                 # Only learn a LOWER device-specific ceiling from the exact
-                # typed out-of-range reply for this positive power request.
+                # typed out-of-range reply for this exact signed power request.
                 # A generic fault never authorizes retry or tariff fallback.
-                if is_power and watts > 0 and reply.HasField("common") and reply.common.HasField("error_response"):
+                if is_power and watts != 0 and reply.HasField("common") and reply.common.HasField("error_response"):
                     status = reply.common.error_response.status
-                    match = re.fullmatch(r"power ([+\-]?\d+(?:\.\d+)?) exceeds discharge limit (\d+(?:\.\d+)?)", status.message)
+                    match = re.fullmatch(r"power ([+\-]?\d+(?:\.\d+)?) exceeds (charge|discharge) limit ([+\-]?\d+(?:\.\d+)?)", status.message)
                     if status.code == 11 and match:
-                        rejected, limit = map(float, match.groups())
-                        if math.isclose(rejected, watts, rel_tol=0, abs_tol=0.000001) and 0 < limit < watts:
-                            previous = getattr(self, "dispatch_discharge_limit_w", math.inf)
-                            self.dispatch_discharge_limit_w = min(previous, limit)
-                            _LOGGER.warning("Gateway reported battery dispatch discharge ceiling: %.0f W", limit)
+                        rejected, direction, limit = float(match[1]), match[2], float(match[3])
+                        correct_sign = (direction == "charge" and watts < limit < 0) or (direction == "discharge" and 0 < limit < watts)
+                        if correct_sign and math.isclose(rejected, watts, rel_tol=0, abs_tol=0.000001):
+                            attr = f"dispatch_{direction}_limit_w"
+                            previous = getattr(self, attr, math.inf)
+                            setattr(self, attr, min(previous, abs(limit)))
+                            _LOGGER.warning("Gateway reported battery dispatch %s ceiling: %.0f W", direction, abs(limit))
                 _LOGGER.warning(
                     "Battery dispatch %s unexpected reply: watts=%s seconds=%s envelope_fields=%s teg_fields=%s",
                     operation, watts, seconds,

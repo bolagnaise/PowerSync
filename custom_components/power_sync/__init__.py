@@ -31401,6 +31401,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if state.get("powerwall_local_dispatch"):
                 state_to_save["powerwall_local_dispatch"] = True
                 state_to_save["command_status"] = state.get("command_status")
+                for direction in ("charge", "discharge"):
+                    state_to_save[f"gateway_{direction}_limit_w"] = state.get(f"gateway_{direction}_limit_w")
 
         stored_data["force_mode_state"] = state_to_save
         stored_data["tesla_grid_charging_preferences"] = dict(
@@ -33366,11 +33368,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def _local_powerwall_dispatch_acknowledged(watts, seconds):
         if not _local_powerwall_generation_current():
             raise ValueError("Powerwall dispatch setup generation was replaced")
+        controller = _local_powerwall_runtime.get("powerwall_battery_dispatch")
+        client = getattr(controller, "client", None)
         for state in (force_charge_state, force_discharge_state):
             if state.get("powerwall_local_dispatch"):
                 state["hardware_expires_at"] = dt_util.utcnow() + timedelta(seconds=seconds)
                 state["command_status"] = "accepted"
                 state["battery_power_w"] = watts
+                for direction in ("charge", "discharge"):
+                    state[f"gateway_{direction}_limit_w"] = getattr(client, f"dispatch_{direction}_limit_w", None)
         await persist_force_mode_state()
 
     async def _local_powerwall_dispatch_failed():
@@ -33563,6 +33569,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raise HomeAssistantError(f"Local Powerwall dispatch failed: {err}") from err
             state["command_status"] = "accepted"
             state["gateway_discharge_limit_w"] = result.get("gateway_discharge_limit_w")
+            state["gateway_charge_limit_w"] = result.get("gateway_charge_limit_w")
             await persist_force_mode_state()
             for force_mode, force_state in (("charge", force_charge_state), ("discharge", force_discharge_state)):
                 async_dispatcher_send(hass, f"{DOMAIN}_force_{force_mode}_state", {

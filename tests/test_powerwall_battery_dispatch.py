@@ -311,8 +311,8 @@ def load_routing(monitored=False, paired=True, **options):
     charge, discharge = state(), state()
     runtime = {}
     hass = SimpleNamespace(data={'power_sync': {'entry': runtime}})
-    data = dict(battery_system='tesla', powerwall_local_paired=paired, powerwall_local_ip='192.168.1.10',
-                **config(), **options)
+    data = dict(battery_system='tesla', powerwall_local_paired=paired, powerwall_local_ip='192.168.1.10', **config())
+    data.update(options)
     entry = SimpleNamespace(entry_id='entry', data=data, options={})
     saved = {}
     async def save(value): saved.clear(); saved.update(value)
@@ -772,3 +772,117 @@ def test_force_power_selection_resolves_renamed_entity_for_current_entry():
     ns={'er':SimpleNamespace(async_get=lambda h:registry),'DOMAIN':'power_sync','HomeAssistant':object,'ConfigEntry':object}
     exec(compile(ast.Module(body=nodes,type_ignores=[]),'<force-number-routing>','exec'),ns)
     assert ns['_selected_force_power_w'](hass,SimpleNamespace(entry_id='one'))==500
+
+
+def test_reported_charge_ceiling_retries_below_limit_without_extending_deadline():
+    async def run():
+        c, client, events = controller()
+        cfg = config(optimization_max_charge_w=20000, optimization_max_grid_import_w=25000)
+        c.config = lambda: cfg
+        order = []
+        async def dispatch(watts, seconds):
+            order.append(('power', watts, seconds))
+            if len([x for x in order if x[0] == 'power']) == 1:
+                client.dispatch_charge_limit_w = 10000
+                return False
+            return True
+        async def resume(): order.append(('resume',)); return True
+        client.dispatch_battery_power.side_effect = dispatch
+        client.resume_battery_operation.side_effect = resume
+        result = await c.start('charge', 12000, 20)
+        assert result['battery_power_w'] == -10000
+        assert result['requested_power_w'] == 12000
+        assert result['gateway_charge_limit_w'] == 10000
+        assert cfg['optimization_max_charge_w'] == 20000
+        assert order[0][1] == -12000 and order[1] == ('resume',) and order[2][1] == -10000
+        assert order[2][2] <= order[0][2]
+        assert events == ['intent', 'intent'] and client.get_snapshot.await_count == 2
+        await c.stop()
+    asyncio.run(run())
+
+
+def test_renewal_charge_ceiling_recovery_preserves_current_lease_owner():
+    async def run():
+        c, client, events = controller()
+        c.config = lambda: config(optimization_max_charge_w=20000, optimization_max_grid_import_w=15000)
+        client.get_snapshot.side_effect = [snapshot(load_w=6000, solar_w=0), snapshot(load_w=1000, solar_w=0), snapshot(load_w=2000, solar_w=0)]
+        sent = []
+        async def dispatch(watts, seconds):
+            sent.append(watts)
+            if len(sent) == 2:
+                client.dispatch_charge_limit_w = 10000
+                return False
+            return True
+        client.dispatch_battery_power.side_effect = dispatch
+        await c.start('charge', 12000, 120)
+        deadline = c._deadline
+        await c._write_with_limit_retry()
+        assert sent == [-9000, -12000, -10000]
+        assert c.pending and c._deadline == deadline
+        assert events == ['intent', 'intent']
+        client.resume_battery_operation.assert_awaited_once()
+        await c.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('failure', ['resume', 'policy', 'second_rejection', 'deadline'])
+def test_charge_cap_retry_cannot_escape_cleanup_policy_or_original_window(failure):
+    async def run():
+        c, client, events = controller()
+        c.config = lambda: config(optimization_max_charge_w=20000, optimization_max_grid_import_w=25000)
+        async def dispatch(watts, seconds):
+            client.dispatch_charge_limit_w = 10000 if client.dispatch_battery_power.await_count == 1 else 9000
+            return False
+        async def resume():
+            if failure == 'resume': return False
+            if failure == 'policy': c.allowed = lambda mode: False
+            if failure == 'deadline': c._deadline = 0
+            return True
+        client.dispatch_battery_power.side_effect = dispatch
+        client.resume_battery_operation.side_effect = resume
+        with pytest.raises((ValueError, module.DispatchCommandFailed)):
+            await c.start('charge', 12000, 20)
+        assert client.dispatch_battery_power.await_count == (2 if failure == 'second_rejection' else 1)
+        assert c.pending is (failure == 'resume')
+        assert c._task is None
+    asyncio.run(run())
+
+
+def test_manual_charge_cap_is_independent_of_export_cap_and_nameplate():
+    cfg = config(optimization_max_charge_w=20000, optimization_max_discharge_w=20000, optimization_max_grid_import_w=None)
+    limits = module.manual_power_limits_kw(site_snapshot(load_w=0, solar_w=0), cfg, 8000, 10000)
+    assert limits == {'charge_input_max_kw': 10, 'grid_export_max_kw': 10.1}
+    assert cfg['optimization_max_charge_w'] == 20000
+
+
+def test_charge_cap_first_learned_on_renewal_updates_persisted_acknowledged_status():
+    async def run():
+        ns, c, client, saved = load_routing(optimization_max_charge_w=20000, optimization_max_grid_import_w=15000)
+        client.get_snapshot.side_effect = [snapshot(load_w=6000, solar_w=0), snapshot(load_w=1000, solar_w=0), snapshot(load_w=2000, solar_w=0)]
+        async def dispatch(watts, seconds):
+            if client.dispatch_battery_power.await_count == 2:
+                client.dispatch_charge_limit_w = 10000
+                return False
+            return True
+        client.dispatch_battery_power.side_effect = dispatch
+        await ns['_try_local_powerwall_force']('charge', call(source='user', power_w=12000), 15, 12000)
+        assert ns['force_charge_state'].get('gateway_charge_limit_w') is None
+        await c._write_with_limit_retry()
+        assert ns['force_charge_state']['gateway_charge_limit_w'] == 10000
+        assert ns['force_charge_state']['battery_power_w'] == -10000
+        assert ns['force_charge_state']['command_status'] == 'accepted'
+        assert saved['force_mode_state']['gateway_charge_limit_w'] == 10000
+        await c.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('mode', ['charge', 'discharge'])
+def test_learned_native_cap_blocks_targetless_tariff_fallback(mode):
+    async def run():
+        c, client, _ = controller()
+        setattr(client, f'dispatch_{mode}_limit_w', 10000)
+        client.get_snapshot.return_value = snapshot()
+        with pytest.raises(ValueError, match='cannot enforce the learned gateway dispatch limit'):
+            await c.check_tariff_fallback(mode)
+        client.dispatch_battery_power.assert_not_called()
+    asyncio.run(run())

@@ -390,7 +390,8 @@ class ForcePowerNumber(NumberEntity):
             runtime = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
             client = runtime.get("powerwall_local", {}).get("client")
             return manual_power_limits_kw(snapshot, {**self._entry.data, **self._entry.options},
-                                          getattr(client, "dispatch_discharge_limit_w", None))
+                                          getattr(client, "dispatch_discharge_limit_w", None),
+                                          getattr(client, "dispatch_charge_limit_w", None))
         except (TypeError, ValueError):
             return {"charge_input_max_kw": 0.0, "grid_export_max_kw": 0.0}
 

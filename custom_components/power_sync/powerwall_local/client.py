@@ -477,6 +477,11 @@ class PowerwallLocalClient:
         return observed if isinstance(observed, bool) else None
 
     @property
+    def dispatch_charge_limit_w(self) -> float | None:
+        """Charging ceiling observed in a typed dispatch rejection."""
+        return getattr(self._transport, "dispatch_charge_limit_w", None)
+
+    @property
     def dispatch_discharge_limit_w(self) -> float | None:
         """Device-specific ceiling observed in a typed dispatch rejection."""
         return getattr(self._transport, "dispatch_discharge_limit_w", None)

@@ -7612,6 +7612,7 @@ class BatteryModeSensor(SensorEntity):
             attributes["requested_power_w"] = local_state.get("power_w")
             attributes["battery_power_w"] = local_state.get("battery_power_w")
             attributes["gateway_discharge_limit_w"] = local_state.get("gateway_discharge_limit_w")
+            attributes["gateway_charge_limit_w"] = local_state.get("gateway_charge_limit_w")
             status = local_state.get("command_status", "pending")
             attributes.update(control_path="powerwall_local_dispatch", command_status=status,
                               physical_effect="unverified")
