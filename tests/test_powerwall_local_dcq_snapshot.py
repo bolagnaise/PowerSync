@@ -943,3 +943,64 @@ def test_snapshot_from_dcq_empty_alerts():
     dcq["control"]["alerts"] = {"active": []}
     snap = client_mod._snapshot_from_dcq(dcq, None)
     assert snap.alerts == []
+
+
+@pytest.mark.asyncio
+async def test_fresh_components_read_keeps_paired_leader_recipient_and_signature(monkeypatch):
+    from unittest.mock import AsyncMock
+    client = object.__new__(client_mod.PowerwallLocalClient)
+    client._host = '192.168.1.42'
+    client._local_access_enabled = True
+    client._din = '1707000-30-L--TEST_LEADER'
+    client._transport = SimpleNamespace(post_v1r=AsyncMock(
+        return_value=SimpleNamespace(ok=True, inner_bytes=b'reply')))
+    requested = []
+    def build(din):
+        requested.append(din)
+        return b'components-envelope'
+    monkeypatch.setattr(fleet_stub, 'build_pw3_components_query_envelope', build, raising=False)
+    expected = {'components': {'baggr': []}}
+    monkeypatch.setattr(client_mod, 'parse_device_controller_response', lambda raw: expected if raw == b'reply' else None)
+    assert await client.get_pw3_components() is expected
+    assert requested == [client._din]
+    client._transport.post_v1r.assert_awaited_once_with(b'components-envelope', client._din)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('response', [SimpleNamespace(ok=False, inner_bytes=b'rejected'),
+                                     SimpleNamespace(ok=True, inner_bytes=None)])
+async def test_components_read_does_not_treat_missing_or_rejected_payload_as_topology(monkeypatch, response):
+    from unittest.mock import AsyncMock
+    client = object.__new__(client_mod.PowerwallLocalClient)
+    client._host = '192.168.1.42'
+    client._local_access_enabled = True
+    client._din = 'test-leader'
+    client._transport = SimpleNamespace(post_v1r=AsyncMock(return_value=response))
+    monkeypatch.setattr(fleet_stub, 'build_pw3_components_query_envelope', lambda din: b'query', raising=False)
+    assert await client.get_pw3_components() is None
+
+
+@pytest.mark.asyncio
+async def test_components_read_preserves_pairing_rejection(monkeypatch):
+    from unittest.mock import AsyncMock
+    client = object.__new__(client_mod.PowerwallLocalClient)
+    client._host = '192.168.1.42'
+    client._local_access_enabled = True
+    client._din = 'test-leader'
+    client._transport = SimpleNamespace(post_v1r=AsyncMock(side_effect=_PowerwallSignatureError('revoked')))
+    monkeypatch.setattr(fleet_stub, 'build_pw3_components_query_envelope', lambda din: b'query', raising=False)
+    with pytest.raises(_PowerwallSignatureError):
+        await client.get_pw3_components()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('enabled,host', [(False, '192.168.1.42'), (True, '127.0.0.1')])
+async def test_components_read_never_connects_when_local_access_is_disabled(enabled, host):
+    from unittest.mock import AsyncMock
+    client = object.__new__(client_mod.PowerwallLocalClient)
+    client._host = host
+    client._local_access_enabled = enabled
+    client._transport = SimpleNamespace(post_v1r=AsyncMock())
+    with pytest.raises(_PowerwallUnreachableError):
+        await client.get_pw3_components()
+    client._transport.post_v1r.assert_not_awaited()

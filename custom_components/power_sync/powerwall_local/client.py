@@ -240,6 +240,22 @@ class PowerwallLocalClient:
             _LOGGER.warning("DeviceControllerQuery decode error: %s", err)
             return None
 
+    async def get_pw3_components(self) -> dict[str, Any] | None:
+        """Read fresh leader PCH/BMS/BAGGR telemetry over the paired LAN path.
+
+        This does not provide independent follower PCH readings. A caller
+        must verify signal timestamps before using topology for control.
+        """
+        if not self._local_access_enabled or is_loopback_host(self._host):
+            raise PowerwallUnreachableError("Powerwall local access disabled")
+        from .fleet_api_bms import build_pw3_components_query_envelope
+
+        envelope = build_pw3_components_query_envelope(self._din)
+        response = await self._transport.post_v1r(envelope, self._din)
+        if not response.ok or not response.inner_bytes:
+            return None
+        return parse_device_controller_response(response.inner_bytes)
+
     async def get_snapshot(self) -> PowerwallSnapshot:
         """Fetch live status via RSA-signed DCQ + config.json read in parallel."""
         if not self._local_access_enabled or is_loopback_host(self._host):
