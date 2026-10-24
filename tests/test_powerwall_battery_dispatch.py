@@ -1188,3 +1188,134 @@ async def test_queued_native_and_numeric_acquisitions_never_leave_competing_actu
         client.resume_battery_operation.assert_awaited()
     if native.pending:await native.stop()
     await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_explicit_max_discharge_releases_local_and_selects_existing_tariff_lifecycle():
+    ns,c,client,_=load_routing(optimization_max_grid_export_w=15000)
+    client.get_snapshot.return_value=site_snapshot(export_kw=-14.8, soc=70)
+    client.dispatch_discharge_limit_w=10000
+    await c.start('discharge',2000,120)
+    result=await ns['_try_local_powerwall_force']('discharge',call(source='user',power_w=0),15,0)
+    assert result=={'fallback':True,'power_w':0,'native_max_discharge':True}
+    assert not c.pending
+    assert client.dispatch_battery_power.await_count==1
+    client.resume_battery_operation.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('owner',['user','automation'])
+async def test_max_discharge_does_not_inherit_the_timed_gateway_power_ceiling(owner):
+    ns,c,client,_=load_routing(optimization_max_grid_export_w=14800)
+    client.get_snapshot.return_value=site_snapshot(export_kw=-14.8)
+    client.dispatch_discharge_limit_w=10000
+    assert await ns['_try_local_powerwall_force']('discharge',call(source=owner,power_w=0),15,0)=={'fallback':True,'power_w':0,'native_max_discharge':True}
+    client.dispatch_battery_power.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('owner',['user','automation','optimizer'])
+async def test_positive_discharge_targets_keep_local_watts(owner):
+    ns,c,client,_=load_routing()
+    result=await ns['_try_local_powerwall_force']('discharge',call(source=owner,power_w=2000),15,2000)
+    assert result['control_path']=='powerwall_local_dispatch'
+    assert client.dispatch_battery_power.await_args.args[0]==2800
+    await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_max_discharge_preserves_software_export_limit_not_enforced_by_native_site():
+    ns,c,client,_=load_routing(optimization_max_grid_export_w=2000)
+    client.get_snapshot.return_value=site_snapshot(export_kw=-14.8)
+    result=await ns['_try_local_powerwall_force']('discharge',call(source='user',power_w=0),15,0)
+    assert result['control_path']=='powerwall_local_dispatch'
+    assert client.dispatch_battery_power.await_args.args[0]<=2800
+    await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('changes',[{'soc':10},{'grid_status':'SystemIslandedActive'}])
+async def test_native_max_discharge_does_not_bypass_soc_or_connection(changes):
+    ns,c,client,_=load_routing()
+    client.get_snapshot.return_value=site_snapshot(**changes)
+    with pytest.raises(ValueError):
+        await ns['_try_local_powerwall_force']('discharge',call(source='user',power_w=0),15,0)
+    client.dispatch_battery_power.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_native_max_discharge_missing_native_cap_evidence_keeps_local_control():
+    c,client,_=controller()
+    client.get_snapshot.return_value=snapshot(raw={'config':{'site_info':{}}})
+    assert not await c.native_max_discharge_available()
+
+
+@pytest.mark.asyncio
+async def test_max_discharge_rechecks_setup_after_final_native_limit_read():
+    ns,c,client,_=load_routing()
+    count=0
+    async def observe():
+        nonlocal count
+        count+=1
+        if count==2:ns['_local_powerwall_runtime']['powerwall_local_dispatch_stopping']=True
+        return site_snapshot()
+    client.get_snapshot.side_effect=observe
+    with pytest.raises(RuntimeError,match='authorization changed'):
+        await ns['_try_local_powerwall_force']('discharge',call(source='user',power_w=0),15,0)
+    client.dispatch_battery_power.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_max_discharge_cannot_cross_unconfirmed_resume_into_tariff_control():
+    ns,c,client,_=load_routing()
+    await c.start('discharge',500,120)
+    client.resume_battery_operation.side_effect=TimeoutError()
+    with pytest.raises(RuntimeError,match='resume unconfirmed'):
+        await ns['_try_local_powerwall_force']('discharge',call(source='user',power_w=0),15,0)
+    assert c.pending
+    client.resume_battery_operation.side_effect=None
+    await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_serialized_discharge_holds_route_lock_through_tariff_acquisition():
+    import ast
+    tree=ast.parse((ROOT/'custom_components/power_sync/__init__.py').read_text())
+    function=next(n for n in ast.walk(tree) if isinstance(n,ast.AsyncFunctionDef) and n.name=='_serialized_force_discharge')
+    ns,c,_,_=load_routing()
+    entered,release=asyncio.Event(),asyncio.Event()
+    async def force(_):entered.set();await release.wait();return {'success':True}
+    ns['_unserialized_force_discharge']=force
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[function],type_ignores=[])),'serialized-test','exec'),ns)
+    operation=asyncio.create_task(ns['_serialized_force_discharge'](call()))
+    await entered.wait()
+    assert ns['_local_powerwall_route_lock'].locked()
+    release.set()
+    assert await operation=={'success':True}
+    assert not ns['_local_powerwall_route_lock'].locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('native,configured,saved,expected',[(True,.2,5,20),(True,.2,35,35),(False,.2,35,0)])
+async def test_native_max_tariff_discharge_keeps_real_and_configured_backup_reserve(native,configured,saved,expected):
+    import ast
+    tree=ast.parse((ROOT/'custom_components/power_sync/__init__.py').read_text())
+    handler=next(n for n in ast.walk(tree) if isinstance(n,ast.AsyncFunctionDef) and n.name=='handle_force_discharge')
+    candidates=[]
+    for parent in ast.walk(handler):
+        body=getattr(parent,'body',None)
+        if not isinstance(body,list):continue
+        for i,node in enumerate(body):
+            if (isinstance(node,ast.Assign) and isinstance(node.value,ast.Constant) and node.value.value==0
+                    and any(isinstance(t,ast.Name) and t.id=='native_reserve' for t in node.targets)):
+                candidates.append(body[i:i+3])
+    assert len(candidates)==1
+    async def pulse(sites,reserve,**kw):return reserve
+    ns=dict(force_discharge_state={'native_max_discharge':native},
+        _local_powerwall_dispatch_config=lambda:{'optimization_backup_reserve':configured},
+        saved_states={'site':{'saved_backup_reserve':saved}},active_site_configs=[('site','token','provider')],
+        _tesla_force_pulse_backup_reserve=pulse)
+    fn=ast.AsyncFunctionDef(name='evaluate',args=ast.arguments(posonlyargs=[],args=[],kwonlyargs=[],kw_defaults=[],defaults=[]),
+        body=candidates[0]+[ast.Return(value=ast.Name(id='reserve_result',ctx=ast.Load()))],decorator_list=[])
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[fn],type_ignores=[])),'native-reserve-test','exec'),ns)
+    assert await ns['evaluate']()==expected

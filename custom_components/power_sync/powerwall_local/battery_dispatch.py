@@ -278,6 +278,35 @@ class LocalBatteryDispatch:
         except Exception as err:
             raise ValueError("Tariff fallback blocked by gateway site limits or unavailable limit evidence") from err
 
+    async def native_max_discharge_available(self) -> bool:
+        """Explicit Max may use Tesla's full-rate tariff actuator.
+
+        The learned timed-command ceiling belongs to a different actuator.
+        A software export cap still requires local watts unless a fresh native
+        site-meter cap is at least as restrictive. Never infer an unset cap
+        from a failed or missing configuration read.
+        """
+        config = self.config()
+        validate_dispatch_config("discharge", config)
+        try:
+            snapshot = await self.client.get_snapshot()
+        except Exception:
+            return False
+        config = self.config()
+        # Reuse SOC, reserve, connection and configuration denials, without
+        # passing the learned local-command ceiling to native tariff control.
+        battery_watts("discharge", 1, snapshot, config)
+        _, native_export = site_grid_limits_w(snapshot)
+        info = (getattr(snapshot, "raw", {}) or {}).get("config", {}).get("site_info", {})
+        if info.get("min_site_meter_power_ac") is None:
+            return False
+        configured = config.get("optimization_max_grid_export_w")
+        if configured is not None:
+            configured = _number(configured, "grid export limit")
+            if native_export is None or native_export > configured:
+                return False
+        return True
+
     async def start(self, mode: str, target_w: float, duration_seconds: int, *, allowed=None, guarded_write=None, target_basis="battery") -> dict:
         if type(duration_seconds) is not int or not 1 <= duration_seconds <= 86400:
             raise ValueError("Invalid local dispatch duration")

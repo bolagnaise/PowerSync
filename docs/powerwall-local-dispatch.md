@@ -65,3 +65,7 @@ reports a 10 kW battery-output ceiling can provide about 2 kW of grid export
 with 8 kW home load and no solar. A higher site export limit does not increase
 the timed command's battery-output ceiling. The range refreshes with live data;
 solar contribution can increase available export.
+
+### Full-rate Max discharge
+
+An explicit manual or automation **Max** discharge uses the existing native tariff method after releasing any timed local dispatch. Its output is independent of the gateway’s learned timed-command ceiling. Numeric targets retain local wattage control and their live home/solar compensation. Max is not a promise to hold an exact grid-export target; installer site limits and reserves remain effective. A software-only limit that native control cannot enforce keeps the bounded local route instead. The tariff, mode, reserve and export settings return through the existing restore lifecycle.

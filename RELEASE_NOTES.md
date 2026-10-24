@@ -1,6 +1,8 @@
 <!-- release: v2.12.1483 -->
-## Powerwall export targets account for home load
+## Powerwall Max discharge uses full site capability
 
-The Force Power export slider now respects both the site export limit and the battery power available after home load and solar. For example, a 10 kW battery-output ceiling with 8 kW home load and no solar leaves about 2 kW available for grid export, even when the site export limit is higher.
+Paired Tesla systems now use the previous tariff method for explicit Max discharge, after safely releasing local wattage control. This avoids restricting larger systems to the gateway’s timed-command battery ceiling. Numeric kW targets continue to use local control; site export limits and backup reserves still apply. Max charging already uses the native tariff method when eligible.
 
-The available range refreshes with live readings. This corrects the displayed target range; it does not raise the gateway’s timed-command ceiling.
+## Export targets account for home load
+
+The Force Power export range now respects both the site export limit and the battery output available after home load and solar. For example, a 10 kW battery-output ceiling with 8 kW home load and no solar leaves about 2 kW for grid export. This range applies to precise local targets; Max uses the separate full-rate route when its safety checks allow it.

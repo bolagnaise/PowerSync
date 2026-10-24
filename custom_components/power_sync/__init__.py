@@ -33695,6 +33695,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         source = _control_call_source(call)
         if source == "optimizer" and power_w <= 0 and grid_target is None:
             raise HomeAssistantError("Optimizer local dispatch requires positive power")
+        # Max is a deliberate full-rate request, not a precise watt target.
+        # Do not quietly turn it into the gateway's clipped local lease.
+        # The caller retains the established tariff baseline/timer/restore
+        # lifecycle, after any earlier local command is positively released.
+        if mode == "discharge" and source != "optimizer" and power_w == 0 and call.data.get("power_w", 0) == 0:
+            controller = await _get_local_powerwall_dispatch()
+            if await controller.native_max_discharge_available():
+                await _stop_local_powerwall_dispatch_locked()
+                if (not _local_powerwall_generation_current()
+                        or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
+                        or _monitoring_mode_should_block_control(call)):
+                    raise HomeAssistantError("Tesla Max discharge authorization changed during cleanup")
+                if not await controller.native_max_discharge_available():
+                    raise HomeAssistantError("Tesla Max discharge limits changed during cleanup")
+                if (not _local_powerwall_generation_current()
+                        or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
+                        or _monitoring_mode_should_block_control(call)):
+                    raise HomeAssistantError("Tesla Max discharge authorization changed during limit verification")
+                if hass.data.get("power_sync_license_manager") is not None:
+                    from .licensing.guard import service_allowed
+                    if not service_allowed(hass, call.data, "handle_force_discharge"):
+                        raise HomeAssistantError("Tesla Max discharge access changed during cleanup")
+                _LOGGER.info("Explicit Powerwall Max discharge uses native tariff control")
+                return {"fallback": True, "power_w": 0, "native_max_discharge": True}
         config = {**entry.data, **entry.options}
         target = grid_target if grid_target is not None else power_w or config.get("optimization_max_grid_export_w" if mode == "discharge" else "optimization_max_charge_w", 5000)
 
@@ -33969,6 +33993,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if local_result is not None:
             if local_result.get("fallback"):
                 command_power_w = local_result["power_w"]
+                force_discharge_state["native_max_discharge"] = local_result.get("native_max_discharge", False)
             else:
                 return local_result
 
@@ -35526,9 +35551,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 active_site_configs = [
                     config for config in site_configs if config[0] in active_site_ids
                 ]
+                native_reserve = 0
+                if force_discharge_state.get("native_max_discharge"):
+                    configured_reserve = float(_local_powerwall_dispatch_config().get("optimization_backup_reserve", .2))
+                    if configured_reserve <= 1:
+                        configured_reserve *= 100
+                    native_reserve = max(configured_reserve, *(float(
+                        (saved_states.get(site_id) or {}).get("saved_backup_reserve") or 0
+                    ) for site_id, _token, _provider in active_site_configs))
                 reserve_result = await _tesla_force_pulse_backup_reserve(
                     active_site_configs,
-                    0,
+                    native_reserve,
                     reason="force discharge final reserve pulse",
                     is_current=lambda: (
                         _command_generation[0] == _restore_gen
@@ -42169,6 +42202,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.exception("Native Max restart cleanup remains pending; new battery control is blocked")
         finally:
             _local_powerwall_runtime.pop("native_max_startup_pending", None)
+
+    # Serialize the entire discharge route, including native tariff baseline
+    # acquisition after releasing a timed local command.
+    _unserialized_force_discharge = handle_force_discharge
+
+    async def _serialized_force_discharge(call):
+        async with _local_powerwall_route_lock:
+            return await _unserialized_force_discharge(call)
+
+    handle_force_discharge = _serialized_force_discharge
 
     from .licensing.entry_routing import register_handlers, routed_handler
     if amber_smartshift_coordinator:
