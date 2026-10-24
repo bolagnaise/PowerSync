@@ -91,6 +91,15 @@ async def test_manual_max_uses_native_settings_and_restores_exact_original(setup
 
 
 @pytest.mark.asyncio
+async def test_signed_solar_standby_draw_is_balanced_without_rejecting_capture_or_settlement(setup):
+    s=setup;s.state.solar_w=-3;s.state.battery_w=1670;s.state.load_w=1668
+    assert (await s.session.start(120))['active']
+    assert s.store.data['baseline']['settle_charge_w']==0
+    assert await s.session.stop()
+    assert s.store.data is None and not s.budget.native_max_claim('site')
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('denial', ['permission','site_cap','zero_charge','soc','grid','policy','native_ev','pending_managed'])
 async def test_current_policy_denial_prevents_every_forcing_write(setup,denial):
     s=setup

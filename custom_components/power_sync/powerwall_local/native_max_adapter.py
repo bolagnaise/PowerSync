@@ -160,7 +160,9 @@ class NativeMaxChargeAdapter:
         if any(type(v) not in (int, float) or not math.isfinite(v) for v in values):
             return False
         battery, grid, load, solar = values
-        return (snapshot.grid_status == "SystemGridConnected" and load >= 0 and solar >= 0
+        # Signed PV meters can report small negative standby draw (the live
+        # owner's gateway reports -3 W). Balance uses the signed value intact.
+        return (snapshot.grid_status == "SystemGridConnected" and load >= 0
                 and abs(grid + battery + solar - load) <= max(250, .05 * max(abs(grid), abs(battery), load)))
 
     async def settled(self, baseline):
