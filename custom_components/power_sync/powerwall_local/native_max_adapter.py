@@ -17,6 +17,17 @@ from .full_rate_charge import native_max_charge_eligibility
 from .native_max_charge import NativeMaxChargeError
 
 
+def _signed_export_limit(value):
+    """Preserve valid signed limits, including Tesla's explicit unset sentinel.
+
+    Missing or malformed evidence must never become an unset-cap permission,
+    a restoration target, or proof that an external controller edited a cap.
+    """
+    if type(value) not in (int, float) or not math.isfinite(value) or value > 0:
+        raise ValueError("Native export limit is unavailable or invalid")
+    return value
+
+
 class NativeMaxChargeAdapter:
     """Translate a durable Max session into acknowledged provider settings.
 
@@ -121,11 +132,10 @@ class NativeMaxChargeAdapter:
             permission = info.get("disallow_charge_from_grid_with_solar_installed", False) if isinstance(info, dict) else None
             if self.direction == "discharge":
                 if (not isinstance(info, dict) or "min_site_meter_power_ac" not in info
-                        or type(info["min_site_meter_power_ac"]) not in (int, float)
-                        or not math.isfinite(info["min_site_meter_power_ac"])
                         or not 0 <= self.monotonic() - self._observed_at <= 5
                         or not self.authority()):
                     return False
+                _signed_export_limit(info["min_site_meter_power_ac"])
                 _, exported = site_grid_limits_w(type("NativeBounds", (), {"raw": {"config": raw}})())
                 configured = config.get("optimization_max_grid_export_w")
                 if configured is not None and (type(configured) not in (int, float)
@@ -192,7 +202,10 @@ class NativeMaxChargeAdapter:
             def percent(value):
                 value = float(value)
                 return value * 100 if value <= 1 else value
-            original_limit = info.get("min_site_meter_power_ac")
+            try:
+                original_limit = _signed_export_limit(info.get("min_site_meter_power_ac"))
+            except ValueError as err:
+                raise NativeMaxChargeError("Native discharge export limit baseline is unavailable") from err
             configured_limit = config.get("optimization_max_grid_export_w")
             force_limit = original_limit if configured_limit is None else max(original_limit, -configured_limit / 1000)
             baseline.update(export_limit=original_limit, force_export_limit=force_limit,
@@ -365,9 +378,14 @@ class NativeMaxChargeAdapter:
 
     async def restore_limits(self, baseline, before_write, *, write_intent):
         """Keep the tightened cap through physical settling; restore only ours."""
-        if baseline.get("direction") != "discharge" or "export_limit" not in baseline:
+        if baseline.get("direction") != "discharge" or not any(
+                field in baseline for field in ("export_limit", "force_export_limit")):
             return True  # Journals from before temporary native limits.
-        original, target = baseline["export_limit"], baseline["force_export_limit"]
+        try:
+            original = _signed_export_limit(baseline.get("export_limit"))
+            target = _signed_export_limit(baseline.get("force_export_limit"))
+        except ValueError:
+            return False  # Keep cleanup for incomplete or malformed cap journals.
         if original == target:
             return True
         await write_intent("wait_local")
@@ -376,7 +394,9 @@ class NativeMaxChargeAdapter:
             return False
         current = await self.client._transport.read_config(self.client._din)
         observed = current.get("site_info", {}).get(field) if isinstance(current, dict) else None
-        if observed is None:
+        try:
+            _signed_export_limit(observed)
+        except ValueError:
             return False
         if observed != target:
             return True  # Already restored or edited externally.
@@ -392,6 +412,10 @@ class NativeMaxChargeAdapter:
             return False
         current = await self.client._transport.read_config(self.client._din)
         observed = current.get("site_info", {}).get(field) if isinstance(current, dict) else None
+        try:
+            _signed_export_limit(observed)
+        except ValueError:
+            return False
         if observed != original:
             return False
         await write_intent("local_confirmed")

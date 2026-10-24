@@ -20,6 +20,8 @@ From v2.12.1486, native discharge temporarily tightens a looser gateway export l
 
 A gateway's explicit unset export-limit value can also be tightened to the configured PowerSync cap before native discharge. Missing, invalid or zero export limits still block the action. The original unset value is restored only after the same ownership and physical-settling checks.
 
+From v2.12.1488, PowerSync also validates the fresh export-limit snapshot used to capture the restore baseline. Missing, null or malformed capture evidence blocks the action. Invalid saved limits or restoration readback retain cleanup for retry, rather than being treated as an external edit or a completed restore. Sites without a software export cap retain their existing native-limit behavior.
+
 The kick and tariff share one restoration owner and saved settings. Stop, expiry, restart or a changed direction revokes pending forcing writes, releases local dispatch if necessary and restores owned settings. Battery Mode exposes `control_path`, `command_status`, `startup_kick_w` and `handoff_phase`. These describe requests and acknowledgements; Battery Power and Grid Power establish the physical result. Discharge cleanup also waits for fresh power observations before releasing ownership. A repeated optimiser action can shorten the durable native deadline without another startup command or tariff upload; it cannot extend that deadline. Restart restores the retained action rather than replaying it.
 
 ## Native Max charging (from v2.12.1482)
