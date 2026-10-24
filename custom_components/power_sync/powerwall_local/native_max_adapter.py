@@ -230,6 +230,7 @@ class NativeMaxChargeAdapter:
 
         Native TOU charging can persist after settings readback. Recovery starts
         these observations again; a previous process's sample is not reused.
+        Solar surplus charging may continue normally after grid charging stops.
         """
         discharge = baseline.get("direction", "charge") == "discharge"
         original = baseline.get("settle_discharge_w" if discharge else "settle_charge_w", 0)
@@ -244,7 +245,7 @@ class NativeMaxChargeAdapter:
             snapshot = await self.client.get_snapshot()
             if (self.monotonic() - started > 5 or not self._physical_sample(snapshot)
                     or (snapshot.battery_w > max(original, snapshot.load_w - snapshot.solar_w) + 250
-                        if discharge else -snapshot.battery_w > original + 250)):
+                        if discharge else -snapshot.battery_w > max(original, snapshot.solar_w - snapshot.load_w) + 250)):
                 return False
         return True
 

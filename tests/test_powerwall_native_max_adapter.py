@@ -474,6 +474,25 @@ async def test_discharge_recovery_retains_owner_until_export_settles(setup):
 
 
 @pytest.mark.asyncio
+async def test_charge_restore_accepts_solar_surplus_without_releasing_grid_charging(setup):
+    s = setup
+    await s.session.start(120)
+    assert s.store.data['baseline']['settle_charge_w'] == 0
+    s.state.solar_w = 4500
+    s.state.load_w = 1000
+    s.state.battery_w = -20000
+    with pytest.raises(s.m.NativeMaxChargeError, match='settling'):
+        await s.session.stop()
+    assert s.session.pending and s.budget.native_max_claim('site')
+    assert (s.state.config, s.state.tariff) == s.original
+    count = len(s.state.events)
+    s.state.battery_w = -3500
+    assert await s.session.stop()
+    assert len(s.state.events) == count
+    assert not s.session.pending and not s.budget.native_max_claim('site')
+
+
+@pytest.mark.asyncio
 async def test_restart_releases_uncertain_startup_kick_without_replaying_it(setup):
     s=setup;s.adapter.startup_kick=True;s.state.resume_ok=False
     with pytest.raises(s.m.NativeMaxChargeError):await s.session.start(120)

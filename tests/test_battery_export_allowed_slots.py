@@ -9261,6 +9261,35 @@ def test_optimizer_owned_force_charge_preserves_commitment_start_on_refresh(opt_
     assert coordinator._optimizer_force_state["started_at"] == start
 
 
+@pytest.mark.parametrize("paired,route,expected_w", [(True, "tariff", 0), (True, "local", 20000), (False, "tariff", 20000)])
+def test_powerwall_charge_refresh_preserves_planned_actuator(opt_module, paired, route, expected_w):
+    start = datetime(2026, 10, 25, 0, 5, tzinfo=timezone.utc)
+    current = {"now": start}
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: current["now"]
+    battery = _FakeBattery(force_charge_result=True)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.25)
+    coordinator._entry.data.update(powerwall_local_paired=paired, powerwall_local_ip="gateway.local")
+    coordinator._powerwall_plan_routes = {"charge": route, "discharge": "tariff"}
+    coordinator._powerwall_plan_method = "tariff"
+    coordinator._powerwall_route = lambda direction: coordinator._powerwall_plan_routes[direction]
+    coordinator._config.max_charge_w = 20000
+    coordinator._config.battery_capacity_wh = 54000
+    coordinator._tesla_force_charge_should_yield_to_live_solar = lambda action: False
+    actions = [SimpleNamespace(action="charge", power_w=20000,
+        timestamp=start + timedelta(minutes=5 * i)) for i in range(11)]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    coordinator._set_optimizer_force_state("charge", 55, 20000)
+    coordinator._optimizer_force_state["hardware_expires_at"] = start + timedelta(minutes=4)
+    current["now"] = start + timedelta(minutes=5)
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[1]))
+
+    assert battery.force_charge_calls == [(50, expected_w, True)]
+    assert battery.restore_normal_calls == 0
+    assert coordinator._optimizer_force_state["active"] is True
+    assert coordinator._optimizer_force_state["started_at"] == start
+
+
 def test_optimizer_owned_force_charge_reissues_when_foxess_mode_drops_to_self_use(opt_module):
     now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
     opt_module.dt_util.utcnow = lambda *args, **kwargs: now

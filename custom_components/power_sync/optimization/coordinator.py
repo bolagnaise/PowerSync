@@ -11823,7 +11823,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             if force_type == "charge":
                                 refresh_result = await fenced_call(self, lambda: battery.force_charge(
                                     duration_minutes=extend_mins,
-                                    power_w=force_power_w,
+                                    power_w=self._powerwall_service_power("charge", force_power_w),
                                     _extend_hardware=True,
                                     **self._charge_grid_target_kwargs(force_window_action),
                                 ), 'force_charge')
