@@ -2237,3 +2237,31 @@ def test_solar_permission_uses_registry_for_ha_device_named_entities():
     '''
     subprocess.run(["node", "-e", script], check=True)
     assert "if (domain === 'switch' && suffix === 'on_grid_solar_curtailment' && solarPermissionEntityId) return solarPermissionEntityId;" in source
+
+
+def test_tesla_control_method_tile_uses_registered_device_or_user_named_entity():
+    source = STRATEGY_PATH.read_text()
+    helper = source[source.index("function _registeredPowerSyncControl("):source.index("class PowerSyncStrategy")]
+    start = source.index("    const findEntity = (domain, suffix) => {")
+    lookup = source[start:source.index("\n    };", start) + len("\n    };")]
+    start = source.index("function _teslaEnergySiteControls(")
+    end = source.find("\nfunction ", start + 1)
+    controls = source[start:end] if end >= 0 else source[start:]
+    for entity in ("select.home_preferred_battery_control", "select.my_battery_choice"):
+        runtime = f"""
+          const hass = {{states: {{'{entity}': {{state:'Tariff'}}}}}};
+          const registry = [{{platform:'power_sync',entity_id:'{entity}',unique_id:'entry_tesla_control_method'}}];
+          const teslaControlMethodEntityId = _registeredPowerSyncControl(hass,registry,'select','tesla_control_method');
+          const solarPermissionEntityId = null;
+          const isAvailable = id => !!hass.states[id];
+        """ + lookup + controls + f"""
+          if (findEntity('select','tesla_control_method') !== '{entity}') throw Error('Renamed selector lost');
+          const card = _teslaEnergySiteControls(findEntity, () => []);
+          if (!JSON.stringify(card).includes('{entity}')) throw Error('Preferred control tile missing');
+          registry[0].disabled_by = 'user';
+          if (_registeredPowerSyncControl(hass,registry,'select','tesla_control_method') !== null) throw Error('Disabled selector exposed');
+          registry[0].disabled_by = null; registry[0].platform = 'other';
+          if (_registeredPowerSyncControl(hass,registry,'select','tesla_control_method') !== null) throw Error('Foreign selector exposed');
+        """
+        subprocess.run(["node", "-e", helper + runtime], check=True, capture_output=True, text=True)
+    assert "hass, registry, 'select', 'tesla_control_method'" in source

@@ -7777,10 +7777,14 @@ class PowerSyncStrategy {
 
     let forcePowerEntityId = null;
     let solarPermissionEntityId = null;
+    let teslaControlMethodEntityId = null;
     try {
       const registry = await hass.callWS({ type: 'config/entity_registry/list' });
       solarPermissionEntityId = _registeredPowerSyncControl(
         hass, registry, 'switch', 'on_grid_solar_curtailment'
+      );
+      teslaControlMethodEntityId = _registeredPowerSyncControl(
+        hass, registry, 'select', 'tesla_control_method'
       );
       forcePowerEntityId = registry.find(row => row.platform === 'power_sync'
         && row.unique_id?.endsWith('_force_power_kw') && !row.disabled_by
@@ -7974,6 +7978,7 @@ class PowerSyncStrategy {
       return s && s.state !== 'unavailable' && s.state !== 'unknown';
     };
     const findEntity = (domain, suffix) => {
+      if (domain === 'select' && suffix === 'tesla_control_method' && teslaControlMethodEntityId) return teslaControlMethodEntityId;
       if (domain === 'switch' && suffix === 'on_grid_solar_curtailment' && solarPermissionEntityId) return solarPermissionEntityId;
       const direct = `${domain}.power_sync_${suffix}`;
       if (isAvailable(direct)) return direct;
