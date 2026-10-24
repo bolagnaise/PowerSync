@@ -121,6 +121,8 @@ class NativeMaxChargeAdapter:
             permission = info.get("disallow_charge_from_grid_with_solar_installed", False) if isinstance(info, dict) else None
             if self.direction == "discharge":
                 if (not isinstance(info, dict) or "min_site_meter_power_ac" not in info
+                        or type(info["min_site_meter_power_ac"]) not in (int, float)
+                        or not math.isfinite(info["min_site_meter_power_ac"])
                         or not 0 <= self.monotonic() - self._observed_at <= 5
                         or not self.authority()):
                     return False
@@ -128,8 +130,10 @@ class NativeMaxChargeAdapter:
                 configured = config.get("optimization_max_grid_export_w")
                 if configured is not None and (type(configured) not in (int, float)
                         or not math.isfinite(configured) or configured <= 0
-                        or exported is None
-                        or ((self._export_limit_ready or require_export_limit) and exported > configured)):
+                        # A known unset sentinel can be tightened at acquisition.
+                        # Forcing still requires a verified finite software cap.
+                        or ((self._export_limit_ready or require_export_limit)
+                            and (exported is None or exported > configured))):
                     return False
                 if info.get("customer_preferred_export_rule") not in ("battery_ok", "pv_only", "never"):
                     return False
