@@ -1,6 +1,6 @@
 # Rate management inside Tesla charge windows
 
-This change is under validation and has not been released.
+Available in the Home Assistant integration from v2.12.1482.
 
 PowerSync can optionally adjust a Tesla vehicle's charging current while the car is already charging at home in a recurring Tesla schedule with explicit start and end times. Tesla continues to start and stop charging and enforce its charge limit. PowerSync does not wake the car, edit its schedule, change its charge limit, or pause a Tesla-owned session.
 
@@ -37,6 +37,6 @@ A manual current change or another controller taking ownership supersedes PowerS
 
 Authenticated `GET /api/power_sync/ev/tesla_schedule_planning?vin=<VIN>` returns each loaded entry's forecast setting, rate permission, availability reason and current status. `POST` accepts `entry_id`, `vin`, `enabled`, and the optional explicit boolean `rate_management`. A rate permission requires forecast inclusion. These settings requests do not themselves establish physical charging proof.
 
-The mobile control appears under **EVs & Chargers > Vehicles** with a matching app build. **Refresh rate status** reads PowerSync's local status without waking or polling the vehicle.
+The mobile control appears under **EVs & Chargers > Vehicles** with a matching app build (1.0.7 build 454 or later). **Refresh rate status** reads PowerSync's local status without waking or polling the vehicle.
 
 This document describes the Home Assistant implementation. Cloud rate control and mobile build delivery require separate implementation and validation; their publication must not be inferred from an HA source change.

@@ -8,9 +8,9 @@ The gateway can report a timed-command limit below the combined Powerwall rating
 
 A four-Powerwall 2 site on firmware 26.34.0 reported a 10 kW timed charging ceiling despite its configured 20 kW combined rating. The reporter demonstrated 10 kW charging and 10 kW grid export. This is evidence for that system, not a universal Powerwall 2 limit or a guarantee for other firmware. Check measured battery and grid power; acknowledgement alone does not prove output.
 
-## Native Max charging (under validation)
+## Native Max charging (from v2.12.1482)
 
-The next Home Assistant change distinguishes **Max** from a numeric battery-input target. For a manual or automation `force_charge` action, zero or omitted `power_w` requests Tesla-managed maximum charging. An eligible paired system resumes local dispatch, temporarily uses a charging tariff and Time-Based Control, and restores its original tariff, mode and reserve afterwards. No extra enable switch is needed. Max can exceed the optimiser's configured charge planning rate; numeric targets, optimiser commands and Spread Import keep their local wattage controls.
+From v2.12.1482, Home Assistant distinguishes **Max** from a numeric battery-input target. For a manual or automation `force_charge` action, zero or omitted `power_w` requests Tesla-managed maximum charging. An eligible paired system resumes local dispatch, temporarily uses a charging tariff and Time-Based Control, and restores its original tariff, mode and reserve afterwards. No extra enable switch is needed. Max can exceed the optimiser's configured charge planning rate; numeric targets, optimiser commands and Spread Import keep their local wattage controls.
 
 Grid-charging permission, SOC protection, demand protection, Monitoring Mode and other controller ownership still apply. A finite PowerSync import limit permits native Max only when a fresh gateway import limit is no higher. Active or unsettled EV control keeps charging on the local path, where prospective EV demand can be reserved. Max therefore does not bypass a lower software import limit or an EV reservation.
 
@@ -22,7 +22,7 @@ After restoring settings, PowerSync retains its charging reservation until two f
 
 A local HTTP timeout does not expire a signed gateway command. PowerSync records the actual signature deadline before sending a configuration write and closes that acceptance window before reconciling settings. An uncertain Fleet tariff upload has no equivalent known expiry: it remains pending until its submitted tariff can be reconciled. Elapsed time or an unchanged tariff alone does not authorize a competing controller.
 
-This section describes the unreleased Home Assistant candidate. Cloud Max charging has a separate implementation and release history; its publication does not establish installation or verification of this HA change.
+Cloud Max charging has a separate implementation and delivery history. This section describes the Home Assistant control path.
 
 ## Full battery and cached charging plans
 
@@ -36,7 +36,7 @@ Home Assistant's Spread Import distributes battery charging across eligible same
 
 The optimiser already plans PowerSync-managed EV charging alongside the battery and treats supported native Tesla charge windows as fixed forecast demand without taking vehicle control. Spread Import now reserves the managed EV's planned power when redistributing battery energy, in addition to native Tesla demand already included in the load forecast. These sources are counted separately, once each.
 
-An optional native-window vehicle rate controller is being validated separately. Its default-off permission, shared charging budget and restoration rules are described in [Rate management inside Tesla charge windows](tesla-native-window-rate.md). It has not been released with the existing battery dispatch changes.
+From v2.12.1482, an optional native-window vehicle rate controller can share local battery headroom. Its default-off permission, supported windows and restoration rules are described in [Rate management inside Tesla charge windows](tesla-native-window-rate.md).
 
 Every local battery lease uses fresh measured home load, including current EV consumption, to limit battery charging to available import headroom. Forecasts help plan future demand; they do not guarantee an unseen vehicle schedule or unreported load. Keep gateway site connection limits configured: software targets do not replace enforced electrical limits.
 
