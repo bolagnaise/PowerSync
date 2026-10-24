@@ -502,11 +502,12 @@ class PowerwallLocalClient:
         """Device-specific ceiling observed in a typed dispatch rejection."""
         return getattr(self._transport, "dispatch_discharge_limit_w", None)
 
-    async def resume_battery_operation(self) -> bool:
+    async def resume_battery_operation(self, *, before_write: Callable[[], None] | None = None) -> bool:
         """Release local dispatch; never substitute a cloud tariff write."""
         if not self._local_access_enabled or is_loopback_host(self._host):
             raise PowerwallUnreachableError("Powerwall LAN access is disabled")
-        return await self._transport.resume_battery_operation(self._din)
+        return await self._transport.resume_battery_operation(self._din,
+            **({"before_write": before_write} if before_write is not None else {}))
 
     async def schedule_max_backup(self, duration_seconds: int = 7200) -> bool:
         """Schedule a local manual max-backup event."""

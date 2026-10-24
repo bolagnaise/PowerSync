@@ -114,6 +114,28 @@ async def test_manual_setting_change_during_durable_commit_prevents_submission(a
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('mutation', ['revision', 'token'])
+async def test_native_max_reduction_rechecks_ownership_after_admission(admission, monkeypatch, mutation):
+    a = admission
+    a.budget.armed_sites.clear()
+    assert await a.budget.claim_native_max('battery', 'site', 'original', NOW+60)
+    original = a.budget.admit_managed
+    async def interleave(*args, **kwargs):
+        ticket = await original(*args, **kwargs)
+        assert ticket
+        if mutation == 'revision':
+            a.budget.revision += 1
+        else:
+            a.budget.entries['native_max:battery']['native_max']['token'] = 'replacement'
+        return ticket
+    monkeypatch.setattr(a.budget, 'admit_managed', interleave)
+    with pytest.raises(a.m.SiteImportAdmissionDenied, match='ownership changed'):
+        await a.m.prepare_ev_submission(a.hass, a.state.entity_id, operation='rate', amps=9)
+    assert VIN not in a.budget.managed
+    assert a.budget.native_max_claim('site')
+
+
+@pytest.mark.asyncio
 async def test_missing_phase_metadata_cannot_authorize_an_increase(admission):
     a = admission; a.charge.pop('charger_phases')
     assert not await a.m.prepare_ev_submission(a.hass, a.state.entity_id, operation='rate', amps=20)
@@ -256,3 +278,64 @@ async def test_battery_handoff_withholds_native_authority_until_legacy_state_is_
     assert a.m.native_coexistence_reason(a.hass, 'site', a.budget)
     a.runtime['force_charge_state']['active'] = False
     assert a.m.native_coexistence_reason(a.hass, 'site', a.budget) is None
+
+
+def route_lock(a):
+    module=importlib.import_module(a.m.__package__+'.powerwall_local.route_lock')
+    lock=module.BatteryRouteLock()
+    a.runtime['powerwall_battery_dispatch_route_lock']=lock
+    return lock
+
+
+@pytest.mark.asyncio
+async def test_battery_route_serializes_competitors_but_allows_same_task_cleanup(admission):
+    a=admission;lock=route_lock(a);entered=asyncio.Event();release=asyncio.Event();events=[]
+    async def cleanup(_):events.append('cleanup')
+    nested=a.m.guard_battery_transition(a.hass,a.entry,cleanup)
+    async def first(_):
+        events.append('first');entered.set();await release.wait()
+        await nested(None);events.append('first_done')
+    async def second(_):events.append('second')
+    one=asyncio.create_task(a.m.guard_battery_transition(a.hass,a.entry,first)(None))
+    await entered.wait()
+    two=asyncio.create_task(a.m.guard_battery_transition(a.hass,a.entry,second)(None))
+    await asyncio.sleep(0);assert events==['first']
+    release.set();await asyncio.wait_for(asyncio.gather(one,two),1)
+    assert events==['first','cleanup','first_done','second'] and not lock.locked()
+    assert a.runtime['native_rate_battery_transitions']==0
+
+
+@pytest.mark.asyncio
+async def test_service_during_startup_waits_for_restore_and_old_handler_cannot_enter(admission):
+    a=admission;lock=route_lock(a);events=[];entered=asyncio.Event();finish=asyncio.Event()
+    a.runtime['native_max_startup_pending']=True
+    async def hardware(_):events.append('control')
+    handler=a.m.guard_battery_transition(a.hass,a.entry,hardware)
+    async def recovery():
+        async with lock:
+            entered.set();await finish.wait();events.append('restore')
+            a.runtime.pop('native_max_startup_pending')
+    restore=asyncio.create_task(recovery());await entered.wait()
+    service=asyncio.create_task(handler(None));await asyncio.sleep(0)
+    assert events==[]
+    finish.set();await asyncio.gather(restore,service)
+    assert events==['restore','control']
+    replacement={'native_max_startup_pending':True}
+    a.hass.data['power_sync'][a.entry.entry_id]=replacement
+    with pytest.raises(a.m.SiteImportAdmissionDenied,match='replaced setup'):
+        await handler(None)
+    assert events==['restore','control']
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiting_battery_command_does_not_take_or_poison_route(admission):
+    a=admission;lock=route_lock(a);events=[]
+    async def hardware(_):events.append('control')
+    handler=a.m.guard_battery_transition(a.hass,a.entry,hardware)
+    async with lock:
+        queued=asyncio.create_task(handler(None));await asyncio.sleep(0)
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):await queued
+    assert not events and a.runtime['native_rate_battery_transitions']==0
+    await handler(None)
+    assert events==['control'] and not lock.locked()

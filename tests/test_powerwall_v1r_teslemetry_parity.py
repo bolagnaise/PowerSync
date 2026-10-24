@@ -983,6 +983,50 @@ async def test_timed_battery_dispatch_and_resume_use_distinct_typed_requests():
     assert not command.HasField("real_power")
 
 
+def test_duration_only_and_explicit_zero_dispatch_have_identical_wire_value():
+    omitted=transport_pb2.MessageEnvelope()
+    omitted.teg.dispatch_battery_power_request.real_power.duration_seconds=30
+    explicit=transport_pb2.MessageEnvelope()
+    explicit.CopyFrom(omitted)
+    explicit.teg.dispatch_battery_power_request.real_power.power_watts=0
+    assert omitted.SerializeToString()==explicit.SerializeToString()
+    assert omitted.teg.dispatch_battery_power_request.real_power.power_watts==0
+
+
+@async_test
+async def test_native_max_resume_preserves_fence_until_actual_transport_submission():
+    transport=_transport_without_key();submitted=[];allowed=True
+    async def post(payload,din,*,before_send):
+        nonlocal allowed
+        allowed=False  # Simulate session/auth acquisition after caller check.
+        before_send()
+        submitted.append(payload)
+    def fence():
+        if not allowed:raise RuntimeError('request superseded')
+    transport.post_v1r=post
+    with pytest.raises(RuntimeError,match='superseded'):
+        await transport.resume_battery_operation('gateway',before_write=fence)
+    assert submitted==[]
+
+
+@async_test
+async def test_config_restore_rejects_external_owner_in_exact_read_modify_write_snapshot():
+    transport=_transport_without_key();writes=[]
+    async def post(payload,din,**kwargs):
+        request=transport_pb2.MessageEnvelope.FromString(payload)
+        assert request.filestore.HasField('read_file_request')
+        reply=transport_pb2.MessageEnvelope()
+        reply.filestore.read_file_response.file.blob=json.dumps({
+            'site_info':{'backup_reserve_percent':30}}).encode()
+        reply.filestore.read_file_response.hash=b'hash'
+        writes.append('read')
+        return transport_mod.TEDAPIResponse(True,reply.SerializeToString())
+    transport.post_v1r=post
+    assert not await transport.write_config('gateway',{'site_info.backup_reserve_percent':5},
+        validate_config=lambda config:config['site_info']['backup_reserve_percent']==100)
+    assert writes==['read']
+
+
 @pytest.mark.parametrize("watts,seconds", [(float('nan'), 30), (float('inf'), 30), (True, 30), (500, 0), (500, -1), (500, 86401), (500, 1.5), (500, True)])
 @async_test
 async def test_invalid_battery_dispatch_never_reaches_gateway(watts, seconds):

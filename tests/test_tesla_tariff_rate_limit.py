@@ -370,6 +370,21 @@ def test_periodic_upload_drops_retry_after_longer_than_cap(upload_harness):
     asyncio.run(run())
 
 
+def test_native_max_revalidates_permission_at_every_tariff_retry(upload_harness):
+    upload,hass,session,clock=upload_harness
+    checks=[]
+    async def before_write():
+        checks.append(clock.now)
+        def fence():
+            if clock.now>0: raise RuntimeError('native Max request expired')
+        return fence
+    async def run():
+        assert not await upload(hass,'site-a',{'name':'Max'},'token',max_retries=2,before_write=before_write)
+        assert len(session.posts)==1
+        assert checks==[0,282]
+    asyncio.run(run())
+
+
 def test_periodic_upload_still_retries_short_retry_after(upload_harness):
     upload, hass, session, _clock = upload_harness
     session.responses = [429, 200]

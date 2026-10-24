@@ -50,14 +50,35 @@ def native_coexistence_reason(hass, site, budget):
 
 def guard_battery_transition(hass, entry, handler):
     """Exclude new native authority throughout a battery service handoff."""
+    bound_runtime = hass.data.get("power_sync", {}).get(entry.entry_id)
     @wraps(handler)
     async def guarded(call):
         runtime = hass.data.get("power_sync", {}).get(entry.entry_id)
+        if bound_runtime is not None and runtime is not bound_runtime:
+            raise SiteImportAdmissionDenied("Battery service belongs to a replaced setup generation")
         if runtime is None:
             return await handler(call)
         runtime["native_rate_battery_transitions"] = runtime.get("native_rate_battery_transitions", 0)+1
+        requested_at = time.time()
+        async def run():
+            if hass.data.get("power_sync", {}).get(entry.entry_id) is not runtime:
+                raise SiteImportAdmissionDenied("Battery setup changed while awaiting route ownership")
+            previous = runtime.get("battery_route_requested_at")
+            runtime["battery_route_requested_at"] = requested_at
+            try:
+                if runtime.get("native_max_startup_pending"):
+                    raise SiteImportAdmissionDenied("Waiting for native Max startup restoration")
+                return await handler(call)
+            finally:
+                if previous is None:
+                    runtime.pop("battery_route_requested_at", None)
+                else:
+                    runtime["battery_route_requested_at"] = previous
         try:
-            return await handler(call)
+            if route_lock := runtime.get("powerwall_battery_dispatch_route_lock"):
+                async with route_lock:
+                    return await run()
+            return await run()
         finally:
             runtime["native_rate_battery_transitions"] -= 1
     return guarded
@@ -237,7 +258,12 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
     from homeassistant.helpers import entity_registry as er
     context = _EV_SUBMISSION_CONTEXT.get()
     budget = hass.data.get(RUNTIME_KEY)
-    if context is None or budget is None:
+    if budget is None:
+        return True
+    if context is None:
+        await budget.load()
+        if any(entry.get("native_max") for entry in budget.entries.values()):
+            raise SiteImportAdmissionDenied("A known EV owner is required while native Max owns the site")
         return True
     await refresh_managed_records(hass, budget)
     entry = context["entry"]
@@ -245,7 +271,7 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
     site = site_identity(entry)
     vin = str(context.get("vin") or "").upper()
     if not re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", vin) or site is None or runtime is None:
-        if budget.armed_sites or any(e.get("sessions") for e in budget.entries.values()):
+        if budget.armed_sites or any(e.get("sessions") or e.get("native_max") for e in budget.entries.values()):
             raise SiteImportAdmissionDenied("A unique vehicle and site are required for shared charging")
         return True
     registry = er.async_get(hass)
@@ -254,9 +280,9 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
     state = _current_setting(hass, registry, registration, entity_id, operation)
     current = _number(getattr(state, "state", None))
     known_setting = math.isfinite(current) and current.is_integer() and 0 <= current <= 80 and 0 <= time.time()-_fresh_at(state) <= 90
-    if budget.site_armed(site) and (identity is None or not known_setting):
+    if (budget.site_armed(site) or budget.native_max_claim(site)) and (identity is None or not known_setting):
         return False
-    if budget.site_armed(site) and operation == "start" and current <= 0:
+    if (budget.site_armed(site) or budget.native_max_claim(site)) and operation == "start" and current <= 0:
         return False
     requested = current if operation == "start" and known_setting else amps
     if requested is None and not budget.site_armed(site):
@@ -273,6 +299,7 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
             return False
         unit = 900  # No authority is gained from this conservative legacy bound.
     evidence["rate_reduction"] = operation == "rate" and known_setting and requested <= current
+    evidence["current_amps"] = int(current) if known_setting else None
     record = {"entry_id": entry.entry_id, "site": site, "identity": identity or entity_id,
               "entity_id": entity_id, "setting_entity_id": getattr(state, "entity_id", None),
               "target_amps": int(requested), "target_w": requested*unit,
@@ -373,6 +400,11 @@ async def _prepare_ev_submission(hass, entity_id, *, operation, amps, committed)
         latest = _site_evidence(hass, entry, runtime, vin, profile)
         if not fits(latest):
             raise SiteImportAdmissionDenied("Site charging headroom changed before submission")
+    maximum = budget.native_max_claim(site)
+    max_token = ticket["record"].get("native_max_token")
+    if (not valid() or budget.revision != revision
+            or (maximum.get("token") if maximum else None) != max_token):
+        raise SiteImportAdmissionDenied("Site charging ownership changed before submission")
     # The provider call follows synchronously in the caller. Keep its task
     # fenced through cancellation; an acknowledgement is not physical draw.
     return True

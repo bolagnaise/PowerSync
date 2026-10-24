@@ -423,7 +423,8 @@ class TEDAPIv1rTransport:
             _LOGGER.debug("read_config parse error: %s", err)
         return None
 
-    async def write_config(self, din: str, updates: dict[str, Any], *, before_write: Callable[[], None] | None = None) -> bool:
+    async def write_config(self, din: str, updates: dict[str, Any], *, before_write: Callable[[], None] | None = None,
+                           validate_config: Callable[[dict[str, Any]], bool] | None = None) -> bool:
         """Read-modify-write ``config.json`` via FileStore updateFileRequest.
 
         ``updates`` keys use dotted paths, eg ``site_info.default_real_mode``.
@@ -451,6 +452,9 @@ class TEDAPIv1rTransport:
             config = json.loads(blob.decode("utf-8"))
         except Exception as err:
             _LOGGER.error("write_config read-phase parse error: %s", err)
+            return False
+
+        if validate_config is not None and validate_config(config) is not True:
             return False
 
         for dotted, value in updates.items():
@@ -622,11 +626,12 @@ class TEDAPIv1rTransport:
         command.duration_seconds = duration_seconds
         return await self._send_battery_dispatch(din, env)
 
-    async def resume_battery_operation(self, din: str) -> bool:
+    async def resume_battery_operation(self, din: str, *, before_write: Callable[[], None] | None = None) -> bool:
         """Release direct dispatch and resume the gateway's configured mode."""
         env = self._battery_dispatch_envelope(din)
         env.teg.dispatch_battery_power_request.resume_device_mode.SetInParent()
-        return await self._send_battery_dispatch(din, env)
+        return await self._send_battery_dispatch(din, env,
+            **({"before_write": before_write} if before_write is not None else {}))
 
     @staticmethod
     def _battery_dispatch_envelope(din: str) -> Any:
@@ -636,13 +641,14 @@ class TEDAPIv1rTransport:
         env.recipient.din = din
         return env
 
-    async def _send_battery_dispatch(self, din: str, env: Any) -> bool:
+    async def _send_battery_dispatch(self, din: str, env: Any, *, before_write: Callable[[], None] | None = None) -> bool:
         request = env.teg.dispatch_battery_power_request
         is_power = request.HasField("real_power")
         operation = "power" if is_power else "resume"
         watts = request.real_power.power_watts if is_power else None
         seconds = request.real_power.duration_seconds if is_power else None
-        resp = await self.post_v1r(env.SerializeToString(), din)
+        resp = await self.post_v1r(env.SerializeToString(), din,
+            **({"before_send": before_write} if before_write is not None else {}))
         if not resp.ok or not resp.inner_bytes:
             _LOGGER.warning(
                 "Battery dispatch %s not acknowledged: watts=%s seconds=%s ok=%s http=%s fault=%s inner=%s",

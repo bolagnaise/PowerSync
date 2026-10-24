@@ -283,6 +283,8 @@ def test_restore_force_mode_from_persistence_hold_soc_expired_restores_normal():
         "_coerce_force_power_w": lambda v: 0,
         "_uses_native_battery_integration": lambda _coordinator: False,
         "hold_soc_state": hold_state,
+        "force_charge_state": {"active": False},
+        "force_discharge_state": {"active": False},
         "hass": SimpleNamespace(
             services=_FakeServices(),
             data={"power_sync": {"entry-1": {}}},

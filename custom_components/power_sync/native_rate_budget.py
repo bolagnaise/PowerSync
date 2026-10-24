@@ -84,10 +84,86 @@ class SharedRateBudget:
             self.managed = deepcopy(managed)
             self.loaded = True
 
+    def native_max_claim(self, site):
+        """Return the distinct durable native-Max barrier, never an EV arm."""
+        return next((entry["native_max"] for entry in self.entries.values()
+                     if entry.get("site") == site and entry.get("native_max")), None)
+
+    async def claim_native_max(self, entry_id, site, token, deadline):
+        """Atomically exclude prospective EV demand before native forcing."""
+        await self.load()
+        task = asyncio.create_task(self._claim_native_max(entry_id, site, token, deadline))
+        self.storage_tasks.add(task)
+        task.add_done_callback(self.storage_tasks.discard)
+        return await asyncio.shield(task)
+
+    async def _claim_native_max(self, entry_id, site, token, deadline):
+        if (not isinstance(entry_id, str) or not entry_id or not isinstance(site, str) or not site
+                or not isinstance(token, str) or not token or isinstance(deadline, bool)
+                or not isinstance(deadline, (int, float)) or not math.isfinite(deadline)):
+            raise ValueError("Invalid native Max site claim")
+        async with self.lock:
+            key = f"native_max:{entry_id}"
+            old = self.entries.get(key)
+            if old:
+                return (old.get("site") == site and old.get("native_max", {}).get("token") == token
+                        and old["native_max"].get("expires_at") == deadline)
+            if (self.clock() >= deadline or self.native_max_claim(site) or self.site_armed(site)
+                    or any(record.get("site") == site for record in self.managed.values())):
+                return False
+            entries = deepcopy(self.entries)
+            entries[key] = {"site": site, "sessions": {}, "native_max": {
+                "entry_id": entry_id, "token": token, "expires_at": deadline}}
+            self._validate(entries)
+            await self.store.async_save({"entries": entries, "managed": self.managed})
+            self.entries = entries
+            self.revision += 1
+            return True
+
+    async def release_native_max(self, entry_id, site, token):
+        """Release only the exact Max generation after native cleanup."""
+        await self.load()
+        task = asyncio.create_task(self._release_native_max(entry_id, site, token))
+        self.storage_tasks.add(task)
+        task.add_done_callback(self.storage_tasks.discard)
+        return await asyncio.shield(task)
+
+    async def _release_native_max(self, entry_id, site, token):
+        async with self.lock:
+            key = f"native_max:{entry_id}"
+            old = self.entries.get(key)
+            if old is None:
+                return True
+            if old.get("site") != site or old.get("native_max", {}).get("token") != token:
+                return False
+            entries = deepcopy(self.entries)
+            entries.pop(key)
+            await self.store.async_save({"entries": entries, "managed": self.managed})
+            self.entries = entries
+            self.revision += 1
+            return True
+
     @staticmethod
     def _validate(entries):
         vins, identities = set(), set()
+        max_sites = set()
+        for key, entry in entries.items():
+            maximum = entry.get("native_max") if isinstance(entry, dict) else None
+            if maximum is not None:
+                if (not isinstance(maximum, dict) or not isinstance(entry.get("site"), str) or not entry["site"]
+                        or not isinstance(maximum.get("entry_id"), str) or not maximum["entry_id"]
+                        or key != f"native_max:{maximum['entry_id']}"
+                        or not isinstance(maximum.get("token"), str) or not maximum["token"]
+                        or isinstance(maximum.get("expires_at"), bool)
+                        or not isinstance(maximum.get("expires_at"), (int, float))
+                        or not math.isfinite(maximum["expires_at"]) or entry.get("sessions")
+                        or entry["site"] in max_sites):
+                    raise ValueError("Native Max reservation journal is invalid")
+                max_sites.add(entry["site"])
         for entry in entries.values():
+            if (isinstance(entry, dict) and entry.get("site") in max_sites
+                    and entry.get("sessions")):
+                raise ValueError("Native Max conflicts with native EV cleanup")
             if not isinstance(entry, dict) or not isinstance(entry.get("sessions", {}), dict):
                 raise ValueError("Native rate reservation journal is invalid")
             for vin, session in entry.get("sessions", {}).items():
@@ -117,7 +193,11 @@ class SharedRateBudget:
 
     async def _save_entry(self, entry_id, site, data):
         async with self.lock:
+            if str(entry_id).startswith("native_max:") or data.get("native_max") is not None:
+                raise ValueError("Native Max uses its own site admission")
             previous = self.entries.get(entry_id, {})
+            if data.get("sessions") and self.native_max_claim(site):
+                raise ValueError("Native Max owns this site's charging headroom")
             if previous.get("sessions") and previous.get("site") != site:
                 raise ValueError("Native rate cleanup belongs to another site")
             entries = deepcopy(self.entries)
@@ -208,6 +288,14 @@ class SharedRateBudget:
                     or any(provider_device(session["identity"]) == provider_device(record["identity"])
                         for entry in self.entries.values() for session in entry.get("sessions", {}).values())):
                 return None
+            maximum = self.native_max_claim(record["site"])
+            if maximum:
+                current, target = evidence.get("current_amps"), record.get("target_amps")
+                if (evidence.get("rate_reduction") is not True or record.get("operation") != "rate"
+                        or type(current) is not int or type(target) is not int
+                        or not 0 <= target <= current <= 80):
+                    return None
+                record["native_max_token"] = maximum["token"]
             old = self.managed.get(vin)
             record["attempt_id"] = uuid4().hex
             record["identities"] = sorted({record["identity"], *(old.get("identities", [old["identity"]]) if old else [])})

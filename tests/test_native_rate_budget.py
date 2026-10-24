@@ -328,3 +328,89 @@ async def test_inflight_managed_provider_task_prevents_releasing_its_reservation
             'charging':False,'owner_active':False})
     assert 'VIN' in budget.managed
     event.set(); await task
+
+
+@pytest.mark.asyncio
+async def test_native_max_is_durable_distinct_from_ev_and_releases_by_exact_token():
+    store = Store(); budget = m.SharedRateBudget(store, clock=lambda: NOW)
+    assert await budget.claim_native_max('battery', 'site', 'generation', NOW+60)
+    assert not budget.site_armed('site')
+    revision = budget.revision
+    assert await budget.claim_native_max('battery', 'site', 'generation', NOW+60)
+    assert budget.revision == revision
+    restarted = m.SharedRateBudget(store, clock=lambda: NOW+120)
+    await restarted.load()
+    assert restarted.native_max_claim('site')['token'] == 'generation'
+    assert not await restarted.claim_native_max('other', 'site', 'new', NOW+180)
+    assert not await restarted.release_native_max('battery', 'site', 'wrong')
+    with pytest.raises(ValueError, match='Native Max owns'):
+        await m.EntryRateJournal(restarted, 'ev', 'site').async_save({'sessions': {'VIN': session()}})
+    assert await restarted.release_native_max('battery', 'site', 'generation')
+    assert restarted.native_max_claim('site') is None
+    assert store.data['entries'] == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('owner', ['native', 'managed', 'armed'])
+async def test_native_max_cannot_overtake_ev_acquisition_or_cleanup(owner):
+    budget = m.SharedRateBudget(Store(), clock=lambda: NOW)
+    if owner == 'native':
+        await m.EntryRateJournal(budget, 'ev', 'site').async_save({'sessions': {'VIN': session()}})
+    elif owner == 'managed':
+        await budget.admit_managed('VIN', {'site':'site', 'identity':'provider:car',
+            'reserved_w':0}, {}, lambda: True)
+    else:
+        budget.armed_sites.add('site')
+    assert not await budget.claim_native_max('battery', 'site', 'generation', NOW+60)
+    assert await budget.claim_native_max('battery', 'another-site', 'generation', NOW+60)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('operation,current,target,expected', [
+    ('start', 20, 20, False), ('rate', 20, 21, False),
+    ('rate', 20, 19, True), ('rate', 20, 0, True),
+    ('rate', None, 10, False), ('rate', True, 1, False)])
+async def test_native_max_allows_only_identified_ev_rate_reductions(operation,current,target,expected):
+    store = Store(); budget = m.SharedRateBudget(store, clock=lambda: NOW)
+    assert await budget.claim_native_max('battery', 'site', 'generation', NOW+60)
+    record = {'site':'site', 'identity':'provider:car', 'entry_id':'ev',
+              'reserved_w':4600, 'operation':operation, 'target_amps':target}
+    ticket = await budget.admit_managed('VIN', record,
+        {'rate_reduction': operation == 'rate' and current is not None and target <= current,
+         'current_amps': current}, lambda: True)
+    assert (ticket is not None) is expected
+    if ticket:
+        assert ticket['record']['native_max_token'] == 'generation'
+        restarted = m.SharedRateBudget(store, clock=lambda: NOW)
+        await restarted.load()
+        assert restarted.native_max_claim('site')
+        await budget.abort_managed(ticket)
+        assert budget.managed == {}
+        assert store.data['entries']['native_max:battery']['native_max']['token'] == 'generation'
+
+
+@pytest.mark.asyncio
+async def test_native_max_and_prospective_managed_start_have_one_winner():
+    budget = m.SharedRateBudget(Store(), clock=lambda: NOW)
+    claim, ticket = await asyncio.gather(
+        budget.claim_native_max('battery','site','generation',NOW+60),
+        budget.admit_managed('VIN', {'site':'site','identity':'provider:car','reserved_w':4600,
+            'operation':'start','target_amps':20}, {}, lambda: True))
+    assert int(claim) + int(ticket is not None) == 1
+
+
+@pytest.mark.asyncio
+async def test_native_max_failed_persistence_never_publishes_or_releases_owner():
+    store = Store(); budget = m.SharedRateBudget(store, clock=lambda: NOW)
+    store.fail = True
+    with pytest.raises(OSError):
+        await budget.claim_native_max('battery','site','generation',NOW+60)
+    assert budget.native_max_claim('site') is None
+    store.fail = False
+    assert await budget.claim_native_max('battery','site','generation',NOW+60)
+    revision = budget.revision
+    store.fail = True
+    with pytest.raises(OSError):
+        await budget.release_native_max('battery','site','generation')
+    assert budget.native_max_claim('site')['token'] == 'generation'
+    assert budget.revision == revision

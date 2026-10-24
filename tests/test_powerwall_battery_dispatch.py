@@ -370,6 +370,9 @@ def load_routing(monitored=False, paired=True, **options):
     tree = ast.parse(source)
     setup = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'async_setup_entry')
     names = {'_clear_local_powerwall_dispatch', '_stop_local_powerwall_dispatch', '_try_local_powerwall_force',
+             '_try_local_powerwall_force_locked',
+             '_stop_local_powerwall_dispatch_locked', '_stop_native_max_charge_locked',
+             '_stop_native_max_charge', '_try_native_max_charge',
              'handle_force_charge', 'handle_force_discharge', 'persist_force_mode_state', 'restore_force_mode_from_persistence',
              '_local_powerwall_dispatch_config', '_local_powerwall_dispatch_acknowledged', '_local_powerwall_dispatch_failed', '_local_powerwall_generation_current'}
     nodes = [n for n in setup.body if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name in names]
@@ -391,14 +394,18 @@ def load_routing(monitored=False, paired=True, **options):
     now = SimpleNamespace(utcnow=lambda: datetime.now(timezone.utc))
     hs = importlib.util.spec_from_file_location('local_host_test', ROOT/'custom_components/power_sync/powerwall_host.py')
     hm = importlib.util.module_from_spec(hs); hs.loader.exec_module(hm)
+    lock_spec = importlib.util.spec_from_file_location('battery_route_test', ROOT/'custom_components/power_sync/powerwall_local/route_lock.py')
+    lock_module = importlib.util.module_from_spec(lock_spec); lock_spec.loader.exec_module(lock_module)
     duration_spec = importlib.util.spec_from_file_location('local_discharge_duration_test', ROOT/'custom_components/power_sync/force_discharge_duration.py')
     durations = importlib.util.module_from_spec(duration_spec); duration_spec.loader.exec_module(durations)
-    ns = dict(math=__import__('math'), local_battery_dispatch_configured=hm.local_battery_dispatch_configured, asyncio=asyncio, Any=object, ServiceCall=object, HomeAssistantError=RuntimeError,
+    ns = dict(math=__import__('math'), time=__import__('time'), uuid4=__import__('uuid').uuid4,
+              _get_tesla_site_configs=lambda *_: [],
+              local_battery_dispatch_configured=hm.local_battery_dispatch_configured, asyncio=asyncio, Any=object, ServiceCall=object, HomeAssistantError=RuntimeError,
               selected_discharge_duration=durations.selected_discharge_duration, validate_native_discharge_duration=durations.validate_native_discharge_duration,
               DOMAIN='power_sync', hass=hass, entry=entry, _local_powerwall_runtime=runtime, DispatchCommandFailed=module.DispatchCommandFailed, validate_dispatch_config=module.validate_dispatch_config, _LOGGER=logging.getLogger(__name__),
               force_charge_state=charge, force_discharge_state=discharge,
               hold_soc_state={'active':False}, self_consumption_state={'active':False},
-              _local_powerwall_route_lock=asyncio.Lock(), _command_generation=[0],
+              _local_powerwall_route_lock=lock_module.BatteryRouteLock(), _command_generation=[0],
               _control_call_source=lambda call: call.data.get('source', 'user'),
               _monitoring_mode_should_block_control=lambda call: monitored and call.data.get('source') not in ('user','manual'),
               _demand_grid_charging_protection_active=lambda: False,
@@ -1077,3 +1084,97 @@ def test_grid_following_releases_instead_of_holding_zero_above_hard_import_cap()
     with pytest.raises(ValueError,match='Home load exceeds the grid import limit'):
         module.battery_watts('charge',12500,snapshot(load_w=17000,solar_w=0),
             config(optimization_max_charge_w=20000,optimization_max_grid_import_w=14900),target_basis='grid_import')
+
+
+@pytest.mark.asyncio
+async def test_explicit_manual_max_selects_native_path_without_local_watts():
+    ns,c,client,_=load_routing()
+    session=SimpleNamespace(pending=False,adapter=SimpleNamespace(guard=AsyncMock(return_value=True)),
+        start=AsyncMock(return_value={'expires_at':2000}))
+    ns.update(_native_max_context={'call':None}, _get_tesla_site_configs=lambda *_:[('site','token','provider')],
+        _get_native_max_charge=AsyncMock(return_value=session),
+        _create_charge_tariff=lambda duration:({'code':'temporary','name':'Force Charge'},None))
+    result=await ns['handle_force_charge'](call(source='user',duration=15,power_w=0))
+    assert result['native_max_charge'] and not result['physical_effect_confirmed']
+    client.dispatch_battery_power.assert_not_called()
+    args=session.start.await_args
+    assert args.args==(900,) and args.kwargs['deadline']>0
+    assert session.adapter.forcing_tariff['code'].startswith('CHARGE_NATIVE_MAX_')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('power_request', [{'source':'optimizer','power_w':0},
+    {'source':'user','power_w':500}, {'source':'user','power_w':True}])
+async def test_precise_or_optimizer_request_never_selects_native_max(power_request):
+    ns,c,client,_=load_routing()
+    ns['_get_native_max_charge']=AsyncMock()
+    assert await ns['_try_native_max_charge'](call(**power_request),15,2000) is None
+    ns['_get_native_max_charge'].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_native_max_finishes_existing_restore_before_capture_and_never_extends_deadline():
+    ns,c,client,_=load_routing()
+    ns['force_charge_state']['active']=True
+    events=[]
+    async def restore(_):events.append('restore');ns['force_charge_state']['active']=False
+    async def get_session():events.append('capture-owner');return session
+    session=SimpleNamespace(pending=False,adapter=SimpleNamespace(guard=AsyncMock(return_value=True)),
+        start=AsyncMock(return_value={'expires_at':2000}))
+    ns.update(_native_max_context={'call':None}, _get_tesla_site_configs=lambda *_:[('site','token','provider')],
+        _get_native_max_charge=get_session,handle_restore_normal=restore,
+        _create_charge_tariff=lambda duration:({'code':'temporary'},None))
+    await ns['_try_native_max_charge'](call(source='user',power_w=0),15,2000)
+    assert events==['restore','capture-owner']
+    assert session.start.await_args.kwargs['deadline']==2000
+
+
+@pytest.mark.asyncio
+async def test_native_max_cleanup_must_finish_before_numeric_local_handoff():
+    ns,c,client,_=load_routing()
+    runtime=ns['_local_powerwall_runtime']
+    async def stop():native.pending=False;ns['force_charge_state'].update(active=False,native_max_charge=False)
+    native=SimpleNamespace(pending=True,stop=AsyncMock(side_effect=stop))
+    runtime['powerwall_native_max_charge']=native
+    ns['force_charge_state'].update(active=True,native_max_charge=True)
+    result=await ns['_try_local_powerwall_force']('charge',call(source='user',power_w=500),15,500)
+    assert result['control_path']=='powerwall_local_dispatch'
+    native.stop.assert_awaited_once()
+    assert client.dispatch_battery_power.await_args.args[0]==-500
+    await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('native_first',[True,False])
+async def test_queued_native_and_numeric_acquisitions_never_leave_competing_actuators(native_first):
+    ns,c,client,_=load_routing();runtime=ns['_local_powerwall_runtime']
+    events=[]
+    async def start(*args,**kwargs):
+        assert not c.pending
+        events.append('native_start');native.pending=True
+        ns['force_charge_state'].update(active=True,native_max_charge=True)
+        return {'expires_at':2000}
+    async def stop():
+        events.append('native_stop');native.pending=False
+        ns['force_charge_state'].update(active=False,native_max_charge=False)
+    native=SimpleNamespace(pending=False,adapter=SimpleNamespace(guard=AsyncMock(return_value=True)),
+        start=AsyncMock(side_effect=start),stop=AsyncMock(side_effect=stop))
+    runtime['powerwall_native_max_charge']=native
+    ns.update(_native_max_context={'call':None}, _get_tesla_site_configs=lambda *_:[('site','token','provider')],
+        _get_native_max_charge=AsyncMock(return_value=native),
+        _create_charge_tariff=lambda duration:({'code':'temporary'},None))
+    async def max_charge():return await ns['_try_native_max_charge'](call(source='user',power_w=0),15,2000)
+    async def numeric():return await ns['_try_local_powerwall_force']('charge',call(source='user',power_w=500),15,500)
+    async with ns['_local_powerwall_route_lock']:
+        first=asyncio.create_task(max_charge() if native_first else numeric())
+        await asyncio.sleep(0)
+        second=asyncio.create_task(numeric() if native_first else max_charge())
+        await asyncio.sleep(0)
+    await asyncio.wait_for(asyncio.gather(first,second),2)
+    assert c.pending is native_first and native.pending is not native_first
+    if native_first:assert events==['native_start','native_stop']
+    else:
+        assert events==['native_start']
+        client.resume_battery_operation.assert_awaited()
+    if native.pending:await native.stop()
+    await c.stop()
