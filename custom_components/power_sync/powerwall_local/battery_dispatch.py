@@ -86,7 +86,7 @@ def site_grid_limits_w(snapshot: Any) -> tuple[float | None, float | None]:
 
 
 def manual_power_limits_kw(snapshot: Any, config: dict, learned_discharge_w: float | None = None, learned_charge_w: float | None = None) -> dict[str, float]:
-    """UI bounds: configured site export first, learned battery bound otherwise."""
+    """UI bounds include both the site limit and available battery output."""
     site_import, site_export = site_grid_limits_w(snapshot)
     load, solar = _number(snapshot.load_w, "home power"), _number(snapshot.solar_w, "solar power")
     charge = _number(config.get("optimization_max_charge_w", 5000), "charge limit")
@@ -103,7 +103,8 @@ def manual_power_limits_kw(snapshot: Any, config: dict, learned_discharge_w: flo
         site_export = min(site_export if site_export is not None else math.inf, _number(user_export, "export limit"))
     if learned_discharge_w is not None:
         discharge = min(discharge, _number(learned_discharge_w, "gateway discharge limit"))
-    export = (site_export if site_export is not None else discharge + solar - load) if discharge > 0 else 0
+    export = min(site_export if site_export is not None else math.inf,
+                 discharge + solar - load) if discharge > 0 else 0
     return {"charge_input_max_kw": math.floor(max(0, charge) + 1e-6) / 1000,
             "grid_export_max_kw": math.floor(max(0, export) + 1e-6) / 1000}
 

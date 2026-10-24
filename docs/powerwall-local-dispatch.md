@@ -55,3 +55,13 @@ Battery Mode exposes `grid_import_target_w`, `power_target_basis`, `estimated_gr
 Tesla defines `self_consumption` as Self-Powered and `autonomous` as Time-Based Control. The local timed-dispatch message contains battery watts and duration, or a resume request; it does not contain an operating-mode choice. PowerSync does not change the underlying Tesla mode to make a timed local command. Grid-charge permission, export rules, SOC protections and gateway power limits still apply. The legacy tariff path relies on autonomous/TOU behaviour, so its mode requirements must not be applied indiscriminately to native dispatch. Resume acknowledgement confirms the gateway accepted release; observe power and native mode readback to verify the resulting behaviour.
 
 References: [Tesla energy operation endpoint](https://developer.tesla.com/docs/fleet-api/endpoints/energy), [aiopowerwall local protocol documentation](https://github.com/Teslemetry/aiopowerwall).
+
+
+## Available grid-export targets
+
+The Force Power export range respects both the configured site export limit and
+the battery power available after current home load and solar. A gateway that
+reports a 10 kW battery-output ceiling can provide about 2 kW of grid export
+with 8 kW home load and no solar. A higher site export limit does not increase
+the timed command's battery-output ceiling. The range refreshes with live data;
+solar contribution can increase available export.

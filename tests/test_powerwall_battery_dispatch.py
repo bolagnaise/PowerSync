@@ -89,18 +89,28 @@ def test_gateway_site_limit_errors_fail_closed(raw):
         module.battery_watts('discharge', 1000, snapshot(raw=raw), config())
 
 
-def test_manual_slider_bounds_prefer_site_limits_then_learned_battery_limit():
+def test_manual_slider_bounds_respect_site_and_available_battery_headroom():
     cfg = config(optimization_max_charge_w=21000, optimization_max_discharge_w=21000,
                  optimization_max_grid_import_w=None)
     assert module.manual_power_limits_kw(site_snapshot(), cfg, 10000) == {
-        'charge_input_max_kw': 14.1, 'grid_export_max_kw': 10.1}
+        'charge_input_max_kw': 14.1, 'grid_export_max_kw': 9.2}
     assert module.manual_power_limits_kw(site_snapshot(import_kw=4, export_kw=-2), cfg, 10000) == {
         'charge_input_max_kw': 3.2, 'grid_export_max_kw': 2}
     assert module.manual_power_limits_kw(site_snapshot(import_kw=16, export_kw=-12), cfg, 10000) == {
-        'charge_input_max_kw': 15.2, 'grid_export_max_kw': 12}
+        'charge_input_max_kw': 15.2, 'grid_export_max_kw': 9.2}
     assert module.manual_power_limits_kw(site_snapshot(import_kw=1e9, export_kw=-1e9), cfg, 10000) == {
         'charge_input_max_kw': 21, 'grid_export_max_kw': 9.2}
     assert module.manual_power_limits_kw(site_snapshot(), {**cfg, 'optimization_max_discharge_w': 0})['grid_export_max_kw'] == 0
+
+
+@pytest.mark.parametrize('load,solar,site_limit,expected', [
+    (8000, 0, -14.9, 2), (8000, 3000, -14.9, 5),
+    (8000, 3000, -1, 1), (11000, 0, -14.9, 0),
+])
+def test_manual_export_slider_deducts_home_load_from_learned_battery_ceiling(load, solar, site_limit, expected):
+    cfg = config(optimization_max_discharge_w=21000)
+    snap = site_snapshot(export_kw=site_limit, load_w=load, solar_w=solar)
+    assert module.manual_power_limits_kw(snap, cfg, 10000)['grid_export_max_kw'] == expected
 
 
 def test_force_power_number_does_not_keep_an_old_selection_above_new_limits():
@@ -134,7 +144,7 @@ def test_force_power_number_does_not_keep_an_old_selection_above_new_limits():
     assert number.native_value == 3.2
     coord.data = site_snapshot(import_kw=16, export_kw=-12)
     assert number.native_max_value == 15.2
-    assert number.extra_state_attributes['grid_export_max_kw'] == 12
+    assert number.extra_state_attributes['grid_export_max_kw'] == 9.2
     coord.last_success_monotonic -= 100
     assert number.native_max_value == 0
     assert number.native_value == 20
@@ -181,7 +191,7 @@ def test_mobile_local_status_reports_fresh_direction_limits_and_fails_closed():
                             last_success_monotonic=time.monotonic(), client=SimpleNamespace(dispatch_discharge_limit_w=10000))
     status = scope['_local_access_status'](entry, coord)
     assert status['charge_input_max_kw'] == 3.2
-    assert status['grid_export_max_kw'] == 10.1
+    assert status['grid_export_max_kw'] == 4.2
     coord.data = snapshot(raw={'config': None})
     assert scope['_local_access_status'](entry, coord)['grid_export_max_kw'] == 0
     coord.data = site_snapshot()
@@ -929,7 +939,7 @@ def test_charge_cap_retry_cannot_escape_cleanup_policy_or_original_window(failur
 def test_manual_charge_cap_is_independent_of_export_cap_and_nameplate():
     cfg = config(optimization_max_charge_w=20000, optimization_max_discharge_w=20000, optimization_max_grid_import_w=None)
     limits = module.manual_power_limits_kw(site_snapshot(load_w=0, solar_w=0), cfg, 8000, 10000)
-    assert limits == {'charge_input_max_kw': 10, 'grid_export_max_kw': 10.1}
+    assert limits == {'charge_input_max_kw': 10, 'grid_export_max_kw': 8}
     assert cfg['optimization_max_charge_w'] == 20000
 
 
