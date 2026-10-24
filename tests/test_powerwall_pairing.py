@@ -264,30 +264,36 @@ def test_teslemetry_cancel_during_poll_never_persists(monkeypatch):
     assert not completed
 
 
+def fleet_response(message, *, snake_case=False):
+    if snake_case:
+        payload = {"payload": {"authorization": {"message": message}}}
+    else:
+        payload = {"Payload": {"Authorization": {"Message": message}}}
+    return {"response": {"message": payload}}
+
+
+class FleetSession(TeslemetrySession):
+    """Keep the Fleet/PowerSync command contract while varying client records."""
+
+    def post(self, url, *, json, headers):
+        self.calls.append(("POST", url, json))
+        assert url.endswith("/api/1/energy_sites/123/command")
+        assert headers["Authorization"] == "Bearer provider-token"
+        name = json["command_name"]
+        fields = (
+            {"key_type": 1, "public_key": PUBLIC_KEY_B64,
+             "authorized_client_type": 1, "description": "PowerSync Local Client"}
+            if name == "add_authorized_client_request" else {}
+        )
+        assert json == pairing._authorization_command_payload(name, {name: fields})
+        if name == "add_authorized_client_request":
+            return Reply(fleet_response({"AddAuthorizedClientResponse": {"client": client(2)}}))
+        return Reply(fleet_response({"ListAuthorizedClientsResponse": {"clients": next(self.polls)}}))
+
+
 @pytest.mark.parametrize("provider", ["fleet_api", "powersync"])
 def test_other_providers_keep_fleet_transport_and_response(monkeypatch, provider):
-    class FleetSession(TeslemetrySession):
-        def post(self, url, *, json, headers):
-            self.calls.append(("POST", url, json))
-            assert url.endswith("/api/1/energy_sites/123/command")
-            assert headers["Authorization"] == "Bearer provider-token"
-            name = json["command_name"]
-            fields = (
-                {"key_type": 1, "public_key": PUBLIC_KEY_B64,
-                 "authorized_client_type": 1, "description": "PowerSync Local Client"}
-                if name == "add_authorized_client_request" else {}
-            )
-            assert json == pairing._authorization_command_payload(name, {name: fields})
-            message = (
-                {"AddAuthorizedClientResponse": {"client": client(2)}}
-                if name == "add_authorized_client_request"
-                else {"ListAuthorizedClientsResponse": {"clients": [client(3)]}}
-            )
-            return Reply({"response": {"message": {"Payload": {
-                "Authorization": {"Message": message},
-            }}}})
-
-    session = FleetSession([])
+    session = FleetSession([[client(3)]])
     manager, completed = prepare_attempt(monkeypatch, session, provider)
 
     async def run():
@@ -298,3 +304,91 @@ def test_other_providers_keep_fleet_transport_and_response(monkeypatch, provider
     assert manager.status().state == pairing.PairingState.VERIFIED
     assert len(session.calls) == 3
     assert len(completed) == 1
+
+
+@pytest.mark.parametrize("provider", ["fleet_api", "powersync"])
+@pytest.mark.parametrize("reverse_clients", [False, True])
+def test_fleet_pairing_waits_for_current_key_in_any_order(monkeypatch, provider, reverse_clients):
+    pending = [client(2), client(3, "b2xkLWtleQ==")]
+    verified = [client(3), client(2, "b2xkLWtleQ==")]
+    if reverse_clients:
+        pending.reverse()
+        verified.reverse()
+    session = FleetSession([pending, verified])
+    manager, completed = prepare_attempt(monkeypatch, session, provider)
+
+    async def run():
+        await manager.start()
+        await manager._task_record.task
+
+    asyncio.run(run())
+    assert manager.status().state == pairing.PairingState.VERIFIED
+    assert manager.status().key_state == 3
+    assert len(session.calls) == 4  # products, register, pending, verified
+    assert len(completed) == 1
+    assert completed[0].public_key_der == PUBLIC_KEY
+
+
+@pytest.mark.parametrize("provider", ["fleet_api", "powersync"])
+@pytest.mark.parametrize("clients", [
+    [client(3, "b2xkLWtleQ==")],
+    [client(2), client(3, "b2xkLWtleQ==")],
+    [{"state": 3}],
+    [None, "invalid", client(3, "b2xkLWtleQ==")],
+    [client(True)],
+    [client(3.7)],
+    [client("unknown")],
+    [client(None)],
+])
+def test_fleet_foreign_missing_or_invalid_key_never_pairs(monkeypatch, provider, clients):
+    session = FleetSession([clients] * 5)
+    manager, completed = prepare_attempt(monkeypatch, session, provider)
+
+    async def run():
+        await manager.start()
+        await manager._task_record.task
+
+    asyncio.run(run())
+    assert manager.status().state == pairing.PairingState.TIMEOUT
+    assert manager.result() is None
+    assert not completed
+
+
+@pytest.mark.parametrize("snake_case", [False, True])
+@pytest.mark.parametrize("response_name,field", [
+    ("AddAuthorizedClientResponse", "Client"),
+    ("add_authorized_client_response", "client"),
+    ("ListAuthorizedClientsResponse", "Clients"),
+    ("list_authorized_clients_response", "clients"),
+])
+@pytest.mark.parametrize("key_field,state_field", [
+    ("public_key", "state"),
+    ("Public_key", "State"),
+    ("publicKey", "state"),
+    ("PublicKey", "State"),
+])
+def test_fleet_response_casing_matches_only_current_key(
+    snake_case, response_name, field, key_field, state_field,
+):
+    matching = {key_field: PUBLIC_KEY_B64, state_field: "3"}
+    foreign = {key_field: "b2xkLWtleQ==", state_field: 3}
+
+    def response(record):
+        value = [record] if field.lower() == "clients" else record
+        return fleet_response({response_name: {field: value}}, snake_case=snake_case)
+
+    manager = pairing.PowerwallPairingManager(None, "https://fleet.example", "token")
+    assert manager._client_state(response(matching), PUBLIC_KEY) == 3
+    assert manager._client_state(response(foreign), PUBLIC_KEY) is None
+
+
+@pytest.mark.parametrize("message", [
+    None, [], "invalid",
+    {"AddAuthorizedClientResponse": None},
+    {"AddAuthorizedClientResponse": {"client": 3}},
+    {"ListAuthorizedClientsResponse": None},
+    {"ListAuthorizedClientsResponse": {"clients": {"state": 3}}},
+])
+def test_fleet_malformed_response_keeps_waiting(message):
+    manager = pairing.PowerwallPairingManager(None, "https://fleet.example", "token")
+    assert manager._client_state(fleet_response(message), PUBLIC_KEY) is None

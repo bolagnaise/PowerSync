@@ -361,7 +361,7 @@ class PowerwallPairingManager:
     def _client_state(self, data: Any, public_key_der: bytes) -> int | None:
         if self._provider == "teslemetry":
             return _extract_teslemetry_client_state(data, public_key_der)
-        return _extract_client_state(data)
+        return _extract_client_state(data, public_key_der)
 
     async def _poll_until_verified(
         self, energy_site_id: int, public_key_der: bytes
@@ -436,12 +436,12 @@ def _generate_rsa_4096() -> tuple[rsa.RSAPrivateKey, bytes]:
     return private_key, public_key_der
 
 
-def _extract_client_state(resp: dict[str, Any] | None) -> int | None:
-    """Pull the client state field out of Fleet API's layered grpc_command response.
+def _extract_client_state(resp: Any, public_key_der: bytes) -> int | None:
+    """Read this attempt's key from Fleet API's layered grpc_command response.
 
     Tesla returns varying key-case layouts across firmware versions, so we
-    check both camelCase and snake_case. Returns None if the field isn't
-    present — the poller treats that as "keep waiting".
+    check both camelCase and snake_case. Missing or unrelated keys return
+    None — the poller treats that as "keep waiting".
     """
     if not isinstance(resp, dict):
         return None
@@ -452,33 +452,26 @@ def _extract_client_state(resp: dict[str, Any] | None) -> int | None:
             msg = resp["response"]["message"]["payload"]["authorization"]["message"]
         except (KeyError, TypeError):
             return None
+    if not isinstance(msg, dict):
+        return None
 
     for key in ("AddAuthorizedClientResponse", "add_authorized_client_response"):
-        if key in msg:
-            client = msg[key].get("client") or msg[key].get("Client")
-            if client:
-                state = client.get("state") or client.get("State")
-                if state is not None:
-                    try:
-                        return int(state)
-                    except (TypeError, ValueError):
-                        return None
+        body = msg.get(key)
+        if isinstance(body, dict):
+            state = _matching_client_state(
+                [body.get("client") or body.get("Client")], public_key_der
+            )
+            if state is not None:
+                return state
 
     for key in ("ListAuthorizedClientsResponse", "list_authorized_clients_response"):
-        if key in msg:
-            clients = (
-                msg[key].get("clients")
-                or msg[key].get("Clients")
-                or []
+        body = msg.get(key)
+        if isinstance(body, dict):
+            state = _matching_client_state(
+                body.get("clients") or body.get("Clients"), public_key_der
             )
-            # Most recently added is usually last — walk in reverse for speed.
-            for client in reversed(clients):
-                state = client.get("state") or client.get("State")
-                if state is not None:
-                    try:
-                        return int(state)
-                    except (TypeError, ValueError):
-                        continue
+            if state is not None:
+                return state
     return None
 
 
@@ -494,15 +487,24 @@ def _extract_teslemetry_client_state(resp: Any, public_key_der: bytes) -> int | 
             clients = body.get("clients", body.get("authorized_clients"))
     else:
         clients = body
+    return _matching_client_state(clients, public_key_der)
+
+
+def _matching_client_state(clients: Any, public_key_der: bytes) -> int | None:
+    """Return a numeric state only for the public key being paired."""
     if not isinstance(clients, list):
         return None
     target_key = base64.b64encode(public_key_der).decode("ascii")
     for client in clients:
         if not isinstance(client, dict):
             continue
-        if client.get("public_key", client.get("publicKey")) != target_key:
+        public_key = client.get(
+            "public_key",
+            client.get("Public_key", client.get("publicKey", client.get("PublicKey"))),
+        )
+        if public_key != target_key:
             continue
-        state = client.get("state", client.get("authorized_client_state"))
+        state = client.get("state", client.get("State", client.get("authorized_client_state")))
         if not isinstance(state, (int, str)) or isinstance(state, bool):
             return None
         try:
