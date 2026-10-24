@@ -16088,7 +16088,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         interval_minutes: int,
         n_steps: int,
     ) -> tuple[int, int] | None:
-        """Return optimizer slot bounds for a timestamped price entry."""
+        """Return slot bounds, an empty range outside the horizon, or None without timestamps."""
         start_str = cls._get_entry_start_time(e)
         end_str = cls._get_entry_end_time(e)
         if not start_str or not end_str:
@@ -16114,7 +16114,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         start_idx = max(0, int(math.floor(start_offset / interval_seconds)))
         end_idx = min(n_steps, int(math.ceil(end_offset / interval_seconds)))
         if end_idx <= start_idx:
-            return None
+            # None enables positional expansion for legacy entries without
+            # timestamps. A valid out-of-window interval must stay empty;
+            # otherwise a far-future price is appended at slot zero.
+            return 0, 0
         return start_idx, end_idx
 
     @staticmethod

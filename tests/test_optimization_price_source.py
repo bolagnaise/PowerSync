@@ -1967,6 +1967,66 @@ def test_octopus_unusable_live_entity_retains_cached_rate(opt_module, monkeypatc
     assert coordinator._last_display_import_prices == pytest.approx([0.2275] * 12)
 
 
+@pytest.mark.parametrize("provider", ["octopus", "amber"])
+@pytest.mark.parametrize("far_minutes", [48 * 60, 49 * 60])
+def test_out_of_horizon_dynamic_prices_cannot_overwrite_current_interval(
+    opt_module, monkeypatch, provider, far_minutes,
+):
+    """Ticket #126: a later price must never be rebased onto 'now'."""
+    now = datetime(2026, 10, 24, 22, 5, tzinfo=timezone.utc)
+    start = now.replace(minute=0)
+    monkeypatch.setattr(opt_module.dt_util, "now", lambda: now)
+    current = [
+        _dynamic_price_entry(start, 22.75, "general", interval_type="CurrentInterval",
+                             advanced_price={"predicted": 22.75}),
+        _dynamic_price_entry(start, 13.43, "feedIn", interval_type="CurrentInterval",
+                             advanced_price={"predicted": -13.43}),
+    ]
+    future_start = start + timedelta(minutes=30)
+    far_start = now + timedelta(minutes=far_minutes)
+    forecast = list(current) + [
+        _dynamic_price_entry(future_start, 0.63, "general", advanced_price={"predicted": 0.63}),
+        _dynamic_price_entry(future_start, 2.91, "feedIn", advanced_price={"predicted": -2.91}),
+        _dynamic_price_entry(far_start, -6.28, "general", advanced_price={"predicted": -6.28}),
+        _dynamic_price_entry(far_start, -1.5, "feedIn", advanced_price={"predicted": 1.5}),
+    ]
+    coordinator = _coordinator_with_dynamic_price_provider(
+        opt_module, provider, forecast, current=current, horizon_hours=48,
+    )
+    imports, exports = asyncio.run(coordinator._get_price_forecast())
+
+    assert imports[:5] == pytest.approx([0.2275] * 5)
+    assert imports[5:] == pytest.approx([0.0063] * 571)
+    assert exports[:5] == pytest.approx([0.1343] * 5)
+    assert exports[5:] == pytest.approx([0.0291] * 571)
+    assert coordinator._last_display_import_prices == pytest.approx([0.2275] * 5 + [0.0063] * 6)
+    assert coordinator._last_display_export_prices == pytest.approx([0.1343] * 5 + [0.0291] * 6)
+    assert coordinator._last_settlement_import_prices == pytest.approx(imports)
+    assert coordinator._last_settlement_export_prices == pytest.approx(exports)
+    assert coordinator._last_optimizer_price_valid_slots == [True] * 11 + [False] * 565
+
+    optimizer = opt_module.BatteryOptimizer(
+        capacity_wh=10000, max_charge_w=4000, max_discharge_w=4000,
+        backup_reserve=0.05, interval_minutes=5, horizon_hours=1, terminal_weight=0.0,
+    )
+    result = optimizer.optimize(
+        import_prices=imports[:12], export_prices=[0.0] * 12,
+        solar_forecast=[0.0] * 12, load_forecast=[0.0] * 12,
+        current_soc=0.5, allow_grid_charge=True,
+    )
+    assert result.feasible
+    assert max(result.grid_import_w) < 1.0
+
+
+@pytest.mark.parametrize("offset_minutes,expected", [(55, (11, 12)), (60, (0, 0)), (65, (0, 0)), (-30, (0, 0))])
+def test_timestamped_price_bounds_clip_or_skip_without_legacy_rebasing(opt_module, offset_minutes, expected):
+    now = datetime(2026, 10, 24, 22, 5, tzinfo=timezone.utc)
+    entry = _dynamic_price_entry(now + timedelta(minutes=offset_minutes), -6.28, "general")
+    assert opt_module.OptimizationCoordinator._entry_slot_bounds(entry, now, 5, 12) == expected
+    # Missing timestamps still take the supported legacy positional route.
+    assert opt_module.OptimizationCoordinator._entry_slot_bounds({"perKwh": 12.0}, now, 5, 12) is None
+
+
 def test_non_amber_dynamic_import_forecast_still_uses_per_kwh(opt_module):
     start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
     forecast = []
