@@ -130,6 +130,23 @@ async def test_restoration_stale_physical_reports_cannot_release_reservation():
     assert c.sessions and ports.writes == [10,32]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('actual_amps', [None, 20, 0])
+async def test_stopped_with_unknown_electrical_unit_requires_measured_zero_amps(actual_amps):
+    c, store, ports = controller()
+    await c.tick()
+    await c.stop()
+    for delta in (30, 60):
+        now = NOW+delta
+        c.clock = lambda: now
+        ports.observed = replace(ports.observed, charging=False, confirmed_stopped=True,
+            watts_per_amp=0, measured_ev_w=0, measured_ev_amps=actual_amps,
+            vehicle_at=now, meter_at=now, measured_ev_at=now)
+        await c.tick()
+    assert bool(c.sessions) == (actual_amps != 0)
+    assert ports.writes == [10,32]
+
+
 def test_rate_accounts_for_home_battery_and_remaining_deadline():
     assert m.decide_rate(observation(), 32, NOW) == (10, 'ready')
     assert m.decide_rate(observation(remaining_grid_wh=10000, import_limit_w=10000), 32, NOW) == (21, 'limited')

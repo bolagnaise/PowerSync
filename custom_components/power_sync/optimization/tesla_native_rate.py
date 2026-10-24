@@ -56,6 +56,7 @@ class RateObservation:
     measured_ev_w: float = 0.0
     measured_ev_at: float = 0.0
     confirmed_stopped: bool = False
+    measured_ev_amps: float | None = None
 
 
 def decide_rate(observed: RateObservation, baseline_amps: int, now: float) -> tuple[int | None, str]:
@@ -224,9 +225,10 @@ class NativeRateController:
                      and at > session["restore_after"] for at in stamps)
                  and max(stamps)-min(stamps) <= 5)
         settled = (math.isfinite(physical) and math.isfinite(target_w)
-                   and ((observed.charging and target_w > 0
+                   and ((observed.charging and observed.watts_per_amp > 0 and target_w > 0
                          and abs(physical-target_w) <= max(250, target_w*0.05))
-                        or (observed.confirmed_stopped and physical <= 250)))
+                        or (observed.confirmed_stopped and physical <= 250
+                            and (observed.watts_per_amp > 0 or observed.measured_ev_amps == 0))))
         if not fresh or not settled:
             if session.pop("restore_sample", None) is not None:
                 await self.save()

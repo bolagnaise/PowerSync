@@ -363,12 +363,14 @@ class NativeRatePorts:
         # restored current setting is waiting for the vehicle to ramp up.
         actual_current = charge.get("charger_actual_current")
         try:
-            actual_current_w = _finite(actual_current)
+            actual_amps = _finite(actual_current)
         except (ValueError, TypeError):
             return None
-        if isinstance(actual_current, bool) or actual_current_w < 0:
+        if isinstance(actual_current, bool) or actual_amps < 0:
             return None
-        actual_ev_w = actual_current_w*unit_w
+        if unit_w <= 0 and actual_amps > 0:
+            return None  # Positive current with unknown watts is not zero draw.
+        actual_ev_w = actual_amps*unit_w
         ev_at = _timestamp(charge.get("timestamp"))
         if self.budget is not None:
             self.budget.observe(vin, watts=actual_ev_w, at=ev_at, meter_at=meter_at)
@@ -412,7 +414,8 @@ class NativeRatePorts:
             _finite(snapshot.load_w)-actual_ev_w-_finite(snapshot.solar_w)+other_pending if snapshot else math.nan,
             planned_battery, site_limit, self.setting.rate_enabled(vin),
             planned_battery if controlled else 0.0, actual_ev_w, ev_at,
-            str(charge.get("charging_state", "")).lower() in {"stopped", "complete", "disconnected"})
+            str(charge.get("charging_state", "")).lower() in {"stopped", "complete", "disconnected"},
+            actual_amps)
         self.observations[vin] = result
         return result
 

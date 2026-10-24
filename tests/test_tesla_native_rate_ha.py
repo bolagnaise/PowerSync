@@ -136,6 +136,21 @@ async def test_cleanup_missing_physical_current_cannot_be_interpreted_as_zero(li
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('actual', [0,20])
+@pytest.mark.parametrize('metadata', [{'charger_phases':None}, {'charger_voltage':0}])
+async def test_cleanup_unknown_power_unit_never_turns_positive_current_into_zero(live_adapter, actual, metadata):
+    a = live_adapter
+    a.ports.controller.sessions[VIN] = {'recovering': True}
+    a.data['charge_state'].update(charging_state='Stopped', charger_actual_current=actual, **metadata)
+    observed = await a.ports.read(VIN)
+    if actual:
+        assert observed is None
+    else:
+        assert observed.confirmed_stopped and observed.measured_ev_amps == 0
+        assert observed.measured_ev_w == 0
+
+
+@pytest.mark.asyncio
 async def test_actual_cleanup_read_reconstructs_whole_site_budget(live_adapter):
     a = live_adapter
     a.state.state = '10'
