@@ -90,7 +90,7 @@ class BatteryControllerWrapper:
         self.battery_system = battery_system
 
     @optimizer_command
-    async def force_charge(self, duration_minutes: int = 60, power_w: float = 5000, _extend_hardware: bool = False) -> bool:
+    async def force_charge(self, duration_minutes: int = 60, power_w: float = 5000, _extend_hardware: bool = False, grid_import_target_w: float | None = None) -> bool:
         """
         Command battery to charge.
 
@@ -108,6 +108,8 @@ class BatteryControllerWrapper:
             _LOGGER.info(f"🔋 Optimizer: Force charge {duration_minutes}min at {power_w}W")
 
             service_data = {"duration": duration_minutes, "power_w": power_w, "source": "optimizer"}
+            if grid_import_target_w is not None:
+                service_data["grid_import_target_w"] = grid_import_target_w
             if _extend_hardware:
                 service_data["_extend_hardware"] = True
             if self.battery_system == "tesla":

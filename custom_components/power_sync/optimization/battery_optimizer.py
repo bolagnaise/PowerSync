@@ -802,8 +802,9 @@ class BatteryOptimizer:
         backup_reserve: float | None = None,
         grid_charge_soc_cap: float | None = None,
         horizon_hours: int | None = None,
+        strict_grid_import_limit: bool = False,
     ) -> None:
-        """Update optimizer configuration."""
+        """Update configuration; native limits may explicitly prohibit import."""
         if capacity_wh is not None:
             self.capacity_wh = capacity_wh
             self.capacity_kwh = capacity_wh / 1000.0
@@ -815,6 +816,8 @@ class BatteryOptimizer:
             self.max_discharge_kw = max_discharge_w / 1000.0
         if max_grid_import_w is not _UNSET:
             self.max_grid_import_w = self._normalize_optional_power_w(max_grid_import_w)
+            if strict_grid_import_limit and max_grid_import_w == 0 and not isinstance(max_grid_import_w, bool):
+                self.max_grid_import_w = 0.0
             self.max_grid_import_kw = (
                 self.max_grid_import_w / 1000.0
                 if self.max_grid_import_w is not None

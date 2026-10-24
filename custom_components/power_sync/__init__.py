@@ -31401,6 +31401,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if state.get("powerwall_local_dispatch"):
                 state_to_save["powerwall_local_dispatch"] = True
                 state_to_save["command_status"] = state.get("command_status")
+                state_to_save["grid_import_target_w"] = state.get("grid_import_target_w")
+                state_to_save["power_target_basis"] = state.get("power_target_basis", "battery")
                 for direction in ("charge", "discharge"):
                     state_to_save[f"gateway_{direction}_limit_w"] = state.get(f"gateway_{direction}_limit_w")
 
@@ -33375,9 +33377,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 state["hardware_expires_at"] = dt_util.utcnow() + timedelta(seconds=seconds)
                 state["command_status"] = "accepted"
                 state["battery_power_w"] = watts
+                estimate = getattr(controller, "grid_import_estimate_w", None)
+                grid_target = state.get("grid_import_target_w")
+                state["estimated_grid_import_w"] = estimate
+                state["grid_import_target_limited"] = (estimate is not None and grid_target is not None
+                    and estimate < grid_target - 250)
                 for direction in ("charge", "discharge"):
                     state[f"gateway_{direction}_limit_w"] = getattr(client, f"dispatch_{direction}_limit_w", None)
         await persist_force_mode_state()
+        if any(state.get("grid_import_target_limited") for state in (force_charge_state, force_discharge_state)):
+            # Feed actuator limits back into a fresh remaining-energy solve.
+            # Do not turn a ten-second lease renewal into a solve storm.
+            import time as _dispatch_time
+            now = _dispatch_time.monotonic()
+            if now - _local_powerwall_runtime.get("grid_import_limit_replan_at", -1e9) >= 60:
+                optimization = _local_powerwall_runtime.get("optimization_coordinator")
+                refresh = getattr(optimization, "_schedule_settings_reoptimization", None)
+                if refresh:
+                    _local_powerwall_runtime["grid_import_limit_replan_at"] = now
+                    refresh()
 
     async def _local_powerwall_dispatch_failed():
         if not _local_powerwall_generation_current():
@@ -33428,8 +33446,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def _try_local_powerwall_force(mode, call, duration, power_w):
         from .powerwall_host import local_battery_dispatch_configured
+        grid_target = call.data.get("grid_import_target_w")
+        if grid_target is not None and (mode != "charge" or _control_call_source(call) != "optimizer"
+                or isinstance(grid_target, bool) or not isinstance(grid_target, (int, float))
+                or not math.isfinite(grid_target) or grid_target <= 0):
+            raise HomeAssistantError("Invalid optimiser grid-import target")
         if active_battery_system != BATTERY_SYSTEM_TESLA:
+            if grid_target is not None:
+                raise HomeAssistantError("Grid-import targeting requires paired local Powerwall control")
             return None
+        if grid_target is not None and (not {**entry.data, **entry.options}.get("optimization_spread_import_enabled", False)
+                or not local_battery_dispatch_configured(entry.data)
+                or _local_powerwall_runtime.get("powerwall_dispatch_fallback_pending")
+                or hold_soc_state.get("active") or self_consumption_state.get("active")
+                or any(state.get("active") and not state.get("powerwall_local_dispatch")
+                       for state in (force_charge_state, force_discharge_state))):
+            raise HomeAssistantError("Grid-import targeting requires available local dispatch")
         if not _local_powerwall_generation_current():
             raise HomeAssistantError("Powerwall dispatch setup generation was replaced")
         if hass.data[DOMAIN][entry.entry_id].get("powerwall_local_dispatch_stopping"):
@@ -33468,10 +33500,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raise HomeAssistantError("Local dispatch cleanup required before changing control paths")
             return None
         source = _control_call_source(call)
-        if source == "optimizer" and power_w <= 0:
+        if source == "optimizer" and power_w <= 0 and grid_target is None:
             raise HomeAssistantError("Optimizer local dispatch requires positive power")
         config = {**entry.data, **entry.options}
-        target = power_w or config.get("optimization_max_grid_export_w" if mode == "discharge" else "optimization_max_charge_w", 5000)
+        target = grid_target if grid_target is not None else power_w or config.get("optimization_max_grid_export_w" if mode == "discharge" else "optimization_max_charge_w", 5000)
 
         def allowed(direction):
             if not _local_powerwall_generation_current() or _monitoring_mode_should_block_control(call) or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping"):
@@ -33480,6 +33512,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not state.get("active") or not state.get("powerwall_local_dispatch"):
                 return False
             if direction == "charge" and _demand_grid_charging_protection_active():
+                return False
+            if grid_target is not None and not {**entry.data, **entry.options}.get("optimization_spread_import_enabled", False):
                 return False
             if hass.data.get("power_sync_license_manager") is not None:
                 from .licensing.guard import service_allowed
@@ -33510,12 +33544,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                          expires_at=expiry, hardware_expires_at=None,
                          powerwall_local_dispatch=True, command_status="pending",
                          scope="optimizer" if source == "optimizer" else "external",
-                         started_at=dt_util.utcnow(), commitment_eligible=False)
+                         started_at=dt_util.utcnow(), commitment_eligible=False,
+                         grid_import_target_w=grid_target,
+                         power_target_basis="grid_import" if grid_target is not None else "battery")
             try:
                 result = await controller.start(mode, target, duration * 60,
-                                                allowed=allowed, guarded_write=local_export_guard if mode == "discharge" else None)
+                                                allowed=allowed, guarded_write=local_export_guard if mode == "discharge" else None,
+                                                target_basis="grid_import" if grid_target is not None else "battery")
             except Exception as err:
                 from .powerwall_local.battery_dispatch import DispatchCommandFailed
+                if grid_target is not None:
+                    raise HomeAssistantError("Grid-import dispatch failed; tariff fallback cannot hold the target") from err
                 if isinstance(err, DispatchCommandFailed) and not controller.pending:
                     from .powerwall_local.battery_dispatch import validate_dispatch_config
                     try:
@@ -45063,6 +45102,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "duration": force_charge_state.get("duration"),
                         "power_w": force_charge_state.get("power_w", 0),
                         "source": force_charge_state.get("source", "user"),
+                        "powerwall_local_dispatch": force_charge_state.get("powerwall_local_dispatch", False),
+                        "hardware_expires_at": force_charge_state.get("hardware_expires_at"),
+                        "battery_power_w": force_charge_state.get("battery_power_w"),
+                        "grid_import_target_w": force_charge_state.get("grid_import_target_w"),
+                        "grid_import_target_limited": force_charge_state.get("grid_import_target_limited", False),
                     }
                 if force_discharge_state.get("active"):
                     return {

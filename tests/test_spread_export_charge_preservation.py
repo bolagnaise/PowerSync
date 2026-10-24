@@ -242,6 +242,7 @@ def _install_power_sync_stubs() -> None:
         battery_charge_w: float = 0.0
         battery_discharge_w: float = 0.0
         ev_charge_w: float = 0.0
+        grid_import_target_w: float | None = None
 
     @dataclass
     class _OptimizationSchedule:

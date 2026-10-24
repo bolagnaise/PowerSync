@@ -108,7 +108,7 @@ def manual_power_limits_kw(snapshot: Any, config: dict, learned_discharge_w: flo
             "grid_export_max_kw": math.floor(max(0, export) + 1e-6) / 1000}
 
 
-def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict) -> float:
+def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict, *, target_basis: str = "battery") -> float:
     """Convert a grid-export target or charging rate into safe battery watts.
 
     Zero target is the existing manual 'device maximum' sentinel, resolved by
@@ -116,6 +116,8 @@ def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict) -> fl
     The export envelope clamps target_w before this function is called.
     """
     validate_dispatch_config(mode, config)
+    if target_basis not in ("battery", "grid_import") or (target_basis == "grid_import" and mode != "charge"):
+        raise ValueError("Invalid dispatch target basis")
     target = _number(target_w, "power target")
     soc = _number(snapshot.soc, "battery SOC")
     if not 0 <= soc <= 100:
@@ -158,6 +160,15 @@ def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict) -> fl
     headroom = maximum if import_limit in (None, 0) else _number(import_limit, "grid import limit") - load + solar
     if site_import is not None:
         headroom = min(headroom, site_import - load + solar)
+    if target_basis == "grid_import":
+        if headroom < 0:
+            # Do not pin the battery at zero output while uncontrolled loads
+            # exceed the hard connection bound. Release to native operation.
+            raise ValueError("Home load exceeds the grid import limit")
+        # Home and EV demand share this grid target. Never turn a charging
+        # request into discharging when uncontrolled demand already exceeds it.
+        power = max(0.0, min(target - load + solar, maximum, headroom))
+        return -power
     power = min(target, maximum, headroom)
     if power <= 0:
         raise ValueError("No grid import headroom for battery charging")
@@ -186,6 +197,8 @@ class LocalBatteryDispatch:
         self._deadline = 0.0
         self._mode = ""
         self._target = 0.0
+        self._target_basis = "battery"
+        self.grid_import_estimate_w = None
         self.pending = False
         self._command_may_have_reached = False
         self._site_limits = None
@@ -224,15 +237,18 @@ class LocalBatteryDispatch:
         except Exception as err:
             raise ValueError("Tariff fallback blocked by gateway site limits or unavailable limit evidence") from err
 
-    async def start(self, mode: str, target_w: float, duration_seconds: int, *, allowed=None, guarded_write=None) -> dict:
+    async def start(self, mode: str, target_w: float, duration_seconds: int, *, allowed=None, guarded_write=None, target_basis="battery") -> dict:
         if type(duration_seconds) is not int or not 1 <= duration_seconds <= 86400:
             raise ValueError("Invalid local dispatch duration")
+        if target_basis not in ("battery", "grid_import") or (target_basis == "grid_import" and mode != "charge"):
+            raise ValueError("Invalid dispatch target basis")
         async with self._lock:
             await self._cancel_task()
             if allowed is not None:
                 self.allowed = allowed
             self.guarded_write = guarded_write
             self._mode, self._target = mode, target_w
+            self._target_basis = target_basis
             self._deadline = time.monotonic() + duration_seconds
             self.pending = True
             try:
@@ -243,7 +259,7 @@ class LocalBatteryDispatch:
                 raise
             self._task = asyncio.create_task(self._renew())
             return {"success": True, "command_status": "accepted", "battery_power_w": watts,
-                    "requested_power_w": target_w,
+                    "requested_power_w": target_w, "power_target_basis": target_basis,
                     "gateway_charge_limit_w": self._device_limit("charge") if mode == "charge" and math.isfinite(self._device_limit("charge")) else None,
                     "gateway_discharge_limit_w": self._device_discharge_limit() if mode == "discharge" and math.isfinite(self._device_discharge_limit()) else None,
                     "control_path": "powerwall_local_dispatch"}
@@ -304,7 +320,7 @@ class LocalBatteryDispatch:
                 _number(current_config.get(limit_key, 5000), f"{self._mode} limit"),
                 self._device_limit(self._mode),
             )
-            watts = battery_watts(self._mode, target, snapshot, current_config)
+            watts = battery_watts(self._mode, target, snapshot, current_config, target_basis=self._target_basis)
             self._command_may_have_reached = True
             try:
                 accepted = await self.client.dispatch_battery_power(watts, remaining)
@@ -313,6 +329,8 @@ class LocalBatteryDispatch:
             if not accepted:
                 raise DispatchCommandFailed("Gateway did not acknowledge local battery dispatch")
             self._last_watts = watts
+            self.grid_import_estimate_w = (_number(snapshot.load_w, "home power")
+                - _number(snapshot.solar_w, "solar power") - watts) if self._target_basis == "grid_import" else None
             if self.acknowledged is not None:
                 await self.acknowledged(watts, remaining)
             return True

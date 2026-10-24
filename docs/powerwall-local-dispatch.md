@@ -15,3 +15,19 @@ Home Assistant's Spread Import distributes battery charging across eligible same
 The optimiser already plans PowerSync-managed EV charging alongside the battery and treats supported native Tesla charge windows as fixed forecast demand without taking vehicle control. Spread Import now reserves the managed EV's planned power when redistributing battery energy, in addition to native Tesla demand already included in the load forecast. These sources are counted separately, once each.
 
 Every local battery lease uses fresh measured home load, including current EV consumption, to limit battery charging to available import headroom. Forecasts help plan future demand; they do not guarantee an unseen vehicle schedule or unreported load. Keep gateway site connection limits configured: software targets do not replace enforced electrical limits.
+
+## Total grid import during Spread Import
+
+From v2.12.1478, Spread Import levels total grid import across eligible windows while retaining planned battery watts for SOC and energy accounting. Paired LAN Powerwalls receive a separate grid-import target; each short lease uses fresh measured home/EV load and solar to calculate battery input. Missing forecast EV draw therefore leaves capacity available to the battery, and actual EV draw reduces battery input. Manual Charge input keeps its existing battery-power meaning. Other supported batteries receive their calculated battery targets; this does not establish the same local renewal cadence for every brand.
+
+The command remains bounded by the configured charge rate, reported gateway charge ceiling and the tighter configured/gateway import limit. When home demand alone exceeds the target, the charging request falls to zero; it never silently becomes a discharge command. Loads that exceed a connection limit independently of battery charging cannot be fixed by a charge-only request. Keep gateway connection limits configured.
+
+The optimiser uses reported charge/discharge ceilings and fresh gateway import limits without rewriting the saved battery rating. It replans from current SOC and remaining time, preserving its energy accounting after spreading. A capped command that cannot reach the grid target requests a throttled fresh solve. It cannot promise an energy target that the remaining time and available capacity make infeasible.
+
+Battery Mode exposes `grid_import_target_w`, `power_target_basis`, `estimated_grid_import_w` and `grid_import_target_limited`. The estimate derives from the fresh pre-command load and acknowledged battery request; measured Grid Power remains the physical evidence. Optimisation status reports the planned grid target separately from planned battery watts and the acknowledged command.
+
+## Tesla operating mode
+
+Tesla defines `self_consumption` as Self-Powered and `autonomous` as Time-Based Control. The local timed-dispatch message contains battery watts and duration, or a resume request; it does not contain an operating-mode choice. PowerSync does not change the underlying Tesla mode to make a timed local command. Grid-charge permission, export rules, SOC protections and gateway power limits still apply. The legacy tariff path relies on autonomous/TOU behaviour, so its mode requirements must not be applied indiscriminately to native dispatch. Resume acknowledgement confirms the gateway accepted release; observe power and native mode readback to verify the resulting behaviour.
+
+References: [Tesla energy operation endpoint](https://developer.tesla.com/docs/fleet-api/endpoints/energy), [aiopowerwall local protocol documentation](https://github.com/Teslemetry/aiopowerwall).

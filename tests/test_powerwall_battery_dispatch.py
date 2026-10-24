@@ -322,7 +322,7 @@ def load_routing(monitored=False, paired=True, **options):
     hm = importlib.util.module_from_spec(hs); hs.loader.exec_module(hm)
     duration_spec = importlib.util.spec_from_file_location('local_discharge_duration_test', ROOT/'custom_components/power_sync/force_discharge_duration.py')
     durations = importlib.util.module_from_spec(duration_spec); duration_spec.loader.exec_module(durations)
-    ns = dict(local_battery_dispatch_configured=hm.local_battery_dispatch_configured, asyncio=asyncio, Any=object, ServiceCall=object, HomeAssistantError=RuntimeError,
+    ns = dict(math=__import__('math'), local_battery_dispatch_configured=hm.local_battery_dispatch_configured, asyncio=asyncio, Any=object, ServiceCall=object, HomeAssistantError=RuntimeError,
               selected_discharge_duration=durations.selected_discharge_duration, validate_native_discharge_duration=durations.validate_native_discharge_duration,
               DOMAIN='power_sync', hass=hass, entry=entry, _local_powerwall_runtime=runtime, DispatchCommandFailed=module.DispatchCommandFailed, validate_dispatch_config=module.validate_dispatch_config, _LOGGER=logging.getLogger(__name__),
               force_charge_state=charge, force_discharge_state=discharge,
@@ -886,3 +886,123 @@ def test_learned_native_cap_blocks_targetless_tariff_fallback(mode):
             await c.check_tariff_fallback(mode)
         client.dispatch_battery_power.assert_not_called()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('load,solar,expected', [(3500,0,-9000),(10860,0,-1640),(3500,2000,-11000),(13000,0,0)])
+def test_grid_import_target_shares_actual_home_ev_and_solar(load,solar,expected):
+    cfg=config(optimization_max_charge_w=20000, optimization_max_grid_import_w=14900)
+    actual=module.battery_watts('charge',12500,snapshot(load_w=load,solar_w=solar),cfg,target_basis='grid_import')
+    assert actual == expected
+    if load-solar <= 14900:
+        assert load-solar-actual <= 14900
+
+
+def test_grid_import_target_renewal_uses_measured_load_and_preserves_deadline():
+    async def run():
+        c,client,_=controller()
+        c.config=lambda: config(optimization_max_charge_w=20000,optimization_max_grid_import_w=14900)
+        client.get_snapshot.return_value=snapshot(load_w=3500,solar_w=0)
+        result=await c.start('charge',12500,60,target_basis='grid_import')
+        assert result['battery_power_w']==-9000
+        assert result['power_target_basis']=='grid_import'
+        deadline=c._deadline
+        await c._cancel_task()
+        client.get_snapshot.return_value=snapshot(load_w=10860,solar_w=0)
+        await c._write_with_limit_retry()
+        assert client.dispatch_battery_power.call_args.args[0]==-1640
+        assert c.grid_import_estimate_w==12500
+        client.get_snapshot.return_value=snapshot(load_w=3500,solar_w=0)
+        await c._write_with_limit_retry()
+        assert client.dispatch_battery_power.call_args.args[0]==-9000
+        assert c._deadline==deadline
+        await c.stop()
+    asyncio.run(run())
+
+
+def test_grid_import_request_routes_without_changing_manual_charge_semantics():
+    async def run():
+        ns,c,client,saved=load_routing(optimization_max_charge_w=20000, optimization_spread_import_enabled=True)
+        request=call(source='optimizer',grid_import_target_w=5000)
+        result=await ns['_try_local_powerwall_force']('charge',request,15,2000)
+        assert result['power_target_basis']=='grid_import'
+        # Default fixture home 1000 less solar200 => 4200 battery input.
+        assert result['battery_power_w']==-4200
+        assert ns['force_charge_state']['grid_import_target_w']==5000
+        await c.stop()
+        result=await ns['_try_local_powerwall_force']('charge',call(source='user'),15,2000)
+        assert result['battery_power_w']==-2000
+        assert result['power_target_basis']=='battery'
+        await c.stop()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('target', [True,0,-1,float('nan'),'5000'])
+def test_grid_import_target_rejects_invalid_or_non_optimizer_requests(target):
+    async def run():
+        ns,c,client,_=load_routing(optimization_spread_import_enabled=True)
+        with pytest.raises(RuntimeError,match='Invalid optimiser grid-import target'):
+            await ns['_try_local_powerwall_force']('charge',call(source='optimizer',grid_import_target_w=target),15,2000)
+        client.dispatch_battery_power.assert_not_called()
+    asyncio.run(run())
+
+
+def test_failed_grid_target_does_not_enter_tariff_fallback():
+    async def run():
+        ns,c,client,_=load_routing(optimization_spread_import_enabled=True)
+        client.dispatch_battery_power.return_value=False
+        with pytest.raises(RuntimeError,match='tariff fallback cannot hold the target'):
+            await ns['_try_local_powerwall_force']('charge',call(source='optimizer',grid_import_target_w=5000),15,2000)
+        client.resume_battery_operation.assert_awaited()
+        assert not c.pending
+        assert not ns['_local_powerwall_runtime'].get('powerwall_dispatch_fallback_pending')
+    asyncio.run(run())
+
+
+def test_grid_target_stops_when_spread_import_is_disabled():
+    async def run():
+        ns,c,client,_=load_routing(optimization_spread_import_enabled=True)
+        await ns['_try_local_powerwall_force']('charge',call(source='optimizer',grid_import_target_w=5000),15,2000)
+        await c._cancel_task()
+        ns['entry'].data['optimization_spread_import_enabled']=False
+        before=client.dispatch_battery_power.await_count
+        with pytest.raises(ValueError,match='ownership or safety'):
+            await c._write_with_limit_retry()
+        assert client.dispatch_battery_power.await_count==before
+        await c.stop()
+    asyncio.run(run())
+
+
+def test_local_gateway_limits_constrain_plan_without_changing_config():
+    import ast,math,time
+    path=ROOT/'custom_components/power_sync/optimization/coordinator.py'
+    cls=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='OptimizationCoordinator')
+    names={'_local_powerwall_plan_limits','_effective_charge_and_import_limits'}
+    nodes=[n for n in cls.body if getattr(n,'name','') in names]
+    class StripImports(ast.NodeTransformer):
+        def visit_ImportFrom(self,node):return ast.copy_location(ast.Pass(),node)
+    ns=dict(math=math,time=time,DOMAIN='power_sync',site_grid_limits_w=module.site_grid_limits_w)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[StripImports().visit(n) for n in nodes],type_ignores=[])),str(path),'exec',flags=__import__('__future__').annotations.compiler_flag),ns)
+    client=SimpleNamespace(dispatch_charge_limit_w=10000,dispatch_discharge_limit_w=9000)
+    coord=SimpleNamespace(data=site_snapshot(import_kw=14.9),last_success_monotonic=time.monotonic())
+    subject=SimpleNamespace(battery_system='tesla',entry_id='entry',_config=SimpleNamespace(max_charge_w=20000,max_grid_import_w=15000),
+        hass=SimpleNamespace(data={'power_sync':{'entry':{'powerwall_local':{'client':client,'coordinator':coord}}}}),
+        _normalize_optional_power_w=lambda n:n)
+    subject._local_powerwall_plan_limits=lambda:ns['_local_powerwall_plan_limits'](subject)
+    assert ns['_effective_charge_and_import_limits'](subject)==(10000,14900)
+    assert subject._config.max_charge_w==20000
+    assert subject._config.max_grid_import_w==15000
+
+
+def test_zero_forecast_battery_plan_still_fills_missing_ev_draw():
+    async def run():
+        ns,c,client,_=load_routing(optimization_spread_import_enabled=True,optimization_max_charge_w=20000)
+        result=await ns['_try_local_powerwall_force']('charge',call(source='optimizer',grid_import_target_w=5000),15,0)
+        assert result['battery_power_w']==-4200
+        await c.stop()
+    asyncio.run(run())
+
+
+def test_grid_following_releases_instead_of_holding_zero_above_hard_import_cap():
+    with pytest.raises(ValueError,match='Home load exceeds the grid import limit'):
+        module.battery_watts('charge',12500,snapshot(load_w=17000,solar_w=0),
+            config(optimization_max_charge_w=20000,optimization_max_grid_import_w=14900),target_basis='grid_import')

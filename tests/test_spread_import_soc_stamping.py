@@ -243,6 +243,7 @@ def _install_power_sync_stubs() -> None:
         battery_charge_w: float = 0.0
         battery_discharge_w: float = 0.0
         ev_charge_w: float = 0.0
+        grid_import_target_w: float | None = None
 
     @dataclass
     class _OptimizationSchedule:
@@ -381,11 +382,11 @@ def test_spread_import_schedule_stamps_running_soc_cursor(opt_module):
         load_forecast=load_forecast,
     )
 
-    # Sanity: the middle slot really was squeezed to self_consumption and the
-    # outer two really kept charging — otherwise this isn't exercising both
-    # restamp branches.
+    # This generic-provider fixture retains self-consumption for zero battery
+    # power; only paired local Tesla can safely run a zero-power grid hold.
     assert spread.actions[0].action == "charge"
     assert spread.actions[1].action == "self_consumption"
+    assert spread.actions[1].battery_charge_w == 0
     assert spread.actions[2].action == "charge"
 
     # None of the restamped actions should keep the stale LP label.
@@ -512,3 +513,55 @@ def test_spread_import_retains_both_ev_sources_in_site_headroom(opt_module, nati
     for i, action in enumerate(result.actions):
         assert action.battery_charge_w + action.ev_charge_w + loads[i] * 1000 <= 16100 + .1
     assert sum(a.battery_charge_w for a in result.actions) == pytest.approx(23300, abs=.1)
+
+
+def test_spread_import_levels_total_grid_power_instead_of_battery_input(opt_module):
+    coordinator = _coordinator(opt_module, 'octopus')
+    coordinator._config.interval_minutes = 60
+    coordinator._config.battery_capacity_wh = 100000
+    coordinator._config.max_charge_w = 14000
+    coordinator._config.max_grid_import_w = 14900
+    start = datetime(2026,5,3,2,tzinfo=timezone.utc)
+    actions = [opt_module.ScheduleAction(timestamp=start+timedelta(hours=i),action='charge',
+        power_w=6000 if i==0 else 10000,battery_charge_w=6000 if i==0 else 10000,
+        soc=.1,ev_charge_w=4000 if i==0 else 0) for i in range(2)]
+    schedule=opt_module.OptimizationSchedule(actions,0,0,start)
+    result=coordinator._spread_import_schedule(schedule,[.1,.1],[False,False],.1,
+        load_forecast=[3,3],solar_forecast=[0,0])
+    assert [a.battery_charge_w for a in result.actions]==[6000,10000]
+    assert [a.grid_import_target_w for a in result.actions]==pytest.approx([13000,13000])
+    assert sum(a.battery_charge_w for a in result.actions)==16000
+    for a in result.actions:
+        assert a.battery_charge_w+a.ev_charge_w+3000==pytest.approx(a.grid_import_target_w)
+
+
+def test_spread_import_all_headroom_lost_cannot_keep_original_charge(opt_module):
+    c=_coordinator(opt_module,'octopus')
+    c._config.interval_minutes=60;c._config.battery_capacity_wh=100000
+    c._config.max_charge_w=14000;c._config.max_grid_import_w=1000
+    start=datetime(2026,5,3,2,tzinfo=timezone.utc)
+    action=opt_module.ScheduleAction(start,'charge',5000,soc=.1,battery_charge_w=5000)
+    result=c._spread_import_schedule(opt_module.OptimizationSchedule([action],0,0,start),[.1],[False],.1,
+        load_forecast=[2],solar_forecast=[0])
+    assert result.actions[0].battery_charge_w==0
+
+
+@pytest.mark.parametrize('paired_tesla', [True,False])
+def test_zero_forecast_battery_slot_retains_grid_following_contract(opt_module,paired_tesla):
+    c=_coordinator(opt_module,'octopus')
+    c.battery_system='tesla' if paired_tesla else 'sigenergy'
+    c._supports_local_powerwall_target_power=lambda:paired_tesla
+    c._config.interval_minutes=60;c._config.battery_capacity_wh=100000
+    c._config.max_charge_w=10000;c._config.max_grid_import_w=15000
+    start=datetime(2026,5,3,2,tzinfo=timezone.utc)
+    actions=[opt_module.ScheduleAction(start,'self_consumption',0,soc=.1,ev_charge_w=9000),
+             opt_module.ScheduleAction(start+timedelta(hours=1),'charge',9000,soc=.1,battery_charge_w=9000)]
+    result=c._spread_import_schedule(opt_module.OptimizationSchedule(actions,0,0,start),[.1,.1],[False,False],.1,
+        load_forecast=[1,1],solar_forecast=[0,0])
+    assert result.actions[0].battery_charge_w==0
+    assert result.actions[0].action==('charge' if paired_tesla else 'self_consumption')
+    if paired_tesla:
+        assert result.actions[0].grid_import_target_w==pytest.approx(10000)
+    else:
+        assert result.actions[0].grid_import_target_w is None
+    assert result.actions[1].battery_charge_w==9000

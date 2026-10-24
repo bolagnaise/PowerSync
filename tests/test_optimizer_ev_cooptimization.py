@@ -1540,3 +1540,23 @@ def test_schedule_api_serializes_ev_load_before_flow_derivations(
     )
 
     assert schedule.to_api_response()["ev_charging_w"] == [7360.0]
+
+
+@pytest.mark.parametrize('solver', ['lp','greedy'])
+def test_native_zero_import_limit_is_not_user_zero_as_unset(optimizer_module,solver):
+    optimizer=_optimizer(optimizer_module)
+    optimizer.update_config(max_grid_import_w=0, strict_grid_import_limit=True)
+    assert optimizer.max_grid_import_w==0
+    assert optimizer.max_grid_import_kw==0
+    kwargs=_kwargs()
+    kwargs['load_forecast']=[0]*8
+    if solver=='lp':
+        result=optimizer.optimize(**kwargs)
+    else:
+        result=optimizer._solve_greedy(8,kwargs['import_prices'],kwargs['export_prices'],
+            kwargs['solar_forecast'],kwargs['load_forecast'],kwargs['current_soc'],
+            'cost',schedule_timestamps=kwargs['schedule_timestamps'])
+    assert result.feasible
+    assert all(a.battery_charge_w==0 for a in result.schedule.actions)
+    optimizer.update_config(max_grid_import_w=0)
+    assert optimizer.max_grid_import_w is None

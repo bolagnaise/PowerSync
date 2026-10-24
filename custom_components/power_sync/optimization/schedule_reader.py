@@ -27,6 +27,9 @@ class ScheduleAction:
     ev_charge_w: float = 0.0
     control_source: str | None = None
     control_action: str | None = None
+    # Spread Import may hold total site import, while power_w remains the
+    # planned battery input for energy/SOC accounting.
+    grid_import_target_w: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for API response."""
@@ -50,6 +53,8 @@ class ScheduleAction:
             payload["control_source"] = self.control_source
         if self.control_action:
             payload["control_action"] = self.control_action
+        if self.grid_import_target_w is not None:
+            payload["grid_import_target_w"] = self.grid_import_target_w
         return payload
 
 

@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable
@@ -3188,6 +3189,39 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return None
 
+    def _local_powerwall_plan_limits(self) -> dict[str, float]:
+        """Actuator feedback limits the solve without rewriting user settings."""
+        if getattr(self, "battery_system", None) != "tesla":
+            return {}
+        runtime = getattr(getattr(self, "hass", None), "data", {}).get(DOMAIN, {}).get(getattr(self, "entry_id", None), {})
+        local = runtime.get("powerwall_local", {})
+        client = local.get("client") or getattr(runtime.get("powerwall_battery_dispatch"), "client", None)
+        limits = {}
+        for direction in ("charge", "discharge"):
+            value = getattr(client, f"dispatch_{direction}_limit_w", None)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
+                limits[f"max_{direction}_w"] = value
+        coordinator = local.get("coordinator")
+        last_success = getattr(coordinator, "last_success_monotonic", None)
+        if last_success is not None and 0 <= time.monotonic() - last_success <= 90:
+            try:
+                from ..powerwall_local.battery_dispatch import site_grid_limits_w
+                imported, _ = site_grid_limits_w(coordinator.data)
+                if imported is not None:
+                    limits["max_grid_import_w"] = imported
+            except (ValueError, TypeError, AttributeError):
+                pass
+        return limits
+
+    def _effective_charge_and_import_limits(self) -> tuple[float, float | None]:
+        limits = self._local_powerwall_plan_limits()
+        charge = min(self._config.max_charge_w, limits.get("max_charge_w", math.inf))
+        imported = self._normalize_optional_power_w(self._config.max_grid_import_w)
+        native = limits.get("max_grid_import_w")
+        if native is not None:
+            imported = min(imported, native) if imported is not None else native
+        return charge, imported
+
     def _sync_optimizer_discharge_limits(self) -> None:
         """Sync physical discharge and target-export caps into the LP model."""
         if not self._optimizer:
@@ -3206,9 +3240,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if detected_physical_w and detected_physical_w > physical_discharge_w:
                 physical_discharge_w = detected_physical_w
 
+        learned = self._local_powerwall_plan_limits()
+        physical_discharge_w = min(physical_discharge_w, learned.get("max_discharge_w", math.inf))
+        charge_limit_w, import_limit_w = self._effective_charge_and_import_limits()
         self._optimizer.update_config(
             max_discharge_w=physical_discharge_w,
             max_battery_export_w=export_command_cap_w,
+            max_charge_w=charge_limit_w,
+            max_grid_import_w=import_limit_w,
+            strict_grid_import_limit=import_limit_w == 0,
         )
 
     def _configured_startup_backup_reserve(self) -> tuple[int | None, str]:
@@ -10740,6 +10780,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         current_charge_w = max(0.0, -battery_w)
         return max(0.0, min(max_charge_w, max_grid_import_w - grid_w + current_charge_w))
 
+    def _charge_grid_target_kwargs(self, action: Any) -> dict:
+        target = getattr(action, "grid_import_target_w", None)
+        if (self._should_spread_import_schedule() and self._supports_local_powerwall_target_power()
+                and isinstance(target, (int, float)) and math.isfinite(target) and target > 0):
+            return {"grid_import_target_w": float(target)}
+        return {}
+
     def _charge_command_power_w(self, action: Any) -> float:
         """Return a safe charge command power for the scheduled action."""
         try:
@@ -11597,6 +11644,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             force_power_w,
                         )
                     )
+                    if force_type == "charge":
+                        grid_target = self._charge_grid_target_kwargs(force_window_action).get("grid_import_target_w")
+                        prior_target = _ext_state.get("grid_import_target_w")
+                        hardware_power_changed = hardware_power_changed or ((grid_target is None) != (prior_target is None)) or (
+                            grid_target is not None and self._force_command_power_changed(prior_target, grid_target))
                     pcc_ceiling_changed = (
                         force_type == "discharge"
                         and self.battery_system == "sigenergy"
@@ -11696,6 +11748,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     duration_minutes=extend_mins,
                                     power_w=force_power_w,
                                     _extend_hardware=True,
+                                    **self._charge_grid_target_kwargs(force_window_action),
                                 ), 'force_charge')
                                 if refresh_result is False:
                                     _LOGGER.warning(
@@ -12450,6 +12503,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         force_result = await fenced_call(self, lambda: battery.force_charge(
                             duration_minutes=charge_duration,
                             power_w=charge_power_w,
+                            **self._charge_grid_target_kwargs(action),
                         ), 'force_charge')
                         if force_result is False:
                             _LOGGER.warning(
@@ -12472,6 +12526,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         force_result = await fenced_call(self, lambda: battery.force_charge(
                             duration_minutes=charge_duration,
                             power_w=charge_power_w,
+                            **self._charge_grid_target_kwargs(action),
                         ), 'force_charge')
                         if force_result is False:
                             _LOGGER.warning(
@@ -13358,11 +13413,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         interval_hours = max(1, int(self._config.interval_minutes or 5)) / 60.0
         capacity_wh = max(0.0, float(self._config.battery_capacity_wh or 0))
         efficiency = float(getattr(self._optimizer, "efficiency", 0.92) or 0.92)
-        max_charge_w = max(0.0, float(self._config.max_charge_w or 0))
-        max_grid_import_w = self._normalize_optional_power_w(
-            self._config.max_grid_import_w
-        )
-        cap_by_slot = max_grid_import_w is not None
+        max_charge_w, max_grid_import_w = self._effective_charge_and_import_limits()
+        max_charge_w = max(0.0, float(max_charge_w or 0))
+        local_grid_following = (getattr(self, "battery_system", None) == "tesla"
+                                and self._supports_local_powerwall_target_power())
         new_actions: list[ScheduleAction] = list(actions)
         fixed_manual_positions = self._manual_control_slot_indices(
             actions,
@@ -13391,28 +13445,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 0.0,
                 min(max_charge_w, max_grid_import_w - load_w - ev_w + solar_w),
             )
-
-        def _spread_power_by_cap(total_wh: float, caps_w: list[float]) -> list[float]:
-            """Spread total Wh evenly while respecting per-slot caps."""
-            if not caps_w:
-                return []
-            remaining = min(total_wh, sum(caps_w) * interval_hours)
-            output = [0.0] * len(caps_w)
-            open_slots = set(range(len(caps_w)))
-            while open_slots and remaining > 1e-6:
-                target_w = remaining / (len(open_slots) * interval_hours)
-                capped_now = [
-                    pos for pos in open_slots if caps_w[pos] <= target_w + 1e-6
-                ]
-                if not capped_now:
-                    for pos in open_slots:
-                        output[pos] = target_w
-                    break
-                for pos in capped_now:
-                    output[pos] = caps_w[pos]
-                    remaining -= caps_w[pos] * interval_hours
-                    open_slots.remove(pos)
-            return [round(max(0.0, value), 1) for value in output]
 
         def _advance_soc(soc: float, action: Any) -> float:
             if capacity_wh <= 0:
@@ -13514,23 +13546,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         soc_cursor = _advance_soc(soc_cursor, new_actions[pos])
                     continue
 
-            if cap_by_slot:
-                target_by_pos = _spread_power_by_cap(
-                    charge_wh,
-                    [_slot_charge_cap_w(pos) for pos in spread_positions],
-                )
-            else:
-                target_w = min(
-                    max_charge_w,
-                    charge_wh / (len(spread_positions) * interval_hours),
-                )
-                target_w = round(max(0.0, target_w), 1)
-                target_by_pos = [target_w] * len(spread_positions)
-
-            if not any(target_w > 0 for target_w in target_by_pos):
-                for pos in range(start, end):
-                    soc_cursor = _advance_soc(soc_cursor, new_actions[pos])
-                continue
+            # Level TOTAL grid import, not just battery input. Fixed native
+            # Tesla demand is in load_forecast; managed EV draw is separate.
+            # Solve for the lowest common grid target that delivers the same
+            # planned battery Wh, respecting every slot's available headroom.
+            net_loads = [(_forecast_kw(load_forecast, pos) - _forecast_kw(solar_forecast, pos)) * 1000
+                         + max(0.0, float(getattr(actions[pos], "ev_charge_w", 0.0) or 0.0))
+                         for pos in spread_positions]
+            caps = [_slot_charge_cap_w(pos) for pos in spread_positions]
+            low = min(net_loads)
+            high = max(base + cap for base, cap in zip(net_loads, caps))
+            if max_grid_import_w is not None:
+                high = min(high, max_grid_import_w)
+            required_w = min(charge_wh / interval_hours, sum(caps))
+            for _ in range(64):
+                middle = (low + high) / 2
+                delivered_w = sum(max(0.0, min(cap, middle - base)) for base, cap in zip(net_loads, caps))
+                if delivered_w < required_w:
+                    low = middle
+                else:
+                    high = middle
+            grid_target_w = high
+            target_by_pos = [max(0.0, min(cap, round(grid_target_w - base, 1)))
+                             for base, cap in zip(net_loads, caps)]
+            # Only a positive import target can drive the live import loop.
+            # Solar-surplus-only windows retain their planned battery targets.
+            live_grid_target_w = max(0.0, grid_target_w)
 
             spread_targets = dict(zip(spread_positions, target_by_pos))
             for pos in range(start, end):
@@ -13544,6 +13585,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         timestamp=original.timestamp,
                         action=original.action,
                         power_w=original.power_w,
+                        grid_import_target_w=getattr(original, "grid_import_target_w", None),
                         soc=round(soc_cursor, 4),
                         battery_charge_w=original.battery_charge_w,
                         battery_discharge_w=original.battery_discharge_w,
@@ -13551,7 +13593,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                     continue
                 target_w = spread_targets[pos]
-                if target_w > 0:
+                if target_w > 0 or (live_grid_target_w > 0 and local_grid_following):
                     new_actions[pos] = ScheduleAction(
                         timestamp=original.timestamp,
                         action="charge",
@@ -13560,6 +13602,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         battery_charge_w=target_w,
                         battery_discharge_w=0.0,
                         ev_charge_w=getattr(original, "ev_charge_w", 0.0),
+                        grid_import_target_w=live_grid_target_w if live_grid_target_w > 0 else None,
                     )
                 else:
                     new_actions[pos] = ScheduleAction(
@@ -20592,6 +20635,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         force_power_w = 0
                     if force_power_w > 0:
                         current_power_w = force_power_w
+                    if force_type == "charge" and force_state.get("grid_import_target_w") is not None:
+                        # The live grid-following command can differ from the
+                        # forecast battery watts while keeping the same site target.
+                        acknowledged_w = force_state.get("battery_power_w")
+                        if isinstance(acknowledged_w, (int, float)) and math.isfinite(acknowledged_w):
+                            current_power_w = max(0.0, -acknowledged_w)
                 elif (
                     last_executed_action
                     and last_executed_planned_action == planned_current_action
@@ -20787,6 +20836,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "planned_current_action": planned_current_action,
             "planned_current_action_detail": planned_current_action_detail,
             "planned_current_power_w": planned_current_power_w,
+            "planned_grid_import_target_w": getattr(self._get_current_action(), "grid_import_target_w", None),
+            "grid_import_target_w": force_state.get("grid_import_target_w") if force_type == "charge" else None,
+            "grid_import_target_limited": force_state.get("grid_import_target_limited", False) if force_type == "charge" else False,
             "effective_current_action": effective_current_action,
             "effective_current_action_detail": effective_current_action_detail,
             "actual_battery_power_w": actual_battery_power_w,
