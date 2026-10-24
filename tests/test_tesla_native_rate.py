@@ -88,6 +88,16 @@ def controller():
     return m.NativeRateController(store, ports, clock=lambda: NOW), store, ports
 
 
+async def settle(c, ports):
+    start = c.clock()
+    for delta in (1, 4):
+        now = start + delta
+        c.clock = lambda: now
+        ports.observed = replace(ports.observed, vehicle_at=now, meter_at=now,
+            measured_ev_at=now, measured_ev_w=ports.observed.current_amps*230)
+        await c.tick()
+
+
 def test_rate_accounts_for_home_battery_and_remaining_deadline():
     assert m.decide_rate(observation(), 32, NOW) == (10, 'ready')
     assert m.decide_rate(observation(remaining_grid_wh=10000, import_limit_w=10000), 32, NOW) == (21, 'limited')
@@ -114,6 +124,7 @@ async def test_baseline_is_durable_before_write_and_stop_restores():
     assert ports.writes == [10] and c.status[VIN]['state'] == 'ready'
     ports.before_write = None
     await c.stop()
+    await settle(c, ports)
     assert ports.writes == [10, 32] and not c.sessions and ports.owner is None
     assert store.data['suppressed'][VIN] == 'window'
 
@@ -150,6 +161,7 @@ async def test_stale_or_missing_reading_changes_session_to_cleanup_only():
     assert c.sessions[VIN]['recovering'] is True
     ports.observed = observation(current_amps=10)
     await c.tick(); await c.tick()
+    await settle(c, ports)
     assert ports.writes == [10, 32] and not c.sessions
 
 
@@ -158,6 +170,7 @@ async def test_restart_restores_baseline_and_never_replays_rate():
     c, store, ports = controller(); await c.tick()
     resumed = m.NativeRateController(store, ports, clock=lambda: NOW)
     await resumed.tick(); await resumed.tick()
+    await settle(resumed, ports)
     assert ports.writes == [10, 32] and not resumed.sessions
 
 
@@ -198,6 +211,7 @@ async def test_stop_defers_restoration_instead_of_violating_hard_import_limit():
     assert c.status[VIN]['reason'] == 'import_headroom_unavailable'
     ports.observed = replace(ports.observed, import_limit_w=15000)
     await c.tick()
+    await settle(c, ports)
     assert ports.writes == [10,32] and not c.sessions
 
 
@@ -216,6 +230,7 @@ async def test_cancelled_write_is_cleanup_only_and_cannot_be_overtaken():
     assert ports.writes == [] and c.status[VIN]['reason'] == 'command_in_flight'
     finish.set(); await asyncio.gather(*list(c.inflight.values()))
     await c.tick()
+    await settle(c, ports)
     assert ports.writes == [10,32] and not c.sessions
 
 
@@ -247,6 +262,7 @@ async def test_pre_submission_denial_keeps_confirmed_setting_and_window_authorit
     assert c.status[VIN]['state'] == 'waiting_for_site_headroom'
     ports.write = original
     await c.stop()
+    await settle(c, ports)
     assert ports.writes == [10, 32] and not c.sessions
 
 

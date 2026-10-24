@@ -29,6 +29,8 @@ Keep enforced gateway connection limits configured. Software coordination uses s
 
 Disabling rate management, leaving a supported window, stopping the optimiser, or restarting Home Assistant ends active control. PowerSync restores only the original current it owns and checks available import headroom before increasing it. An offline vehicle, uncertain command or insufficient capacity can leave restoration pending; the journal survives restart and does not replay a charging target.
 
+After the original current setting is acknowledged, its prospective demand stays reserved until two fresh, aligned vehicle and site readings confirm physical settlement. Battery charging cannot consume that headroom while the car ramps up. Waiting for settlement does not resend the current command.
+
 A manual current change or another controller taking ownership supersedes PowerSync. PowerSync does not overwrite that change or reacquire the same native window. Native Charge on Solar and native-window rate management are mutually exclusive across PowerSync entries for the same vehicle.
 
 ## Home Assistant API

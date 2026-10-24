@@ -3,6 +3,9 @@ import asyncio
 from copy import deepcopy
 import importlib.util
 from pathlib import Path
+import sys
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +14,88 @@ spec = importlib.util.spec_from_file_location('native_budget_probe', path)
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 NOW = 1800000000.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('already_at_baseline', [False, True])
+async def test_restored_setpoint_keeps_battery_headroom_through_ramp_and_restart(already_at_baseline):
+    root = path.parent
+    spec = importlib.util.spec_from_file_location('settlement_controller', root/'optimization/tesla_native_rate.py')
+    rate = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = rate
+    spec.loader.exec_module(rate)
+    spec = importlib.util.spec_from_file_location('settlement_battery', root/'powerwall_local/battery_dispatch.py')
+    battery = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(battery)
+    clock = [NOW]
+    store = Store()
+    budget = m.SharedRateBudget(store, clock=lambda: clock[0])
+    journal = m.EntryRateJournal(budget, 'entry', 'site')
+    record = session(recovering=True)
+    record.update(session='lease', entity_id='number.current', window_id='window', uncertain=False)
+    await journal.async_save({'sessions': {'VIN': record}})
+
+    class Ports:
+        observed = rate.RateObservation('VIN', 'number.current', 'provider:car',
+            32 if already_at_baseline else 10, 5, 32, 230, True, True,
+            NOW, NOW, 'window', NOW-60, NOW+3600, NOW, 2300,
+            1000, 1000, 10000, False, measured_ev_w=2300, measured_ev_at=NOW)
+        writes = []
+        async def read(self, _): return self.observed
+        def enabled_vins(self): return []
+        def permitted(self, *_): return True
+        def superseded(self, *_): return False
+        def release(self, *_): pass
+        async def write(self, observed, amps, authorize):
+            assert authorize()
+            self.writes.append(amps)
+            self.observed = replace(self.observed, current_amps=amps)
+            return rate.RateWriteResult(True, True)
+
+    ports = Ports()
+    controller = rate.NativeRateController(journal, ports, clock=lambda: clock[0])
+    await controller.tick()
+    assert controller.sessions['VIN']['restore_settling']
+    expected_writes = [] if already_at_baseline else [32]
+    assert ports.writes == expected_writes
+
+    # A battery renewal sees the restored 32 A envelope, even though the
+    # acknowledged number entity says 32 A and the car still draws only 10 A.
+    budget.observe('VIN', watts=2300, at=NOW, meter_at=NOW)
+    snapshot = SimpleNamespace(soc=60, grid_status='SystemGridConnected',
+        load_w=3300, solar_w=0, battery_w=-1000, grid_w=4300,
+        backup_reserve_percent=20, grid_charging_enabled=True,
+        raw={'config': {'site_info': {'max_site_meter_power_ac': 10000}}})
+    config = dict(optimization_backup_reserve=.2, optimization_max_charge_w=10000,
+                  optimization_max_grid_import_w=10000)
+    def renewal():
+        return battery.battery_watts('charge', 10000, snapshot,
+            dict(config, native_ev_unobserved_w=budget.unobserved_w('site')),
+            target_basis='grid_import')
+    assert budget.unobserved_w('site') == 5060
+    assert renewal() == -1640
+    await controller.tick()
+    assert ports.writes == expected_writes and controller.sessions
+
+    # Storage recovery cannot mistake the acknowledged setting for settlement.
+    budget = m.SharedRateBudget(store, clock=lambda: clock[0])
+    journal = m.EntryRateJournal(budget, 'entry', 'site')
+    controller = rate.NativeRateController(journal, ports, clock=lambda: clock[0])
+    await controller.tick()
+    assert budget.unobserved_w('site') == 7360
+    budget.observe('VIN', watts=2300, at=NOW, meter_at=NOW)
+    assert renewal() == -1640
+    assert controller.sessions and ports.writes == expected_writes
+
+    for delta in (1, 4):
+        clock[0] = NOW+delta
+        ports.observed = replace(ports.observed, vehicle_at=clock[0],
+            measured_ev_at=clock[0], meter_at=clock[0], measured_ev_w=7360)
+        budget.observe('VIN', watts=7360, at=clock[0], meter_at=clock[0])
+        await controller.tick()
+        assert bool(controller.sessions) == (delta == 1)
+    assert budget.unobserved_w('site') == 0
+    assert ports.writes == expected_writes
 
 
 class Store:

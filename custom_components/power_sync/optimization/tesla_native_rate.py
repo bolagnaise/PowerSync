@@ -201,6 +201,43 @@ class NativeRateController:
         self.status[vin]={"state":reason}
         getattr(self.ports, "changed", lambda: None)()
 
+    async def settle_restoration(self, vin, observed, session):
+        """A restored setpoint is not proof that its prospective draw landed.
+
+        Keep the durable baseline reservation through ramp-up and restart. Two
+        fresh aligned physical reports must settle before battery renewals can
+        reuse this headroom. This state never submits another current command.
+        """
+        now = self.clock()
+        if not session.get("restore_settling"):
+            session.update(restore_settling=True, restore_after=now,
+                           recovering=True, uncertain=False)
+            await self.save()
+        self.status[vin]["reason"] = "waiting_for_physical_restoration"
+        stamps = (observed.vehicle_at, observed.measured_ev_at, observed.meter_at)
+        target_w = session["baseline_amps"] * observed.watts_per_amp
+        physical = observed.measured_ev_w
+        fresh = (observed.current_amps == session["baseline_amps"]
+                 and all(math.isfinite(at) and 0 <= now-at <= 15
+                     and at > session["restore_after"] for at in stamps)
+                 and max(stamps)-min(stamps) <= 5)
+        settled = (math.isfinite(physical) and math.isfinite(target_w)
+                   and ((observed.charging and target_w > 0
+                         and abs(physical-target_w) <= max(250, target_w*0.05))
+                        or (not observed.charging and physical <= 250)))
+        if not fresh or not settled:
+            if session.pop("restore_sample", None) is not None:
+                await self.save()
+            return
+        first = session.get("restore_sample")
+        if (not isinstance(first, list) or len(first) != 3
+                or now-min(first) > 15):
+            session["restore_sample"] = list(stamps)
+            await self.save()
+            return
+        if all(at > before for at, before in zip(stamps, first)) and min(stamps)-min(first) >= 3:
+            await self.finish(vin, session, "restored")
+
     async def restore(self, vin, observed, session):
         self.status[vin]={"state":"restore_pending","baseline_amps":session["baseline_amps"]}
         if observed is None or not self.same_setting(observed,session):
@@ -217,8 +254,11 @@ class NativeRateController:
         if observed.current_amps not in (session["baseline_amps"],attempted,session.get("confirmed_amps")):
             await self.finish(vin,session,"superseded")
             return
+        if session.get("restore_settling"):
+            await self.settle_restoration(vin, observed, session)
+            return
         if observed.current_amps == session["baseline_amps"] and not session.get("uncertain"):
-            await self.finish(vin,session,"restored")
+            await self.settle_restoration(vin, observed, session)
             return
         if session.get("restore_attempts",0) >= MAX_RESTORE_ATTEMPTS:
             return
@@ -246,7 +286,7 @@ class NativeRateController:
             return
         confirmed = confirmed.confirmed if isinstance(confirmed, RateWriteResult) else confirmed
         if confirmed is True and authorize():
-            await self.finish(vin,session,"restored")
+            await self.settle_restoration(vin, observed, session)
 
     async def tick(self):
         async with self.lock:
