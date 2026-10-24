@@ -12793,10 +12793,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             discharge_duration,
                         )
             elif effective_action == "no_discharge":
-                await self._set_scheduled_ev_no_discharge_mode(
+                if await self._set_scheduled_ev_no_discharge_mode(
                     battery,
                     getattr(action, "action", "scheduled_ev_preserve"),
-                )
+                ) is False:
+                    _LOGGER.warning(
+                        "Optimizer: EV no-discharge command failed — keeping "
+                        "previous action marker so the next execution retries"
+                    )
+                    return
             elif effective_action == "idle":
                 if await self._set_idle_hold_mode(
                     battery,

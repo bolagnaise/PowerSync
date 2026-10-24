@@ -438,6 +438,14 @@ Notes:
   only the cost-shifting is lost.
 - `ev_charge_w` appears on schedule slots that carry planned EV power.
 
+### EV home-battery preservation status
+
+From v2.12.1495, a rejected or timed-out EV battery-preservation command keeps
+the previous executed action instead of reporting `no_discharge` as applied.
+PowerSync retries the hold on a later optimizer execution. For FoxESS, this hold
+uses Backup mode; an unreachable inverter still needs its connection restored.
+An accepted command alone does not prove that battery discharge has stopped.
+
 ## App and API fields
 
 Current settings use these keys:

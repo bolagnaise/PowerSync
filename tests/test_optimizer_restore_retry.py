@@ -404,6 +404,51 @@ def _self_consumption_action():
     )
 
 
+@pytest.mark.parametrize("failure", ["false", "exception"])
+@pytest.mark.parametrize("previous_action", ["charge", "self_consumption"])
+def test_failed_foxess_ev_preserve_keeps_action_and_retries(
+    opt_module, failure, previous_action
+):
+    """A rejected hold must not become the displayed executed action."""
+    async def _run():
+        calls = []
+
+        async def set_no_discharge_mode():
+            calls.append(True)
+            if len(calls) == 1:
+                if failure == "exception":
+                    raise TimeoutError("simulated FoxESS Modbus timeout")
+                return False
+            return True
+
+        coordinator = _execute_coordinator(opt_module, SimpleNamespace())
+        coordinator.battery_system = "foxess"
+        coordinator.energy_coordinator = SimpleNamespace(
+            set_no_discharge_mode=set_no_discharge_mode
+        )
+        coordinator._scheduled_ev_preserve_active = lambda: True
+        coordinator._last_executed_action = previous_action
+        coordinator._last_executed_planned_action = previous_action
+
+        await coordinator._execute_optimizer_action(_self_consumption_action())
+        assert calls == [True]
+        assert coordinator._scheduled_ev_no_discharge_active is False
+        assert coordinator._last_executed_action == previous_action
+        assert coordinator._last_executed_planned_action == previous_action
+
+        await coordinator._execute_optimizer_action(_self_consumption_action())
+        assert calls == [True, True]
+        assert coordinator._scheduled_ev_no_discharge_active is True
+        assert coordinator._last_executed_action == "no_discharge"
+        assert coordinator._last_executed_planned_action == "self_consumption"
+
+        # An accepted hold remains active without a duplicate hardware write.
+        await coordinator._execute_optimizer_action(_self_consumption_action())
+        assert calls == [True, True]
+
+    asyncio.run(_run())
+
+
 def test_failed_self_consumption_restore_keeps_marker_and_retries(opt_module):
     async def _run():
         calls = []
