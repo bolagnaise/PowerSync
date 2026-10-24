@@ -8,6 +8,22 @@ The gateway can report a timed-command limit below the combined Powerwall rating
 
 A four-Powerwall 2 site on firmware 26.34.0 reported a 10 kW timed charging ceiling despite its configured 20 kW combined rating. The reporter demonstrated 10 kW charging and 10 kW grid export. This is evidence for that system, not a universal Powerwall 2 limit or a guarantee for other firmware. Check measured battery and grid power; acknowledgement alone does not prove output.
 
+## Native Max charging (under validation)
+
+The next Home Assistant change distinguishes **Max** from a numeric battery-input target. For a manual or automation `force_charge` action, zero or omitted `power_w` requests Tesla-managed maximum charging. An eligible paired system resumes local dispatch, temporarily uses a charging tariff and Time-Based Control, and restores its original tariff, mode and reserve afterwards. No extra enable switch is needed. Max can exceed the optimiser's configured charge planning rate; numeric targets, optimiser commands and Spread Import keep their local wattage controls.
+
+Grid-charging permission, SOC protection, demand protection, Monitoring Mode and other controller ownership still apply. A finite PowerSync import limit permits native Max only when a fresh gateway import limit is no higher. Active or unsettled EV control keeps charging on the local path, where prospective EV demand can be reserved. Max therefore does not bypass a lower software import limit or an EV reservation.
+
+The timed-command ceiling is separate from native charging capability. An owner-authorized PW3 test reached 13.82 kW battery charging with 0.94 kW home load and 14.76 kW grid import, retaining the site's 14.9 kW import limit. The only observed `config.json` changes were mode and reserve; there was no adjustable 10 kW dispatch-limit setting. This demonstrates charging above 10 kW on that site, rather than a universal charge rating.
+
+Native TOU control can take roughly a minute to affect measured power, including after restoring settings. Acknowledgement or restored settings do not prove charging has physically stopped. Keep checking Battery Power and Grid Power. This path relies on Home Assistant for timed restoration; it does not have the short device-side lease used by numeric local dispatch. Its restore journal survives restart, and uncertain cleanup blocks a new control owner. Manual changes are preserved while PowerSync removes the remaining settings it owns.
+
+After restoring settings, PowerSync retains its charging reservation until two fresh, balanced readings show charging has returned to its pre-Max level, allowing a small measurement tolerance. Restart repeats those observations. This prevents an EV controller from reusing capacity while the additional Max charging is still settling.
+
+A local HTTP timeout does not expire a signed gateway command. PowerSync records the actual signature deadline before sending a configuration write and closes that acceptance window before reconciling settings. An uncertain Fleet tariff upload has no equivalent known expiry: it remains pending until its submitted tariff can be reconciled. Elapsed time or an unchanged tariff alone does not authorize a competing controller.
+
+This section describes the unreleased Home Assistant candidate. Cloud Max charging has a separate implementation and release history; its publication does not establish installation or verification of this HA change.
+
 ## Full battery and cached charging plans
 
 From v2.12.1479, the optimiser checks fresh paired-gateway SOC before applying or extending a charge. At the configured charge ceiling, including 100%, it restores normal operation once and suppresses repeated cached charge attempts. It can resume charging when a later fresh reading is below the ceiling. Stale, failed or invalid local readings do not establish that the battery is full. The local command retains its independent safety check.

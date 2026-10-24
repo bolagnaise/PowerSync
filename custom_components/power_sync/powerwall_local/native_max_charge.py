@@ -57,7 +57,7 @@ class NativeMaxChargeSession:
             return {"active": False, "restore_pending": False}
         r = self.record
         return {"active": r["phase"] == "active", "restore_pending": r["phase"] in
-                ("applying", "restoring", "restored"), "phase": r["phase"],
+                ("applying", "restoring", "settling", "restored"), "phase": r["phase"],
                 "expires_at": r["expires_at"], "id": r["id"],
                 "last_error": r.get("last_error")}
 
@@ -70,7 +70,7 @@ class NativeMaxChargeSession:
                 if (not isinstance(data, dict) or data.get("version") != 1
                         or not isinstance(data.get("id"), str) or not data["id"]
                         or not isinstance(data.get("identity"), str) or not data["identity"]
-                        or data.get("phase") not in ("prepared", "applying", "active", "restoring", "restored")
+                        or data.get("phase") not in ("prepared", "applying", "active", "restoring", "settling", "restored")
                         or isinstance(data.get("expires_at"), bool)
                         or not isinstance(data.get("expires_at"), (int, float))
                         or not math.isfinite(data["expires_at"])
@@ -81,6 +81,10 @@ class NativeMaxChargeSession:
                         {"mode_released", "reserve_released", "tariff_released", "mode_disarmed"}
                         or type(value) is not bool for key, value in cleanup.items())):
                     raise NativeMaxChargeError("Native Max cleanup journal is invalid")
+                until = data.get("local_acceptance_until", 0)
+                if (type(until) not in (int, float) or not math.isfinite(until) or until < 0
+                        or data.get("tariff_intent") not in (None, "forcing", "baseline")):
+                    raise NativeMaxChargeError("Native Max mutation journal is invalid")
                 self.record = deepcopy(data)
             self.loaded = True
 
@@ -128,6 +132,32 @@ class NativeMaxChargeSession:
             with suppress(asyncio.CancelledError):
                 await task
 
+    async def _write_intent(self, kind, value=None):
+        """Journal possible remote writes, including acceptance after timeout."""
+        if not self.record or self.record["identity"] != self.adapter.identity:
+            raise NativeMaxChargeError("Native Max mutation ownership changed")
+        if kind == "wait_local":
+            # One extra second avoids treating an inclusive gateway expiry as
+            # closed. A restart uses the same durable, actual signature expiry.
+            while self.record.get("local_acceptance_until", 0) + 1 > self.clock():
+                await asyncio.sleep(min(1, self.record["local_acceptance_until"] + 1 - self.clock()))
+            self.record.pop("local_acceptance_until", None)
+        elif kind == "local":
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise NativeMaxChargeError("Native Max acceptance deadline is invalid")
+            self.record["local_acceptance_until"] = max(value, self.record.get("local_acceptance_until", 0))
+        elif kind == "local_confirmed":
+            self.record.pop("local_acceptance_until", None)
+        elif kind == "tariff":
+            if value not in ("forcing", "baseline"):
+                raise NativeMaxChargeError("Native Max tariff intent is invalid")
+            self.record["tariff_intent"] = value
+        elif kind == "tariff_confirmed":
+            self.record.pop("tariff_intent", None)
+        else:
+            raise NativeMaxChargeError("Unknown Native Max mutation intent")
+        await self._save()
+
     async def start(self, duration_seconds, *, deadline=None):
         if type(duration_seconds) is not int or not 1 <= duration_seconds <= 86400:
             raise ValueError("Native Max duration must be an integer from 1 to 86400 seconds")
@@ -171,7 +201,7 @@ class NativeMaxChargeSession:
                         raise NativeMaxChargeError("Local battery resume was not confirmed")
                     await self._authorize(token, generation)
                     if await self.adapter.apply(deepcopy(baseline),
-                            lambda: self._authorize(token, generation)) is not True:
+                            lambda: self._authorize(token, generation), write_intent=self._write_intent) is not True:
                         raise NativeMaxChargeError("Native Max command readback was not confirmed")
                     await self._authorize(token, generation)
                 self._apply_task = asyncio.create_task(apply())
@@ -182,6 +212,8 @@ class NativeMaxChargeSession:
                         raise NativeMaxChargeError("Native Max application was revoked") from None
                     raise
                 except asyncio.TimeoutError:
+                    if self._apply_task.done() and not self._apply_task.cancelled():
+                        raise NativeMaxChargeError("Native Max provider timed out; cleanup retained") from None
                     raise NativeMaxChargeError("Native Max application deadline expired") from None
                 finally:
                     self._apply_task = None
@@ -217,14 +249,24 @@ class NativeMaxChargeSession:
                 await self._save()
                 restore_fence()
             return restore_fence
-        if self.record["phase"] not in ("prepared", "restored"):
+        if self.record["phase"] not in ("prepared", "settling", "restored"):
             self.record["phase"] = "restoring"
             await self._save()
+            await self._write_intent("wait_local")
             baseline = deepcopy(self.record["baseline"])
             baseline["_cleanup"] = deepcopy(self.record.get("cleanup", {}))
-            if await self.adapter.restore(baseline, before_restore) is not True:
+            baseline["_tariff_intent"] = self.record.get("tariff_intent")
+            if await self.adapter.restore(baseline, before_restore,
+                    write_intent=self._write_intent) is not True:
                 raise NativeMaxChargeError("Native Max restore was not confirmed")
-        # Persist physical cleanup before releasing the shared site barrier.
+            if self.record.get("tariff_intent"):
+                raise NativeMaxChargeError("Native Max tariff submission remains uncertain")
+            self.record["phase"] = "settling"
+            await self._save()
+        if self.record["phase"] == "settling":
+            if await self.adapter.settled(deepcopy(self.record["baseline"])) is not True:
+                raise NativeMaxChargeError("Native Max settings restored; physical settling is pending")
+        # Settings readback alone does not release physical EV capacity.
         # A later failed journal clear must never replay native restore writes.
         self.record["phase"] = "restored"
         await self._save()

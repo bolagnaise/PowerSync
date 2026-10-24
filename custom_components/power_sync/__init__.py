@@ -33566,7 +33566,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not _local_powerwall_generation_current():
                 return
             phase = status.get("phase")
-            active = phase in ("applying", "active", "restoring", "restored")
+            active = phase in ("applying", "active", "restoring", "settling", "restored")
             force_charge_state.update(active=active, native_max_charge=bool(phase),
                 source="user" if _native_max_context["call"] is None else _control_call_source(_native_max_context["call"]),
                 expires_at=datetime.fromtimestamp(status["expires_at"], dt_util.UTC) if phase else None,

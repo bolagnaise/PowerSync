@@ -25,7 +25,7 @@ import struct
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 import aiohttp
 from cryptography.hazmat.primitives import hashes, serialization
@@ -252,7 +252,8 @@ class TEDAPIv1rTransport:
             algorithm=hashes.SHA512(),
         )
 
-    async def post_v1r(self, envelope_bytes: bytes, din: str, *, before_send: Callable[[], None] | None = None) -> TEDAPIResponse:
+    async def post_v1r(self, envelope_bytes: bytes, din: str, *, before_send: Callable[[], None] | None = None,
+                       before_submit: Callable[[int], Awaitable[None]] | None = None) -> TEDAPIResponse:
         """Wrap an envelope in a signed ``RoutableMessage`` and POST it."""
         routable = signed_message_pb2.RoutableMessage()
         routable.to_destination.domain = signed_message_pb2.DOMAIN_ENERGY_DEVICE
@@ -279,8 +280,14 @@ class TEDAPIv1rTransport:
         )
         try:
             async with await self._session() as sess:
+                # Persist the actual signed acceptance deadline before a write
+                # can leave this process. HTTP timeout alone does not expire it.
+                if before_submit is not None:
+                    await before_submit(expires_at)
                 if before_send is not None:
                     before_send()
+                if time.time() >= expires_at:
+                    raise PowerwallLocalError("Signed command expired before submission")
                 async with sess.post(url, data=payload, headers=headers) as resp:
                     http_status = resp.status
                     if http_status != 200:
@@ -424,7 +431,8 @@ class TEDAPIv1rTransport:
         return None
 
     async def write_config(self, din: str, updates: dict[str, Any], *, before_write: Callable[[], None] | None = None,
-                           validate_config: Callable[[dict[str, Any]], bool] | None = None) -> bool:
+                           validate_config: Callable[[dict[str, Any]], bool] | None = None,
+                           before_submit: Callable[[int], Awaitable[None]] | None = None) -> bool:
         """Read-modify-write ``config.json`` via FileStore updateFileRequest.
 
         ``updates`` keys use dotted paths, eg ``site_info.default_real_mode``.
@@ -477,7 +485,8 @@ class TEDAPIv1rTransport:
         update_req.hash = config_hash
 
         write_resp = await self.post_v1r(w_env.SerializeToString(), din,
-            **({"before_send": before_write} if before_write is not None else {}))
+            **({"before_send": before_write} if before_write is not None else {}),
+            **({"before_submit": before_submit} if before_submit is not None else {}))
         if not write_resp.ok or not write_resp.inner_bytes:
             return False
         try:

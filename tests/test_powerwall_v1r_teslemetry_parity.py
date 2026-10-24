@@ -993,6 +993,34 @@ def test_duration_only_and_explicit_zero_dispatch_have_identical_wire_value():
     assert omitted.teg.dispatch_battery_power_request.real_power.power_watts==0
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('journal_fails',[False,True])
+async def test_actual_signed_acceptance_deadline_is_durable_before_http_submission(journal_fails):
+    transport=transport_mod.TEDAPIv1rTransport('192.168.1.10',_private_key_pem(),din='DIN--1')
+    deadlines=[];posted=[]
+    class Session:
+        async def __aenter__(self):return self
+        async def __aexit__(self,*args):pass
+        def post(self,url,*,data,headers):
+            signed=energy_device.signed_message_pb2.RoutableMessage.FromString(data)
+            assert deadlines==[signed.signature_data.rsa_data.expires_at]
+            posted.append(data)
+            raise asyncio.TimeoutError
+    async def acquire():return Session()
+    async def persist(until):
+        await asyncio.sleep(0)
+        if journal_fails:raise OSError('journal unavailable')
+        deadlines.append(until)
+    transport._session=acquire
+    if journal_fails:
+        with pytest.raises(OSError):await transport.post_v1r(b'payload','DIN--1',before_submit=persist)
+        assert not posted
+    else:
+        with pytest.raises(transport_mod.PowerwallUnreachableError):
+            await transport.post_v1r(b'payload','DIN--1',before_submit=persist)
+        assert posted and deadlines
+
+
 @async_test
 async def test_native_max_resume_preserves_fence_until_actual_transport_submission():
     transport=_transport_without_key();submitted=[];allowed=True

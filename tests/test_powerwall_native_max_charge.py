@@ -41,7 +41,7 @@ class Adapter:
     async def resume(self,fence):
         fence();assert self.store.data['phase']=='applying';self.events.append('resume')
         return self.resume_ok
-    async def apply(self,baseline,before_write):
+    async def apply(self,baseline,before_write,*,write_intent):
         fence=await before_write();fence();self.events.append('apply_mode')
         assert self.barrier==self.store.data['id']
         self.current['mode']='autonomous';self.current['reserve']=100
@@ -49,11 +49,12 @@ class Adapter:
         fence=await before_write();fence();self.events.append('apply_tariff')
         self.current['tariff']={'name':'force tariff'}
         return self.apply_ok
-    async def restore(self,baseline,before_write):
+    async def restore(self,baseline,before_write,*,write_intent):
         fence=await before_write();fence();self.events.append('restore')
         assert self.barrier==self.store.data['id']
-        if self.restore_ok:self.current={k:deepcopy(v) for k,v in baseline.items() if k!='_cleanup'}
+        if self.restore_ok:self.current={k:deepcopy(v) for k,v in baseline.items() if not k.startswith('_')}
         return self.restore_ok
+    async def settled(self,baseline): return True
     async def release(self,token):
         assert self.store.data['phase']=='restored'
         self.events.append('release')
@@ -275,3 +276,31 @@ async def test_initial_journal_failure_never_mutates_hardware():
     with pytest.raises(OSError):await s.start(120)
     assert 'resume' not in a.events and 'apply_mode' not in a.events and 'restore' not in a.events
     await s._cancel_watch();store.fail_save=False;await s.stop()
+
+
+@pytest.mark.asyncio
+async def test_restart_closes_durable_acceptance_window_before_baseline_readback():
+    s,a,store,clock=setup();await s.start(120);await s._cancel_watch()
+    await s._write_intent('local',clock.now+.05)
+    original=deepcopy(store.data['baseline']);a.current=deepcopy(original)
+    restored=type(s)(a,store,clock=lambda:clock.now,monotonic=lambda:clock.now,interval=.01)
+    task=asyncio.create_task(restored.recover());await asyncio.sleep(.02)
+    assert not task.done() and a.barrier and 'restore' not in a.events
+    # The abandoned process's signed envelope is accepted after the new
+    # process already observed the original settings, but before expiry.
+    a.current.update(mode='autonomous',reserve=100);clock.now+=2
+    assert await task
+    assert a.current==original and not a.barrier and store.data is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field,value',[('local_acceptance_until',True),('local_acceptance_until',float('inf')),
+                                       ('tariff_intent','unknown')])
+async def test_invalid_mutation_journal_retains_cleanup_barrier(field,value):
+    s,a,store,_=setup();await s.start(120);await s._cancel_watch()
+    store.data[field]=value
+    recovered=type(s)(a,store)
+    with pytest.raises(m.NativeMaxChargeError,match='mutation journal'):
+        await recovered.recover()
+    assert a.barrier
+    await s.stop()

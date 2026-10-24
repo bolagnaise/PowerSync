@@ -24,7 +24,7 @@ def setup(monkeypatch):
         'customer_preferred_export_rule':'pv_only'}}, tariff={'name':'real tariff','code':'REAL'},
         identity='paired', policy=True, grid='SystemGridConnected', soc=50,
         events=[], at=1000., upload_ok=True, local_ok=True,
-        before_validate=None,before_send=None)
+        before_validate=None,before_send=None, battery_w=0, load_w=1000, solar_w=0)
     original = deepcopy(state.config), deepcopy(state.tariff)
     settings = {'optimization_max_charge_w':14700, 'optimization_max_grid_import_w':15000,
                 'optimization_grid_charge_soc_cap':1, 'optimization_allow_grid_charge':True}
@@ -34,12 +34,13 @@ def setup(monkeypatch):
         async def async_save(self,data): self.data=deepcopy(data)
     class Transport:
         async def read_config(self,din): return deepcopy(state.config)
-        async def write_config(self,din,updates,*,before_write,validate_config):
+        async def write_config(self,din,updates,*,before_write,validate_config,before_submit):
             await asyncio.sleep(0)
             forcing=updates.get('default_real_mode')=='autonomous' and updates.get('site_info.backup_reserve_percent')==100
             if forcing and state.before_validate: state.before_validate()
             if not validate_config(deepcopy(state.config)): return False
             if forcing and state.before_send: state.before_send()
+            await before_submit(state.at-2)
             before_write()
             state.events.append(('config',deepcopy(updates)))
             if not state.local_ok: return False
@@ -50,7 +51,9 @@ def setup(monkeypatch):
     class Client:
         _transport=Transport(); _din='gateway'; local_access_enabled=True
         async def get_snapshot(self):
-            return SimpleNamespace(raw={'config':deepcopy(state.config)},soc=state.soc,grid_status=state.grid)
+            return SimpleNamespace(raw={'config':deepcopy(state.config)},soc=state.soc,grid_status=state.grid,
+                battery_w=state.battery_w, load_w=state.load_w, solar_w=state.solar_w,
+                grid_w=state.load_w-state.solar_w-state.battery_w)
         async def resume_battery_operation(self,*,before_write):
             before_write(); state.events.append(('resume',None)); return True
     async def read_tariff(): return deepcopy(state.tariff)
@@ -63,7 +66,7 @@ def setup(monkeypatch):
         current_identity=lambda:state.identity,policy=lambda:state.policy,config=lambda:settings,
         read_tariff=read_tariff,upload=upload,restorable=lambda t:t.get('code')=='REAL',
         forcing_tariff={'name':'Force Charge','code':'UNIQUE_FORCE'},budget=budget,
-        entry_id='battery',site='site',monotonic=lambda:state.at)
+        entry_id='battery',site='site',monotonic=lambda:state.at,settle_interval=0)
     store=Store()
     session=session_module.NativeMaxChargeSession(adapter,store,
         clock=lambda:state.at,monotonic=lambda:state.at)
@@ -210,6 +213,10 @@ async def test_autonomous_baseline_disarm_survives_restart_and_finishes_after_ta
     assert s.state.config['site_info']['backup_reserve_percent']==5
     assert s.store.data['cleanup']['mode_disarmed']
     await s.session._cancel_watch();s.state.upload_ok=True
+    # The failed Fleet attempt was ambiguous. Its late baseline readback,
+    # rather than a retry or elapsed delay, resolves that submitted write.
+    assert s.store.data['tariff_intent']=='baseline'
+    s.state.tariff=deepcopy(s.original[1])
     recovered=type(s.session)(s.adapter,s.store,clock=lambda:s.state.at,monotonic=lambda:s.state.at)
     assert await recovered.recover()
     assert s.state.config['default_real_mode']=='autonomous' and s.state.tariff==s.original[1]
@@ -234,3 +241,91 @@ async def test_cancellation_waits_for_submitted_tariff_before_cleanup_can_releas
     assert await stop
     assert s.state.tariff==s.original[1] and s.state.config==s.original[0]
     assert not s.budget.native_max_claim('site')
+
+
+@pytest.mark.asyncio
+async def test_http_timeout_does_not_expire_signed_config_before_late_application(setup):
+    s=setup; submitted=asyncio.Event(); late=[]
+    original=s.adapter.client._transport.write_config
+    async def timeout(din,updates,*,before_write,validate_config,before_submit):
+        if updates.get('site_info.backup_reserve_percent')!=100:
+            return await original(din,updates,before_write=before_write,
+                                  validate_config=validate_config,before_submit=before_submit)
+        assert validate_config(deepcopy(s.state.config))
+        await before_submit(s.state.at+.05)
+        before_write();submitted.set()
+        async def remotely_delayed():
+            await asyncio.sleep(.02)
+            assert s.store.data['local_acceptance_until']==1000.05
+            assert s.budget.native_max_claim('site')
+            s.state.config['default_real_mode']='autonomous'
+            s.state.config['site_info']['backup_reserve_percent']=100
+            s.state.at+=2
+            late.append('applied after HTTP timeout')
+        asyncio.create_task(remotely_delayed())
+        raise TimeoutError('HTTP completed before envelope acceptance expired')
+    s.adapter.client._transport.write_config=timeout
+    start=asyncio.create_task(s.session.start(120));await submitted.wait();await asyncio.sleep(0)
+    assert s.session.pending and s.budget.native_max_claim('site')
+    with pytest.raises(s.m.NativeMaxChargeError,match='provider timed out'):await start
+    assert late and (s.state.config,s.state.tariff)==s.original
+    assert s.store.data is None and not s.budget.native_max_claim('site')
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_fleet_submission_is_quarantined_until_unique_late_tariff_arrives(setup):
+    s=setup;original=s.adapter.upload
+    async def timeout(tariff,before_write):
+        if tariff.get('code')!='UNIQUE_FORCE':return await original(tariff,before_write)
+        fence=await before_write();fence()
+        raise TimeoutError('Fleet request may be queued remotely')
+    s.adapter.upload=timeout
+    with pytest.raises(s.m.NativeMaxChargeError,match='provider timed out'):await s.session.start(120)
+    await s.session._cancel_watch()
+    assert s.store.data['tariff_intent']=='forcing'
+    assert s.state.tariff==s.original[1] and s.budget.native_max_claim('site')
+    s.state.at+=600
+    with pytest.raises(s.m.NativeMaxChargeError):await s.session.stop()
+    await s.session._cancel_watch()
+    # Neither elapsed time nor an unchanged baseline proves the queued write
+    # cannot arrive. This exact unique tariff proves its one attempt arrived.
+    s.state.tariff=deepcopy(s.adapter.forcing_tariff)
+    assert await s.session.stop()
+    assert s.state.tariff==s.original[1] and s.store.data is None
+
+
+@pytest.mark.asyncio
+async def test_settings_restored_with_high_battery_draw_keeps_ev_barrier_across_restart(setup):
+    s=setup;await s.session.start(120)
+    s.state.battery_w=-13800
+    with pytest.raises(s.m.NativeMaxChargeError,match='physical settling'):
+        await s.session.stop()
+    assert (s.state.config,s.state.tariff)==s.original
+    assert s.store.data['phase']=='settling' and s.budget.native_max_claim('site')
+    await s.session._cancel_watch();events=deepcopy(s.state.events)
+    recovered=type(s.session)(s.adapter,s.store,clock=lambda:s.state.at,monotonic=lambda:s.state.at)
+    with pytest.raises(s.m.NativeMaxChargeError,match='physical settling'):
+        await recovered.recover()
+    await recovered._cancel_watch()
+    assert s.budget.native_max_claim('site') and s.state.events==events
+    s.state.battery_w=0
+    assert await recovered.recover()
+    assert not s.budget.native_max_claim('site') and s.state.events==events
+
+
+@pytest.mark.asyncio
+async def test_one_safe_sample_followed_by_renewed_draw_cannot_release_ev_capacity(setup):
+    s=setup;await s.session.start(120)
+    original=s.adapter.client.get_snapshot;reads=[]
+    async def samples():
+        s.state.battery_w=0 if not reads else -10000
+        reads.append(s.state.battery_w)
+        return await original()
+    s.adapter.client.get_snapshot=samples
+    with pytest.raises(s.m.NativeMaxChargeError,match='physical settling'):
+        await s.session.stop()
+    await s.session._cancel_watch()
+    assert reads==[0,-10000] and s.store.data['phase']=='settling'
+    assert s.budget.native_max_claim('site')
+    s.adapter.client.get_snapshot=original;s.state.battery_w=0
+    assert await s.session.stop()

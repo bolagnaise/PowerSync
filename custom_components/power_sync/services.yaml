@@ -138,7 +138,7 @@ force_discharge:
 
 force_charge:
   name: Force Charge
-  description: Force battery charging for a timed window. Paired Powerwalls use local power control first, with existing Tesla controls as a fallback.
+  description: Force battery charging for a timed window. Paired Powerwalls use local control for numeric targets; Max can use Tesla-managed charging when the gateway can enforce the site's import limit.
   fields:
     duration:
       name: Duration
@@ -183,7 +183,7 @@ force_charge:
               value: "240"
     power_w:
       name: Power (W)
-      description: Target power in watts. 0 or omitted means use the inverter's rated/BMS max.
+      description: Battery-input target in watts. For paired Powerwalls, 0 or omitted requests Tesla-managed Max charging and may exceed the optimiser's charge planning rate. Numeric targets retain local wattage control. Grid-charging permission, SOC and site limits still apply.
       required: false
       default: 0
       example: 5000

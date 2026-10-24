@@ -28,7 +28,8 @@ class NativeMaxChargeAdapter:
 
     def __init__(self, *, client, identity, current_identity, policy, config,
                  read_tariff, upload, restorable, forcing_tariff,
-                 budget, entry_id, site, tariff_matches=None, monotonic=time.monotonic):
+                 budget, entry_id, site, tariff_matches=None, monotonic=time.monotonic,
+                 settle_interval=5):
         self.client, self.identity = client, identity
         self.current_identity, self.policy, self.config = current_identity, policy, config
         self.read_tariff, self.upload, self.restorable = read_tariff, upload, restorable
@@ -39,6 +40,7 @@ class NativeMaxChargeAdapter:
         self.token = None
         self._snapshot = None
         self._observed_at = None
+        self.settle_interval = settle_interval
 
     def _matches(self, expected, observed):
         # A same-priced foreign tariff is not this session's restore owner.
@@ -137,17 +139,50 @@ class NativeMaxChargeAdapter:
     async def capture(self):
         if not self.authority():
             raise NativeMaxChargeError("Native Max ownership is unavailable")
-        config, tariff = await asyncio.gather(
-            self.client._transport.read_config(self.client._din), self.read_tariff())
+        started = self.monotonic()
+        snapshot, tariff = await asyncio.gather(self.client.get_snapshot(), self.read_tariff())
+        config = snapshot.raw.get("config")
         info = config.get("site_info") if isinstance(config, dict) else None
         mode = config.get("default_real_mode") if isinstance(config, dict) else None
         reserve = info.get("backup_reserve_percent") if isinstance(info, dict) else None
         if (mode not in ("self_consumption", "autonomous", "backup")
                 or type(reserve) not in (int, float) or not math.isfinite(reserve)
-                or not 0 <= reserve <= 100 or not self.restorable(tariff)):
+                or not 0 <= reserve <= 100 or not self.restorable(tariff)
+                or not self._physical_sample(snapshot) or self.monotonic() - started > 5):
             raise NativeMaxChargeError("Exact native Max restoration baseline is unavailable")
         return {"mode": mode, "reserve": reserve, "tariff": deepcopy(tariff),
-                "forcing_tariff": deepcopy(self.forcing_tariff)}
+                "forcing_tariff": deepcopy(self.forcing_tariff),
+                "settle_charge_w": max(0, -snapshot.battery_w)}
+
+    @staticmethod
+    def _physical_sample(snapshot):
+        values = [getattr(snapshot, key, None) for key in ("battery_w", "grid_w", "load_w", "solar_w")]
+        if any(type(v) not in (int, float) or not math.isfinite(v) for v in values):
+            return False
+        battery, grid, load, solar = values
+        return (snapshot.grid_status == "SystemGridConnected" and load >= 0 and solar >= 0
+                and abs(grid + battery + solar - load) <= max(250, .05 * max(abs(grid), abs(battery), load)))
+
+    async def settled(self, baseline):
+        """Require two fresh, balanced physical samples before freeing EV capacity.
+
+        Native TOU charging can persist after settings readback. Recovery starts
+        these observations again; a previous process's sample is not reused.
+        """
+        original = baseline.get("settle_charge_w", 0)
+        if type(original) not in (int, float) or not math.isfinite(original) or original < 0:
+            return False
+        for index in range(2):
+            if index:
+                await asyncio.sleep(self.settle_interval)
+            if self.current_identity() != self.identity:
+                return False
+            started = self.monotonic()
+            snapshot = await self.client.get_snapshot()
+            if (self.monotonic() - started > 5 or not self._physical_sample(snapshot)
+                    or -snapshot.battery_w > original + 250):
+                return False
+        return True
 
     async def claim(self, token, deadline):
         self.token = token
@@ -163,7 +198,7 @@ class NativeMaxChargeAdapter:
         fence()
         return await self._mutate(self.client.resume_battery_operation(before_write=fence))
 
-    async def _write_config(self, mode, reserve, before_write, baseline):
+    async def _write_config(self, mode, reserve, before_write, baseline, write_intent):
         fence = await before_write()
         fence()
         checked_config = None
@@ -181,20 +216,35 @@ class NativeMaxChargeAdapter:
                 raise NativeMaxChargeError("Native Max policy changed before config submission")
         if not await self._mutate(self.client._transport.write_config(self.client._din,
                 {"default_real_mode": mode, "site_info.backup_reserve_percent": reserve},
-                before_write=checked_fence, validate_config=owned)):
+                before_write=checked_fence, validate_config=owned,
+                before_submit=lambda until: write_intent("local", until))):
             return False
         current = await self.client._transport.read_config(self.client._din)
-        return (isinstance(current, dict) and current.get("default_real_mode") == mode
+        confirmed = (isinstance(current, dict) and current.get("default_real_mode") == mode
                 and isinstance(current.get("site_info"), dict)
                 and current["site_info"].get("backup_reserve_percent") == reserve)
+        if confirmed:
+            await write_intent("local_confirmed")
+        return confirmed
 
-    async def apply(self, baseline, before_write):
+    async def _upload(self, tariff, target, before_write, write_intent):
+        async def submitted():
+            await before_write()
+            await write_intent("tariff", target)
+            # Storage must not extend a policy/identity grant.
+            return await before_write()
+        confirmed = await self._mutate(self.upload(tariff, submitted))
+        if confirmed is True:
+            await write_intent("tariff_confirmed")
+        return confirmed
+
+    async def apply(self, baseline, before_write, *, write_intent):
         before_write = self._owned_before(baseline, before_write)
-        if not await self._mutate(self.upload(deepcopy(baseline["forcing_tariff"]), before_write)):
+        if not await self._upload(deepcopy(baseline["forcing_tariff"]), "forcing", before_write, write_intent):
             return False
-        return await self._write_config("autonomous", 100, before_write, baseline)
+        return await self._write_config("autonomous", 100, before_write, baseline, write_intent)
 
-    async def restore(self, baseline, before_write):
+    async def restore(self, baseline, before_write, *, write_intent):
         """Release each owned field independently; retain uncertain cleanup.
 
         A foreign tariff/mode/reserve never authorizes overwriting that field
@@ -202,6 +252,7 @@ class NativeMaxChargeAdapter:
         Cleanup progress is part of the session's existing durable journal.
         """
         progress = deepcopy(baseline.get("_cleanup", {}))
+        pending_tariff = baseline.get("_tariff_intent")
 
         async def checkpoint(**changes):
             progress.update(changes)
@@ -225,9 +276,21 @@ class NativeMaxChargeAdapter:
             fence = await cleanup_fence()
             def owned(config):
                 return value(config, field) == expected
-            written = await self._mutate(self.client._transport.write_config(self.client._din,
-                {field: target}, before_write=fence, validate_config=owned))
+            try:
+                written = await self._mutate(self.client._transport.write_config(self.client._din,
+                    {field: target}, before_write=fence, validate_config=owned,
+                    before_submit=lambda until: write_intent("local", until)))
+            except BaseException:
+                # No subsequent read/checkpoint may outrun a signed full-config
+                # envelope which can still be accepted after the HTTP timeout.
+                await write_intent("wait_local")
+                raise
             observed = await self.client._transport.read_config(self.client._din)
+            if written and isinstance(observed, dict) and value(observed, field) == target:
+                await write_intent("local_confirmed")
+            else:
+                await write_intent("wait_local")
+                observed = await self.client._transport.read_config(self.client._din)
             if not isinstance(observed, dict):
                 return False, None
             return written and value(observed, field) == target, value(observed, field)
@@ -263,7 +326,14 @@ class NativeMaxChargeAdapter:
             tariff = await self.read_tariff()
         except Exception:
             tariff = None
-        if isinstance(tariff, dict) and tariff and not self._matches(baseline["forcing_tariff"], tariff):
+        if pending_tariff:
+            target = baseline["forcing_tariff"] if pending_tariff == "forcing" else baseline["tariff"]
+            if self._matches(target, tariff):
+                # A unique late forcing tariff, or the baseline after an owned
+                # restoration, proves this one submitted attempt arrived.
+                await write_intent("tariff_confirmed")
+                pending_tariff = None
+        if not pending_tariff and isinstance(tariff, dict) and tariff and not self._matches(baseline["forcing_tariff"], tariff):
             await checkpoint(tariff_released=True)
 
         if not progress.get("mode_released"):
@@ -293,24 +363,24 @@ class NativeMaxChargeAdapter:
                 except Exception:
                     pass
 
-        if not progress.get("tariff_released"):
+        if not progress.get("tariff_released") and not pending_tariff:
             async def before_tariff_restore():
                 observed = await self.read_tariff()
                 if isinstance(observed, dict) and observed and not self._matches(baseline["forcing_tariff"], observed):
                     raise NativeMaxChargeError("Native Max tariff changed before restore")
                 return await cleanup_fence()
             try:
-                await self._mutate(self.upload(deepcopy(baseline["tariff"]), before_tariff_restore))
+                await self._upload(deepcopy(baseline["tariff"]), "baseline", before_tariff_restore, write_intent)
             except Exception:
                 pass
             try:
                 observed = await self.read_tariff()
-                if not self._matches(baseline["forcing_tariff"], observed):
+                if isinstance(observed, dict) and observed and not self._matches(baseline["forcing_tariff"], observed):
                     await checkpoint(tariff_released=True)
             except Exception:
                 pass
 
         if progress.get("mode_disarmed") and progress.get("tariff_released"):
             await release_field("mode_released", "default_real_mode", baseline["mode"], "self_consumption")
-        return all(progress.get(field) for field in
+        return not pending_tariff and all(progress.get(field) for field in
                    ("mode_released", "reserve_released", "tariff_released"))
