@@ -298,6 +298,12 @@ class NativeMaxChargeSession:
         if self.record["phase"] == "settling":
             if await self.adapter.settled(deepcopy(self.record["baseline"])) is not True:
                 raise NativeMaxChargeError("Native Max settings restored; physical settling is pending")
+        restore_limits = getattr(self.adapter, "restore_limits", None)
+        if self.record["phase"] == "settling" and restore_limits is not None:
+            await self._write_intent("wait_local")
+            if await restore_limits(deepcopy(self.record["baseline"]), before_restore,
+                    write_intent=self._write_intent) is not True:
+                raise NativeMaxChargeError("Native Max site limit restore was not confirmed")
         # Settings readback alone does not release physical EV capacity.
         # A later failed journal clear must never replay native restore writes.
         self.record["phase"] = "restored"
@@ -314,6 +320,26 @@ class NativeMaxChargeSession:
             raise
         finally:
             self._clearing = False
+
+    async def shorten(self, deadline):
+        """Persist an earlier safety deadline without replaying a force command."""
+        if type(deadline) not in (int, float) or not math.isfinite(deadline):
+            raise ValueError("Native Max deadline is invalid")
+        async with self._lock:
+            if not self.record or self.record["phase"] != "active":
+                raise NativeMaxChargeError("Native Max session is not active")
+            if deadline < self.record["expires_at"]:
+                self.record["expires_at"] = deadline
+                try:
+                    await self._save()
+                except BaseException:
+                    self.revoke()
+                    raise
+            if self.clock() >= self.record["expires_at"]:
+                self.revoke()
+                await self._restore_locked()
+                raise NativeMaxChargeError("Native Max safety deadline expired")
+            return self.status()
 
     def revoke(self):
         """Revoke before a caller waits for the shared site route lock."""

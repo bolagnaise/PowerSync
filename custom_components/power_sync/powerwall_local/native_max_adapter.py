@@ -1,7 +1,8 @@
 """Provider boundary for deliberate native Max, with one restore baseline.
 
-This actuator leaves grid-charge permission, export rules and hardware limits
-unchanged. A software battery-input ceiling is not promised by native Max.
+This actuator preserves grid-charge permission and never raises site limits.
+A stricter software export cap is applied natively before tariff control.
+A software battery-input ceiling is not promised by native Max.
 Every local write and tariff retry must use its immediately acquired fence.
 """
 from __future__ import annotations
@@ -45,6 +46,7 @@ class NativeMaxChargeAdapter:
         self.startup_kick = False
         self.planning_request = False
         self.clock = clock
+        self._export_limit_ready = False
 
     def _matches(self, expected, observed):
         # A same-priced foreign tariff is not this session's restore owner.
@@ -84,7 +86,7 @@ class NativeMaxChargeAdapter:
                 if self.current_identity() != self.identity:
                     raise NativeMaxChargeError("Native Max paired identity changed")
                 fence()
-                if not self._forcing_permitted():
+                if not self._forcing_permitted(require_export_limit=True):
                     raise NativeMaxChargeError("Native Max forcing policy changed")
             checked()
             return checked
@@ -98,7 +100,7 @@ class NativeMaxChargeAdapter:
         except (ValueError, TypeError):
             return False
 
-    def _forcing_permitted(self, native_config=None):
+    def _forcing_permitted(self, native_config=None, *, require_export_limit=False):
         snapshot = self._snapshot
         if snapshot is None or self._observed_at is None or not self.authority():
             return False
@@ -111,9 +113,7 @@ class NativeMaxChargeAdapter:
             config = dict(self.config())
             if self.planning_request:
                 capacity = config.get("powerwall_native_capacity_w")
-                maximum = config.get(f"optimization_max_{self.direction}_w", 5000)
-                if (type(capacity) not in (int, float) or not math.isfinite(capacity) or capacity <= 0
-                        or type(maximum) not in (int, float) or not math.isfinite(maximum) or maximum < capacity):
+                if type(capacity) not in (int, float) or not math.isfinite(capacity) or capacity <= 0:
                     return False
             raw = snapshot.raw.get("config") if native_config is None else native_config
             info = raw.get("site_info") if isinstance(raw, dict) else None
@@ -128,7 +128,8 @@ class NativeMaxChargeAdapter:
                 configured = config.get("optimization_max_grid_export_w")
                 if configured is not None and (type(configured) not in (int, float)
                         or not math.isfinite(configured) or configured <= 0
-                        or exported is None or exported > configured):
+                        or exported is None
+                        or ((self._export_limit_ready or require_export_limit) and exported > configured)):
                     return False
                 if info.get("customer_preferred_export_rule") not in ("battery_ok", "pv_only", "never"):
                     return False
@@ -162,6 +163,7 @@ class NativeMaxChargeAdapter:
             return False
 
     async def capture(self):
+        self._export_limit_ready = False
         if not self.authority():
             raise NativeMaxChargeError("Native Max ownership is unavailable")
         started = self.monotonic()
@@ -186,7 +188,11 @@ class NativeMaxChargeAdapter:
             def percent(value):
                 value = float(value)
                 return value * 100 if value <= 1 else value
-            baseline.update(export_rule=export, settle_discharge_w=max(0, snapshot.battery_w),
+            original_limit = info.get("min_site_meter_power_ac")
+            configured_limit = config.get("optimization_max_grid_export_w")
+            force_limit = original_limit if configured_limit is None else max(original_limit, -configured_limit / 1000)
+            baseline.update(export_limit=original_limit, force_export_limit=force_limit,
+                export_rule=export, settle_discharge_w=max(0, snapshot.battery_w),
                 force_reserve=max(reserve, percent(config.get("optimization_backup_reserve", .2)),
                                   percent(config.get("hardware_backup_reserve", 0))))
         return baseline
@@ -231,8 +237,10 @@ class NativeMaxChargeAdapter:
 
     async def release(self, token):
         result = await self.budget.release_native_max(self.entry_id, self.site, token)
-        if result and self.token == token:
-            self.token = None
+        if result:
+            self._export_limit_ready = False
+            if self.token == token:
+                self.token = None
         return result
 
     async def kick(self, baseline, before_write, *, deadline, write_intent):
@@ -317,7 +325,77 @@ class NativeMaxChargeAdapter:
             await write_intent("tariff_confirmed")
         return confirmed
 
+    async def _prepare_export_limit(self, baseline, before_write, write_intent):
+        """Tighten, never raise, the fresh native cap before a forcing tariff."""
+        if self.direction != "discharge":
+            return True
+        original, target = baseline["export_limit"], baseline["force_export_limit"]
+        def owned(config):
+            info = config.get("site_info", {}) if isinstance(config, dict) else {}
+            observed = info.get("min_site_meter_power_ac")
+            configured = self.config().get("optimization_max_grid_export_w")
+            return (observed in (original, target) and self._forcing_permitted(config)
+                    and (configured is None or -target * 1000 <= configured))
+        if target != original:
+            fence = await before_write()
+            checked = None
+            def validate(config):
+                nonlocal checked
+                checked = config
+                return owned(config)
+            def submit():
+                fence()
+                if checked is None or not owned(checked):
+                    raise NativeMaxChargeError("Native export limit policy changed")
+            if not await self._mutate(self.client._transport.write_config(self.client._din,
+                    {"site_info.min_site_meter_power_ac": target}, before_write=submit,
+                    validate_config=validate,
+                    before_submit=lambda until: write_intent("local", until))):
+                return False
+        current = await self.client._transport.read_config(self.client._din)
+        if not owned(current) or not self._forcing_permitted(current, require_export_limit=True):
+            return False
+        await write_intent("local_confirmed")
+        self._export_limit_ready = True
+        return True
+
+    async def restore_limits(self, baseline, before_write, *, write_intent):
+        """Keep the tightened cap through physical settling; restore only ours."""
+        if baseline.get("direction") != "discharge" or "export_limit" not in baseline:
+            return True  # Journals from before temporary native limits.
+        original, target = baseline["export_limit"], baseline["force_export_limit"]
+        if original == target:
+            return True
+        await write_intent("wait_local")
+        field = "min_site_meter_power_ac"
+        if self.current_identity() != self.identity or not self.client.local_access_enabled:
+            return False
+        current = await self.client._transport.read_config(self.client._din)
+        observed = current.get("site_info", {}).get(field) if isinstance(current, dict) else None
+        if observed is None:
+            return False
+        if observed != target:
+            return True  # Already restored or edited externally.
+        fence = await before_write()
+        def checked():
+            if self.current_identity() != self.identity or not self.client.local_access_enabled:
+                raise NativeMaxChargeError("Native export limit cleanup identity changed")
+            fence()
+        if not await self._mutate(self.client._transport.write_config(self.client._din,
+                {"site_info." + field: original}, before_write=checked,
+                validate_config=lambda config: config.get("site_info", {}).get(field) == target,
+                before_submit=lambda until: write_intent("local", until))):
+            return False
+        current = await self.client._transport.read_config(self.client._din)
+        observed = current.get("site_info", {}).get(field) if isinstance(current, dict) else None
+        if observed != original:
+            return False
+        await write_intent("local_confirmed")
+        return True
+
     async def apply(self, baseline, before_write, *, write_intent):
+        if not await self._prepare_export_limit(baseline, before_write, write_intent):
+            return False
         before_write = self._owned_before(baseline, before_write)
         if not await self._upload(deepcopy(baseline["forcing_tariff"]), "forcing", before_write, write_intent):
             return False

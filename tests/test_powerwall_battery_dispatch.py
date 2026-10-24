@@ -726,7 +726,7 @@ def test_local_target_capability_honors_lp_and_static_limits_without_changing_cl
     import ast
     tree=ast.parse((ROOT/'custom_components/power_sync/optimization/coordinator.py').read_text())
     cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='OptimizationCoordinator')
-    names={'_supports_local_powerwall_target_power','_supports_target_export_power','_supports_target_charge_power','_export_command_power_w'}
+    names={'_supports_local_powerwall_target_power','_supports_target_export_power','_supports_target_charge_power','_export_command_power_w','_native_powerwall_safety_power_w'}
     nodes=[n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name in names]
     class StripImports(ast.NodeTransformer):
         def visit_ImportFrom(self,node): return ast.copy_location(ast.Pass(),node)
@@ -1385,7 +1385,7 @@ async def test_duplicate_optimizer_native_action_retains_owner_and_original_dead
     expiry=__import__('time').time()+120
     native=SimpleNamespace(pending=True,record={'phase':phase,'expires_at':expiry},
         adapter=SimpleNamespace(direction='charge',guard=AsyncMock(return_value=True)),
-        start=AsyncMock(),stop=AsyncMock())
+        start=AsyncMock(),stop=AsyncMock(),shorten=AsyncMock(return_value={'expires_at':expiry}))
     runtime['powerwall_native_max_charge']=native
     ns.update(_native_max_context={'call':call(source='optimizer'),'targetless':True},
               _get_tesla_site_configs=lambda *_:[('site','token','provider')])
@@ -1429,3 +1429,47 @@ async def test_stop_revokes_native_application_before_waiting_for_site_route_loc
         assert events==['revoke'] and not task.done()
     assert await task
     native.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('direction',['charge','discharge'])
+@pytest.mark.parametrize('source',['user','automation','optimizer'])
+async def test_large_site_max_denial_never_silently_submits_capped_local_command(direction,source):
+    ns,c,client,_=load_routing()
+    runtime=ns['_local_powerwall_runtime']
+    runtime['tesla_coordinator']=SimpleNamespace(_site_info_cache={'nameplate_power':21040},
+        _site_info_last_fetch=__import__('time').monotonic())
+    native=SimpleNamespace(pending=False,adapter=SimpleNamespace(guard=AsyncMock(return_value=False)),start=AsyncMock())
+    ns.update(_native_max_context={},_get_native_max_charge=AsyncMock(return_value=native),
+        _get_tesla_site_configs=lambda *_:[('site','token','provider')])
+    with pytest.raises(RuntimeError,match='Max was not started'):
+        await ns['_try_local_powerwall_force'](direction,call(source=source,power_w=0),15,21000)
+    native.start.assert_not_called()
+    client.dispatch_battery_power.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_repeated_optimizer_request_persists_shorter_native_deadline():
+    ns,c,client,_=load_routing()
+    runtime=ns['_local_powerwall_runtime'];now=__import__('time').time()
+    runtime.update(battery_route_requested_at=now,tesla_coordinator=SimpleNamespace(
+        _site_info_cache={'nameplate_power':21040},_site_info_last_fetch=__import__('time').monotonic()))
+    native=SimpleNamespace(pending=True,record={'phase':'active','expires_at':now+3600},
+        adapter=SimpleNamespace(direction='discharge',guard=AsyncMock(return_value=True)),
+        start=AsyncMock(),stop=AsyncMock(),shorten=AsyncMock(return_value={'expires_at':now+480}))
+    runtime['powerwall_native_max_charge']=native
+    ns.update(_native_max_context={'targetless':True},_get_tesla_site_configs=lambda *_:[('site','token','provider')])
+    result=await ns['_try_local_powerwall_force']('discharge',call(source='optimizer',power_w=0),8,21000)
+    native.shorten.assert_awaited_once_with(now+480)
+    assert result['expires_at']==now+480
+    native.start.assert_not_called();client.dispatch_battery_power.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_large_site_max_without_tariff_provider_never_uses_local_fallback():
+    ns,c,client,_=load_routing()
+    ns['_local_powerwall_runtime']['tesla_coordinator']=SimpleNamespace(
+        _site_info_cache={'nameplate_power':21040},_site_info_last_fetch=__import__('time').monotonic())
+    with pytest.raises(RuntimeError,match='provider is unavailable'):
+        await ns['_try_local_powerwall_force']('discharge',call(source='user',power_w=0),15,21000)
+    client.dispatch_battery_power.assert_not_called()

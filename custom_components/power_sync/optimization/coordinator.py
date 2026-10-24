@@ -2613,6 +2613,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             command_w = float(
                 getattr(self._config, "max_charge_w", 0.0) or 0.0
             )
+            command_w = self._native_powerwall_safety_power_w(command_w)
             requested_w = max(
                 0.0,
                 float(getattr(action, "power_w", 0.0) or 0.0),
@@ -10301,9 +10302,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return the active force state, including optimizer-owned hardware force."""
         return self._get_active_force_state()
 
+    def _native_powerwall_safety_power_w(self, configured_w: float) -> float:
+        """A planning rate is not an enforceable native tariff power ceiling."""
+        if self.battery_system == "tesla" and getattr(self, "_powerwall_plan_native_tariff", False):
+            from ..powerwall_local.hybrid_policy import native_capacity_w, routing_site_info
+            reported = native_capacity_w(routing_site_info(getattr(self, "energy_coordinator", None)))
+            if reported is not None:
+                return max(configured_w, reported)
+        return configured_w
+
     def _export_command_power_w(self, action: Any) -> float:
         """Return the hardware export command power for an optimizer action."""
-        command_w = float(self._config.max_discharge_w)
+        command_w = self._native_powerwall_safety_power_w(float(self._config.max_discharge_w))
         if self._supports_target_export_power():
             if self.battery_system == "foxess":
                 # FoxESS remote-discharge mode targets the site grid meter, not

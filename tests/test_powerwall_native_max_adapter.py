@@ -473,8 +473,140 @@ async def test_restart_releases_uncertain_startup_kick_without_replaying_it(setu
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('direction',['charge','discharge'])
-async def test_optimizer_native_force_cannot_ignore_a_lower_configured_power_bound(setup,direction):
+async def test_optimizer_native_force_accepts_planning_rate_below_native_rating(setup,direction):
     s=setup;s.adapter.direction=direction;s.adapter.planning_request=True
     s.settings.update(powerwall_native_capacity_w=20000,optimization_max_discharge_w=15000)
-    with pytest.raises(s.m.NativeMaxChargeError,match='policy denied'):await s.session.start(120)
-    assert not s.state.events and not s.session.pending
+    assert (await s.session.start(120))['active']
+    assert any(event[0]=='tariff' for event in s.state.events)
+    assert await s.session.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('optimizer', [False, True])
+async def test_reported_large_site_tightens_export_before_tariff_and_restores(setup, optimizer):
+    s=setup;s.adapter.direction='discharge';s.adapter.planning_request=optimizer
+    s.settings.update(powerwall_native_capacity_w=21040, optimization_max_discharge_w=21000,
+                      optimization_max_grid_export_w=10000, optimization_backup_reserve=.66)
+    s.state.soc=72;s.state.config['site_info']['min_site_meter_power_ac']=-10.1
+    original=deepcopy(s.state.config)
+    upload=s.adapter.upload
+    async def checked_upload(tariff,before_write):
+        if tariff.get('code')=='UNIQUE_FORCE':
+            assert s.state.config['site_info']['min_site_meter_power_ac']==-10
+        return await upload(tariff,before_write)
+    s.adapter.upload=checked_upload
+    assert (await s.session.start(480))['active']
+    assert s.store.data['baseline']['export_limit']==-10.1
+    assert s.state.config['site_info']['backup_reserve_percent']==66
+    assert s.settings['optimization_max_grid_export_w']==10000
+    assert s.state.config['site_info']['min_site_meter_power_ac']==-10
+    assert await s.session.stop()
+    assert s.state.config==original
+
+
+@pytest.mark.asyncio
+async def test_export_bound_unconfirmed_never_uploads_forcing_tariff(setup):
+    s=setup;s.adapter.direction='discharge'
+    s.settings.update(optimization_max_discharge_w=21000,optimization_max_grid_export_w=10000)
+    s.state.config['site_info']['min_site_meter_power_ac']=-10.1
+    write=s.adapter.client._transport.write_config
+    async def ignored_limit(din,updates,**kwargs):
+        result=await write(din,updates,**kwargs)
+        if 'site_info.min_site_meter_power_ac' in updates:
+            s.state.config['site_info']['min_site_meter_power_ac']=-10.1
+        return result
+    s.adapter.client._transport.write_config=ignored_limit
+    with pytest.raises(s.m.NativeMaxChargeError):await s.session.start(120)
+    assert not any(e[0]=='tariff' for e in s.state.events)
+    assert not s.session.pending
+
+
+@pytest.mark.asyncio
+async def test_export_limit_retained_through_settling_and_restart(setup):
+    s=setup;s.adapter.direction='discharge'
+    s.settings.update(optimization_max_discharge_w=21000,optimization_max_grid_export_w=10000)
+    s.state.config['site_info']['min_site_meter_power_ac']=-10.1
+    await s.session.start(120)
+    s.state.battery_w=5000
+    with pytest.raises(s.m.NativeMaxChargeError,match='settling'):await s.session.stop()
+    await s.session._cancel_watch()
+    assert s.store.data['phase']=='settling'
+    assert s.state.config['site_info']['min_site_meter_power_ac']==-10
+    s.state.battery_w=900
+    recovered=type(s.session)(s.adapter,s.store,clock=lambda:s.state.at,monotonic=lambda:s.state.at)
+    assert await recovered.recover()
+    assert s.state.config['site_info']['min_site_meter_power_ac']==-10.1
+
+
+@pytest.mark.asyncio
+async def test_export_limit_changed_externally_is_preserved_on_restore(setup):
+    s=setup;s.adapter.direction='discharge'
+    s.settings.update(optimization_max_discharge_w=21000,optimization_max_grid_export_w=10000)
+    s.state.config['site_info']['min_site_meter_power_ac']=-10.1
+    await s.session.start(120)
+    s.state.config['site_info']['min_site_meter_power_ac']=-8
+    assert await s.session.stop()
+    assert s.state.config['site_info']['min_site_meter_power_ac']==-8
+
+
+@pytest.mark.asyncio
+async def test_second_native_max_session_can_reacquire_after_export_limit_restore(setup):
+    s=setup;s.adapter.direction='discharge'
+    s.settings.update(optimization_max_discharge_w=21000,optimization_max_grid_export_w=10000)
+    s.state.config['site_info']['min_site_meter_power_ac']=-10.1
+    for _ in range(2):
+        assert (await s.session.start(120))['active']
+        assert s.state.config['site_info']['min_site_meter_power_ac']==-10
+        assert await s.session.stop()
+        assert s.state.config['site_info']['min_site_meter_power_ac']==-10.1
+
+
+@pytest.mark.asyncio
+async def test_native_export_cap_raised_during_session_revokes_forcing(setup):
+    s=setup;s.adapter.direction='discharge'
+    s.settings.update(optimization_max_discharge_w=21000,optimization_max_grid_export_w=10000)
+    s.state.config['site_info']['min_site_meter_power_ac']=-10.1
+    await s.session.start(120)
+    s.state.config['site_info']['min_site_meter_power_ac']=-12
+    assert not await s.adapter.guard()
+    assert await s.session.stop()
+    assert s.state.config['site_info']['min_site_meter_power_ac']==-12
+
+
+@pytest.mark.asyncio
+async def test_failed_native_limit_restore_retains_cleanup_for_retry(setup):
+    s=setup;s.adapter.direction='discharge'
+    s.settings.update(optimization_max_discharge_w=21000,optimization_max_grid_export_w=10000)
+    s.state.config['site_info']['min_site_meter_power_ac']=-10.1
+    await s.session.start(120)
+    write=s.adapter.client._transport.write_config
+    async def fail_restore(din,updates,**kwargs):
+        if updates.get('site_info.min_site_meter_power_ac')==-10.1:
+            return False
+        return await write(din,updates,**kwargs)
+    s.adapter.client._transport.write_config=fail_restore
+    with pytest.raises(s.m.NativeMaxChargeError,match='site limit restore'):
+        await s.session.stop()
+    await s.session._cancel_watch()
+    assert s.store.data['phase']=='settling' and s.budget.native_max_claim('site')
+    assert s.state.config['site_info']['min_site_meter_power_ac']==-10
+    s.adapter.client._transport.write_config=write
+    assert await s.session.stop()
+    assert s.state.config['site_info']['min_site_meter_power_ac']==-10.1
+
+
+@pytest.mark.asyncio
+async def test_export_limit_edit_before_acquisition_write_blocks_forcing(setup):
+    s=setup;s.adapter.direction='discharge'
+    s.settings.update(optimization_max_discharge_w=21000,optimization_max_grid_export_w=10000)
+    s.state.config['site_info']['min_site_meter_power_ac']=-10.1
+    write=s.adapter.client._transport.write_config
+    async def changed(din,updates,**kwargs):
+        if 'site_info.min_site_meter_power_ac' in updates:
+            s.state.config['site_info']['min_site_meter_power_ac']=-8
+        return await write(din,updates,**kwargs)
+    s.adapter.client._transport.write_config=changed
+    with pytest.raises(s.m.NativeMaxChargeError):await s.session.start(120)
+    assert not any(e[0]=='tariff' for e in s.state.events)
+    assert s.state.config['site_info']['min_site_meter_power_ac']==-8
+    assert not s.session.pending

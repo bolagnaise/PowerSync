@@ -33638,8 +33638,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 or (not targetless and (type(raw_power) not in (int, float) or raw_power != 0))
                 or call.data.get("grid_import_target_w") is not None
                 or (direction == "discharge" and not large_site)
-                or not local_battery_dispatch_configured(entry.data)
-                or not _get_tesla_site_configs(hass, entry)):
+                or not local_battery_dispatch_configured(entry.data)):
+            return None
+        if not _get_tesla_site_configs(hass, entry):
+            if large_site:
+                raise HomeAssistantError("Native Powerwall tariff provider is unavailable; Max was not started")
             return None
         previous = _local_powerwall_runtime.get("powerwall_native_max_charge")
         if (previous and previous.pending and callable(revoke := getattr(previous, "revoke", None))
@@ -33658,8 +33661,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     raise HomeAssistantError("Native Powerwall tariff policy changed")
                 if controller.record["phase"] != "active":
                     raise HomeAssistantError("Native Powerwall tariff handoff is already in progress")
+                status = await controller.shorten(deadline)
                 return {"success": True, "control_path": "powerwall_native_tariff",
-                        "expires_at": controller.record["expires_at"], "physical_effect_confirmed": False}
+                        "expires_at": status["expires_at"], "physical_effect_confirmed": False}
             await _stop_local_powerwall_dispatch()
             legacy = any(state.get("active") and not state.get("native_max_charge")
                          and not state.get("native_tariff_force")
@@ -33677,8 +33681,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             controller.adapter.startup_kick = large_site
             controller.adapter.planning_request = targetless
             if await controller.adapter.guard() is not True:
-                if targetless:
-                    raise HomeAssistantError("Native Powerwall tariff cannot enforce current software or EV limits")
+                if targetless or large_site:
+                    raise HomeAssistantError("Native Powerwall tariff cannot enforce current software or EV limits; Max was not started")
                 return None  # Preserve software, EV and connection limits.
             from uuid import uuid4
             if direction == "charge":

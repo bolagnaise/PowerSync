@@ -469,3 +469,21 @@ def test_capacity_change_between_solve_and_execution_requests_a_fresh_plan(opt_m
     replans=[];coordinator._schedule_settings_reoptimization=lambda:replans.append(True)
     _run(coordinator,actions[0])
     assert replans==[True] and not battery.force_discharge_calls
+
+
+@pytest.mark.parametrize('direction',['charge','discharge'])
+def test_native_tariff_safety_uses_reported_rating_above_planning_rate(opt_module,clock,direction):
+    coordinator,battery,actions,_=_controller(opt_module,soc=.717,targetless=True)
+    coordinator._powerwall_plan_native_tariff=True
+    coordinator.energy_coordinator=SimpleNamespace(_site_info_cache={'nameplate_power':21040},
+        _site_info_last_fetch=__import__('time').monotonic())
+    coordinator._config.max_discharge_w=21000;coordinator._config.max_charge_w=14700
+    coordinator._config.battery_capacity_wh=54000
+    action=_api_action(NOW,direction,8900,.66)
+    if direction=='discharge':
+        assert coordinator._export_command_power_w(action)==21040
+        duration,_=coordinator._targetless_export_safe_duration(action,.717,.66,105)
+        assert duration==8
+    else:
+        duration,_=coordinator._targetless_charge_safe_duration(action,.8,.9,30)
+        assert duration==12  # Planned energy is the tighter bound than SOC headroom.

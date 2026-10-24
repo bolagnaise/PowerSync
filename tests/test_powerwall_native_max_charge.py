@@ -304,3 +304,38 @@ async def test_invalid_mutation_journal_retains_cleanup_barrier(field,value):
         await recovered.recover()
     assert a.barrier
     await s.stop()
+
+
+@pytest.mark.asyncio
+async def test_shorter_optimizer_deadline_is_durable_without_restarting_force():
+    s,a,store,clock=setup()
+    await s.start(600)
+    events=list(a.events)
+    result=await s.shorten(1120)
+    assert result['expires_at']==1120 and store.data['expires_at']==1120
+    assert a.events==events
+    assert (await s.shorten(1500))['expires_at']==1120
+    await s._cancel_watch()
+    recovered=m.NativeMaxChargeSession(a,store,clock=lambda:clock.now,monotonic=lambda:clock.now)
+    assert await recovered.recover()
+    assert a.events.count('apply_tariff')==1 and store.data is None
+
+
+@pytest.mark.asyncio
+async def test_shortened_deadline_expires_original_session():
+    s,a,store,clock=setup();await s.start(600)
+    await s.shorten(1001);clock.now=1002
+    await asyncio.sleep(.04)
+    assert not s.pending and store.data is None
+    assert a.events.count('apply_tariff')==1
+
+
+@pytest.mark.asyncio
+async def test_shortened_deadline_save_failure_stops_forcing():
+    s,a,store,clock=setup();await s.start(600)
+    store.fail_save=True
+    with pytest.raises(OSError):await s.shorten(1120)
+    assert s._generation>1
+    store.fail_save=False
+    assert await s.stop()
+    assert store.data is None
