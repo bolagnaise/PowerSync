@@ -10,14 +10,14 @@
   "source_state": {
     "components": {
       "config_flow.py": "c7f7b532a016d4b63839b9cf617771293cd7803da73bdd488281f0fe28210120",
-      "const.py": "ebbed6079678a1094813f84afa7f114056280cde9426042b0556f28fa70217ab",
+      "const.py": "1bc1e97506905459c3942499915dc46c6168ecf980beff6702dbb02da423dfd6",
       "battery_backend/profiles.py": "b192164b20cc0b39ce23580a4a90ade9279d281f1f9e692158aa9a3a31a396b3",
       "battery_backend/discovery.py": "3a8c88c00d6c57f6101d55056968524d7971d1ac3b8e16365923bca978f9489b",
       "settings_metadata.py": "deea4c452dd3cd334d5e1b9348e0ead03891542128c4061c368ad6e1c012ffd9",
       "strings.json": "b1f056e338d97d17fdbd334c76c6c8d50da5877b0e7a889cb1e0393526657ea3",
       "translations/en.json": "0977adedbcb9a794dfd934d83ee3d72a9d055c6fadc17ac3df7714be0222a24d",
       "services.yaml": "92fe0a80d60d37dbd030129e74388200418c750d0a643ff76ba1242852c742a6",
-      "switch.py": "33df2c0648ab1348daf19eccf90e7c6860f2ede4a5cb7d09ec3b39f56c1a18ec",
+      "switch.py": "18ce79a144314110acede54e8b237a7d8675aecc2ba4892dff0e6e0e55658b1d",
       "select.py": "9465457645f19e36335976298580a33908ecae29b724fa67085d6251d2d160e9",
       "number.py": "0c0541d354d2cf2a05d9fc100f6d3883fc6f8aca6af48fb0e71a28c06b02996b",
       "sensor.py": "aef6741b2a4cc00895c53f564f57425426f757c8d02ce924da1d176f58c6372b",

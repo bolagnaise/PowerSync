@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import importlib
+import logging
 import sys
 import types
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
@@ -381,12 +385,14 @@ def test_on_grid_command_reconnects_and_shares_pending_state():
     assert off_grid.is_on is False
 
 
-def test_grid_charging_switch_prefers_fresh_local_readback():
+@pytest.mark.parametrize("cloud_failed", [False, True])
+def test_grid_charging_switch_prefers_fresh_local_readback(cloud_failed):
     hass = _Hass("SystemGridConnected")
     coord = hass.data["power_sync"]["entry-1"]["powerwall_local"]["coordinator"]
     coord.data.grid_charging_enabled = False
     coord.last_success_monotonic = switch.time.monotonic()
     hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = types.SimpleNamespace(
+        _site_info_fetch_failed=cloud_failed,
         _site_info_cache={
             "components": {
                 "disallow_charge_from_grid_with_solar_installed": False
@@ -402,6 +408,9 @@ def test_grid_charging_switch_prefers_fresh_local_readback():
     entity = switch.GridChargingSwitch(hass, entry)
 
     assert entity.is_on is False
+    if not cloud_failed:
+        coord.last_success_monotonic -= 31
+        assert entity.is_on is True
 
 
 def test_grid_charging_switch_uses_remembered_preference_when_field_is_absent():
@@ -449,6 +458,101 @@ def test_grid_charging_switch_keeps_unknown_when_field_and_preference_are_absent
     entity = switch.GridChargingSwitch(hass, entry)
 
     assert entity.is_on is None
+
+
+def _cloud_permission_probe(*, cached, error):
+    """Exercise the real Site Info reader through the switch without HA/network."""
+    source = (ROOT / "coordinator.py").read_text()
+    tree = ast.parse(source)
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+               and node.name == "TeslaEnergyCoordinator")
+    methods = [node for node in cls.body
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and node.name in {"async_get_site_info", "invalidate_site_info_cache"}]
+    clock = [1000.0]
+    calls = []
+
+    class ReadFailed(Exception):
+        pass
+
+    async def fetch(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise ReadFailed("temporary provider failure") if error == "update" else OSError("offline")
+        return {"response": {"components": {
+            "disallow_charge_from_grid_with_solar_installed": False,
+        }}}
+
+    namespace = {
+        "Any": object,
+        "time": types.SimpleNamespace(monotonic=lambda: clock[0]),
+        "_LOGGER": logging.getLogger(__name__),
+        "TESLA_SITE_INFO_CACHE_TTL_SECONDS": 21600,
+        "TESLA_SITE_INFO_RETRY_SECONDS": 300,
+        "TESLA_PROVIDER_FLEET_API": "fleet_api",
+        "_fetch_with_retry": fetch,
+        "UpdateFailed": ReadFailed,
+    }
+    exec(compile(ast.Module(body=methods, type_ignores=[]), str(ROOT / "coordinator.py"), "exec"), namespace)
+    coord = types.SimpleNamespace(
+        _site_info_cache=cached,
+        _site_info_last_fetch=0.0,
+        _site_info_fetch_failed=False,
+        _site_info_retry_at=0.0,
+        _capabilities_probed=True,
+        _get_current_token=lambda: "fake-token",
+        _tesla_headers=lambda token: {},
+        session=object(),
+        api_base_url="https://example.invalid",
+        api_provider="teslemetry",
+        site_id="site-1",
+    )
+    for name in ("async_get_site_info", "invalidate_site_info_cache"):
+        setattr(coord, name, types.MethodType(namespace[name], coord))
+    hass = _Hass("SystemGridConnected")
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = coord
+    entity = switch.GridChargingSwitch(hass, _entry())
+    return entity, coord, clock, calls
+
+
+@pytest.mark.parametrize("cached", [None, {
+    "components": {"disallow_charge_from_grid_with_solar_installed": True},
+}])
+@pytest.mark.parametrize("error", ["update", "unexpected"])
+def test_grid_charging_cloud_read_recovers_after_bounded_failure_cooldown(cached, error):
+    entity, coord, clock, calls = _cloud_permission_probe(cached=cached, error=error)
+    asyncio.run(entity.async_update())
+    assert len(calls) == 1
+    assert entity.is_on is None
+    clock[0] += 299
+    asyncio.run(entity.async_update())
+    assert len(calls) == 1
+    clock[0] += 1
+    asyncio.run(entity.async_update())
+    assert len(calls) == 2
+    assert coord._site_info_fetch_failed is False
+    assert entity.is_on is True
+
+
+def test_grid_charging_failed_cloud_read_does_not_publish_old_permission():
+    entity, coord, clock, calls = _cloud_permission_probe(cached={
+        "components": {"disallow_charge_from_grid_with_solar_installed": True},
+    }, error="update")
+    assert entity.is_on is False
+    asyncio.run(entity.async_update())
+    assert len(calls) == 1
+    assert entity.is_on is None
+
+
+def test_grid_charging_cloud_invalidation_allows_immediate_recovery():
+    entity, coord, clock, calls = _cloud_permission_probe(cached=None, error="update")
+    asyncio.run(entity.async_update())
+    coord.invalidate_site_info_cache()
+    asyncio.run(entity.async_update())
+    assert len(calls) == 2
+    assert coord._site_info_fetch_failed is False
+    assert coord._site_info_retry_at == 0.0
+    assert entity.is_on is True
 
 
 def test_force_switches_are_added_for_non_tesla_batteries():

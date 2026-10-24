@@ -1829,6 +1829,9 @@ class GridChargingSwitch(_TeslaSiteSwitchBase):
         if local_enabled is not None:
             return bool(local_enabled)
         coord = self._tesla_coord()
+        if getattr(coord, "_site_info_fetch_failed", False):
+            # A failed refresh cannot confirm an old permission or user intent.
+            return None
         site_info = getattr(coord, "_site_info_cache", None) if coord else None
         if not site_info:
             return self._attr_is_on
