@@ -122,6 +122,7 @@ class PowerwallPairingManager:
         fleet_api_base: str,
         fleet_api_token: str,
         *,
+        provider: str = "fleet_api",
         energy_site_id: int | None = None,
         window_seconds: int = _DEFAULT_WINDOW_SECONDS,
         on_success: Any = None,
@@ -129,6 +130,7 @@ class PowerwallPairingManager:
         self._session = session
         self._fleet_api_base = fleet_api_base.rstrip("/")
         self._token = fleet_api_token
+        self._provider = provider
         self._energy_site_id = energy_site_id
         self._window = window_seconds
         self._on_success = on_success
@@ -234,7 +236,7 @@ class PowerwallPairingManager:
             # "client authorization not verified" error on the first real
             # TEDAPI command. Always require the physical toggle regardless
             # of what the cloud says.
-            state = _extract_client_state(register_resp)
+            state = self._client_state(register_resp, public_key_der)
             self._status.key_state = state
 
             # Step 4: ask the user to toggle the switch, poll for state change.
@@ -243,7 +245,7 @@ class PowerwallPairingManager:
                 "Toggle your Powerwall DC isolator OFF then ON now. "
                 "(PW2: right side of unit. PW3: left side, under cover flap.)"
             )
-            verified = await self._poll_until_verified(energy_site_id)
+            verified = await self._poll_until_verified(energy_site_id, public_key_der)
             if verified:
                 await self._complete(private_pem, public_key_der, din or "", energy_site_id)
                 return
@@ -332,6 +334,16 @@ class PowerwallPairingManager:
             "Authorization": f"Bearer {self._token}",
             "Content-Type": "application/json",
         }
+        if self._provider == "teslemetry":
+            # Teslemetry exposes a custom endpoint with flat protobuf fields,
+            # rather than accepting the Fleet command_properties envelope.
+            url += "/add_authorized_client"
+            payload = {
+                "key_type": 1,
+                "public_key": b64,
+                "authorized_client_type": 1,
+                "description": "PowerSync Local Client",
+            }
         try:
             async with self._session.post(
                 url, json=payload, headers=headers
@@ -346,7 +358,14 @@ class PowerwallPairingManager:
         except aiohttp.ClientError as err:
             raise PowerwallPairingError(f"Fleet API register error: {err}") from err
 
-    async def _poll_until_verified(self, energy_site_id: int) -> bool:
+    def _client_state(self, data: Any, public_key_der: bytes) -> int | None:
+        if self._provider == "teslemetry":
+            return _extract_teslemetry_client_state(data, public_key_der)
+        return _extract_client_state(data)
+
+    async def _poll_until_verified(
+        self, energy_site_id: int, public_key_der: bytes
+    ) -> bool:
         """Poll list_authorized_clients until state=VERIFIED or we run out of time."""
         url = (
             f"{self._fleet_api_base}/api/1/energy_sites/"
@@ -360,6 +379,8 @@ class PowerwallPairingManager:
             "list_authorized_clients_request",
             {"list_authorized_clients_request": {}},
         )
+        if self._provider == "teslemetry":
+            url += "/authorized_clients"
         while True:
             if (
                 self._status.expires_at is not None
@@ -367,9 +388,12 @@ class PowerwallPairingManager:
             ):
                 return False
             try:
-                async with self._session.post(
-                    url, json=payload, headers=headers
-                ) as resp:
+                request = (
+                    self._session.get(url, headers=headers)
+                    if self._provider == "teslemetry"
+                    else self._session.post(url, json=payload, headers=headers)
+                )
+                async with request as resp:
                     if resp.status != 200:
                         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
                         continue
@@ -379,7 +403,7 @@ class PowerwallPairingManager:
                 await asyncio.sleep(_POLL_INTERVAL_SECONDS)
                 continue
 
-            state = _extract_client_state(data)
+            state = self._client_state(data, public_key_der)
             if state is not None:
                 self._status.key_state = state
             if state == _KEY_STATE_VERIFIED:
@@ -455,4 +479,34 @@ def _extract_client_state(resp: dict[str, Any] | None) -> int | None:
                         return int(state)
                     except (TypeError, ValueError):
                         continue
+    return None
+
+
+def _extract_teslemetry_client_state(resp: Any, public_key_der: bytes) -> int | None:
+    """Read only this attempt's key from Teslemetry's decoded response."""
+    if not isinstance(resp, dict):
+        return None
+    body = resp.get("response")
+    if isinstance(body, dict):
+        if isinstance(body.get("client"), dict):
+            clients = [body["client"]]
+        else:
+            clients = body.get("clients", body.get("authorized_clients"))
+    else:
+        clients = body
+    if not isinstance(clients, list):
+        return None
+    target_key = base64.b64encode(public_key_der).decode("ascii")
+    for client in clients:
+        if not isinstance(client, dict):
+            continue
+        if client.get("public_key", client.get("publicKey")) != target_key:
+            continue
+        state = client.get("state", client.get("authorized_client_state"))
+        if not isinstance(state, (int, str)) or isinstance(state, bool):
+            return None
+        try:
+            return int(state)
+        except (TypeError, ValueError):
+            return None
     return None

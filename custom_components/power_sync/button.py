@@ -30,6 +30,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
+    CONF_TESLA_API_PROVIDER,
+    TESLA_PROVIDER_TESLEMETRY,
     CONF_POWERWALL_LOCAL_DIN,
     CONF_POWERWALL_LOCAL_ENERGY_SITE_ID,
     CONF_POWERWALL_LOCAL_PAIRED,
@@ -259,6 +261,7 @@ async def _start_pairing_with_notifications(
         session,
         base,
         token,
+        provider=entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY),
         energy_site_id=site_id,
         window_seconds=POWERWALL_PAIRING_WINDOW_SECONDS,
         on_success=_on_success,
