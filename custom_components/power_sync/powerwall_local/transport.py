@@ -657,6 +657,12 @@ class TEDAPIv1rTransport:
                 "dispatch_battery_power_response"
             )
             if not accepted:
+                if reply.HasField("common") and reply.common.HasField("error_response"):
+                    status = reply.common.error_response.status
+                    _LOGGER.warning(
+                        "Battery dispatch %s gateway error: watts=%s seconds=%s code=%s message=%r",
+                        operation, watts, seconds, status.code, status.message[:350],
+                    )
                 # Only learn a LOWER device-specific ceiling from the exact
                 # typed out-of-range reply for this positive power request.
                 # A generic fault never authorizes retry or tariff fallback.

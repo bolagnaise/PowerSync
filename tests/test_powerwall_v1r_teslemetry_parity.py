@@ -1044,3 +1044,33 @@ async def test_only_typed_matching_lower_dispatch_limit_is_learned(code,message,
     transport.post_v1r=AsyncMock(return_value=transport_mod.TEDAPIResponse(True,reply.SerializeToString()))
     assert not await transport.dispatch_battery_power('gateway',10570.5,12)
     assert getattr(transport,'dispatch_discharge_limit_w',None)==expected
+
+
+@pytest.mark.parametrize('watts,code,message', [
+    (-12050, 11, 'requested charge power exceeds gateway allowance'),
+    (500, 12, 'battery dispatch is not implemented'),
+])
+@async_test
+async def test_dispatch_gateway_error_is_reported_without_accepting_or_retrying(watts, code, message, caplog):
+    transport = _transport_without_key()
+    reply = transport_pb2.MessageEnvelope()
+    reply.common.error_response.status.code = code
+    reply.common.error_response.status.message = message
+    transport.post_v1r = AsyncMock(return_value=transport_mod.TEDAPIResponse(True, reply.SerializeToString()))
+    assert not await transport.dispatch_battery_power('gateway', watts, 30)
+    transport.post_v1r.assert_awaited_once()
+    assert f'code={code}' in caplog.text
+    assert message in caplog.text
+    assert getattr(transport, 'dispatch_discharge_limit_w', None) is None
+
+
+@async_test
+async def test_dispatch_gateway_error_message_is_bounded(caplog):
+    transport = _transport_without_key()
+    reply = transport_pb2.MessageEnvelope()
+    reply.common.error_response.status.code = 12
+    reply.common.error_response.status.message = 'x' * 350 + 'OMITTED_DETAIL'
+    transport.post_v1r = AsyncMock(return_value=transport_mod.TEDAPIResponse(True, reply.SerializeToString()))
+    assert not await transport.dispatch_battery_power('gateway', -500, 30)
+    assert 'x' * 350 in caplog.text
+    assert 'OMITTED_DETAIL' not in caplog.text
