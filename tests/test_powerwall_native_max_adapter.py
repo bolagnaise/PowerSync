@@ -100,6 +100,27 @@ async def test_manual_max_uses_native_settings_and_restores_exact_original(setup
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('direction', ['charge', 'discharge'])
+async def test_native_max_guard_recovers_empty_dcq_without_writing_or_claiming(setup, direction):
+    from unittest.mock import AsyncMock
+    from test_powerwall_v1r_teslemetry_parity import (
+        _bare_client, _dcq_snapshot_reply, transport_mod,
+    )
+    s = setup
+    gateway = _bare_client()
+    gateway._transport = SimpleNamespace(post_v1r=AsyncMock(side_effect=[
+        transport_mod.TEDAPIResponse(True, None), _dcq_snapshot_reply()]),
+        read_config=AsyncMock(side_effect=lambda *_: deepcopy(s.state.config)))
+    s.adapter.client.get_snapshot = gateway.get_snapshot
+    s.adapter.direction = direction
+
+    assert await s.adapter.guard()
+    assert gateway._transport.post_v1r.await_count == 2
+    assert not s.state.events
+    assert not s.budget.native_max_claim('site')
+
+
+@pytest.mark.asyncio
 async def test_signed_solar_standby_draw_is_balanced_without_rejecting_capture_or_settlement(setup):
     s=setup;s.state.solar_w=-3;s.state.battery_w=1670;s.state.load_w=1668
     assert (await s.session.start(120))['active']

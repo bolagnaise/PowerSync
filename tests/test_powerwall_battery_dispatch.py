@@ -1547,3 +1547,53 @@ def _install_native_discharge_owner(ns,local,client):
     ns['_create_discharge_tariff']=lambda duration:({'code':'force'},None)
     ns['_local_powerwall_runtime']['powerwall_native_max_charge']=session
     return session
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('duration', [30, 47, 'Custom'])
+@pytest.mark.parametrize('power', [0, 1000])
+@pytest.mark.parametrize('missing_config', [False, True])
+async def test_force_discharge_recovers_empty_dcq_and_requires_current_limits(duration, power, missing_config):
+    from test_powerwall_v1r_teslemetry_parity import (
+        _bare_client, _dcq_snapshot_reply, transport_mod,
+    )
+    ns, local, client, _ = load_routing()
+    native = _install_native_discharge_owner(ns, local, client)
+    ns['entry'].options['force_discharge_custom_duration'] = 47
+    native.adapter.apply = AsyncMock(wraps=native.adapter.apply)
+    gateway = _bare_client()
+    replies = iter([transport_mod.TEDAPIResponse(True, None)])
+    fresh_reply = _dcq_snapshot_reply()
+    config_read = site_snapshot().raw['config']
+    configs = iter([config_read])
+    async def read_query(*args):
+        # Recovery is a read-only preflight, never a replay of discharge.
+        if gateway._transport.post_v1r.await_count <= 2:
+            client.dispatch_battery_power.assert_not_awaited()
+            native.adapter.apply.assert_not_awaited()
+        return next(replies, fresh_reply)
+    async def read_config(*args):
+        return next(configs, None if missing_config else config_read)
+    gateway._transport = SimpleNamespace(post_v1r=AsyncMock(side_effect=read_query),
+        read_config=AsyncMock(side_effect=read_config))
+    client.get_snapshot.side_effect = gateway.get_snapshot
+    try:
+        if missing_config:
+            with pytest.raises((ValueError, RuntimeError)):
+                await ns['handle_force_discharge'](call(source='user', power_w=power, duration=duration))
+            client.dispatch_battery_power.assert_not_awaited()
+            native.adapter.apply.assert_not_awaited()
+            assert not local.pending and not native.pending
+            assert not ns['force_discharge_state']['active']
+        else:
+            result = await ns['handle_force_discharge'](call(source='user', power_w=power, duration=duration))
+            assert result['control_path'] == ('powerwall_native_tariff' if power == 0 else 'powerwall_local_dispatch')
+            assert ns['force_discharge_state']['duration'] == (47 if duration == 'Custom' else duration)
+            assert gateway._transport.post_v1r.await_count >= 2
+            if power:
+                client.dispatch_battery_power.assert_awaited_once()
+            else:
+                native.adapter.apply.assert_awaited_once()
+    finally:
+        await native.stop()
+        await local.stop()

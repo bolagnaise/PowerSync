@@ -257,33 +257,45 @@ class PowerwallLocalClient:
         return parse_device_controller_response(response.inner_bytes)
 
     async def get_snapshot(self) -> PowerwallSnapshot:
-        """Fetch live status via RSA-signed DCQ + config.json read in parallel."""
-        if not self._local_access_enabled or is_loopback_host(self._host):
-            raise PowerwallUnreachableError(
-                "Powerwall local access disabled; gateway IP is not configured"
+        """Read live DCQ/config together, retrying an empty query once.
+
+        Only reads are retried. Never use cached telemetry or retain limits
+        from the failed attempt, and preserve pairing/connection failures.
+        Callers retain their own deadline and control admission checks.
+        """
+        for attempt in range(2):
+            if not self._local_access_enabled or is_loopback_host(self._host):
+                raise PowerwallUnreachableError(
+                    "Powerwall local access disabled; gateway IP is not configured"
+                )
+
+            dcq, cfg = await asyncio.gather(
+                self._fetch_dcq_local(), self._transport.read_config(self._din),
+                return_exceptions=True,
             )
 
-        dcq_task = self._fetch_dcq_local()
-        cfg_task = self._transport.read_config(self._din)
-        dcq, cfg = await asyncio.gather(dcq_task, cfg_task, return_exceptions=True)
+            if isinstance(dcq, BaseException):
+                if not isinstance(dcq, Exception) or isinstance(
+                    dcq, (PowerwallUnreachableError, PowerwallSignatureError)
+                ):
+                    raise dcq
+                _LOGGER.warning("DeviceControllerQuery raised: %s", dcq)
+                dcq = None
+            if isinstance(cfg, BaseException):
+                if not isinstance(cfg, Exception) or isinstance(cfg, PowerwallSignatureError):
+                    raise cfg
+                _LOGGER.debug("config.json read raised: %s", cfg)
+                cfg = None
 
-        if isinstance(dcq, BaseException):
-            if isinstance(dcq, (PowerwallUnreachableError, PowerwallSignatureError)):
-                raise dcq
-            _LOGGER.warning("DeviceControllerQuery raised: %s", dcq)
-            dcq = None
-        if isinstance(cfg, BaseException):
-            if isinstance(cfg, PowerwallSignatureError):
-                raise cfg
-            _LOGGER.debug("config.json read raised: %s", cfg)
-            cfg = None
+            if dcq:
+                return _snapshot_from_dcq(dcq, cfg if isinstance(cfg, dict) else None)
+            if attempt == 0:
+                _LOGGER.debug("DeviceControllerQuery was empty; retrying a fresh snapshot once")
+                await asyncio.sleep(0.25)
 
-        if not dcq:
-            raise PowerwallUnreachableError(
-                "Gateway returned no DeviceControllerQuery data"
-            )
-
-        return _snapshot_from_dcq(dcq, cfg if isinstance(cfg, dict) else None)
+        raise PowerwallUnreachableError(
+            "Gateway returned no DeviceControllerQuery data"
+        )
 
     async def verify_pairing(self) -> int | None:
         """Check our key's state on the gateway via list_authorized_clients.

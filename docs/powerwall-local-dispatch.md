@@ -2,6 +2,8 @@
 
 Paired Powerwalls with a reachable LAN gateway use timed local battery control for numeric charge/discharge targets. The Tesla-only Preferred battery control selector chooses the method for Max and optimiser actions, with Tariff as the default for existing and new sites. Charge kW targets battery input. Discharge kW targets grid export, adjusting battery output for current home load and solar. Fresh telemetry, reserves, charging permission, configured power limits and gateway site limits still apply.
 
+From v2.12.1494, an empty gateway telemetry reply is retried once before a control fails. PowerSync reads both live telemetry and gateway limits again; it never uses cached readings or the first attempt's limits to start control. Pairing rejection and connection timeouts still fail immediately. If telemetry or required limits remain unavailable, charge/discharge remains blocked.
+
 ## Preferred battery control
 
 The Tesla-only **Preferred battery control** selector is saved per Home Assistant entry and shared with the mobile app. It is available independently of an optimiser subscription; actual controls retain their existing admission checks.

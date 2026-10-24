@@ -634,6 +634,153 @@ async def test_snapshot_preserves_signature_rejection_for_coordinator():
         await client.get_snapshot()
 
 
+def _dcq_snapshot_reply(payload=None):
+    wire = importlib.import_module(f"{_LOCAL_PKG}.fleet_api_bms")
+    if payload is None:
+        payload = {"control": {
+            "systemStatus": {"nominalFullPackEnergyWh": 13500,
+                             "nominalEnergyRemainingWh": 9000},
+            "islanding": {"contactorClosed": True, "gridOK": True, "microGridOK": True},
+            "meterAggregates": [{"location": key, "realPowerW": value}
+                                for key, value in (("site", 800), ("load", 1000),
+                                                   ("solar", 200), ("battery", 0))],
+        }}
+    envelope = wire._field_bytes(16, wire._field_bytes(2,
+        wire._field_string(2, json.dumps(payload))))
+    return transport_mod.TEDAPIResponse(True, envelope)
+
+
+@async_test
+@pytest.mark.parametrize("empty_reply", [
+    transport_mod.TEDAPIResponse(True, None),
+    transport_mod.TEDAPIResponse(True, b""),
+    transport_mod.TEDAPIResponse(True, b"\x82\x01\x00"),
+    _dcq_snapshot_reply({}),
+])
+async def test_snapshot_recovers_one_empty_dcq_with_new_telemetry_and_config(empty_reply):
+    client = _bare_client()
+    first_config = {"site_info": {"min_site_meter_power_ac": -10}}
+    current_config = {"site_info": {"min_site_meter_power_ac": -2}}
+    client._transport = SimpleNamespace(
+        post_v1r=AsyncMock(side_effect=[empty_reply, _dcq_snapshot_reply()]),
+        read_config=AsyncMock(side_effect=[first_config, current_config]),
+    )
+
+    snapshot = await client.get_snapshot()
+
+    assert snapshot.soc is not None and snapshot.grid_status == "SystemGridConnected"
+    assert (snapshot.load_w, snapshot.solar_w, snapshot.grid_w) == (1000, 200, 800)
+    assert snapshot.raw["config"] == current_config
+    assert client._transport.post_v1r.await_count == 2
+    assert client._transport.read_config.await_count == 2
+
+
+@async_test
+async def test_snapshot_success_does_not_add_a_retry():
+    client = _bare_client()
+    client._transport = SimpleNamespace(post_v1r=AsyncMock(return_value=_dcq_snapshot_reply()),
+        read_config=AsyncMock(return_value={}))
+
+    assert (await client.get_snapshot()).load_w == 1000
+    client._transport.post_v1r.assert_awaited_once()
+    client._transport.read_config.assert_awaited_once()
+
+
+@async_test
+async def test_snapshot_empty_dcq_remains_bounded_and_never_uses_a_third_reply():
+    client = _bare_client()
+    client._transport = SimpleNamespace(
+        post_v1r=AsyncMock(side_effect=[transport_mod.TEDAPIResponse(True, None),
+            transport_mod.TEDAPIResponse(True, None), _dcq_snapshot_reply()]),
+        read_config=AsyncMock(return_value={}))
+
+    with pytest.raises(client_mod.PowerwallUnreachableError, match="no DeviceControllerQuery data"):
+        await client.get_snapshot()
+    assert client._transport.post_v1r.await_count == 2
+    assert client._transport.read_config.await_count == 2
+
+
+@async_test
+@pytest.mark.parametrize("source", ["query", "config"])
+async def test_snapshot_does_not_retry_a_rejected_pairing_key(source):
+    client = _bare_client()
+    rejected = client_mod.PowerwallSignatureError("inactive key")
+    client._transport = SimpleNamespace(
+        post_v1r=AsyncMock(side_effect=rejected if source == "query" else None,
+            return_value=transport_mod.TEDAPIResponse(True, None)),
+        read_config=AsyncMock(side_effect=rejected if source == "config" else None,
+            return_value={}))
+
+    with pytest.raises(client_mod.PowerwallSignatureError, match="inactive key"):
+        await client.get_snapshot()
+    client._transport.post_v1r.assert_awaited_once()
+    client._transport.read_config.assert_awaited_once()
+
+
+@async_test
+async def test_snapshot_retry_does_not_reuse_config_when_the_new_read_fails():
+    client = _bare_client()
+    client._transport = SimpleNamespace(
+        post_v1r=AsyncMock(side_effect=[transport_mod.TEDAPIResponse(True, None), _dcq_snapshot_reply()]),
+        read_config=AsyncMock(side_effect=[{"site_info": {"min_site_meter_power_ac": -10}}, None]))
+
+    snapshot = await client.get_snapshot()
+    assert snapshot.raw["config"] is None
+
+
+@async_test
+async def test_snapshot_retry_rechecks_local_access_before_the_second_read():
+    client = _bare_client()
+    async def disabled_during_read(*args):
+        client._local_access_enabled = False
+        return transport_mod.TEDAPIResponse(True, None)
+    client._transport = SimpleNamespace(post_v1r=AsyncMock(side_effect=disabled_during_read),
+        read_config=AsyncMock(return_value={}))
+
+    with pytest.raises(client_mod.PowerwallUnreachableError, match="local access disabled"):
+        await client.get_snapshot()
+    client._transport.post_v1r.assert_awaited_once()
+
+
+@async_test
+async def test_snapshot_does_not_retry_an_unreachable_gateway():
+    client = _bare_client()
+    client._transport = SimpleNamespace(
+        post_v1r=AsyncMock(side_effect=client_mod.PowerwallUnreachableError("timed out")),
+        read_config=AsyncMock(return_value={}))
+
+    with pytest.raises(client_mod.PowerwallUnreachableError, match="timed out"):
+        await client.get_snapshot()
+    client._transport.post_v1r.assert_awaited_once()
+
+
+@async_test
+async def test_snapshot_cancellation_during_retry_never_starts_another_read(monkeypatch):
+    client = _bare_client()
+    client._transport = SimpleNamespace(post_v1r=AsyncMock(
+        return_value=transport_mod.TEDAPIResponse(True, None)), read_config=AsyncMock(return_value={}))
+    monkeypatch.setattr(client_mod.asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError))
+
+    with pytest.raises(asyncio.CancelledError):
+        await client.get_snapshot()
+    client._transport.post_v1r.assert_awaited_once()
+
+
+@async_test
+@pytest.mark.parametrize("source", ["query", "config"])
+async def test_snapshot_cancelled_child_read_is_not_retried(source):
+    client = _bare_client()
+    client._transport = SimpleNamespace(
+        post_v1r=AsyncMock(side_effect=asyncio.CancelledError if source == "query" else None,
+            return_value=transport_mod.TEDAPIResponse(True, None)),
+        read_config=AsyncMock(side_effect=asyncio.CancelledError if source == "config" else None,
+            return_value={}))
+
+    with pytest.raises(asyncio.CancelledError):
+        await client.get_snapshot()
+    client._transport.post_v1r.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     ("grid_status", "off_grid", "expected"),
     [
