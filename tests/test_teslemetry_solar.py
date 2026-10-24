@@ -142,6 +142,14 @@ async def test_service_provider_monitoring_handover_and_readback(monkeypatch):
     with pytest.raises(m.SolarError): await call(get)
     assert not calls
     actions._dynamic_ev_state.clear()
+    # A rate lease in another PowerSync entry uses the shared physical VIN.
+    hass.data['power_sync']['two'] = {'tesla_native_rate':SimpleNamespace(sessions={VIN:{}})}
+    hass.data['power_sync_native_rate_budget'] = SimpleNamespace(native_claimed=lambda vin: vin == VIN)
+    with pytest.raises(m.SolarError, match='native-window rate management'):
+        await call(put)
+    assert not calls
+    hass.data.pop('power_sync_native_rate_budget')
+    hass.data['power_sync'].pop('two')
     responses.extend([None, m.SolarError('readback failed')])
     with pytest.raises(m.SolarError): await call(put)
     assert gate.blocked(VIN)

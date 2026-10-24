@@ -35,6 +35,30 @@ def test_charging_respects_rate_and_site_import_headroom():
     assert module.battery_watts('charge', 10000, snapshot(load_w=5500), config()) == -700
 
 
+def test_native_ev_reservation_reduces_grid_following_battery_without_rewriting_limits():
+    cfg = config(native_ev_unobserved_w=2000)
+    assert module.battery_watts('charge', 6000, snapshot(load_w=2000, solar_w=0), cfg,
+                               target_basis='grid_import') == -2000
+    # A manual battery target shares the same site connection and cannot
+    # consume power already reserved for an outstanding EV command.
+    assert module.battery_watts('charge', 3000, snapshot(load_w=2000, solar_w=0), cfg) == -2000
+    cfg['native_ev_unobserved_w'] = 6000
+    assert module.battery_watts('charge', 6000, snapshot(load_w=2000, solar_w=0), cfg,
+                               target_basis='grid_import') == 0
+    assert cfg['optimization_max_grid_import_w'] == 6000
+    assert cfg['optimization_max_charge_w'] == 4000
+    with pytest.raises(ValueError, match='No grid import headroom'):
+        module.battery_watts('charge', 3000, snapshot(load_w=2000, solar_w=0), cfg)
+
+
+@pytest.mark.asyncio
+async def test_tariff_fallback_cannot_consume_reserved_ev_capacity():
+    controller = module.LocalBatteryDispatch(None, lambda: config(native_ev_unobserved_w=1000),
+                                            None, None, None)
+    with pytest.raises(ValueError, match='reserved EV headroom'):
+        await controller.check_tariff_fallback('charge')
+
+
 def site_snapshot(import_kw=14.9, export_kw=-10.1, **kw):
     return snapshot(raw={'config': {'site_info': {'max_site_meter_power_ac': import_kw,
                                                  'min_site_meter_power_ac': export_kw}}}, **kw)
@@ -207,6 +231,53 @@ def controller():
     async def stopped(): events.append('stopped')
     c = module.LocalBatteryDispatch(client, config, lambda mode: True, persist, stopped)
     return c, client, events
+
+
+@pytest.mark.asyncio
+async def test_pending_battery_charge_draw_survives_uncertain_ack_until_resume():
+    c, client, events = controller()
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def dispatch(*_):
+        entered.set(); await release.wait(); return False
+    client.dispatch_battery_power.side_effect = dispatch
+    client.resume_battery_operation.return_value = False
+    task = asyncio.create_task(c.start('charge',3000,20))
+    await entered.wait()
+    assert c.charge_generation is None  # Manual battery target, not grid following.
+    assert c.prospective_charge_w == 3000 and c._last_watts == 0
+    release.set()
+    with pytest.raises(ValueError): await task
+    assert c.prospective_charge_w == 3000 and c.pending
+    client.resume_battery_operation.return_value = True
+    await c.stop()
+    assert c.prospective_charge_w == 0 and not c.pending
+
+
+@pytest.mark.asyncio
+async def test_borrow_refresh_preserves_exact_generation_owner_target_and_deadline():
+    c, client, _ = controller()
+    cfg = config()
+    c.config = lambda: cfg
+    await c.start('charge',6000,20,target_basis='grid_import')
+    generation, deadline, allowed = c.charge_generation, c._deadline, c.allowed
+    cfg['native_ev_unobserved_w'] = 2000
+    result = await c.refresh_current_generation(generation)
+    assert result['battery_power_w'] == -3200
+    assert c._deadline == deadline and c._target == 6000 and c.allowed is allowed
+    assert await c.refresh_current_generation(generation+1) is None
+    await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_tariff_fallback_rechecks_reservations_after_native_limit_read():
+    c, client, _ = controller()
+    cfg = config()
+    c.config = lambda: cfg
+    async def snapshot_with_new_ev_demand():
+        cfg['native_ev_unobserved_w'] = 5000
+        return snapshot()
+    client.get_snapshot.side_effect = snapshot_with_new_ev_demand
+    with pytest.raises(ValueError): await c.check_tariff_fallback('charge')
 
 
 def test_persists_before_command_and_releases_after_stop():

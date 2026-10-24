@@ -372,6 +372,49 @@ def test_non_ble_dynamic_update_tears_down_and_stops_amps_after_debounce(monkeyp
     assert len(set_amps_calls) == amps_before
 
 
+def test_managed_ev_requests_planned_rate_from_battery_only_with_coordinated_admission(monkeypatch):
+    _install_ev_planner_stub(monkeypatch, plugged_in=True)
+    monkeypatch.setattr(actions, '_release_dynamic_tesla_if_away', AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, '_refresh_dynamic_tesla_charger_capability', AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, '_reconcile_stopped_smart_schedule_tesla', AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, '_get_tesla_live_status', AsyncMock(return_value={
+        'battery_power':-10000, 'grid_power':14900, 'ev_power':2400, 'battery_soc':50}))
+    monkeypatch.setattr(actions, '_optimizer_planned_ev_charge_kw', lambda *args: 5.5)
+    monkeypatch.setattr(actions, '_optimizer_planned_battery_charge_kw', lambda *args: 4.0)
+    for lendable, no_grid, expected in ((0, False, []), (10000, False, [22]), (10000, True, [])):
+        monkeypatch.setattr(actions, 'managed_borrowable_w', lambda *args: lendable)
+        setter = AsyncMock(return_value=True)
+        monkeypatch.setattr(actions, '_set_vehicle_amps', setter)
+        state = _fleet_dynamic_state(); state['current_amps'] = 10
+        state['params'].update(max_grid_import_kw=14.9, no_grid_import=no_grid)
+        actions._dynamic_ev_state.clear()
+        actions._dynamic_ev_state['entry-1'] = {FLEET_VIN:state}
+        asyncio.run(actions._dynamic_ev_update(_Hass(), _Entry(), 'entry-1', FLEET_VIN))
+        assert [call.args[3] for call in setter.await_args_list] == expected
+
+
+def test_site_admission_denial_terminates_ble_to_fleet_start_fallback(monkeypatch):
+    hass = _two_fleet_vehicle_hass()
+    prefix = 'bridge_alpha'
+    charger = actions.TESLA_BLE_SWITCH_CHARGER.format(prefix=prefix)
+    hass.states._states[charger] = _State(charger, 'off')
+    entry = _both_provider_entry(prefix, f'{VIN_B}={prefix}')
+    monkeypatch.setattr(actions, '_is_ble_available', lambda *args: True)
+    monkeypatch.setattr(actions, '_wake_tesla_ble', AsyncMock(return_value=True))
+    denied = RuntimeError('Shared site capacity unavailable')
+    denied.site_import_admission_denied = True
+    admission = AsyncMock(side_effect=denied)
+    monkeypatch.setattr(actions, 'prepare_ev_submission', admission)
+    tbt = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, '_start_ev_charging_teslemetry_bt', tbt)
+    result = asyncio.run(actions._action_start_ev_charging(hass, entry,
+        {'vehicle_vin':VIN_B,'charger_type':'tesla'}, {}))
+    assert result is False
+    admission.assert_awaited_once_with(hass, charger, operation='start')
+    tbt.assert_not_awaited()
+    assert hass.services.calls == []
+
+
 def test_still_plugged_non_ble_session_is_not_falsely_released(monkeypatch):
     _install_ev_planner_stub(monkeypatch, plugged_in=True)
 
@@ -766,7 +809,7 @@ def test_both_provider_start_prefers_paired_esphome_ble(monkeypatch):
     )
 
     assert result is True
-    ble_start.assert_awaited_once_with(hass, "bridge_alpha")
+    ble_start.assert_awaited_once_with(hass, "bridge_alpha", allow_backoff=True)
     tbt_start.assert_not_awaited()
 
 

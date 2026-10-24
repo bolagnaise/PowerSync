@@ -42,6 +42,7 @@ from datetime import timedelta, datetime, timezone as dt_timezone, time as dt_ti
 from homeassistant.util import dt as dt_util
 
 from ..teslemetry_solar import guard_ev_control
+from ..native_rate_admission import prepare_ev_submission, bind_vehicle, managed_borrowable_w
 
 from ..const import (
     DOMAIN,
@@ -2588,6 +2589,8 @@ async def _start_ev_charging_ble(
             hass, ble_prefix, allow_backoff=allow_backoff
         ):
             return False
+        if not await prepare_ev_submission(hass, charger_entity, operation="start"):
+            return False
         command_started_at = datetime.now(dt_timezone.utc)
         hass.data.setdefault(DOMAIN, {}).setdefault("_ev_ble_start_dispatched_at", {})[ble_prefix] = command_started_at
         command_dispatched = True
@@ -2606,6 +2609,8 @@ async def _start_ev_charging_ble(
         )
         return True if confirmed else None
     except Exception as e:
+        if getattr(e, "site_import_admission_denied", False):
+            raise
         err_str = str(e).lower()
         if "complete" in err_str:
             _LOGGER.info(f"EV charging is complete (at target SOC) via BLE — skipping start")
@@ -2772,6 +2777,8 @@ async def _set_ev_charging_amps_ble(
             hass, ble_prefix, allow_backoff=allow_backoff
         ):
             return False
+        if not await prepare_ev_submission(hass, amps_entity, operation="rate", amps=capped_amps):
+            return False
         command_started_at = datetime.now(dt_timezone.utc)
         command_dispatched = True
         await hass.services.async_call(
@@ -2785,6 +2792,8 @@ async def _set_ev_charging_amps_ble(
         )
         return True if confirmed else None
     except Exception as e:
+        if getattr(e, "site_import_admission_denied", False):
+            raise
         fallback_amps = None
         if _is_number_range_error(str(e)):
             fallback_amps = _tesla_entity_max_fallback_amps(
@@ -2796,6 +2805,8 @@ async def _set_ev_charging_amps_ble(
             )
         if fallback_amps is not None:
             try:
+                if not await prepare_ev_submission(hass, amps_entity, operation="rate", amps=fallback_amps):
+                    return False
                 await hass.services.async_call(
                     "number",
                     "set_value",
@@ -2816,6 +2827,8 @@ async def _set_ev_charging_amps_ble(
                     params["_tesla_entity_range_fallback_amps"] = fallback_amps
                 return True
             except Exception as fallback_error:
+                if getattr(fallback_error, "site_import_admission_denied", False):
+                    raise
                 _LOGGER.error(
                     "Failed Tesla BLE entity range fallback to %dA: %s",
                     fallback_amps,
@@ -2866,6 +2879,8 @@ async def _start_ev_charging_teslemetry_bt(hass: HomeAssistant, tbt_prefix: str)
         _LOGGER.error(f"Teslemetry BT charge entity not found: {entity_id}")
         return False
     try:
+        if not await prepare_ev_submission(hass, entity_id, operation="start"):
+            return False
         await hass.services.async_call(
             "switch", "turn_on",
             {"entity_id": entity_id},
@@ -2874,6 +2889,8 @@ async def _start_ev_charging_teslemetry_bt(hass: HomeAssistant, tbt_prefix: str)
         _LOGGER.info(f"Started EV charging via Teslemetry BT: {entity_id}")
         return True
     except Exception as e:
+        if getattr(e, "site_import_admission_denied", False):
+            raise
         err_str = str(e).lower()
         if "complete" in err_str:
             _LOGGER.info(f"EV charging is complete (at target SOC) via Teslemetry BT — skipping start")
@@ -2937,6 +2954,8 @@ async def _set_ev_charging_amps_teslemetry_bt(
     if capped != amps:
         _LOGGER.debug(f"Teslemetry BT amps capped from {amps}A to {capped}A (range: {min_val}-{max_val})")
     try:
+        if not await prepare_ev_submission(hass, entity_id, operation="rate", amps=capped):
+            return False
         await hass.services.async_call(
             "number", "set_value",
             {"entity_id": entity_id, "value": capped},
@@ -2949,6 +2968,8 @@ async def _set_ev_charging_amps_teslemetry_bt(
         _LOGGER.info(f"Set EV charging amps to {capped}A via Teslemetry BT: {entity_id}")
         return True
     except Exception as e:
+        if getattr(e, "site_import_admission_denied", False):
+            raise
         fallback_amps = None
         if _is_number_range_error(str(e)):
             fallback_amps = _tesla_entity_max_fallback_amps(
@@ -2960,6 +2981,8 @@ async def _set_ev_charging_amps_teslemetry_bt(
             )
         if fallback_amps is not None:
             try:
+                if not await prepare_ev_submission(hass, entity_id, operation="rate", amps=fallback_amps):
+                    return False
                 await hass.services.async_call(
                     "number",
                     "set_value",
@@ -2976,6 +2999,8 @@ async def _set_ev_charging_amps_teslemetry_bt(
                     params["_tesla_entity_range_fallback_amps"] = fallback_amps
                 return True
             except Exception as fallback_error:
+                if getattr(fallback_error, "site_import_admission_denied", False):
+                    raise
                 _LOGGER.error(
                     "Failed Teslemetry BT entity range fallback to %dA: %s",
                     fallback_amps,
@@ -5212,6 +5237,7 @@ async def _action_start_ev_charging(
             "vehicle_vin": resolved_vehicle_id,
         }
 
+    bind_vehicle(params.get("vehicle_vin") or params.get("vehicle_id"))
     owner_mode = params.get("owner_mode") or params.get("dynamic_mode")
     if charger_type == "tesla" and owner_mode:
         from .ev_ownership import owner_family
@@ -5426,6 +5452,8 @@ async def _action_start_ev_charging(
                 _LOGGER.warning("Wake failed (possibly due to API credits), skipping charge command")
                 return False
 
+            if not await prepare_ev_submission(hass, charge_switch_entity, operation="start"):
+                return False
             await hass.services.async_call(
                 "switch",
                 "turn_on",
@@ -5435,6 +5463,8 @@ async def _action_start_ev_charging(
             _LOGGER.info(f"Started EV charging via {charge_switch_entity}")
             charging_started = True
         except Exception as e:
+            if getattr(e, "site_import_admission_denied", False):
+                raise
             err_str = str(e).lower()
             # If the car is already charging, treat as success
             if "is_charging" in err_str or "already" in err_str:
@@ -6032,6 +6062,8 @@ async def _action_set_ev_charging_amps(
                 )
                 return False
 
+            if not await prepare_ev_submission(hass, charging_amps_entity, operation="rate", amps=amps):
+                return False
             await hass.services.async_call(
                 "number",
                 "set_value",
@@ -6044,6 +6076,8 @@ async def _action_set_ev_charging_amps(
             _LOGGER.info(f"Set EV charging amps to {amps}A via {charging_amps_entity}")
             return True
         except Exception as e:
+            if getattr(e, "site_import_admission_denied", False):
+                raise
             fallback_amps = None
             if _is_number_range_error(str(e)):
                 fallback_amps = _tesla_entity_max_fallback_amps(
@@ -6055,6 +6089,8 @@ async def _action_set_ev_charging_amps(
                 )
             if fallback_amps is not None:
                 try:
+                    if not await prepare_ev_submission(hass, charging_amps_entity, operation="rate", amps=fallback_amps):
+                        return False
                     await hass.services.async_call(
                         "number",
                         "set_value",
@@ -6070,6 +6106,8 @@ async def _action_set_ev_charging_amps(
                     )
                     return True
                 except Exception as fallback_error:
+                    if getattr(fallback_error, "site_import_admission_denied", False):
+                        raise
                     _LOGGER.error(
                         "Failed Tesla entity range fallback to %dA: %s",
                         fallback_amps,
@@ -9142,6 +9180,8 @@ async def _update_smart_schedule_battery_target_group(
         budget_kw = min(site_budget_kw, max(0.0, budget_kw))
 
     optimizer_ceilings: Dict[str, int] = {}
+    planned_group_kw = []
+    lendable_group_kw = []
     for vehicle_id, state in sessions:
         params = state.get("params") or {}
         planned_kw = _optimizer_planned_ev_charge_kw(
@@ -9164,6 +9204,15 @@ async def _update_smart_schedule_battery_target_group(
         )
         if ceiling_amps is not None:
             optimizer_ceilings[vehicle_id] = ceiling_amps
+        planned_group_kw.append(planned_kw)
+        lendable_group_kw.append(managed_borrowable_w(hass, config_entry, vehicle_id, params)/1000)
+    if (planned_group_kw and min(lendable_group_kw) > 0
+            and all(value is not None for value in planned_group_kw)):
+        # This is a request for the final two-phase admission, never a claim
+        # that battery draw is already free grid capacity. One battery's
+        # lendable power is shared by the whole group, not added per vehicle.
+        budget_kw = max(budget_kw, min(sum(planned_group_kw),
+            site_budget_kw+min(lendable_group_kw)))
     targets = _allocate_dynamic_ev_site_budget(
         sessions,
         budget_kw,
@@ -12407,6 +12456,11 @@ async def _dynamic_ev_update(
         )
         planned_ev_charge_kw = None
     if planned_ev_charge_kw is not None:
+        if params.get("charger_type", "tesla") == "tesla" and not no_grid_import:
+            lendable_kw = managed_borrowable_w(hass, config_entry, vehicle_id, params)/1000
+            if lendable_kw > 0:
+                available_power_kw = max(available_power_kw, min(
+                    planned_ev_charge_kw-current_ev_power_kw, grid_headroom_kw+lendable_kw))
         available_power_kw = min(
             available_power_kw,
             planned_ev_charge_kw - current_ev_power_kw,

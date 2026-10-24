@@ -160,6 +160,9 @@ def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict, *, ta
     headroom = maximum if import_limit in (None, 0) else _number(import_limit, "grid import limit") - load + solar
     if site_import is not None:
         headroom = min(headroom, site_import - load + solar)
+    reservation = _number(config.get("native_ev_unobserved_w", 0), "native EV reservation")
+    if reservation < 0:
+        raise ValueError("Invalid native EV reservation")
     if target_basis == "grid_import":
         if headroom < 0:
             # Do not pin the battery at zero output while uncontrolled loads
@@ -167,9 +170,9 @@ def battery_watts(mode: str, target_w: float, snapshot: Any, config: dict, *, ta
             raise ValueError("Home load exceeds the grid import limit")
         # Home and EV demand share this grid target. Never turn a charging
         # request into discharging when uncontrolled demand already exceeds it.
-        power = max(0.0, min(target - load + solar, maximum, headroom))
+        power = max(0.0, min(target - load + solar - reservation, maximum, headroom - reservation))
         return -power
-    power = min(target, maximum, headroom)
+    power = min(target, maximum, headroom - reservation)
     if power <= 0:
         raise ValueError("No grid import headroom for battery charging")
     return -power
@@ -202,6 +205,37 @@ class LocalBatteryDispatch:
         self.pending = False
         self._command_may_have_reached = False
         self._site_limits = None
+        self._generation = 0
+        self._last_watts = 0.0
+        self._pending_watts = None
+
+    @property
+    def charge_generation(self):
+        """Only an active grid-following charge may lend EV headroom."""
+        if self.pending and self._mode == "charge" and self._target_basis == "grid_import":
+            return self._generation
+        return None
+
+    @property
+    def prospective_charge_w(self):
+        """Accepted and possibly submitted draw, including an ACK in flight."""
+        return max((max(0.0, -value) for value in (self._last_watts, self._pending_watts)
+                    if value is not None), default=0.0)
+
+    async def refresh_current_generation(self, expected_generation):
+        """Apply the current reservation without replacing owner or deadline."""
+        async with self._lock:
+            if (expected_generation is None or self.charge_generation != expected_generation
+                    or time.monotonic() >= self._deadline):
+                return None
+            try:
+                watts = await self._write_with_limit_retry()
+            except BaseException:
+                await self._cancel_task()
+                await self._release()
+                raise
+            return {"generation": self._generation, "battery_power_w": watts,
+                    "acknowledged_at": time.time()}
 
     def assume_pending(self):
         """Recover durable intent without replaying its power request."""
@@ -221,6 +255,9 @@ class LocalBatteryDispatch:
         Require fresh, explicit unset evidence even after reload: an unknown
         or failed read cannot erase a previously configured installer limit.
         """
+        if (self.config().get("native_ev_rate_armed")
+                or _number(self.config().get("native_ev_unobserved_w", 0), "native EV reservation") > 0):
+            raise ValueError("Tariff fallback cannot enforce reserved EV headroom")
         # Tariff forcing has no wattage control. A learned native ceiling
         # cannot be guaranteed by the configured optimiser power setting.
         if math.isfinite(self._device_limit(mode)):
@@ -234,6 +271,9 @@ class LocalBatteryDispatch:
                 raise ValueError("Gateway site limits unavailable")
             if limits[0 if mode == "charge" else 1] is not None:
                 raise ValueError("Tariff fallback cannot enforce the gateway site limit")
+            if (self.config().get("native_ev_rate_armed")
+                    or _number(self.config().get("native_ev_unobserved_w", 0), "native EV reservation") > 0):
+                raise ValueError("Tariff fallback cannot enforce reserved EV headroom")
         except Exception as err:
             raise ValueError("Tariff fallback blocked by gateway site limits or unavailable limit evidence") from err
 
@@ -244,6 +284,7 @@ class LocalBatteryDispatch:
             raise ValueError("Invalid dispatch target basis")
         async with self._lock:
             await self._cancel_task()
+            self._generation += 1
             if allowed is not None:
                 self.allowed = allowed
             self.guarded_write = guarded_write
@@ -322,6 +363,7 @@ class LocalBatteryDispatch:
             )
             watts = battery_watts(self._mode, target, snapshot, current_config, target_basis=self._target_basis)
             self._command_may_have_reached = True
+            self._pending_watts = watts
             try:
                 accepted = await self.client.dispatch_battery_power(watts, remaining)
             except Exception as err:
@@ -329,6 +371,7 @@ class LocalBatteryDispatch:
             if not accepted:
                 raise DispatchCommandFailed("Gateway did not acknowledge local battery dispatch")
             self._last_watts = watts
+            self._pending_watts = None
             self.grid_import_estimate_w = (_number(snapshot.load_w, "home power")
                 - _number(snapshot.solar_w, "solar power") - watts) if self._target_basis == "grid_import" else None
             if self.acknowledged is not None:
@@ -393,6 +436,8 @@ class LocalBatteryDispatch:
                 await self.failed()
             raise
         self._command_may_have_reached = False
+        self._pending_watts = None
+        self._last_watts = 0.0
         if retain_intent:
             return
         self.pending = False
@@ -400,5 +445,6 @@ class LocalBatteryDispatch:
 
     async def stop(self):
         async with self._lock:
+            self._generation += 1
             await self._cancel_task()
             await self._release()

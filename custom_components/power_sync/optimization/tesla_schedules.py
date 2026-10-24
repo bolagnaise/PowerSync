@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 import logging
 import math
+import hashlib
+import json
 from typing import Any, Mapping, Sequence
 
 _LOGGER = logging.getLogger(__name__)
@@ -72,6 +74,62 @@ class TeslaScheduleForecast:
     vehicle_id: str
     power_w: tuple[float, ...]
     energy_needed_kwh: float
+
+
+@dataclass(frozen=True)
+class NativeChargeWindow:
+    identity: str
+    start: float
+    end: float
+    read_at: float
+
+
+def active_native_window(*, data: Mapping[str, Any], now: datetime,
+                         schedule_read_at: datetime, latitude: float,
+                         longitude: float) -> NativeChargeWindow | None:
+    """Actual explicit home window; synthetic forecast bounds grant no control.
+
+    One-time, work-location, start-only and finish-by schedules remain
+    forecast-only; a fresh cache read alone cannot prove one-time occurrence.
+    """
+    if now.tzinfo is None or schedule_read_at.tzinfo is None:
+        return None
+    if not 0 <= now.timestamp()-schedule_read_at.timestamp() <= REFRESH_SECONDS:
+        return None
+    schedules = _section(data, "charge_schedule_data").get("charge_schedules")
+    if not isinstance(schedules, list):
+        return None
+    windows = []
+    for schedule in schedules:
+        if (not isinstance(schedule, dict) or schedule.get("enabled") is not True
+                or schedule.get("start_enabled") is not True
+                or schedule.get("end_enabled") is not True
+                or schedule.get("one_time") is True
+                or not _near_site(schedule, latitude, longitude)):
+            continue
+        start_minutes = _number(schedule.get("start_time"), math.nan)
+        end_minutes = _number(schedule.get("end_time"), math.nan)
+        if (not 0 <= start_minutes < 1440 or not 0 <= end_minutes < 1440
+                or not start_minutes.is_integer() or not end_minutes.is_integer()
+                or start_minutes == end_minutes):
+            continue
+        reference = now
+        day = datetime.combine(reference.date()-timedelta(days=1), time(), now.tzinfo)
+        for offset in range(2):
+            date = day+timedelta(days=offset)
+            if not _scheduled_day(schedule.get("days_of_week"), date):
+                continue
+            start = date+timedelta(minutes=start_minutes)
+            end = date+timedelta(minutes=end_minutes)
+            if end <= start:
+                end += timedelta(days=1)
+            if start.timestamp() <= now.timestamp() < end.timestamp():
+                identity = hashlib.sha256(json.dumps(
+                    [schedule, start.timestamp(), end.timestamp()], sort_keys=True).encode()).hexdigest()
+                windows.append(NativeChargeWindow(identity, start.timestamp(), end.timestamp(),
+                                                 schedule_read_at.timestamp()))
+    # Do not extend one command lease across a change between overlapping rules.
+    return min(windows, key=lambda window: (window.end, window.identity)) if windows else None
 
 
 def forecast_vehicle(

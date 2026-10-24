@@ -21532,6 +21532,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
     from .licensing.manager import async_get_manager
     await async_get_manager(hass)
+    from .native_rate_budget import budget_for as _prepare_native_rate_budget
+    await _prepare_native_rate_budget(hass)
     _LOGGER.info("=" * 60)
     _LOGGER.info("PowerSync integration loading...")
     _LOGGER.info("Domain: %s", DOMAIN)
@@ -24391,6 +24393,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "_mode_stick_failures": [],  # list of timestamps for calibration detection
         "_calibration_check_unsub": None,
     }
+
+    from .tesla_native_rate import async_prepare as _prepare_tesla_native_rate
+    await _prepare_tesla_native_rate(hass, entry)
 
     # PV-production stopping runs independently of export-price and battery
     # routes. It must also reconcile a durable restore journal after restart.
@@ -33365,6 +33370,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         for name in ("max_charge_w", "max_discharge_w", "max_grid_import_w", "max_grid_export_w", "grid_charge_soc_cap", "allow_grid_charge"):
             if effective is not None and hasattr(effective, name):
                 config[f"optimization_{name}"] = getattr(effective, name)
+        if budget := hass.data.get("power_sync_native_rate_budget"):
+            from .native_rate_budget import site_identity
+            config["native_ev_unobserved_w"] = budget.unobserved_w(site_identity(entry))
+            config["native_ev_rate_armed"] = budget.site_armed(site_identity(entry))
         return config
 
     async def _local_powerwall_dispatch_acknowledged(watts, seconds):
@@ -42010,6 +42019,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             routed_handler(hass, entry.entry_id, "preserve_battery", native_handlers["preserve_battery"]),
             supports_response=SupportsResponse.OPTIONAL,
         )
+    if active_battery_system == BATTERY_SYSTEM_TESLA:
+        from .native_rate_admission import guard_battery_transition
+        handle_force_charge = guard_battery_transition(hass, entry, handle_force_charge)
+        handle_force_discharge = guard_battery_transition(hass, entry, handle_force_discharge)
+        handle_restore_normal = guard_battery_transition(hass, entry, handle_restore_normal)
     register_handlers(hass, entry.entry_id, {
         **(native_handlers if amber_smartshift_coordinator else {}),
         'force_charge': handle_force_charge,
@@ -46014,6 +46028,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # must still be eligible for the user's next Smart Optimization enable.
     license_manager.entry_loaded(entry.entry_id)
 
+    from .tesla_native_rate import async_start as _start_tesla_native_rate
+    await _start_tesla_native_rate(hass, entry)
+
     _LOGGER.info("=" * 60)
     _LOGGER.info("PowerSync integration setup complete!")
     _LOGGER.info("Domain '%s' registered successfully", DOMAIN)
@@ -47824,6 +47841,8 @@ class OptimizationAISummaryView(HomeAssistantView):
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     hass.data.get(DOMAIN, {}).get(entry.entry_id, {})["powerwall_local_dispatch_stopping"] = True
+    from .tesla_native_rate import async_stop as _stop_tesla_native_rate
+    await _stop_tesla_native_rate(hass, entry)
     if license_manager := hass.data.get("power_sync_license_manager"):
         license_manager.detach(entry.entry_id)
     _LOGGER.info("Unloading PowerSync integration")

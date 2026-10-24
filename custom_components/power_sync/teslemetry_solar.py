@@ -6,10 +6,41 @@ wake a vehicle. The hold is intentionally retained after an uncertain command.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import wraps
 from inspect import signature
 import re
 import time
+
+_EV_SUBMISSION_CONTEXT = ContextVar("power_sync_ev_submission", default=None)
+
+
+def ev_owner_snapshot(hass, entry, vin):
+    from .automations.ev_ownership import get_ev_ownership
+    owners = []
+    entries = {entry.entry_id: entry}
+    entries.update({key: runtime["entry"] for key, runtime in hass.data.get("power_sync", {}).items()
+                    if isinstance(runtime, dict) and runtime.get("entry") is not None})
+    for key, value in entries.items():
+        _, lease = get_ev_ownership(hass, value, vin)
+        if lease is not None:
+            owners.append((key, id(lease), lease.get("owner"), lease.get("owner_mode"), lease.get("session_id")))
+    return tuple(sorted(owners))
+
+
+@contextmanager
+def _ev_submission_scope(hass, entry, vin, params):
+    data = getattr(hass, "data", {})
+    runtime = data.get("power_sync", {}).get(entry.entry_id)
+    snapshot = ev_owner_snapshot(hass, entry, vin) if data.get("power_sync_native_rate_budget") is not None else None
+    token = _EV_SUBMISSION_CONTEXT.set({"hass": hass, "entry": entry,
+                                       "vin": vin, "params": params, "runtime": runtime,
+                                       "owner_snapshot": snapshot})
+    try:
+        yield
+    finally:
+        _EV_SUBMISSION_CONTEXT.reset(token)
 
 
 class SolarError(ValueError):
@@ -136,6 +167,20 @@ def guard_ev_control(func):
         entry = bound.get("config_entry")
         if entry is None:
             return await func(*args, **kwargs)
+        params = bound.get("params") or {}
+        if (str(params.get("charger_type") or "tesla").lower() != "tesla"
+                and func.__name__ in {"_action_start_ev_charging", "_action_start_ev_charging_dynamic",
+                    "_action_set_ev_charging_amps", "_set_vehicle_amps", "_dynamic_ev_update"}):
+            budget = hass.data.get("power_sync_native_rate_budget")
+            if budget is not None:
+                from .native_rate_budget import site_identity
+                site = site_identity(entry)
+                if any(record.get("site") == site and record.get("sessions")
+                        for record in budget.entries.values()):
+                    # Native rate cleanup must settle before an unsupported
+                    # charger can acquire this site's unreserved capacity.
+                    # Explicit stop actions remain available throughout.
+                    return False
         gate = await ownership(hass, entry.entry_id)
         if gate.owner is asyncio.current_task():
             params = bound.get("params") or {}
@@ -143,7 +188,8 @@ def guard_ev_control(func):
             cleanup_only = params.get("stop_charging") is False and func.__name__ == "_action_stop_ev_charging_dynamic"
             if gate.blocked(vin) and not cleanup_only:
                 return False
-            return await func(*args, **kwargs)
+            with _ev_submission_scope(hass, entry, vin, params):
+                return await func(*args, **kwargs)
         async with gate.lock:
             await gate.load()
             params = bound.get("params") or {}
@@ -153,7 +199,12 @@ def guard_ev_control(func):
                 return False
             gate.owner = asyncio.current_task()
             try:
-                return await func(*args, **kwargs)
+                with _ev_submission_scope(hass, entry, vin, params):
+                    return await func(*args, **kwargs)
+            except Exception as err:
+                if getattr(err, "site_import_admission_denied", False):
+                    return False
+                raise
             finally:
                 gate.owner = None
     return guarded
@@ -185,6 +236,11 @@ def register_services(hass):
                 await gate.load()
                 if any(state.get("active") for state in _dynamic_ev_state.get(entry.entry_id, {}).values()):
                     raise SolarError("Turn off PowerSync EV charging sessions before reading or changing native Charge on Solar")
+                native_rate = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_native_rate")
+                budget = hass.data.get("power_sync_native_rate_budget")
+                if (vin in getattr(native_rate, "sessions", {})
+                        or (budget is not None and budget.native_claimed(vin))):
+                    raise SolarError("Turn off native-window rate management and wait for current restoration before reading or changing Charge on Solar")
                 settings = None
                 if call.service == "set_teslemetry_charge_on_solar":
                     if entry.options.get(CONF_MONITORING_MODE, entry.data.get(CONF_MONITORING_MODE, False)):

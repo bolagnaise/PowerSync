@@ -17477,6 +17477,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             excluded_vins=excluded_vins(self.hass, self._entry.entry_id),
             charging_parameters=charging_parameters,
         )
+        rate = entry_data.get("tesla_native_rate")
+        rate_forecast = getattr(getattr(rate, "ports", None), "forecast", None)
+        if rate_forecast is not None:
+            native = {vin: rate_forecast(vin, forecast, timestamps,
+                self._config.interval_minutes, dt_util.now().timestamp()) for vin, forecast in native.items()}
         smart, price, self._pending_ev_charge_plan = merge_native_schedules(
             native=native, smart=smart_components, price=price_components,
             plans=self._pending_ev_charge_plan, canonical=canonical,

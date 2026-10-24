@@ -38,6 +38,33 @@ def vehicle(schedules=None, **charge):
     }
 
 
+def test_rate_authority_requires_current_explicit_home_window():
+    window = m.active_native_window(data=vehicle(), now=NOW,
+        schedule_read_at=NOW, latitude=-27.47, longitude=153.03)
+    assert window and window.start == NOW.timestamp() and window.end == (NOW+timedelta(hours=3)).timestamp()
+    assert window.read_at == NOW.timestamp()
+
+
+@pytest.mark.parametrize('changes', [dict(start_enabled=False), dict(end_enabled=False),
+    dict(one_time=True), dict(latitude=0), dict(enabled=False), dict(start_time=600.5),
+    dict(end_time=600), dict(days_of_week=0)])
+def test_forecast_window_is_not_rate_authority(changes):
+    rule = schedule(); rule.update(changes)
+    assert m.active_native_window(data=vehicle([rule]), now=NOW,
+        schedule_read_at=NOW, latitude=-27.47, longitude=153.03) is None
+
+
+def test_rate_window_expires_and_recurring_overnight_is_allowed():
+    rule = schedule(); rule.update(start_time=1380, end_time=660)
+    window = m.active_native_window(data=vehicle([rule]), now=NOW,
+        schedule_read_at=NOW, latitude=-27.47, longitude=153.03)
+    assert window and window.end == (NOW+timedelta(hours=1)).timestamp()
+    assert m.active_native_window(data=vehicle(), now=NOW+timedelta(hours=3),
+        schedule_read_at=NOW+timedelta(hours=3), latitude=-27.47, longitude=153.03) is None
+    assert m.active_native_window(data=vehicle(), now=NOW,
+        schedule_read_at=NOW-timedelta(seconds=901), latitude=-27.47, longitude=153.03) is None
+
+
 def forecast(data=None, *, start=NOW, count=5, minutes=60, capacity=60):
     return m.forecast_vehicle(vehicle_id=VIN, data=data or vehicle(),
         timestamps=[start + timedelta(minutes=minutes * i) for i in range(count)],

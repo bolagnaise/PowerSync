@@ -105,6 +105,36 @@ async def test_failed_persistence_never_changes_active_preference(api):
 
 
 @pytest.mark.asyncio
+async def test_rate_management_is_explicit_default_off_and_separate_from_forecast(api):
+    _, result = await api.view.get(request())
+    assert all(not entry['rate_management'] for entry in result['entries'])
+    api.hass.async_create_task = lambda task: task.close()
+    api.hass.data['power_sync']['one']['tesla_native_rate'] = SimpleNamespace(status={})
+    async def tick(): pass
+    api.hass.data['power_sync']['one']['tesla_native_rate'].tick = tick
+    status, result = await api.view.post(request({'entry_id':'one','vin':VIN,'enabled':True,'rate_management':True}))
+    assert status == 200 and result['rate_management'] is True
+    assert api.disk['power_sync.tesla_schedule_planning.one']['rate_management'] == {VIN:True}
+    api.hass.data.pop(m.RUNTIME_KEY)
+    _, result = await api.view.get(request())
+    assert result['entries'][0]['rate_management'] is True
+    assert result['entries'][1]['rate_management'] is False
+    await api.view.post(request({'entry_id':'one','vin':OTHER,'enabled':True}))
+    _, result = await api.view.get(request(vin=OTHER))
+    assert result['entries'][0]['rate_management'] is False
+    await api.view.post(request({'entry_id':'one','vin':VIN,'enabled':False}))
+    _, result = await api.view.get(request())
+    assert result['entries'][0]['rate_management'] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('rate', [None, 'true', 1, [], {}])
+async def test_malformed_rate_optin_never_saves(api, rate):
+    status, _ = await api.view.post(request({'entry_id':'one','vin':VIN,'enabled':True,'rate_management':rate}))
+    assert status == 400 and not api.writes
+
+
+@pytest.mark.asyncio
 async def test_concurrent_car_updates_cannot_overwrite_each_other(api, monkeypatch):
     setting = await m.preferences(api.hass, 'one')
     started, finish = asyncio.Event(), asyncio.Event()
