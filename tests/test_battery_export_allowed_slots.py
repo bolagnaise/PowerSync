@@ -8732,6 +8732,76 @@ def test_full_grid_soc_cap_keeps_charge_execution(opt_module):
     assert battery.force_charge_calls == [(10, 5000, False)]
 
 
+def _with_local_charge_soc(coordinator, soc, *, age=0, success=True):
+    import time
+    coordinator._supports_local_powerwall_target_power = lambda: True
+    coordinator.hass.data = {'power_sync': {coordinator.entry_id: {'powerwall_local': {
+        'coordinator': SimpleNamespace(data=SimpleNamespace(soc=soc),
+            last_success_monotonic=time.monotonic()-age, last_update_success=success),
+    }}}}
+
+
+def test_full_local_powerwall_suppresses_cached_charge_and_can_resume(opt_module):
+    """Physical full SOC ends repeated local refusals without pinning a stale plan."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.95)
+    coordinator._config.grid_charge_soc_cap = 1.0
+    _with_local_charge_soc(coordinator, 100)
+    action = SimpleNamespace(action='charge', power_w=20000)
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert battery.force_charge_calls == []
+    assert battery.restore_normal_calls == 1
+    assert coordinator._last_executed_action == 'self_consumption'
+    _with_local_charge_soc(coordinator, 99)
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert len(battery.force_charge_calls) == 1
+
+
+@pytest.mark.parametrize('age, success, soc', [(91, True, 100), (0, False, 100),
+    (0, True, float('nan')), (0, True, True), (0, True, 101)])
+def test_full_local_guard_ignores_unverified_snapshot(opt_module, age, success, soc):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.95)
+    _with_local_charge_soc(coordinator, soc, age=age, success=success)
+    reached, _, _ = asyncio.run(coordinator._grid_charge_soc_cap_reached())
+    assert reached is False
+
+
+def test_full_local_guard_does_not_override_user_force(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=1)
+    _with_local_charge_soc(coordinator, 100)
+    coordinator._force_state_getter = lambda: {'active': True, 'type': 'charge', 'source': 'user'}
+    asyncio.run(coordinator._execute_optimizer_action(SimpleNamespace(action='charge', power_w=5000)))
+    assert battery.force_charge_calls == [] and battery.restore_normal_calls == 0
+
+
+def test_full_local_charge_releases_owned_force_instead_of_extending(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.95)
+    _with_local_charge_soc(coordinator, 100)
+    coordinator._set_optimizer_force_state('charge', 10, 5000)
+    action = SimpleNamespace(action='charge', power_w=5000,
+                             timestamp=datetime.now(timezone.utc))
+    coordinator._current_schedule = SimpleNamespace(actions=[action])
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert battery.restore_normal_calls == 1
+    assert battery.force_charge_calls == []
+    assert coordinator._optimizer_force_state['active'] is False
+
+
+def test_local_soc_preempts_stale_fleet_reading_at_lower_configured_cap(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator._config.grid_charge_soc_cap = 0.89
+    coordinator._get_energy_data = lambda: {'battery_level': 50}
+    _with_local_charge_soc(coordinator, 90)
+    asyncio.run(coordinator._execute_optimizer_action(SimpleNamespace(action='charge', power_w=5000)))
+    assert battery.force_charge_calls == []
+    assert battery.restore_normal_calls == 1
+
+
 @pytest.mark.parametrize("cap", [None, "invalid"])
 def test_invalid_grid_soc_cap_defaults_to_full(opt_module, cap):
     """Missing or malformed persisted caps cannot block optimizer charging."""

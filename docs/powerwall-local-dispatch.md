@@ -8,6 +8,12 @@ The gateway can report a timed-command limit below the combined Powerwall rating
 
 A four-Powerwall 2 site on firmware 26.34.0 reported a 10 kW timed charging ceiling despite its configured 20 kW combined rating. The reporter demonstrated 10 kW charging and 10 kW grid export. This is evidence for that system, not a universal Powerwall 2 limit or a guarantee for other firmware. Check measured battery and grid power; acknowledgement alone does not prove output.
 
+## Full battery and cached charging plans
+
+From v2.12.1479, the optimiser checks fresh paired-gateway SOC before applying or extending a charge. At the configured charge ceiling, including 100%, it restores normal operation once and suppresses repeated cached charge attempts. It can resume charging when a later fresh reading is below the ceiling. Stale, failed or invalid local readings do not establish that the battery is full. The local command retains its independent safety check.
+
+Optimiser charge logs label the requested watts explicitly. The local acknowledgement reports the accepted battery target separately; measured battery/grid power establishes the physical result. A 20 kW request followed by a 10 kW acknowledgement is not proof of 20 kW charging.
+
 ## Spread Import, Spread Export and EV charging
 
 Home Assistant's Spread Import distributes battery charging across eligible same-price windows. Spread Export distributes planned export across eligible windows. They retain reserve, price, ownership and connection limits; Cloud does not expose these HA switches.
