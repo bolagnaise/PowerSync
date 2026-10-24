@@ -7,6 +7,10 @@ forecast, household load forecast, battery limits, and configured reserve floors
 Solar forecasting via Solcast or Open-Meteo Solar Forecast should be configured
 for accurate schedules.
 
+## Price interval boundaries
+
+Timestamped tariff rates apply only where their validity period overlaps the current planning horizon. Rates beyond that horizon are ignored until their period enters the plan; they do not replace the current import or export price. A period crossing the end of the horizon is included only for the part that overlaps.
+
 ## AI Plan Explanation
 
 AI Plan Explanation is optional. It turns an existing deterministic Smart
