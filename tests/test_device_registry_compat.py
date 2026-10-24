@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import importlib.util
 from pathlib import Path
 import sys
@@ -20,6 +21,68 @@ PRODUCTION_PATHS = (
     COMPONENT_ROOT / "optimization" / "ev_coordinator.py",
     COMPONENT_ROOT / "inverters" / "foxess_entity.py",
 )
+
+
+def _load_device_removal_callback():
+    tree = ast.parse((COMPONENT_ROOT / "__init__.py").read_text())
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "async_remove_config_entry_device"
+    )
+    namespace = {
+        "HomeAssistant": object,
+        "ConfigEntry": object,
+        "DOMAIN": "power_sync",
+        "CONF_ELECTRICITY_PROVIDER": "electricity_provider",
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "__init__.py", "exec"), namespace)
+    return namespace["async_remove_config_entry_device"]
+
+
+def test_inactive_globird_pricing_device_can_be_removed_after_switching_to_amber():
+    """An old provider child must not be permanently attached to the new hub."""
+    callback = _load_device_removal_callback()
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={"electricity_provider": "globird"},
+        options={"electricity_provider": "amber"},
+    )
+    device = SimpleNamespace(identifiers={("power_sync", "entry-1_globird_pricing")})
+    assert asyncio.run(callback(object(), entry, device)) is True
+
+
+def test_device_removal_preserves_active_provider_and_other_devices():
+    callback = _load_device_removal_callback()
+    cases = [
+        # Options are the effective provider even when data still says Amber.
+        ({"electricity_provider": "amber"}, {"electricity_provider": "globird"},
+         {("power_sync", "entry-1_globird_pricing")}, False),
+        ({"electricity_provider": "globird"}, {},
+         {("power_sync", "entry-1_globird_pricing")}, False),
+        ({}, {}, {("power_sync", "entry-1_globird_pricing")}, False),
+        ({"electricity_provider": "globird"}, {"electricity_provider": ""},
+         {("power_sync", "entry-1_globird_pricing")}, False),
+        ({"electricity_provider": "amber"}, {},
+         {("power_sync", "entry-1_globird_pricing")}, True),
+        ({"electricity_provider": "amber"}, {},
+         {("power_sync", "entry-2_globird_pricing")}, False),
+        ({"electricity_provider": "amber"}, {},
+         {("another_integration", "entry-1_globird_pricing")}, False),
+        ({"electricity_provider": "amber"}, {},
+         {("power_sync", "entry-1")}, False),
+        ({"electricity_provider": "amber"}, {},
+         {("power_sync", "entry-1_powerwall")}, False),
+        ({"electricity_provider": "amber"}, {},
+         {("power_sync", "entry-1_flow_power_pricing")}, False),
+        ({"electricity_provider": "globird"}, {},
+         {("power_sync", "entry-1_pw_0")}, True),
+        ({"electricity_provider": "amber"}, {}, set(), False),
+    ]
+    for data, options, identifiers, expected in cases:
+        entry = SimpleNamespace(entry_id="entry-1", data=data, options=options)
+        device = SimpleNamespace(identifiers=identifiers)
+        assert asyncio.run(callback(object(), entry, device)) is expected
 
 
 def _compat_module():
