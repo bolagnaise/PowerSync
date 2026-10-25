@@ -3,8 +3,8 @@
 Implements Sungrow iHM protocol V1.0.2, not the SH inverter register map.
 The default client is read-only. Control callers must explicitly supply a live
 permission callback (Monitoring Mode, entry lifetime and external ownership).
-This driver is deliberately not advertised as an optimizer connection until
-native telemetry direction and the inverter telemetry source are validated.
+The native coordinator uses the established SH inverter connection for
+normalized telemetry and this client exclusively for native battery dispatch.
 """
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ class SungrowIHomeManagerController:
     UNIT = 247
     HEARTBEAT_SECONDS = 20
     RENEW_SECONDS = 10
-    MAX_DURATION_SECONDS = 1800
+    MAX_DURATION_SECONDS = 86400
     MODE_ADDRESS = 8023
     HEARTBEAT_ADDRESS = 8032
     MODE_SELF_CONSUMPTION = 1
@@ -84,7 +84,7 @@ class SungrowIHomeManagerController:
     ) -> None:
         if not host.strip() or int(port) not in (503, 504):
             raise ValueError("Use a configured plaintext iHomeManager port 503 or 504")
-        if not (0 <= reserve_percent < max_soc_percent <= 100):
+        if not (0 <= reserve_percent <= max_soc_percent <= 100):
             raise ValueError("Invalid battery SOC boundaries")
         self.host = host.strip()
         self.port = int(port)
@@ -103,6 +103,13 @@ class SungrowIHomeManagerController:
         self._heartbeat_owned = False
         self._deadline = 0.0
         self._closed = False
+
+    def set_soc_limits(self, reserve_percent: float, max_soc_percent: float = 100) -> None:
+        """Refresh software guards without writing persistent hardware reserves."""
+        if not (0 <= reserve_percent <= max_soc_percent <= 100):
+            raise ValueError("Invalid battery SOC boundaries")
+        self._reserve_percent = reserve_percent
+        self._max_soc_percent = max_soc_percent
 
     def _allowed(self) -> bool:
         try:
@@ -226,7 +233,7 @@ class SungrowIHomeManagerController:
             or isinstance(duration_seconds, bool) or not isinstance(duration_seconds, (int, float))
             or not math.isfinite(duration_seconds) or not 0 < duration_seconds <= self.MAX_DURATION_SECONDS
         ):
-            raise ValueError("Supply positive power >=100 W and a duration up to 1800 seconds")
+            raise ValueError("Supply positive power >=100 W and a duration up to 86400 seconds")
         if not self._allowed():
             return False
         # Stop the prior lease before changing targets. Failed restoration stays

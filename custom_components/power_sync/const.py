@@ -277,8 +277,12 @@ CONF_SUNGROW_SLAVE_ID = "sungrow_slave_id"
 CONF_SUNGROW_CONNECTION_TYPE = "sungrow_connection_type"
 SUNGROW_CONNECTION_DIRECT = "direct"
 SUNGROW_CONNECTION_IHOMEMANAGER = "ihomemanager"
+SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE = "ihomemanager_native"
+CONF_SUNGROW_IHOMEMANAGER_HOST = "sungrow_ihomemanager_host"
+CONF_SUNGROW_IHOMEMANAGER_PORT = "sungrow_ihomemanager_port"
 SUNGROW_CONNECTION_TYPES = {
     SUNGROW_CONNECTION_DIRECT: "Direct inverter / WiNet-S",
+    SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE: "iHomeManager battery control + inverter telemetry",
     SUNGROW_CONNECTION_IHOMEMANAGER: (
         "iHomeManager forwarding channel — telemetry only"
     ),

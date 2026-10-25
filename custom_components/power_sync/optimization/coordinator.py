@@ -1513,7 +1513,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @property
     def spread_export_enabled(self) -> bool:
         """Return whether export spreading is active."""
-        return self._config.spread_export_enabled
+        return bool(
+            self._config.spread_export_enabled
+            and getattr(getattr(self, "energy_coordinator", None), "supports_spread_export", True)
+        )
 
     @property
     def spread_import_enabled(self) -> bool:
@@ -8892,7 +8895,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _should_disable_idle_schedule(self) -> bool:
         """Return True when no-idle mode should replace optimizer IDLE."""
-        return bool(self._config.disable_idle_enabled)
+        return bool(
+            self._config.disable_idle_enabled
+            or getattr(getattr(self, "energy_coordinator", None), "supports_idle_hold", True) is False
+        )
 
     def _adopt_solved_ev_series(self, result: Any) -> None:
         """Publish the solved EV draw everywhere the overlay used to go.
@@ -13453,7 +13459,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _should_spread_export_schedule(self) -> bool:
         """Return True when optimizer export actions should be flattened."""
         return (
-            self._config.spread_export_enabled
+            self.spread_export_enabled
             and self._supports_target_export_power()
         )
 
@@ -20878,7 +20884,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "cost_function": self._cost_function.value,
             "amber_forecast_confidence_enabled": self.amber_forecast_confidence_enabled,
             "amber_forecast_confidence": dict(getattr(self, "_last_amber_forecast_confidence", {})),
-            "spread_export_enabled": self._config.spread_export_enabled,
+            "spread_export_enabled": self.spread_export_enabled,
             "spread_import_enabled": self._config.spread_import_enabled,
             "disable_idle_enabled": self.disable_idle_enabled,
             "battery_efficiency_learning_enabled": (
@@ -20998,7 +21004,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "allow_grid_charge": self._config.allow_grid_charge,
                 "grid_charge_blackout_windows": self._grid_charge_blackout_windows(),
                 "amber_forecast_confidence_enabled": self.amber_forecast_confidence_enabled,
-                "spread_export_enabled": self._config.spread_export_enabled,
+                "spread_export_enabled": self.spread_export_enabled,
                 "spread_import_enabled": self._config.spread_import_enabled,
                 "disable_idle_enabled": self.disable_idle_enabled,
                 "battery_efficiency_learning_enabled": (

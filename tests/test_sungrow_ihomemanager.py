@@ -170,7 +170,7 @@ def test_invalid_or_external_state_never_writes(driver, device, mutation):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("power,duration", [(float("nan"), 60), (float("inf"), 60), (0, 60), (99, 60), (True, 60), (1000, 0), (1000, 1801), (1000, float("nan")), (1000, True)])
+@pytest.mark.parametrize("power,duration", [(float("nan"), 60), (float("inf"), 60), (0, 60), (99, 60), (True, 60), (1000, 0), (1000, 86401), (1000, float("nan")), (1000, True)])
 def test_invalid_request_never_connects(driver, device, power, duration):
     async def run():
         controller = driver.SungrowIHomeManagerController("ihm.test", control_allowed=lambda: True)
@@ -459,4 +459,14 @@ def test_write_surface_rejects_unrelated_or_unsafe_registers(driver, device, add
         with pytest.raises(ValueError):
             await controller._write(address, words)
         assert not writes(device)
+    asyncio.run(run())
+
+
+def test_full_software_reserve_blocks_discharge_but_still_allows_charging(driver, device):
+    async def run():
+        controller = driver.SungrowIHomeManagerController("ihm.test", control_allowed=lambda: True, reserve_percent=100)
+        assert not await controller.start_dispatch("discharge", 5000, 60)
+        assert not writes(device)
+        assert await controller.start_dispatch("charge", 5000, 60)
+        assert await controller.async_shutdown()
     asyncio.run(run())

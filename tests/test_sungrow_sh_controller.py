@@ -51,6 +51,9 @@ def _install_const_stub() -> None:
     const.FLOW_POWER_KWATCH_REGIONS = {}
     const.CONF_FLEET_API_BASE_URL = "fleet_api_base_url"
     const.CONF_MONITORING_MODE = "monitoring_mode"
+    const.CONF_DAILY_SUPPLY_CHARGE = "daily_supply_charge"
+    const.CONF_MONTHLY_SUPPLY_CHARGE = "monthly_supply_charge"
+    const.TESLA_SITE_INFO_RETRY_SECONDS = 300
     const.CONF_POWERSYNC_CLIENT_INSTANCE_ID = "powersync_client_instance_id"
     const.CONF_EV_PROVIDER = "ev_provider"
     const.CONF_TESLA_BLE_ENTITY_PREFIX = "tesla_ble_entity_prefix"

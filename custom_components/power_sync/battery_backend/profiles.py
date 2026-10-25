@@ -41,6 +41,7 @@ from ..const import (
     FOXESS_CONNECTION_TCP,
     SUNGROW_CONNECTION_DIRECT,
     SUNGROW_CONNECTION_IHOMEMANAGER,
+    SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE,
 )
 
 
@@ -119,6 +120,14 @@ _PROFILES: tuple[BatteryConnectionProfile, ...] = (
         "direct_monitoring",
         monitoring_only=True,
         route_value=SUNGROW_CONNECTION_IHOMEMANAGER,
+    ),
+    _p(
+        "sungrow_ihomemanager_native",
+        BATTERY_SYSTEM_SUNGROW,
+        "iHomeManager battery control + inverter telemetry",
+        "direct",
+        route_value=SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE,
+        controls_summary="Native battery charge/discharge; inverter telemetry; no Idle hold, reserve writes or spread export",
     ),
     _p(
         "sungrow_ha_monitoring",
@@ -244,7 +253,10 @@ def legacy_profile_id(
     """Map existing settings to an equivalent profile without changing route."""
     if battery_system == BATTERY_SYSTEM_SUNGROW:
         route = _value(data, options, CONF_SUNGROW_CONNECTION_TYPE, SUNGROW_CONNECTION_DIRECT)
-        return "sungrow_ihomemanager" if route == SUNGROW_CONNECTION_IHOMEMANAGER else "sungrow_direct"
+        return {
+            SUNGROW_CONNECTION_IHOMEMANAGER: "sungrow_ihomemanager",
+            SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE: "sungrow_ihomemanager_native",
+        }.get(route, "sungrow_direct")
     if battery_system == BATTERY_SYSTEM_FOXESS:
         route = _value(data, options, CONF_FOXESS_CONNECTION_TYPE, FOXESS_CONNECTION_TCP)
         return {

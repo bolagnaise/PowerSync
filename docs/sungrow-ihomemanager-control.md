@@ -1,68 +1,95 @@
 # Native Sungrow iHomeManager battery control
 
-The native iHomeManager battery driver is an implementation for evaluation,
-not a released PowerSync connection option. Existing iHomeManager forwarding
-connections remain telemetry-only and keep Monitoring Mode enforced. The driver
-is not registered as a service, constructed during setup, or connected to the
-optimizer. Adding this module does not enable hardware writes on existing sites.
+The **iHomeManager battery control + inverter telemetry** connection pairs the
+existing Sungrow SH inverter readings with native iHomeManager battery commands.
+It supports price-driven battery charging and discharging, manual force modes,
+and return to self-consumption. The implementation is in
+[PR #136](https://github.com/bolagnaise/PowerSync/pull/136); it has not yet been
+released or verified on the reporter's hardware.
 
-## Protocol and scope
+Existing **iHomeManager forwarding — monitoring only** connections keep their
+current read-only behaviour. Updating does not migrate or enable control on an
+existing site. Native AC22E-01 charger control is outside this feature.
 
-The driver implements the manufacturer's native system dispatch protocol at unit
-247 on an explicitly configured plaintext port 503 or 504. It does not send SH
-inverter commands through a forwarding connection. It was written independently
-from Sungrow's protocol; no third-party integration code or UI is included.
+## Setup
 
-Primary source: [Sungrow iHM Communication Protocol V1.0.2](https://www.photovoltaikforum.com/core/file-download/563585/).
-The older [V1.0.1 protocol](https://www.photovoltaikforum.com/core/file-download/527824/)
-describes the same dispatch block, but this driver permits control only when the
-native device reports the documented V1.0.2 identity. Firmware version alone does
-not establish the protocol revision.
+Select **iHomeManager battery control + inverter telemetry** in the Sungrow
+connection form or battery connection profile. Configure both endpoints:
 
-Protocol addresses below are one-based; the driver subtracts one for Modbus:
-
-| Register | Function |
+| Field | Use |
 | --- | --- |
-| 8000–8004 | Device type, protocol number and protocol version (FC04) |
-| 8024–8027 | EMS mode, charge/discharge command and low-word-first U32 power (FC16) |
-| 8033 | VPP heartbeat timeout in seconds (FC03/FC16) |
-| 8151–8163 | Battery limits, raw signed system powers and SOC (FC04) |
+| Inverter IP address, Modbus port and slave ID | Existing SH inverter / WiNet-S telemetry, normally port 502 and unit 1 |
+| iHomeManager control IP address | The separate native iHomeManager endpoint |
+| iHomeManager plaintext control port | Configured non-SSL port 503 or 504; native unit is fixed at 247 |
 
-V1.0.2's version example contains wire bytes `02 00 01 00`, decoded as
-low-word-first U32 `0x01000200`. Unknown versions remain readable but cannot
-start dispatch. Battery power targets use 100 W units. Charge/discharge
-requests round down, clamp to the live maximum, and reject targets below the
-live minimum. Configured SOC boundaries are checked initially and on renewal.
-Persistent battery reserves, export limits, charger settings and inverter
-power-on/off settings are outside this driver's write surface.
+Both hosts must be explicit. The same host is allowed with different TCP ports;
+the same host/port pair is rejected. Setup checks both connections using reads
+only, including the native device identity and protocol revision. It does not
+send a control test. A failed check leaves the old settings intact. Changing
+an active route first restores its existing control before saving the change.
 
-## Dispatch lifecycle
+A newly selected native connection starts in **Monitoring Mode**. Disable
+Sungrow AI/VPP or other battery controllers before turning Monitoring Mode off.
+Native control requires protocol **V1.0.2**; the firmware string alone does not
+identify the protocol revision. Unsupported identities remain blocked.
 
-The client is read-only unless its caller supplies a live `control_allowed`
-callback. A future integration must evaluate Monitoring Mode, current entry
-lifetime, authorization and external ownership in this callback. An exception or
-anything other than `True` denies control. A callback alone is not a substitute
-for planning with fresh, normalized telemetry.
+No reporter-provided capture is required to implement or select this connection:
+the software verifies the documented native identity itself and uses the
+established inverter telemetry map. A separate capture remains useful for
+troubleshooting and physical validation.
 
-Starting a session requires self-consumption mode, valid native identity, fresh
-SOC/limits, and confirmed 20-second heartbeat readback. One FC16 request writes
-VPP mode, direction and power together; all four words must read back before the
-method reports success. The target is **battery power**, not a guaranteed grid
-export rate. Existing site export limits remain active.
+## Supported behaviour and limits
 
-The client renews the heartbeat every 10 seconds, for at most the requested
-finite duration (maximum 30 minutes). Each renewal checks authorization,
-mode/command/target, timeout, fresh limits and SOC. Expiry, failed checks,
-shutdown or lost communication stops renewal and attempts to restore
-self-consumption. V1.0.2 documents return to self-consumption if the heartbeat
-expires. A failed restore remains retryable and blocks session replacement.
-The prior heartbeat timeout is restored only after the dispatch is safe.
+- Charge and discharge targets are battery watts, rounded down to 100 W units
+  and bounded by live native minimum/maximum limits and configured SOC guards.
+- A zero target in the existing force-mode API uses the fresh native maximum;
+  normal explicit optimiser watt targets remain supported.
+- Requests last for their specified duration, up to 24 hours, and depend on
+  continued heartbeat renewal. Returning to normal releases the native session.
+- Existing hardware reserves and site export limits are retained. A battery
+  discharge request does not guarantee a particular amount of grid export.
+- Native protocol V1.0.2 does not document the inverter's zero-discharge-cap
+  primitive. **No Idle** is therefore effective for this connection: Idle plan
+  slots become self-consumption. Native reserve writes, rate-limit writes,
+  spread export and battery solar curtailment return unsupported rather than
+  issuing SH inverter register writes. The SH telemetry client also blocks
+  writes independently at its transport boundary.
 
-The protocol has no owner token. Changed settings are treated as external
-ownership and left alone; another writer using an identical target cannot be
-distinguished. The eventual connection must be explicitly exclusive with native
-Sungrow AI/VPP/other controllers. This limitation cannot be solved by readback.
-No claim of physical battery export follows from acknowledgement or readback.
+Solar, grid, battery, load and SOC for planning use the existing SH telemetry
+path. All required live power readings must be present and finite, including
+actual PV telemetry; missing, stale or failed readings block control. Native
+signed power readings are kept raw and are not used to guess power direction or
+label aggregate inverter AC output as PV generation.
+
+## Dispatch and recovery
+
+The client is read-only without its live permission callback. Native dispatch
+requires a current entry, matching routes/endpoints, Monitoring Mode off, no
+monitoring handoff, fresh complete inverter/native snapshots and valid battery
+SOC/limits. Optimiser leases also require the optimiser to remain enabled and
+its licence generation to remain valid. Manual control remains separate from
+optimiser enablement.
+
+Starting a session requires self-consumption mode. The driver verifies a
+20-second heartbeat timeout, then writes VPP mode, direction and power in one
+FC16 block. All command words must read back before success is returned.
+Heartbeat renewal occurs every 10 seconds and repeats the permission, ownership,
+SOC and power-limit checks. The driver stops renewal and attempts cleanup on
+expiry, failed checks, connection loss, cancellation or shutdown.
+
+Sungrow V1.0.2 documents automatic return to self-consumption when the heartbeat
+expires. Orderly cleanup restores self-consumption and the prior heartbeat
+setting. Failed cleanup remains retryable; another session cannot discard it.
+After an abrupt process restart, no old session is renewed or taken over: the
+existing VPP session must expire back to self-consumption before a new dispatch
+can start. The shortened heartbeat setting can remain after such an abrupt
+restart because its pre-crash baseline was held in memory.
+
+The protocol exposes no owner token. Changed command settings are treated as
+external ownership and left alone, including another controller's changed
+self-consumption command. Another writer using an identical target cannot be
+distinguished, so the connection must have exclusive battery-control ownership.
+Acknowledgement and readback are software proof, not proof of physical export.
 
 ## Read-only compatibility capture
 
@@ -72,29 +99,23 @@ With Python 3.12 and `pymodbus` installed, run from this checkout:
 python3.12 scripts/probe_ihomemanager.py --host LOCAL_IHOMEMANAGER_IP --port 503
 ```
 
-The script constructs the default read-only client and prints identity, native
-protocol version, live battery limits, SOC and raw system power. It does not
-print the host address or enable control. Keep other clients off that TCP port
-while capturing; iHomeManager allows one connection per port.
+The probe prints identity, protocol revision, battery limits, SOC and raw powers.
+It does not print the host address or enable control. Only one client can use an
+iHomeManager TCP port at a time. For physical validation, compare a timestamped
+capture with contemporaneous inverter battery/grid directions and PV readings;
+any actual control test needs separate authorization.
 
-Capture the output alongside the inverter's contemporaneous battery direction,
-grid direction and PV reading. No setting changes or device control tests are
-needed for this capture.
+## Protocol source
 
-## Remaining integration gate
+Written independently from the manufacturer's
+[iHM Communication Protocol V1.0.2](https://www.photovoltaikforum.com/core/file-download/563585/).
+No third-party integration code or UI is included. Protocol addresses are
+one-based; the driver subtracts one for Modbus. U32/S32 values use low-word-first
+order. V1.0.2's wire version bytes `02 00 01 00` decode to `0x01000200`.
 
-Sungrow does not define positive/negative direction for the native signed power
-registers. Aggregate inverter AC output is not a documented PV generation
-reading. The driver deliberately returns raw powers and never labels inverter
-AC output as solar generation. Before adding an optimizer/config-flow route:
-
-- Confirm the target firmware's native protocol identity and battery limits.
-- Reconcile native battery/grid directions with simultaneous inverter readings.
-- Establish a reliable independent inverter PV telemetry source and ownership.
-- Implement and validate the supported optimizer actions, unsupported idle and
-  reserve behaviour, Monitoring Mode handoff and shutdown/restart recovery.
-- Arrange any physical control test separately; this implementation has not
-  issued commands to the reporter's system or established physical export.
-
-Native AC22E-01 charger control and Tesla vehicle-side charging are separate
-features. They are not implemented by this battery driver.
+| Protocol registers | Function |
+| --- | --- |
+| 8000–8004 | Device type, protocol number and version (FC04) |
+| 8024–8027 | EMS mode, direction and U32 battery power (FC03/FC16) |
+| 8033 | VPP heartbeat timeout in seconds (FC03/FC16) |
+| 8151–8163 | Battery limits, raw system powers and SOC (FC04) |
