@@ -389,6 +389,7 @@ def load_routing(monitored=False, paired=True, **options):
              '_try_local_powerwall_force_locked',
              '_stop_local_powerwall_dispatch_locked', '_stop_native_max_charge_locked',
              '_set_tesla_control_method', '_stop_native_max_charge', '_try_native_max_charge', '_try_native_powerwall_force', '_powerwall_prefers_native_tariff',
+             '_cloud_tariff_control_requested', '_prepare_cloud_tariff_control',
              'handle_force_charge', 'handle_force_discharge', 'persist_force_mode_state', 'restore_force_mode_from_persistence',
              '_local_powerwall_dispatch_config', '_local_powerwall_dispatch_acknowledged', '_local_powerwall_dispatch_failed', '_local_powerwall_generation_current'}
     nodes = [n for n in setup.body if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name in names]
@@ -1142,11 +1143,12 @@ def test_grid_following_releases_instead_of_holding_zero_above_hard_import_cap()
 
 
 @pytest.mark.asyncio
-async def test_explicit_manual_max_selects_native_path_without_local_watts():
-    ns,c,client,_=load_routing(tesla_control_method='tariff')
+async def test_automatic_manual_max_selects_native_path_without_local_watts():
+    ns,c,client,_=load_routing(tesla_control_method='auto')
     session=SimpleNamespace(pending=False,adapter=SimpleNamespace(guard=AsyncMock(return_value=True)),
         start=AsyncMock(return_value={'expires_at':2000}))
-    ns['entry'].options={'tesla_control_method':'tariff'}
+    ns['entry'].options={'tesla_control_method':'auto'}
+    ns['_powerwall_prefers_native_tariff'] = lambda direction='discharge': True
     ns.update(_native_max_context={'call':None}, _get_tesla_site_configs=lambda *_:[('site','token','provider')],
         _get_native_max_charge=AsyncMock(return_value=session),
         _create_charge_tariff=lambda duration:({'code':'temporary','name':'Force Charge'},None))
@@ -1160,8 +1162,9 @@ async def test_explicit_manual_max_selects_native_path_without_local_watts():
 
 @pytest.mark.asyncio
 async def test_native_max_drains_inflight_price_upload_before_capturing_restore_tariff():
-    ns, local, client, _ = load_routing(tesla_control_method='tariff')
-    ns['entry'].options = {'tesla_control_method': 'tariff'}
+    ns, local, client, _ = load_routing(tesla_control_method='auto')
+    ns['entry'].options = {'tesla_control_method': 'auto'}
+    ns['_powerwall_prefers_native_tariff'] = lambda direction='discharge': True
     slot = {'busy': True, 'retry_at': 0.0}
     ns['hass'].data['power_sync']['_tesla_tou_uploads'] = {('provider', 'provider', 'site'): slot}
     observed = {'code': 'old-price-tariff'}
@@ -1215,7 +1218,8 @@ async def test_native_max_finishes_existing_restore_before_capture_and_never_ext
     async def get_session():events.append('capture-owner');return session
     session=SimpleNamespace(pending=False,adapter=SimpleNamespace(guard=AsyncMock(return_value=True)),
         start=AsyncMock(return_value={'expires_at':2000}))
-    ns['entry'].options={'tesla_control_method':'tariff'}
+    ns['entry'].options={'tesla_control_method':'auto'}
+    ns['_powerwall_prefers_native_tariff'] = lambda direction='discharge': True
     ns.update(_native_max_context={'call':None}, _get_tesla_site_configs=lambda *_:[('site','token','provider')],
         _get_native_max_charge=get_session,handle_restore_normal=restore,
         _create_charge_tariff=lambda duration:({'code':'temporary'},None))
@@ -1230,7 +1234,8 @@ async def test_native_max_cleanup_must_finish_before_numeric_local_handoff():
     runtime=ns['_local_powerwall_runtime']
     async def stop():native.pending=False;ns['force_charge_state'].update(active=False,native_max_charge=False)
     native=SimpleNamespace(pending=True,stop=AsyncMock(side_effect=stop))
-    ns['entry'].options={'tesla_control_method':'tariff'}
+    ns['entry'].options={'tesla_control_method':'auto'}
+    ns['_powerwall_prefers_native_tariff'] = lambda direction='discharge': True
     runtime['powerwall_native_max_charge']=native
     ns['force_charge_state'].update(active=True,native_max_charge=True)
     result=await ns['_try_local_powerwall_force']('charge',call(source='user',power_w=500),15,500)
@@ -1255,9 +1260,10 @@ async def test_queued_native_and_numeric_acquisitions_never_leave_competing_actu
         ns['force_charge_state'].update(active=False,native_max_charge=False)
     native=SimpleNamespace(pending=False,adapter=SimpleNamespace(guard=AsyncMock(return_value=True)),
         start=AsyncMock(side_effect=start),stop=AsyncMock(side_effect=stop))
-    ns['entry'].options={'tesla_control_method':'tariff'}
+    ns['entry'].options={'tesla_control_method':'auto'}
+    ns['_powerwall_prefers_native_tariff'] = lambda direction='discharge': True
     runtime['powerwall_native_max_charge']=native
-    ns['entry'].options={'tesla_control_method':'tariff'}
+    ns['entry'].options={'tesla_control_method':'auto'}
     ns.update(_native_max_context={'call':None}, _get_tesla_site_configs=lambda *_:[('site','token','provider')],
         _get_native_max_charge=AsyncMock(return_value=native),
         _create_charge_tariff=lambda duration:({'code':'temporary'},None))
@@ -1421,7 +1427,7 @@ async def test_native_max_tariff_discharge_keeps_real_and_configured_backup_rese
 @pytest.mark.parametrize('direction',['charge','discharge'])
 @pytest.mark.parametrize('source',['user','automation','optimizer'])
 async def test_large_site_tariff_route_never_starts_renewable_local_dispatch(direction,source):
-    ns,c,client,_=load_routing(tesla_control_method='tariff',optimization_max_charge_w=20000,optimization_max_discharge_w=20000)
+    ns,c,client,_=load_routing(tesla_control_method='auto',optimization_max_charge_w=20000,optimization_max_discharge_w=20000)
     runtime=ns['_local_powerwall_runtime']
     requested_at=__import__('time').time()-30
     runtime['battery_route_requested_at']=requested_at
@@ -1429,7 +1435,8 @@ async def test_large_site_tariff_route_never_starts_renewable_local_dispatch(dir
                                                _site_info_last_fetch=__import__('time').monotonic())
     native=SimpleNamespace(pending=False,record=None,adapter=SimpleNamespace(guard=AsyncMock(return_value=True)),
                            start=AsyncMock(return_value={'expires_at':2000}))
-    ns['entry'].options={'tesla_control_method':'tariff'}
+    ns['entry'].options={'tesla_control_method':'auto'}
+    ns['_powerwall_prefers_native_tariff'] = lambda direction='discharge': True
     ns.update(_native_max_context={'call':None},_get_native_max_charge=AsyncMock(return_value=native),
         _get_tesla_site_configs=lambda *_:[('site','token','provider')],
         _create_charge_tariff=lambda minutes:({'code':'charge'},None),
@@ -1467,9 +1474,10 @@ async def test_duplicate_optimizer_native_action_retains_owner_and_original_dead
     native=SimpleNamespace(pending=True,record={'phase':phase,'expires_at':expiry},
         adapter=SimpleNamespace(direction='charge',guard=AsyncMock(return_value=True)),
         start=AsyncMock(),stop=AsyncMock(),shorten=AsyncMock(return_value={'expires_at':expiry}))
-    ns['entry'].options={'tesla_control_method':'tariff'}
+    ns['entry'].options={'tesla_control_method':'auto'}
+    ns['_powerwall_prefers_native_tariff'] = lambda direction='discharge': True
     runtime['powerwall_native_max_charge']=native
-    ns['entry'].options={'tesla_control_method':'tariff'}
+    ns['entry'].options={'tesla_control_method':'auto'}
     ns.update(_native_max_context={'call':call(source='optimizer'),'targetless':True},
               _get_tesla_site_configs=lambda *_:[('site','token','provider')])
     if phase=='active':
@@ -1523,7 +1531,8 @@ async def test_large_site_max_denial_never_silently_submits_capped_local_command
     runtime['tesla_coordinator']=SimpleNamespace(_site_info_cache={'nameplate_power':21040},
         _site_info_last_fetch=__import__('time').monotonic())
     native=SimpleNamespace(pending=False,adapter=SimpleNamespace(guard=AsyncMock(return_value=False)),start=AsyncMock())
-    ns['entry'].options={'tesla_control_method':'tariff'}
+    ns['entry'].options={'tesla_control_method':'auto'}
+    ns['_powerwall_prefers_native_tariff'] = lambda direction='discharge': True
     ns.update(_native_max_context={},_get_native_max_charge=AsyncMock(return_value=native),
         _get_tesla_site_configs=lambda *_:[('site','token','provider')])
     with pytest.raises(RuntimeError,match='Max was not started'):
@@ -1541,9 +1550,10 @@ async def test_repeated_optimizer_request_persists_shorter_native_deadline():
     native=SimpleNamespace(pending=True,record={'phase':'active','expires_at':now+3600},
         adapter=SimpleNamespace(direction='discharge',guard=AsyncMock(return_value=True)),
         start=AsyncMock(),stop=AsyncMock(),shorten=AsyncMock(return_value={'expires_at':now+480}))
-    ns['entry'].options={'tesla_control_method':'tariff'}
+    ns['entry'].options={'tesla_control_method':'auto'}
+    ns['_powerwall_prefers_native_tariff'] = lambda direction='discharge': True
     runtime['powerwall_native_max_charge']=native
-    ns['entry'].options={'tesla_control_method':'tariff'}
+    ns['entry'].options={'tesla_control_method':'auto'}
     ns.update(_native_max_context={'targetless':True},_get_tesla_site_configs=lambda *_:[('site','token','provider')])
     result=await ns['_try_local_powerwall_force']('discharge',call(source='optimizer',power_w=0),8,21000)
     native.shorten.assert_awaited_once_with(now+480)
@@ -1556,7 +1566,8 @@ async def test_large_site_max_without_tariff_provider_never_uses_local_fallback(
     ns,c,client,_=load_routing()
     ns['_local_powerwall_runtime']['tesla_coordinator']=SimpleNamespace(
         _site_info_cache={'nameplate_power':21040},_site_info_last_fetch=__import__('time').monotonic())
-    ns['entry'].options={'tesla_control_method':'tariff'}
+    ns['entry'].options={'tesla_control_method':'auto'}
+    ns['_powerwall_prefers_native_tariff'] = lambda direction='discharge': True
     with pytest.raises(RuntimeError,match='provider is unavailable'):
         await ns['_try_local_powerwall_force']('discharge',call(source='user',power_w=0),15,21000)
     client.dispatch_battery_power.assert_not_called()
@@ -1583,7 +1594,8 @@ def _install_native_discharge_owner(ns,local,client):
         restore=restore,settled=AsyncMock(return_value=True))
     session=native_module.NativeMaxChargeSession(adapter,Store())
     ns['NativeMaxChargeError']=native_module.NativeMaxChargeError
-    ns['entry'].options={'tesla_control_method':'tariff'}
+    ns['entry'].options={'tesla_control_method':'auto'}
+    ns['_powerwall_prefers_native_tariff'] = lambda direction='discharge': True
     ns['_get_tesla_site_configs']=lambda *_:[('site','token','provider')]
     ns['_get_native_max_charge']=AsyncMock(return_value=session)
     ns['_native_max_context']={}

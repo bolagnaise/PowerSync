@@ -183,3 +183,141 @@ def test_unpaired_tariff_plans_keep_the_existing_tariff_service_contract():
     assert namespace['_powerwall_service_power'](obj,'discharge',15000)==15000
     obj._entry.data.update(powerwall_local_paired=True,powerwall_local_ip='gateway.local')
     assert namespace['_powerwall_service_power'](obj,'discharge',15000)==0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('direction', ['charge', 'discharge'])
+@pytest.mark.parametrize('source', ['user', 'optimizer'])
+@pytest.mark.parametrize('preference', ['tariff', None])
+async def test_tariff_control_reaches_cloud_without_reading_unreachable_gateway(direction, source, preference):
+    from test_powerwall_battery_dispatch import load_routing, call
+    from unittest.mock import AsyncMock
+    ns, local, client, _ = load_routing(tesla_control_method='tariff')
+    if preference is None:
+        ns['entry'].data.pop('tesla_control_method')
+    client.get_snapshot.side_effect = OSError('Powerwall LAN unreachable')
+    native = SimpleNamespace(pending=False, adapter=SimpleNamespace(
+        guard=AsyncMock(side_effect=OSError('Powerwall LAN unreachable'))))
+    ns.update(_get_tesla_site_configs=lambda *_: [('site', 'token', 'provider')],
+              _get_native_max_charge=AsyncMock(return_value=native), _native_max_context={})
+    request = call(source=source, power_w=0)
+    # None passes admission on to the existing confirmed cloud tariff path.
+    if direction == 'charge':
+        assert await ns['_try_native_max_charge'](request, 15, 9999999999) is None
+    assert await ns['_try_local_powerwall_force'](direction, request, 15, 0) is None
+    ns['_get_native_max_charge'].assert_not_awaited()
+    client.get_snapshot.assert_not_awaited()
+    client.dispatch_battery_power.assert_not_awaited()
+    assert not local.pending
+
+
+@pytest.mark.asyncio
+async def test_tariff_preference_keeps_an_explicit_watt_target_local():
+    from test_powerwall_battery_dispatch import load_routing, call
+    ns, local, client, _ = load_routing(tesla_control_method='tariff')
+    result = await ns['_try_local_powerwall_force']('charge', call(power_w=500), 15, 500)
+    assert result['control_path'] == 'powerwall_local_dispatch'
+    client.dispatch_battery_power.assert_awaited_once()
+    await local.stop()
+
+
+@pytest.mark.asyncio
+async def test_tariff_control_cannot_abandon_uncertain_local_cleanup():
+    from test_powerwall_battery_dispatch import load_routing, call
+    ns, local, client, _ = load_routing(tesla_control_method='tariff')
+    await local.start('charge', 500, 120)
+    client.resume_battery_operation.return_value = False
+    with pytest.raises(RuntimeError, match='cleanup remains pending'):
+        await ns['_try_local_powerwall_force']('charge', call(power_w=0), 15, 0)
+    assert local.pending
+    client.resume_battery_operation.return_value = True
+    await local.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reservation', ['armed', 'unobserved', 'managed', 'native_max'])
+async def test_cloud_tariff_keeps_shared_ev_and_native_ownership_guards(reservation):
+    from test_powerwall_battery_dispatch import load_routing, call
+    from unittest.mock import AsyncMock
+    ns, local, client, _ = load_routing(tesla_control_method='tariff')
+    ns['site_identity'] = lambda entry: 'site'
+    ns['hass'].data['power_sync_native_rate_budget'] = SimpleNamespace(
+        load=AsyncMock(),
+        native_max_claim=lambda site: {'token': 'owner'} if reservation == 'native_max' else None,
+        site_armed=lambda site: reservation == 'armed',
+        unobserved_w=lambda site: 1000 if reservation == 'unobserved' else 0,
+        managed={'car': {'site': 'site'}} if reservation == 'managed' else {},
+    )
+    with pytest.raises(RuntimeError, match='headroom|owns this site'):
+        await ns['_try_local_powerwall_force']('charge', call(power_w=0), 15, 0)
+    client.get_snapshot.assert_not_awaited()
+    client.dispatch_battery_power.assert_not_awaited()
+    assert not local.pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('direction', ['charge', 'discharge'])
+async def test_tariff_waits_for_durable_native_ownership_before_falling_through(direction):
+    from test_powerwall_battery_dispatch import load_routing, call
+    from unittest.mock import AsyncMock
+    ns, _, client, _ = load_routing(tesla_control_method='tariff')
+    budget = SimpleNamespace(loaded=False)
+    async def load():
+        budget.loaded = True
+    budget.load = AsyncMock(side_effect=load)
+    budget.native_max_claim = lambda site: {'token': 'persisted-owner'} if budget.loaded else None
+    ns['site_identity'] = lambda entry: 'site'
+    ns['hass'].data['power_sync_native_rate_budget'] = budget
+    with pytest.raises(RuntimeError, match='owns this site'):
+        await ns['_try_local_powerwall_force'](direction, call(power_w=0), 15, 0)
+    budget.load.assert_awaited_once()
+    client.dispatch_battery_power.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tariff_cleanup_cannot_continue_from_a_replaced_setup():
+    from test_powerwall_battery_dispatch import load_routing, call
+    from unittest.mock import AsyncMock
+    ns, _, client, _ = load_routing(tesla_control_method='tariff')
+    async def replace():
+        ns['hass'].data['power_sync']['entry'] = {}
+    ns['_stop_local_powerwall_dispatch'] = AsyncMock(side_effect=replace)
+    with pytest.raises(RuntimeError, match='authorization changed'):
+        await ns['_try_local_powerwall_force']('charge', call(power_w=0), 15, 0)
+    client.dispatch_battery_power.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('setting', ['operation_mode', 'grid_charging'])
+@pytest.mark.parametrize('accepted', [True, False])
+async def test_tariff_prerequisite_settings_use_confirmed_cloud_writes(setting, accepted):
+    import ast
+    import logging
+    from unittest.mock import AsyncMock
+    from test_tesla_grid_control import tesla_grid_control
+    path = ROOT / '__init__.py'
+    setup = next(n for n in ast.parse(path.read_text()).body if getattr(n, 'name', '') == 'async_setup_entry')
+    node = next(n for n in setup.body if getattr(n, 'name', '') == '_tesla_force_apply_' + setting)
+    class StripImports(ast.NodeTransformer):
+        def visit_ImportFrom(self, node):
+            return ast.copy_location(ast.Pass(), node)
+    local = AsyncMock(side_effect=AssertionError('Tariff must not attempt local V1R'))
+    cloud_mode = AsyncMock(return_value=accepted)
+    cloud_grid = AsyncMock(return_value=tesla_grid_control.TeslaGridWriteOutcome(
+        tesla_grid_control.TeslaGridWriteStatus.APPLIED if accepted
+        else tesla_grid_control.TeslaGridWriteStatus.REJECTED))
+    ns = dict(entry=SimpleNamespace(data={'tesla_control_method': 'local'}, options={'tesla_control_method': 'tariff'}),
+        async_get_clientsession=lambda hass: object(), hass=object(),
+        dispatch_powerwall_write=local, _tesla_force_set_operation_mode=cloud_mode,
+        async_set_tesla_grid_charging_confirmed=cloud_grid,
+        TeslaGridWriteStatus=tesla_grid_control.TeslaGridWriteStatus,
+        get_tesla_api_base_url=lambda provider, base: 'https://tesla.test',
+        CONF_FLEET_API_BASE_URL='base', _LOGGER=logging.getLogger(__name__))
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[StripImports().visit(node)], type_ignores=[])),
+                 str(path), 'exec', flags=__import__('__future__').annotations.compiler_flag), ns)
+    result = await ns[node.name]([('site', 'token', 'provider')],
+        'autonomous' if setting == 'operation_mode' else True, reason='force charge')
+    assert result['confirmed_sites'] == (['site'] if accepted else [])
+    assert result['failed_sites'] == ([] if accepted else ['site'])
+    local.assert_not_awaited()
+    (cloud_mode if setting == 'operation_mode' else cloud_grid).assert_awaited_once()

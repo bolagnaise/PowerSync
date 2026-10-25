@@ -8,7 +8,7 @@ From v2.12.1494, an empty gateway telemetry reply is retried once before a contr
 
 The Tesla-only **Preferred battery control** selector is saved per Home Assistant entry and shared with the mobile app. It is available independently of an optimiser subscription; actual controls retain their existing admission checks.
 
-- **Tariff** (default): use Tesla tariff control for sustained Max and optimiser charge/export, with one optional safe startup kick on a paired gateway.
+- **Tariff** (default): use the Tesla cloud API for Max and optimiser charge/export. A paired gateway being unreachable does not block tariff control. Mode, grid-charging permission, reserve and tariff writes retain their cloud acknowledgement/readback and restore checks; no local startup kick is required.
 - **Local V1R**: use timed gateway commands capped at 10 kW or a lower learned charge/discharge ceiling. This requires pairing and fails explicitly if local control is unavailable; it does not silently upload a tariff.
 - **Automatic**: choose charge and discharge independently using fresh home load, solar, connection limits and available battery power. A multi-Powerwall site can therefore use Local V1R for a modest export and Tariff for charging. Missing or unsafe telemetry selects Tariff, whose own safety checks must still pass. A running native tariff action retains its route until restored.
 
@@ -24,7 +24,9 @@ A four-Powerwall 2 site on firmware 26.34.0 reported a 10 kW timed charging ceil
 
 ## Startup kick and tariff control
 
-When Tariff is selected, or Automatic selects the tariff route, Max charge/discharge and optimiser actions use the existing tariff method for sustained power. When safe, one local startup command requests at most 10 kW for at most 30 seconds. PowerSync immediately releases that command and requires acknowledgement before applying the tariff. It does not renew the startup command or restart the action's finish time. A brief transition in measured power is possible; this does not promise seamless takeover.
+When Automatic selects the native tariff route, Max charge/discharge and optimiser actions use the existing tariff method for sustained power. When safe, one local startup command requests at most 10 kW for at most 30 seconds. PowerSync immediately releases that command and requires acknowledgement before applying the tariff. It does not renew the startup command or restart the action's finish time. A brief transition in measured power is possible; this does not promise seamless takeover. Explicit Tariff uses the cloud path without acquiring local control.
+
+Tariff control asks Tesla to charge or export through its own operating mode and prices; it does not enforce an exact software watt target. Tesla's site limits remain effective. Numeric targets still require fresh local telemetry. Unfinished local/native restoration, an existing native-control owner, or reserved shared EV charging headroom can still prevent takeover; an unreachable gateway alone cannot.
 
 The startup command is skipped if current battery flow, solar output or net home demand makes it restrictive, or the requested direction is already underway. Numeric targets remain bounded local commands. Unknown or expired site-capacity data cannot authorize a larger native planning envelope; paired local commands remain bounded by 10 kW, lower reported ceilings and current safety limits.
 
@@ -100,4 +102,4 @@ solar contribution can increase available export.
 
 ### Full-rate Max discharge
 
-An explicit manual or automation **Max** discharge uses the existing native tariff method after releasing any timed local dispatch. Its output is independent of the gateway’s learned timed-command ceiling. Numeric targets retain local wattage control and their live home/solar compensation. Max is not a promise to hold an exact grid-export target; installer site limits and reserves remain effective. On the tariff route, a stricter software export limit is temporarily applied and verified at the gateway. If native takeover cannot be confirmed, Max fails explicitly; numeric targets retain local control. The tariff, mode, reserve and export settings return through the existing restore lifecycle.
+An explicit manual or automation **Max** discharge uses cloud tariff control when Tariff is selected. Its output is independent of the gateway’s learned timed-command ceiling. Numeric targets retain local wattage control and their live home/solar compensation. Max is not a promise to hold an exact grid-export target; installer site limits and reserves remain effective. When Automatic selects native tariff control, a stricter software export limit is temporarily applied and verified at the gateway. If that native takeover cannot be confirmed, it fails explicitly. The tariff, mode, reserve and export settings return through the existing restore lifecycle.

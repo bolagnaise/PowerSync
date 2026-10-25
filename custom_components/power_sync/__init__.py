@@ -32691,6 +32691,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         }
         remaining = list(site_configs)
         session = async_get_clientsession(hass)
+        prefer_local = prefer_local and entry.options.get(
+            "tesla_control_method", entry.data.get("tesla_control_method", "tariff")
+        ) != "tariff"
         if prefer_local and remaining:
             site_id, current_token, provider = remaining.pop(0)
             din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
@@ -32803,6 +32806,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         }
         remaining = list(site_configs)
         session = async_get_clientsession(hass)
+        prefer_local = prefer_local and entry.options.get(
+            "tesla_control_method", entry.data.get("tesla_control_method", "tariff")
+        ) != "tariff"
 
         async def _cloud_apply(
             site_id: str,
@@ -33639,6 +33645,51 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         from .powerwall_local.control_method import runtime_route
         return runtime_route(_local_powerwall_runtime, _local_powerwall_dispatch_config(), direction) == "tariff"
 
+    def _cloud_tariff_control_requested(call):
+        """Tariff Max/plans use the cloud; explicit watt targets remain local."""
+        from .powerwall_local.control_method import control_method
+        power = call.data.get("power_w", 0)
+        return (
+            active_battery_system == BATTERY_SYSTEM_TESLA
+            and control_method({**entry.data, **entry.options}) == "tariff"
+            and type(power) in (int, float) and power == 0
+            and call.data.get("grid_import_target_w") is None
+        )
+
+    async def _prepare_cloud_tariff_control(direction, call):
+        """Release previous authority without acquiring or polling local control."""
+        if not _cloud_tariff_control_requested(call):
+            return False
+        if (not _local_powerwall_generation_current()
+                or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
+                or _local_powerwall_runtime.get("tesla_control_method_changing")):
+            raise HomeAssistantError("Powerwall control setup is changing")
+        await _stop_local_powerwall_dispatch()
+        if any(_local_powerwall_runtime.get(key) for key in (
+                "powerwall_local_recovery_pending", "optimizer_force_restart_restore_pending",
+                "pending_tesla_restore", "native_max_recovery_unavailable")):
+            raise HomeAssistantError("Previous Powerwall control restoration remains pending")
+        # Cloud tariff control cannot lower battery watts to reserve shared EV
+        # headroom. Keep prospective demand and durable ownership fail-closed.
+        budget = hass.data.get("power_sync_native_rate_budget")
+        if budget is not None:
+            from .native_rate_budget import site_identity
+            await budget.load()
+            site = site_identity(entry)
+            if budget.native_max_claim(site):
+                raise HomeAssistantError("Previous native Powerwall control still owns this site")
+            if direction == "charge" and (
+                    budget.site_armed(site) or budget.unobserved_w(site) > 0
+                    or any(record.get("site") == site for record in budget.managed.values())):
+                raise HomeAssistantError("Cloud tariff charging cannot reserve shared EV headroom")
+        if (not _local_powerwall_generation_current()
+                or not _cloud_tariff_control_requested(call)
+                or _local_powerwall_runtime.get("powerwall_local_dispatch_stopping")
+                or _local_powerwall_runtime.get("tesla_control_method_changing")
+                or _monitoring_mode_should_block_control(call)):
+            raise HomeAssistantError("Cloud tariff control authorization changed during cleanup")
+        return True
+
     async def _set_tesla_control_method(method):
         from .powerwall_local.control_method import CONF_CONTROL_METHOD, control_method, validate_method
         from .powerwall_host import local_battery_dispatch_configured
@@ -33685,6 +33736,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _local_powerwall_runtime["set_tesla_control_method"] = _set_tesla_control_method
 
     async def _try_native_max_charge(call, duration, deadline):
+        if _cloud_tariff_control_requested(call):
+            return None
         return await _try_native_powerwall_force("charge", call, duration, deadline)
 
     async def _try_native_powerwall_force(direction, call, duration, deadline):
@@ -33804,6 +33857,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if active_battery_system != BATTERY_SYSTEM_TESLA:
             if grid_target is not None:
                 raise HomeAssistantError("Grid-import targeting requires paired local Powerwall control")
+            return None
+        if await _prepare_cloud_tariff_control(mode, call):
             return None
         from .powerwall_local.control_method import control_method
         if (control_method({**entry.data, **entry.options}) == "local"
