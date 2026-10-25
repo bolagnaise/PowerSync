@@ -52,9 +52,10 @@ def test_reported_15kwh_earns_225_and_supply_is_counted_once():
         acc.update(0, -5, 5, 2, 0.30, 0.05)
     summary = acc.as_dict()
     assert summary["export_earnings_today"] == pytest.approx(2.25)
-    assert summary["net_cost_today"] == pytest.approx(-1.05)
+    assert summary["net_cost_today"] == pytest.approx(-2.05)
+    assert summary["zerohero_credit_status"] == "unverified"
     assert summary["daily_supply_charge"] == 1.20
-    assert summary["avg_cost_per_kwh_today"] == pytest.approx(-1.05 / 6, abs=0.0001)
+    assert summary["avg_cost_per_kwh_today"] == pytest.approx(-2.05 / 6, abs=0.0001)
     assert acc.as_dict()["net_cost_today"] == summary["net_cost_today"]
     assert summary["mtd_supply_charge"] == pytest.approx(25 * 1.20)
 
@@ -252,3 +253,151 @@ def test_normal_month_rollover_does_not_become_legacy_unknown(monkeypatch):
     configured.observe(old, now, 6, 0.05, True)
     assert configured.state["month"] == "2026-11"
     assert not configured.state["mtd_partial"]
+
+
+def _credit_window(tracker, *, import_kw=0.0, start=None, gap=False):
+    cursor = start or _time()
+    tracker.observe(None, cursor, 0, 0.05, False, import_kw=import_kw)
+    while cursor < _time(21):
+        end = cursor + timedelta(minutes=5)
+        tracker.observe(cursor, end, 0, 0.05, not (gap and cursor.hour == 19),
+                        import_kw=import_kw)
+        cursor = end
+    return tracker
+
+
+def _cost_base():
+    return dict(import_cost_today=0.21, export_earnings_today=1.69,
+                avg_cost_per_kwh_today=0, load_today_kwh=10,
+                mtd_import_cost=0.21, mtd_export_earnings=1.69,
+                avg_cost_per_kwh_mtd=0, mtd_load_kwh=10)
+
+
+def test_requested_039_becomes_minus_061_but_never_verified_locally():
+    tracker = _credit_window(_module().DailyCostTracker(_config(), 1.87))
+    summary = tracker.summary(_cost_base())
+    assert summary["net_cost_today"] == pytest.approx(-0.61)
+    assert summary["zerohero_credit_today"] == 1
+    assert summary["zerohero_credit_status"] == "unverified"
+    assert summary["avg_cost_per_kwh_today"] == pytest.approx(-0.061)
+    assert summary["avg_cost_per_kwh_mtd"] == pytest.approx((0.21 - 1.69 + 25 * 1.87 - 1) / 10)
+    assert tracker.summary(_cost_base()) == summary  # no repeated deduction
+
+
+@pytest.mark.parametrize("variant", ["imports", "gap", "late", "missing", "restart"])
+def test_credit_withheld_for_imports_or_unobserved_window(variant):
+    tracker = _module().DailyCostTracker(_config())
+    if variant == "restart":
+        tracker.observe(None, _time(), 0, 0.05, False, import_kw=0)
+        tracker.observe(_time(), _time(18, 55), 0, 0.05, True, import_kw=0)
+        tracker = _module().DailyCostTracker(_config(), state=tracker.state)
+    tracker = _credit_window(tracker, import_kw=(0.1 if variant == "imports" else
+                            None if variant == "missing" else 0),
+                            start=_time(19) if variant in ("late", "restart") else None,
+                            gap=variant == "gap")
+    summary = tracker.summary(_cost_base())
+    assert summary["zerohero_credit_today"] == 0
+    assert summary["zerohero_credit_status"] == ("missed" if variant == "imports" else "unknown")
+
+
+def test_no_credit_before_end_and_plan_allowance_is_respected():
+    tracker = _module().DailyCostTracker(_config())
+    tracker.observe(None, _time(), 0, 0.05, False, import_kw=0)
+    tracker.observe(_time(), _time(20, 59), 0, 0.05, True, import_kw=0)
+    assert tracker.summary(_cost_base())["zerohero_credit_today"] == 0
+    assert tracker.summary(_cost_base())["zerohero_credit_status"] == "pending"
+    tracker = _credit_window(_module().DailyCostTracker(_config()), import_kw=0.02)
+    assert tracker.summary(_cost_base())["zerohero_credit_status"] == "unverified"
+
+
+@pytest.mark.parametrize("api_amount", [-1.0, -0.75, 0.0, 0.25])
+def test_next_day_api_replaces_estimate_persists_and_does_not_double_count(api_amount):
+    m = _module()
+    tracker = _credit_window(m.DailyCostTracker(_config()))
+    tracker.observe(None, _time(9, day=26), 0, 0.05, False, import_kw=0)
+    assert tracker.summary(_cost_base())["mtd_zerohero_credit"] == 1
+    rows = [{"date": "2026-10-25", "amount": 0.2, "chargeCategory": "USAGE", "complete": True}]
+    if api_amount:
+        rows.append({"date": "2026-10-25", "amount": api_amount,
+                     "chargeCategory": "ZEROHERO CREDIT", "complete": True})
+    for _ in range(2):
+        tracker.reconcile_credit({"daily": rows}, _time(9, day=26))
+    restored = m.DailyCostTracker(_config(), state=tracker.state)
+    summary = restored.summary(_cost_base())
+    assert summary["zerohero_credit_today"] == 0
+    assert summary["mtd_zerohero_credit"] == -api_amount
+    assert summary["zerohero_credit_days"]["2026-10-25"]["status"] == (
+        "confirmed" if api_amount else "not_awarded")
+
+
+def test_supply_only_and_same_day_api_cannot_verify_credit():
+    tracker = _credit_window(_module().DailyCostTracker(_config()))
+    rows = [{"date": "2026-10-25", "amount": -1, "complete": True,
+             "chargeCategory": "ZEROHERO CREDIT"}]
+    tracker.reconcile_credit({"daily": rows}, _time(22))
+    assert tracker.summary(_cost_base())["zerohero_credit_status"] == "unverified"
+    rows[0]["complete"] = False
+    tracker.reconcile_credit({"daily": rows, "available_daily": rows}, _time(9, day=26))
+    assert tracker.summary(_cost_base())["zerohero_credit_status"] == "unverified"
+
+
+def test_multi_service_account_never_confirms_another_sites_credit(monkeypatch):
+    m = _module("daily_cost_fixture.daily_cost")
+    monkeypatch.setitem(sys.modules, "daily_cost_fixture.zerohero", zerohero)
+    entry = SimpleNamespace(data={"electricity_provider": "globird", "globird_plan": "zerohero_current"}, options={})
+    detail = {"cost_summary": {"daily": [{"date": "2026-10-25", "amount": -1,
+              "chargeCategory": "ZEROHERO CREDIT", "complete": True}]}}
+    portal = SimpleNamespace(data={"service_data": {"one": detail, "two": detail}})
+    hass = SimpleNamespace(data={"power_sync": {"entry": {"globird_coordinator": portal}}},
+                           config_entries=SimpleNamespace(async_get_entry=lambda _: entry))
+    tracker = m.configure_tracker(hass, "entry", _time(9, day=26), None, {})
+    assert "2026-10-25" not in tracker.state["credits"]
+    del portal.data["service_data"]["two"]
+    tracker = m.configure_tracker(hass, "entry", _time(9, day=26), tracker, {})
+    assert tracker.state["credits"]["2026-10-25"]["status"] == "confirmed"
+
+
+def test_overnight_credit_is_owned_by_window_start_day():
+    tracker = _module().DailyCostTracker(_config(start="22:00", end="02:00"))
+    tracker.observe(None, _time(22), 0, 0.05, False, import_kw=0)
+    tracker.observe(_time(22), _time(2, day=26), 0, 0.05, True, import_kw=0)
+    summary = tracker.summary(_cost_base())
+    assert summary["zerohero_credit_today"] == 0
+    assert summary["zerohero_credit_days"]["2026-10-25"] == {"amount": 1, "status": "unverified"}
+
+
+def test_month_rollover_drops_prior_month_credit_from_mtd():
+    tracker = _credit_window(_module().DailyCostTracker(_config()))
+    november = _time().replace(month=11, day=1, hour=9)
+    tracker.observe(None, november, 0, 0.05, False, import_kw=0)
+    assert tracker.summary(_cost_base())["mtd_zerohero_credit"] == 0
+
+
+def test_credit_survives_accumulator_store_restore_without_regranting():
+    clock = _Clock(_time())
+    acc = _new_accumulator(clock, _Store())
+    m = _module()
+    acc._daily_cost_tracker = m.DailyCostTracker(_config())
+    acc.update(0, -5, 5, 2, 0.30, 0.05)
+    for _ in range(36):
+        clock.current += timedelta(minutes=5)
+        acc.update(0, -5, 5, 2, 0.30, 0.05)
+    payload = acc._data_to_save()
+    assert payload["daily_cost_state"]["credits"]["2026-10-25"]["amount"] == 1
+    restored = _new_accumulator(clock, _Store(payload))
+    asyncio.run(restored.async_restore())
+    restored._daily_cost_tracker = m.DailyCostTracker(_config(), state=restored._daily_cost_state)
+    clock.current += timedelta(minutes=5)
+    restored.update(0, -5, 5, 2, 0.30, 0.05)
+    assert restored.as_dict()["zerohero_credit_today"] == 1
+    assert restored.as_dict()["zerohero_credit_status"] == "unverified"
+
+
+def test_plan_change_mid_window_cannot_claim_credit():
+    m = _module()
+    tracker = m.DailyCostTracker(_config())
+    tracker.observe(_time(), _time(19), 0, 0.05, True, import_kw=0)
+    tracker = m.DailyCostTracker(_config(credit_amount=2), state=tracker.state)
+    tracker.observe(_time(19), _time(21), 0, 0.05, True, import_kw=0)
+    assert tracker.summary(_cost_base())["zerohero_credit_status"] == "unknown"
+    assert tracker.summary(_cost_base())["zerohero_credit_today"] == 0

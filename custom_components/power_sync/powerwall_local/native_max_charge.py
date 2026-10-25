@@ -24,6 +24,10 @@ class NativeMaxTariffRejected(NativeMaxChargeError):
     """The provider explicitly rejected the session's only tariff POST."""
 
 
+class NativeMaxTariffNotSubmitted(NativeMaxChargeError):
+    """The provider boundary was never entered for this tariff upload."""
+
+
 class NativeMaxChargeSession:
     """One restoration owner, protected by the caller's shared site admission.
 
@@ -177,7 +181,7 @@ class NativeMaxChargeSession:
             self.record["tariff_intent"] = value
         elif kind == "tariff_confirmed":
             self.record.pop("tariff_intent", None)
-        elif kind == "tariff_rejected":
+        elif kind in ("tariff_rejected", "tariff_not_submitted"):
             if value not in ("forcing", "baseline") or self.record.get("tariff_intent") != value:
                 raise NativeMaxChargeError("Native Max rejected tariff intent changed")
             self.record.pop("tariff_intent")

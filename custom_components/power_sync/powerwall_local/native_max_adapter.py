@@ -14,7 +14,7 @@ import time
 
 from .battery_dispatch import battery_watts, site_grid_limits_w, validate_dispatch_config
 from .full_rate_charge import native_max_charge_eligibility
-from .native_max_charge import NativeMaxChargeError, NativeMaxTariffRejected
+from .native_max_charge import NativeMaxChargeError, NativeMaxTariffNotSubmitted, NativeMaxTariffRejected
 
 
 def _signed_export_limit(value):
@@ -345,19 +345,30 @@ class NativeMaxChargeAdapter:
         return confirmed
 
     async def _upload(self, tariff, target, before_write, write_intent):
+        intent_recorded = False
         async def submitted():
+            nonlocal intent_recorded
             await before_write()
             await write_intent("tariff", target)
+            intent_recorded = True
             # Storage must not extend a policy/identity grant.
             return await before_write()
-        try:
-            confirmed = await self._mutate(self.upload(tariff, submitted))
-        except NativeMaxTariffRejected:
-            # A definite rejection of this single POST cannot arrive later.
-            # Leave unknown/timeout outcomes quarantined, and retain all other
-            # cleanup ownership until its normal readback and settling checks.
-            await write_intent("tariff_rejected", target)
-            return False
+        async def upload():
+            try:
+                return await self.upload(tariff, submitted)
+            except NativeMaxTariffNotSubmitted:
+                if intent_recorded:
+                    await write_intent("tariff_not_submitted", target)
+                return False
+            except NativeMaxTariffRejected:
+                if intent_recorded:
+                    await write_intent("tariff_rejected", target)
+                return False
+        # Record definite non-submission/rejection inside the provider task.
+        # A revoked caller still drains that task before restoring, so it must
+        # not lose this outcome when _mutate re-raises its cancellation.
+        # All uncertain outcomes retain their existing journal and ownership.
+        confirmed = await self._mutate(upload())
         if confirmed is True:
             await write_intent("tariff_confirmed")
         return confirmed

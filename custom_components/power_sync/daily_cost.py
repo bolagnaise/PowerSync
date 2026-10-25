@@ -1,8 +1,9 @@
-"""Display-only measured export bonuses and configured fixed supply costs.
+"""Display-only export bonuses, conditional credits and fixed supply costs.
 
 This accounting never feeds an optimizer objective or a hardware command.
 Only observed intervals earn a bonus. Unknown quota history withholds totals
 until the next complete local-day window rather than inventing earnings.
+ZeroHero credits remain unverified until complete next-day portal cost data.
 """
 from __future__ import annotations
 
@@ -50,7 +51,14 @@ def configure_tracker(hass, entry_id, now, previous, restored,
             and legacy_month == now.strftime("%Y-%m")
             and state.get("month") != legacy_month):
         state["unknown_prior_bonus_month"] = now.strftime("%Y-%m")
-    return DailyCostTracker(config, configured_supply_charge(entry, now), state)
+    tracker = DailyCostTracker(config, configured_supply_charge(entry, now), state)
+    portal = getattr(entry_data.get("globird_coordinator"), "data", None) or {}
+    # No service selector exists yet. Multiple sites must never settle another
+    # home's credit against this home's measured costs.
+    services = list((portal.get("service_data") or {}).values())
+    if config is not None and len(services) == 1:
+        tracker.reconcile_credit(services[0].get("cost_summary") or {}, now)
+    return tracker
 
 
 def _seconds(start: datetime, end: datetime) -> float:
@@ -109,6 +117,89 @@ class DailyCostTracker:
         self.supply_charge = max(0.0, _finite(supply_charge))
         self.state = dict(state) if isinstance(state, dict) else {}
         self.state["supply_by_day"] = dict(self.state.get("supply_by_day") or {})
+        self.state["credits"] = {
+            day: dict(record) for day, record in (self.state.get("credits") or {}).items()
+        }
+
+    def reconcile_credit(self, summary, now):
+        """Replace estimates with signed, complete, past-day portal credits."""
+        grouped = {}
+        for row in summary.get("daily", []):
+            day = str(row.get("date") or "").split("T")[0].replace("/", "-")
+            if not row.get("complete") or day >= now.date().isoformat():
+                continue
+            grouped.setdefault(day, []).append(row)
+        for day, rows in grouped.items():
+            if day[:7] != now.strftime("%Y-%m"):
+                continue
+            # Portal costs are signed: a negative credit reduces net cost.
+            amounts = [_finite(row.get("amount"), float("nan")) for row in rows
+                       if str(row.get("chargeCategory") or "").strip().casefold()
+                       == "zerohero credit"]
+            if not all(math.isfinite(amount) for amount in amounts):
+                continue
+            amount = -sum(amounts)
+            self.state["credits"][day] = {
+                "amount": amount, "status": "confirmed" if amount else "not_awarded",
+                "source": "globird_api",
+            }
+
+    def _observe_credit(self, start, end, import_kw, integrated):
+        """Accrue only a fully observed window; eligibility stays unverified."""
+        config = self.config
+        if config is None:
+            return
+        credits = self.state["credits"]
+        # Keep the prior month across midnight for overnight windows, but no
+        # unbounded daily history in HA storage.
+        cutoff = (end.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+        for day in list(credits):
+            if day[:7] < cutoff:
+                del credits[day]
+        if start is not None and _seconds(start, end) > 0:
+            cursor = start
+            for day, active, hours in _parts(start, end, config):
+                if active:
+                    first, last = config.start, config.end
+                    if last <= first and cursor.strftime("%H:%M") < last:
+                        day = (cursor - timedelta(days=1)).date().isoformat()
+                    record = credits.setdefault(day, {"hours": 0.0, "import_kwh": 0.0})
+                    signature = [config.start, config.end, config.credit_amount,
+                                 config.import_limit_kw]
+                    if record.get("signature", signature) != signature:
+                        record["invalid"] = True
+                    record["signature"] = signature
+                    power = _finite(import_kw, float("nan"))
+                    if integrated and math.isfinite(power):
+                        record["hours"] = record.get("hours", 0.0) + hours
+                        record["import_kwh"] = record.get("import_kwh", 0.0) + max(0.0, power) * hours
+                cursor = datetime.fromtimestamp(cursor.timestamp() + hours * 3600, cursor.tzinfo)
+        day = end.date().isoformat()
+        credits.setdefault(day, {"hours": 0.0, "import_kwh": 0.0})
+        for day, record in credits.items():
+            if record.get("source") == "globird_api":
+                continue
+            if record.get("status") in ("unverified", "unknown", "missed"):
+                continue
+            midnight = datetime.fromisoformat(day).replace(tzinfo=end.tzinfo)
+            h, m = map(int, config.end.split(":"))
+            finish = midnight.replace(hour=h, minute=m)
+            if config.end <= config.start:
+                finish += timedelta(days=1)
+            begin_h, begin_m = map(int, config.start.split(":"))
+            begin = midnight.replace(hour=begin_h, minute=begin_m)
+            expected = _seconds(begin, finish) / 3600
+            complete = (not record.get("invalid")
+                        and abs(record.get("hours", 0.0) - expected) < 1e-6)
+            status = "pending"
+            if end >= finish:
+                if not complete:
+                    status = "unknown"
+                elif record.get("import_kwh", 0.0) > config.import_allowance_kwh + 1e-6:
+                    status = "missed"
+                else:
+                    status = "unverified"
+            record.update(status=status, amount=config.credit_amount if status == "unverified" else 0.0)
 
     def _begin(self, now):
         day = now.date().isoformat()
@@ -116,6 +207,7 @@ class DailyCostTracker:
         if self.state.get("month") != month:
             unknown_prior = self.state.get("unknown_prior_bonus_month") == month
             self.state = {"month": month, "supply_by_day": {}, "mtd_bonus": 0.0,
+                          "credits": self.state.get("credits", {}),
                           "mtd_partial": unknown_prior}
         if self.state.get("day") != day:
             self.state.update(day=day, bonus=0.0, used=0.0, partial=False)
@@ -141,7 +233,8 @@ class DailyCostTracker:
         self.state["config"] = signature
         self.state["supply_by_day"][day] = self.supply_charge
 
-    def observe(self, start, end, export_kw, base_price, integrated):
+    def observe(self, start, end, export_kw, base_price, integrated, import_kw=None):
+        self._observe_credit(start, end, import_kw, integrated)
         if start is None:
             saved_time = self.state.get("last_observed")
             if saved_time:
@@ -198,13 +291,26 @@ class DailyCostTracker:
             result[key] = (round(result[key] + bonus, 4)
                            if result.get(key) is not None and not missing else None)
         cost, earnings = result.get("import_cost_today"), result.get("export_earnings_today")
-        net = (round(cost - earnings + daily_supply, 4)
+        credits = self.state.get("credits", {}) if self.config is not None else {}
+        today_credit = credits.get(self.state.get("day"), {})
+        credit = today_credit.get("amount", 0.0)
+        mtd_credit = sum(record.get("amount", 0.0) for day, record in credits.items()
+                         if day[:7] == self.state.get("month"))
+        net = (round(cost - earnings + daily_supply - credit, 4)
                if cost is not None and earnings is not None else None)
         result.update(daily_supply_charge=round(daily_supply, 4), net_cost_today=net,
                       export_bonus_today=round(self.state.get("bonus", 0.0), 4),
                       export_bonus_coverage="partial" if partial else "complete",
                       mtd_supply_charge=round(mtd_supply, 4),
                       supply_charge_days=elapsed_days)
+        result.update(zerohero_credit_today=round(credit, 4),
+                      zerohero_credit_status=today_credit.get("status", "disabled"),
+                      zerohero_credit_verification="GloBird complete next-day API cost data required",
+                      mtd_zerohero_credit=round(mtd_credit, 4),
+                      zerohero_credit_days={day: {"amount": record.get("amount", 0.0),
+                                                "status": record.get("status", "pending")}
+                                           for day, record in credits.items()
+                                           if day[:7] == self.state.get("month")})
         if partial:
             result["export_earnings_coverage"] = "partial"
         result["avg_cost_per_kwh_today"] = (
@@ -213,7 +319,7 @@ class DailyCostTracker:
             and result.get("load_today_kwh", 0) > 0 else None)
         imp, exp = result.get("mtd_import_cost"), result.get("mtd_export_earnings")
         result["avg_cost_per_kwh_mtd"] = (
-            round((imp - exp + mtd_supply) / result["mtd_load_kwh"], 4)
+            round((imp - exp + mtd_supply - mtd_credit) / result["mtd_load_kwh"], 4)
             if imp is not None and exp is not None
             and result.get("avg_cost_per_kwh_mtd") is not None
             and result.get("mtd_load_kwh", 0) > 0 else None)
