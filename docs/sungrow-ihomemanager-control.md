@@ -3,9 +3,8 @@
 The **iHomeManager battery control + inverter telemetry** connection pairs the
 existing Sungrow SH inverter readings with native iHomeManager battery commands.
 It supports price-driven battery charging and discharging, manual force modes,
-and return to self-consumption. The implementation is in
-[PR #136](https://github.com/bolagnaise/PowerSync/pull/136); it has not yet been
-released or verified on the reporter's hardware.
+and return to self-consumption. Available from **v2.12.1508**. Software validation has passed; physical battery
+behaviour has not yet been verified on the reporter's hardware.
 
 Existing **iHomeManager forwarding — monitoring only** connections keep their
 current read-only behaviour. Updating does not migrate or enable control on an
