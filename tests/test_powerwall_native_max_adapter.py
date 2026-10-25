@@ -591,6 +591,130 @@ async def test_reported_large_site_tightens_export_before_tariff_and_restores(se
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('original_limit', [-10.1, -1e9])
+@pytest.mark.parametrize('readback_seconds', [5, 6])
+async def test_slow_confirmed_export_cap_refreshes_evidence_without_rewriting(setup, original_limit, readback_seconds):
+    s = setup
+    s.adapter.direction = 'discharge'
+    s.adapter.planning_request = True
+    s.settings.update(powerwall_native_capacity_w=15000, optimization_max_discharge_w=15000,
+                      optimization_max_grid_export_w=10000)
+    s.state.config['site_info']['min_site_meter_power_ac'] = original_limit
+    original = deepcopy(s.state.config)
+    read = s.adapter.client._transport.read_config
+    delayed = False
+
+    async def slow_cap_readback(din):
+        nonlocal delayed
+        current = await read(din)
+        if not delayed and current['site_info']['min_site_meter_power_ac'] == -10:
+            delayed = True
+            s.state.at += readback_seconds
+        return current
+
+    s.adapter.client._transport.read_config = slow_cap_readback
+    try:
+        assert (await s.session.start(120))['active']
+        assert delayed
+        assert s.session.record['expires_at'] == 1120
+        assert sum(e == ('config', {'site_info.min_site_meter_power_ac': -10})
+                   for e in s.state.events) == 1
+        assert any(e[0] == 'tariff' for e in s.state.events)
+        assert await s.session.stop()
+        assert s.state.config == original
+        assert not s.budget.native_max_claim('site')
+    finally:
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['policy', 'raised_cap', 'unknown_cap', 'slow_snapshot'])
+async def test_slow_export_cap_readback_never_bypasses_new_safety_evidence(setup, change):
+    s = setup
+    s.adapter.direction = 'discharge'
+    s.settings.update(optimization_max_discharge_w=15000, optimization_max_grid_export_w=10000)
+    s.state.config['site_info']['min_site_meter_power_ac'] = -1e9
+    read = s.adapter.client._transport.read_config
+    snapshot = s.adapter.client.get_snapshot
+    delayed = False
+
+    async def slow_cap_readback(din):
+        nonlocal delayed
+        current = await read(din)
+        if not delayed and current['site_info']['min_site_meter_power_ac'] == -10:
+            delayed = True
+            s.state.at += 6
+            if change == 'policy':
+                s.state.policy = False
+            elif change == 'raised_cap':
+                s.state.config['site_info']['min_site_meter_power_ac'] = -20
+            elif change == 'unknown_cap':
+                s.state.config['site_info'].pop('min_site_meter_power_ac')
+        return current
+
+    async def fresh_snapshot():
+        if delayed and change == 'slow_snapshot':
+            s.state.at += 6
+        return await snapshot()
+
+    s.adapter.client._transport.read_config = slow_cap_readback
+    s.adapter.client.get_snapshot = fresh_snapshot
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.start(120)
+        assert delayed
+        assert not any(e[0] == 'tariff' for e in s.state.events)
+    finally:
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_export_cap_evidence_refresh_restores_without_forcing(setup):
+    s = setup
+    s.adapter.direction = 'discharge'
+    s.settings.update(optimization_max_discharge_w=15000, optimization_max_grid_export_w=10000)
+    s.state.config['site_info']['min_site_meter_power_ac'] = -1e9
+    original = deepcopy(s.state.config)
+    read = s.adapter.client._transport.read_config
+    snapshot = s.adapter.client.get_snapshot
+    delayed = blocked = False
+    waiting = asyncio.Event()
+
+    async def slow_cap_readback(din):
+        nonlocal delayed
+        current = await read(din)
+        if not delayed and current['site_info']['min_site_meter_power_ac'] == -10:
+            delayed = True
+            s.state.at += 6
+        return current
+
+    async def blocked_refresh():
+        nonlocal blocked
+        if delayed and not blocked:
+            blocked = True
+            waiting.set()
+            await asyncio.Event().wait()
+        return await snapshot()
+
+    s.adapter.client._transport.read_config = slow_cap_readback
+    s.adapter.client.get_snapshot = blocked_refresh
+    task = asyncio.create_task(s.session.start(120))
+    try:
+        await asyncio.wait_for(waiting.wait(), 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not any(e[0] == 'tariff' for e in s.state.events)
+        assert s.state.config == original
+        assert not s.session.pending and not s.budget.native_max_claim('site')
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('original_limit', [-10.1, -1e9])
 async def test_export_bound_unconfirmed_never_uploads_forcing_tariff(setup, original_limit):
     s=setup;s.adapter.direction='discharge'
     s.settings.update(optimization_max_discharge_w=21000,optimization_max_grid_export_w=10000)

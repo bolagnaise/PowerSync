@@ -383,6 +383,16 @@ class NativeMaxChargeAdapter:
                     before_submit=lambda until: write_intent("local", until))):
                 return False
         current = await self.client._transport.read_config(self.client._din)
+        if (self._observed_at is None
+                or not 0 <= self.monotonic() - self._observed_at <= 5):
+            # The acknowledged write and its readback can outlive the earlier
+            # telemetry grant. Acquire fresh evidence rather than rejecting a
+            # correctly applied cap solely because that round trip was slow.
+            # Use the new config too: a later external edit must not inherit
+            # the earlier readback's permission. No cap write is replayed.
+            if await self.guard() is not True:
+                return False
+            current = self._snapshot.raw.get("config")
         if not owned(current) or not self._forcing_permitted(current, require_export_limit=True):
             return False
         await write_intent("local_confirmed")
