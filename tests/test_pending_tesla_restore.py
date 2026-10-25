@@ -279,6 +279,49 @@ def test_pending_only_restart_blocks_optimizer_and_forces_cleanup():
     assert calls[0]["_force_restore"] is True
 
 
+def test_pending_only_restart_schedules_recovery_and_gates_before_task_runs():
+    """Exercise setup's real call site, not just the recovery helper in isolation."""
+    marker = {"reason": "interrupted restore"}
+    data = {"pending_tesla_restore": marker}
+    tasks, calls = [], []
+
+    async def service(*args, **kwargs):
+        calls.append(args[2])
+        # A service returning normally does not establish verified restoration.
+
+    env = dict(
+        active_battery_system="tesla", BATTERY_SYSTEM_SOLAREDGE="solaredge",
+        persisted_force_state={}, persisted_pending_restore=marker,
+        is_amber_smartshift=False,
+        entry=SimpleNamespace(entry_id="entry-1"), DOMAIN="power_sync",
+        SERVICE_RESTORE_NORMAL="restore_normal", _LOGGER=logging.getLogger(__name__),
+        hass=SimpleNamespace(data={"power_sync": {"entry-1": data}},
+                             services=SimpleNamespace(async_call=service),
+                             async_create_task=lambda coro: tasks.append(asyncio.create_task(coro))),
+    )
+    exec("from __future__ import annotations\n" + textwrap.dedent(
+        _function_source("restore_force_mode_from_persistence")), env)
+    setup = _find_function(ast.parse(INIT_PATH.read_text()), "async_setup_entry")
+    scheduler = next(node for node in setup.body if isinstance(node, ast.If)
+                     and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                             and call.func.id == "restore_force_mode_from_persistence"
+                             for call in ast.walk(node)))
+    compiled = compile(ast.Module(body=[scheduler], type_ignores=[]), "<restore-scheduler>", "exec")
+
+    async def run():
+        exec(compiled, env)
+        assert len(tasks) == 1
+        assert data.get("optimizer_force_restart_restore_pending") is True
+        await asyncio.gather(*tasks)
+
+    asyncio.run(run())
+    assert calls == [{"_allow_monitoring_restore": True,
+                      "_skip_backup_reserve_restore": False,
+                      "source": "startup_pending_restore", "_force_restore": True}]
+    assert data["pending_tesla_restore"] == marker
+    assert data["optimizer_force_restart_restore_pending"] is True
+
+
 @pytest.mark.parametrize("superseded", [False, True])
 def test_only_current_verified_completion_releases_restart_gate(superseded):
     data = {"optimizer_force_restart_restore_pending": True}

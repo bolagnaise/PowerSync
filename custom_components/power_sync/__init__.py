@@ -42432,8 +42432,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, "set_self_consumption", routed_handler(hass, entry.entry_id, 'set_self_consumption', handle_set_self_consumption))
     hass.services.async_register(DOMAIN, "set_autonomous", routed_handler(hass, entry.entry_id, 'set_autonomous', handle_set_autonomous))
 
-    # Now that handle_restore_normal is defined, schedule expired force mode restore
-    if persisted_force_state and not is_amber_smartshift:
+    # A failed restore can outlive its force-mode record. Start its cleanup
+    # even when only the durable restore marker remains after a restart.
+    if (persisted_force_state or persisted_pending_restore) and not is_amber_smartshift:
+        if persisted_pending_restore:
+            hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = True
         hass.async_create_task(restore_force_mode_from_persistence())
 
     # Register Powerwall settings services
