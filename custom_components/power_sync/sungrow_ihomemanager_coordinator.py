@@ -97,7 +97,12 @@ class SungrowIHomeManagerEnergyCoordinator(SungrowEnergyCoordinator):
                     or int(options.get(CONF_SUNGROW_PORT, 502)) != int(self.port)
                     or int(options.get(CONF_SUNGROW_SLAVE_ID, 1)) != int(self.slave_id)):
                 return False
-            reserve = float(options.get(CONF_OPTIMIZATION_BACKUP_RESERVE, 20))
+            # Match optimizer/settings precedence: legacy options may retain an
+            # older reserve after the current setting is persisted in data.
+            reserve = float(entry.data.get(
+                CONF_OPTIMIZATION_BACKUP_RESERVE,
+                entry.options.get(CONF_OPTIMIZATION_BACKUP_RESERVE, 20),
+            ))
             if 0 < reserve <= 1:
                 reserve *= 100
             self._native.set_soc_limits(reserve)

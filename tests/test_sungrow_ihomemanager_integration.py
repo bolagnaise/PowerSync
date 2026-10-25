@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from test_sungrow_ihomemanager import device, driver, writes
+
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENT = ROOT / "custom_components/power_sync"
 
@@ -183,7 +185,7 @@ def test_controls_and_renewal_callback_fail_closed(integration, reason):
         elif reason == "changed_port": integration.entry.options["sungrow_ihomemanager_port"] = "bad"
         elif reason == "changed_telemetry": integration.entry.options["sungrow_host"] = "other.test"
         elif reason == "changed_route": integration.entry.options["sungrow_connection_type"] = "direct"
-        elif reason == "invalid_reserve": integration.entry.options["optimization_backup_reserve"] = float("nan")
+        elif reason == "invalid_reserve": integration.entry.data["optimization_backup_reserve"] = float("nan")
         assert not await c.force_discharge(30, 5000)
         assert not c._native.allowed()
         assert not c._native.calls
@@ -223,9 +225,74 @@ def test_zero_power_uses_fresh_native_maximum_and_reserve_changes_reach_guard(in
         await publish(c)
         assert await c.force_discharge(30)
         assert c._native.calls[-1] == ("discharge", 18000, 1800)
-        integration.entry.options["optimization_backup_reserve"] = 0.35
+        integration.entry.data["optimization_backup_reserve"] = 0.35
         assert c._native.allowed()
         assert c._native.reserve_percent == 35
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("data_reserve,options_reserve,expected", [
+    (50, 20, 50), (0.5, 0.2, 50), (20, 50, 20), (0, 50, 0),
+    (100, 20, 100), (None, 0.35, 35), (None, None, 20),
+])
+def test_native_reserve_uses_data_before_legacy_options(
+    integration, data_reserve, options_reserve, expected,
+):
+    async def run():
+        c = integration.coordinator
+        key = "optimization_backup_reserve"
+        integration.entry.data.pop(key)
+        if data_reserve is not None:
+            integration.entry.data[key] = data_reserve
+        if options_reserve is not None:
+            integration.entry.options[key] = options_reserve
+        await publish(c)
+        assert c._native.allowed()
+        assert c._native.reserve_percent == expected
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("soc_tenths", [499, 500, 501])
+def test_configured_reserve_blocks_native_discharge_at_floor(
+    integration, driver, device, soc_tenths,
+):
+    async def run():
+        c = integration.coordinator
+        integration.entry.data["optimization_backup_reserve"] = 50
+        integration.entry.options["optimization_backup_reserve"] = 20
+        c._native = driver.SungrowIHomeManagerController(
+            "ihm.test", control_allowed=c._dispatch_allowed,
+        )
+        device.data[12] = soc_tenths
+        try:
+            await publish(c)
+            assert await c.force_discharge(30, 5000) is (soc_tenths > 500)
+            if soc_tenths <= 500:
+                assert not writes(device)
+        finally:
+            await c._native.async_shutdown()
+    asyncio.run(run())
+
+
+def test_active_native_lease_stops_when_data_reserve_rises(integration, driver, device):
+    async def run():
+        c = integration.coordinator
+        integration.entry.options["optimization_backup_reserve"] = 20
+        c._native = driver.SungrowIHomeManagerController(
+            "ihm.test", control_allowed=c._dispatch_allowed,
+        )
+        c._native.RENEW_SECONDS = 0.001
+        try:
+            await publish(c)
+            assert await c.force_discharge(30, 5000)
+            # At 65% SOC a new 70% reserve must end the lease even though
+            # the legacy options still say 20%.
+            integration.entry.data["optimization_backup_reserve"] = 70
+            await asyncio.wait_for(c._native._task, timeout=1)
+            assert device.mode == [1, 0xCC, 0, 0]
+            assert len([call for call in writes(device) if call[1:] == (8032, [20])]) == 1
+        finally:
+            await c._native.async_shutdown()
     asyncio.run(run())
 
 
