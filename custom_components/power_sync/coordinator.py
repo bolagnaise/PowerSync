@@ -433,8 +433,9 @@ class EnergyAccumulator:
     Resets at local midnight. Persisted via HA Store to survive restarts.
     """
 
-    def __init__(self, hass: HomeAssistant | None = None, store_key: str = "") -> None:
+    def __init__(self, hass: HomeAssistant | None = None, store_key: str = "", entry_id: str = "") -> None:
         self._hass = hass
+        self._entry_id = entry_id
         self._last_update: datetime | None = None
         self._last_date: Any = None
         self.solar_kwh: float = 0.0
@@ -445,6 +446,8 @@ class EnergyAccumulator:
         self.load_kwh: float = 0.0
         self.import_cost_today: float = 0.0
         self.export_earnings_today: float = 0.0
+        self._daily_cost_state: dict = {}
+        self._daily_cost_tracker: Any = None
         self.import_cost_covered_kwh: float = 0.0
         self.export_earnings_covered_kwh: float = 0.0
         self._load_accounting_partial_today = False
@@ -495,6 +498,7 @@ class EnergyAccumulator:
             return
         if not data:
             return
+        self._daily_cost_state = data.get("daily_cost_state") or {}
         stored_date = data.get("date")
         now = dt_util.now()
         today = now.strftime("%Y-%m-%d")
@@ -747,6 +751,10 @@ class EnergyAccumulator:
         stored_month = self._last_month or stored_date.strftime("%Y-%m")
         return {
             "date": stored_date.strftime("%Y-%m-%d"),
+            "daily_cost_state": (
+                self._daily_cost_tracker.state
+                if self._daily_cost_tracker is not None else self._daily_cost_state
+            ),
             "solar_kwh": round(self.solar_kwh, 4),
             "grid_import_kwh": round(self.grid_import_kwh, 4),
             "grid_export_kwh": round(self.grid_export_kwh, 4),
@@ -825,6 +833,12 @@ class EnergyAccumulator:
             sell_price_per_kwh: current export/feed-in price in $/kWh (None = skip cost tracking)
         """
         now = dt_util.now()  # Local time for midnight reset
+        if self._hass is not None and self._entry_id:
+            from .daily_cost import configure_tracker
+            self._daily_cost_tracker = configure_tracker(
+                self._hass, self._entry_id, now, self._daily_cost_tracker,
+                self._daily_cost_state, self.mtd_grid_export_kwh, self._last_month,
+            )
 
         def _finite_price(value: float | None) -> float | None:
             try:
@@ -900,8 +914,13 @@ class EnergyAccumulator:
 
         # Integrate power × time
         if self._last_update is not None:
-            delta_h = (now - self._last_update).total_seconds() / 3600
+            delta_h = (now.timestamp() - self._last_update.timestamp()) / 3600
             if 0 < delta_h < 0.1:  # Sanity: skip if > 6 min gap (stale/restart)
+                mtd_delta_h = min(delta_h, (now.timestamp() - now.replace(
+                    day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()) / 3600)
+                # A crossing sample belongs only to the current local day.
+                delta_h = min(delta_h, (now.timestamp() - now.replace(
+                    hour=0, minute=0, second=0, microsecond=0).timestamp()) / 3600)
                 self.solar_kwh += max(0, solar_kw) * delta_h
                 self.grid_import_kwh += max(0, grid_kw) * delta_h
                 self.grid_export_kwh += max(0, -grid_kw) * delta_h
@@ -919,19 +938,19 @@ class EnergyAccumulator:
                     self.export_earnings_today += export_kwh * sell_price_per_kwh
                     self.export_earnings_covered_kwh += export_kwh
                 # MTD accumulation
-                self.mtd_solar_kwh += max(0, solar_kw) * delta_h
-                self.mtd_grid_import_kwh += max(0, grid_kw) * delta_h
-                self.mtd_grid_export_kwh += max(0, -grid_kw) * delta_h
-                self.mtd_battery_charge_kwh += max(0, -battery_kw) * delta_h
-                self.mtd_battery_discharge_kwh += max(0, battery_kw) * delta_h
+                self.mtd_solar_kwh += max(0, solar_kw) * mtd_delta_h
+                self.mtd_grid_import_kwh += max(0, grid_kw) * mtd_delta_h
+                self.mtd_grid_export_kwh += max(0, -grid_kw) * mtd_delta_h
+                self.mtd_battery_charge_kwh += max(0, -battery_kw) * mtd_delta_h
+                self.mtd_battery_discharge_kwh += max(0, battery_kw) * mtd_delta_h
                 if load_kw is not None:
-                    self.mtd_load_kwh += max(0, load_kw) * delta_h
+                    self.mtd_load_kwh += max(0, load_kw) * mtd_delta_h
                 if buy_price_per_kwh is not None:
-                    import_kwh = max(0, grid_kw) * delta_h
+                    import_kwh = max(0, grid_kw) * mtd_delta_h
                     self.mtd_import_cost += import_kwh * buy_price_per_kwh
                     self.mtd_import_cost_covered_kwh += import_kwh
                 if sell_price_per_kwh is not None:
-                    export_kwh = max(0, -grid_kw) * delta_h
+                    export_kwh = max(0, -grid_kw) * mtd_delta_h
                     self.mtd_export_earnings += export_kwh * sell_price_per_kwh
                     self.mtd_export_earnings_covered_kwh += export_kwh
                 if load_kw is None:
@@ -944,6 +963,15 @@ class EnergyAccumulator:
                     self._load_accounting_partial_mtd = True
                 self._schedule_save()
 
+        if self._daily_cost_tracker is not None:
+            elapsed = (
+                now.timestamp() - self._last_update.timestamp()
+                if self._last_update is not None else 0.0
+            )
+            self._daily_cost_tracker.observe(
+                self._last_update, now, max(0.0, -grid_kw),
+                sell_price_per_kwh, 0 < elapsed < 360,
+            )
         self._last_update = now
         self._last_date = now.date()
         self._last_month = current_month
@@ -1021,7 +1049,7 @@ class EnergyAccumulator:
             )
             else None
         )
-        return {
+        summary = {
             "pv_today_kwh": round(self.solar_kwh, 3),
             "grid_import_today_kwh": round(self.grid_import_kwh, 3),
             "grid_export_today_kwh": round(self.grid_export_kwh, 3),
@@ -1046,6 +1074,10 @@ class EnergyAccumulator:
             "mtd_load_kwh": round(self.mtd_load_kwh, 3),
             "avg_cost_per_kwh_mtd": avg_mtd,
         }
+        return (
+            self._daily_cost_tracker.summary(summary)
+            if self._daily_cost_tracker is not None else summary
+        )
 
     def reconcile_hardware_daily_coverage(
         self,
@@ -2906,7 +2938,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self._site_info_last_fetch: float = 0  # Timestamp of last successful fetch
         self._site_info_fetch_failed = False
         self._site_info_retry_at: float = 0  # Bounded negative cache after read failures
-        self._energy_acc = EnergyAccumulator(hass, "tesla")
+        self._energy_acc = EnergyAccumulator(hass, "tesla", entry_id)
         self._firmware = None  # Extracted from site_info gateways
         self._last_valid_battery_level_pct: float | None = None
         self._teslemetry_stream: TeslemetryEnergySSEClient | None = None
@@ -3218,8 +3250,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         )
 
         if load_kw is not None:
+            buy, sell = _get_current_prices(self.hass, self._entry_id)
             self._energy_acc.update(
-                max(0, solar_kw), grid_kw, battery_kw, load_kw, 0.0, 0.0
+                max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell
             )
 
         local_is_off_grid = _grid_status_is_off_grid(
@@ -5694,7 +5727,7 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
             configured_charge_rate_limit_kw=configured_charge_rate_limit_kw,
             configured_discharge_rate_limit_kw=configured_discharge_rate_limit_kw,
         )
-        self._energy_acc = EnergyAccumulator(hass, "sigenergy")
+        self._energy_acc = EnergyAccumulator(hass, "sigenergy", entry_id)
         # Rated charge/discharge power in kW — cached after first successful
         # read from input registers 30079/30081. Static hardware spec so it
         # only needs to be fetched once.
@@ -6049,7 +6082,7 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
             self._controller = AlphaESSController(
                 host, port, slave_id, max_export_limit_kw=max_export_limit_kw
             )
-        self._energy_acc = EnergyAccumulator(hass, "alphaess")
+        self._energy_acc = EnergyAccumulator(hass, "alphaess", entry_id)
         self._cloud = cloud_client
         self._modbus_failures = 0  # Consecutive failures → cloud fallback
 
@@ -6397,7 +6430,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._ac_inverter_source_id = ac_inverter_source_id
         self._telemetry_only = bool(telemetry_only)
         self._controller = SungrowSHController(host, port, slave_id)
-        self._energy_acc = EnergyAccumulator(hass, "sungrow")
+        self._energy_acc = EnergyAccumulator(hass, "sungrow", entry_id)
         self._daily_energy_baseline_store = (
             Store(
                 hass,
@@ -6789,8 +6822,12 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         load_kwh = summary.get("load_today_kwh", 0.0) or 0.0
         import_cost = summary.get("import_cost_today")
         export_earn = summary.get("export_earnings_today")
+        summary["net_cost_today"] = (
+            round(import_cost - export_earn + summary.get("daily_supply_charge", 0.0), 4)
+            if import_cost is not None and export_earn is not None else None
+        )
         if load_kwh > 0 and import_cost is not None and export_earn is not None:
-            summary["avg_cost_per_kwh_today"] = round((import_cost - export_earn) / load_kwh, 4)
+            summary["avg_cost_per_kwh_today"] = round(summary["net_cost_today"] / load_kwh, 4)
         else:
             summary["avg_cost_per_kwh_today"] = None
 
@@ -8225,6 +8262,11 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
             "grid_export_today_source",
             "mtd_import_cost",
             "mtd_export_earnings",
+            "daily_supply_charge",
+            "mtd_supply_charge",
+            "supply_charge_days",
+            "export_bonus_today",
+            "export_bonus_coverage",
         ):
             if key in es1:
                 combined_energy[key] = es1[key]
@@ -8232,7 +8274,7 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         import_cost = combined_energy.get("import_cost_today")
         export_earnings = combined_energy.get("export_earnings_today")
         combined_energy["avg_cost_per_kwh_today"] = (
-            round((import_cost - export_earnings) / load_today, 4)
+            round((import_cost - export_earnings + combined_energy.get("daily_supply_charge", 0.0)) / load_today, 4)
             if (
                 load_today > 0
                 and import_cost is not None
@@ -8244,13 +8286,17 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         mtd_import_cost = combined_energy.get("mtd_import_cost")
         mtd_export_earnings = combined_energy.get("mtd_export_earnings")
         combined_energy["avg_cost_per_kwh_mtd"] = (
-            round((mtd_import_cost - mtd_export_earnings) / mtd_load, 4)
+            round((mtd_import_cost - mtd_export_earnings + combined_energy.get("mtd_supply_charge", 0.0)) / mtd_load, 4)
             if (
                 mtd_load > 0
                 and mtd_import_cost is not None
                 and mtd_export_earnings is not None
             )
             else None
+        )
+        combined_energy["net_cost_today"] = (
+            round(import_cost - export_earnings + combined_energy.get("daily_supply_charge", 0.0), 4)
+            if import_cost is not None and export_earnings is not None else None
         )
         charge_limit_w = self._combined_power_limit_w("charge")
         discharge_limit_w = self._combined_power_limit_w("discharge")
@@ -8465,7 +8511,7 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
             model_family=model_family,
         )
 
-        self._energy_acc = EnergyAccumulator(hass, "foxess")
+        self._energy_acc = EnergyAccumulator(hass, "foxess", entry_id)
 
         # Serialise all Modbus access so that data polls (every 30s) can't
         # clobber an in-progress force charge/discharge. Without this, the
@@ -8767,7 +8813,7 @@ class CustomEntityEnergyCoordinator(DataUpdateCoordinator):
             for key, entity_id in source_entities.items()
         }
         self._power_multipliers = dict(power_multipliers or {})
-        self._energy_acc = EnergyAccumulator(hass, f"custom_{entry_id}")
+        self._energy_acc = EnergyAccumulator(hass, f"custom_{entry_id}", entry_id)
 
         super().__init__(
             hass,
@@ -9030,7 +9076,7 @@ class FoxESSEntityEnergyCoordinator(
             foxess_entry_id=foxess_entry_id,
             entity_prefix=entity_prefix,
         )
-        self._energy_acc = EnergyAccumulator(hass, "foxess_entity")
+        self._energy_acc = EnergyAccumulator(hass, "foxess_entity", entry_id)
         self._ct2_energy_acc = EnergyAccumulator(hass, "foxess_entity_ct2")
         self._validated = False
 
@@ -9252,7 +9298,7 @@ class FoxESSCloudEnergyCoordinator(DataUpdateCoordinator):
         # Keep compatibility with older curtailment code paths that reached for
         # foxess_coordinator._controller.curtail()/restore().
         self._controller = self
-        self._energy_acc = EnergyAccumulator(hass, "foxess_cloud")
+        self._energy_acc = EnergyAccumulator(hass, "foxess_cloud", entry_id)
         self._store = Store(hass, 1, f"{DOMAIN}.foxess_cloud.{entry_id}") if entry_id else None
         self._stored_scheduler_groups: list[dict] | None = None
         self._last_backup_reserve = 10
@@ -9630,7 +9676,7 @@ class GoodWeEnergyCoordinator(
         self._telemetry_validated = False
         self._entity_telemetry_rated_power_w: int | None = None
         self._entity_telemetry_rated_power_probe_attempted = False
-        self._energy_acc = EnergyAccumulator(hass, "goodwe")
+        self._energy_acc = EnergyAccumulator(hass, "goodwe", entry_id)
         self._discharge_floor_pct: int = 10  # updated by set_backup_reserve
 
         super().__init__(
@@ -10189,7 +10235,7 @@ class SolaxBatteryEnergyCoordinator(
             max_charge_current_a=max_charge_current_a,
             max_discharge_current_a=max_discharge_current_a,
         )
-        self._energy_acc = EnergyAccumulator(hass, "solax")
+        self._energy_acc = EnergyAccumulator(hass, "solax", entry_id)
 
         super().__init__(
             hass,
@@ -10344,7 +10390,7 @@ class SolarEdgeEnergyCoordinator(
             entity_prefix=entity_prefix,
             solaredge_entry_id=solaredge_entry_id,
         )
-        self._energy_acc = EnergyAccumulator(hass, "solaredge")
+        self._energy_acc = EnergyAccumulator(hass, "solaredge", entry_id)
         self._daily_total_store = Store(
             hass,
             SOLAREDGE_DAILY_TOTALS_STORE_VERSION,
@@ -10856,7 +10902,7 @@ class SajH2EnergyCoordinator(
             min_soc_pct=min_soc_pct,
             inverter_rated_kw=inverter_rated_kw,
         )
-        self._energy_acc = EnergyAccumulator(hass, "saj_h2")
+        self._energy_acc = EnergyAccumulator(hass, "saj_h2", entry_id)
 
         super().__init__(
             hass,
@@ -10991,7 +11037,7 @@ class FroniusReservaEnergyCoordinator(
             max_charge_kw=max_charge_kw,
             max_discharge_kw=max_discharge_kw,
         )
-        self._energy_acc = EnergyAccumulator(hass, "fronius_reserva")
+        self._energy_acc = EnergyAccumulator(hass, "fronius_reserva", entry_id)
         self._last_upstream_outage: tuple[str, str] | None = None
 
         super().__init__(
@@ -11177,7 +11223,7 @@ class NeovoltEnergyCoordinator(
             soc_balance_tolerance_pct=soc_balance_tolerance_pct,
             battery_capacities_kwh=battery_capacities_kwh,
         )
-        self._energy_acc = EnergyAccumulator(hass, "neovolt")
+        self._energy_acc = EnergyAccumulator(hass, "neovolt", entry_id)
 
         super().__init__(
             hass,
@@ -11355,7 +11401,7 @@ class AnkerSolixEnergyCoordinator(
                 max_charge_kw=max_charge_kw,
                 max_discharge_kw=max_discharge_kw,
             )
-        self._energy_acc = EnergyAccumulator(hass, "anker_solix")
+        self._energy_acc = EnergyAccumulator(hass, "anker_solix", entry_id)
 
         super().__init__(
             hass,
@@ -11527,7 +11573,7 @@ class ESYSunhomeEnergyCoordinator(
         self._entry_id = entry_id
         self._entity_map: dict[str, str] = {}   # esy_key → ha entity_id
         self._mode_select_entity_id: str | None = None
-        self._energy_acc = EnergyAccumulator(hass, "esy_sunhome")
+        self._energy_acc = EnergyAccumulator(hass, "esy_sunhome", entry_id)
 
         super().__init__(
             hass,

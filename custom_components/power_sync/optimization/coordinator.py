@@ -21269,6 +21269,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 api_response["import_price"] = display_import[:n_sched]
             if display_export:
                 api_response["export_price"] = display_export[:n_sched]
+                # Keep chart tariff prices intact. Window earnings use the
+                # configured total Super Export rate on the remaining quota,
+                # shared by battery AND natural solar exports in time order.
+                zerohero_config = self._zerohero_config()
+                exports = api_response.get("grid_export_w") or []
+                if zerohero_config is not None and len(exports) == n_sched:
+                    from ..daily_cost import forecast_export_value_prices
+
+                    local_times = [
+                        dt_util.as_local(dt_util.parse_datetime(ts))
+                        for ts in api_response["timestamps"]
+                    ]
+                    api_response["export_value_price"] = forecast_export_value_prices(
+                        zerohero_config, local_times, exports, display_export,
+                        self._config.interval_minutes,
+                        getattr(self, "_last_export_bonus_caps_by_group", None),
+                    )
             if self._last_planned_ev_load_forecast_w:
                 planned_ev = self._aligned_schedule_series(
                     self._last_planned_ev_load_forecast_w, n_sched

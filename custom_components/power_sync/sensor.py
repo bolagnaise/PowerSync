@@ -62,6 +62,7 @@ from .const import (
     SENSOR_TYPE_DAILY_LOAD,
     SENSOR_TYPE_DAILY_IMPORT_COST,
     SENSOR_TYPE_DAILY_EXPORT_EARNINGS,
+    SENSOR_TYPE_DAILY_NET_COST,
     SENSOR_TYPE_DAILY_AVG_COST_PER_KWH,
     SENSOR_TYPE_MTD_AVG_COST_PER_KWH,
     SENSOR_TYPE_GRID_IMPORT_POWER,
@@ -521,6 +522,7 @@ _RESTORED_NUMERIC_SENSOR_KEYS = {
 
 _ENERGY_SUMMARY_VALUE_KEYS = {
     SENSOR_TYPE_DAILY_IMPORT_COST: "import_cost_today",
+    SENSOR_TYPE_DAILY_NET_COST: "net_cost_today",
     SENSOR_TYPE_DAILY_EXPORT_EARNINGS: "export_earnings_today",
     SENSOR_TYPE_DAILY_AVG_COST_PER_KWH: "avg_cost_per_kwh_today",
     SENSOR_TYPE_MTD_AVG_COST_PER_KWH: "avg_cost_per_kwh_mtd",
@@ -891,6 +893,17 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         suggested_display_precision=3,
         icon="mdi:cash-clock",
         value_fn=lambda data: data.get("energy_summary", {}).get("avg_cost_per_kwh_today") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_DAILY_NET_COST,
+        name="Estimated Net Cost Today",
+        currency_unit="money",
+        currency_attrs=True,
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=2,
+        icon="mdi:cash",
+        value_fn=lambda data: data.get("energy_summary", {}).get("net_cost_today") if data else None,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_MTD_AVG_COST_PER_KWH,
@@ -3381,6 +3394,20 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
                 }
             )
         energy_summary = energy_data.get("energy_summary") or {}
+        if self.entity_description.key in (
+            SENSOR_TYPE_DAILY_NET_COST, SENSOR_TYPE_DAILY_AVG_COST_PER_KWH,
+            SENSOR_TYPE_MTD_AVG_COST_PER_KWH, SENSOR_TYPE_DAILY_EXPORT_EARNINGS,
+        ):
+            attrs.update({
+                "estimated": True,
+                "daily_supply_charge": energy_summary.get("daily_supply_charge"),
+                "export_bonus_today": energy_summary.get("export_bonus_today"),
+                "export_bonus_coverage": energy_summary.get("export_bonus_coverage"),
+                "mtd_supply_charge": energy_summary.get("mtd_supply_charge"),
+                "supply_charge_days": energy_summary.get("supply_charge_days"),
+                "excluded_costs": "conditional plan credits, demand charges and bill adjustments",
+                "supply_charge_basis": "configured rates; unobserved month days use current rate",
+            })
         if self.entity_description.key == SENSOR_TYPE_DAILY_IMPORT_COST:
             attrs.update(
                 {

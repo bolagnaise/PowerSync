@@ -2679,6 +2679,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       : [];
     const importPrice = Array.isArray(schedule.import_price) ? schedule.import_price : [];
     const exportPrice = Array.isArray(schedule.export_price) ? schedule.export_price : [];
+    const exportValuePrice = Array.isArray(schedule.export_value_price) ? schedule.export_value_price : exportPrice;
     const gridExportLimit = Array.isArray(schedule.grid_export_limit_w)
       ? schedule.grid_export_limit_w
       : [];
@@ -2732,6 +2733,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         conditionalEvKw: this._kw(conditionalEv[i]),
         importPrice: this._minorPrice(importPrice[i]),
         exportPrice: this._minorPrice(exportPrice[i]),
+        exportValuePrice: this._minorPrice(exportValuePrice[i]),
         gridExportLimitKw: this._kw(gridExportLimit[i]),
       });
       for (const series of evVehicleSeries) {
@@ -3407,7 +3409,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
   _priceStatsForSegments(segments, action, model) {
     if (!Array.isArray(segments) || !segments.length || !model?.points?.length) return null;
     const useExport = action === 'discharge' || action === 'export' || action === 'solar_export';
-    const key = useExport ? 'exportPrice' : 'importPrice';
+    const key = useExport ? 'exportValuePrice' : 'importPrice';
     const values = [];
     for (const segment of segments) {
       const start = Date.parse(segment?.timestamp);
@@ -3421,7 +3423,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           const ts = Date.parse(point.timestamp);
           return Number.isFinite(ts) && ts >= start && ts < safeEnd;
         })
-        .map(point => point[key])
+        .map(point => point[key] ?? (useExport ? point.exportPrice : point.importPrice))
         .filter(value => Number.isFinite(value)));
     }
     if (!values.length) return null;
@@ -3452,7 +3454,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const powerKey = action === 'charge'
       ? 'chargeKw'
       : (model.detailedSchedule ? 'exportKw' : 'dischargeKw');
-    const priceKey = action === 'charge' ? 'importPrice' : 'exportPrice';
+    const priceKey = action === 'charge' ? 'importPrice' : 'exportValuePrice';
     const intervalMs = Math.max(1, Number(model.intervalMinutes) || 5) * 60000;
     const ranges = segments.map(segment => {
       const start = Date.parse(segment?.timestamp);
@@ -3484,7 +3486,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       }
       const intervalEnergyKwh = powerKw * overlapMs / 3600000;
       energyKwh += intervalEnergyKwh;
-      const minorPrice = Number(point[priceKey]);
+      const minorPrice = Number(point[priceKey] ?? (action === 'charge' ? point.importPrice : point.exportPrice));
       if (Number.isFinite(minorPrice)) {
         value += intervalEnergyKwh * minorPrice / 100;
         hasPrice = true;
@@ -8243,7 +8245,10 @@ class PowerSyncStrategy {
         costEntities.push({ entity: e('daily_import_cost'), name: 'Estimated Import Cost Today', icon: 'mdi:cash-minus' });
       }
       if (hasEntityE('daily_export_earnings')) {
-        costEntities.push({ entity: e('daily_export_earnings'), name: 'Export Earnings Today', icon: 'mdi:cash-plus' });
+        costEntities.push({ entity: e('daily_export_earnings'), name: 'Estimated Export Earnings Today', icon: 'mdi:cash-plus' });
+      }
+      if (hasEntityE('daily_net_cost')) {
+        costEntities.push({ entity: e('daily_net_cost'), name: 'Estimated Net Cost Today (incl. supply)', icon: 'mdi:cash' });
       }
       if (hasEntityE('daily_avg_cost_per_kwh')) {
         costEntities.push({ entity: e('daily_avg_cost_per_kwh'), name: 'Avg Cost per kWh (Today)', icon: 'mdi:cash-clock' });
