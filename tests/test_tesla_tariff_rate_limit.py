@@ -60,7 +60,7 @@ def upload_harness(monkeypatch):
 
     session = Session()
     coordinator = SimpleNamespace(
-        _parse_retry_after=lambda response: float(response.headers["Retry-After"])
+        _parse_retry_after=lambda response: float(response.headers.get("Retry-After", 0)) or None
     )
     monkeypatch.setitem(sys.modules, "power_sync.coordinator", coordinator)
 
@@ -100,6 +100,61 @@ def test_final_429_defers_fresh_call_until_retry_after_even_with_rotated_token(u
         clock.now = 282.0
         assert await upload(hass, "site-a", {"name": "fresh"}, "token") is True
         assert [post[0] for post in session.posts] == [0.0, 282.0]
+
+    asyncio.run(run())
+
+
+def test_single_attempt_429_exposes_definite_rejection_without_acceptance(upload_harness):
+    upload, hass, session, _clock = upload_harness
+    accepted = {}
+    assert asyncio.run(upload(hass, 'site-a', {}, 'token', max_retries=1,
+                              accepted_status=accepted)) is False
+    assert accepted == {'rejected': True}
+    assert len(session.posts) == 1
+
+
+@pytest.mark.parametrize('status', [200, 408, 500])
+def test_unconfirmed_and_unknown_outcomes_never_claim_definite_rejection(upload_harness, status):
+    upload, hass, session, clock = upload_harness
+    session.responses = [status]
+    clock.confirmed = False
+    accepted = {}
+    assert asyncio.run(upload(hass, 'site-a', {}, 'token', max_retries=1,
+                              accepted_status=accepted)) is False
+    assert accepted.get('rejected') is not True
+    if status == 200:
+        assert accepted.get('accepted') is True
+
+
+def test_429_after_uncertain_earlier_attempt_does_not_claim_definite_rejection(upload_harness):
+    upload, hass, session, _clock = upload_harness
+    session.responses = [200, 429]
+    post = session.post
+
+    def uncertain_post(url, **kwargs):
+        response = post(url, **kwargs)
+        if len(session.posts) == 1:
+            raise aiohttp.ClientConnectionError('first command may have been accepted')
+        return response
+
+    session.post = uncertain_post
+    accepted = {}
+    assert asyncio.run(upload(hass, 'site-a', {}, 'token', max_retries=2,
+                              max_retry_after_seconds=5, accepted_status=accepted)) is False
+    assert len(session.posts) == 2 and accepted.get('rejected') is not True
+
+
+def test_deferred_call_clears_reused_rejection_status(upload_harness):
+    upload, hass, session, _clock = upload_harness
+    accepted = {}
+
+    async def run():
+        assert await upload(hass, 'site-a', {}, 'token', max_retries=1,
+                            accepted_status=accepted) is False
+        assert accepted == {'rejected': True}
+        assert await upload(hass, 'site-a', {}, 'token', max_retries=1,
+                            accepted_status=accepted) is False
+        assert accepted == {} and len(session.posts) == 1
 
     asyncio.run(run())
 

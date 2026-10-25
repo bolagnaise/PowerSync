@@ -5792,6 +5792,8 @@ async def send_tariff_to_tesla(
     Periodic price syncs set max_retry_after_seconds so a long Retry-After
     drops their retry instead of resending an older tariff at the next sync.
     """
+    if accepted_status is not None:
+        accepted_status.pop("rejected", None)
     uploads = hass.data.setdefault(DOMAIN, {}).setdefault("_tesla_tou_uploads", {})
     key = (api_provider, get_tesla_api_base_url(api_provider, fleet_base_url), str(site_id))
     state = uploads.setdefault(key, {"busy": False, "retry_at": 0.0})
@@ -5852,6 +5854,8 @@ async def _send_tariff_to_tesla(
         confirm_readback: Confirm the uploaded tariff appears in site_info before returning success.
         accepted_status: Optional mutable status populated with ``accepted=True``
             after Tesla accepts the upload, even if readback confirmation fails.
+            A single-attempt HTTP 429 sets ``rejected=True``; other failures and
+            retry sequences remain potentially ambiguous.
         readback_status: Optional mutable status populated with the confirmed
             representation (``exact`` or ``tesla_zero_normalized``).
         max_retry_after_seconds: Give up instead of retrying when a 429 or 5xx
@@ -5991,6 +5995,10 @@ async def _send_tariff_to_tesla(
                 error_text = await response.text()
 
                 if response.status == 429:
+                    if accepted_status is not None and max_retries == 1:
+                        # Native Max submits only once. A 429 rejects that
+                        # request; no earlier uncertain attempt can arrive late.
+                        accepted_status["rejected"] = True
                     # Rate limited — retry with Retry-After if provided
                     from .coordinator import _parse_retry_after
                     retry_after_delay = _parse_retry_after(response)
@@ -33531,7 +33539,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if current is not None:
             return current
         from .powerwall_local.views import ensure_client
-        from .powerwall_local.native_max_charge import NativeMaxChargeSession
+        from .powerwall_local.native_max_charge import NativeMaxChargeSession, NativeMaxTariffRejected
         from .powerwall_local.native_max_adapter import NativeMaxChargeAdapter
         from .native_rate_budget import budget_for, site_identity
         client = await ensure_client(hass, entry)
@@ -33593,12 +33601,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 key = (provider, get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL)), str(site_id))
                 if reserved[0] != key:
                     raise HomeAssistantError("Native Max tariff provider changed during acquisition")
-            return await send_tariff_to_tesla(hass, site_id, tariff, token, provider,
+            status = {}
+            confirmed = await send_tariff_to_tesla(hass, site_id, tariff, token, provider,
                 timeout_seconds=12, max_retries=1, max_retry_after_seconds=5,
                 fleet_base_url=entry.data.get(CONF_FLEET_API_BASE_URL),
-                confirm_readback=True, before_write=before_write,
+                confirm_readback=True, accepted_status=status, before_write=before_write,
                 upload_owner=reserved[1] if reserved is not None else None,
                 is_current=lambda: _native_max_identity() == identity)
+            if confirmed is not True and status.get("rejected") is True:
+                raise NativeMaxTariffRejected("Native Max tariff upload was rejected by rate limiting")
+            return confirmed
 
         async def changed(status):
             if not _local_powerwall_generation_current():

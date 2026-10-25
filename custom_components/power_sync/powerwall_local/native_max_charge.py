@@ -20,6 +20,10 @@ class NativeMaxChargeError(Exception):
     """Charging was rejected, superseded, expired or could not be restored."""
 
 
+class NativeMaxTariffRejected(NativeMaxChargeError):
+    """The provider explicitly rejected the session's only tariff POST."""
+
+
 class NativeMaxChargeSession:
     """One restoration owner, protected by the caller's shared site admission.
 
@@ -173,6 +177,10 @@ class NativeMaxChargeSession:
             self.record["tariff_intent"] = value
         elif kind == "tariff_confirmed":
             self.record.pop("tariff_intent", None)
+        elif kind == "tariff_rejected":
+            if value not in ("forcing", "baseline") or self.record.get("tariff_intent") != value:
+                raise NativeMaxChargeError("Native Max rejected tariff intent changed")
+            self.record.pop("tariff_intent")
         else:
             raise NativeMaxChargeError("Unknown Native Max mutation intent")
         await self._save()

@@ -1,5 +1,6 @@
 """Native Max preserves permissions and restores only its own exact settings."""
 import asyncio
+import ast
 from copy import deepcopy
 import importlib
 from pathlib import Path
@@ -7,6 +8,7 @@ import sys
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from test_tesla_tariff_rate_limit import upload_harness
 
 ROOT = Path(__file__).parents[1] / 'custom_components/power_sync'
 
@@ -397,6 +399,95 @@ async def test_ambiguous_fleet_submission_is_quarantined_until_unique_late_tarif
     s.state.tariff=deepcopy(s.adapter.forcing_tariff)
     assert await s.session.stop()
     assert s.state.tariff==s.original[1] and s.store.data is None
+
+
+def native_http_upload(setup, upload_harness):
+    """Use the real native closure and sender against the fake HTTP boundary."""
+    s = setup
+    sender, hass, http, clock = upload_harness
+    tree = ast.parse((ROOT/'__init__.py').read_text())
+    get = next(node for node in ast.walk(tree)
+               if isinstance(node, ast.AsyncFunctionDef) and node.name == '_get_native_max_charge_locked')
+    upload = next(node for node in get.body
+                  if isinstance(node, ast.AsyncFunctionDef) and node.name == 'upload')
+    namespace = dict(site_config=lambda: ('site', 'token', 'fleet_api'),
+                     _local_powerwall_runtime={}, hass=hass,
+                     entry=SimpleNamespace(data={}), CONF_FLEET_API_BASE_URL='fleet_base',
+                     send_tariff_to_tesla=sender, _native_max_identity=lambda: 'paired',
+                     identity='paired', HomeAssistantError=s.m.NativeMaxChargeError,
+                     NativeMaxTariffRejected=getattr(s.m, 'NativeMaxTariffRejected', s.m.NativeMaxChargeError))
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[upload], type_ignores=[])),
+                 '<native-tariff-upload>', 'exec'), namespace)
+    s.adapter.upload = namespace['upload']
+    post = http.post
+
+    def apply_accepted_tariff(url, **kwargs):
+        response = post(url, **kwargs)
+        if response.status == 200:
+            s.state.tariff = deepcopy(kwargs['json']['tou_settings']['tariff_content_v2'])
+        return response
+
+    http.post = apply_accepted_tariff
+    return http, clock
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('direction', ['charge', 'discharge'])
+async def test_rejected_native_tariff_does_not_quarantine_site_or_bypass_cooldown(setup, upload_harness, direction):
+    s = setup
+    s.adapter.direction = direction
+    http, clock = native_http_upload(s, upload_harness)
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.start(120)
+        assert not s.session.pending
+        assert s.store.data is None and not s.budget.native_max_claim('site')
+        assert (s.state.config, s.state.tariff) == s.original
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.start(120)
+        assert len(http.posts) == 1 and not s.session.pending
+        clock.now = 282
+        s.state.at += 282
+        assert (await s.session.start(120))['active']
+        assert len(http.posts) == 2
+        assert await s.session.stop()
+        assert (s.state.config, s.state.tariff) == s.original
+    finally:
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['self_consumption', 'autonomous'])
+async def test_rejected_baseline_restore_can_retry_after_restart_and_cooldown(setup, upload_harness, mode):
+    s = setup
+    s.state.config['default_real_mode'] = mode
+    original = deepcopy(s.state.config), deepcopy(s.state.tariff)
+    http, clock = native_http_upload(s, upload_harness)
+    http.responses = [200, 429, 200]
+    recovered = None
+    try:
+        assert (await s.session.start(120))['active']
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.stop()
+        assert s.session.pending and s.budget.native_max_claim('site')
+        assert not s.store.data.get('tariff_intent')
+        await s.session._cancel_watch()
+        recovered = type(s.session)(s.adapter, s.store, clock=lambda: s.state.at,
+                                    monotonic=lambda: s.state.at)
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await recovered.recover()
+        assert len(http.posts) == 2 and recovered.pending
+        await recovered._cancel_watch()
+        clock.now = 282
+        s.state.at += 282
+        assert await recovered.recover()
+        assert len(http.posts) == 3
+        assert (s.state.config, s.state.tariff) == original
+        assert s.store.data is None and not s.budget.native_max_claim('site')
+    finally:
+        await s.session._cancel_watch()
+        if recovered:
+            await recovered._cancel_watch()
 
 
 @pytest.mark.asyncio

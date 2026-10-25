@@ -14,7 +14,7 @@ import time
 
 from .battery_dispatch import battery_watts, site_grid_limits_w, validate_dispatch_config
 from .full_rate_charge import native_max_charge_eligibility
-from .native_max_charge import NativeMaxChargeError
+from .native_max_charge import NativeMaxChargeError, NativeMaxTariffRejected
 
 
 def _signed_export_limit(value):
@@ -350,7 +350,14 @@ class NativeMaxChargeAdapter:
             await write_intent("tariff", target)
             # Storage must not extend a policy/identity grant.
             return await before_write()
-        confirmed = await self._mutate(self.upload(tariff, submitted))
+        try:
+            confirmed = await self._mutate(self.upload(tariff, submitted))
+        except NativeMaxTariffRejected:
+            # A definite rejection of this single POST cannot arrive later.
+            # Leave unknown/timeout outcomes quarantined, and retain all other
+            # cleanup ownership until its normal readback and settling checks.
+            await write_intent("tariff_rejected", target)
+            return False
         if confirmed is True:
             await write_intent("tariff_confirmed")
         return confirmed
