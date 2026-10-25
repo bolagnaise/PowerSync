@@ -470,6 +470,51 @@ def test_v1r_diagnostics_partial_success_keeps_working_endpoints():
     assert "system_info: unsupported field" in coord._v1r_diagnostics["error"]
 
 
+@pytest.mark.asyncio
+async def test_failed_dcq_polls_retry_independent_diagnostics_at_bounded_interval(monkeypatch):
+    """A failed startup diagnostic read must recover even if DCQ stays empty."""
+    from unittest.mock import AsyncMock
+
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    client = SimpleNamespace(
+        local_access_enabled=True,
+        get_snapshot=AsyncMock(side_effect=_PowerwallUnreachableError("empty DCQ")),
+        get_v1r_diagnostics=AsyncMock(side_effect=[RuntimeError("busy"), {
+            "system_info": {"device_type": "Gateway 3"},
+            "networking": None, "internet": None, "errors": {},
+        }]),
+    )
+    coord._client = client
+    coord._entry_id = "entry"
+    coord._consecutive_failures = 0
+    coord._v1r_diagnostics = {}
+    coord._last_success_ts = None
+    snapshot = object()
+    coord.data = snapshot
+    coord.hass = SimpleNamespace(async_create_task=lambda coro, name: asyncio.create_task(coro, name=name))
+    coord.async_update_listeners = lambda: None
+    now = 100.0
+    monkeypatch.setattr(coordinator_mod.time, "monotonic", lambda: now)
+
+    # Reproduce the initial independent attempt scheduled by ensure_coordinator.
+    coord._schedule_v1r_diagnostics_if_due()
+    await coord._v1r_diagnostics_task
+    assert coord._v1r_diagnostics["error"] == "busy"
+    for now in (101.0, 399.0, 400.0):
+        with pytest.raises(Exception, match="empty DCQ"):
+            await coord._async_update_data()
+        await coord._v1r_diagnostics_task
+
+    assert client.get_snapshot.await_count == 3
+    assert client.get_v1r_diagnostics.await_count == 2
+    assert coord._v1r_diagnostics["system_info"] == {"device_type": "Gateway 3"}
+    assert coord._v1r_diagnostics["error"] is None
+    assert coord.data is snapshot
+    assert coord._last_success_ts is None
+
+
 def _calibration_snapshot(active: bool):
     return client_mod.PowerwallSnapshot(
         soc=50.0,

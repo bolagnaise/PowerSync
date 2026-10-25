@@ -3445,6 +3445,13 @@ class _PowerwallV1rSensorBase(_PowerwallLocalSensorBase):
     diagnostic_key = ""
 
     @property
+    def capability_attributes(self) -> dict[str, Any]:
+        # HA omits extra_state_attributes for unavailable entities. Keep the
+        # attempt/error evidence visible without presenting a failed endpoint
+        # as healthy or retaining its old readings.
+        return (super().capability_attributes or {}) | self._diagnostic_attributes()
+
+    @property
     def available(self) -> bool:
         # Common API diagnostics are refreshed independently of the live DCQ
         # snapshot, so a DCQ polling failure must not hide a successful
@@ -3459,8 +3466,10 @@ class _PowerwallV1rSensorBase(_PowerwallLocalSensorBase):
         if diagnostics.get("last_success_ts") is not None:
             attrs["last_success_ts"] = diagnostics["last_success_ts"]
         errors = diagnostics.get("errors") or {}
-        if isinstance(errors, dict) and errors.get(self.diagnostic_key):
-            attrs["error"] = errors[self.diagnostic_key]
+        if isinstance(errors, dict):
+            error = errors.get(self.diagnostic_key) or errors.get("diagnostics")
+            if error:
+                attrs["error"] = error
         return attrs
 
 

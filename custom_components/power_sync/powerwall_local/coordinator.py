@@ -161,6 +161,9 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         if not self._client.local_access_enabled:
             return None
 
+        # Common API diagnostics must keep retrying on their own cadence even
+        # when DCQ telemetry remains unavailable after startup.
+        self._schedule_v1r_diagnostics_if_due()
         try:
             snap = await asyncio.wait_for(
                 self._client.get_snapshot(),
@@ -211,7 +214,6 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         self._consecutive_failures = 0
         self._discard_unverified_backup_reserve(snap)
         await self._sync_calibration_alert(snap)
-        self._schedule_v1r_diagnostics_if_due()
         return snap
 
     async def _sync_calibration_alert(self, snap: PowerwallSnapshot) -> None:
