@@ -971,6 +971,7 @@ class EnergyAccumulator:
             self._daily_cost_tracker.observe(
                 self._last_update, now, max(0.0, -grid_kw),
                 sell_price_per_kwh, 0 < elapsed < 360,
+                import_kw=grid_kw,
             )
         self._last_update = now
         self._last_date = now.date()

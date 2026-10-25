@@ -3405,7 +3405,12 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
                 "export_bonus_coverage": energy_summary.get("export_bonus_coverage"),
                 "mtd_supply_charge": energy_summary.get("mtd_supply_charge"),
                 "supply_charge_days": energy_summary.get("supply_charge_days"),
-                "excluded_costs": "conditional plan credits, demand charges and bill adjustments",
+                "zerohero_credit_today": energy_summary.get("zerohero_credit_today"),
+                "zerohero_credit_status": energy_summary.get("zerohero_credit_status"),
+                "zerohero_credit_verification": energy_summary.get("zerohero_credit_verification"),
+                "mtd_zerohero_credit": energy_summary.get("mtd_zerohero_credit"),
+                "zerohero_credit_days": energy_summary.get("zerohero_credit_days"),
+                "excluded_costs": "other conditional plan credits, demand charges and bill adjustments",
                 "supply_charge_basis": "configured rates; unobserved month days use current rate",
             })
         if self.entity_description.key == SENSOR_TYPE_DAILY_IMPORT_COST:

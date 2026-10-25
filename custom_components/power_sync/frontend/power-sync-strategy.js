@@ -8249,6 +8249,11 @@ class PowerSyncStrategy {
       }
       if (hasEntityE('daily_net_cost')) {
         costEntities.push({ entity: e('daily_net_cost'), name: 'Estimated Net Cost Today (incl. supply)', icon: 'mdi:cash' });
+        const creditStatus = hass.states[e('daily_net_cost')]?.attributes?.zerohero_credit_status;
+        if (creditStatus && creditStatus !== 'disabled') {
+          costEntities.push({ type: 'attribute', entity: e('daily_net_cost'),
+            attribute: 'zerohero_credit_status', name: 'ZeroHero Credit', icon: 'mdi:cash-check' });
+        }
       }
       if (hasEntityE('daily_avg_cost_per_kwh')) {
         costEntities.push({ entity: e('daily_avg_cost_per_kwh'), name: 'Avg Cost per kWh (Today)', icon: 'mdi:cash-clock' });
