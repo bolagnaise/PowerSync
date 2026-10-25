@@ -785,6 +785,9 @@ from .const import (
     DEFAULT_SUNGROW_SLAVE_ID,
     SUNGROW_CONNECTION_DIRECT,
     SUNGROW_CONNECTION_IHOMEMANAGER,
+    SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE,
+    CONF_SUNGROW_IHOMEMANAGER_HOST,
+    CONF_SUNGROW_IHOMEMANAGER_PORT,
     # FoxESS battery system configuration
     BATTERY_SYSTEM_FOXESS,
     CONF_FOXESS_HOST,
@@ -22550,9 +22553,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_INVERTER_BRAND,
             entry.data.get(CONF_INVERTER_BRAND, ""),
         )
-        if inverter_brand != "sungrow":
-            return False
-
         inverter_host = entry.options.get(
             CONF_INVERTER_HOST,
             entry.data.get(CONF_INVERTER_HOST, ""),
@@ -22581,6 +22581,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID),
         )
         try:
+            if entry.options.get(CONF_SUNGROW_CONNECTION_TYPE, entry.data.get(CONF_SUNGROW_CONNECTION_TYPE)) == SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE:
+                if (
+                    str(inverter_host).strip() == str(entry.options.get(CONF_SUNGROW_IHOMEMANAGER_HOST, entry.data.get(CONF_SUNGROW_IHOMEMANAGER_HOST, ""))).strip()
+                    and int(inverter_port) == int(entry.options.get(CONF_SUNGROW_IHOMEMANAGER_PORT, entry.data.get(CONF_SUNGROW_IHOMEMANAGER_PORT, 503)))
+                ):
+                    return True
+            if inverter_brand != "sungrow":
+                return False
             return (
                 str(inverter_host).strip() == str(sungrow_host).strip()
                 and int(inverter_port) == int(sungrow_port)
@@ -22812,15 +22820,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if has_separate_sungrow_ac_inverter
             else None
         )
-        sungrow_coordinator = SungrowEnergyCoordinator(
-            hass,
-            sungrow_host,
-            port=sungrow_port,
-            slave_id=sungrow_slave_id,
-            entry_id=entry.entry_id,
-            ac_inverter_source_id=ac_inverter_source_id,
-            telemetry_only=sungrow_telemetry_only,
-        )
+        if sungrow_connection_type == SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE:
+            from .sungrow_ihomemanager_coordinator import SungrowIHomeManagerEnergyCoordinator
+
+            sungrow_coordinator = SungrowIHomeManagerEnergyCoordinator(
+                hass, sungrow_host, port=sungrow_port, slave_id=sungrow_slave_id,
+                entry_id=entry.entry_id, ac_inverter_source_id=ac_inverter_source_id,
+                ihomemanager_host=entry.options.get(
+                    CONF_SUNGROW_IHOMEMANAGER_HOST, entry.data.get(CONF_SUNGROW_IHOMEMANAGER_HOST, "")
+                ),
+                ihomemanager_port=entry.options.get(
+                    CONF_SUNGROW_IHOMEMANAGER_PORT, entry.data.get(CONF_SUNGROW_IHOMEMANAGER_PORT, 503)
+                ),
+            )
+        else:
+            sungrow_coordinator = SungrowEnergyCoordinator(
+                hass, sungrow_host, port=sungrow_port, slave_id=sungrow_slave_id,
+                entry_id=entry.entry_id, ac_inverter_source_id=ac_inverter_source_id,
+                telemetry_only=sungrow_telemetry_only,
+            )
 
     elif is_foxess:
         _LOGGER.info("Running in FoxESS mode - Tesla credentials not required")
@@ -34351,7 +34369,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 else:
                     sungrow_result = await _guarded_force_discharge_write(
                         lambda guarded_w: sungrow_coord.force_discharge(
-                            duration, power_w=guarded_w
+                            duration,
+                            power_w=guarded_w,
+                            **({"source": source} if getattr(sungrow_coord, "native_ihomemanager", False) else {}),
                         )
                     )
                     if not sungrow_result:
@@ -35272,7 +35292,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 power_w = command_power_w
                 discharge_result = await _guarded_force_discharge_write(
                     lambda guarded_w: sungrow_coord.force_discharge(
-                        duration, power_w=guarded_w
+                        duration,
+                        power_w=guarded_w,
+                        **({"source": source} if getattr(sungrow_coord, "native_ihomemanager", False) else {}),
                     )
                 )
 
@@ -35334,6 +35356,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     })
                     await persist_force_mode_state()
                     _LOGGER.error("Sungrow force discharge failed")
+                    if getattr(sungrow_coord, "native_ihomemanager", False):
+                        raise HomeAssistantError("Native iHomeManager force discharge was not confirmed")
                 return
             except Exception as e:
                 force_discharge_state["active"] = False
@@ -35347,6 +35371,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await persist_force_mode_state()
                 _LOGGER.error(f"Error in Sungrow force discharge: {e}", exc_info=True)
                 hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Sungrow Modbus communication error"))
+                if getattr(sungrow_coord, "native_ihomemanager", False):
+                    raise HomeAssistantError("Native iHomeManager force discharge was not confirmed") from e
                 return
 
         is_anker_solix_local = entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_ANKER_SOLIX
@@ -36271,6 +36297,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 charge_result = await sungrow_coord.force_charge(
                     duration,
                     power_w=power_w,
+                    **({"source": source} if getattr(sungrow_coord, "native_ihomemanager", False) else {}),
                 )
                 if charge_result is False:
                     raise HomeAssistantError(
@@ -37171,7 +37198,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state["expires_at"] = None
 
                 power_w = command_power_w
-                charge_result = await sungrow_coord.force_charge(duration, power_w=power_w)
+                charge_result = await sungrow_coord.force_charge(
+                    duration,
+                    power_w=power_w,
+                    **({"source": source} if getattr(sungrow_coord, "native_ihomemanager", False) else {}),
+                )
 
                 if charge_result:
                     force_charge_state["active"] = True
@@ -37223,11 +37254,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 else:
                     force_charge_state["active"] = False
                     _LOGGER.error("Sungrow force charge failed")
+                    if getattr(sungrow_coord, "native_ihomemanager", False):
+                        raise HomeAssistantError("Native iHomeManager force charge was not confirmed")
                 return
             except Exception as e:
                 force_charge_state["active"] = False
                 _LOGGER.error(f"Error in Sungrow force charge: {e}", exc_info=True)
                 hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Sungrow Modbus communication error"))
+                if getattr(sungrow_coord, "native_ihomemanager", False):
+                    raise HomeAssistantError("Native iHomeManager force charge was not confirmed") from e
                 return
 
         is_anker_solix_local = entry.data.get(CONF_BATTERY_SYSTEM) == BATTERY_SYSTEM_ANKER_SOLIX

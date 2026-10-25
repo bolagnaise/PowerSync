@@ -41,6 +41,10 @@ _CONST_NAMESPACE = {
     "CONF_INVERTER_SLAVE_ID": "inverter_slave_id",
     "DEFAULT_INVERTER_PORT": 502,
     "DEFAULT_INVERTER_SLAVE_ID": 1,
+    "CONF_SUNGROW_CONNECTION_TYPE": "sungrow_connection_type",
+    "SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE": "ihomemanager_native",
+    "CONF_SUNGROW_IHOMEMANAGER_HOST": "sungrow_ihomemanager_host",
+    "CONF_SUNGROW_IHOMEMANAGER_PORT": "sungrow_ihomemanager_port",
     "CONF_SUNGROW_HOST": "sungrow_host",
     "CONF_SUNGROW_PORT": "sungrow_port",
     "CONF_SUNGROW_SLAVE_ID": "sungrow_slave_id",
@@ -350,3 +354,11 @@ def test_provider_api_keeps_ihomemanager_monitoring_mode_forced_on():
         assert "CONF_SUNGROW_CONNECTION_TYPE" in method_source
     assert 'config["monitoring_mode"] = True' in get_source
     assert "new_options[CONF_MONITORING_MODE] = True" in post_source
+
+
+@pytest.mark.parametrize("brand", ["sungrow", "goodwe", "huawei"])
+def test_native_ihomemanager_control_endpoint_cannot_be_used_for_ac_curtailment(brand):
+    entry = _entry(brand=brand, model="sg20rt", host="native-ihm", port=503, slave=247)
+    entry.data.update(sungrow_connection_type="ihomemanager_native",
+                      sungrow_ihomemanager_host="native-ihm", sungrow_ihomemanager_port=503)
+    assert _build_guard(entry)() is True

@@ -555,18 +555,22 @@
       },
       "sungrow": {
         "title": "Sungrow Modbus connection",
-        "description": "Connect directly to a Sungrow SH-series inverter, or read it through an iHomeManager plaintext forwarding channel. iHomeManager connections are telemetry-only.",
+        "description": "Choose direct inverter control, telemetry-only iHomeManager forwarding, or native iHomeManager battery control with separate inverter telemetry. Native control requires iHM protocol V1.0.2, starts in Monitoring Mode, and supports charge, discharge and self-consumption. Disable Sungrow AI or other VPP control before enabling PowerSync control.",
         "data": {
           "sungrow_connection_type": "Connection type",
           "sungrow_host": "Inverter IP address",
           "sungrow_port": "Modbus port",
-          "sungrow_slave_id": "Modbus slave ID"
+          "sungrow_slave_id": "Modbus slave ID",
+          "sungrow_ihomemanager_host": "iHomeManager control IP address (native control only)",
+          "sungrow_ihomemanager_port": "iHomeManager plaintext control port"
         },
         "data_description": {
-          "sungrow_connection_type": "Direct supports telemetry and control. iHomeManager uses a configured port 503 or 504 forwarding channel, forces Monitoring Mode, and blocks all register writes.",
-          "sungrow_host": "Local IP of your Sungrow inverter, WiNet-S dongle, or iHomeManager.",
-          "sungrow_port": "Direct Modbus normally uses 502. For iHomeManager, enable a non-SSL forwarding channel on port 503 or 504 and enter that port.",
-          "sungrow_slave_id": "Default is 1. Only change if you have multiple devices on the same bus."
+          "sungrow_connection_type": "Native iHomeManager control uses the inverter address above for read-only telemetry and a separate iHomeManager endpoint below for commands. Idle holds, reserve writes, spread export and battery solar curtailment are unavailable on that connection.",
+          "sungrow_host": "For native iHomeManager control, enter the inverter or WiNet-S telemetry address here. Enter the separate iHomeManager control address below.",
+          "sungrow_port": "The inverter telemetry port normally uses 502. Telemetry-only iHomeManager forwarding uses configured non-SSL port 503 or 504. Native iHomeManager control uses the separate endpoint below.",
+          "sungrow_slave_id": "Default is 1. Only change if you have multiple devices on the same bus.",
+          "sungrow_ihomemanager_host": "Required only for native control. Enter the iHomeManager address; the inverter telemetry and control TCP endpoints must differ.",
+          "sungrow_ihomemanager_port": "Use configured port 503 or 504 with SSL disabled. The native unit address is fixed at 247."
         },
         "submit": "Connect"
       },
@@ -1184,6 +1188,8 @@
       "modbus_host_required": "IP address is required -- enter the local IP of your Sigenergy inverter or gateway.",
       "sungrow_host_required": "IP address is required -- enter the local IP of your Sungrow inverter or WiNet-S dongle.",
       "sungrow_ihomemanager_plaintext_port_required": "iHomeManager support requires a non-SSL forwarding channel on port 503 or 504. Enable that channel in iHomeManager settings and enter the matching port.",
+      "sungrow_native_endpoints_required": "Native iHomeManager control requires an inverter telemetry endpoint (unit 1–246) and a separate iHomeManager plaintext endpoint on port 503 or 504.",
+      "sungrow_native_protocol_unsupported": "This iHomeManager does not report supported native protocol V1.0.2. Firmware version alone does not establish protocol compatibility. You can keep using telemetry-only forwarding.",
       "modbus_conflict": "Connected but received invalid data (SOC > 100%). Another integration is likely using Modbus on the same port. Disable other Modbus integrations for this inverter and retry.",
       "sungrow_modbus_conflict": "The AC inverter curtailment path cannot use the same Sungrow Modbus IP, port, and slave ID as the battery system. Disable this option for a hybrid-only setup, or configure a separate AC-coupled/string inverter endpoint.",
       "alphaess_cloud_required": "AlphaESS Cloud monitoring requires both an App ID and App Secret.",
@@ -1638,18 +1644,22 @@
       },
       "sungrow_connection": {
         "title": "Sungrow Modbus connection",
-        "description": "Update the direct Sungrow or telemetry-only iHomeManager forwarding connection. Changes take effect immediately.",
+        "description": "Choose direct inverter control, telemetry-only iHomeManager forwarding, or native iHomeManager battery control with separate inverter telemetry. Native control requires iHM protocol V1.0.2, starts in Monitoring Mode, and supports charge, discharge and self-consumption. Disable Sungrow AI or other VPP control before enabling PowerSync control.",
         "data": {
           "sungrow_connection_type": "Connection type",
           "sungrow_host": "Inverter IP address",
           "sungrow_port": "Modbus port",
-          "sungrow_slave_id": "Modbus slave ID"
+          "sungrow_slave_id": "Modbus slave ID",
+          "sungrow_ihomemanager_host": "iHomeManager control IP address (native control only)",
+          "sungrow_ihomemanager_port": "iHomeManager plaintext control port"
         },
         "data_description": {
-          "sungrow_connection_type": "Direct supports telemetry and control. iHomeManager uses a configured port 503 or 504 forwarding channel, forces Monitoring Mode, and blocks all register writes.",
-          "sungrow_host": "Local IP of your Sungrow inverter, WiNet-S dongle, or iHomeManager.",
-          "sungrow_port": "Direct Modbus normally uses 502. For iHomeManager, enable a non-SSL forwarding channel on port 503 or 504 and enter that port.",
-          "sungrow_slave_id": "Default is 1. Only change if you have multiple devices on the same bus."
+          "sungrow_connection_type": "Native iHomeManager control uses the inverter address above for read-only telemetry and a separate iHomeManager endpoint below for commands. Idle holds, reserve writes, spread export and battery solar curtailment are unavailable on that connection.",
+          "sungrow_host": "For native iHomeManager control, enter the inverter or WiNet-S telemetry address here. Enter the separate iHomeManager control address below.",
+          "sungrow_port": "The inverter telemetry port normally uses 502. Telemetry-only iHomeManager forwarding uses configured non-SSL port 503 or 504. Native iHomeManager control uses the separate endpoint below.",
+          "sungrow_slave_id": "Default is 1. Only change if you have multiple devices on the same bus.",
+          "sungrow_ihomemanager_host": "Required only for native control. Enter the iHomeManager address; the inverter telemetry and control TCP endpoints must differ.",
+          "sungrow_ihomemanager_port": "Use configured port 503 or 504 with SSL disabled. The native unit address is fixed at 247."
         },
         "submit": "Save"
       },
@@ -2070,19 +2080,23 @@
       },
       "init_sungrow": {
         "title": "Sungrow settings",
-        "description": "Configure pricing and a direct Sungrow or telemetry-only iHomeManager Modbus forwarding connection.",
+        "description": "Choose direct inverter control, telemetry-only iHomeManager forwarding, or native iHomeManager battery control with separate inverter telemetry. Native control requires iHM protocol V1.0.2, starts in Monitoring Mode, and supports charge, discharge and self-consumption. Disable Sungrow AI or other VPP control before enabling PowerSync control.",
         "data": {
           "electricity_provider": "Electricity provider",
           "sungrow_connection_type": "Connection type",
           "sungrow_host": "Inverter IP address",
           "sungrow_port": "Modbus port",
-          "sungrow_slave_id": "Modbus slave ID"
+          "sungrow_slave_id": "Modbus slave ID",
+          "sungrow_ihomemanager_host": "iHomeManager control IP address (native control only)",
+          "sungrow_ihomemanager_port": "iHomeManager plaintext control port"
         },
         "data_description": {
-          "sungrow_connection_type": "Direct supports telemetry and control. iHomeManager uses a configured port 503 or 504 forwarding channel, forces Monitoring Mode, and blocks all register writes.",
-          "sungrow_host": "Local IP of your Sungrow inverter, WiNet-S dongle, or iHomeManager.",
-          "sungrow_port": "Direct Modbus normally uses 502. For iHomeManager, enable a non-SSL forwarding channel on port 503 or 504 and enter that port.",
-          "sungrow_slave_id": "Default is 1. Only change if you have multiple devices on the same bus."
+          "sungrow_connection_type": "Native iHomeManager control uses the inverter address above for read-only telemetry and a separate iHomeManager endpoint below for commands. Idle holds, reserve writes, spread export and battery solar curtailment are unavailable on that connection.",
+          "sungrow_host": "For native iHomeManager control, enter the inverter or WiNet-S telemetry address here. Enter the separate iHomeManager control address below.",
+          "sungrow_port": "The inverter telemetry port normally uses 502. Telemetry-only iHomeManager forwarding uses configured non-SSL port 503 or 504. Native iHomeManager control uses the separate endpoint below.",
+          "sungrow_slave_id": "Default is 1. Only change if you have multiple devices on the same bus.",
+          "sungrow_ihomemanager_host": "Required only for native control. Enter the iHomeManager address; the inverter telemetry and control TCP endpoints must differ.",
+          "sungrow_ihomemanager_port": "Use configured port 503 or 504 with SSL disabled. The native unit address is fixed at 247."
         },
         "submit": "Save"
       },

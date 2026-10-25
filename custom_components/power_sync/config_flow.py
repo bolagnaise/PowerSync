@@ -256,6 +256,9 @@ from .const import (
     DEFAULT_SUNGROW_SLAVE_ID,
     SUNGROW_CONNECTION_DIRECT,
     SUNGROW_CONNECTION_IHOMEMANAGER,
+    SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE,
+    CONF_SUNGROW_IHOMEMANAGER_HOST,
+    CONF_SUNGROW_IHOMEMANAGER_PORT,
     SUNGROW_CONNECTION_TYPES,
     CONF_SUNGROW_HOST_2,
     CONF_SUNGROW_PORT_2,
@@ -772,6 +775,8 @@ BATTERY_SYSTEM_CONNECTION_KEYS: dict[str, tuple[str, ...]] = {
         CONF_SIGENERGY_MODBUS_SLAVE_ID,
     ),
     BATTERY_SYSTEM_SUNGROW: (
+        CONF_SUNGROW_IHOMEMANAGER_HOST,
+        CONF_SUNGROW_IHOMEMANAGER_PORT,
         CONF_SUNGROW_CONNECTION_TYPE,
         CONF_SUNGROW_HOST,
         CONF_SUNGROW_PORT,
@@ -1738,6 +1743,44 @@ async def validate_sigenergy_credentials(
     except Exception as err:
         _LOGGER.exception("Unexpected error validating Sigenergy credentials: %s", err)
         return {"success": False, "error": "unknown"}
+
+
+def sungrow_native_schema(current: dict[str, Any]) -> dict:
+    """Extra endpoint fields, used only by the explicit native-control choice."""
+    return {
+        vol.Optional(CONF_SUNGROW_IHOMEMANAGER_HOST,
+                     default=current.get(CONF_SUNGROW_IHOMEMANAGER_HOST, "")):
+            TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(CONF_SUNGROW_IHOMEMANAGER_PORT,
+                     default=current.get(CONF_SUNGROW_IHOMEMANAGER_PORT, 503)):
+            NumberSelector(NumberSelectorConfig(min=503, max=504, step=1, mode=NumberSelectorMode.BOX)),
+    }
+
+
+async def validate_sungrow_native_connection(hass, values, *, check_inverter=True):
+    """Validate a native route using read-only probes; never take over EMS."""
+    from .sungrow_ihomemanager_config import native_connection_settings
+    from .inverters.sungrow_ihomemanager import SungrowIHomeManagerController
+    try:
+        settings = native_connection_settings(values)
+    except (TypeError, ValueError):
+        return "sungrow_native_endpoints_required"
+    if check_inverter:
+        result = await test_sungrow_connection(
+            hass, values[CONF_SUNGROW_HOST], values.get(CONF_SUNGROW_PORT, 502),
+            values.get(CONF_SUNGROW_SLAVE_ID, 1),
+        )
+        if not result.get("success"):
+            return "cannot_connect"
+    try:
+        snapshot = await SungrowIHomeManagerController(
+            settings[CONF_SUNGROW_IHOMEMANAGER_HOST], settings[CONF_SUNGROW_IHOMEMANAGER_PORT],
+        ).read_snapshot()
+        if not snapshot.supports_dispatch:
+            return "sungrow_native_protocol_unsupported"
+    except Exception:
+        return "cannot_connect"
+    return None
 
 
 async def test_sungrow_connection(
@@ -5741,6 +5784,15 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
             port = user_input.get(CONF_SUNGROW_PORT, default_port)
             slave_id = user_input.get(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID)
 
+            native_settings = {}
+            if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE:
+                native_error = await validate_sungrow_native_connection(self.hass, user_input, check_inverter=False)
+                if native_error:
+                    errors["base"] = native_error
+                else:
+                    from .sungrow_ihomemanager_config import native_connection_settings
+                    native_settings = native_connection_settings(user_input)
+
             if not host:
                 errors["base"] = "sungrow_host_required"
             elif (
@@ -5748,7 +5800,7 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                 and int(port) not in (503, 504)
             ):
                 errors["base"] = "sungrow_ihomemanager_plaintext_port_required"
-            else:
+            elif not errors:
                 # Test Modbus connection
                 test_result = await test_sungrow_connection(
                     self.hass, host, port, slave_id
@@ -5762,6 +5814,17 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                         CONF_SUNGROW_PORT: port,
                         CONF_SUNGROW_SLAVE_ID: slave_id,
                     }
+                    self._sungrow_data.update(native_settings)
+                    profile_id = {SUNGROW_CONNECTION_DIRECT: "sungrow_direct",
+                                  SUNGROW_CONNECTION_IHOMEMANAGER: "sungrow_ihomemanager",
+                                  SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE: "sungrow_ihomemanager_native"}[connection_type]
+                    self._battery_profile_data = {
+                        **getattr(self, "_battery_profile_data", {}),
+                        CONF_BATTERY_CONNECTION_PROFILE: profile_id,
+                        CONF_SUNGROW_CONNECTION_TYPE: connection_type,
+                    }
+                    if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE:
+                        self._ml_options[CONF_MONITORING_MODE] = True
                     if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER:
                         self._sungrow_data[CONF_MONITORING_MODE] = True
                     _LOGGER.info(
@@ -5806,6 +5869,7 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                     ): NumberSelector(
                         NumberSelectorConfig(min=1, max=247, step=1, mode=NumberSelectorMode.BOX)
                     ),
+                    **sungrow_native_schema({}),
                 }
             ),
             errors=errors,
@@ -9218,6 +9282,9 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     else:
                         updates[CONF_GOODWE_EMS_CONTROL_MODE] = GOODWE_EMS_CONTROL_DIRECT
 
+                if profile.profile_id == "sungrow_ihomemanager_native":
+                    self._pending_sungrow_profile_updates = updates
+                    return await self.async_step_sungrow_connection()
                 return await self._save_connection_profile_and_reload(updates)
 
         schema_fields: dict[Any, Any] = {
@@ -10716,6 +10783,16 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 CONF_SUNGROW_SLAVE_ID,
                 DEFAULT_SUNGROW_SLAVE_ID,
             )
+            native_settings = {}
+            if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE:
+                native_values = {**self.config_entry.data, **self.config_entry.options, **user_input}
+                native_error = await validate_sungrow_native_connection(self.hass, native_values)
+                if native_error:
+                    errors["base"] = native_error
+                else:
+                    from .sungrow_ihomemanager_config import native_connection_settings
+                    native_settings = native_connection_settings(native_values)
+
             if not modbus_host:
                 errors["base"] = "sungrow_host_required"
             elif (
@@ -10729,9 +10806,22 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 sungrow_slave_id,
             ):
                 errors["base"] = "sungrow_modbus_conflict"
-            else:
+            elif not errors:
                 new_data = dict(self.config_entry.data)
                 new_options = dict(self.config_entry.options)
+                new_data.update(getattr(self, "_pending_sungrow_profile_updates", {}))
+                new_options.update(getattr(self, "_pending_sungrow_profile_updates", {}))
+                new_data.update(native_settings)
+                new_options.update(native_settings)
+                profile_id = {SUNGROW_CONNECTION_DIRECT: "sungrow_direct",
+                              SUNGROW_CONNECTION_IHOMEMANAGER: "sungrow_ihomemanager",
+                              SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE: "sungrow_ihomemanager_native"}[connection_type]
+                new_data[CONF_BATTERY_CONNECTION_PROFILE] = profile_id
+                new_options[CONF_BATTERY_CONNECTION_PROFILE] = profile_id
+                if (connection_type == SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE
+                        and self._get_option(CONF_SUNGROW_CONNECTION_TYPE) != connection_type):
+                    new_data[CONF_MONITORING_MODE] = True
+                    new_options[CONF_MONITORING_MODE] = True
                 new_data[CONF_SUNGROW_CONNECTION_TYPE] = connection_type
                 new_data[CONF_SUNGROW_HOST] = modbus_host
                 new_data[CONF_SUNGROW_PORT] = sungrow_port
@@ -10746,7 +10836,8 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 self._remove_legacy_sungrow_dual_options(new_data, new_options)
 
                 monitoring_handoff = (
-                    connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                    (connection_type in (SUNGROW_CONNECTION_IHOMEMANAGER, SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE)
+                     or self._get_option(CONF_SUNGROW_CONNECTION_TYPE) == SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE)
                     and not bool(
                         self._get_option(
                             CONF_MONITORING_MODE,
@@ -10788,9 +10879,9 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 self._schedule_entry_reload()
                 return self.async_create_entry(title="", data=new_options)
 
-        current_connection_type = self._get_option(
+        current_connection_type = getattr(self, "_pending_sungrow_profile_updates", {}).get(
             CONF_SUNGROW_CONNECTION_TYPE,
-            SUNGROW_CONNECTION_DIRECT,
+            self._get_option(CONF_SUNGROW_CONNECTION_TYPE, SUNGROW_CONNECTION_DIRECT),
         )
         current_host = self._get_option(CONF_SUNGROW_HOST, "")
         current_port = self._get_option(
@@ -10837,6 +10928,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     ): NumberSelector(NumberSelectorConfig(
                         min=1, max=247, step=1, mode=NumberSelectorMode.BOX,
                     )),
+                    **sungrow_native_schema({**self.config_entry.data, **self.config_entry.options}),
                 }
             ),
             errors=errors,
@@ -13898,6 +13990,16 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 CONF_SUNGROW_SLAVE_ID,
                 DEFAULT_SUNGROW_SLAVE_ID,
             )
+            native_settings = {}
+            if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE:
+                native_values = {**self.config_entry.data, **self.config_entry.options, **user_input}
+                native_error = await validate_sungrow_native_connection(self.hass, native_values)
+                if native_error:
+                    errors["base"] = native_error
+                else:
+                    from .sungrow_ihomemanager_config import native_connection_settings
+                    native_settings = native_connection_settings(native_values)
+
             if not modbus_host:
                 errors["base"] = "sungrow_host_required"
             elif (
@@ -13911,13 +14013,26 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                 sungrow_slave_id,
             ):
                 errors["base"] = "sungrow_modbus_conflict"
-            else:
+            elif not errors:
                 # Store provider and Sungrow settings
                 self._provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
 
                 # Update config entry data with Sungrow Modbus settings
                 new_data = dict(self.config_entry.data)
                 new_options = dict(self.config_entry.options)
+                new_data.update(getattr(self, "_pending_sungrow_profile_updates", {}))
+                new_options.update(getattr(self, "_pending_sungrow_profile_updates", {}))
+                new_data.update(native_settings)
+                new_options.update(native_settings)
+                profile_id = {SUNGROW_CONNECTION_DIRECT: "sungrow_direct",
+                              SUNGROW_CONNECTION_IHOMEMANAGER: "sungrow_ihomemanager",
+                              SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE: "sungrow_ihomemanager_native"}[connection_type]
+                new_data[CONF_BATTERY_CONNECTION_PROFILE] = profile_id
+                new_options[CONF_BATTERY_CONNECTION_PROFILE] = profile_id
+                if (connection_type == SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE
+                        and self._get_option(CONF_SUNGROW_CONNECTION_TYPE) != connection_type):
+                    new_data[CONF_MONITORING_MODE] = True
+                    new_options[CONF_MONITORING_MODE] = True
                 new_data[CONF_SUNGROW_CONNECTION_TYPE] = connection_type
                 new_data[CONF_SUNGROW_HOST] = modbus_host
                 new_data[CONF_SUNGROW_PORT] = sungrow_port
@@ -13933,7 +14048,8 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
 
                 if not errors:
                     monitoring_handoff = (
-                        connection_type == SUNGROW_CONNECTION_IHOMEMANAGER
+                        (connection_type in (SUNGROW_CONNECTION_IHOMEMANAGER, SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE)
+                         or self._get_option(CONF_SUNGROW_CONNECTION_TYPE) == SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE)
                         and not bool(
                             self._get_option(
                                 CONF_MONITORING_MODE,
@@ -14049,6 +14165,7 @@ class PowerSyncOptionsFlow(AmberOptionsMixin, config_entries.OptionsFlow):
                     ): NumberSelector(NumberSelectorConfig(
                         min=1, max=247, step=1, mode=NumberSelectorMode.BOX,
                     )),
+                    **sungrow_native_schema({**self.config_entry.data, **self.config_entry.options}),
                 }
             ),
             errors=errors,
