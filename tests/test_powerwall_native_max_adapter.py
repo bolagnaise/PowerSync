@@ -415,6 +415,7 @@ def native_http_upload(setup, upload_harness):
                      entry=SimpleNamespace(data={}), CONF_FLEET_API_BASE_URL='fleet_base',
                      send_tariff_to_tesla=sender, _native_max_identity=lambda: 'paired',
                      identity='paired', HomeAssistantError=s.m.NativeMaxChargeError,
+                     NativeMaxTariffNotSubmitted=getattr(s.m, 'NativeMaxTariffNotSubmitted', s.m.NativeMaxChargeError),
                      NativeMaxTariffRejected=getattr(s.m, 'NativeMaxTariffRejected', s.m.NativeMaxChargeError))
     exec(compile(ast.fix_missing_locations(ast.Module(body=[upload], type_ignores=[])),
                  '<native-tariff-upload>', 'exec'), namespace)
@@ -429,6 +430,96 @@ def native_http_upload(setup, upload_harness):
 
     http.post = apply_accepted_tariff
     return http, clock
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('direction', ['charge', 'discharge'])
+async def test_policy_denial_after_journaling_before_post_releases_native_claim(setup, upload_harness, direction):
+    s = setup
+    s.adapter.direction = direction
+    http, _clock = native_http_upload(s, upload_harness)
+    save = s.store.async_save
+
+    async def deny_after_intent(data):
+        await save(data)
+        if data and data.get('tariff_intent') == 'forcing':
+            s.state.policy = False
+
+    s.store.async_save = deny_after_intent
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.start(120)
+        assert http.posts == []
+        assert not s.session.pending and s.store.data is None
+        assert not s.budget.native_max_claim('site')
+        assert (s.state.config, s.state.tariff) == s.original
+    finally:
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+async def test_revoked_application_still_records_drained_provider_as_unsent(setup, upload_harness):
+    s = setup
+    s.adapter.direction = 'discharge'
+    http, _clock = native_http_upload(s, upload_harness)
+    save = s.store.async_save
+    intent, resume = asyncio.Event(), asyncio.Event()
+
+    async def pause_after_intent(data):
+        await save(data)
+        if data and data.get('tariff_intent') == 'forcing':
+            intent.set()
+            await resume.wait()
+
+    s.store.async_save = pause_after_intent
+    task = asyncio.create_task(s.session.start(120))
+    try:
+        await asyncio.wait_for(intent.wait(), 2)
+        s.state.policy = False
+        task.cancel()
+        resume.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert http.posts == []
+        assert s.store.data is None and not s.session.pending
+        assert not s.budget.native_max_claim('site')
+        assert (s.state.config, s.state.tariff) == s.original
+    finally:
+        resume.set()
+        if not task.done():
+            task.cancel()
+        await s.session._cancel_watch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('outcome', ['timeout', 'server_error'])
+async def test_http_boundary_unknown_outcome_keeps_native_intent_across_restart(setup, upload_harness, outcome):
+    s = setup
+    http, clock = native_http_upload(s, upload_harness)
+    http.responses = [500]
+    if outcome == 'timeout':
+        def timed_out(url, **kwargs):
+            http.posts.append((clock.now, url, kwargs['json']))
+            raise TimeoutError('request may have been accepted')
+        http.post = timed_out
+    recovered = None
+    try:
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await s.session.start(120)
+        await s.session._cancel_watch()
+        assert len(http.posts) == 1
+        assert s.store.data['tariff_intent'] == 'forcing'
+        assert s.state.tariff == s.original[1]
+        recovered = type(s.session)(s.adapter, s.store, clock=lambda: s.state.at,
+                                    monotonic=lambda: s.state.at)
+        with pytest.raises(s.m.NativeMaxChargeError):
+            await recovered.recover()
+        assert len(http.posts) == 1
+        assert recovered.pending and s.budget.native_max_claim('site')
+    finally:
+        await s.session._cancel_watch()
+        if recovered:
+            await recovered._cancel_watch()
 
 
 @pytest.mark.asyncio

@@ -5794,6 +5794,7 @@ async def send_tariff_to_tesla(
     """
     if accepted_status is not None:
         accepted_status.pop("rejected", None)
+        accepted_status.pop("not_submitted", None)
     uploads = hass.data.setdefault(DOMAIN, {}).setdefault("_tesla_tou_uploads", {})
     key = (api_provider, get_tesla_api_base_url(api_provider, fleet_base_url), str(site_id))
     state = uploads.setdefault(key, {"busy": False, "retry_at": 0.0})
@@ -5855,7 +5856,8 @@ async def _send_tariff_to_tesla(
         accepted_status: Optional mutable status populated with ``accepted=True``
             after Tesla accepts the upload, even if readback confirmation fails.
             A single-attempt HTTP 429 sets ``rejected=True``; other failures and
-            retry sequences remain potentially ambiguous.
+            retry sequences remain potentially ambiguous. A failed initial
+            write fence sets ``not_submitted=True`` only before any POST begins.
         readback_status: Optional mutable status populated with the confirmed
             representation (``exact`` or ``tesla_zero_normalized``).
         max_retry_after_seconds: Give up instead of retrying when a 429 or 5xx
@@ -5952,9 +5954,15 @@ async def _send_tariff_to_tesla(
                 max_retries
             )
 
+            if accepted_status is not None and attempt == 0:
+                accepted_status["not_submitted"] = True
             if before_write is not None:
                 write_fence = await before_write()
                 write_fence()
+            # Once entering the HTTP boundary, even a connection error can
+            # leave an accepted request. Never reassert this on a later retry.
+            if accepted_status is not None:
+                accepted_status.pop("not_submitted", None)
             async with session.post(
                 url,
                 headers=headers,
@@ -33539,7 +33547,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if current is not None:
             return current
         from .powerwall_local.views import ensure_client
-        from .powerwall_local.native_max_charge import NativeMaxChargeSession, NativeMaxTariffRejected
+        from .powerwall_local.native_max_charge import (
+            NativeMaxChargeSession, NativeMaxTariffNotSubmitted, NativeMaxTariffRejected,
+        )
         from .powerwall_local.native_max_adapter import NativeMaxChargeAdapter
         from .native_rate_budget import budget_for, site_identity
         client = await ensure_client(hass, entry)
@@ -33608,6 +33618,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 confirm_readback=True, accepted_status=status, before_write=before_write,
                 upload_owner=reserved[1] if reserved is not None else None,
                 is_current=lambda: _native_max_identity() == identity)
+            if confirmed is not True and status.get("not_submitted") is True:
+                raise NativeMaxTariffNotSubmitted("Native Max tariff stopped before submission")
             if confirmed is not True and status.get("rejected") is True:
                 raise NativeMaxTariffRejected("Native Max tariff upload was rejected by rate limiting")
             return confirmed

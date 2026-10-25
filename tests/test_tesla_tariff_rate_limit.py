@@ -113,6 +113,57 @@ def test_single_attempt_429_exposes_definite_rejection_without_acceptance(upload
     assert len(session.posts) == 1
 
 
+@pytest.mark.parametrize('stage', ['async_fence', 'sync_fence'])
+def test_failed_initial_fence_reports_no_tariff_submission(upload_harness, stage):
+    upload, hass, session, _clock = upload_harness
+    status = {}
+
+    def denied():
+        raise RuntimeError('policy changed before POST')
+
+    async def before_write():
+        if stage == 'async_fence':
+            denied()
+        return denied
+
+    assert asyncio.run(upload(hass, 'site-a', {}, 'token', max_retries=1,
+                              before_write=before_write, accepted_status=status)) is False
+    assert session.posts == []
+    assert status.get('not_submitted') is True
+
+
+def test_later_fence_failure_does_not_hide_an_earlier_unknown_post(upload_harness):
+    upload, hass, session, _clock = upload_harness
+    status, checks = {}, []
+    post = session.post
+
+    def uncertain_post(url, **kwargs):
+        post(url, **kwargs)
+        raise aiohttp.ClientConnectionError('request outcome unknown')
+
+    session.post = uncertain_post
+
+    async def before_write():
+        checks.append(True)
+        if len(checks) == 2:
+            raise RuntimeError('policy changed before retry')
+        return lambda: None
+
+    assert asyncio.run(upload(hass, 'site-a', {}, 'token', max_retries=2,
+                              before_write=before_write, accepted_status=status)) is False
+    assert len(session.posts) == 1
+    assert status.get('not_submitted') is not True
+
+
+def test_reused_not_submitted_status_is_cleared_before_an_unknown_post(upload_harness):
+    upload, hass, session, _clock = upload_harness
+    status = {'not_submitted': True}
+    session.responses = [500]
+    assert asyncio.run(upload(hass, 'site-a', {}, 'token', max_retries=1,
+                              accepted_status=status)) is False
+    assert len(session.posts) == 1 and status.get('not_submitted') is not True
+
+
 @pytest.mark.parametrize('status', [200, 408, 500])
 def test_unconfirmed_and_unknown_outcomes_never_claim_definite_rejection(upload_harness, status):
     upload, hass, session, clock = upload_harness
