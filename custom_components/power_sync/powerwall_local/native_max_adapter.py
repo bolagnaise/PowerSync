@@ -58,6 +58,7 @@ class NativeMaxChargeAdapter:
         self.planning_request = False
         self.clock = clock
         self._export_limit_ready = False
+        self.guard_denial_reason = None
 
     def _matches(self, expected, observed):
         # A same-priced foreign tariff is not this session's restore owner.
@@ -149,7 +150,7 @@ class NativeMaxChargeAdapter:
                     return False
                 battery_watts("discharge", 1, snapshot, config)
                 return True
-            return native_max_charge_eligibility(
+            eligibility = native_max_charge_eligibility(
                 source="native_manual_max", requested_power_w=0, grid_import_target_w=None,
                 planning_charge_max_w=config.get("optimization_max_charge_w", 5000),
                 software_import_max_w=config.get("optimization_max_grid_import_w"),
@@ -160,11 +161,17 @@ class NativeMaxChargeAdapter:
                 grid_connected=snapshot.grid_status == "SystemGridConnected",
                 soc=snapshot.soc, soc_cap=config.get("optimization_grid_charge_soc_cap", 1)*100,
                 evidence_fresh=0 <= self.monotonic()-self._observed_at <= 5,
-                control_permitted=self.authority()).eligible
+                control_permitted=self.authority())
+            if not eligibility.eligible:
+                self.guard_denial_reason = eligibility.reason
+            return eligibility.eligible
         except (ValueError, TypeError, KeyError):
             return False
 
     async def guard(self):
+        # Keep the failed admission check for the caller's error report. It
+        # must never become permission or survive a later successful check.
+        self.guard_denial_reason = "native_max_control_not_permitted"
         if not self.authority():
             return False
         await self.budget.load()
@@ -172,8 +179,13 @@ class NativeMaxChargeAdapter:
         try:
             self._snapshot = await asyncio.wait_for(self.client.get_snapshot(), timeout=10)
             self._observed_at = observed_at
-            return self._forcing_permitted()
+            self.guard_denial_reason = "native_max_policy_denied"
+            permitted = self._forcing_permitted()
+            if permitted:
+                self.guard_denial_reason = None
+            return permitted
         except (ValueError, TypeError, KeyError, asyncio.TimeoutError):
+            self.guard_denial_reason = "native_limit_evidence_unavailable"
             return False
 
     async def capture(self):

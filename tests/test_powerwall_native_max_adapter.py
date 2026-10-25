@@ -177,6 +177,22 @@ async def test_current_policy_denial_prevents_every_forcing_write(setup,denial):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('settings,expected', [
+    ({'optimization_max_grid_import_w': 14000}, 'software_import_limit_requires_local_control'),
+    ({'optimization_grid_charge_soc_cap': .4}, 'charge_soc_limit_reached_or_unknown'),
+])
+async def test_native_charge_guard_retains_the_specific_admission_failure(setup, settings, expected):
+    s = setup
+    s.settings.update(settings)
+    assert not await s.adapter.guard()
+    assert s.adapter.guard_denial_reason == expected
+    assert not s.state.events and not s.budget.native_max_claim('site')
+    s.settings.update(optimization_max_grid_import_w=15000, optimization_grid_charge_soc_cap=1)
+    assert await s.adapter.guard()
+    assert s.adapter.guard_denial_reason is None
+
+
+@pytest.mark.asyncio
 async def test_foreign_tariff_is_preserved_while_owned_mode_and_reserve_restore(setup):
     s=setup;await s.session.start(120)
     s.state.tariff={'code':'FOREIGN','name':'new external tariff'}

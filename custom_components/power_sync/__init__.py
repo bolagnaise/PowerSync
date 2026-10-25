@@ -33744,7 +33744,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             controller.adapter.planning_request = targetless
             if await controller.adapter.guard() is not True:
                 if targetless or large_site:
-                    raise HomeAssistantError("Native Powerwall tariff cannot enforce current software or EV limits; Max was not started")
+                    reason = getattr(controller.adapter, "guard_denial_reason", None) or "native_max_policy_denied"
+                    _LOGGER.warning("Native Powerwall %s admission refused: %s", direction, reason)
+                    raise HomeAssistantError(
+                        "Native Powerwall tariff cannot enforce current software or EV limits; "
+                        f"Max was not started ({reason})")
                 return None  # Preserve software, EV and connection limits.
             from uuid import uuid4
             if direction == "charge":

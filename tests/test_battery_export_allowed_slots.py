@@ -8758,6 +8758,58 @@ def test_full_local_powerwall_suppresses_cached_charge_and_can_resume(opt_module
     assert len(battery.force_charge_calls) == 1
 
 
+def _with_native_tariff_charge_soc(coordinator, soc, *, method='tariff', **kwargs):
+    _with_local_charge_soc(coordinator, soc, **kwargs)
+    coordinator._entry.data.update(powerwall_local_paired=True, powerwall_local_ip='gateway.local',
+                                   tesla_control_method=method)
+    coordinator._powerwall_plan_routes = {'charge': 'tariff', 'discharge': 'tariff'}
+    coordinator._powerwall_plan_method = method
+    coordinator._powerwall_route = lambda direction: coordinator._powerwall_plan_routes[direction]
+    coordinator._supports_local_powerwall_target_power = lambda *args: False
+
+
+@pytest.mark.parametrize('method', ['tariff', 'auto'])
+@pytest.mark.parametrize('active', [False, True])
+def test_full_native_tariff_powerwall_suppresses_charge_and_can_resume(opt_module, method, active):
+    """Native Max must use fresh local SOC before a cached charge is submitted."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.95)
+    coordinator._config.grid_charge_soc_cap = 1.0
+    _with_native_tariff_charge_soc(coordinator, 100, method=method)
+    if active:
+        coordinator._set_optimizer_force_state('charge', 120, 0)
+    action = SimpleNamespace(action='charge', power_w=20000)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.force_charge_calls == []
+    assert battery.restore_normal_calls == 1
+    assert coordinator._last_executed_action == 'self_consumption'
+    _with_native_tariff_charge_soc(coordinator, 99, method=method)
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert len(battery.force_charge_calls) == 1
+    assert battery.force_charge_calls[0][1] == 0  # Native Max, not physical 0 W.
+
+
+@pytest.mark.parametrize('age, success, soc', [(91, True, 100), (0, False, 100),
+    (0, True, float('nan')), (0, True, True), (0, True, 101)])
+def test_native_tariff_full_soc_ignores_unverified_snapshot(opt_module, age, success, soc):
+    coordinator = _execution_coordinator(opt_module, _FakeBattery(), soc=0.95)
+    _with_native_tariff_charge_soc(coordinator, soc, age=age, success=success)
+    reached, _, _ = asyncio.run(coordinator._grid_charge_soc_cap_reached())
+    assert reached is False
+
+
+def test_native_tariff_full_soc_does_not_override_user_force(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=1)
+    _with_native_tariff_charge_soc(coordinator, 100)
+    coordinator._force_state_getter = lambda: {'active': True, 'type': 'charge', 'source': 'user'}
+    asyncio.run(coordinator._execute_optimizer_action(SimpleNamespace(action='charge', power_w=5000)))
+    assert battery.force_charge_calls == [] and battery.restore_normal_calls == 0
+
+
 @pytest.mark.parametrize('age, success, soc', [(91, True, 100), (0, False, 100),
     (0, True, float('nan')), (0, True, True), (0, True, 101)])
 def test_full_local_guard_ignores_unverified_snapshot(opt_module, age, success, soc):

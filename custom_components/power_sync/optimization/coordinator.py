@@ -11082,7 +11082,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             getattr(self._config, "grid_charge_soc_cap", 1.0),
             1.0,
         )
-        if self._supports_local_powerwall_target_power():
+        if (self._supports_local_powerwall_target_power()
+                or self._powerwall_service_power("charge", 1) == 0):
             runtime = getattr(getattr(self, "hass", None), "data", {}).get(
                 DOMAIN, {}
             ).get(getattr(self, "entry_id", None), {})
@@ -11095,8 +11096,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     and isinstance(raw_soc, (int, float)) and not isinstance(raw_soc, bool)
                     and math.isfinite(raw_soc) and 0 <= raw_soc <= 100):
                 # A full-cap setting still cannot charge a physically full
-                # Powerwall. Prefer the same live local SOC as the actuator so
-                # a cached Fleet reading cannot trigger repeated refusals.
+                # Powerwall, including native tariff Max. Use the actuator's
+                # live local SOC to avoid repeated refusals from cached Fleet SOC.
                 soc = raw_soc / 100.0
                 return soc >= cap - (0.0001 if cap < 0.999 else 0), soc, cap
         if cap >= 0.999:
