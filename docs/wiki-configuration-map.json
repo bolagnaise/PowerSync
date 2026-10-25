@@ -20,7 +20,7 @@
       "switch.py": "18ce79a144314110acede54e8b237a7d8675aecc2ba4892dff0e6e0e55658b1d",
       "select.py": "37f3b54fce4aac28b546ffe6e3e478fbab2e81ecedbb29947789c5806c68ecb5",
       "number.py": "0c0541d354d2cf2a05d9fc100f6d3883fc6f8aca6af48fb0e71a28c06b02996b",
-      "sensor.py": "aef6741b2a4cc00895c53f564f57425426f757c8d02ce924da1d176f58c6372b",
+      "sensor.py": "04ae437ac128347894b4642dc56a31f8b2267b6eab86ca8e5ced9594be58f74e",
       "binary_sensor.py": "cad335bcce4d56edb1121bc08a6bbe34d55cad991ce31a34547d150ec4898704",
       "button.py": "69368d0dc0f8a1a9e336fed0da117103676670003db81d3360fc24bc0e6123b0",
       "automations/actions.py": "e8dc37c25a946bbd35a0f0bb7c4cba4ad15b3c18295508f3f33e511c7891f61f",
