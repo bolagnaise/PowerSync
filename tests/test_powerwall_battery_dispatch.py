@@ -414,8 +414,13 @@ def load_routing(monitored=False, paired=True, **options):
     lock_module = importlib.util.module_from_spec(lock_spec); lock_spec.loader.exec_module(lock_module)
     duration_spec = importlib.util.spec_from_file_location('local_discharge_duration_test', ROOT/'custom_components/power_sync/force_discharge_duration.py')
     durations = importlib.util.module_from_spec(duration_spec); duration_spec.loader.exec_module(durations)
+    upload_spec = importlib.util.spec_from_file_location('tariff_upload_probe', ROOT/'custom_components/power_sync/tesla_tariff_upload.py')
+    uploads = importlib.util.module_from_spec(upload_spec); upload_spec.loader.exec_module(uploads)
     from test_powerwall_control_method import policy
     ns = dict(NativeMaxChargeError=type("NativeMaxChargeError", (Exception,), {}),runtime_route=policy.runtime_route, control_method=policy.control_method,
+              reserve_tariff_upload=uploads.reserve_tariff_upload,
+              TariffUploadReservationError=uploads.TariffUploadReservationError,
+              get_tesla_api_base_url=lambda provider, base: base or provider, CONF_FLEET_API_BASE_URL='fleet_api_base_url',
               validate_method=policy.validate_method, CONF_CONTROL_METHOD=policy.CONF_CONTROL_METHOD, prefers_native_tariff=prefers_native_tariff, routing_site_info=routing_site_info, native_capacity_w=native_capacity_w, math=__import__('math'), time=__import__('time'), uuid4=__import__('uuid').uuid4,
               _get_tesla_site_configs=lambda *_: [],
               local_battery_dispatch_configured=hm.local_battery_dispatch_configured, asyncio=asyncio, Any=object, ServiceCall=object, HomeAssistantError=RuntimeError,
@@ -1151,6 +1156,44 @@ async def test_explicit_manual_max_selects_native_path_without_local_watts():
     args=session.start.await_args
     assert args.args==(900,) and args.kwargs['deadline']>0
     assert session.adapter.forcing_tariff['code'].startswith('CHARGE_NATIVE_MAX_')
+
+
+@pytest.mark.asyncio
+async def test_native_max_drains_inflight_price_upload_before_capturing_restore_tariff():
+    ns, local, client, _ = load_routing(tesla_control_method='tariff')
+    ns['entry'].options = {'tesla_control_method': 'tariff'}
+    slot = {'busy': True, 'retry_at': 0.0}
+    ns['hass'].data['power_sync']['_tesla_tou_uploads'] = {('provider', 'provider', 'site'): slot}
+    observed = {'code': 'old-price-tariff'}
+    captured = []
+    async def start(seconds, *, deadline):
+        captured.append(observed['code'])
+        return {'expires_at': deadline}
+    session = SimpleNamespace(pending=False,
+        adapter=SimpleNamespace(guard=AsyncMock(return_value=True)), start=AsyncMock(side_effect=start))
+    ns.update(_native_max_context={}, _get_tesla_site_configs=lambda *_: [('site', 'token', 'provider')],
+        _get_native_max_charge=AsyncMock(return_value=session),
+        get_tesla_api_base_url=lambda provider, base: base or provider,
+        CONF_FLEET_API_BASE_URL='fleet_api_base_url',
+        _create_charge_tariff=lambda duration: ({'code': 'force'}, None))
+    deadline = ns['dt_util'].utcnow().timestamp() + 60
+    request = asyncio.create_task(ns['_try_native_max_charge'](call(source='user', power_w=0), 1, deadline))
+    try:
+        await asyncio.sleep(.01)
+        assert not session.start.await_count, 'Native Max captured before the in-flight price write settled'
+        observed['code'] = 'new-price-tariff'
+        slot['busy'] = False
+        result = await request
+        assert captured == ['new-price-tariff']
+        assert result['success']
+        assert session.start.await_args.kwargs['deadline'] == deadline
+    finally:
+        slot['busy'] = False
+        if not request.done():
+            request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+    assert 'reservation' not in slot
+    client.dispatch_battery_power.assert_not_called()
 
 
 @pytest.mark.asyncio

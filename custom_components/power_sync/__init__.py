@@ -5781,6 +5781,7 @@ async def send_tariff_to_tesla(
     is_current: Callable[[], bool] | None = None,
     max_retry_after_seconds: float | None = None,
     before_write: Callable[[], Any] | None = None,
+    upload_owner: object | None = None,
 ) -> bool:
     """Upload one site's tariff, sharing backpressure across all TOU callers.
 
@@ -5794,7 +5795,8 @@ async def send_tariff_to_tesla(
     uploads = hass.data.setdefault(DOMAIN, {}).setdefault("_tesla_tou_uploads", {})
     key = (api_provider, get_tesla_api_base_url(api_provider, fleet_base_url), str(site_id))
     state = uploads.setdefault(key, {"busy": False, "retry_at": 0.0})
-    if state["busy"] or state["retry_at"] > time.monotonic():
+    if (state["busy"] or state["retry_at"] > time.monotonic()
+            or (state.get("reservation") is not None and state["reservation"] is not upload_owner)):
         _LOGGER.debug("Deferring TOU upload for site %s: upload busy or rate limited", site_id)
         return False
 
@@ -33580,10 +33582,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         async def upload(tariff, before_write):
             site_id, token, provider = site_config()
+            reserved = _local_powerwall_runtime.get("native_max_tariff_upload")
+            if reserved is not None:
+                key = (provider, get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL)), str(site_id))
+                if reserved[0] != key:
+                    raise HomeAssistantError("Native Max tariff provider changed during acquisition")
             return await send_tariff_to_tesla(hass, site_id, tariff, token, provider,
                 timeout_seconds=12, max_retries=1, max_retry_after_seconds=5,
                 fleet_base_url=entry.data.get(CONF_FLEET_API_BASE_URL),
                 confirm_readback=True, before_write=before_write,
+                upload_owner=reserved[1] if reserved is not None else None,
                 is_current=lambda: _native_max_identity() == identity)
 
         async def changed(status):
@@ -33750,8 +33758,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             state = force_charge_state if direction == "charge" else force_discharge_state
             state["duration"] = duration
             from .powerwall_local.native_max_charge import NativeMaxChargeError
+            from .tesla_tariff_upload import reserve_tariff_upload, TariffUploadReservationError
+            site_id, _, provider = _get_tesla_site_configs(hass, entry)[0]
+            upload_key = (provider, get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL)), str(site_id))
             try:
-                status = await controller.start(duration * 60, deadline=deadline)
+                # Generation revocation cannot retract a normal tariff POST
+                # already in flight. Drain it before capturing the baseline,
+                # and prevent new price writes throughout native acquisition.
+                async with reserve_tariff_upload(hass.data.setdefault(DOMAIN, {}), upload_key,
+                        timeout=max(0, deadline - dt_util.utcnow().timestamp())) as owner:
+                    _local_powerwall_runtime["native_max_tariff_upload"] = (upload_key, owner)
+                    try:
+                        status = await controller.start(duration * 60, deadline=deadline)
+                    finally:
+                        _local_powerwall_runtime.pop("native_max_tariff_upload", None)
+            except TariffUploadReservationError as error:
+                raise HomeAssistantError(str(error)) from error
             except NativeMaxChargeError as error:
                 raise HomeAssistantError(str(error)) from error
             return {"success": True, "native_max_charge": direction == "charge",

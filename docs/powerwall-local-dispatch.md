@@ -52,6 +52,8 @@ After restoring settings, PowerSync retains its charging reservation until two f
 
 A local HTTP timeout does not expire a signed gateway command. PowerSync records the actual signature deadline before sending a configuration write and closes that acceptance window before reconciling settings. An uncertain Fleet tariff upload has no equivalent known expiry: it remains pending until its submitted tariff can be reconciled. Elapsed time or an unchanged tariff alone does not authorize a competing controller.
 
+Before native Max captures its restore tariff, PowerSync waits for an earlier price-tariff upload and its readback to finish. New price uploads defer during this handoff, so a PowerSync price refresh cannot replace the saved baseline during acquisition. The original request deadline still applies, and tariffs changed by another controller remain protected.
+
 Cloud Max charging has a separate implementation and delivery history. This section describes the Home Assistant control path.
 
 ## Full battery and cached charging plans

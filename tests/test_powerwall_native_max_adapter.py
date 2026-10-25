@@ -100,6 +100,35 @@ async def test_manual_max_uses_native_settings_and_restores_exact_original(setup
 
 
 @pytest.mark.asyncio
+async def test_drained_price_upload_becomes_exact_native_restore_baseline(setup):
+    s = setup
+    reserve = importlib.import_module(s.m.__package__.split('.')[0]+'.tesla_tariff_upload').reserve_tariff_upload
+    key = ('provider', 'base', 'site')
+    slot = {'busy': True, 'retry_at': 0.0}
+    domain = {'_tesla_tou_uploads': {key: slot}}
+    latest = {'code': 'REAL', 'name': 'latest normal price tariff'}
+    async def acquire():
+        async with reserve(domain, key, timeout=1):
+            return await s.session.start(120)
+    request = asyncio.create_task(acquire())
+    try:
+        await asyncio.sleep(0)
+        assert not s.store.data and not s.state.events
+        s.state.tariff = deepcopy(latest)
+        slot['busy'] = False
+        assert (await request)['active']
+        assert s.store.data['baseline']['tariff'] == latest
+        await s.session.stop()
+        assert s.state.tariff == latest
+        assert not s.session.pending and not s.budget.native_max_claim('site')
+    finally:
+        if not request.done():
+            request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+    assert 'reservation' not in slot
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('direction', ['charge', 'discharge'])
 async def test_native_max_guard_recovers_empty_dcq_without_writing_or_claiming(setup, direction):
     from unittest.mock import AsyncMock

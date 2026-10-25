@@ -124,6 +124,22 @@ def test_overlapping_force_upload_is_deferred_during_normal_upload_retry(upload_
     asyncio.run(run())
 
 
+def test_reserved_native_handoff_defers_price_upload_but_admits_owner(upload_harness):
+    upload, hass, session, _clock = upload_harness
+    session.responses = [200, 200]
+    owner = object()
+    slot = {'busy': False, 'retry_at': 0.0, 'reservation': owner}
+    hass.data['power_sync'] = {'_tesla_tou_uploads': {('teslemetry', 'teslemetry', 'site-a'): slot}}
+    async def run():
+        assert not await upload(hass, 'site-a', {'name': 'normal'}, 'token')
+        assert not session.posts
+        assert not await upload(hass, 'site-a', {}, 'token', upload_owner=object())
+        assert await upload(hass, 'site-a', {'name': 'force'}, 'token', upload_owner=owner)
+        assert slot['reservation'] is owner and not slot['busy']
+        assert await upload(hass, 'site-b', {}, 'token')
+    asyncio.run(run())
+
+
 def test_other_sites_and_api_providers_are_not_blocked(upload_harness):
     upload, hass, session, _clock = upload_harness
 
