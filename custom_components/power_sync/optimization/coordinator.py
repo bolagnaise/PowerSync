@@ -12117,11 +12117,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if restore_success is False:
                         if optimizer_force_snapshot is not None:
                             self._optimizer_force_state = optimizer_force_snapshot
-                        _LOGGER.warning(
-                            "Optimizer: Restore after canceling force %s failed; "
-                            "retaining optimizer force state for retry",
-                            force_type,
-                        )
+                        if getattr(battery, "restore_pending", False) is True:
+                            _LOGGER.info(
+                                "Optimizer: Physical settling after canceling force %s "
+                                "is pending; retaining optimizer force state for retry",
+                                force_type,
+                            )
+                        else:
+                            _LOGGER.warning(
+                                "Optimizer: Restore after canceling force %s failed; "
+                                "retaining optimizer force state for retry",
+                                force_type,
+                            )
                         return
                     await self._restore_pre_idle_backup_reserve(
                         battery,

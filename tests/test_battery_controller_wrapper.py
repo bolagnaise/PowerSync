@@ -228,6 +228,34 @@ def test_tesla_forced_restore_requires_handler_confirmation():
         restore()
 
 
+def test_native_restore_settling_keeps_false_result_without_error_traceback(caplog):
+    import logging
+    module, restore = _load_controller_module()
+    try:
+        outcomes = ['pending', 'failure', 'success']
+        async def async_call(*args, **kwargs):
+            outcome = outcomes.pop(0)
+            if outcome == 'pending':
+                raise module.NativeMaxRestorePending('settings restored; physical settling pending')
+            if outcome == 'failure':
+                raise RuntimeError('restore readback failed')
+        controller = module.BatteryControllerWrapper(
+            SimpleNamespace(services=SimpleNamespace(async_call=async_call)), 'tesla')
+        caplog.set_level(logging.INFO, logger=module.__name__)
+        assert asyncio.run(controller.restore_normal()) is False
+        assert controller.restore_pending is True
+        assert 'awaiting physical settling' in caplog.text
+        assert not any(r.levelno >= logging.WARNING or r.exc_info for r in caplog.records)
+        caplog.clear()
+        assert asyncio.run(controller.restore_normal()) is False
+        assert controller.restore_pending is False
+        assert any(r.levelno == logging.ERROR and r.exc_info for r in caplog.records)
+        assert asyncio.run(controller.restore_normal()) is True
+        assert controller.restore_pending is False
+    finally:
+        restore()
+
+
 def test_only_solax_routes_total_battery_discharge_to_service():
     module, restore = _load_controller_module()
     try:

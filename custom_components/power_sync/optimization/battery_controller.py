@@ -19,6 +19,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 
 from ..const import TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS
+from ..powerwall_local.native_max_charge import NativeMaxRestorePending
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ class BatteryControllerWrapper:
         """
         self.hass = hass
         self.battery_system = battery_system
+        self.restore_pending = False
 
     @optimizer_command
     async def force_charge(self, duration_minutes: int = 60, power_w: float = 5000, _extend_hardware: bool = False, grid_import_target_w: float | None = None) -> bool:
@@ -214,6 +216,7 @@ class BatteryControllerWrapper:
         Returns:
             True if command was sent successfully
         """
+        self.restore_pending = False
         try:
             _LOGGER.info("🔋 Optimizer: Restoring normal operation")
 
@@ -251,6 +254,13 @@ class BatteryControllerWrapper:
                 )
             return True
 
+        except NativeMaxRestorePending:
+            self.restore_pending = True
+            _LOGGER.info(
+                "Native Max settings restored; awaiting physical settling. "
+                "Restore remains pending and ownership is retained for retry"
+            )
+            return False
         except Exception as e:
             _LOGGER.error(f"Restore normal failed: {e}", exc_info=True)
             return False

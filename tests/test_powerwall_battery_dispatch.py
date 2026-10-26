@@ -1491,11 +1491,15 @@ async def test_duplicate_optimizer_native_action_retains_owner_and_original_dead
 
 
 @pytest.mark.asyncio
-async def test_native_discharge_projection_cannot_create_a_second_restore_journal():
+async def test_native_discharge_projection_cannot_create_a_second_restore_journal(caplog):
+    import logging
     ns,c,client,saved=load_routing()
+    caplog.set_level(logging.DEBUG, logger=__name__)
     ns['force_discharge_state'].update(active=True,native_tariff_force=True)
     await ns['persist_force_mode_state']()
     assert saved['force_mode_state'] is None
+    assert 'separate durable recovery journal' in caplog.text
+    assert 'Cleared persisted force mode state' not in caplog.text
 
 
 def test_stale_or_missing_capacity_does_not_authorize_full_rate_takeover():

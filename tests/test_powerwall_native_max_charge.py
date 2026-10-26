@@ -83,6 +83,32 @@ async def test_persist_baseline_and_original_deadline_before_native_writes():
 
 
 @pytest.mark.asyncio
+async def test_settling_pending_is_distinct_and_keeps_journal_claim_until_retry():
+    s, a, store, _ = setup()
+    original = deepcopy(a.current)
+    await s.start(120)
+    async def still_settling(_baseline):
+        return False
+    a.settled = still_settling
+    try:
+        with pytest.raises(m.NativeMaxRestorePending):
+            await s.stop()
+        assert s.pending and store.data['phase'] == 'settling'
+        assert a.barrier == store.data['id']
+        assert a.current == original
+        assert 'release' not in a.events
+        async def physically_settled(_baseline):
+            return True
+        a.settled = physically_settled
+        assert await s.stop()
+        assert not s.pending and store.data is None and a.barrier is None
+        assert a.events.count('restore') == 1
+        assert a.events.count('apply_tariff') == 1
+    finally:
+        await s._cancel_watch()
+
+
+@pytest.mark.asyncio
 async def test_resume_ack_required_before_any_native_forcing_write():
     s,a,store,_=setup();a.resume_ok=False
     with pytest.raises(m.NativeMaxChargeError,match='resume'):

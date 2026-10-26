@@ -31481,6 +31481,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             pass
         if state_to_save:
             _LOGGER.debug(f"Persisted force mode state: {state_to_save['mode']} expires {state_to_save['expires_at']}")
+        elif (force_charge_state.get("native_max_charge")
+              or force_discharge_state.get("native_tariff_force")):
+            _LOGGER.debug(
+                "Native Max uses its separate durable recovery journal; "
+                "legacy force mode snapshot omitted"
+            )
         else:
             _LOGGER.debug("Cleared persisted force mode state")
 

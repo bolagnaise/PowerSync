@@ -20,6 +20,10 @@ class NativeMaxChargeError(Exception):
     """Charging was rejected, superseded, expired or could not be restored."""
 
 
+class NativeMaxRestorePending(NativeMaxChargeError):
+    """Settings are restored; physical verification still owns the session."""
+
+
 class NativeMaxTariffRejected(NativeMaxChargeError):
     """The provider explicitly rejected the session's only tariff POST."""
 
@@ -323,7 +327,7 @@ class NativeMaxChargeSession:
             await self._save()
         if self.record["phase"] == "settling":
             if await self.adapter.settled(deepcopy(self.record["baseline"])) is not True:
-                raise NativeMaxChargeError("Native Max settings restored; physical settling is pending")
+                raise NativeMaxRestorePending("Native Max settings restored; physical settling is pending")
         restore_limits = getattr(self.adapter, "restore_limits", None)
         if self.record["phase"] == "settling" and restore_limits is not None:
             await self._write_intent("wait_local")

@@ -475,6 +475,32 @@ def test_failed_self_consumption_restore_keeps_marker_and_retries(opt_module):
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize('pending', [True, False])
+def test_cancelled_force_retains_retry_state_and_distinguishes_settling(opt_module, caplog, pending):
+    from unittest.mock import AsyncMock
+    battery = SimpleNamespace(restore_normal=AsyncMock(return_value=False),
+                              restore_pending=pending,
+                              set_self_consumption_mode=AsyncMock(return_value=True))
+    coordinator = _execute_coordinator(opt_module, battery)
+    state = {'active': True, 'source': 'optimizer', 'type': 'discharge',
+             'scope': 'optimizer', 'power_w': 20000}
+    coordinator._optimizer_force_state = dict(state)
+    coordinator._get_active_force_state = lambda: dict(state)
+    coordinator._optimizer_force_discharge_commitment_remaining = lambda *_: None
+    caplog.set_level(logging.INFO, logger=opt_module.__name__)
+    asyncio.run(coordinator._execute_optimizer_action(_self_consumption_action()))
+    battery.restore_normal.assert_awaited_once()
+    battery.set_self_consumption_mode.assert_not_called()
+    assert coordinator._optimizer_force_state == state
+    assert coordinator._last_executed_action == 'charge'
+    if pending:
+        assert 'Physical settling after canceling force discharge is pending' in caplog.text
+        assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+    else:
+        assert 'Restore after canceling force discharge failed' in caplog.text
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
 def test_successful_self_consumption_restore_advances_marker(opt_module):
     async def _run():
         calls = []
