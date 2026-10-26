@@ -33760,11 +33760,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _cancel_all_force_timers("Tesla control preference changed")
                 _command_generation[0] += 1
                 await _stop_local_powerwall_dispatch()
-                if any(state.get("active") for state in (force_charge_state, force_discharge_state, hold_soc_state, self_consumption_state)):
+                # Resuming a local dispatch clears its force-mode projection,
+                # but cannot finish an older cloud settings restore. Recover
+                # that durable owner before changing the control preference.
+                pending_restore = _local_powerwall_runtime.get("pending_tesla_restore")
+                if pending_restore or _local_powerwall_runtime.get("optimizer_force_restart_restore_pending"):
+                    await handle_restore_normal(ServiceCall(DOMAIN, "restore_normal", {
+                        "source": "user",
+                        "_force_restore": True,
+                        "_confirm_restore": True,
+                        "_skip_backup_reserve_restore": bool(
+                            (pending_restore or {}).get("_skip_backup_reserve_restore")
+                        ),
+                    }))
+                elif any(state.get("active") for state in (force_charge_state, force_discharge_state, hold_soc_state, self_consumption_state)):
                     await handle_restore_normal(ServiceCall(DOMAIN, "restore_normal", {"source": "user"}))
                 native = _local_powerwall_runtime.get("powerwall_native_max_charge")
                 local = _local_powerwall_runtime.get("powerwall_battery_dispatch")
                 if ((native and native.pending) or (local and local.pending)
+                        or _local_powerwall_runtime.get("pending_tesla_restore")
+                        or _local_powerwall_runtime.get("optimizer_force_restart_restore_pending")
                         or any(state.get("active") for state in (force_charge_state, force_discharge_state, hold_soc_state, self_consumption_state))):
                     raise HomeAssistantError("Previous battery control cleanup remains pending")
                 current_entry = hass.config_entries.async_get_entry(entry.entry_id)

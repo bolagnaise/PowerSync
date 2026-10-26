@@ -321,3 +321,52 @@ async def test_tariff_prerequisite_settings_use_confirmed_cloud_writes(setting, 
     assert result['failed_sites'] == ([] if accepted else ['site'])
     local.assert_not_awaited()
     (cloud_mode if setting == 'operation_mode' else cloud_grid).assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('local_active', [False, True])
+@pytest.mark.parametrize('restored', [False, True])
+async def test_preference_change_finishes_pending_cloud_restore_after_local_stop(local_active, restored):
+    """Ticket 409: local resume does not complete an older cloud restore."""
+    from test_powerwall_battery_dispatch import load_routing
+    from unittest.mock import AsyncMock, Mock
+    ns, local, client, _ = load_routing(tesla_control_method='local')
+    entry = ns['entry']
+    runtime = ns['_local_powerwall_runtime']
+    marker = {'reason': 'grid charging restore failed', '_skip_backup_reserve_restore': True}
+    runtime['pending_tesla_restore'] = marker
+    runtime['optimizer_force_restart_restore_pending'] = True
+    save = Mock(side_effect=lambda current, **values: setattr(current, 'options', values['options']))
+    ns['hass'].config_entries = SimpleNamespace(async_get_entry=lambda key: entry, async_update_entry=save)
+    ns['ServiceCall'] = lambda domain, service, data: SimpleNamespace(data=data)
+    events = []
+    async def restore(call):
+        assert not local.pending
+        assert call.data['_force_restore'] is True
+        assert call.data['_confirm_restore'] is True
+        assert call.data['_skip_backup_reserve_restore'] is True
+        events.append('restore')
+        if restored:
+            runtime['pending_tesla_restore'] = None
+            runtime['optimizer_force_restart_restore_pending'] = False
+        # A normal service return alone does not prove completion.
+    ns['handle_restore_normal'] = AsyncMock(side_effect=restore)
+    if local_active:
+        await local.start('discharge', 2000, 120)
+    if restored:
+        await ns['_set_tesla_control_method']('tariff')
+        assert entry.options['tesla_control_method'] == 'tariff'
+        save.assert_called_once()
+        assert runtime['pending_tesla_restore'] is None
+    else:
+        with pytest.raises(RuntimeError, match='cleanup remains pending'):
+            await ns['_set_tesla_control_method']('tariff')
+        save.assert_not_called()
+        assert policy.control_method({**entry.data, **entry.options}) == 'local'
+        assert runtime['pending_tesla_restore'] == marker
+    assert events == ['restore']
+    assert not runtime.get('tesla_control_method_changing')
+    if local_active:
+        client.dispatch_battery_power.assert_awaited_once()
+    else:
+        client.dispatch_battery_power.assert_not_awaited()
