@@ -2937,6 +2937,10 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self.session = async_get_clientsession(hass)
         self._site_info_cache = None  # Cache site_info (normally refreshed every 6 hours)
         self._site_info_last_fetch: float = 0  # Timestamp of last successful fetch
+        # Nameplate capability survives writes to mutable site settings. Keep
+        # only this field, with its original observation time and normal TTL.
+        self._site_capacity_cache: dict[str, Any] | None = None
+        self._site_capacity_last_fetch: float = 0
         self._site_info_fetch_failed = False
         self._site_info_retry_at: float = 0  # Bounded negative cache after read failures
         self._energy_acc = EnergyAccumulator(hass, "tesla", entry_id)
@@ -4047,6 +4051,10 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             # Cache the result with timestamp
             self._site_info_cache = site_info
             self._site_info_last_fetch = time.monotonic()
+            # Replace even missing/invalid ratings: a newer successful read
+            # must not silently revive an older, larger capability.
+            self._site_capacity_cache = {"nameplate_power": site_info.get("nameplate_power")}
+            self._site_capacity_last_fetch = self._site_info_last_fetch
             self._site_info_fetch_failed = False
             self._site_info_retry_at = 0.0
 

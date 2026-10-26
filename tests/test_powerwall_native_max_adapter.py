@@ -282,6 +282,27 @@ async def test_export_cap_recheck_logs_values_and_clears_after_success(setup, ca
 
 
 @pytest.mark.asyncio
+async def test_optimizer_discharge_admits_reported_capacity_after_reserve_cache_invalidation(setup):
+    """Exercise the service config reader and real adapter in the reported gap."""
+    from test_powerwall_battery_dispatch import load_routing
+    import time
+    s = setup
+    ns, _, _, _ = load_routing(optimization_max_discharge_w=20000,
+                               optimization_max_grid_export_w=30000)
+    ns['_local_powerwall_runtime']['tesla_coordinator'] = SimpleNamespace(
+        _site_info_cache=None, _site_info_last_fetch=0,
+        _site_capacity_cache={'nameplate_power': 20000},
+        _site_capacity_last_fetch=time.monotonic())
+    s.adapter.direction = 'discharge'
+    s.adapter.planning_request = True
+    s.adapter.config = ns['_local_powerwall_dispatch_config']
+    assert s.adapter.config()['powerwall_native_capacity_w'] == 20000
+    assert (await s.session.start(240))['active']
+    assert await s.session.stop()
+    assert (s.state.config, s.state.tariff) == s.original
+
+
+@pytest.mark.asyncio
 async def test_foreign_tariff_is_preserved_while_owned_mode_and_reserve_restore(setup):
     s=setup;await s.session.start(120)
     s.state.tariff={'code':'FOREIGN','name':'new external tariff'}

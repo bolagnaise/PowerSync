@@ -460,7 +460,7 @@ def test_grid_charging_switch_keeps_unknown_when_field_and_preference_are_absent
     assert entity.is_on is None
 
 
-def _cloud_permission_probe(*, cached, error):
+def _cloud_permission_probe(*, cached, error, site_info=None):
     """Exercise the real Site Info reader through the switch without HA/network."""
     source = (ROOT / "coordinator.py").read_text()
     tree = ast.parse(source)
@@ -477,8 +477,10 @@ def _cloud_permission_probe(*, cached, error):
 
     async def fetch(*args, **kwargs):
         calls.append(kwargs)
-        if len(calls) == 1:
+        if len(calls) == 1 and error is not None:
             raise ReadFailed("temporary provider failure") if error == "update" else OSError("offline")
+        if site_info is not None:
+            return {"response": site_info}
         return {"response": {"components": {
             "disallow_charge_from_grid_with_solar_installed": False,
         }}}
@@ -553,6 +555,46 @@ def test_grid_charging_cloud_invalidation_allows_immediate_recovery():
     assert coord._site_info_fetch_failed is False
     assert coord._site_info_retry_at == 0.0
     assert entity.is_on is True
+
+
+@pytest.mark.parametrize('invalidations', [1, 2])
+def test_reserve_invalidation_preserves_only_reported_capacity_with_original_ttl(monkeypatch, invalidations):
+    spec = importlib.util.spec_from_file_location('reserve_capacity_probe', ROOT / 'powerwall_local/hybrid_policy.py')
+    hybrid = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hybrid)
+    reported = {'nameplate_power': 20000, 'backup_reserve_percent': 5,
+                'components': {'disallow_charge_from_grid_with_solar_installed': False}}
+    _, coord, clock, calls = _cloud_permission_probe(cached=None, error=None, site_info=reported)
+    monkeypatch.setattr(hybrid, 'time', types.SimpleNamespace(monotonic=lambda: clock[0]))
+    asyncio.run(coord.async_get_site_info())
+    assert hybrid.native_capacity_w(hybrid.routing_site_info(coord)) == 20000
+    for _ in range(invalidations):
+        clock[0] += 1
+        coord.invalidate_site_info_cache()
+    assert coord._site_info_cache is None
+    assert coord._site_info_last_fetch == 0
+    assert hybrid.routing_site_info(coord) == {'nameplate_power': 20000}
+    assert len(calls) == 1  # Routing performs no network or control writes.
+    clock[0] = 1000 + 21601
+    assert hybrid.routing_site_info(coord) is None
+
+
+@pytest.mark.parametrize('replacement', [None, 0, True, '20000', 10000])
+def test_successful_site_refresh_replaces_retained_capacity_even_when_invalid(monkeypatch, replacement):
+    spec = importlib.util.spec_from_file_location('capacity_refresh_probe', ROOT / 'powerwall_local/hybrid_policy.py')
+    hybrid = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hybrid)
+    reported = {'nameplate_power': 20000}
+    _, coord, clock, _ = _cloud_permission_probe(cached=None, error=None, site_info=reported)
+    monkeypatch.setattr(hybrid, 'time', types.SimpleNamespace(monotonic=lambda: clock[0]))
+    asyncio.run(coord.async_get_site_info())
+    coord.invalidate_site_info_cache()
+    reported['nameplate_power'] = replacement
+    asyncio.run(coord.async_get_site_info())
+    coord.invalidate_site_info_cache()
+    expected = hybrid.native_capacity_w(reported)
+    assert hybrid.native_capacity_w(hybrid.routing_site_info(coord)) == expected
+    assert not hybrid.prefers_native_tariff(hybrid.routing_site_info(coord))
 
 
 def test_force_switches_are_added_for_non_tesla_batteries():

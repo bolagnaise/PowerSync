@@ -19,16 +19,23 @@ def prefers_native_tariff(site_info):
 
 
 def routing_site_info(energy):
-    """Use only a successful site_info cache within its normal six-hour TTL.
+    """Use reported capacity within the successful read's six-hour TTL.
 
-    Unknown capacity retains bounded local control, without inventing a site
-    rating. Native takeover and a larger planning envelope need reported data.
+    Setting writes invalidate mutable site_info, but cannot erase a known
+    nameplate rating before the next read. The fallback contains capacity
+    only; never reuse old reserve, export limits or control permissions.
     """
-    at = getattr(energy, "_site_info_last_fetch", None)
-    if type(at) not in (int, float) or not math.isfinite(at) or at <= 0:
-        return None
-    age = time.monotonic() - at
-    return getattr(energy, "_site_info_cache", None) if 0 <= age <= 21600 else None
+    now = time.monotonic()
+    for cache_name, time_name in (
+        ("_site_info_cache", "_site_info_last_fetch"),
+        ("_site_capacity_cache", "_site_capacity_last_fetch"),
+    ):
+        at = getattr(energy, time_name, None)
+        cached = getattr(energy, cache_name, None)
+        if (isinstance(cached, dict) and type(at) in (int, float)
+                and math.isfinite(at) and at > 0 and 0 <= now - at <= 21600):
+            return cached
+    return None
 
 
 def startup_watts(direction, snapshot, config):
