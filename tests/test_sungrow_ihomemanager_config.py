@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
@@ -24,15 +25,19 @@ def flow(monkeypatch):
               SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE="ihomemanager_native", DEFAULT_SUNGROW_PORT=502,
               DEFAULT_SUNGROW_IHOMEMANAGER_PORT=503, DEFAULT_SUNGROW_SLAVE_ID=1)
     ns["SUNGROW_CONNECTION_TYPES"] = {"direct": "Direct", "ihomemanager": "Forwarding", "ihomemanager_native": "Native"}
+    ns["ELECTRICITY_PROVIDERS"] = {"amber": "Amber"}
     config_tree = ast.parse((COMPONENT / "sungrow_ihomemanager_config.py").read_text())
     function = next(n for n in config_tree.body if isinstance(n, ast.FunctionDef))
     exec(compile(ast.Module(body=[function], type_ignores=[]), "native-settings", "exec"), ns)
     events = []
     snapshot = SimpleNamespace(supports_dispatch=True)
+    probe_errors = {}
     class Probe:
         def __init__(self, host, port):
             events.append(("native_probe", host, port))
         async def read_snapshot(self):
+            if "native" in probe_errors:
+                raise probe_errors["native"]
             return snapshot
     for name in ("native_flow_test", "native_flow_test.inverters"):
         package = ModuleType(name)
@@ -46,6 +51,8 @@ def flow(monkeypatch):
     monkeypatch.setitem(sys.modules, driver_module.__name__, driver_module)
     async def inverter_probe(hass, host, port, slave_id):
         events.append(("inverter_probe", host, port, slave_id))
+        if "inverter" in probe_errors:
+            return {"success": False, "error": probe_errors["inverter"]}
         return {"success": True, "battery_soc": 65}
     async def handoff(hass, entry):
         events.append(("cleanup",))
@@ -91,7 +98,8 @@ def flow(monkeypatch):
     owner.async_step_amber_options = provider_step
     values = dict(sungrow_connection_type="ihomemanager_native", sungrow_host="inverter.test", sungrow_port=502,
                   sungrow_slave_id=1, sungrow_ihomemanager_host="ihm.test", sungrow_ihomemanager_port=503)
-    return SimpleNamespace(owner=owner, ns=ns, entry=entry, values=values, events=events, saved=saved, snapshot=snapshot)
+    return SimpleNamespace(owner=owner, ns=ns, entry=entry, values=values, events=events,
+                           saved=saved, snapshot=snapshot, probe_errors=probe_errors)
 
 
 def test_initial_setup_probes_both_endpoints_and_starts_in_monitoring(flow):
@@ -150,3 +158,40 @@ def test_provider_options_saves_native_endpoints_before_provider_step(flow):
     assert flow.saved[0]["data"]["battery_connection_profile"] == "sungrow_ihomemanager_native"
     assert flow.saved[0]["options"]["sungrow_ihomemanager_host"] == "ihm.test"
     assert flow.saved[0]["options"]["monitoring_mode"] is True
+
+
+@pytest.mark.parametrize("step", ["async_step_sungrow", "async_step_sungrow_connection", "async_step_init_sungrow"])
+@pytest.mark.parametrize("endpoint", ["native", "inverter"])
+@pytest.mark.parametrize("port", [503, 504])
+def test_native_setup_identifies_failed_local_endpoint_without_saving(flow, step, endpoint, port):
+    flow.values["sungrow_ihomemanager_port"] = port
+    flow.probe_errors[endpoint] = (
+        ConnectionRefusedError("Local Modbus connection refused") if endpoint == "native" else "cannot_connect"
+    )
+
+    result = asyncio.run(flow.ns[step](flow.owner, flow.values))
+
+    error = result["errors"]["base"]
+    assert error == ("sungrow_native_cannot_connect" if endpoint == "native" else "sungrow_inverter_cannot_connect")
+    # Both initial setup and options must explain the failed local check.
+    for path in (COMPONENT / "strings.json", COMPONENT / "translations/en.json"):
+        strings = json.loads(path.read_text())
+        for section in ("config", "options"):
+            message = strings[section]["error"][error]
+            assert ("iHomeManager" if endpoint == "native" else "inverter") in message
+            assert "HTTPS" not in message and "portal" not in message
+    assert not flow.saved
+    assert not hasattr(flow.owner, "_sungrow_data")
+    assert flow.entry.data == {"sungrow_connection_type": "ihomemanager", "monitoring_mode": True}
+    assert flow.entry.options == {}
+    assert all(event[0] in ("native_probe", "inverter_probe") for event in flow.events)
+    if endpoint == "native":
+        assert ("native_probe", "ihm.test", port) in flow.events
+
+
+@pytest.mark.parametrize("step", ["async_step_sungrow", "async_step_sungrow_connection", "async_step_init_sungrow"])
+def test_native_setup_reports_invalid_inverter_battery_read_as_telemetry_failure(flow, step):
+    flow.probe_errors["inverter"] = "modbus_conflict"
+    result = asyncio.run(flow.ns[step](flow.owner, flow.values))
+    assert result["errors"] == {"base": "sungrow_inverter_cannot_connect"}
+    assert not flow.saved

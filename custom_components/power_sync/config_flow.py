@@ -1771,7 +1771,7 @@ async def validate_sungrow_native_connection(hass, values, *, check_inverter=Tru
             values.get(CONF_SUNGROW_SLAVE_ID, 1),
         )
         if not result.get("success"):
-            return "cannot_connect"
+            return "sungrow_inverter_cannot_connect"
     try:
         snapshot = await SungrowIHomeManagerController(
             settings[CONF_SUNGROW_IHOMEMANAGER_HOST], settings[CONF_SUNGROW_IHOMEMANAGER_PORT],
@@ -1779,7 +1779,7 @@ async def validate_sungrow_native_connection(hass, values, *, check_inverter=Tru
         if not snapshot.supports_dispatch:
             return "sungrow_native_protocol_unsupported"
     except Exception:
-        return "cannot_connect"
+        return "sungrow_native_cannot_connect"
     return None
 
 
@@ -5837,7 +5837,11 @@ class PowerSyncConfigFlow(AmberSetupMixin, config_entries.ConfigFlow, domain=DOM
                     # Go directly to creating the entry (skip secondary)
                     return self._create_final_entry()
                 else:
-                    errors["base"] = "cannot_connect"
+                    errors["base"] = (
+                        "sungrow_inverter_cannot_connect"
+                        if connection_type == SUNGROW_CONNECTION_IHOMEMANAGER_NATIVE
+                        else "cannot_connect"
+                    )
 
         return self.async_show_form(
             step_id="sungrow",
