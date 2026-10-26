@@ -90,7 +90,7 @@ class NativeMaxChargeSession:
                     raise NativeMaxChargeError("Native Max restore journal is invalid")
                 cleanup = data.get("cleanup", {})
                 if (not isinstance(cleanup, dict) or any(key not in
-                        {"mode_released", "reserve_released", "tariff_released", "mode_disarmed", "export_released"}
+                        {"mode_released", "reserve_released", "tariff_released", "mode_disarmed", "export_released", "grid_released"}
                         or type(value) is not bool for key, value in cleanup.items())):
                     raise NativeMaxChargeError("Native Max cleanup journal is invalid")
                 until = data.get("local_acceptance_until", 0)
@@ -98,8 +98,13 @@ class NativeMaxChargeSession:
                         or data.get("tariff_intent") not in (None, "forcing", "baseline")):
                     raise NativeMaxChargeError("Native Max mutation journal is invalid")
                 if (data["baseline"].get("direction", "charge") not in ("charge", "discharge")
-                        or type(data.get("kick_pending", False)) is not bool):
+                        or type(data.get("kick_pending", False)) is not bool
+                        or type(data.get("grid_charge_intent", False)) is not bool):
                     raise NativeMaxChargeError("Native force direction or kick journal is invalid")
+                if data.get("grid_charge_intent") and (
+                        data["baseline"].get("direction", "charge") != "charge"
+                        or data["baseline"].get("grid_charge_blocked") is not True):
+                    raise NativeMaxChargeError("Grid charge restoration journal is invalid")
                 self.record = deepcopy(data)
             self.loaded = True
 
@@ -157,10 +162,14 @@ class NativeMaxChargeSession:
             while self.record.get("local_acceptance_until", 0) + 1 > self.clock():
                 await asyncio.sleep(min(1, self.record["local_acceptance_until"] + 1 - self.clock()))
             self.record.pop("local_acceptance_until", None)
-        elif kind == "local":
+        elif kind in ("local", "grid_charge"):
             if type(value) not in (int, float) or not math.isfinite(value):
                 raise NativeMaxChargeError("Native Max acceptance deadline is invalid")
             self.record["local_acceptance_until"] = max(value, self.record.get("local_acceptance_until", 0))
+            if kind == "grid_charge":
+                if self.record["baseline"].get("grid_charge_blocked") is not True:
+                    raise NativeMaxChargeError("Grid charge restoration baseline is unavailable")
+                self.record["grid_charge_intent"] = True
         elif kind == "kick":
             until, seconds, watts = value
             if (type(until) not in (int, float) or not math.isfinite(until)
@@ -228,6 +237,10 @@ class NativeMaxChargeSession:
                 self._watch_task = asyncio.create_task(self._watch(token, generation))
                 async def apply():
                     fence()  # storage/admission awaits must not extend a grant
+                    prepare = getattr(self.adapter, "prepare", None)
+                    if prepare is not None and await prepare(deepcopy(baseline),
+                            lambda: self._authorize(token, generation), write_intent=self._write_intent) is not True:
+                        raise NativeMaxChargeError("Native Max preparation readback was not confirmed")
                     kick = getattr(self.adapter, "kick", None)
                     if kick is not None:
                         await kick(deepcopy(baseline), lambda: self._authorize(token, generation),
@@ -300,6 +313,7 @@ class NativeMaxChargeSession:
             baseline = deepcopy(self.record["baseline"])
             baseline["_cleanup"] = deepcopy(self.record.get("cleanup", {}))
             baseline["_tariff_intent"] = self.record.get("tariff_intent")
+            baseline["_grid_charge_intent"] = self.record.get("grid_charge_intent", False)
             if await self.adapter.restore(baseline, before_restore,
                     write_intent=self._write_intent) is not True:
                 raise NativeMaxChargeError("Native Max restore was not confirmed")

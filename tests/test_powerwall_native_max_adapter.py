@@ -739,6 +739,142 @@ async def test_restart_releases_uncertain_startup_kick_without_replaying_it(setu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('startup_kick', [False, True])
+async def test_optimizer_charge_enables_initially_disabled_grid_then_restores_it(setup, startup_kick):
+    s = setup
+    field = 'disallow_charge_from_grid_with_solar_installed'
+    s.state.config['site_info'][field] = True
+    original = deepcopy(s.state.config), deepcopy(s.state.tariff)
+    s.adapter.planning_request = True
+    s.adapter.startup_kick = startup_kick
+    s.settings.update(powerwall_native_capacity_w=20000, optimization_max_charge_w=20000)
+    try:
+        assert (await s.session.start(180 * 60))['active']
+        assert s.state.events[0] == ('config', {'site_info.' + field: False})
+        assert s.state.config['site_info'][field] is False
+        assert s.store.data['baseline']['grid_charge_blocked'] is True
+        # A later device-side disable ends forcing rather than being enabled again.
+        s.state.config['site_info'][field] = True
+        assert not await s.adapter.guard()
+        s.state.config['site_info'][field] = False
+        assert await s.session.stop()
+        assert (s.state.config, s.state.tariff) == original
+        assert not s.budget.native_max_claim('site')
+    finally:
+        await s.session.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('denial', ['permission', 'site_cap', 'soc', 'grid', 'policy', 'ev'])
+async def test_optimizer_grid_setup_cannot_bypass_current_safety_policy(setup, denial):
+    s = setup
+    s.adapter.planning_request = True
+    s.settings['powerwall_native_capacity_w'] = 20000
+    s.state.config['site_info']['disallow_charge_from_grid_with_solar_installed'] = True
+    if denial == 'permission': s.settings['optimization_allow_grid_charge'] = False
+    if denial == 'site_cap': s.settings['optimization_max_grid_import_w'] = 14000
+    if denial == 'soc': s.state.soc = 100
+    if denial == 'grid': s.state.grid = 'SystemIslandedActive'
+    if denial == 'policy': s.state.policy = False
+    if denial == 'ev': s.budget.armed_sites.add('site')
+    with pytest.raises(s.m.NativeMaxChargeError, match='policy denied'):
+        await s.session.start(120)
+    assert not s.state.events and not s.session.pending
+
+
+@pytest.mark.asyncio
+async def test_uncertain_grid_enable_restores_after_restart_without_starting_charge(setup):
+    s = setup
+    field = 'disallow_charge_from_grid_with_solar_installed'
+    s.state.config['site_info'][field] = True
+    original = deepcopy(s.state.config), deepcopy(s.state.tariff)
+    s.adapter.planning_request = True
+    s.settings['powerwall_native_capacity_w'] = 20000
+    transport = s.adapter.client._transport
+    write = transport.write_config
+    async def uncertain(din, updates, **kwargs):
+        if updates.get('site_info.' + field) is False:
+            assert s.store.data['baseline']['grid_charge_blocked'] is True
+            result = await write(din, updates, **kwargs)
+            assert result and s.store.data['grid_charge_intent'] is True
+            raise TimeoutError('enable may have arrived')
+        if updates.get('site_info.' + field) is True:
+            return False
+        return await write(din, updates, **kwargs)
+    transport.write_config = uncertain
+    with pytest.raises(s.m.NativeMaxChargeError, match='provider timed out'):
+        await s.session.start(120)
+    assert s.session.pending and s.budget.native_max_claim('site')
+    assert s.state.config['site_info'][field] is False
+    assert all(event[0] == 'config' for event in s.state.events)
+    await s.session._cancel_watch()
+    transport.write_config = write
+    restarted = s.session.__class__(s.adapter, s.store, clock=lambda: s.state.at, monotonic=lambda: s.state.at)
+    assert await restarted.recover()
+    assert (s.state.config, s.state.tariff) == original
+    assert not s.budget.native_max_claim('site') and not s.store.data
+
+
+@pytest.mark.asyncio
+async def test_grid_setup_requires_confirmed_readback_before_any_force_write(setup):
+    s = setup
+    field = 'disallow_charge_from_grid_with_solar_installed'
+    s.state.config['site_info'][field] = True
+    s.adapter.planning_request = True
+    s.settings['powerwall_native_capacity_w'] = 20000
+    write = s.adapter.client._transport.write_config
+    async def unchanged(din, updates, **kwargs):
+        result = await write(din, updates, **kwargs)
+        if updates.get('site_info.' + field) is False:
+            s.state.config['site_info'][field] = True
+        return result
+    s.adapter.client._transport.write_config = unchanged
+    with pytest.raises(s.m.NativeMaxChargeError, match='preparation readback'):
+        await s.session.start(120)
+    assert not any(event[0] in ('tariff', 'kick', 'resume') for event in s.state.events)
+    assert s.state.config['site_info'][field] is True
+    assert not s.session.pending
+
+
+@pytest.mark.asyncio
+async def test_external_enable_before_grid_setup_is_not_adopted_as_owned(setup):
+    s = setup
+    field = 'disallow_charge_from_grid_with_solar_installed'
+    s.state.config['site_info'][field] = True
+    s.adapter.planning_request = True
+    s.settings['powerwall_native_capacity_w'] = 20000
+    write = s.adapter.client._transport.write_config
+    async def external_enable(din, updates, **kwargs):
+        if updates.get('site_info.' + field) is False:
+            s.state.config['site_info'][field] = False
+        return await write(din, updates, **kwargs)
+    s.adapter.client._transport.write_config = external_enable
+    with pytest.raises(s.m.NativeMaxChargeError, match='preparation readback'):
+        await s.session.start(120)
+    assert s.state.config['site_info'][field] is False
+    assert not s.state.events and not s.session.pending
+
+
+@pytest.mark.asyncio
+async def test_grid_disabled_again_before_tariff_submission_is_preserved(setup):
+    s = setup
+    field = 'disallow_charge_from_grid_with_solar_installed'
+    s.state.config['site_info'][field] = True
+    s.adapter.planning_request = True
+    s.settings['powerwall_native_capacity_w'] = 20000
+    async def external_disable(tariff, before_write):
+        s.state.config['site_info'][field] = True
+        await before_write()
+        raise AssertionError('must not authorize tariff')
+    s.adapter.upload = external_disable
+    with pytest.raises(s.m.NativeMaxChargeError, match='policy denied'):
+        await s.session.start(120)
+    assert not any(event[0] == 'tariff' for event in s.state.events)
+    assert s.state.config['site_info'][field] is True
+    assert not s.session.pending
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('direction',['charge','discharge'])
 async def test_optimizer_native_force_accepts_planning_rate_below_native_rating(setup,direction):
     s=setup;s.adapter.direction=direction;s.adapter.planning_request=True

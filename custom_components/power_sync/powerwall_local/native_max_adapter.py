@@ -1,6 +1,8 @@
 """Provider boundary for deliberate native Max, with one restore baseline.
 
-This actuator preserves grid-charge permission and never raises site limits.
+Optimiser charge setup temporarily enables a known grid-charge setting only
+under current PowerSync permission, with durable ownership and restoration.
+This actuator never raises site limits.
 A stricter software export cap is applied natively before tariff control.
 A software battery-input ceiling is not promised by native Max.
 Every local write and tariff retry must use its immediately acquired fence.
@@ -50,6 +52,7 @@ class NativeMaxChargeAdapter:
         self.monotonic = monotonic
         self.tariff_matches = tariff_matches or (lambda expected, observed: expected == observed)
         self.token = None
+        self._grid_charge_ready = False
         self._snapshot = None
         self._observed_at = None
         self.settle_interval = settle_interval
@@ -157,7 +160,10 @@ class NativeMaxChargeAdapter:
                 native_import_max_w=imported, native_import_known=isinstance(info, dict),
                 pending_ev_w=self.budget.unobserved_w(self.site),
                 native_ev_active=self.budget.site_armed(self.site),
-                grid_charging_allowed=permission is False,
+                grid_charging_allowed=(permission is False or (
+                    permission is True and self.planning_request
+                    and not self._grid_charge_ready
+                    and config.get("optimization_allow_grid_charge") is True)),
                 grid_connected=snapshot.grid_status == "SystemGridConnected",
                 soc=snapshot.soc, soc_cap=config.get("optimization_grid_charge_soc_cap", 1)*100,
                 evidence_fresh=0 <= self.monotonic()-self._observed_at <= 5,
@@ -206,6 +212,9 @@ class NativeMaxChargeAdapter:
         baseline = {"mode": mode, "reserve": reserve, "tariff": deepcopy(tariff),
                     "forcing_tariff": deepcopy(self.forcing_tariff),
                     "settle_charge_w": max(0, -snapshot.battery_w), "direction": self.direction}
+        if (self.direction == "charge" and self.planning_request
+                and info.get("disallow_charge_from_grid_with_solar_installed") is True):
+            baseline["grid_charge_blocked"] = True
         if self.direction == "discharge":
             export = info.get("customer_preferred_export_rule")
             if export not in ("battery_ok", "pv_only", "never"):
@@ -269,9 +278,42 @@ class NativeMaxChargeAdapter:
         result = await self.budget.release_native_max(self.entry_id, self.site, token)
         if result:
             self._export_limit_ready = False
+            self._grid_charge_ready = False
             if self.token == token:
                 self.token = None
         return result
+
+    async def prepare(self, baseline, before_write, *, write_intent):
+        """Enable an owned optimiser setting before any battery or tariff write."""
+        if baseline.get("grid_charge_blocked") is True:
+            field = "disallow_charge_from_grid_with_solar_installed"
+            checked = None
+            fence = await self._owned_before(baseline, before_write)()
+            def owned(config):
+                nonlocal checked
+                checked = config
+                info = config.get("site_info", {}) if isinstance(config, dict) else {}
+                return (self.direction == "charge" and self.planning_request
+                        and self.config().get("optimization_allow_grid_charge") is True
+                        and info.get(field) is True
+                        and config.get("default_real_mode") == baseline["mode"]
+                        and info.get("backup_reserve_percent") == baseline["reserve"]
+                        and self._forcing_permitted(config))
+            def submit():
+                fence()
+                if checked is None or not owned(checked):
+                    raise NativeMaxChargeError("Grid charge setup policy changed")
+            if not await self._mutate(self.client._transport.write_config(self.client._din,
+                    {"site_info." + field: False}, before_write=submit,
+                    validate_config=owned,
+                    before_submit=lambda until: write_intent("grid_charge", until))):
+                return False
+            current = await self.client._transport.read_config(self.client._din)
+            if not isinstance(current, dict) or current.get("site_info", {}).get(field) is not False:
+                return False
+            await write_intent("local_confirmed")
+        self._grid_charge_ready = True
+        return await self.guard()
 
     async def kick(self, baseline, before_write, *, deadline, write_intent):
         """Optional one-shot pulse, never a renewable local controller."""
@@ -499,10 +541,13 @@ class NativeMaxChargeAdapter:
                 config = config.get(key) if isinstance(config, dict) else None
             return config
 
+        def matches(observed, expected):
+            return (observed is expected if type(expected) is bool else observed == expected)
+
         async def write_field(field, target, expected):
             fence = await cleanup_fence()
             def owned(config):
-                return value(config, field) == expected
+                return matches(value(config, field), expected)
             try:
                 written = await self._mutate(self.client._transport.write_config(self.client._din,
                     {field: target}, before_write=fence, validate_config=owned,
@@ -513,14 +558,14 @@ class NativeMaxChargeAdapter:
                 await write_intent("wait_local")
                 raise
             observed = await self.client._transport.read_config(self.client._din)
-            if written and isinstance(observed, dict) and value(observed, field) == target:
+            if written and isinstance(observed, dict) and matches(value(observed, field), target):
                 await write_intent("local_confirmed")
             else:
                 await write_intent("wait_local")
                 observed = await self.client._transport.read_config(self.client._din)
             if not isinstance(observed, dict):
                 return False, None
-            return written and value(observed, field) == target, value(observed, field)
+            return written and matches(value(observed, field), target), value(observed, field)
 
         async def release_field(label, field, original, owned):
             if progress.get(label):
@@ -532,7 +577,7 @@ class NativeMaxChargeAdapter:
             if not isinstance(current, dict):
                 return
             observed = value(current, field)
-            if observed is None:
+            if observed is None or (type(owned) is bool and type(observed) is not bool):
                 return
             if observed != owned or observed == original:
                 # Already restored or changed externally: relinquish this field.
@@ -546,6 +591,9 @@ class NativeMaxChargeAdapter:
                 await checkpoint(**{label: True})
 
         await cleanup_fence()
+        if baseline.get("_grid_charge_intent") is True:
+            await release_field("grid_released", "site_info.disallow_charge_from_grid_with_solar_installed",
+                                True, False)
         # Remove the owned reserve even when tariff readback is unavailable.
         await release_field("reserve_released", "site_info.backup_reserve_percent",
                             baseline["reserve"], baseline.get("force_reserve", 100))
@@ -613,6 +661,8 @@ class NativeMaxChargeAdapter:
         if progress.get("mode_disarmed") and progress.get("tariff_released"):
             await release_field("mode_released", "default_real_mode", baseline["mode"], "self_consumption")
         fields = ["mode_released", "reserve_released", "tariff_released"]
+        if baseline.get("_grid_charge_intent") is True:
+            fields.append("grid_released")
         if baseline.get("direction", "charge") == "discharge":
             fields.append("export_released")
         return not pending_tariff and all(progress.get(field) for field in fields)

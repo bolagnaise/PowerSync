@@ -16,6 +16,8 @@ Explicit positive kW requests retain local wattage control regardless of this pr
 
 Changing the preference stops the current force action and confirms restoration before saving. Pending or failed cleanup keeps the previous preference. The optimiser requests a fresh plan; a stopped manual action is not replayed. Mobile reads the saved backend preference and hides the selector when an older backend does not advertise support.
 
+When Automatic selects native tariff charging and **Allow grid charging** is enabled, the optimiser can temporarily enable a known disabled Tesla charge-from-grid setting. It verifies the setting before any startup command or charging tariff, then restores the original value during cleanup, including after restart. Turning Tesla grid charging off again ends the action rather than repeatedly enabling it. Site limits, SOC ceilings, EV demand, Monitoring Mode and demand protection still apply.
+
 ## Gateway command limits
 
 The gateway can report a timed-command limit below the combined Powerwall rating. From v2.12.1477, PowerSync learns charge and discharge ceilings independently from an exact matching gateway rejection. It requests normal operation, requires the gateway’s acknowledgement, and permits one retry with fresh safety checks inside the original time window. Later commands and the manual power controls use that ceiling; the configured battery rating is unchanged. An unconfirmed resume blocks further dispatch. Tariff fallback cannot bypass a learned ceiling or enforce a selected kW target.
