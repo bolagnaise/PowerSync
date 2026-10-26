@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import logging
 import math
 import time
 
 from .battery_dispatch import battery_watts, site_grid_limits_w, validate_dispatch_config
 from .full_rate_charge import native_max_charge_eligibility
 from .native_max_charge import NativeMaxChargeError, NativeMaxTariffNotSubmitted, NativeMaxTariffRejected
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _signed_export_limit(value):
@@ -107,51 +110,103 @@ class NativeMaxChargeAdapter:
             return checked
         return before_owned_write
 
+    def _deny(self, reason, **values):
+        """Record a failed check without logging gateway config or identities."""
+        self.guard_denial_reason = reason
+        # Never interpolate raw config, exception messages, ownership tokens or
+        # unexpected strings supplied by a device into support logs.
+        safe_values = {
+            key: value if (type(value) is bool or
+                           (type(value) in (int, float) and math.isfinite(value)))
+            else None for key, value in values.items()
+        }
+        _LOGGER.warning("Native Powerwall %s admission denied: reason=%s diagnostics=%s",
+                        self.direction, reason, safe_values)
+        return False
+
     def authority(self):
         try:
             validate_dispatch_config(self.direction, dict(self.config()))
-            return (self.identity == self.current_identity() and self.policy() is True
-                    and bool(self.client.local_access_enabled))
+            if self.identity != self.current_identity():
+                return self._deny("native_max_identity_changed")
+            if self.policy() is not True:
+                return self._deny("native_max_control_policy_denied")
+            if not self.client.local_access_enabled:
+                return self._deny("native_max_local_access_disabled")
+            return True
         except (ValueError, TypeError):
-            return False
+            return self._deny("native_max_dispatch_config_invalid")
 
     def _forcing_permitted(self, native_config=None, *, require_export_limit=False):
         snapshot = self._snapshot
-        if snapshot is None or self._observed_at is None or not self.authority():
+        if snapshot is None or self._observed_at is None:
+            return self._deny("native_snapshot_unavailable")
+        if not self.authority():
             return False
         maximum = self.budget.native_max_claim(self.site)
         if maximum and maximum.get("token") != self.token:
-            return False
+            return self._deny("native_max_site_already_owned")
         if any(r.get("site") == self.site for r in self.budget.managed.values()):
-            return False
+            return self._deny("managed_ev_ownership_present")
         try:
             config = dict(self.config())
             if self.planning_request:
                 capacity = config.get("powerwall_native_capacity_w")
                 if type(capacity) not in (int, float) or not math.isfinite(capacity) or capacity <= 0:
-                    return False
+                    return self._deny("native_capacity_unavailable", native_capacity_w=capacity)
             raw = snapshot.raw.get("config") if native_config is None else native_config
             info = raw.get("site_info") if isinstance(raw, dict) else None
-            imported, _ = site_grid_limits_w(type("NativeBounds", (), {"raw": {"config": raw}})())
+            try:
+                imported, _ = site_grid_limits_w(type("NativeBounds", (), {"raw": {"config": raw}})())
+            except (ValueError, TypeError, KeyError):
+                limits = info if isinstance(info, dict) else {}
+                return self._deny("native_site_limits_invalid", site_info_present=isinstance(info, dict),
+                                  native_import_limit_kw=limits.get("max_site_meter_power_ac"),
+                                  native_export_limit_kw=limits.get("min_site_meter_power_ac"))
             permission = info.get("disallow_charge_from_grid_with_solar_installed", False) if isinstance(info, dict) else None
             if self.direction == "discharge":
-                if (not isinstance(info, dict) or "min_site_meter_power_ac" not in info
-                        or not 0 <= self.monotonic() - self._observed_at <= 5
-                        or not self.authority()):
+                if not isinstance(info, dict) or "min_site_meter_power_ac" not in info:
+                    return self._deny("native_export_limit_missing")
+                age = self.monotonic() - self._observed_at
+                if not 0 <= age <= 5:
+                    return self._deny("native_snapshot_stale", evidence_age_s=age)
+                if not self.authority():
                     return False
-                _signed_export_limit(info["min_site_meter_power_ac"])
+                try:
+                    _signed_export_limit(info["min_site_meter_power_ac"])
+                except ValueError:
+                    return self._deny("native_export_limit_invalid",
+                                      native_export_limit_kw=info["min_site_meter_power_ac"])
                 _, exported = site_grid_limits_w(type("NativeBounds", (), {"raw": {"config": raw}})())
                 configured = config.get("optimization_max_grid_export_w")
                 if configured is not None and (type(configured) not in (int, float)
-                        or not math.isfinite(configured) or configured <= 0
+                        or not math.isfinite(configured) or configured <= 0):
+                    return self._deny("software_export_limit_invalid", software_export_limit_w=configured)
+                if (configured is not None
                         # A known unset sentinel can be tightened at acquisition.
                         # Forcing still requires a verified finite software cap.
-                        or ((self._export_limit_ready or require_export_limit)
+                        and ((self._export_limit_ready or require_export_limit)
                             and (exported is None or exported > configured))):
-                    return False
+                    return self._deny("native_export_limit_exceeds_software_limit",
+                                      native_export_limit_w=exported, software_export_limit_w=configured)
                 if info.get("customer_preferred_export_rule") not in ("battery_ok", "pv_only", "never"):
-                    return False
-                battery_watts("discharge", 1, snapshot, config)
+                    return self._deny("native_export_rule_invalid")
+                try:
+                    battery_watts("discharge", 1, snapshot, config)
+                except (ValueError, TypeError, KeyError) as error:
+                    reason = {
+                        "Battery is at its discharge reserve floor": "discharge_reserve_floor_reached",
+                        "Local dispatch requires confirmed grid connection": "grid_connection_unconfirmed",
+                        "Missing or invalid battery SOC": "battery_soc_unavailable",
+                        "Non-finite battery SOC": "battery_soc_unavailable",
+                        "Battery SOC is out of range": "battery_soc_invalid",
+                        "Grid export limit blocks force discharge": "native_export_limit_blocks_discharge",
+                    }.get(str(error), "discharge_inputs_invalid")
+                    return self._deny(reason, soc_percent=snapshot.soc,
+                                      gateway_reserve_percent=snapshot.backup_reserve_percent,
+                                      software_reserve=config.get("optimization_backup_reserve", .2),
+                                      hardware_reserve=config.get("hardware_backup_reserve", 0),
+                                      load_w=snapshot.load_w, solar_w=snapshot.solar_w)
                 return True
             eligibility = native_max_charge_eligibility(
                 source="native_manual_max", requested_power_w=0, grid_import_target_w=None,
@@ -169,10 +224,14 @@ class NativeMaxChargeAdapter:
                 evidence_fresh=0 <= self.monotonic()-self._observed_at <= 5,
                 control_permitted=self.authority())
             if not eligibility.eligible:
-                self.guard_denial_reason = eligibility.reason
+                return self._deny(eligibility.reason, native_import_limit_w=imported,
+                                  software_import_limit_w=config.get("optimization_max_grid_import_w"),
+                                  soc_percent=snapshot.soc,
+                                  soc_cap_fraction=config.get("optimization_grid_charge_soc_cap", 1),
+                                  evidence_age_s=self.monotonic()-self._observed_at)
             return eligibility.eligible
         except (ValueError, TypeError, KeyError):
-            return False
+            return self._deny("native_limit_or_config_invalid")
 
     async def guard(self):
         # Keep the failed admission check for the caller's error report. It
@@ -191,8 +250,7 @@ class NativeMaxChargeAdapter:
                 self.guard_denial_reason = None
             return permitted
         except (ValueError, TypeError, KeyError, asyncio.TimeoutError):
-            self.guard_denial_reason = "native_limit_evidence_unavailable"
-            return False
+            return self._deny("native_limit_evidence_unavailable")
 
     async def capture(self):
         self._export_limit_ready = False

@@ -195,6 +195,93 @@ async def test_native_charge_guard_retains_the_specific_admission_failure(setup,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('case,expected', [
+    ('missing_export_limit', 'native_export_limit_missing'),
+    ('invalid_export_limit', 'native_site_limits_invalid'),
+    ('null_export_limit', 'native_export_limit_invalid'),
+    ('invalid_export_rule', 'native_export_rule_invalid'),
+    ('zero_export_limit', 'native_export_limit_blocks_discharge'),
+    ('reserve_floor', 'discharge_reserve_floor_reached'),
+    ('missing_soc', 'battery_soc_unavailable'),
+    ('off_grid', 'grid_connection_unconfirmed'),
+    ('missing_capacity', 'native_capacity_unavailable'),
+    ('stale_snapshot', 'native_snapshot_stale'),
+    ('managed_ev', 'managed_ev_ownership_present'),
+    ('foreign_claim', 'native_max_site_already_owned'),
+    ('identity_changed', 'native_max_identity_changed'),
+    ('policy_denied', 'native_max_control_policy_denied'),
+    ('local_disabled', 'native_max_local_access_disabled'),
+    ('invalid_dispatch_config', 'native_max_dispatch_config_invalid'),
+])
+async def test_discharge_admission_logs_reason_without_starting_control(setup, caplog, case, expected):
+    s = setup
+    s.adapter.direction = 'discharge'
+    info = s.state.config['site_info']
+    if case == 'missing_export_limit':
+        del info['min_site_meter_power_ac']
+    elif case == 'invalid_export_limit':
+        info['min_site_meter_power_ac'] = 'SECRET_INVALID_GATEWAY_VALUE'
+    elif case == 'null_export_limit':
+        info['min_site_meter_power_ac'] = None
+    elif case == 'invalid_export_rule':
+        info['customer_preferred_export_rule'] = 'SECRET_EXPORT_RULE'
+    elif case == 'zero_export_limit':
+        info['min_site_meter_power_ac'] = 0
+    elif case == 'reserve_floor':
+        s.state.soc = 5
+    elif case == 'missing_soc':
+        s.state.soc = None
+    elif case == 'off_grid':
+        s.state.grid = 'SystemIslandedActive'
+    elif case == 'missing_capacity':
+        s.adapter.planning_request = True
+    elif case == 'stale_snapshot':
+        original = s.adapter.client.get_snapshot
+        async def slow_snapshot():
+            result = await original()
+            s.state.at += 6
+            return result
+        s.adapter.client.get_snapshot = slow_snapshot
+    elif case == 'managed_ev':
+        await s.budget.admit_managed('SECRET_VIN',
+            {'site': 'site', 'identity': 'SECRET_EV', 'reserved_w': 0}, {}, lambda: True)
+    elif case == 'foreign_claim':
+        await s.budget.claim_native_max('other', 'site', 'SECRET_TOKEN', s.state.at + 120)
+    elif case == 'identity_changed':
+        s.state.identity = 'SECRET_IDENTITY'
+    elif case == 'policy_denied':
+        s.state.policy = False
+    elif case == 'local_disabled':
+        s.adapter.client.local_access_enabled = False
+    elif case == 'invalid_dispatch_config':
+        s.settings['optimization_max_discharge_w'] = 0
+    before = deepcopy(s.state.config), deepcopy(s.state.tariff)
+    with pytest.raises(s.m.NativeMaxChargeError, match='policy denied'):
+        await s.session.start(120)
+    assert s.adapter.guard_denial_reason == expected
+    assert f'reason={expected}' in caplog.text
+    assert 'SECRET_' not in caplog.text
+    assert not s.state.events and not s.session.pending
+    assert (s.state.config, s.state.tariff) == before
+
+
+@pytest.mark.asyncio
+async def test_export_cap_recheck_logs_values_and_clears_after_success(setup, caplog):
+    s = setup
+    s.adapter.direction = 'discharge'
+    s.settings['optimization_max_grid_export_w'] = 10000
+    assert await s.adapter.guard()  # Acquisition may tighten this native cap.
+    assert not s.adapter._forcing_permitted(require_export_limit=True)
+    assert s.adapter.guard_denial_reason == 'native_export_limit_exceeds_software_limit'
+    assert "'native_export_limit_w': 14900.0" in caplog.text
+    assert "'software_export_limit_w': 10000" in caplog.text
+    assert not s.state.events
+    s.state.config['site_info']['min_site_meter_power_ac'] = -10
+    assert await s.adapter.guard()
+    assert s.adapter.guard_denial_reason is None
+
+
+@pytest.mark.asyncio
 async def test_foreign_tariff_is_preserved_while_owned_mode_and_reserve_restore(setup):
     s=setup;await s.session.start(120)
     s.state.tariff={'code':'FOREIGN','name':'new external tariff'}
