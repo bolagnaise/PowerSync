@@ -11,6 +11,12 @@ for accurate schedules.
 
 Timestamped tariff rates apply only where their validity period overlaps the current planning horizon. Rates beyond that horizon are ignored until their period enters the plan; they do not replace the current import or export price. A period crossing the end of the horizon is included only for the part that overlaps.
 
+## Stored-energy acquisition cost
+
+PowerSync values measured solar charging at zero acquisition cost, grid charging at its measured cost, and unknown stored energy conservatively from import prices. Discharge reduces the source categories and retained grid cost proportionally.
+
+Timestamped battery measurements are settled once, so repeated plan updates using the same measurement do not replace known solar energy with unknown energy. Updating does not reclassify previously stored unknown energy; missing measurements and long telemetry gaps still retain the conservative valuation.
+
 ## AI Plan Explanation
 
 AI Plan Explanation is optional. It turns an existing deterministic Smart

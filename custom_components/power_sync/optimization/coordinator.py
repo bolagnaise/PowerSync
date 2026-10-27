@@ -19108,6 +19108,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Resets automatically at midnight.
         """
         now = dt_util.now()
+        data = self._get_energy_data()
+        tracking_time = now
+        observed_at = data.get("last_update") if data else None
+        if (
+            isinstance(observed_at, datetime)
+            and observed_at.tzinfo is not None
+            and observed_at <= now
+        ):
+            # Settle a cached power/SOC snapshot on its observation clock.
+            # Integrating it again at a later solve time would reconcile the
+            # added/removed energy against unchanged SOC and turn solar into
+            # unknown. Tariff windows and quota ledgers retain wall-clock now.
+            tracking_time = observed_at.astimezone(now.tzinfo)
         today = now.strftime("%Y-%m-%d")
 
         # Reset at midnight
@@ -19162,14 +19175,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Use actual elapsed time to prevent multi-counting
         if self._last_cost_tracking_time is None:
-            self._last_cost_tracking_time = now
+            # A replayed pre-midnight sample can trigger the wall-date reset,
+            # but must not carry yesterday's interval into today's counters.
+            self._last_cost_tracking_time = max(
+                tracking_time, now.replace(hour=0, minute=0, second=0, microsecond=0)
+            )
             return  # First call — no interval to accumulate yet
 
         # Subtract UTC instants rather than local wall times so a daylight-saving
         # transition cannot double-count or skip an hour of measured settlement.
         elapsed_seconds = elapsed_settlement_seconds(
             self._last_cost_tracking_time,
-            now,
+            tracking_time,
         )
 
         # Regular refreshes coalesce short intervals. A solve must settle them
@@ -19178,13 +19195,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if elapsed_seconds <= 0 or (elapsed_seconds < 30 and not force):
             return
 
-        self._last_cost_tracking_time = now
+        self._last_cost_tracking_time = tracking_time
 
         # Cap at 10 minutes to avoid inflated accumulation after long gaps
         dt_hours = min(elapsed_seconds / 3600, 10.0 / 60)
 
         # Need energy coordinator data and cached prices
-        data = self._get_energy_data()
         if not data:
             _LOGGER.debug("Cost tracking skipped: no energy coordinator data")
             return
